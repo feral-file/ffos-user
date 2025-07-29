@@ -1,0 +1,27 @@
+[package]
+name    = "feral-setupd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bluer         = { version = "0.17.3", features = ["bluetoothd"] }
+tokio         = { version = "1.45.0", features = ["full"] }
+uuid          = "1.16.0"
+futures-util  = "0.3"
+dbus          = "0.9"
+dbus-crossroads = "0.5.2"
+mac_address   = "1.1.8"
+md5 = "0.7.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+reqwest = { version = "0.12.15", default-features = false, features = ["blocking", "json", "native-tls"] }
+url = "2.5.4"
+tungstenite = { version = "0.26.2", default-features = false, features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26.2", default-features = false, features = ["connect", "native-tls"] }
+futures = "0.3.31"
+thiserror = "2.0.12"
+parking_lot = "0.12.4"
+anyhow = "1.0.98"
+semver = "1.0.26"
+regex = "1.0"
+rand = "0.9.1"

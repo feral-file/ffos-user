@@ -1,0 +1,10 @@
+[Unit]
+Description=Run FeralFile Log Rotation Hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Unit=feral-log-rotation.service
+
+[Install]
+WantedBy=timers.target

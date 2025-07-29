@@ -1,0 +1,35 @@
+html, body, table, canvas {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+}
+
+canvas {
+    position: absolute;
+}
+
+table, tr, td {
+    border: none;
+    border-collapse: collapse;
+}
+
+table {
+    width: 100%;
+}
+
+td {
+    padding-left: 8%;
+    padding-right: 8%;
+
+    text-align: left;
+    vertical-align: middle; 
+    overflow: hidden;  
+
+    font-size: 32px;
+    font-family: "Georgia";
+    
+    color: white; 
+    background-color: black;
+}
+
+

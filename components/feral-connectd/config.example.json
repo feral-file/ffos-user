@@ -1,0 +1,17 @@
+{
+  "cdp": {
+    "endpoint": "localhost"
+  },
+  "relayer": {
+    "endpoint": "wss://example.com/ws",
+    "apiKey": 5
+  },
+  "sentry": {
+    "dsn": "https://YOUR_SENTRY_DSN@o0.ingest.sentry.io/0",
+    "debug": "false",
+    "sample_rate": "1.0",
+    "environment": "production",
+    "release": "feral-connectd@1.0.0",
+    "repository": "organization/repository-name"
+  }
+} 

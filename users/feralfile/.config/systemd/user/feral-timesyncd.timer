@@ -1,0 +1,10 @@
+[Unit]
+Description=Run FeralFile Time Synchronization Hourly
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+Unit=feral-timesyncd.service
+
+[Install]
+WantedBy=timers.target

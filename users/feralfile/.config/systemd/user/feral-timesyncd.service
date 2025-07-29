@@ -1,0 +1,12 @@
+[Unit]
+Description=FeralFile Time Synchronization Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/feralfile/scripts/feral-timesyncd.sh
+StandardOutput=append:/home/feralfile/.logs/timesyncd.log
+StandardError=append:/home/feralfile/.logs/timesyncd.log
+Restart=on-failure
+RestartSec=10

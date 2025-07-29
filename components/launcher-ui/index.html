@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QR Onboarding</title>
+    <script src="js/qrcode.min.js"></script>
+    
+    <style>
+        .hidden {
+            display: none !important;
+        }
+
+        html,
+        body {
+            pointer-events: none;
+            user-select: none;
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: black;
+            color: white;
+            font-family: sans-serif;
+            text-align: center;
+            font-size: clamp(28px, 1.5vw, 64px);
+        }
+        
+
+        #qrcode {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #qrcode img {
+            max-width: 50vh;
+            max-height: 50vh;
+            width: auto;
+            height: auto;
+        }
+        .logo {
+            max-width: 50vw;
+            max-height: 50vh;
+            width: auto;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+
+<body style="display: none;">
+    <!-- Screens -->
+    <div id="logoScreen" class="hidden">
+        <img src="assets/portal.svg" alt="Logo" class="logo" />
+    </div>
+    <div id="initScreen" class="hidden">Initializing...</div>
+    <div id="qrScreen" class="hidden">
+        <div id="qrcode"></div>
+        <div id="qrError" style="margin-top: 12px; padding-top: 32px; color: #ff4d4f; font-size: 16px; display: none;"></div>
+        <div id="qrMessage" style="margin-top: 8px; color: #fffbe0; font-size: 16px; display: none;"></div>
+    </div>
+    <div id="welcomeScreen" class="hidden">
+        <p id="welcomeText"></p>
+    </div>
+    <div id="connectScreen" class="hidden">
+        <p id="connectText"></p>
+    </div>
+    <div id="messageScreen" class="hidden">
+        <p id="messageText"></p>
+        <div id="messageSubText" style="margin-top: 8px; color: #888; font-size: 0.7em; display: none;"></div>
+    </div>
+    <!-- Version display -->
+    <div id="versionDisplay" style="position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); color: #ccc; border-radius: 16px; padding: 4px 18px; font-size: 16px; z-index: 1000; pointer-events: none; user-select: none; display: none; border: 1px solid #444;"></div>
+
+    <script>
+        const screens = {
+            logo: {
+                id: "logoScreen",
+                requiredParams: [],
+            },
+            init: {
+                id: "initScreen",
+                requiredParams: [],
+            },
+            qr: {
+                id: "qrScreen",
+                requiredParams: ["device_id"],
+                render: (params) => {
+                    const deviceId = params.get("device_id");
+                    const qrData = `https://link.feralfile.com/device_connect/${deviceId}`;                     
+                    // Calculate QR code size based on viewport
+                    const minEdge = Math.min(window.innerWidth, window.innerHeight);
+                    const qrSize = Math.floor(minEdge / 2);
+                    
+                    // Clear previous QR code if exists
+                    document.getElementById("qrcode").innerHTML = '';
+                    
+                    // Generate QR code using QRCode.js
+                    const qrCode = new QRCode(document.getElementById("qrcode"), {
+                        text: qrData,
+                        width: qrSize,
+                        height: qrSize,
+                        colorDark: "#ffffff",
+                        colorLight: "#000000",
+                        correctLevel: QRCode.CorrectLevel.L
+                    });
+
+
+                    // Hiển thị error nếu có
+                    const errorMsg = params.get("error");
+                    const qrError = document.getElementById("qrError");
+                    if (errorMsg) {
+                        qrError.textContent = errorMsg;
+                        qrError.style.display = '';
+                    } else {
+                        qrError.textContent = '';
+                        qrError.style.display = 'none';
+                    }
+
+                    const message = params.get("message");
+                    const qrMessage = document.getElementById("qrMessage");
+                    if (message) {
+                        qrMessage.textContent = message;
+                        qrMessage.style.display = '';
+                    } else {
+                        qrMessage.textContent = '';
+                        qrMessage.style.display = 'none';
+                    }
+                }
+            },
+            welcome: {
+                id: "welcomeScreen",
+                requiredParams: ["device_id"],
+                render: (params) => {
+                    document.getElementById("welcomeText").textContent = 
+                        `Welcome to the Portal ${params.get("device_id")} Alpha Pilot`;
+                },
+            },
+            connect: {
+                id: "connectScreen",
+                requiredParams: ["ssid"],
+                render: (params) => {
+                    document.getElementById("connectText").textContent = 
+                        `Connecting to ${params.get("ssid")}`;
+                },
+            },
+            message: {
+                id: "messageScreen",
+                requiredParams: ["message"],
+                render: (params) => {
+                    document.getElementById("messageText").textContent = params.get("message");
+                    const subText = params.get("subtext");
+                    const subTextDiv = document.getElementById("messageSubText");
+                    if (subText) {
+                        subTextDiv.textContent = subText;
+                        subTextDiv.style.display = '';
+                    } else {
+                        subTextDiv.textContent = '';
+                        subTextDiv.style.display = 'none';
+                    }
+                },
+            },
+        };
+
+        function showScreen(step, params) {
+            const screen = screens[step];
+
+            if (!screen) {
+                document.body.innerHTML = `<h2 style="color:red;">Unknown step: "${step}"</h2>`;
+                return;
+            }
+
+            const missing = screen.requiredParams.filter(key => !params.get(key));
+            if (missing.length) {
+                document.body.innerHTML = `<h2 style="color:red;">Missing param(s): ${missing.join(', ')}</h2>`;
+                return;
+            }
+
+            Object.values(screens).forEach(({ id }) => {
+                document.getElementById(id)?.classList.add("hidden");
+            });
+
+            if (screen.render) screen.render(params);
+            document.getElementById(screen.id)?.classList.remove("hidden");
+        }
+
+        // Initialize
+        const params = new URLSearchParams(window.location.search);
+        const step = params.get("step") || "logo";
+
+        // Show body and initial screen after DOM is loaded
+        document.addEventListener("DOMContentLoaded", () => {
+            showScreen(step, params);
+            // Version display
+            const version = params.get("version");
+            const versionDisplay = document.getElementById("versionDisplay");
+            if (version) {
+                versionDisplay.textContent = version;
+                versionDisplay.style.display = '';
+            } else {
+                versionDisplay.style.display = 'none';
+            }
+            document.body.style.display = "";
+        });
+
+        // Handle window resize for QR code
+        window.addEventListener('resize', () => {
+            if (step === 'qr') {
+                showScreen('qr', params);
+            }
+        });
+
+        function handleCDPRequest({ command, params }) {
+            if (command === 'navigateWhenOnline') {
+                const url = params.url;
+                if (!url) {
+                    return { ok: false, error: 'URL is required' };
+                }
+                
+                // Check if online
+                if (navigator.onLine) {
+                    window.location.replace(url);
+                    return { ok: true };
+                } else {
+                    // Wait for online event
+                    window.addEventListener('online', function handler() {
+                        window.location.replace(url);
+                        window.removeEventListener('online', handler);
+                    });
+                    return { ok: true, message: 'Waiting for internet connection' };
+                }
+            } else {
+                return { ok:false, error: `Unknown command: ${command}` };
+            }
+        }
+        window.handleCDPRequest = handleCDPRequest;
+    </script>
+</body>
+
+</html>

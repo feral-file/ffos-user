@@ -1,0 +1,68 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Go Development Standards
+
+## Service Architecture
+- All Go services use `package main` (no shared libraries)
+- Services run as user `feralfile` (UID 1000), never root
+- Use structured logging with appropriate log levels
+- Implement graceful shutdown with signal handling
+
+## Code Organization
+- Group related functionality in separate files (e.g., `dbus.go`, `config.go`, `watchdog.go`)
+- Use consistent error handling patterns
+- Implement proper resource cleanup (defer statements)
+
+## Key Patterns
+- **Configuration**: Load from `/home/feralfile/.config/<service>/`
+- **Logging**: Write to `/home/feralfile/.logs/<service>.log`
+- **State**: Store persistent state in `/home/feralfile/.state/`
+- **Communication**: Use DBus for inter-service messaging
+
+## Testing & Quality
+- Always run `go fmt ./...` before commits
+- Write unit tests for core functionality  
+- Use `go test ./...` from repo root
+- Handle network failures gracefully
+
+### Writing Testable Code
+- **Dependency Injection**: Pass dependencies as parameters, not global variables
+- **Interface-based Design**: Define interfaces for external dependencies (DBus, filesystem, network)
+- **Pure Functions**: Separate business logic from I/O operations where possible
+- **Avoid Global State**: Use structs to encapsulate state, pass context explicitly
+- **Error Handling**: Return errors that can be tested, avoid panic() in production code
+- **Small Functions**: Keep functions focused on single responsibilities
+
+### Testable Function Patterns
+```go
+// Good: Testable with dependency injection
+func ProcessMessage(logger Logger, db Database, msg Message) error {
+    // Business logic here
+}
+
+// Good: Interface for external dependency
+type FileWriter interface {
+    WriteFile(filename string, data []byte) error
+}
+
+// Good: Pure function - easy to test
+func CalculateTimeout(attempts int, baseDelay time.Duration) time.Duration {
+    return baseDelay * time.Duration(attempts)
+}
+```
+
+### Test Structure
+- Use table-driven tests for multiple scenarios
+- Create test doubles/mocks for external dependencies
+- Test error conditions, not just happy paths
+- Use `testify/assert` or similar for cleaner assertions
+
+## Common Service Components
+- `main.go` - Entry point and signal handling
+- `config.go` - Configuration loading and validation
+- `logger.go` - Structured logging setup
+- `dbus.go` - DBus interface implementation
+- `mediator.go` - Core business logic coordination

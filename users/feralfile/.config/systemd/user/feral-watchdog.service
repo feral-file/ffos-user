@@ -1,0 +1,18 @@
+[Unit]
+Description=FeralFile Kiosk Watchdog Daemon
+After=feral-sys-monitord.service network.target
+Requires=user@1000.service
+ConditionPathExists=/run/user/1000/bus
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/feral-watchdog
+Restart=always
+RestartSec=5s
+WatchdogSec=30s
+Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+StandardOutput=append:/home/feralfile/.logs/watchdog.log
+StandardError=append:/home/feralfile/.logs/watchdog.log
+
+[Install]
+WantedBy=multi-user.target

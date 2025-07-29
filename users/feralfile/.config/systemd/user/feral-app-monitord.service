@@ -1,0 +1,14 @@
+[Unit]
+Description=Feral File App Monitord
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/feral-app-monitord
+Restart=always
+RestartSec=5
+WatchdogSec=30s
+StandardOutput=append:/home/feralfile/.logs/app-monitord.log
+StandardError=append:/home/feralfile/.logs/app-monitord.log
+
+[Install]
+WantedBy=default.target

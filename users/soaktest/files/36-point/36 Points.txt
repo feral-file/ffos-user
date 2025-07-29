@@ -1,0 +1,90 @@
+36 Points (2019-2022)
+by Sage Jenson
+(sagejenson.com / @mxsage)
+jenson.sage@gmail.com
+
+Software (black and white, silent) Dimensions variable (native resolution 1080 x (1080*2)), horizontal or vertical Generative, interactive WebGL 2.0, HTML, Javascript
+
+Collector receives: Source code (WebGL 2.0), Applications for Mac/Windows/Linux, Art Sale Agreement, Artists + Collector Rights.
+
+See edition number at the top of the main.js file.
+
+Point titles:
+
+01. pure_multiscale
+02. hex_hole_open
+03. vertebrata
+04. traffic_many_lanes
+05. tactile_extreme
+06. star_network
+07. enmeshed_singularities
+08. waves_upturn
+09. turing
+10. petri_worms
+11. a_rooting
+12. more_individuals
+13. slow_metastructure
+14. sloppy_bucky
+15. massive_structure
+16. speed_modulation
+17. emergent_hex_waves
+18. formalisms
+19. growing_on_a_sea_of_sand
+20. grid_of_sorts
+21. negotiation_of_highways
+22. transmission_tower
+23. sacred_network_nodules
+24. positive_negative_space
+25. circular_consolidation
+26. radiative_nexus
+27. unfold_time_but_only_in_a_line
+28. ink_on_white
+29. network_time
+30. inverse_network
+31. vanishing_points
+32. neuron_cluster
+33. scaling_nodule_emergence
+34. probe_emergence_from_line
+35. hyp_offset
+36. noise
+
+Full controls:
+[0 - 9] [a - z] : move to one of the 36 Points
+~ : load random configuration
+
++ or - : increase or decrease the interpolation time
+\ : freeze interpolation in current state
+S : save frame (only works if webpage is not sandboxed)
+
+Text (by symbios.wiki)
+
+In “36 Points,” the keyboard is an instrument for traversing curated locales within the phase space of a home-grown bio-sim. A multitude of particle-agents inhabit this playable terrarium. Their emergent behavior feeds-back and folds onto itself to create a rich and evolving primordium, teeming with material potentiality. The system yearns for the next keystroke, a symphony vibrating within a virtual membrane.
+
+Each edition provides the collector with a unique system state that is loaded at instantiation. To access any of the other points, the user may press keys 0-9 or a-z, and the system will interpolate into its new state. However, the point will drift back to its original configuration over time.
+
+“36 Points” culminates three years of research into Sage’s first web-based instrument. The embedding of the system within the web is intentional, as browsers offer cross compatibility and built-in interactivity. This also allows for the pieces to be collectable, yet open. It is interesting to note that the total file size of the work is 32kB and fits entirely within the metadata.
+
+
+------
+
+A primordium is an organ at the earliest stages of development, a mass of cell tissue teeming with potentiality. For Sage Jenson, primordium is material at the precipice of desire, and their material of choice. Their work functions in the aesthetics of immanence; a place where machinic systems imbue each other with unending possibility, a world in motion, out of equilibrium, and pulsating with unstable flows. Each piece in Primordium, their solo exhibition, embodies this sense of becoming, hypnotizing the viewer with an ever-unfolding actualization of the shadow future.
+
+In each of the works in the show, there are agents (particles) that can sense, navigate, and modify their environment. The environment acts as both an arena and a message board for the agents. All of the shapes and patterns within the pieces are emergent behaviors within a rich parameter space. In one sense, the behavior of the agents can be viewed as a reaction to the current state of the environment, and in another, the environment is a creation of the agents’ will upon it. 
+
+From slime molds to the structure of the cosmic web, similar algorithmic techniques correlate to natural phenomena at the smallest and largest scales of the universe. Sage is inspired by the natural processes of Earth—a planet out of equilibrium, constantly irradiated with the energy of the sun— to create virtual worlds through the primordial logic of music. Having played the violin for over a decade, and with a deep love of sound from Ligeti to SOPHIE, their work often melts the lines between audio and visual expression. 
+
+Stealing pages from philosophy, science, and music, Sage has developed a recipe book for actuating concepts. It is their hope that these mirrorings of the complexities of nature and society, through art, can illuminate the relationship between you, the agent, and the structure of material reality. Primordium presents art at the precipice of becoming, art as a verb. 
+
+-----
+
+“It’s this strange device that captures and immediately redistributes the surrounding forces that are both musical and pictorial, or rather neither entirely musical nor entirely pictorial.”
+
+French philosopher Francois Laruelle describes this flattening of the artist / composer / computer and the object / music / pixels as the “registration of the real” and representative of the “perfect indifference” of music, its primordial nature. The emergent forms arising from this flattening of the simulation model and its expression are possibly best described by an aesthetics of the immanent.
+
+The philosopher Gilles Deleuze builds upon Baruch Spinoza’s theory of immanence, and Henri Bergson’s theory of time. With Felix Guattari, he attempts to flatten the hierarchy prescribed by transcendence in favor of a temporal view of the world. Rather than a world of agents with transcendent goals, Deleuze imagines a world with machinic agents which actualize themselves through their connections with each other, because of those connections. In the language of complexity theory and thermodynamics, this is a theory of systems out of equilibrium, which evolve entropically. Forms arise due to symmetry breaking and phase instabilities. These are theories of becoming. 
+
+What makes generative art, and Sage’s work in particular, so captivating is the “adjacent possible” of the system. Every present moment unlocks the forever unfolding set of future possibilities. The systems morph and ooze, and fold back onto themselves in an unending expression of their underlying computational substance (Jon McCormack’s “computational sublime”). You feel a sense of eternal recurrence, perpetually delayed, free-falling into the holographic firewall surrounding the overwhelming weight of every piece until a sufficient distraction snaps you back into your own actuality. Even though there are recurrent motifs throughout the work, you’d sooner see the heat death of the universe than the system repeat itself.
+
+1. Michel Henry on August von Briesen’s series of pencil drawings composed while sitting, closed-eyed, in the concert pit at the Théâtre des Champs Elysées, Alex Galloway “Laruelle Against the Real”
+
+
