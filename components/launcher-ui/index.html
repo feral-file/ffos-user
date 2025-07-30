@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QR Onboarding</title>
     <script src="js/qrcode.min.js"></script>
-    
+
     <style>
         .hidden {
             display: none !important;
@@ -28,8 +28,9 @@
             font-family: sans-serif;
             text-align: center;
             font-size: clamp(28px, 1.5vw, 64px);
+            cursor: none;
         }
-        
+
 
         #qrcode {
             display: flex;
@@ -93,14 +94,14 @@
                 requiredParams: ["device_id"],
                 render: (params) => {
                     const deviceId = params.get("device_id");
-                    const qrData = `https://link.feralfile.com/device_connect/${deviceId}`;                     
+                    const qrData = `https://link.feralfile.com/device_connect/${deviceId}`;
                     // Calculate QR code size based on viewport
                     const minEdge = Math.min(window.innerWidth, window.innerHeight);
                     const qrSize = Math.floor(minEdge / 2);
-                    
+
                     // Clear previous QR code if exists
                     document.getElementById("qrcode").innerHTML = '';
-                    
+
                     // Generate QR code using QRCode.js
                     const qrCode = new QRCode(document.getElementById("qrcode"), {
                         text: qrData,
@@ -138,7 +139,7 @@
                 id: "welcomeScreen",
                 requiredParams: ["device_id"],
                 render: (params) => {
-                    document.getElementById("welcomeText").textContent = 
+                    document.getElementById("welcomeText").textContent =
                         `Welcome to the Portal ${params.get("device_id")} Alpha Pilot`;
                 },
             },
@@ -146,7 +147,7 @@
                 id: "connectScreen",
                 requiredParams: ["ssid"],
                 render: (params) => {
-                    document.getElementById("connectText").textContent = 
+                    document.getElementById("connectText").textContent =
                         `Connecting to ${params.get("ssid")}`;
                 },
             },
@@ -222,7 +223,7 @@
                 if (!url) {
                     return { ok: false, error: 'URL is required' };
                 }
-                
+
                 // Check if online
                 if (navigator.onLine) {
                     window.location.replace(url);
