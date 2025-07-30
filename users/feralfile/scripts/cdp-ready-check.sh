@@ -6,7 +6,7 @@ MAX_RETRY=90
 for i in $(seq 1 "$MAX_RETRY"); do
     if curl -sf "http://127.0.0.1:$CDP_PORT/json" > /dev/null; then
         echo "✅ CDP is available, Chromium ready"
-        systemctl start chromium-ready.target
+        systemctl --user start chromium-ready.target
         exit 0
     fi
 
@@ -15,5 +15,5 @@ for i in $(seq 1 "$MAX_RETRY"); do
 done
 
 echo "❌ Timeout: CDP not responding, restarting Chromium kiosk service"
-systemctl restart chromium-kiosk.service
+systemctl --user restart chromium-kiosk.service
 exit 1

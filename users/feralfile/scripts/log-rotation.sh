@@ -19,7 +19,6 @@ if [ ! -f "$LOG_CONFIG_FILE" ]; then
 /home/feralfile/.logs/connectd.log|/home/feralfile/.logs/backup/connectd
 /home/feralfile/.logs/setupd.log|/home/feralfile/.logs/backup/setupd
 /home/feralfile/.logs/timesyncd.log|/home/feralfile/.logs/backup/timesyncd
-/home/feralfile/.logs/updaterd.log|/home/feralfile/.logs/backup/updaterd
 # Add more logs as needed
 EOL
 fi
