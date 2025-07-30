@@ -1,17 +1,14 @@
+if ! systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; then
+    systemctl --user enable --now "feral-sys-monitord.service"
+fi
+if ! systemctl --user is-enabled "feral-app-monitord.service" >/dev/null 2>&1; then
+    systemctl --user enable --now "feral-app-monitord.service"
+fi
+if ! systemctl --user is-enabled "feral-watchdog.service" >/dev/null 2>&1; then
+    systemctl --user enable --now "feral-watchdog.service"
+fi
+
 systemctl --user start "chromium-kiosk.service"
-
-ENV_MODE="test"
-if [[ -r /home/feralfile/.config/environment ]]; then
-    ENV_MODE="$(cat /home/feralfile/.config/environment 2>/dev/null | xargs)"
-fi
-
-if [[ "$ENV_MODE" == "live" ]]; then
-    for timer in 03:00; do
-        if ! systemctl --user is-enabled "feral-updater@$timer.timer" >/dev/null 2>&1; then
-            systemctl --user enable --now "feral-updater@$timer.timer"
-        fi
-    done
-fi
 
 # Enable hourly timers for time sync and log rotation
 if ! systemctl --user is-enabled "feral-timesyncd.timer" >/dev/null 2>&1; then
@@ -20,4 +17,12 @@ fi
 
 if ! systemctl --user is-enabled "feral-log-rotation.timer" >/dev/null 2>&1; then
     systemctl --user enable --now "feral-log-rotation.timer"
+fi
+
+if ! sudo systemctl is-enabled "feral-updater@03:00.timer" >/dev/null 2>&1; then
+    sudo systemctl enable --now "feral-updater@03:00.timer"
+fi
+
+if ! sudo systemctl is-enabled "root-log-rotation.timer" >/dev/null 2>&1; then
+    sudo systemctl enable --now "root-log-rotation.timer"
 fi
