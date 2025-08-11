@@ -3,27 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/Feral-File/feralfile-device/components/feral-sys-monitord/metric"
 	"go.uber.org/zap"
 )
-
-// GetMacAddress finds the MAC address of the first active, non-loopback network interface.
-func GetMacAddress() (string, error) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0 && iface.HardwareAddr != nil {
-			return iface.HardwareAddr.String(), nil
-		}
-	}
-	return "", fmt.Errorf("no suitable network interface found")
-}
 
 func GetConnectivityStatus() (bool, error) {
 	logger.Info("Getting connectivity status")
@@ -92,8 +76,9 @@ const (
 )
 
 type PageState struct {
-	Page            Page  `json:"page"`
-	PageChangedUnix int64 `json:"page_changed_unix"`
+	ID              string `json:"id"`
+	Page            Page   `json:"page"`
+	PageChangedUnix int64  `json:"page_changed_unix"`
 }
 
 // GetSysMetrics retrieves system metrics from the sysmonitord service.
@@ -107,7 +92,7 @@ func GetPageState() (*PageState, error) {
 
 	err := dbusClient.Scan(
 		deadlineCtx,
-		[]interface{}{&pg.Page, &pg.PageChangedUnix},
+		[]interface{}{&pg.ID, &pg.Page, &pg.PageChangedUnix},
 		SETUPD_DBUS_NAME,
 		SETUPD_DBUS_PATH,
 		SETUPD_DBUS_INTERFACE,

@@ -1,6 +1,5 @@
 //! Firmware / software updater support for setupd.
-
-use crate::constant;
+use crate::{cfg, constant};
 use anyhow::{Context, Result};
 use rand::Rng;
 use regex::Regex;
@@ -18,31 +17,22 @@ use tokio::{
 };
 
 // ---------- Cache ----------
-
-static CURRENT_BUILD: OnceLock<RunningBuild> = OnceLock::new();
 static REMOTE_VERSIONS: OnceLock<UpstreamVersion> = OnceLock::new();
 
 // ---------- Public API ----------
 
-pub async fn current_version() -> Result<String> {
-    let current = read_local_cfg().await?;
-    Ok(current.version.to_string())
-}
-
-pub async fn latest_version() -> Result<String> {
-    let current = read_local_cfg().await?;
-    let remote_versions = fetch_remote_version(&current).await?;
-    let latest = remote_versions.latest_version;
-    Ok(latest.to_string())
-}
-
 /// Return `Ok(true)` when the running build is **below** the distributor’s
 /// minimum supported version and an update is therefore required.
 pub async fn is_update_required() -> Result<bool> {
-    let current = read_local_cfg().await?;
-    let remote_versions = fetch_remote_version(&current).await?;
-    let min_version = remote_versions.min_version;
-    Ok(current.version < min_version)
+    let current = cfg::current_version().await?;
+    let remote_versions = fetch_remote_version().await?;
+    Ok(current < remote_versions.min_version)
+}
+
+/// Return the latest version from the remote server.
+pub async fn latest_version() -> Result<String> {
+    let remote_versions = fetch_remote_version().await?;
+    Ok(remote_versions.latest_version.to_string())
 }
 
 /// Spawn the updater in a background task and return a channel receiver that
@@ -164,45 +154,6 @@ async fn run_update_and_send(tx: mpsc::Sender<Result<String, anyhow::Error>>) ->
 // ---------- Internal helpers ----------
 
 #[derive(Deserialize)]
-struct LocalConfigJSON {
-    branch: String,
-    version: String,
-    distribution_acc: String,
-    distribution_pass: String,
-    endpoint: String,
-}
-
-#[derive(Debug, Clone)]
-struct RunningBuild {
-    branch: String,
-    version: Version,
-    acc: String,
-    pwd: String,
-    endpoint: String,
-}
-
-async fn read_local_cfg() -> Result<RunningBuild> {
-    if let Some(build) = CURRENT_BUILD.get() {
-        return Ok(build.clone());
-    }
-
-    let buf = fs::read_to_string(constant::UPDATER_LOCAL_CONFIG_PATH)
-        .await
-        .context("reading local config")?;
-    let cfg: LocalConfigJSON = serde_json::from_str(&buf).context("parsing local config JSON")?;
-    let version = Version::parse(&cfg.version).context("parsing local semver")?;
-    let build = RunningBuild {
-        branch: cfg.branch,
-        version,
-        acc: cfg.distribution_acc,
-        pwd: cfg.distribution_pass,
-        endpoint: cfg.endpoint,
-    };
-    CURRENT_BUILD.set(build.clone()).unwrap();
-    Ok(build)
-}
-
-#[derive(Deserialize)]
 struct UpstreamInfo {
     min_version: String,
     latest_version: String,
@@ -214,20 +165,20 @@ struct UpstreamVersion {
     latest_version: Version,
 }
 
-async fn fetch_remote_version(current: &RunningBuild) -> Result<UpstreamVersion> {
+async fn fetch_remote_version() -> Result<UpstreamVersion> {
     if let Some(versions) = REMOTE_VERSIONS.get() {
         return Ok(versions.clone());
     }
 
     let url = format!(
         "{}{}{}",
-        current.endpoint,
+        cfg::endpoint().await?,
         constant::UPDATER_UPSTREAM_CONFIG_URL_SUFFIX,
-        current.branch
+        cfg::branch().await?
     );
     let resp = reqwest::Client::new()
         .get(&url)
-        .basic_auth(&current.acc, Some(&current.pwd))
+        .basic_auth(cfg::acc().await?, Some(cfg::pwd().await?))
         .send()
         .await
         .with_context(|| format!("fetching {url}"))?;

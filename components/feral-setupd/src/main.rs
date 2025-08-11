@@ -1,6 +1,7 @@
 mod ble;
 mod cache;
 mod cdp;
+mod cfg;
 mod connectivity;
 mod constant;
 mod dbus_utils;
@@ -73,6 +74,7 @@ impl Page {
 #[derive(Debug)]
 struct AppState {
     device_id: String,
+    branch: String,
     current_version: String,
     app_cache: Cache,
     internet: Connectivity,
@@ -89,9 +91,10 @@ struct AppState {
 }
 
 impl PageStateProvider for AppState {
-    fn get_page_state(&self) -> (String, i64) {
+    fn get_page_state(&self) -> (String, String, i64) {
+        let id = self.device_id.clone();
         let page = self.page.blocking_lock();
-        (page.page_type().to_string(), page.timestamp())
+        (id, page.page_type().to_string(), page.timestamp())
     }
 }
 
@@ -105,7 +108,8 @@ async fn main() -> Result<()> {
     let ble_service = Arc::new(Ble::new());
     let app_state = Arc::new(AppState {
         device_id: ble_service.get_device_id().await,
-        current_version: updater::current_version().await.unwrap_or_default(),
+        branch: cfg::branch().await?.to_string(),
+        current_version: cfg::current_version().await?.to_string(),
         app_cache: Cache::new(constant::CACHE_FILEPATH)?,
         internet: Connectivity::spawn().await,
         page: Mutex::new(Page::None(unix_s())),
@@ -128,8 +132,25 @@ async fn main() -> Result<()> {
         .context("starting Bluetooth advertising")?;
     println!("MAIN: Bluetooth advertising started successfully");
 
-    let has_internet = app_state.internet.is_online(true).await;
     let used_to_connect = app_state.app_cache.get(cache::CONNECTED);
+
+    // If the device used to be able to connect to the internet
+    // It's likely that it will have internet again really soon
+    // We aggressively poll for internet for a few seconds to
+    // go directly to the webapp instead of the QRCode
+    if used_to_connect.is_some() {
+        app_state
+            .internet
+            .wait_until_online(
+                Duration::from_millis(constant::AGGRESSIVE_INTERNET_CHECK_INTERVAL),
+                Some(Duration::from_millis(
+                    constant::INITIAL_INTERNET_CHECK_TIMEOUT,
+                )),
+            )
+            .await;
+    }
+
+    let has_internet = app_state.internet.is_online(true).await;
     if !has_internet {
         // Show the QRCode so the user can do something with the internet
         ssids_cacher.trigger_refresh();
@@ -142,11 +163,11 @@ async fn main() -> Result<()> {
             // We should be more aggressive with the polling (we want to take action as soon as users fix the internet)
             // Otherwise, we should be more conservative as users might plug in the LAN cable, but this is rare
             let urgency = if used_to_connect.is_some() {
-                Duration::from_secs(2)
+                Duration::from_millis(constant::AGGRESSIVE_INTERNET_CHECK_INTERVAL)
             } else {
-                Duration::from_secs(10)
+                Duration::from_millis(constant::RELAXED_INTERNET_CHECK_INTERVAL)
             };
-            app_state.internet.wait_until_online(urgency).await;
+            app_state.internet.wait_until_online(urgency, None).await;
             if used_to_connect.is_none() {
                 app_state.app_cache.set(cache::CONNECTED, "true");
                 app_state.app_cache.save(constant::CACHE_FILEPATH).unwrap();
@@ -380,18 +401,22 @@ fn create_factory_reset_cb(
 }
 
 // The url format is like this
-// url?step=qr&device_id=<device_id>|<topic_id>|<internet>
+// url?step=qr&device_info=<device_id>|<topic_id>|<internet>|<branch>|<version>
 async fn build_qrcode_url(app_state: &Arc<AppState>) -> String {
-    let mut qrcode_url = format!("{}{}", constant::QRCODE_URL_PREFIX, app_state.device_id);
+    let device_id = app_state.device_id.clone();
     let topic_id = app_state.app_cache.get(cache::TOPIC_ID).unwrap_or_default();
     let has_internet = if app_state.internet.is_online(false).await {
         "true"
     } else {
         "false"
     };
-    qrcode_url = format!("{qrcode_url}|{topic_id}|{has_internet}");
-    qrcode_url = format!("{qrcode_url}&version={}", &app_state.current_version);
-    qrcode_url
+    let branch = app_state.branch.clone().replace('/', "%2F");
+    let version = app_state.current_version.clone();
+
+    format!(
+        "{}&device_info={device_id}|{topic_id}|{has_internet}|{branch}|{version}&version={version}&device_id={device_id}",
+        constant::QRCODE_URL_PREFIX
+    )
 }
 
 async fn wait_for_shutdown() {
@@ -489,11 +514,15 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
     // This is to avoid Err Network Changed from Chrome
     time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
 
+    let webapp_url = match cfg::webapp_url().await? {
+        Some(url) => url,
+        None => constant::WEBAPP_URL.to_string(),
+    };
     chrome
-        .navigate(constant::WEBAPP_URL)
+        .navigate(&webapp_url)
         .await
-        .with_context(|| format!("navigating to {}", constant::WEBAPP_URL))?;
-    println!("MAIN: Navigated to {}", constant::WEBAPP_URL);
+        .with_context(|| format!("navigating to {webapp_url}"))?;
+    println!("MAIN: Navigated to {webapp_url}");
     *page = Page::WebApp(unix_s());
     Ok(())
 }

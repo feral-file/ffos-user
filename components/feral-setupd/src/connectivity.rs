@@ -2,7 +2,10 @@
 //! Drop-in helper for “am I online?” logic.
 
 use crate::dbus_utils;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     sync::{Mutex, watch},
     time,
@@ -73,16 +76,21 @@ impl Connectivity {
 
     /// Suspends until the state flips to *online*.
     /// Duration allows the caller to set the urgency of the wait.
-    pub async fn wait_until_online(&self, duration: Duration) {
+    pub async fn wait_until_online(&self, interval: Duration, timeout: Option<Duration>) {
+        let start = Instant::now();
         loop {
             // Force a fresh check so callers don't have to wait for
             // the 30‑second background refresher.
             if self.is_online(true).await {
                 return;
             }
-            // Poll again after a short delay—fast enough for UX, but
-            // still light on DBus calls.
-            time::sleep(duration).await;
+            // Poll again if time is not up
+            if let Some(timeout) = timeout {
+                if start.elapsed() > timeout {
+                    return;
+                }
+            }
+            time::sleep(interval).await;
         }
     }
 }

@@ -30,7 +30,6 @@ type Config struct {
 	Branch            string `json:"branch"`
 	Version           string `json:"version"`
 	HeartbeatEndpoint string `json:"heartbeat_endpoint"`
-	MAC               string `json:"mac"`
 	Pubkey            string `json:"pubkey"`
 }
 
@@ -50,11 +49,6 @@ func LoadConfig() error {
 
 	if err := json.Unmarshal(bytes, &config); err != nil {
 		return fmt.Errorf("failed to parse config JSON: %w", err)
-	}
-
-	config.MAC, err = GetMacAddress()
-	if err != nil {
-		return fmt.Errorf("failed to get MAC address: %w", err)
 	}
 
 	config.Pubkey, err = CleanPublicKeyBase64()
