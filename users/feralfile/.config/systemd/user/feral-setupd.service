@@ -2,7 +2,6 @@
 Description=Feral File Setup Service
 BindsTo=feral-connectd.service
 After=feral-connectd.service
-Requires=bluetooth.service
 
 [Service]
 Type=simple
