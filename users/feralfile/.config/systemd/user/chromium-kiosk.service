@@ -5,7 +5,7 @@ Description=Chromium Kiosk Mode
 Type=simple
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 ExecStart=/home/feralfile/scripts/start-kiosk.sh
-ExecStopPost=systemctl stop chromium-ready.target
+ExecStopPost=systemctl --user stop chromium-ready.target
 StandardOutput=append:/home/feralfile/.logs/chromium.log
 StandardError=append:/home/feralfile/.logs/chromium.log
 Restart=always
