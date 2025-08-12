@@ -22,7 +22,3 @@ fi
 if ! sudo systemctl is-enabled "feral-updater@03:00.timer" >/dev/null 2>&1; then
     sudo systemctl enable --now "feral-updater@03:00.timer"
 fi
-
-if ! sudo systemctl is-enabled "root-log-rotation.timer" >/dev/null 2>&1; then
-    sudo systemctl enable --now "root-log-rotation.timer"
-fi
