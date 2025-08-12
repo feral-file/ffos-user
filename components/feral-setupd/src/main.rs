@@ -98,6 +98,25 @@ impl PageStateProvider for AppState {
     }
 }
 
+async fn wait_for_connectd_dbus() {
+    println!("MAIN: Waiting for connectd D-Bus connection...");
+    loop {
+        match dbus_utils::check_dbus_connection(
+            constant::DBUS_CONNECTD_DESTINATION,
+            constant::DBUS_CONNECTD_OBJECT,
+        ) {
+            Ok(_) => {
+                println!("MAIN: connectd D-Bus connection established successfully");
+                break;
+            }
+            Err(e) => {
+                println!("MAIN: connectd D-Bus not available yet: {e}, retrying in 2 seconds...");
+                time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize dependencies
@@ -131,6 +150,9 @@ async fn main() -> Result<()> {
         .await
         .context("starting Bluetooth advertising")?;
     println!("MAIN: Bluetooth advertising started successfully");
+
+    // Wait for connectd D-Bus connection before proceeding
+    wait_for_connectd_dbus().await;
 
     let used_to_connect = app_state.app_cache.get(cache::CONNECTED);
 

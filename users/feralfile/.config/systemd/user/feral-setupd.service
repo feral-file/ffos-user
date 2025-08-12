@@ -1,7 +1,6 @@
 [Unit]
 Description=Feral File Setup Service
-BindsTo=feral-connectd.service
-After=feral-connectd.service
+PartOf=chromium-ready.target
 
 [Service]
 Type=simple

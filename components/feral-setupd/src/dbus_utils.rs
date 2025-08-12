@@ -310,3 +310,13 @@ pub fn get_relayer_info() -> Result<String> {
         }
     }
 }
+
+pub fn check_dbus_connection(destination: &str, object_path: &str) -> Result<()> {
+    let conn = Connection::new_session()?;
+    let proxy = conn.with_proxy(destination, object_path, Duration::from_millis(1000));
+
+    let _: () = proxy.method_call("org.freedesktop.DBus.Peer", "Ping", ())?;
+
+    println!("DBUS: Connection check successful via Peer.Ping");
+    Ok(())
+}
