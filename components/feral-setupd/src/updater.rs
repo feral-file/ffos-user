@@ -76,13 +76,31 @@ async fn run_update_and_send(tx: mpsc::Sender<Result<String, anyhow::Error>>) ->
         ));
     }
 
-    // 2. Open the log file, then seek to end
+    // 2. Open the log file with retry mechanism (1 minute timeout, retry every 5 seconds)
     let log_path = constant::UPDATER_PROCESS_LOG_FILE;
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .open(log_path)
-        .await
-        .with_context(|| format!("opening {log_path}"))?;
+    let retry_duration = Duration::from_secs(60); // 1 minute total
+    let retry_interval = Duration::from_secs(5); // 5 seconds between retries
+    let start_time = time::Instant::now();
+
+    let mut file = loop {
+        match fs::OpenOptions::new().read(true).open(log_path).await {
+            Ok(f) => break f,
+            Err(e) => {
+                let elapsed = start_time.elapsed();
+                if elapsed >= retry_duration {
+                    return Err(anyhow::anyhow!(
+                        "Failed to open {} after {} seconds: {}",
+                        log_path,
+                        elapsed.as_secs(),
+                        e
+                    ));
+                }
+
+                // Wait before next retry
+                time::sleep(retry_interval).await;
+            }
+        }
+    };
 
     file.seek(SeekFrom::End(0))
         .await
