@@ -1,0 +1,51 @@
+name: Test Watchdog
+
+on:
+  push:
+    branches: [release, develop]
+    paths:
+      - 'components/feral-watchdog/**/*.go'
+  pull_request:
+    branches: [release, develop]
+    paths:
+      - 'components/feral-watchdog/**/*.go'
+
+jobs:
+  test:
+    name: Test feral-watchdog (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./components/feral-watchdog
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+          cache-dependency-path: components/feral-watchdog/go.sum
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with coverage
+        run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./components/feral-watchdog/coverage.out
+          directory: ./components/feral-watchdog
+          slug: feral-file/feralfile-device
+          flags: feral-watchdog
+          name: feral-watchdog-coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          override_branch: ${{ github.ref_name }}
+          override_build: ${{ github.run_id }}-watchdog

@@ -1,0 +1,66 @@
+name: Test Setupd
+
+on:
+  push:
+    branches: [release, develop]
+    paths:
+      - 'components/feral-setupd/src/**'
+  pull_request:
+    branches: [release, develop]
+    paths:
+      - 'components/feral-setupd/src/**'
+
+jobs:
+  test:
+    name: Test feral-setupd (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./components/feral-setupd
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.88.0
+          override: true
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            components/feral-setupd/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('components/feral-setupd/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run cargo check
+        run: cargo check --verbose
+
+      - name: Run tests with coverage
+        run: |
+          # Install cargo-tarpaulin for coverage
+          cargo install cargo-tarpaulin
+          cargo tarpaulin --out Xml --output-dir coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./components/feral-setupd/coverage/cobertura.xml
+          directory: ./components/feral-setupd
+          flags: feral-setupd
+          name: feral-setupd-coverage
+          slug: feral-file/feralfile-device
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          override_branch: ${{ github.ref_name }}
+          override_build: ${{ github.run_id }}-setupd

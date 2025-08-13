@@ -1,0 +1,51 @@
+name: Test Connectd
+
+on:
+  push:
+    branches: [release, develop]
+    paths:
+      - 'components/feral-connectd/**/*.go'
+  pull_request:
+    branches: [release, develop]
+    paths:
+      - 'components/feral-connectd/**/*.go'
+
+jobs:
+  test:
+    name: Test feral-connectd (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./components/feral-connectd
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+          cache-dependency-path: components/feral-connectd/go.sum
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with coverage
+        run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./components/feral-connectd/coverage.out
+          directory: ./components/feral-connectd
+          slug: feral-file/feralfile-device
+          flags: feral-connectd
+          name: feral-connectd-coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          override_branch: ${{ github.ref_name }}
+          override_build: ${{ github.run_id }}-connectd
