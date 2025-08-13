@@ -58,6 +58,11 @@ ffos-user/
     │   │   ├── feral-updater.sh
     │   │   └── ...
     │   ├── .config/              # User configurations
+    │   │   │   ├── systemd/user/
+    │   │   │   │   ├── feral-sys-monitord.service
+    │   │   │   │   ├── feral-setupd.service
+    │   │   │   │   ├── chromium-kiosk.service
+    │   │   │   │   └── ...
     │   │   ├── connectd.json
     │   │   └── watchdog.json
     │   ├── .bash_profile         # Shell configuration
@@ -106,6 +111,11 @@ users/feralfile/
 │   ├── log-rotation.sh          # Log management
 │   └── ...
 ├── .config/                      # Application configs
+│   ├── systemd/user/             # Systemd services
+│   │   ├── feral-sys-monitord.service
+│   │   ├── feral-setupd.service
+│   │   ├── chromium-kiosk.service
+│   │   └── ...
 │   ├── connectd.json            # Connection daemon config
 │   └── watchdog.json            # Watchdog config
 └── .bash_profile                # Shell environment
@@ -115,7 +125,7 @@ users/feralfile/
 ```
 users/soaktest/
 ├── scripts/                      # Test automation
-│   └── automated_script.sh      # Automated testing
+│   └── soak-test.sh            # Soak testing
 ├── logs/                        # Test output
 ├── files/                       # Test assets
 └── .bash_profile               # Test environment
@@ -140,35 +150,6 @@ ffos-user/users/feralfile/.config/ → ISO /home/feralfile/.config/
 ffos-user/users/feralfile/scripts/ → ISO /home/feralfile/scripts/
 ```
 
-## Component Specifications
-
-### Build Requirements
-
-#### Go Components
-- **Build System**: Go modules
-- **Output**: Single binary
-- **Package Format**: pacman package
-- **Dependencies**: Minimal system dependencies
-
-#### Rust Components
-- **Build System**: Cargo
-- **Output**: Release binary
-- **Package Format**: pacman package
-- **Dependencies**: System libraries
-
-#### UI Components
-- **Format**: Static HTML/CSS/JS
-- **Deployment**: Copied to `/opt/feral/ui/`
-- **Access**: Web interface
-
-### Package Structure
-```
-{component}-{version}/
-├── usr/bin/{component}          # Binary executable
-├── usr/share/doc/{component}/   # Documentation
-└── etc/systemd/system/          # Service files (if applicable)
-```
-
 ## Integration with FFOS
 
 ### Version Control
@@ -185,7 +166,6 @@ ffos-user/users/feralfile/scripts/ → ISO /home/feralfile/scripts/
 ```
 ffos-user/main → ffos build → R2/{main}/
 ffos-user/develop → ffos build → R2/{develop}/
-ffos-user/v1.0.0 → ffos build → R2/{v1.0.0}/
 ```
 
 ## Repository Management
