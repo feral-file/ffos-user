@@ -130,6 +130,8 @@ func (c *handler) Execute(ctx context.Context, cmd Command) (interface{}, error)
 		result, err = c.handleScreenRotation(ctx, bytes)
 	case relayer.CMD_SHUTDOWN:
 		result, err = c.shutdown(ctx)
+	case relayer.CMD_REBOOT:
+		result, err = c.reboot(ctx)
 	case relayer.CMD_DEVICE_STATUS:
 		result, err = c.getDeviceStatus(ctx)
 	case relayer.CMD_UPDATE_TO_LATEST:
@@ -594,6 +596,17 @@ func (c *handler) shutdown(ctx context.Context) (interface{}, error) {
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to execute shutdown command: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (c *handler) reboot(ctx context.Context) (interface{}, error) {
+
+	cmd := c.exec.CommandContext(ctx, "sudo", "reboot", "-h", "now")
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("failed to execute reboot command: %w", err)
 	}
 
 	return CmdOK, nil
