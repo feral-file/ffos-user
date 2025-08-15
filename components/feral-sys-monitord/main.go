@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Feral-File/feralfile-device/components/feral-sys-monitord/metric"
+	"github.com/Feral-File/ffos-user/components/feral-sys-monitord/metric"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"

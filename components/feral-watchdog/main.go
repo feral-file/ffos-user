@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Feral-File/feralfile-device/components/feral-watchdog/packages/cdp"
+	"github.com/Feral-File/ffos-user/components/feral-watchdog/packages/cdp"
 	"github.com/feral-file/godbus"
 	"github.com/godbus/dbus/v5"
 	"go.uber.org/zap"

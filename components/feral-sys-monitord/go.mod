@@ -1,4 +1,4 @@
-module github.com/Feral-File/feralfile-device/components/feral-sys-monitord
+module github.com/Feral-File/ffos-user/components/feral-sys-monitord
 
 go 1.23.5
 

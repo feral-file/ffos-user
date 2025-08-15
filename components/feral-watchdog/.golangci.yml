@@ -18,7 +18,7 @@ formatters:
     goimports:
       # change to your project’s import path(s)
       local-prefixes:
-        - github.com/feral-file/feralfile-device/components/feral-watchdog
+        - github.com/Feral-File/ffos-user/components/feral-watchdog
 
 # =========
 # Linters

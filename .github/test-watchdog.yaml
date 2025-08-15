@@ -42,7 +42,7 @@ jobs:
         with:
           files: ./components/feral-watchdog/coverage.out
           directory: ./components/feral-watchdog
-          slug: feral-file/feralfile-device
+          slug: feral-file/ffos-user
           flags: feral-watchdog
           name: feral-watchdog-coverage
           token: ${{ secrets.CODECOV_TOKEN }}

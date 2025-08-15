@@ -6,12 +6,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/cdp"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/dbus"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/relayer"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/state"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/status"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/wrapper"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/cdp"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/dbus"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/state"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/status"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/wrapper"
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
 )

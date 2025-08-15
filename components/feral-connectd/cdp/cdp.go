@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/wrapper"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/wrapper"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )

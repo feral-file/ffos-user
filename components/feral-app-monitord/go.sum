@@ -1,5 +1,5 @@
-github.com/Feral-File/feralfile-device/components/feral-sys-monitord v0.0.0-20250716034320-6d7b3d73eead h1:VkcLzNbQZoZuhP9j4yyiN3q244pre2xCa8tYr20jykA=
-github.com/Feral-File/feralfile-device/components/feral-sys-monitord v0.0.0-20250716034320-6d7b3d73eead/go.mod h1:Ts1Rgvbyf8ve3GJpxH/owDBMmfW6gQ3nLcsjB2bdN38=
+github.com/Feral-File/ffos-user/components/feral-sys-monitord v0.0.0-20250716034320-6d7b3d73eead h1:VkcLzNbQZoZuhP9j4yyiN3q244pre2xCa8tYr20jykA=
+github.com/Feral-File/ffos-user/components/feral-sys-monitord v0.0.0-20250716034320-6d7b3d73eead/go.mod h1:Ts1Rgvbyf8ve3GJpxH/owDBMmfW6gQ3nLcsjB2bdN38=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/coreos/go-systemd/v22 v22.5.0 h1:RrqgGjYQKalulkV8NGVIfkXQf6YYmOyiJKk8iXXhfZs=

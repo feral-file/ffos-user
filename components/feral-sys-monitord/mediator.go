@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/Feral-File/feralfile-device/components/feral-sys-monitord/metric"
+	"github.com/Feral-File/ffos-user/components/feral-sys-monitord/metric"
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
 )

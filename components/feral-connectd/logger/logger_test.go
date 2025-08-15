@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/logger"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/mocks"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/logger"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/mocks"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"

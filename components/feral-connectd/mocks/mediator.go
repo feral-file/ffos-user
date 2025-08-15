@@ -7,7 +7,7 @@ package mocks
 import (
 	reflect "reflect"
 
-	status "github.com/Feral-File/feralfile-device/components/feral-connectd/status"
+	status "github.com/Feral-File/ffos-user/components/feral-connectd/status"
 	gomock "github.com/golang/mock/gomock"
 )
 

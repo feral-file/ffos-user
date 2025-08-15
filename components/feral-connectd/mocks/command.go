@@ -8,8 +8,8 @@ import (
 	context "context"
 	reflect "reflect"
 
-	command "github.com/Feral-File/feralfile-device/components/feral-connectd/command"
-	status "github.com/Feral-File/feralfile-device/components/feral-connectd/status"
+	command "github.com/Feral-File/ffos-user/components/feral-connectd/command"
+	status "github.com/Feral-File/ffos-user/components/feral-connectd/status"
 	gomock "github.com/golang/mock/gomock"
 )
 

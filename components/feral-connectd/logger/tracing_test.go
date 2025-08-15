@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/logger"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/relayer"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/logger"
+	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
 	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap/zaptest"
 )
