@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/mocks"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/state"
+	"github.com/feral-file/ffos-user/components/feral-connectd/mocks"
+	"github.com/feral-file/ffos-user/components/feral-connectd/state"
+
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"

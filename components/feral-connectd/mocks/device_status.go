@@ -8,7 +8,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	status "github.com/Feral-File/feralfile-device/components/feral-connectd/status"
+	status "github.com/feral-file/ffos-user/components/feral-connectd/status"
 	gomock "github.com/golang/mock/gomock"
 )
 

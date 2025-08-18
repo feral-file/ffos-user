@@ -59,7 +59,7 @@ jobs:
           directory: ./components/feral-setupd
           flags: feral-setupd
           name: feral-setupd-coverage
-          slug: feral-file/feralfile-device
+          slug: feral-file/ffos-user
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
           override_branch: ${{ github.ref_name }}

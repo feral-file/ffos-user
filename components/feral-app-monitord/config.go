@@ -12,7 +12,7 @@ import (
 const (
 	homeDir            = "/home/feralfile"
 	configDirName      = ".config"
-	configFileBasename = "x1-config.json"
+	configFileBasename = "ff1-config.json"
 	privateKeyFilename = "device.pem"
 	publicKeyFilename  = "device.pub"
 )
@@ -25,7 +25,7 @@ var (
 	config         *Config
 )
 
-// Config holds the configuration loaded from the x1-config.json file.
+// Config holds the configuration loaded from the ff1-config.json file.
 type Config struct {
 	Branch            string `json:"branch"`
 	Version           string `json:"version"`

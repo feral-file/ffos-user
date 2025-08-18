@@ -7,7 +7,7 @@ package mocks
 import (
 	reflect "reflect"
 
-	state "github.com/Feral-File/feralfile-device/components/feral-connectd/state"
+	state "github.com/feral-file/ffos-user/components/feral-connectd/state"
 	gomock "github.com/golang/mock/gomock"
 	zap "go.uber.org/zap"
 )

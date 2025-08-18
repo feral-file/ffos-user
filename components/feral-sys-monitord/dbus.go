@@ -1,7 +1,8 @@
 package main
 
 import (
-	"github.com/Feral-File/feralfile-device/components/feral-sys-monitord/metric"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
+
 	"github.com/feral-file/godbus"
 	"github.com/godbus/dbus/v5"
 	"go.uber.org/zap"

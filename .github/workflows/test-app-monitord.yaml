@@ -1,32 +1,32 @@
-name: Test Connectd
+name: Test App Monitord
 
 on:
   push:
     branches: [release, develop]
     paths:
-      - 'components/feral-connectd/**/*.go'
+      - 'components/feral-app-monitord/**/*.go'
   pull_request:
     branches: [release, develop]
     paths:
-      - 'components/feral-connectd/**/*.go'
+      - 'components/feral-app-monitord/**/*.go'
 
 jobs:
   test:
-    name: Test feral-connectd (Go)
+    name: Test feral-app-monitord (Go)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./components/feral-connectd
+        working-directory: ./components/feral-app-monitord
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.23.5'
           cache: true
-          cache-dependency-path: components/feral-connectd/go.sum
+          cache-dependency-path: components/feral-app-monitord/go.sum
 
       - name: Install dependencies
         run: go mod download
@@ -40,12 +40,12 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: ./components/feral-connectd/coverage.out
-          directory: ./components/feral-connectd
-          slug: feral-file/feralfile-device
-          flags: feral-connectd
-          name: feral-connectd-coverage
+          files: ./components/feral-app-monitord/coverage.out
+          directory: ./components/feral-app-monitord
+          slug: feral-file/ffos-user
+          flags: feral-app-monitord
+          name: feral-app-monitord-coverage
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
           override_branch: ${{ github.ref_name }}
-          override_build: ${{ github.run_id }}-connectd
+          override_build: ${{ github.run_id }}-app-monitord

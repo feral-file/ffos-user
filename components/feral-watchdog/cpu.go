@@ -5,7 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Feral-File/feralfile-device/components/feral-watchdog/packages/cdp"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
+
 	"go.uber.org/zap"
 )
 

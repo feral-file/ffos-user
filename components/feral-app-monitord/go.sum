@@ -1,5 +1,3 @@
-github.com/Feral-File/feralfile-device/components/feral-sys-monitord v0.0.0-20250716034320-6d7b3d73eead h1:VkcLzNbQZoZuhP9j4yyiN3q244pre2xCa8tYr20jykA=
-github.com/Feral-File/feralfile-device/components/feral-sys-monitord v0.0.0-20250716034320-6d7b3d73eead/go.mod h1:Ts1Rgvbyf8ve3GJpxH/owDBMmfW6gQ3nLcsjB2bdN38=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
 github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
 github.com/coreos/go-systemd/v22 v22.5.0 h1:RrqgGjYQKalulkV8NGVIfkXQf6YYmOyiJKk8iXXhfZs=
@@ -7,6 +5,8 @@ github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSV
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818091311-c9dee9df5ca2 h1:n/FLSu5Xbew12iRidEI9ObiF34BfNTHmYQuIFp730Pg=
+github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818091311-c9dee9df5ca2/go.mod h1:1rNUMWlKEuPynvggsSGaMLzx7sx+ZLbtfX5Vfp28TOc=
 github.com/feral-file/godbus v0.0.6-0.20250716043107-25b56328d11e h1:hI6GdD65NWy8i//KM7RDUbPw829nWLhCdzaBxLKp7fE=
 github.com/feral-file/godbus v0.0.6-0.20250716043107-25b56328d11e/go.mod h1:fJiQvR6JLa2TKwwzOoxKg+/qfjM2MeWxpjFhrleOEMA=
 github.com/godbus/dbus/v5 v5.0.4/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=

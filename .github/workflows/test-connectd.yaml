@@ -1,32 +1,32 @@
-name: Test Watchdog
+name: Test Connectd
 
 on:
   push:
     branches: [release, develop]
     paths:
-      - 'components/feral-watchdog/**/*.go'
+      - 'components/feral-connectd/**/*.go'
   pull_request:
     branches: [release, develop]
     paths:
-      - 'components/feral-watchdog/**/*.go'
+      - 'components/feral-connectd/**/*.go'
 
 jobs:
   test:
-    name: Test feral-watchdog (Go)
+    name: Test feral-connectd (Go)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./components/feral-watchdog
+        working-directory: ./components/feral-connectd
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.23.5'
           cache: true
-          cache-dependency-path: components/feral-watchdog/go.sum
+          cache-dependency-path: components/feral-connectd/go.sum
 
       - name: Install dependencies
         run: go mod download
@@ -40,12 +40,12 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: ./components/feral-watchdog/coverage.out
-          directory: ./components/feral-watchdog
-          slug: feral-file/feralfile-device
-          flags: feral-watchdog
-          name: feral-watchdog-coverage
+          files: ./components/feral-connectd/coverage.out
+          directory: ./components/feral-connectd
+          slug: feral-file/ffos-user
+          flags: feral-connectd
+          name: feral-connectd-coverage
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
           override_branch: ${{ github.ref_name }}
-          override_build: ${{ github.run_id }}-watchdog
+          override_build: ${{ github.run_id }}-connectd

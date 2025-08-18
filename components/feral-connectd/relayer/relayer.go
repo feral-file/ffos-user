@@ -12,8 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/state"
-	"github.com/Feral-File/feralfile-device/components/feral-connectd/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-connectd/state"
+	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
+
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
@@ -33,6 +34,7 @@ var (
 		CMD_MOUSE_TAP_EVENT:      true,
 		CMD_SCREEN_ROTATION:      true,
 		CMD_SHUTDOWN:             true,
+		CMD_REBOOT:               true,
 		CMD_DEVICE_STATUS:        true,
 		CMD_UPDATE_TO_LATEST:     true,
 	}
@@ -56,6 +58,7 @@ const (
 	RELAYER_CMD_SYS_METRICS  RelayerCmd = "deviceMetrics"
 	CMD_SCREEN_ROTATION      RelayerCmd = "rotate"
 	CMD_SHUTDOWN             RelayerCmd = "shutdown"
+	CMD_REBOOT               RelayerCmd = "reboot"
 	CMD_DEVICE_STATUS        RelayerCmd = "getDeviceStatus"
 	CMD_UPDATE_TO_LATEST     RelayerCmd = "updateToLatestVersion"
 )

@@ -8,7 +8,7 @@ import (
 	reflect "reflect"
 	time "time"
 
-	logger "github.com/Feral-File/feralfile-device/components/feral-connectd/logger"
+	logger "github.com/feral-file/ffos-user/components/feral-connectd/logger"
 	gomock "github.com/golang/mock/gomock"
 	zap "go.uber.org/zap"
 )

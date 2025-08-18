@@ -12,7 +12,7 @@ pub const AGGRESSIVE_INTERNET_CHECK_INTERVAL: u64 = 2 * 1000; // 2 seconds
 pub const RELAXED_INTERNET_CHECK_INTERVAL: u64 = 10 * 1000; // 10 seconds
 
 // Updater configuration
-pub const UPDATER_LOCAL_CONFIG_PATH: &str = "/home/feralfile/x1-config.json";
+pub const UPDATER_LOCAL_CONFIG_PATH: &str = "/home/feralfile/ff1-config.json";
 pub const UPDATER_UPSTREAM_CONFIG_URL_SUFFIX: &str = "/api/latest/";
 pub const UPDATER_PROCESS_LOG_FILE: &str = "/var/log/updaterd.log";
 pub const UPDATER_FAILED_TO_CHECK_VERSION_MSG: &str =
@@ -29,7 +29,7 @@ pub const CMD_KEEP_WIFI: &str = "keep_wifi";
 pub const CMD_FACTORY_RESET: &str = "factory_reset";
 pub const MAX_SSIDS: usize = 9;
 pub const MD5_LENGTH: usize = 8; // Used for conversion to device ID
-pub const DEVICE_ID_PREFIX: &str = "FF-X1-";
+pub const DEVICE_ID_PREFIX: &str = "FF1-";
 // Bluetooth communication codes
 pub const BLE_SUCCESS_CODE: u8 = 0;
 pub const BLE_ERR_CODE_WRONG_WIFI_PWD: u8 = 1;
@@ -46,7 +46,7 @@ pub const CDP_ID_START: u64 = 1_000_000;
 pub const WEBAPP_URL: &str = "https://display.feralfile.com";
 pub const QRCODE_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=qr";
 pub const MSG_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=message&message=";
-pub const WELCOME_MSG: &str = "Welcome to the Portal (FF-X1)";
+pub const WELCOME_MSG: &str = "Welcome to the FF1";
 pub const WIFI_CONNECTING_MSG_PREFIX: &str = "Connecting to ";
 pub const WIFI_FAILED_TO_CONNECT_MSG: &str =
     "Failed to connect to the wifi network, please try again.";

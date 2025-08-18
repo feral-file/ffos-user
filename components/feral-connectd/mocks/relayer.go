@@ -8,7 +8,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	relayer "github.com/Feral-File/feralfile-device/components/feral-connectd/relayer"
+	relayer "github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 	gomock "github.com/golang/mock/gomock"
 )
 

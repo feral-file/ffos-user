@@ -18,7 +18,7 @@ formatters:
     goimports:
       # change to your project’s import path(s)
       local-prefixes:
-        - github.com/feral-file/feralfile-device/components/feral-watchdog
+        - github.com/feral-file/ffos-user/components/feral-watchdog
 
 # =========
 # Linters
@@ -56,7 +56,7 @@ issues:
   max-issues-per-linter: 0   # keep unlimited, as before
   max-same-issues: 0         # …
   new: true                  # show only issues on changed lines (handy for CI)
-  new-from-merge-base: main  # compare against the main branch
+  new-from-merge-base: develop  # compare against the develop branch
 
 # ==========
 # CLI output

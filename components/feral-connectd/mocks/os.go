@@ -9,7 +9,7 @@ import (
 	os "os"
 	reflect "reflect"
 
-	wrapper "github.com/Feral-File/feralfile-device/components/feral-connectd/wrapper"
+	wrapper "github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 	gomock "github.com/golang/mock/gomock"
 )
 

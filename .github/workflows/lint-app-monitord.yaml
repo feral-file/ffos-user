@@ -1,32 +1,32 @@
-name: Lint Watchdog
+name: Lint App Monitord
 
 on:
   push:
     branches: [release, develop]
     paths:
-      - 'components/feral-watchdog/**/*.go'
+      - 'components/feral-app-monitord/**/*.go'
   pull_request:
     branches: [release, develop]
     paths:
-      - 'components/feral-watchdog/**/*.go'
+      - 'components/feral-app-monitord/**/*.go'
 
 jobs:
   lint:
-    name: Lint feral-watchdog (Go)
+    name: Lint feral-app-monitord (Go)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./components/feral-watchdog
+        working-directory: ./components/feral-app-monitord
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.25'
           cache: true
-          cache-dependency-path: components/feral-watchdog/go.sum
+          cache-dependency-path: components/feral-app-monitord/go.sum
 
       - name: Install dependencies
         run: go mod download
@@ -37,8 +37,8 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.1.6
-          working-directory: ./components/feral-watchdog
+          version: v2.4.0
+          working-directory: ./components/feral-app-monitord
 
       - name: Run go fmt check
         run: |
