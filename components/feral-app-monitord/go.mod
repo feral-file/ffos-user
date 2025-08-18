@@ -4,7 +4,7 @@ go 1.23.5
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
-	github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818084538-bfcb575ea918
+	github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818091311-c9dee9df5ca2
 	github.com/feral-file/godbus v0.0.6-0.20250716043107-25b56328d11e
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/gowebpki/jcs v1.0.1
