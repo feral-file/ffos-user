@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Feral-File/ffos-user/components/feral-connectd/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 
 	"golang.org/x/sync/errgroup"
 )

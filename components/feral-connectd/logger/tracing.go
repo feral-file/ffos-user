@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
+	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 
 	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"

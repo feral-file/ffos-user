@@ -10,7 +10,7 @@ import (
 	reflect "reflect"
 	time "time"
 
-	wrapper "github.com/Feral-File/ffos-user/components/feral-connectd/wrapper"
+	wrapper "github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 	gomock "github.com/golang/mock/gomock"
 )
 

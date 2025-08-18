@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Feral-File/ffos-user/components/feral-connectd/dbus"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/mocks"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/state"
+	"github.com/feral-file/ffos-user/components/feral-connectd/dbus"
+	"github.com/feral-file/ffos-user/components/feral-connectd/mocks"
+	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
+	"github.com/feral-file/ffos-user/components/feral-connectd/state"
 
 	godbus "github.com/godbus/dbus/v5"
 	"github.com/golang/mock/gomock"

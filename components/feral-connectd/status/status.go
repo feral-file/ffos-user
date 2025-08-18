@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Feral-File/ffos-user/components/feral-connectd/cdp"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
+	"github.com/feral-file/ffos-user/components/feral-connectd/cdp"
+	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 
 	"go.uber.org/zap"
 )

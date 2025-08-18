@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Feral-File/ffos-user/components/feral-connectd/mocks"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-connectd/mocks"
+	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
+	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 
 	"github.com/golang/mock/gomock"
 	"github.com/gorilla/websocket"
