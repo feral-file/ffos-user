@@ -7,12 +7,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/Feral-File/ffos-user/components/feral-connectd/command"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/dbus"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/mocks"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/state"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/status"
+	"github.com/feral-file/ffos-user/components/feral-connectd/command"
+	"github.com/feral-file/ffos-user/components/feral-connectd/dbus"
+	"github.com/feral-file/ffos-user/components/feral-connectd/mocks"
+	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
+	"github.com/feral-file/ffos-user/components/feral-connectd/state"
+	"github.com/feral-file/ffos-user/components/feral-connectd/status"
 	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -2407,11 +2407,18 @@ func TestHandler_Reboot_CommandError(t *testing.T) {
 		CommandContext(ts.ctx, "sudo", "reboot", "-h", "now").
 		Return(ts.mockExecCmd)
 
-	// Execute command
+	// Mock Run() to return an error
+	ts.mockExecCmd.EXPECT().
+		Run().
+		Return(fmt.Errorf("command failed"))
+
+	// Execute command and expect error
 	result, err := ts.handler.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to execute reboot command")
+	assert.Nil(t, result)
 }
+
 func TestHandler_GetSysMetrics_Success(t *testing.T) {
 	tests := []struct {
 		name        string

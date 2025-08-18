@@ -1,4 +1,4 @@
-module github.com/Feral-File/ffos-user/components/feral-watchdog
+module github.com/feral-file/ffos-user/components/feral-watchdog
 
 go 1.23.5
 

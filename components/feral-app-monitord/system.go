@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Feral-File/ffos-user/components/feral-sys-monitord/metric"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
 	"go.uber.org/zap"
 )
 

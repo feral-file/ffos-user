@@ -1,4 +1,4 @@
-module github.com/Feral-File/ffos-user/components/feral-sys-monitord
+module github.com/feral-file/ffos-user/components/feral-sys-monitord
 
 go 1.23.5
 

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Feral-File/ffos-user/components/feral-connectd/logger"
-	"github.com/Feral-File/ffos-user/components/feral-connectd/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-connectd/logger"
+	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 	"go.uber.org/zap"
 )
 
