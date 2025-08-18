@@ -110,7 +110,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Get installed version and latest version
 	g.Go(func() error {
-		configFile := "/home/feralfile/x1-config.json"
+		configFile := "/home/feralfile/ff1-config.json"
 		configBytes, err := d.os.ReadFile(configFile)
 		if err != nil {
 			return fmt.Errorf("failed to read config file: %w", err)
