@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/Feral-File/ffos-user/components/feral-connectd/wrapper"
+
 	"go.uber.org/zap"
 )
 

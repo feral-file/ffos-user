@@ -9,6 +9,7 @@ import (
 
 	"github.com/Feral-File/ffos-user/components/feral-connectd/mocks"
 	"github.com/Feral-File/ffos-user/components/feral-connectd/state"
+
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"

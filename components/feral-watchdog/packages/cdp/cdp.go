@@ -7,9 +7,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Feral-File/ffos-user/components/feral-watchdog/packages/wrapper"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/wrapper"
 )
 
 var (

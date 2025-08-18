@@ -11,6 +11,7 @@ import (
 	"github.com/Feral-File/ffos-user/components/feral-connectd/logger"
 	"github.com/Feral-File/ffos-user/components/feral-connectd/mocks"
 	"github.com/Feral-File/ffos-user/components/feral-connectd/state"
+
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"

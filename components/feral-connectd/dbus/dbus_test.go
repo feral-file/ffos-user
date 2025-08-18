@@ -10,6 +10,7 @@ import (
 	"github.com/Feral-File/ffos-user/components/feral-connectd/mocks"
 	"github.com/Feral-File/ffos-user/components/feral-connectd/relayer"
 	"github.com/Feral-File/ffos-user/components/feral-connectd/state"
+
 	godbus "github.com/godbus/dbus/v5"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
