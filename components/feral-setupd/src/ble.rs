@@ -2,6 +2,7 @@ use crate::constant;
 use crate::encoding;
 use crate::system;
 use crate::wifi_utils::SSIDsCacher;
+use base64::{Engine as _, engine::general_purpose};
 use bluer::{
     Adapter, Session,
     adv::Advertisement,
@@ -21,6 +22,7 @@ use bluer::{
     },
 };
 use futures_util::future::FutureExt;
+use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
@@ -263,6 +265,9 @@ impl Ble {
                                 handle_factory_reset(notifier, reply_id, factory_reset_callback)
                                     .await
                             }
+                            constant::CMD_SEND_LOGS => {
+                                handle_submit_logs(notifier, reply_id, params).await
+                            }
                             _ => {
                                 eprintln!("BLE: Unknown command: {cmd}");
                                 Ok::<(), ReqError>(())
@@ -429,6 +434,90 @@ async fn handle_factory_reset(
     notify_central(notifier, payload).await
 }
 
+async fn handle_submit_logs(
+    notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
+    reply_id: String,
+    params: Vec<String>,
+) -> Result<(), ReqError> {
+    println!("BLE: Starting log submission process");
+    println!("BLE: Reply ID: {reply_id}");
+    println!("BLE: Received {} parameters", params.len());
+
+    // Expect userId, apiKey, and title
+    if params.len() < 3 {
+        eprintln!(
+            "BLE: ERROR - Received submit logs payload with only {} values, expected at least 3",
+            params.len()
+        );
+
+        println!("BLE: Creating error response for invalid parameters");
+        let mut payload = Vec::with_capacity(2);
+        payload.push(reply_id.as_bytes());
+        let error_code = [constant::BLE_ERR_CODE_INVALID_PARAMS];
+        payload.push(&error_code);
+
+        println!("BLE: Notifying central with invalid params error");
+        return notify_central(notifier, payload).await;
+    }
+
+    let user_id = &params[0];
+    let api_key = &params[1];
+    let title = &params[2];
+
+    println!("BLE: Extracted parameters - User ID: {user_id}, Title: {title}");
+    println!("BLE: API key length: {}", api_key.len());
+
+    println!("BLE: Preparing response payload");
+    let mut payload = Vec::with_capacity(2);
+    payload.push(reply_id.as_bytes());
+
+    // Collect log files
+    println!("BLE: Starting log file collection");
+    let log_files = match collect_log_files().await {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("BLE: Failed to collect log files: {e}");
+            let error_code = [constant::BLE_ERR_CODE_FILE_ERROR];
+            payload.push(&error_code);
+            return notify_central(notifier, payload).await;
+        }
+    };
+
+    // Create request body
+    println!("BLE: Creating log submission request body");
+    let body = create_log_submission_body(
+        title,
+        "Device log submission via BLE",
+        vec!["device-logs".to_string(), "ble-submission".to_string()],
+        log_files,
+    );
+
+    println!("BLE: Request body created successfully");
+    // Submit logs via HTTP
+    println!("BLE: Initiating HTTP submission to API");
+    println!("BLE: Submitting for user: {user_id}");
+
+    let result = submit_logs_to_api(user_id, api_key, body).await;
+
+    let error_code: [u8; 1];
+    match result {
+        Ok(response) => {
+            println!("BLE: HTTP submission completed successfully");
+            println!("BLE: API response received");
+            println!("BLE: Adding success code to payload");
+            payload.push(&[constant::BLE_SUCCESS_CODE]);
+        }
+        Err(e) => {
+            eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}",);
+            println!("BLE: Creating error response for API submission failure");
+            error_code = [e];
+            payload.push(&error_code);
+        }
+    };
+
+    notify_central(notifier, payload).await
+}
+
 async fn notify_central(
     notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
     payload: Vec<&[u8]>,
@@ -447,4 +536,145 @@ async fn notify_central(
         eprintln!("BLE: Notifier not yet available; skipping reply");
     }
     Ok(())
+}
+
+// Helper function to collect log files
+pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Error> {
+    use tokio::fs;
+
+    let logs_dir = constant::LOG_FILEDIR;
+    let mut log_files = Vec::new();
+
+    let mut dir = fs::read_dir(logs_dir).await?;
+    while let Some(entry) = dir.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("log") {
+            let file_name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown.log")
+                .to_string();
+
+            match fs::read(&path).await {
+                Ok(contents) => {
+                    println!("BLE: Collected log file: {file_name}");
+                    log_files.push((file_name, contents));
+                }
+                Err(e) => {
+                    eprintln!("BLE: Failed to read log file {file_name}: {e}");
+                }
+            }
+        }
+    }
+
+    Ok(log_files)
+}
+
+pub async fn submit_logs_to_api(
+    user_id: &str,
+    api_key: &str,
+    body: serde_json::Value,
+) -> Result<(), u8> {
+    use reqwest;
+
+    println!("API: Starting log submission to remote API");
+
+    // Log request body size
+    if let Ok(serialized_body) = serde_json::to_string(&body) {
+        println!("API: Request body size: {} bytes", serialized_body.len());
+    }
+
+    let client = reqwest::Client::new();
+
+    println!("API: Building POST request");
+
+    let request_builder = client
+        .post(constant::LOG_UPLOAD_API)
+        .header("x-api-key", api_key)
+        .header("x-device-id", user_id)
+        .header("Content-Type", "application/json")
+        .json(&body);
+
+    println!("API: Sending HTTP request...");
+    let start_time = std::time::Instant::now();
+
+    let response = request_builder.send().await;
+    let elapsed = start_time.elapsed();
+
+    println!("API: HTTP request completed in {elapsed:?}");
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            println!("API: Received HTTP response with status: {status}");
+
+            if status.is_success() {
+                println!("API: SUCCESS - Logs submitted successfully");
+                println!("API: Response headers: {:?}", resp.headers());
+                Ok(())
+            } else {
+                println!("API: ERROR - HTTP request failed with status: {status}");
+
+                // Try to get response body for debugging
+                match resp.text().await {
+                    Ok(response_text) => {
+                        eprintln!("API: Error response body: {response_text}");
+                        println!("API: Failed to submit logs: HTTP {status}, {response_text}");
+                    }
+                    Err(body_err) => {
+                        eprintln!("API: Failed to read error response body: {body_err}");
+                        eprintln!("API: Failed to submit logs: HTTP {status}");
+                    }
+                }
+
+                println!("API: Returning network error code");
+                Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
+            }
+        }
+        Err(e) => {
+            eprintln!("API: ERROR - Network error occurred: {e}");
+
+            // More detailed error information
+            if e.is_timeout() {
+                eprintln!("API: Error type: Request timeout");
+            } else if e.is_connect() {
+                eprintln!("API: Error type: Connection error");
+            } else if e.is_request() {
+                eprintln!("API: Error type: Request building error");
+            } else {
+                eprintln!("API: Error type: Other network error");
+            }
+
+            println!("API: Returning network error code");
+            Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
+        }
+    }
+}
+
+pub fn create_log_submission_body(
+    title: &str,
+    message: &str,
+    tags: Vec<String>,
+    log_files: Vec<(String, Vec<u8>)>,
+) -> serde_json::Value {
+    let attachments: Vec<serde_json::Value> = log_files
+        .into_iter()
+        .map(|(file_name, data)| {
+            json!({
+                "title": file_name,
+                "data": general_purpose::STANDARD.encode(data)
+            })
+        })
+        .collect();
+
+    let result = json!({
+        "attachments": attachments,
+        "title": title,
+        "message": message,
+        "tags": tags
+    });
+
+    println!("Log submission body: {:#}", result);
+    
+    result
 }
