@@ -240,13 +240,18 @@ fn create_bt_connected_cb(
     app_state: Arc<AppState>,
     chromium: Arc<Cdp>,
 ) -> ble::BTConnectedCallback {
-    Some(Box::new(move || {
-        let chromium = chromium.clone();
-        let app_state = app_state.clone();
-        Box::pin(async move {
-            let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
-        })
-    }))
+    let used_to_connect = app_state.app_cache.get(cache::CONNECTED);
+    if used_to_connect.is_none() {
+        Some(Box::new(move || {
+            let chromium = chromium.clone();
+            let app_state = app_state.clone();
+            Box::pin(async move {
+                let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
+            })
+        }))
+    } else {
+        None
+    }
 }
 
 fn create_connect_wifi_cb(
