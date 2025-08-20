@@ -23,10 +23,15 @@ use bluer::{
 };
 use futures_util::future::FutureExt;
 use serde_json::json;
+use std::fs::File;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::fs;
 use tokio::sync::Mutex;
+use zip::ZipWriter;
+use zip::write::FileOptions;
 
 use anyhow::Result;
 
@@ -483,21 +488,62 @@ async fn handle_submit_logs(
         }
     };
 
-    // Create request body
-    println!("BLE: Creating log submission request body");
-    let body = create_log_submission_body(
+    // Create ZIP file
+    println!("BLE: Creating temporary ZIP file");
+    let zip_path = match create_zip_from_logs(log_files).await {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("BLE: Failed to create ZIP file: {e}");
+            let error_code = [constant::BLE_ERR_CODE_FILE_ERROR];
+            payload.push(&error_code);
+            return notify_central(notifier, payload).await;
+        }
+    };
+
+    // Read ZIP file and encode as base64
+    println!("BLE: Reading ZIP file and encoding to base64");
+    let zip_data = match fs::read(&zip_path).await {
+        Ok(data) => general_purpose::STANDARD.encode(data),
+        Err(e) => {
+            eprintln!("BLE: Failed to read ZIP file: {e}");
+            // Clean up ZIP file
+            let _ = fs::remove_file(&zip_path).await;
+            let error_code = [constant::BLE_ERR_CODE_FILE_ERROR];
+            payload.push(&error_code);
+            return notify_central(notifier, payload).await;
+        }
+    };
+
+    // Create request body with ZIP
+    println!("BLE: Creating log submission request body with ZIP");
+    let body = create_log_submission_body_with_zip(
         title,
-        "Device log submission via BLE",
-        vec!["device-logs".to_string(), "ble-submission".to_string()],
-        log_files,
+        "Device log submission via BLE (ZIP package)",
+        vec![
+            "device-logs".to_string(),
+            "ble-submission".to_string(),
+            "zip-package".to_string(),
+        ],
+        zip_data,
     );
 
     println!("BLE: Request body created successfully");
+
     // Submit logs via HTTP
     println!("BLE: Initiating HTTP submission to API");
     println!("BLE: Submitting for user: {user_id}");
 
     let result = submit_logs_to_api(user_id, api_key, body).await;
+
+    // Clean up ZIP file regardless of submission result
+    println!("BLE: Cleaning up temporary ZIP file");
+    match fs::remove_file(&zip_path).await {
+        Ok(_) => println!("BLE: Successfully deleted temporary ZIP file: {}", zip_path),
+        Err(e) => eprintln!(
+            "BLE: Warning - Failed to delete temporary ZIP file {}: {e}",
+            zip_path
+        ),
+    }
 
     let error_code: [u8; 1];
     match result {
@@ -508,7 +554,7 @@ async fn handle_submit_logs(
             payload.push(&[constant::BLE_SUCCESS_CODE]);
         }
         Err(e) => {
-            eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}",);
+            eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}");
             println!("BLE: Creating error response for API submission failure");
             error_code = [e];
             payload.push(&error_code);
@@ -568,6 +614,62 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
     }
 
     Ok(log_files)
+}
+
+pub async fn create_zip_from_logs(
+    log_files: Vec<(String, Vec<u8>)>,
+) -> Result<String, std::io::Error> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Generate unique filename with timestamp
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let zip_filename = format!("logs_{}.zip", timestamp);
+    let zip_path = format!("{}/{}", constant::LOG_FILEDIR, zip_filename);
+
+    println!("ZIP: Creating ZIP file at: {}", zip_path);
+
+    // Create ZIP file using std::fs (synchronous) in a blocking task
+    let zip_path_clone = zip_path.clone();
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let file = File::create(&zip_path_clone)?;
+        let mut zip = ZipWriter::new(file);
+        let options = FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o755);
+
+        for (filename, data) in log_files {
+            println!("ZIP: Adding file to archive: {}", filename);
+            zip.start_file(&filename, options)?;
+            zip.write_all(&data)?;
+        }
+
+        zip.finish()?;
+        println!(
+            "ZIP: Successfully created ZIP archive with {} files",
+            zip.len()
+        );
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {
+            println!("ZIP: ZIP file creation completed successfully");
+            Ok(zip_path)
+        }
+        Ok(Err(e)) => {
+            eprintln!("ZIP: Failed to create ZIP file: {e}");
+            Err(e)
+        }
+        Err(e) => {
+            eprintln!("ZIP: Task execution failed: {e}");
+            Err(std::io::Error::new(std::io::ErrorKind::Other, e))
+        }
+    }
 }
 
 pub async fn submit_logs_to_api(
@@ -651,6 +753,32 @@ pub async fn submit_logs_to_api(
     }
 }
 
+// Modified function to create request body with ZIP file
+pub fn create_log_submission_body_with_zip(
+    title: &str,
+    message: &str,
+    tags: Vec<String>,
+    zip_data: String, // base64 encoded ZIP data
+) -> serde_json::Value {
+    let attachments = vec![json!({
+        "title": "device_logs.zip",
+        "data": zip_data,
+        "content_type": "application/zip"
+    })];
+
+    let result = json!({
+        "attachments": attachments,
+        "title": title,
+        "message": message,
+        "tags": tags
+    });
+
+    println!("Log submission body created with ZIP attachment");
+
+    result
+}
+
+// Keep the original function for backward compatibility if needed
 pub fn create_log_submission_body(
     title: &str,
     message: &str,
@@ -675,6 +803,6 @@ pub fn create_log_submission_body(
     });
 
     println!("Log submission body: {:#}", result);
-    
+
     result
 }
