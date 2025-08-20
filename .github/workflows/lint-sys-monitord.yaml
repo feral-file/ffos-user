@@ -2,11 +2,10 @@ name: Lint Sys Monitord
 
 on:
   push:
-    branches: [main, develop]
+    branches: [release, develop]
     paths:
       - 'components/feral-sys-monitord/**/*.go'
   pull_request:
-    branches: [main, develop]
     paths:
       - 'components/feral-sys-monitord/**/*.go'
 
