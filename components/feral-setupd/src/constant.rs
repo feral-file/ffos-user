@@ -1,6 +1,8 @@
 use uuid::Uuid;
 
 // Functional configuration
+pub const SENTRY_URL: &str =
+    "https://a1c5bd8607e7493634a05015d17d6aff@o142150.ingest.us.sentry.io/4509869844135936";
 pub const CACHE_FILEPATH: &str = "/home/feralfile/.state/setupd";
 pub const TIMEZONE_CMD: &str = "/home/feralfile/scripts/feral-timesyncd.sh";
 pub const TIMEZONE_INSTRUCTION: &str = "set-time";
@@ -10,6 +12,7 @@ pub const WIFI_WEBAPP_DELAY: u64 = 3 * 1000; // 3 seconds
 pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 3 * 1000; // 10 seconds
 pub const AGGRESSIVE_INTERNET_CHECK_INTERVAL: u64 = 2 * 1000; // 2 seconds
 pub const RELAXED_INTERNET_CHECK_INTERVAL: u64 = 10 * 1000; // 10 seconds
+pub const WAIT_FOR_CONNECTD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
 
 // Updater configuration
 pub const UPDATER_LOCAL_CONFIG_PATH: &str = "/home/feralfile/ff1-config.json";
