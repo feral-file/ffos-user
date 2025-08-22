@@ -4,7 +4,9 @@ use uuid::Uuid;
 pub const SENTRY_URL: &str =
     "https://a1c5bd8607e7493634a05015d17d6aff@o142150.ingest.us.sentry.io/4509869844135936";
 pub const CACHE_FILEPATH: &str = "/home/feralfile/.state/setupd";
+pub const LOG_FILEDIR: &str = "/home/feralfile/.logs";
 pub const TIMEZONE_CMD: &str = "/home/feralfile/scripts/feral-timesyncd.sh";
+pub const LOG_UPLOAD_API: &str = "https://support.autonomy.io/v1/issues/";
 pub const TIMEZONE_INSTRUCTION: &str = "set-time";
 pub const SSID_CACHE_TTL: u64 = 10 * 60 * 1000; // 10 minutes
 pub const BLE_SHUTDOWN_DELAY: u64 = 1000; // 1 second
@@ -30,6 +32,7 @@ pub const CMD_GET_INFO: &str = "get_info";
 pub const CMD_SET_TIME: &str = "set_time";
 pub const CMD_KEEP_WIFI: &str = "keep_wifi";
 pub const CMD_FACTORY_RESET: &str = "factory_reset";
+pub const CMD_SEND_LOGS: &str = "send_log";
 pub const MAX_SSIDS: usize = 9;
 pub const MD5_LENGTH: usize = 8; // Used for conversion to device ID
 pub const DEVICE_ID_PREFIX: &str = "FF1-";
@@ -41,6 +44,9 @@ pub const BLE_ERR_CODE_SERVER_UNREACHABLE: u8 = 3;
 pub const BLE_ERR_CODE_WIFI_REQUIRED: u8 = 4; // Used when user doesn't have wifi but asks to proceed
 pub const BLE_ERR_CODE_DEVICE_UPDATING: u8 = 5;
 pub const BLE_ERR_CODE_VERSION_CHECK_FAILED: u8 = 6;
+pub const BLE_ERR_CODE_INVALID_PARAMS: u8 = 7;
+pub const BLE_ERR_CODE_FILE_ERROR: u8 = 8;
+pub const BLE_ERR_CODE_NETWORK_ERROR: u8 = 9;
 pub const BLE_ERR_CODE_UNKNOWN_ERROR: u8 = 255;
 
 // Chrome configuration

@@ -541,6 +541,7 @@ name = "feral-setupd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bluer",
  "dbus",
  "dbus-crossroads",

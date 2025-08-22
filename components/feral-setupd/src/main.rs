@@ -6,6 +6,7 @@ mod connectivity;
 mod constant;
 mod dbus_utils;
 mod encoding;
+mod log_uploader;
 mod system;
 mod updater;
 mod wifi_utils;
@@ -257,10 +258,17 @@ fn create_bt_connected_cb(
     chromium: Arc<Cdp>,
 ) -> ble::BTConnectedCallback {
     Some(Box::new(move || {
-        let chromium = chromium.clone();
         let app_state = app_state.clone();
+        let chromium = chromium.clone();
+
         Box::pin(async move {
-            let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
+            let should_show_welcome = {
+                let page = app_state.page.lock().await;
+                matches!(*page, Page::QRCode(_))
+            };
+            if should_show_welcome {
+                let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
+            }
         })
     }))
 }
