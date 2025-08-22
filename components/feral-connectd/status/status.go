@@ -173,7 +173,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	}
 
 	// Send CDP request using the same format as mediator
-	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payloadBytes)),
 	})
 	if err != nil {

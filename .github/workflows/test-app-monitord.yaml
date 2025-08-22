@@ -6,7 +6,6 @@ on:
     paths:
       - 'components/feral-app-monitord/**/*.go'
   pull_request:
-    branches: [release, develop]
     paths:
       - 'components/feral-app-monitord/**/*.go'
 

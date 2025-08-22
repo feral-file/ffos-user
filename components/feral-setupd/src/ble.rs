@@ -1,5 +1,6 @@
 use crate::constant;
 use crate::encoding;
+use crate::log_uploader;
 use crate::system;
 use crate::wifi_utils::SSIDsCacher;
 use bluer::{
@@ -263,6 +264,9 @@ impl Ble {
                                 handle_factory_reset(notifier, reply_id, factory_reset_callback)
                                     .await
                             }
+                            constant::CMD_SEND_LOGS => {
+                                handle_submit_logs(notifier, reply_id, params).await
+                            }
                             _ => {
                                 eprintln!("BLE: Unknown command: {cmd}");
                                 Ok::<(), ReqError>(())
@@ -426,6 +430,80 @@ async fn handle_factory_reset(
     let mut payload = Vec::with_capacity(3);
     payload.push(reply_id.as_bytes());
     payload.push(&status_code);
+    notify_central(notifier, payload).await
+}
+
+async fn handle_submit_logs(
+    notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
+    reply_id: String,
+    params: Vec<String>,
+) -> Result<(), ReqError> {
+    println!("BLE: Starting log submission process");
+    println!("BLE: Reply ID: {reply_id}");
+
+    // Expect userId, apiKey, and title
+    if params.len() < 3 {
+        eprintln!(
+            "BLE: ERROR - Received submit logs payload with only {} values, expected at least 3",
+            params.len()
+        );
+
+        println!("BLE: Creating error response for invalid parameters");
+        let mut payload = Vec::with_capacity(2);
+        payload.push(reply_id.as_bytes());
+        let error_code = [constant::BLE_ERR_CODE_INVALID_PARAMS];
+        payload.push(&error_code);
+
+        println!("BLE: Notifying central with invalid params error");
+        return notify_central(notifier, payload).await;
+    }
+
+    let user_id = &params[0];
+    let api_key = &params[1];
+    let title = &params[2];
+
+    println!("BLE: Extracted parameters - User ID: {user_id}, Title: {title}");
+
+    let mut payload = Vec::with_capacity(2);
+    payload.push(reply_id.as_bytes());
+
+    // Collect log files
+    println!("BLE: Starting log file collection");
+    let log_files = match log_uploader::collect_log_files().await {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("BLE: Failed to collect log files: {e}");
+            let error_code = [constant::BLE_ERR_CODE_FILE_ERROR];
+            payload.push(&error_code);
+            return notify_central(notifier, payload).await;
+        }
+    };
+
+    // Create request body
+    let body = log_uploader::create_log_submission_body(
+        title,
+        "Device log submission via BLE",
+        vec!["device-logs".to_string(), "ble-submission".to_string()],
+        log_files,
+    );
+
+    // Submit logs via HTTP
+    println!("BLE: Submitting for user: {user_id}");
+
+    let result = log_uploader::submit_logs_to_api(user_id, api_key, body).await;
+
+    let error_code: [u8; 1];
+    match result {
+        Ok(_response) => {
+            payload.push(&[constant::BLE_SUCCESS_CODE]);
+        }
+        Err(e) => {
+            eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}",);
+            error_code = [e];
+            payload.push(&error_code);
+        }
+    };
+
     notify_central(notifier, payload).await
 }
 
