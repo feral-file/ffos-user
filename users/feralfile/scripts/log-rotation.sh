@@ -4,11 +4,7 @@ set -e
 # Configuration
 MAX_DAYS=7
 TODAY=$(date +"%Y-%m-%d")
-STATUS_DIR="/var/lib/feral-logrotate"
-LOG_CONFIG_FILE="$STATUS_DIR/log_paths.conf"
-
-# Create status directory if it doesn't exist
-mkdir -p "$STATUS_DIR"
+LOG_CONFIG_FILE="/home/feralfile/log_paths.conf"
 
 # Initialize or load config file if it doesn't exist
 if [ ! -f "$LOG_CONFIG_FILE" ]; then
