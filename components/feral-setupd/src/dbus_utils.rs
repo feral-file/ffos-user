@@ -37,9 +37,6 @@ pub fn start_dbus_service<T: PageStateProvider + 'static>(state_provider: Arc<T>
                 ("id", "page", "page_changed_unix"),
                 move |_, (), ()| {
                     let (id, page, timestamp) = p.get_page_state();
-                    println!(
-                        "DBUS: debug page state: device_id={id} page={page}, timestamp={timestamp}",
-                    );
                     Ok((id, page, timestamp))
                 },
             );

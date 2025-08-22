@@ -74,6 +74,21 @@ func (mr *MockCDPMockRecorder) Initialized() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Initialized", reflect.TypeOf((*MockCDP)(nil).Initialized))
 }
 
+// NoLogSend mocks base method.
+func (m *MockCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NoLogSend", method, params)
+	ret0, _ := ret[0].(interface{})
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// NoLogSend indicates an expected call of NoLogSend.
+func (mr *MockCDPMockRecorder) NoLogSend(method, params interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NoLogSend", reflect.TypeOf((*MockCDP)(nil).NoLogSend), method, params)
+}
+
 // Send mocks base method.
 func (m *MockCDP) Send(method string, params map[string]interface{}) (interface{}, error) {
 	m.ctrl.T.Helper()

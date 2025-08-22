@@ -73,7 +73,9 @@ func (m *mediator) handleDBusSignal(
 		return nil, nil
 	}
 
-	m.logger.Info("handle received DBus signal", zap.String("name", payload.Name()), zap.String("path", payload.Path.String()))
+	if payload.Member != dbus.MONITORD_EVENT_SYSMETRICS {
+		m.logger.Info("handle received DBus signal", zap.String("name", payload.Name()), zap.String("path", payload.Path.String()))
+	}
 
 	switch payload.Member {
 	case dbus.MONITORD_EVENT_SYSMETRICS:

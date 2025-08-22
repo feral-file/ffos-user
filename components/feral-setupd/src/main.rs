@@ -6,6 +6,7 @@ mod connectivity;
 mod constant;
 mod dbus_utils;
 mod encoding;
+mod log_uploader;
 mod system;
 mod updater;
 mod wifi_utils;
@@ -98,32 +99,35 @@ impl PageStateProvider for AppState {
     }
 }
 
-async fn wait_for_connectd_dbus() {
-    println!("MAIN: Waiting for connectd D-Bus connection...");
-    loop {
-        match dbus_utils::check_dbus_connection(
-            constant::DBUS_CONNECTD_DESTINATION,
-            constant::DBUS_CONNECTD_OBJECT,
-        ) {
-            Ok(_) => {
-                println!("MAIN: connectd D-Bus connection established successfully");
-                break;
+// Sentry has to start before tokio runtime
+// That's why we can't use #[tokio::main]
+// We use usual main and create the tokio runtime here
+fn main() {
+    println!("MAIN: Starting feral-setupd ------------------------------");
+    let _guard = sentry::init((
+        constant::SENTRY_URL,
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            send_default_pii: true,
+            ..Default::default()
+        },
+    ));
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            if let Err(e) = run().await {
+                eprintln!("MAIN: Error running feral-setupd: {e:#?}");
+                let error: &dyn std::error::Error = e.as_ref();
+                sentry::capture_error(error);
             }
-            Err(e) => {
-                println!("MAIN: connectd D-Bus not available yet: {e}, retrying in 2 seconds...");
-                time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
+        });
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize dependencies
-    let chrome = Cdp::connect(constant::CDP_URL)
-        .await
-        .context("connecting to CDP")?;
-    let chrome = Arc::new(chrome);
+async fn run() -> Result<()> {
+    // Initialize state
     let ble_service = Arc::new(Ble::new());
     let app_state = Arc::new(AppState {
         device_id: ble_service.get_device_id().await,
@@ -134,7 +138,21 @@ async fn main() -> Result<()> {
         page: Mutex::new(Page::None(unix_s())),
         auto_proceed: AtomicBool::new(false),
     });
+    sentry::configure_scope(|scope| {
+        scope.set_tag("branch", app_state.branch.clone());
+        scope.set_tag("version", app_state.current_version.clone());
+        scope.set_user(Some(sentry::User {
+            id: Some(app_state.device_id.clone()),
+            ..Default::default()
+        }));
+    });
     println!("MAIN: App state initialized: {app_state:?}");
+
+    // Initialize CDP
+    let chrome = Cdp::connect(constant::CDP_URL)
+        .await
+        .context("connecting to CDP")?;
+    let chrome = Arc::new(chrome);
 
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());
@@ -152,14 +170,13 @@ async fn main() -> Result<()> {
     println!("MAIN: Bluetooth advertising started successfully");
 
     // Wait for connectd D-Bus connection before proceeding
-    wait_for_connectd_dbus().await;
-
-    let used_to_connect = app_state.app_cache.get(cache::CONNECTED);
+    wait_for_connectd(Duration::from_millis(constant::WAIT_FOR_CONNECTD_TIMEOUT)).await?;
 
     // If the device used to be able to connect to the internet
     // It's likely that it will have internet again really soon
     // We aggressively poll for internet for a few seconds to
     // go directly to the webapp instead of the QRCode
+    let used_to_connect = app_state.app_cache.get(cache::CONNECTED);
     if used_to_connect.is_some() {
         app_state
             .internet
@@ -172,40 +189,38 @@ async fn main() -> Result<()> {
             .await;
     }
 
-    let has_internet = app_state.internet.is_online(true).await;
-    if !has_internet {
+    if !app_state.internet.is_online(true).await {
         // Show the QRCode so the user can do something with the internet
         ssids_cacher.trigger_refresh();
         let _ = show_qrcode(&app_state, &chrome).await;
         app_state.auto_proceed.store(true, Ordering::Release);
-        let app_state = app_state.clone();
-        let chrome = chrome.clone();
-        tokio::spawn(async move {
-            // If the device used to be able to connect to the internet
-            // We should be more aggressive with the polling (we want to take action as soon as users fix the internet)
-            // Otherwise, we should be more conservative as users might plug in the LAN cable, but this is rare
-            let urgency = if used_to_connect.is_some() {
-                Duration::from_millis(constant::AGGRESSIVE_INTERNET_CHECK_INTERVAL)
-            } else {
-                Duration::from_millis(constant::RELAXED_INTERNET_CHECK_INTERVAL)
-            };
-            app_state.internet.wait_until_online(urgency, None).await;
-            if used_to_connect.is_none() {
-                app_state.app_cache.set(cache::CONNECTED, "true");
-                app_state.app_cache.save(constant::CACHE_FILEPATH).unwrap();
-            }
-            // If the user has chosen to provide a different wifi
-            // This will be false and we should not proceed
-            if app_state.auto_proceed.load(Ordering::Acquire) {
-                on_startup_with_internet(app_state, chrome).await;
-            }
-        });
+        // If somehow, the device has internet
+        // 1. Users fix the previous internet
+        // 2. Users plug in the LAN cable (instead of setting up wifi via bluetooth)
+        // We will take action immediately
+        let urgency = if used_to_connect.is_some() {
+            Duration::from_millis(constant::AGGRESSIVE_INTERNET_CHECK_INTERVAL)
+        } else {
+            Duration::from_millis(constant::RELAXED_INTERNET_CHECK_INTERVAL)
+        };
+        app_state.internet.wait_until_online(urgency, None).await;
+        if used_to_connect.is_none() {
+            app_state.app_cache.set(cache::CONNECTED, "true");
+            app_state.app_cache.save(constant::CACHE_FILEPATH)?;
+        }
+        // We now have internet, but we need to check if
+        // the internet comes from bluetooth (auto_proceed is set to false)
+        // if it's from bluetooth, we shouldn't do anything else as the bluetooth
+        // flow will handle it
+        if app_state.auto_proceed.load(Ordering::Acquire) {
+            on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
+        }
     } else {
         if used_to_connect.is_none() {
             app_state.app_cache.set(cache::CONNECTED, "true");
-            app_state.app_cache.save(constant::CACHE_FILEPATH).unwrap();
+            app_state.app_cache.save(constant::CACHE_FILEPATH)?;
         }
-        on_startup_with_internet(app_state.clone(), chrome.clone()).await;
+        on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
     }
 
     // Listen for QRCode switch signal
@@ -228,9 +243,11 @@ async fn main() -> Result<()> {
     println!("MAIN: Stopping DBus listener...");
     stop_dbus_listener.store(true, Ordering::Relaxed);
     println!("MAIN: Stopping BLE service...");
-    match ble_service.stop().await {
-        Ok(_) => println!("MAIN: BLE service stopped"),
-        Err(e) => println!("MAIN: Error stopping BLE service: {e}"),
+    if let Err(e) = ble_service.stop().await {
+        eprintln!("MAIN: Error stopping BLE service: {e: }");
+        return Err(e);
+    } else {
+        println!("MAIN: BLE service stopped");
     }
     println!("MAIN: Shutting down...");
     Ok(())
@@ -241,10 +258,17 @@ fn create_bt_connected_cb(
     chromium: Arc<Cdp>,
 ) -> ble::BTConnectedCallback {
     Some(Box::new(move || {
-        let chromium = chromium.clone();
         let app_state = app_state.clone();
+        let chromium = chromium.clone();
+
         Box::pin(async move {
-            let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
+            let should_show_welcome = {
+                let page = app_state.page.lock().await;
+                matches!(*page, Page::QRCode(_))
+            };
+            if should_show_welcome {
+                let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
+            }
         })
     }))
 }
@@ -271,7 +295,7 @@ fn create_connect_wifi_cb(
             // Connect to wifi & return early if failed
             if let Err(e) = wifi_utils::connect(&ssid, &pwd) {
                 eprintln!(
-                    "MAIN: Failed to connect to wifi \"{ssid}\" in {:?} ms: {e}",
+                    "MAIN: Failed to connect to wifi \"{ssid}\" in {:?} ms: {e: }",
                     start_time.elapsed().as_millis()
                 );
                 // Tell user that the wifi connection failed
@@ -336,7 +360,7 @@ async fn internet_setup_successfully_cb(
         }
         Ok(false) => {} // No update required, proceed with the normal flow
         Err(e) => {
-            eprintln!("MAIN: Error checking for update: {e}");
+            eprintln!("MAIN: Error checking for update: {e:#?}");
             let _ = show_message(
                 chromium,
                 app_state,
@@ -351,7 +375,7 @@ async fn internet_setup_successfully_cb(
     let topic_id = match dbus_utils::get_relayer_info() {
         Ok(info) => info,
         Err(e) => {
-            eprintln!("BLE: can't get relayer data from connectd: {e}");
+            eprintln!("BLE: can't get relayer data from connectd: {e:#?}");
             return Err(constant::BLE_ERR_CODE_SERVER_UNREACHABLE);
         }
     };
@@ -360,7 +384,7 @@ async fn internet_setup_successfully_cb(
     match app_state.app_cache.save(constant::CACHE_FILEPATH) {
         Ok(_) => {}
         Err(e) => {
-            eprintln!("MAIN: Error saving cache: {e}");
+            eprintln!("MAIN: Error saving cache: {e:#?}");
         }
     }
 
@@ -396,7 +420,7 @@ fn create_qrcode_switch_cb(
         let mut qrcode_requested = false;
         match msg.read1::<bool>() {
             Ok(true) => qrcode_requested = true,
-            Err(e) => println!("MAIN: Error reading message: {e}"),
+            Err(e) => println!("MAIN: Error reading message: {e: }"),
             _ => {}
         }
         task::spawn(async move {
@@ -468,35 +492,34 @@ async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
     Ok(())
 }
 
-async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) {
+async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
     // If the update process is triggered and it takes over the chromium
     // We should not proceed with the normal flow any more
     // The device needs to automatically restart to apply the update
     // So we just return
     match updater::is_update_required().await {
         Ok(true) => {
-            let _ = update(app_state.clone(), chrome.clone()).await;
-            return;
+            update(app_state.clone(), chrome.clone()).await?;
+            return Ok(());
         }
         Err(e) => {
-            eprintln!("MAIN: Error checking for update: {e}");
             let _ = show_message(
                 &chrome,
                 &app_state,
                 constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
             )
             .await;
-            return;
+            return Err(e);
         }
-        Ok(false) => {}
-    }
+        Ok(false) => {} // No update required, proceed with the normal flow
+    };
 
-    // Otherwise, proceed with the normal flow
+    // No update, show art/qrcode depending on whether we have a cache
     let has_cache = app_state.app_cache.get(cache::TOPIC_ID).is_some();
     if has_cache {
-        let _ = show_webapp(&app_state, &chrome).await;
+        show_webapp(&app_state, &chrome).await
     } else {
-        let _ = show_qrcode(&app_state, &chrome).await;
+        show_qrcode(&app_state, &chrome).await
     }
 }
 
@@ -519,7 +542,7 @@ async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
                         .await;
             }
             Err(e) => {
-                eprintln!("MAIN: Update process failed: {e:#}");
+                return Err(e).context("update process failed");
             }
         }
     }
@@ -594,4 +617,28 @@ async fn show_factory_reset(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) -> Res
     let mut page = app_state.page.lock().await;
     *page = Page::FactoryReset(unix_s());
     Ok(())
+}
+
+async fn wait_for_connectd(timeout: Duration) -> Result<()> {
+    println!("MAIN: Waiting for connectd connection...");
+
+    let wait_future = async {
+        loop {
+            match dbus_utils::check_dbus_connection(
+                constant::DBUS_CONNECTD_DESTINATION,
+                constant::DBUS_CONNECTD_OBJECT,
+            ) {
+                Ok(_) => break,
+                Err(e) => {
+                    println!("MAIN: connectd not available yet: {e:#?}, retrying in 2 seconds...");
+                    time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    };
+
+    match time::timeout(timeout, wait_future).await {
+        Ok(_) => Ok(()),
+        Err(_) => Err(anyhow::anyhow!("Timeout waiting for connectd connection")),
+    }
 }
