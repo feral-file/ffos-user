@@ -26,7 +26,7 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
             let mut file = match fs::File::open(&path).await {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("BLE: Failed to open log file {}: {}", file_name, e);
+                    eprintln!("BLE: Failed to open log file {file_name}: {e}");
                     continue;
                 }
             };
@@ -35,21 +35,20 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
             let file_size = match file.metadata().await {
                 Ok(metadata) => metadata.len() as usize,
                 Err(e) => {
-                    eprintln!("BLE: Failed to get metadata for {}: {}", file_name, e);
+                    eprintln!("BLE: Failed to get metadata for {file_name}: {e}");
                     continue;
                 }
             };
 
             let contents = if file_size > MAX_FILE_SIZE_BYTES {
                 println!(
-                    "BLE: Log file {} exceeds 1MB ({} bytes), reading last 1MB",
-                    file_name, file_size
+                    "BLE: Log file {file_name} exceeds 1MB ({file_size} bytes), reading last 1MB"
                 );
 
                 // Seek to the position 1MB from the end
                 let seek_pos = file_size - MAX_FILE_SIZE_BYTES;
                 if let Err(e) = file.seek(std::io::SeekFrom::Start(seek_pos as u64)).await {
-                    eprintln!("BLE: Failed to seek in file {}: {}", file_name, e);
+                    eprintln!("BLE: Failed to seek in file {file_name}: {e}");
                     continue;
                 }
 
@@ -64,23 +63,21 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
 
                         // Add truncation notice
                         let truncation_notice = format!(
-                            "[TRUNCATED: Original file size {} bytes, showing last {} bytes]\n",
-                            file_size,
+                            "[TRUNCATED: Original file size {file_size} bytes, showing last {} bytes]\n",
                             buffer.len()
                         );
                         let mut final_contents = truncation_notice.into_bytes();
                         final_contents.extend(buffer);
 
                         println!(
-                            "BLE: Truncated log file: {} (final size: {} bytes)",
-                            file_name,
+                            "BLE: Truncated log file: {file_name} (final size: {} bytes)",
                             final_contents.len()
                         );
 
                         final_contents
                     }
                     Err(e) => {
-                        eprintln!("BLE: Failed to read from file {}: {}", file_name, e);
+                        eprintln!("BLE: Failed to read from file {file_name}: {e}");
                         continue;
                     }
                 }
@@ -90,14 +87,13 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
                 match file.read_to_end(&mut contents).await {
                     Ok(_) => {
                         println!(
-                            "BLE: Collected log file: {} ({} bytes)",
-                            file_name,
+                            "BLE: Collected log file: {file_name} ({} bytes)",
                             contents.len()
                         );
                         contents
                     }
                     Err(e) => {
-                        eprintln!("BLE: Failed to read file {}: {}", file_name, e);
+                        eprintln!("BLE: Failed to read file {file_name}: {e}");
                         continue;
                     }
                 }
