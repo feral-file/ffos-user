@@ -35,6 +35,7 @@ const (
 type CDP interface {
 	Init(ctx context.Context) error
 	Send(method string, params map[string]interface{}) (interface{}, error)
+	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
 	Close()
 	Initialized() bool
 }
@@ -176,10 +177,18 @@ func (c *cdp) Init(ctx context.Context) error {
 	return nil
 }
 
-// Send sends a raw CDP JSON-RPC message and waits for response
+// Send sends a raw CDP JSON-RPC message with logging
 func (c *cdp) Send(method string, params map[string]interface{}) (interface{}, error) {
 	c.logger.Info("Sending CDP request", zap.String("method", method), zap.Any("params", params))
+	return c.send(method, params)
+}
 
+// NoLogSend sends a raw CDP JSON-RPC message without logging
+func (c *cdp) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
+	return c.send(method, params)
+}
+
+func (c *cdp) send(method string, params map[string]interface{}) (interface{}, error) {
 	c.mu.Lock()
 	if c.conn == nil {
 		c.mu.Unlock()
