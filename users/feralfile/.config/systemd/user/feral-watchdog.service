@@ -5,7 +5,7 @@ ConditionPathExists=/run/user/1000/bus
 
 [Service]
 Type=notify
-ExecStart=/usr/bin/feral-watchdog
+ExecStart=/usr/bin/feral-watchdog --debug
 Restart=always
 RestartSec=5s
 WatchdogSec=30s
