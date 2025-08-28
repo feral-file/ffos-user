@@ -131,9 +131,9 @@ async fn run() -> Result<()> {
     const PROFILE: &str = env!("BUILD_PROFILE");
     println!("MAIN: Build profile: {PROFILE}");
 
-    let qemu = PROFILE == "QEMU";
+    let qemu = PROFILE == "qemu";
     if qemu {
-        println!("MAIN: Running in QEMU mode");
+        println!("MAIN: Running in qemu mode");
     }
 
     // Initialize state
