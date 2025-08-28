@@ -7,8 +7,9 @@ package mocks
 import (
 	reflect "reflect"
 
-	status "github.com/feral-file/ffos-user/components/feral-connectd/status"
 	gomock "github.com/golang/mock/gomock"
+
+	status "github.com/feral-file/ffos-user/components/feral-connectd/status"
 )
 
 // MockMediator is a mock of Mediator interface.

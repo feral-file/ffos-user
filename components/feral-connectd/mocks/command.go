@@ -8,9 +8,10 @@ import (
 	context "context"
 	reflect "reflect"
 
+	gomock "github.com/golang/mock/gomock"
+
 	command "github.com/feral-file/ffos-user/components/feral-connectd/command"
 	status "github.com/feral-file/ffos-user/components/feral-connectd/status"
-	gomock "github.com/golang/mock/gomock"
 )
 
 // MockCommandHandler is a mock of CommandHandler interface.

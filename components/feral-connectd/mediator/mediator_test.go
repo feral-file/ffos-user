@@ -6,6 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/godbus"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
+
 	"github.com/feral-file/ffos-user/components/feral-connectd/cdp"
 	"github.com/feral-file/ffos-user/components/feral-connectd/command"
 	"github.com/feral-file/ffos-user/components/feral-connectd/dbus"
@@ -13,11 +19,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-connectd/mocks"
 	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 	"github.com/feral-file/ffos-user/components/feral-connectd/state"
-	"github.com/feral-file/godbus"
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 type testSetup struct {

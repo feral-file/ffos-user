@@ -6,6 +6,9 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/feral-file/godbus"
+	"go.uber.org/zap"
+
 	"github.com/feral-file/ffos-user/components/feral-connectd/cdp"
 	"github.com/feral-file/ffos-user/components/feral-connectd/command"
 	"github.com/feral-file/ffos-user/components/feral-connectd/dbus"
@@ -14,8 +17,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-connectd/state"
 	"github.com/feral-file/ffos-user/components/feral-connectd/status"
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
-	"github.com/feral-file/godbus"
-	"go.uber.org/zap"
 )
 
 //go:generate mockgen -source=mediator.go -destination=../mocks/mediator.go -package=mocks -mock_names=Mediator=MockMediator
