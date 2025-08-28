@@ -10,6 +10,7 @@ mod log_uploader;
 mod system;
 mod updater;
 mod wifi_utils;
+use std::env;
 
 use crate::dbus_utils::PageStateProvider;
 use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
@@ -127,6 +128,14 @@ fn main() {
 }
 
 async fn run() -> Result<()> {
+    const PROFILE: &str = env!("BUILD_PROFILE");
+    println!("MAIN: Build profile: {PROFILE}");
+
+    let qemu = PROFILE == "QEMU";
+    if qemu {
+        println!("MAIN: Running in QEMU mode");
+    }
+
     // Initialize state
     let ble_service = Arc::new(Ble::new());
     let app_state = Arc::new(AppState {
@@ -156,18 +165,20 @@ async fn run() -> Result<()> {
 
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());
-    ble_service
-        .start(
-            create_bt_connected_cb(app_state.clone(), chrome.clone()),
-            create_factory_reset_cb(app_state.clone(), chrome.clone()),
-            create_connect_wifi_cb(app_state.clone(), chrome.clone()),
-            create_keep_wifi_cb(app_state.clone(), chrome.clone()),
-            create_get_info_cb(app_state.clone()),
-            ssids_cacher.clone(),
-        )
-        .await
-        .context("starting Bluetooth advertising")?;
-    println!("MAIN: Bluetooth advertising started successfully");
+    if !qemu {
+        ble_service
+            .start(
+                create_bt_connected_cb(app_state.clone(), chrome.clone()),
+                create_factory_reset_cb(app_state.clone(), chrome.clone()),
+                create_connect_wifi_cb(app_state.clone(), chrome.clone()),
+                create_keep_wifi_cb(app_state.clone(), chrome.clone()),
+                create_get_info_cb(app_state.clone()),
+                ssids_cacher.clone(),
+            )
+            .await
+            .context("starting Bluetooth advertising")?;
+        println!("MAIN: Bluetooth advertising started successfully");
+    }
 
     // Wait for connectd D-Bus connection before proceeding
     wait_for_connectd(Duration::from_millis(constant::WAIT_FOR_CONNECTD_TIMEOUT)).await?;
@@ -220,6 +231,17 @@ async fn run() -> Result<()> {
             app_state.app_cache.set(cache::CONNECTED, "true");
             app_state.app_cache.save(constant::CACHE_FILEPATH)?;
         }
+        if qemu {
+            let topic_id = match dbus_utils::get_relayer_info() {
+                Ok(info) => info,
+                Err(e) => {
+                    eprintln!("QEMU: can't get relayer data from connectd: {e:#?}");
+                    String::new()
+                }
+            };
+            app_state.app_cache.set(cache::TOPIC_ID, &topic_id);
+            app_state.app_cache.save(constant::CACHE_FILEPATH)?;
+        }
         on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
     }
 
@@ -243,11 +265,13 @@ async fn run() -> Result<()> {
     println!("MAIN: Stopping DBus listener...");
     stop_dbus_listener.store(true, Ordering::Relaxed);
     println!("MAIN: Stopping BLE service...");
-    if let Err(e) = ble_service.stop().await {
-        eprintln!("MAIN: Error stopping BLE service: {e: }");
-        return Err(e);
-    } else {
-        println!("MAIN: BLE service stopped");
+    if !qemu {
+        if let Err(e) = ble_service.stop().await {
+            eprintln!("MAIN: Error stopping BLE service: {e:#?}");
+            return Err(e);
+        } else {
+            println!("MAIN: BLE service stopped");
+        }
     }
     println!("MAIN: Shutting down...");
     Ok(())
