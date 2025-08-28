@@ -81,6 +81,7 @@ struct AppState {
     app_cache: Cache,
     internet: Connectivity,
     page: Mutex<Page>,
+    qemu: bool,
 
     // This is the flag to indicate whether we should automatically redirect to webapp
     // when internet is available.
@@ -146,6 +147,7 @@ async fn run() -> Result<()> {
         internet: Connectivity::spawn().await,
         page: Mutex::new(Page::None(unix_s())),
         auto_proceed: AtomicBool::new(false),
+        qemu,
     });
     sentry::configure_scope(|scope| {
         scope.set_tag("branch", app_state.branch.clone());
@@ -540,7 +542,7 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
 
     // No update, show art/qrcode depending on whether we have a cache
     let has_cache = app_state.app_cache.get(cache::TOPIC_ID).is_some();
-    if has_cache {
+    if !app_state.qemu && has_cache {
         show_webapp(&app_state, &chrome).await
     } else {
         show_qrcode(&app_state, &chrome).await
