@@ -1,0 +1,41 @@
+name: Testing
+
+on:
+  push:
+    branches: [main, develop]
+
+jobs:
+  test-connectd:
+    name: Test Connectd
+    uses: ./.github/workflows/test-connectd.yaml
+    with:
+      upload-coverage: true
+    secrets: inherit
+
+  test-setupd:
+    name: Test Setupd
+    uses: ./.github/workflows/test-setupd.yaml
+    with:
+      upload-coverage: true
+    secrets: inherit
+
+  test-app-monitord:
+    name: Test App Monitord
+    uses: ./.github/workflows/test-app-monitord.yaml
+    with:
+      upload-coverage: true
+    secrets: inherit
+
+  test-sys-monitord:
+    name: Test Sys Monitord
+    uses: ./.github/workflows/test-sys-monitord.yaml
+    with:
+      upload-coverage: true
+    secrets: inherit
+
+  test-watchdog:
+    name: Test Watchdog
+    uses: ./.github/workflows/test-watchdog.yaml
+    with:
+      upload-coverage: true
+    secrets: inherit

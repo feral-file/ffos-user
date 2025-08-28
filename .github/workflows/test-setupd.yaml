@@ -1,13 +1,16 @@
 name: Test Setupd
 
 on:
-  push:
-    branches: [release, develop]
-    paths:
-      - 'components/feral-setupd/src/**'
   pull_request:
     paths:
       - 'components/feral-setupd/src/**'
+  workflow_call:
+    inputs:
+      upload-coverage:
+        description: 'Whether to upload coverage results'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   test:
@@ -52,6 +55,7 @@ jobs:
           cargo tarpaulin --out Xml --output-dir coverage
 
       - name: Upload coverage to Codecov
+        if: ${{ inputs.upload-coverage == true }}
         uses: codecov/codecov-action@v5
         with:
           files: ./components/feral-setupd/coverage/cobertura.xml
