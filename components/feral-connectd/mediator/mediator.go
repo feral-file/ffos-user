@@ -106,6 +106,8 @@ func (m *mediator) handleDBusSignal(
 			return nil, fmt.Errorf("invalid body type")
 		}
 
+		m.logger.Info("Received connectivity change event", zap.Bool("connected", connected), zap.Bool("relayer_connected", m.relayer.IsConnected()))
+
 		// Send the connectivity change to web app
 		_, err := m.cdp.Send(
 			cdp.METHOD_EVALUATE,
