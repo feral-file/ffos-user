@@ -10,6 +10,7 @@ mod log_uploader;
 mod system;
 mod updater;
 mod wifi_utils;
+use std::env;
 
 use crate::dbus_utils::PageStateProvider;
 use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
@@ -80,6 +81,7 @@ struct AppState {
     app_cache: Cache,
     internet: Connectivity,
     page: Mutex<Page>,
+    qemu: bool,
 
     // This is the flag to indicate whether we should automatically redirect to webapp
     // when internet is available.
@@ -127,6 +129,14 @@ fn main() {
 }
 
 async fn run() -> Result<()> {
+    const PROFILE: &str = env!("BUILD_PROFILE");
+    println!("MAIN: Build profile: {PROFILE}");
+
+    let qemu = PROFILE == "qemu";
+    if qemu {
+        println!("MAIN: Running in qemu mode");
+    }
+
     // Initialize state
     let ble_service = Arc::new(Ble::new());
     let app_state = Arc::new(AppState {
@@ -137,6 +147,7 @@ async fn run() -> Result<()> {
         internet: Connectivity::spawn().await,
         page: Mutex::new(Page::None(unix_s())),
         auto_proceed: AtomicBool::new(false),
+        qemu,
     });
     sentry::configure_scope(|scope| {
         scope.set_tag("branch", app_state.branch.clone());
@@ -156,18 +167,20 @@ async fn run() -> Result<()> {
 
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());
-    ble_service
-        .start(
-            create_bt_connected_cb(app_state.clone(), chrome.clone()),
-            create_factory_reset_cb(app_state.clone(), chrome.clone()),
-            create_connect_wifi_cb(app_state.clone(), chrome.clone()),
-            create_keep_wifi_cb(app_state.clone(), chrome.clone()),
-            create_get_info_cb(app_state.clone()),
-            ssids_cacher.clone(),
-        )
-        .await
-        .context("starting Bluetooth advertising")?;
-    println!("MAIN: Bluetooth advertising started successfully");
+    if !qemu {
+        ble_service
+            .start(
+                create_bt_connected_cb(app_state.clone(), chrome.clone()),
+                create_factory_reset_cb(app_state.clone(), chrome.clone()),
+                create_connect_wifi_cb(app_state.clone(), chrome.clone()),
+                create_keep_wifi_cb(app_state.clone(), chrome.clone()),
+                create_get_info_cb(app_state.clone()),
+                ssids_cacher.clone(),
+            )
+            .await
+            .context("starting Bluetooth advertising")?;
+        println!("MAIN: Bluetooth advertising started successfully");
+    }
 
     // Wait for connectd D-Bus connection before proceeding
     wait_for_connectd(Duration::from_millis(constant::WAIT_FOR_CONNECTD_TIMEOUT)).await?;
@@ -220,6 +233,17 @@ async fn run() -> Result<()> {
             app_state.app_cache.set(cache::CONNECTED, "true");
             app_state.app_cache.save(constant::CACHE_FILEPATH)?;
         }
+        if qemu {
+            let topic_id = match dbus_utils::get_relayer_info() {
+                Ok(info) => info,
+                Err(e) => {
+                    eprintln!("QEMU: can't get relayer data from connectd: {e:#?}");
+                    String::new()
+                }
+            };
+            app_state.app_cache.set(cache::TOPIC_ID, &topic_id);
+            app_state.app_cache.save(constant::CACHE_FILEPATH)?;
+        }
         on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
     }
 
@@ -243,11 +267,13 @@ async fn run() -> Result<()> {
     println!("MAIN: Stopping DBus listener...");
     stop_dbus_listener.store(true, Ordering::Relaxed);
     println!("MAIN: Stopping BLE service...");
-    if let Err(e) = ble_service.stop().await {
-        eprintln!("MAIN: Error stopping BLE service: {e: }");
-        return Err(e);
-    } else {
-        println!("MAIN: BLE service stopped");
+    if !qemu {
+        if let Err(e) = ble_service.stop().await {
+            eprintln!("MAIN: Error stopping BLE service: {e:#?}");
+            return Err(e);
+        } else {
+            println!("MAIN: BLE service stopped");
+        }
     }
     println!("MAIN: Shutting down...");
     Ok(())
@@ -516,7 +542,7 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
 
     // No update, show art/qrcode depending on whether we have a cache
     let has_cache = app_state.app_cache.get(cache::TOPIC_ID).is_some();
-    if has_cache {
+    if !app_state.qemu && has_cache {
         show_webapp(&app_state, &chrome).await
     } else {
         show_qrcode(&app_state, &chrome).await
