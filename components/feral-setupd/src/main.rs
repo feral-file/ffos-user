@@ -136,7 +136,6 @@ async fn run() -> Result<()> {
     if qemu {
         println!("MAIN: Running in qemu mode");
     }
-
     // Initialize state
     let ble_service = Arc::new(Ble::new());
     let app_state = Arc::new(AppState {
@@ -148,6 +147,14 @@ async fn run() -> Result<()> {
         page: Mutex::new(Page::None(unix_s())),
         auto_proceed: AtomicBool::new(false),
         qemu,
+    });
+    sentry::configure_scope(|scope| {
+        scope.set_tag("branch", app_state.branch.clone());
+        scope.set_tag("version", app_state.current_version.clone());
+        scope.set_user(Some(sentry::User {
+            id: Some(app_state.device_id.clone()),
+            ..Default::default()
+        }));
     });
     sentry::configure_scope(|scope| {
         scope.set_tag("branch", app_state.branch.clone());
