@@ -115,6 +115,8 @@ fn main() {
         },
     ));
 
+    std::process::exit(1);
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
