@@ -9,6 +9,12 @@ import (
 	"time"
 
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
+	"github.com/feral-file/godbus"
+	"github.com/getsentry/sentry-go"
+	dbus_v5 "github.com/godbus/dbus/v5"
+	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+
 	"github.com/feral-file/ffos-user/components/feral-connectd/cdp"
 	"github.com/feral-file/ffos-user/components/feral-connectd/command"
 	"github.com/feral-file/ffos-user/components/feral-connectd/config"
@@ -20,11 +26,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-connectd/status"
 	"github.com/feral-file/ffos-user/components/feral-connectd/watchdog"
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
-	"github.com/feral-file/godbus"
-	"github.com/getsentry/sentry-go"
-	dbus_v5 "github.com/godbus/dbus/v5"
-	"github.com/gorilla/websocket"
-	"go.uber.org/zap"
 )
 
 const (
@@ -301,7 +302,7 @@ func initializeApp(
 	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, http, logger)
 
 	// Relayer
-	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, logger)
+	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, logger)
 
 	// DBus
 	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)

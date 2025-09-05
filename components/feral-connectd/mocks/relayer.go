@@ -8,8 +8,9 @@ import (
 	context "context"
 	reflect "reflect"
 
-	relayer "github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 	gomock "github.com/golang/mock/gomock"
+
+	relayer "github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 )
 
 // MockRelayer is a mock of Relayer interface.

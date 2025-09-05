@@ -114,6 +114,14 @@ func main() {
 		chromiumMonitor.Start(ctx)
 	}()
 
+	// Start Systemd monitor
+	systemdMonitor := NewSystemdMonitor(cdpClient, logger, commandHandler)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		systemdMonitor.Start(ctx)
+	}()
+
 	// Notify systemd that we're ready
 	if err := systemdWatchdog.NotifyReady(); err != nil {
 		logger.Warn("Failed to notify systemd, but continuing", zap.Error(err))

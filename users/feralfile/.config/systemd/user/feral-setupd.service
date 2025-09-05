@@ -1,6 +1,8 @@
 [Unit]
 Description=Feral File Setup Service
 PartOf=chromium-ready.target
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=simple
