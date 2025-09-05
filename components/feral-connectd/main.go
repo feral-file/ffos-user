@@ -302,7 +302,7 @@ func initializeApp(
 	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, http, logger)
 
 	// Relayer
-	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, logger)
+	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, logger)
 
 	// DBus
 	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)

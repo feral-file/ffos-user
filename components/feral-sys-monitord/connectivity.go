@@ -179,6 +179,7 @@ func (c *Connectivity) background() {
 					c.notifyHandlers(c.ctx, connected)
 
 					// restart the background goroutine when connectivity changes
+					time.Sleep(200 * time.Millisecond) // Add a small delay
 					c.restart()
 
 					return
@@ -197,13 +198,13 @@ func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
 	resultChan := make(chan bool, len(PING_TARGET_ADDRESS))
 
 	for _, target := range PING_TARGET_ADDRESS {
-		target := target
+		t := target
 		eg.Go(func() error {
 			before := time.Now()
 			dialer := net.Dialer{Timeout: timeout}
-			conn, err := dialer.DialContext(egCtx, "tcp", target)
+			conn, err := dialer.DialContext(egCtx, "tcp", t)
 			after := time.Now()
-			c.logger.Debug("Connectivity check result", zap.String("target", target), zap.Duration("duration", after.Sub(before)), zap.Error(err))
+			c.logger.Debug("Connectivity check result", zap.String("target", t), zap.Duration("duration", after.Sub(before)), zap.Error(err))
 			if conn != nil {
 				if err := conn.Close(); err != nil {
 					c.logger.Warn("Failed to close connection", zap.Error(err))

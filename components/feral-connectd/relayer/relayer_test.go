@@ -2,9 +2,12 @@ package relayer_test
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,6 +25,13 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
+// timeoutError implements net.Error interface for testing
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return false }
+
 type testSetup struct {
 	ctrl           *gomock.Controller
 	ctx            context.Context
@@ -29,6 +39,7 @@ type testSetup struct {
 	mockConn       *mocks.MockWebSocketConn
 	mockRandomizer *mocks.MockRandomizer
 	mockClock      *mocks.MockClock
+	mockOS         *mocks.MockOS
 	client         relayer.Relayer
 }
 
@@ -42,8 +53,9 @@ func setup(t *testing.T) *testSetup {
 	mockConn := mocks.NewMockWebSocketConn(ctrl)
 	mockRandomizer := mocks.NewMockRandomizer(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
+	mockOS := mocks.NewMockOS(ctrl)
 
-	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, logger)
+	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, logger)
 
 	return &testSetup{
 		ctrl:           ctrl,
@@ -52,6 +64,7 @@ func setup(t *testing.T) *testSetup {
 		mockConn:       mockConn,
 		mockRandomizer: mockRandomizer,
 		mockClock:      mockClock,
+		mockOS:         mockOS,
 		client:         client,
 	}
 }
@@ -255,14 +268,86 @@ func TestClient_Connect_Failed(t *testing.T) {
 			expectedType: "PermanentErr",
 		},
 		{
-			name:         "connection refused should be TransientErr",
+			name:         "connection refused should be BusyErr",
 			inputError:   syscall.ECONNREFUSED,
 			statusCode:   500,
-			expectedType: "TransientErr",
+			expectedType: "BusyErr",
 		},
 		{
 			name:         "connection reset should be TransientErr",
 			inputError:   syscall.ECONNRESET,
+			statusCode:   500,
+			expectedType: "TransientErr",
+		},
+		{
+			name:         "broken pipe should be TransientErr",
+			inputError:   syscall.EPIPE,
+			statusCode:   500,
+			expectedType: "TransientErr",
+		},
+		{
+			name:         "host unreachable should be TransientErr",
+			inputError:   syscall.EHOSTUNREACH,
+			statusCode:   500,
+			expectedType: "TransientErr",
+		},
+		{
+			name:         "network unreachable should be TransientErr",
+			inputError:   syscall.ENETUNREACH,
+			statusCode:   500,
+			expectedType: "TransientErr",
+		},
+		{
+			name:         "protocol not supported should be PermanentErr",
+			inputError:   syscall.EPROTONOSUPPORT,
+			statusCode:   500,
+			expectedType: "PermanentErr",
+		},
+		{
+			name:         "address not available should be PermanentErr",
+			inputError:   syscall.EADDRNOTAVAIL,
+			statusCode:   500,
+			expectedType: "PermanentErr",
+		},
+		{
+			name:         "unsupported protocol scheme should be PermanentErr",
+			inputError:   &url.Error{Op: "GET", URL: "ftp://example.com", Err: errors.New("unsupported protocol scheme")},
+			statusCode:   500,
+			expectedType: "PermanentErr",
+		},
+		{
+			name:         "bad request URI should be PermanentErr",
+			inputError:   &url.Error{Op: "GET", URL: "http://example.com", Err: errors.New("bad request uri")},
+			statusCode:   500,
+			expectedType: "PermanentErr",
+		},
+		{
+			name:         "invalid control character in URL should be PermanentErr",
+			inputError:   &url.Error{Op: "GET", URL: "http://example.com", Err: errors.New("invalid control character in URL")},
+			statusCode:   500,
+			expectedType: "PermanentErr",
+		},
+		{
+			name:         "DNS temporary error should be TransientErr",
+			inputError:   &net.DNSError{Name: "example.com", Err: "temporary failure", IsTemporary: true},
+			statusCode:   500,
+			expectedType: "TransientErr",
+		},
+		{
+			name:         "DNS permanent error should be PermanentErr",
+			inputError:   &net.DNSError{Name: "example.com", Err: "permanent failure", IsTemporary: false},
+			statusCode:   500,
+			expectedType: "PermanentErr",
+		},
+		{
+			name:         "network timeout error should be TransientErr",
+			inputError:   &net.OpError{Op: "dial", Net: "tcp", Addr: nil, Err: &timeoutError{}},
+			statusCode:   500,
+			expectedType: "TransientErr",
+		},
+		{
+			name:         "TLS record header error should be TransientErr",
+			inputError:   &tls.RecordHeaderError{},
 			statusCode:   500,
 			expectedType: "TransientErr",
 		},
@@ -476,6 +561,143 @@ func TestClient_RetryableConnect_ContextCanceled(t *testing.T) {
 		"Expected context.Canceled error, got: %v", err)
 	assert.False(t, ts.client.IsConnected(), "expected client to remain disconnected")
 	assert.Equal(t, 2, callCount, "expected exactly 2 dial attempts")
+}
+
+func TestClient_RetryableConnect_UnknownError_RetryLimitExceeded(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Expect time.Sleep to return 100ms for faster testing
+	ts.mockClock.EXPECT().
+		Sleep(gomock.Any()).
+		DoAndReturn(func(d time.Duration) {
+			time.Sleep(100 * time.Millisecond)
+		}).
+		Times(10)
+
+	// Expect randomizer to return 1 second for all calls
+	ts.mockRandomizer.EXPECT().
+		Duration(gomock.Any(), gomock.Any()).
+		Return(1 * time.Second).
+		Times(10)
+
+	// Create an unknown error (not categorized as any of our custom error types)
+	unknownError := errors.New("some unknown network error")
+
+	// Expect dialer to fail 11 times with unknown error (10 retries + 1 initial attempt)
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(nil, &http.Response{StatusCode: 500}, unknownError).
+		Times(11)
+
+	// Test - should fail after 10 retries with unknown error
+	err := ts.client.RetryableConnect(ts.ctx)
+	assert.Error(t, err)
+	assert.Equal(t, unknownError, err, "Expected the original unknown error to be returned")
+
+	assert.False(t, ts.client.IsConnected(), "expected client to remain disconnected")
+}
+
+func TestClient_RetryableConnect_UnknownError_RetryLimitNotExceeded(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Expect time.Sleep to return 100ms for faster testing
+	ts.mockClock.EXPECT().
+		Sleep(gomock.Any()).
+		DoAndReturn(func(d time.Duration) {
+			time.Sleep(100 * time.Millisecond)
+		}).
+		Times(5) // 5 retries
+
+	// Expect ticker to return a 100ms ticker (only when connection succeeds)
+	ts.mockClock.EXPECT().
+		NewTicker(gomock.Any()).
+		Return(time.NewTicker(100 * time.Millisecond)).
+		Times(1) // 1 ticker when connection succeeds
+
+	// Expect time to return default time (only when ticker is created)
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Time{}).
+		Times(1) // 1 time when ticker is created
+
+	// Expect randomizer to return 1 second for all calls
+	ts.mockRandomizer.EXPECT().
+		Duration(gomock.Any(), gomock.Any()).
+		Return(1 * time.Second).
+		Times(5) // 5 retries
+
+	// Create an unknown error (not categorized as any of our custom error types)
+	unknownError := errors.New("some unknown network error")
+
+	// Expect dialer to fail 5 times with unknown error, then succeed
+	gomock.InOrder(
+		// First 5 attempts: Unknown error (should retry)
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(nil, &http.Response{StatusCode: 500}, unknownError),
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(nil, &http.Response{StatusCode: 500}, unknownError),
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(nil, &http.Response{StatusCode: 500}, unknownError),
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(nil, &http.Response{StatusCode: 500}, unknownError),
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(nil, &http.Response{StatusCode: 500}, unknownError),
+		// 6th attempt: Success
+		ts.mockDialer.EXPECT().
+			DialContext(ts.ctx, gomock.Any(), nil).
+			Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil),
+	)
+
+	// Expect conn to set pong handler
+	ts.mockConn.EXPECT().
+		SetPongHandler(gomock.Any()).
+		Times(1)
+
+	// Expect conn to send ping
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.PingMessage, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect conn to set read deadline
+	ts.mockConn.EXPECT().
+		SetReadDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect conn to read message
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		Return(0, []byte{}, nil).
+		AnyTimes()
+
+	// Expect cleanup when connection closes
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.CloseMessage, gomock.Any(), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect conn to close
+	ts.mockConn.EXPECT().
+		Close().
+		Return(nil).
+		AnyTimes()
+
+	// Test - should succeed after retrying unknown errors
+	err := ts.client.RetryableConnect(ts.ctx)
+	assert.NoError(t, err, "expected no error after retrying unknown errors")
+	assert.True(t, ts.client.IsConnected(), "expected client to be connected after retries")
+
+	// Properly close the client to prevent goroutine leaks
+	ts.client.Close()
+	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
 }
 
 func TestClient_SendMessage_Success(t *testing.T) {
@@ -1350,4 +1572,101 @@ func TestClient_Ping_ContextCanceled(t *testing.T) {
 	// Properly close the client to prevent goroutine leaks
 	ts.client.Close()
 	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
+}
+
+func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
+	ts := setup(t)
+	defer ts.ctrl.Finish()
+
+	// Expect clock to return ticker
+	ts.mockClock.EXPECT().
+		NewTicker(gomock.Any()).
+		Return(time.NewTicker(100 * time.Millisecond)).
+		AnyTimes()
+
+	// Expect time.Now() to return default time
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Time{}).
+		AnyTimes()
+
+	// Setup ordered expectations for initial connection
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil).
+		Times(1)
+
+	// Expect conn to set pong handler
+	ts.mockConn.EXPECT().
+		SetPongHandler(gomock.Any()).
+		Times(1)
+
+	// Expect conn to write ping
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.PingMessage, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect conn to set read deadline
+	ts.mockConn.EXPECT().
+		SetReadDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect conn to read message with error (this triggers reconnection attempt)
+	readErrorOccurred := make(chan struct{})
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			close(readErrorOccurred)
+			return 0, []byte{}, errors.New("test read error")
+		}).
+		Times(1)
+
+	// Expect cleanup when first connection closes due to error
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), gomock.Any()).
+		Return(nil).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		Close().
+		Return(nil).
+		Times(1)
+
+	// Expect reconnection attempt to fail with PermanentError
+	permanentErr := relayer.PermanentError{Err: errors.New("permanent connection error")}
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(nil, nil, permanentErr).
+		Times(1)
+
+	// Expect os.Exit(1) to be called when reconnection fails with PermanentError
+	exitCalled := make(chan struct{})
+	ts.mockOS.EXPECT().
+		Exit(1).
+		DoAndReturn(func(code int) {
+			close(exitCalled)
+		}).
+		Times(1)
+
+	// Test - Connect (this automatically starts background message reading)
+	err := ts.client.Connect(ts.ctx)
+	assert.NoError(t, err, "expected no error during initial connection, got %v", err)
+
+	// Wait for ReadMessage error to occur
+	select {
+	case <-readErrorOccurred:
+		// ReadMessage error occurred, continue
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected ReadMessage error to occur within timeout")
+	}
+
+	// Wait for os.Exit(1) to be called
+	select {
+	case <-exitCalled:
+		// Exit was called as expected
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected os.Exit(1) to be called within timeout")
+	}
 }

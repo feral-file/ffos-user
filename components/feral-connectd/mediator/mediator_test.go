@@ -191,11 +191,11 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 					Return(map[string]interface{}{"result": "ok"}, nil).
 					Times(1)
 
-				// Expect IsConnected to be called
+				// Expect IsConnected to be called twice (once for logging, once for condition check)
 				ts.mockRelayer.EXPECT().
 					IsConnected().
 					Return(false).
-					Times(1)
+					Times(2)
 
 				// Expect RetryableConnect to be called
 				ts.mockRelayer.EXPECT().
@@ -223,11 +223,11 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 					Return(map[string]interface{}{"result": "ok"}, nil).
 					Times(1)
 
-				// Expect IsConnected to be called
+				// Expect IsConnected to be called twice (once for logging, once for condition check)
 				ts.mockRelayer.EXPECT().
 					IsConnected().
 					Return(true).
-					Times(1)
+					Times(2)
 
 				payload := godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
@@ -246,6 +246,12 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 						"expression": "window.handleConnectivityChange(false)",
 					}).
 					Return(map[string]interface{}{"result": "ok"}, nil).
+					Times(1)
+
+				// Expect IsConnected to be called once for logging (condition short-circuits since connected=false)
+				ts.mockRelayer.EXPECT().
+					IsConnected().
+					Return(false).
 					Times(1)
 
 				payload := godbus.DBusPayload{
@@ -269,11 +275,11 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 					Return(nil, cdpError).
 					Times(1)
 
-				// Expect IsConnected to be called
+				// Expect IsConnected to be called twice (once for logging, once for condition check)
 				ts.mockRelayer.EXPECT().
 					IsConnected().
 					Return(false).
-					Times(1)
+					Times(2)
 
 				// Expect RetryableConnect to be called
 				ts.mockRelayer.EXPECT().
