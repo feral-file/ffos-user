@@ -1,6 +1,8 @@
 [Unit]
 Description=Feral File Setup Service
 PartOf=chromium-ready.target
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=simple
@@ -9,7 +11,5 @@ Environment="XDG_RUNTIME_DIR=/run/user/1000"
 ExecStart=/usr/bin/feral-setupd
 Restart=always
 RestartSec=5s
-StartLimitBurst=5
-StartLimitIntervalSec=60
 StandardOutput=append:/home/feralfile/.logs/setupd.log
 StandardError=append:/home/feralfile/.logs/setupd.log

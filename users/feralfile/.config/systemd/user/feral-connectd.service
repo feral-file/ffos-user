@@ -2,6 +2,8 @@
 Description=Feral File Connectd
 PartOf=chromium-ready.target
 After=feral-sys-monitord.service
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=notify
@@ -11,8 +13,6 @@ Environment="XDG_RUNTIME_DIR=/run/user/1000"
 ExecStart=/usr/bin/feral-connectd
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=60
 WatchdogSec=30s
 StandardOutput=append:/home/feralfile/.logs/connectd.log
 StandardError=append:/home/feralfile/.logs/connectd.log
