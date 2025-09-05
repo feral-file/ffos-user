@@ -8,6 +8,10 @@ if ! systemctl --user is-enabled "feral-watchdog.service" >/dev/null 2>&1; then
     systemctl --user enable --now "feral-watchdog.service"
 fi
 
+if ! systemctl --user is-enabled "display-restore.service" >/dev/null 2>&1; then
+    systemctl --user enable --now "display-restore.service"
+fi
+
 systemctl --user start "chromium-kiosk.service"
 
 # Enable hourly timers for time sync and log rotation
