@@ -288,30 +288,6 @@ func (c *Client) Send(method string, params map[string]interface{}) (interface{}
 	}
 }
 
-// Navigate navigates to the specified URL
-func (c *Client) Navigate(ctx context.Context, url string) error {
-	c.logger.Info("CDP: Navigating to", zap.String("url", url))
-	params := map[string]interface{}{
-		"url": url,
-	}
-	_, err := c.Send(METHOD_NAVIGATE, params)
-	if err != nil {
-		if c.IsReconnectionError(err) {
-			if reconnErr := c.Reconnect(ctx); reconnErr != nil {
-				return fmt.Errorf("failed to reconnect: %w", reconnErr)
-			}
-			// Retry navigation after reconnect
-			_, err = c.Send(METHOD_NAVIGATE, params)
-			if err != nil {
-				return fmt.Errorf("failed to navigate to %s: %w", url, err)
-			}
-		} else {
-			return fmt.Errorf("failed to navigate to %s: %w", url, err)
-		}
-	}
-	return nil
-}
-
 func (c *Client) IsReconnectionError(err error) bool {
 	if err == nil {
 		return false
@@ -403,6 +379,30 @@ func (c *Client) SendCriticalCPUTemperatureNotification(ctx context.Context) err
 	}
 
 	c.logger.Info("Critical CPU temperature notification sent successfully")
+	return nil
+}
+
+// Navigate navigates to the specified URL
+func (c *Client) Navigate(ctx context.Context, url string) error {
+	c.logger.Info("CDP: Navigating to", zap.String("url", url))
+	params := map[string]interface{}{
+		"url": url,
+	}
+	_, err := c.Send(METHOD_NAVIGATE, params)
+	if err != nil {
+		if c.IsReconnectionError(err) {
+			if reconnErr := c.Reconnect(ctx); reconnErr != nil {
+				return fmt.Errorf("failed to reconnect: %w", reconnErr)
+			}
+			// Retry navigation after reconnect
+			_, err = c.Send(METHOD_NAVIGATE, params)
+			if err != nil {
+				return fmt.Errorf("failed to navigate to %s: %w", url, err)
+			}
+		} else {
+			return fmt.Errorf("failed to navigate to %s: %w", url, err)
+		}
+	}
 	return nil
 }
 

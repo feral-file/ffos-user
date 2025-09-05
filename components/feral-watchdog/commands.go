@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
-	"time"
 
 	"go.uber.org/zap"
 )
 
 const (
-	SYSTEMD_SERVICE_HANG_THRESHOLD = time.Minute
+	SYSTEMD_SERVICE_HANG_THRESHOLD_SECOND int64 = 60
 
 	SYSTEMD_SERVICE_STATUS_ACTIVE   SystemdServiceStatus = "active"
 	SYSTEMD_SERVICE_STATUS_FAILED   SystemdServiceStatus = "failed"
@@ -165,7 +164,7 @@ func (c *CommandHandler) checkSystemdUserServiceStatus(ctx context.Context, serv
 			return nil, tsErr
 		}
 		uptimeMicros := int64(uptimeSec * 1e6)
-		if (uptimeMicros-exitTsMicros)/1e6 < int64(SYSTEMD_SERVICE_HANG_THRESHOLD) {
+		if (uptimeMicros-exitTsMicros)/1e6 < SYSTEMD_SERVICE_HANG_THRESHOLD_SECOND {
 			c.logger.Warn("Service is in failed state but within hang threshold, might be restarting",
 				zap.String("service", serviceName),
 				zap.Int64("failed_seconds", (uptimeMicros-exitTsMicros)/1e6))
