@@ -107,10 +107,17 @@ func (c *CommandHandler) checkSystemdUserServiceStatus(ctx context.Context, serv
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	args := []string{}
-	args = append(args, "--user", "show", serviceName, "--property=ActiveState,ExecMainExitTimestampMonotonic", "--no-page")
+	if !systemdServices[serviceName] {
+		c.logger.Error("unauthorized service name",
+			zap.String("service", serviceName))
+		return nil, fmt.Errorf("unauthorized service: %s", serviceName)
+	}
 
-	cmd := exec.CommandContext(ctx, "systemctl", args...)
+	cmd := exec.CommandContext(ctx, "systemctl",
+		"--user", "show", serviceName,
+		"--property=ActiveState,ExecMainExitTimestampMonotonic",
+		"--no-page")
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		c.logger.Error("Failed to check service status",

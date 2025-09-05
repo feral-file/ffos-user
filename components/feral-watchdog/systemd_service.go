@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
@@ -17,17 +16,16 @@ const (
 )
 
 var (
-	systemdServices = []string{
-		"feral-setupd.service",
-		"feral-connectd.service",
-		"feral-sys-monitord.service",
-		"feral-app-monitord.service",
+	systemdServices = map[string]bool{
+		"feral-setupd.service":       true,
+		"feral-connectd.service":     true,
+		"feral-sys-monitord.service": true,
+		"feral-app-monitord.service": true,
 	}
 )
 
 // SystemdMonitor monitors systemd services
 type SystemdMonitor struct {
-	mu             sync.Mutex
 	cdpClient      *cdp.Client
 	logger         *zap.Logger
 	commandHandler *CommandHandler
@@ -64,7 +62,7 @@ func (m *SystemdMonitor) Start(ctx context.Context) {
 }
 
 func (m *SystemdMonitor) check(ctx context.Context) error {
-	for _, service := range systemdServices {
+	for service := range systemdServices {
 		state, err := m.commandHandler.checkSystemdUserServiceStatus(ctx, service)
 		if err != nil {
 			m.logger.Error("Systemd: Failed to get service state",
@@ -96,7 +94,6 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 						zap.String("service", service))
 				}
 			}
-			break
 		case SYSTEMD_SERVICE_STATUS_INACTIVE:
 			m.logger.Warn("Systemd: Service is inactive",
 				zap.String("service", service))
