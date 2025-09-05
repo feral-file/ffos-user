@@ -6,7 +6,7 @@ ConditionPathExists=/run/user/1000/bus
 Type=notify
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
-ExecStart=/usr/bin/feral-sys-monitord --debug
+ExecStart=/usr/bin/feral-sys-monitord
 Restart=always
 RestartSec=5
 WatchdogSec=30s
