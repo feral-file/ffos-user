@@ -24,7 +24,7 @@ const (
 	CDP_CRITICAL_CPU_TEMPERATURE_EVENT = "CriticalCPUTemperature"
 
 	MSG_URL_PREFIX                  = "file:///opt/feral/ui/launcher/index.html?step=message&message="
-	SERVICE_FAILED_TO_START_MESSAGE = "Some critical services failed to start. Please contact the Feral File team for assistance."
+	SERVICE_FAILED_TO_START_MESSAGE = "FF1 encountered an unexpected issue and has stopped working. Please reboot the device. If the problem persists, contact support@feralfile.com for assistance."
 
 	// CDP Methods
 	METHOD_EVALUATE = "Runtime.evaluate"
