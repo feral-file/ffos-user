@@ -1,6 +1,8 @@
 [Unit]
 Description=Feral File System Monitord
 ConditionPathExists=/run/user/1000/bus
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=notify

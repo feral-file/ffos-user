@@ -23,8 +23,12 @@ var (
 const (
 	CDP_CRITICAL_CPU_TEMPERATURE_EVENT = "CriticalCPUTemperature"
 
+	MSG_URL_PREFIX                  = "file:///opt/feral/ui/launcher/index.html?step=message&message="
+	SERVICE_FAILED_TO_START_MESSAGE = "FF1 encountered an unexpected issue and has stopped working. Please reboot the device. If the problem persists, contact support@feralfile.com for assistance."
+
 	// CDP Methods
 	METHOD_EVALUATE = "Runtime.evaluate"
+	METHOD_NAVIGATE = "Page.navigate"
 
 	// CDP Types
 	TYPE_STRING  = "string"
@@ -375,6 +379,42 @@ func (c *Client) SendCriticalCPUTemperatureNotification(ctx context.Context) err
 	}
 
 	c.logger.Info("Critical CPU temperature notification sent successfully")
+	return nil
+}
+
+// Navigate navigates to the specified URL
+func (c *Client) Navigate(ctx context.Context, url string) error {
+	c.logger.Info("CDP: Navigating to", zap.String("url", url))
+	params := map[string]interface{}{
+		"url": url,
+	}
+	_, err := c.Send(METHOD_NAVIGATE, params)
+	if err != nil {
+		if c.IsReconnectionError(err) {
+			if reconnErr := c.Reconnect(ctx); reconnErr != nil {
+				return fmt.Errorf("failed to reconnect: %w", reconnErr)
+			}
+			// Retry navigation after reconnect
+			_, err = c.Send(METHOD_NAVIGATE, params)
+			if err != nil {
+				return fmt.Errorf("failed to navigate to %s: %w", url, err)
+			}
+		} else {
+			return fmt.Errorf("failed to navigate to %s: %w", url, err)
+		}
+	}
+	return nil
+}
+
+// ShowServiceFailedToStartPage navigates to the service failed to start page
+func (c *Client) ShowServiceFailedToStartPage(ctx context.Context) error {
+	message := SERVICE_FAILED_TO_START_MESSAGE
+	messageURL := MSG_URL_PREFIX + message
+	err := c.Navigate(ctx, messageURL)
+	if err != nil {
+		return fmt.Errorf("failed to navigate to %s: %w", messageURL, err)
+	}
+	c.logger.Info("Navigated to", zap.String("url", messageURL))
 	return nil
 }
 
