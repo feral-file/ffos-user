@@ -170,6 +170,7 @@ async fn run() -> Result<()> {
         ble_service
             .start(
                 create_bt_connected_cb(app_state.clone(), chrome.clone()),
+                create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
                 create_factory_reset_cb(app_state.clone(), chrome.clone()),
                 create_connect_wifi_cb(app_state.clone(), chrome.clone()),
                 create_keep_wifi_cb(app_state.clone(), chrome.clone()),
@@ -293,6 +294,26 @@ fn create_bt_connected_cb(
             };
             if should_show_welcome {
                 let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
+            }
+        })
+    }))
+}
+
+fn create_bt_disconnected_cb(
+    app_state: Arc<AppState>,
+    chromium: Arc<Cdp>,
+) -> ble::BTConnectedCallback {
+    Some(Box::new(move || {
+        let app_state = app_state.clone();
+        let chromium = chromium.clone();
+
+        Box::pin(async move {
+            let should_go_qrcode = {
+                let page = app_state.page.lock().await;
+                matches!(*page, Page::Message(_, _))
+            };
+            if should_go_qrcode {
+                let _ = show_qrcode(&app_state, &chromium).await;
             }
         })
     }))
