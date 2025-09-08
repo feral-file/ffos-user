@@ -5,13 +5,13 @@ Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/home/feralfile/scripts/display-restore.sh
-Restart=always
-RestartSec=5
-StandardOutput=append:/home/feralfile/.logs/display-restore.log
-StandardError=append:/home/feralfile/.logs/display-restore.log
 Environment="WAYLAND_DISPLAY=wayland-0"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
+ExecStart=/home/feralfile/scripts/display-restore.sh
+StandardOutput=append:/home/feralfile/.logs/display-restore.log
+StandardError=append:/home/feralfile/.logs/display-restore.log
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=default.target
