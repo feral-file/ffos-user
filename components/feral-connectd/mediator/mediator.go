@@ -12,7 +12,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-connectd/cdp"
 	"github.com/feral-file/ffos-user/components/feral-connectd/command"
 	"github.com/feral-file/ffos-user/components/feral-connectd/dbus"
-	"github.com/feral-file/ffos-user/components/feral-connectd/display"
 	"github.com/feral-file/ffos-user/components/feral-connectd/logger"
 	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 	"github.com/feral-file/ffos-user/components/feral-connectd/state"
@@ -29,15 +28,14 @@ type Mediator interface {
 }
 
 type mediator struct {
-	relayer        relayer.Relayer
-	dbus           dbus.DBus
-	cdp            cdp.CDP
-	cmd            command.CommandHandler
-	statusPoller   status.Poller
-	displayManager display.Manager
-	clock          wrapper.Clock
-	logger         *zap.Logger
-	tracer         *logger.RelayerMessageTracer
+	relayer      relayer.Relayer
+	dbus         dbus.DBus
+	cdp          cdp.CDP
+	cmd          command.CommandHandler
+	statusPoller status.Poller
+	clock        wrapper.Clock
+	logger       *zap.Logger
+	tracer       *logger.RelayerMessageTracer
 }
 
 func New(
@@ -49,14 +47,13 @@ func New(
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
-		relayer:        relayer,
-		dbus:           dbus,
-		cdp:            cdp,
-		cmd:            cmd,
-		displayManager: display.NewManager(l),
-		clock:          clock,
-		logger:         l,
-		tracer:         logger.NewRelayerMessageTracer(l),
+		relayer: relayer,
+		dbus:    dbus,
+		cdp:     cdp,
+		cmd:     cmd,
+		clock:   clock,
+		logger:  l,
+		tracer:  logger.NewRelayerMessageTracer(l),
 	}
 }
 
@@ -127,35 +124,6 @@ func (m *mediator) handleDBusSignal(
 			if err != nil {
 				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
 			}
-		}
-
-	case dbus.MONITORD_EVENT_SYSEVENT:
-		if len(payload.Body) != 1 {
-			m.logger.Error("Invalid number of arguments", zap.Int("expected", 1), zap.Int("actual", len(payload.Body)))
-			return nil, fmt.Errorf("invalid number of arguments")
-		}
-
-		eventType, ok := payload.Body[0].(string)
-		if !ok {
-			m.logger.Error("Invalid body type", zap.String("expected", "string"), zap.String("actual", reflect.TypeOf(payload.Body[0]).String()))
-			return nil, fmt.Errorf("invalid body type")
-		}
-
-		m.logger.Info("Received system event", zap.String("event", eventType))
-
-		if eventType == "display_connected" {
-			m.logger.Info("Display connected event received, reapplying saved rotation")
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-
-				err := m.displayManager.ReapplySavedRotation(ctx)
-				if err != nil {
-					m.logger.Error("Failed to reapply saved rotation", zap.Error(err))
-				} else {
-					m.logger.Info("Successfully reapplied saved rotation after display reconnect")
-				}
-			}()
 		}
 
 	default:

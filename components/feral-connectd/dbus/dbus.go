@@ -26,7 +26,6 @@ const (
 	MONITORD_METHOD_GET_CONNECTIVITY_STATUS godbus.Member    = "GetConnectivityStatus"
 	MONITORD_EVENT_SYSMETRICS               godbus.Member    = "sysmetrics"
 	MONITORD_EVENT_CONNECTIVITY_CHANGE      godbus.Member    = "connectivity_change"
-	MONITORD_EVENT_SYSEVENT                 godbus.Member    = "sysevent"
 
 	SETUPD_EVENT_SHOW_PAIRING_QR_CODE godbus.Member = "show_pairing_qr_code"
 )
