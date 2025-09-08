@@ -21,15 +21,19 @@ use bluer::{
         Service,
     },
 };
+use futures_util::StreamExt;
 use futures_util::future::FutureExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use anyhow::Result;
 
 pub type BTConnectedCallback =
+    Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
+pub type BTDisconnectedCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
 pub type ConnectWifiCallback = Box<
     dyn Fn(&str, &str) -> Pin<Box<dyn Future<Output = Result<String, u8>> + Send>> + Send + Sync,
@@ -47,6 +51,7 @@ struct Inner {
     adapter: Option<Adapter>,
     adv_handle: Option<AdvertisementHandle>,
     app_handle: Option<ApplicationHandle>,
+    monitor_task: Option<JoinHandle<()>>,
 }
 
 pub struct Ble {
@@ -67,6 +72,7 @@ impl Ble {
     pub async fn start(
         &self,
         bt_connected_cb: BTConnectedCallback,
+        bt_disconnected_cb: BTDisconnectedCallback,
         factory_reset_cb: FactoryResetCallback,
         connect_wifi_cb: ConnectWifiCallback,
         keep_wifi_cb: KeepWifiCallback,
@@ -87,6 +93,10 @@ impl Ble {
             adapter.name(),
             inner.device_id
         );
+
+        let monitor_task = self
+            .start_device_monitor(adapter.clone(), bt_disconnected_cb)
+            .await;
 
         // Start advertising our service UUID
         let adv = Advertisement {
@@ -125,12 +135,100 @@ impl Ble {
         inner.adapter = Some(adapter);
         inner.adv_handle = Some(adv_handle);
         inner.app_handle = Some(app_handle);
+        inner.monitor_task = Some(monitor_task);
         inner.advertised = true;
         Ok(())
     }
 
+    async fn start_device_monitor(
+        &self,
+        adapter: Adapter,
+        bt_disconnected_cb: BTDisconnectedCallback,
+    ) -> JoinHandle<()> {
+        let bt_disconnected_callback = Arc::new(bt_disconnected_cb);
+
+        tokio::spawn(async move {
+            println!("BLE: Starting device connection monitor");
+
+            let mut device_events = match adapter.discover_devices().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("BLE: Failed to start device discovery: {e}");
+                    return;
+                }
+            };
+
+            while let Some(evt) = device_events.next().await {
+                match evt {
+                    bluer::AdapterEvent::DeviceAdded(addr) => {
+                        println!("BLE: Device added: {addr}");
+                        let device = match adapter.device(addr) {
+                            Ok(dev) => dev,
+                            Err(e) => {
+                                eprintln!("BLE: Failed to get device {addr}: {e}");
+                                continue;
+                            }
+                        };
+
+                        let cb = bt_disconnected_callback.clone();
+                        tokio::spawn(async move {
+                            Self::monitor_device_connection(device, cb).await;
+                        });
+                    }
+                    bluer::AdapterEvent::DeviceRemoved(addr) => {
+                        println!("BLE: Device removed: {addr}");
+                    }
+                    _ => {}
+                }
+            }
+
+            println!("BLE: Device monitor stopped");
+        })
+    }
+
+    async fn monitor_device_connection(
+        device: bluer::Device,
+        bt_disconnected_cb: Arc<BTDisconnectedCallback>,
+    ) {
+        let addr = device.address();
+        println!("BLE: Monitoring connection for device: {addr}");
+
+        let mut prop_stream = match device.events().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("BLE: Failed to get property events for {addr}: {e}");
+                return;
+            }
+        };
+
+        let mut was_connected = false;
+
+        while let Some(evt) = prop_stream.next().await {
+            match evt {
+                bluer::DeviceEvent::PropertyChanged(prop) => {
+                    if let bluer::DeviceProperty::Connected(connected) = prop {
+                        println!("BLE: Device {addr} connection status changed: {connected}");
+
+                        if was_connected && !connected {
+                            println!("BLE: Device {addr} disconnected");
+                            if let Some(cb) = bt_disconnected_cb.as_ref() {
+                                cb().await;
+                            }
+                            break;
+                        }
+
+                        was_connected = connected;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        println!("BLE: Stopped monitoring device: {addr}");
+    }
+
     pub async fn stop(&self) -> Result<()> {
-        let (adv, app, adapter) = {
+        let (adv, app, adapter, monitor_task) = {
             let mut inner = self.inner.lock().await;
             if !inner.advertised {
                 return Ok(());
@@ -140,8 +238,15 @@ impl Ble {
                 inner.adv_handle.take(),
                 inner.app_handle.take(),
                 inner.adapter.take(),
+                inner.monitor_task.take(),
             )
         };
+
+        if let Some(task) = monitor_task {
+            task.abort();
+            println!("BLE: Device monitor task stopped");
+        }
+
         // Disconnect all devices (to make sure BlueZ doesn't block adv unregistration)
         if let Some(adapter) = adapter {
             for addr in adapter.device_addresses().await? {
