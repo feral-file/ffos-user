@@ -302,7 +302,7 @@ fn create_bt_connected_cb(
 fn create_bt_disconnected_cb(
     app_state: Arc<AppState>,
     chromium: Arc<Cdp>,
-) -> ble::BTConnectedCallback {
+) -> ble::BTDisconnectedCallback {
     Some(Box::new(move || {
         let app_state = app_state.clone();
         let chromium = chromium.clone();
@@ -310,7 +310,7 @@ fn create_bt_disconnected_cb(
         Box::pin(async move {
             let should_go_qrcode = {
                 let page = app_state.page.lock().await;
-                matches!(*page, Page::Message(_, _))
+                matches!(*page, Page::Message(_, ref msg) if msg != constant::SETUP_SUCCESSFULLY_MSG)
             };
             if should_go_qrcode {
                 let _ = show_qrcode(&app_state, &chromium).await;
