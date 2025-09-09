@@ -32,3 +32,6 @@ base64 = "0.22.1"
 
 [profile.qemu]
 inherits = "release"
+
+[lints.clippy]
+too-many-arguments = { level = "allow", threshold = 8 }

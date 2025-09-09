@@ -8,17 +8,9 @@ use bluer::{
     adv::Advertisement,
     adv::AdvertisementHandle,
     gatt::local::{
-        Application,
-        ApplicationHandle,
-        Characteristic,
-        CharacteristicNotifier,
-        // Add notify imports
-        CharacteristicNotify,
-        CharacteristicNotifyMethod,
-        CharacteristicWrite,
-        CharacteristicWriteMethod,
-        ReqError,
-        Service,
+        Application, ApplicationHandle, Characteristic, CharacteristicNotifier,
+        CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicWrite,
+        CharacteristicWriteMethod, ReqError, Service,
     },
 };
 use futures_util::future::FutureExt;
@@ -30,6 +22,8 @@ use tokio::sync::Mutex;
 use anyhow::Result;
 
 pub type BTConnectedCallback =
+    Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
+pub type BTDisconnectedCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
 pub type ConnectWifiCallback = Box<
     dyn Fn(&str, &str) -> Pin<Box<dyn Future<Output = Result<String, u8>> + Send>> + Send + Sync,
@@ -67,6 +61,7 @@ impl Ble {
     pub async fn start(
         &self,
         bt_connected_cb: BTConnectedCallback,
+        bt_disconnected_cb: BTDisconnectedCallback,
         factory_reset_cb: FactoryResetCallback,
         connect_wifi_cb: ConnectWifiCallback,
         keep_wifi_cb: KeepWifiCallback,
@@ -105,6 +100,7 @@ impl Ble {
             characteristics: vec![
                 self.create_cmd_char(
                     bt_connected_cb,
+                    bt_disconnected_cb,
                     factory_reset_cb,
                     connect_wifi_cb,
                     keep_wifi_cb,
@@ -142,6 +138,7 @@ impl Ble {
                 inner.adapter.take(),
             )
         };
+
         // Disconnect all devices (to make sure BlueZ doesn't block adv unregistration)
         if let Some(adapter) = adapter {
             for addr in adapter.device_addresses().await? {
@@ -173,6 +170,7 @@ impl Ble {
     async fn create_cmd_char(
         &self,
         bt_connected_cb: BTConnectedCallback,
+        bt_disconnected_cb: BTDisconnectedCallback,
         factory_reset_cb: FactoryResetCallback,
         connect_wifi_cb: ConnectWifiCallback,
         keep_wifi_cb: KeepWifiCallback,
@@ -183,12 +181,15 @@ impl Ble {
         let notifier: Arc<Mutex<Option<CharacteristicNotifier>>> = Arc::new(Mutex::new(None));
         let notifier_for_write = notifier.clone();
         let notifier_for_notify = notifier.clone();
+        let notifier_for_monitor = notifier.clone();
 
         let bt_connected_callback = Arc::new(bt_connected_cb);
+        let bt_disconnected_callback = Arc::new(bt_disconnected_cb);
         let factory_reset_callback = Arc::new(factory_reset_cb);
         let connect_wifi_callback = Arc::new(connect_wifi_cb);
         let keep_wifi_callback = Arc::new(keep_wifi_cb);
         let get_info_callback = Arc::new(get_info_cb);
+
         Characteristic {
             uuid: constant::CMD_CHAR_UUID,
             // Enable notifications on this characteristic
@@ -197,10 +198,20 @@ impl Ble {
                 method: CharacteristicNotifyMethod::Fun(Box::new(move |notifier| {
                     println!("BLE: a device is connected");
                     let handle = notifier_for_notify.clone();
+                    let monitor_handle = notifier_for_monitor.clone();
                     let bt_connected_callback = bt_connected_callback.clone();
+                    let bt_disconnected_callback = bt_disconnected_callback.clone();
+
                     async move {
                         // Store the notifier for later use in the write callback
                         *handle.lock().await = Some(notifier);
+
+                        let disconnect_monitor = Self::start_disconnect_monitor(
+                            monitor_handle.clone(),
+                            bt_disconnected_callback.clone(),
+                        );
+                        tokio::spawn(disconnect_monitor);
+
                         if let Some(cb) = bt_connected_callback.as_ref() {
                             cb().await;
                         }
@@ -279,6 +290,38 @@ impl Ble {
             }),
             ..Default::default()
         }
+    }
+
+    async fn start_disconnect_monitor(
+        notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
+        bt_disconnected_cb: Arc<BTDisconnectedCallback>,
+    ) {
+        println!("BLE: Starting disconnect monitor for connected device");
+
+        let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+
+        loop {
+            check_interval.tick().await;
+
+            let is_disconnected = {
+                let mut guard = notifier.lock().await;
+                if let Some(notifier) = guard.as_mut() {
+                    notifier.is_stopped()
+                } else {
+                    true
+                }
+            };
+
+            if is_disconnected {
+                println!("BLE: Device disconnected (session stopped)");
+                if let Some(cb) = bt_disconnected_cb.as_ref() {
+                    cb().await;
+                }
+                break;
+            }
+        }
+
+        println!("BLE: Disconnect monitor stopped");
     }
 }
 
