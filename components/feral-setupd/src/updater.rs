@@ -61,7 +61,16 @@ async fn run_update_and_send(tx: mpsc::Sender<Result<String, anyhow::Error>>) ->
     let progress_regex = Regex::new(r"progress=(\d+)").context("compiling progress regex")?;
     let message_regex = Regex::new(r#"message="([^"]*)""#).context("compiling message regex")?;
 
-    // 1. Start the systemd transient service and wait for it to finish
+    // 1. Stop the feral-watchdog service to avoid conflicts
+    let _ = Command::new("systemctl")
+        .args(["--user", "stop", "feral-watchdog.service"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("stopping watchdog service with systemctl")?;
+
+    // 2. Start the systemd transient service and wait for it to finish
     let status = Command::new("systemctl")
         .args(["start", &format!("feral-updater-run@{id}.service")])
         .stdout(Stdio::null())
