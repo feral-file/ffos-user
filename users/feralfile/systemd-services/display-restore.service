@@ -1,0 +1,17 @@
+[Unit]
+Description=Display Restore Service - Auto-applies display rotation on HDMI events
+After=system-ready.target graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+ExecStart=/home/feralfile/scripts/display-restore.sh
+StandardOutput=append:/home/feralfile/.logs/display-restore.log
+StandardError=append:/home/feralfile/.logs/display-restore.log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

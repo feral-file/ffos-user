@@ -22,6 +22,7 @@ systemctl --user start system-ready.target
 systemctl --user start "feral-sys-monitord.service"
 systemctl --user start "feral-app-monitord.service"
 systemctl --user start "feral-watchdog.service"
+systemctl --user start "display-restore.service"
 systemctl --user start "chromium-kiosk.service"
 
 # Enable hourly timers for time sync and log rotation
