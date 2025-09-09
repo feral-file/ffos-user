@@ -1,6 +1,7 @@
 [Unit]
 Description=Feral File System Monitord
 ConditionPathExists=/run/user/1000/bus
+After=system-ready.target
 StartLimitBurst=5
 StartLimitIntervalSec=600
 
