@@ -1,6 +1,6 @@
 [Unit]
 Description=Display Restore Service - Auto-applies display rotation on HDMI events
-After=graphical-session.target
+After=system-ready.target graphical-session.target
 Wants=graphical-session.target
 
 [Service]
