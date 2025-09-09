@@ -1,5 +1,6 @@
 [Unit]
 Description=Chromium Kiosk Mode
+After=system-ready.target
 
 [Service]
 Type=simple

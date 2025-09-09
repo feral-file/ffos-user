@@ -1,5 +1,6 @@
 [Unit]
 Description=FeralFile Log Rotation Service
+After=system-ready.target
 
 [Service]
 Type=simple
