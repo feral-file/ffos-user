@@ -14,6 +14,7 @@ if systemctl --user is-enabled "feral-watchdog.service" >/dev/null 2>&1; then
     systemctl --user stop "feral-watchdog.service"
 fi
 
+mkdir -p /home/feralfile/.config/systemd/user/
 sudo mount /home/feralfile/systemd-services/ /home/feralfile/.config/systemd/user/ -o bind
 
 systemctl --user daemon-reload
