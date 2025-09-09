@@ -156,6 +156,14 @@ async fn run() -> Result<()> {
             ..Default::default()
         }));
     });
+    sentry::configure_scope(|scope| {
+        scope.set_tag("branch", app_state.branch.clone());
+        scope.set_tag("version", app_state.current_version.clone());
+        scope.set_user(Some(sentry::User {
+            id: Some(app_state.device_id.clone()),
+            ..Default::default()
+        }));
+    });
     println!("MAIN: App state initialized: {app_state:?}");
 
     // Initialize CDP
