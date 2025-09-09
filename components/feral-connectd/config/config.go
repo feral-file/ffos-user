@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"github.com/feral-file/ffos-user/components/feral-connectd/logger"
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
-	"go.uber.org/zap"
 )
 
 const (

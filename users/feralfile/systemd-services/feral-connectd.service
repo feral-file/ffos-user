@@ -1,7 +1,9 @@
 [Unit]
 Description=Feral File Connectd
 PartOf=chromium-ready.target
-After=feral-sys-monitord.service
+After=system-ready.target feral-sys-monitord.service
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=notify

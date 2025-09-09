@@ -1,5 +1,8 @@
 [Unit]
 Description=Feral File App Monitord
+After=system-ready.target
+StartLimitBurst=5
+StartLimitIntervalSec=600
 
 [Service]
 Type=notify

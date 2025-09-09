@@ -7,9 +7,10 @@ package mocks
 import (
 	reflect "reflect"
 
-	config "github.com/feral-file/ffos-user/components/feral-connectd/config"
 	gomock "github.com/golang/mock/gomock"
 	zap "go.uber.org/zap"
+
+	config "github.com/feral-file/ffos-user/components/feral-connectd/config"
 )
 
 // MockConfigManager is a mock of ConfigManager interface.

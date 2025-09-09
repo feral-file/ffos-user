@@ -2,12 +2,14 @@ package relayer
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -149,6 +151,7 @@ type relayer struct {
 	dialer     wrapper.WebSocketDialer
 	randomizer wrapper.Randomizer
 	clock      wrapper.Clock
+	os         wrapper.OS
 
 	// Internal state
 	endpoint     string
@@ -169,6 +172,7 @@ func New(
 	dialer wrapper.WebSocketDialer,
 	randomizer wrapper.Randomizer,
 	clock wrapper.Clock,
+	os wrapper.OS,
 	logger *zap.Logger,
 ) Relayer {
 	return &relayer{
@@ -178,6 +182,7 @@ func New(
 		randomizer: randomizer,
 		clock:      clock,
 		done:       make(chan struct{}),
+		os:         os,
 		logger:     logger,
 		handlers:   []Handler{},
 	}
@@ -223,7 +228,15 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 			r.clock.Sleep(sleepTime)
 			continue
 		default:
-			return err
+			// For unknown error, we retry several times before giving up and return error
+			r.logger.Error("Unknown relayer connection error", zap.Error(err))
+			if attempts > 10 {
+				return err
+			}
+			// randomize sleep time between 10 and 60 seconds
+			sleepTime := r.randomizer.Duration(10*time.Second, 60*time.Second)
+			r.clock.Sleep(sleepTime)
+			continue
 		}
 	}
 }
@@ -368,7 +381,9 @@ func (r *relayer) background(ctx context.Context) {
 					r.logger.Error("Failed to read message. Will attempt to reconnect shortly", zap.Error(err))
 					err := r.reconnect(ctx)
 					if err != nil {
-						r.logger.Error("Failed to reconnect to Relayer", zap.Error(err))
+						// Stop the program and let the systemd restart it
+						r.logger.Error("Failed to reconnect to Relayer, the connectd will be restarted by systemd shortly", zap.Error(err))
+						r.os.Exit(1)
 					}
 					return
 				}
@@ -526,26 +541,63 @@ func (r *relayer) SendNotification(ctx context.Context, notificationType Notific
 }
 
 func (r *relayer) categorizeWebsocketError(err error, resp *http.Response) error {
-	// Handshake errors
+	// Extract error types for analysis
+	var urlErr *url.Error
+	var netErr net.Error
+	var dnsErr *net.DNSError
+	var tlsErr *tls.RecordHeaderError
+
+	errors.As(err, &urlErr)
+	errors.As(err, &netErr)
+	errors.As(err, &dnsErr)
+	errors.As(err, &tlsErr)
+
+	// 1. Busy errors (retryable server issues)
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return BusyError{Err: err}
+	}
+
 	if errors.Is(err, websocket.ErrBadHandshake) {
 		statusCode := resp.StatusCode
 		if statusCode >= 500 || statusCode == http.StatusTooManyRequests {
 			return BusyError{Err: err}
 		}
+	}
+
+	// 2. Permanent errors (configuration/unsupported issues)
+	if errors.Is(err, websocket.ErrBadHandshake) {
 		return PermanentError{Err: err}
 	}
 
-	// Network errors
-	var urlErr *url.Error
-	var netErr net.Error
-	if errors.As(err, &urlErr) ||
-		(errors.As(err, &netErr) && netErr.Timeout()) ||
-		errors.Is(err, syscall.ECONNREFUSED) ||
+	if urlErr != nil {
+		urlErrStr := urlErr.Error()
+		if strings.Contains(urlErrStr, "unsupported protocol scheme") ||
+			strings.Contains(urlErrStr, "bad request uri") ||
+			strings.Contains(urlErrStr, "invalid control character in URL") {
+			return PermanentError{Err: err}
+		}
+	}
+
+	if dnsErr != nil && !dnsErr.Temporary() && !dnsErr.Timeout() {
+		return PermanentError{Err: err}
+	}
+
+	if errors.Is(err, syscall.EPROTONOSUPPORT) ||
+		errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return PermanentError{Err: err}
+	}
+
+	// 3. Transient errors (network issues that might resolve)
+	if (netErr != nil && netErr.Timeout()) ||
+		(dnsErr != nil && dnsErr.Temporary()) ||
 		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EPIPE) {
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		(tlsErr != nil) {
 		return TransientError{Err: err}
 	}
 
-	// Fallback to permanent error
-	return PermanentError{Err: err}
+	// 4. Fallback to unknown error
+	return err
 }

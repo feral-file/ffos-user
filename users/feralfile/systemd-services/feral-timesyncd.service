@@ -1,6 +1,6 @@
 [Unit]
 Description=FeralFile Time Synchronization Service
-After=network.target
+After=system-ready.target network.target
 Wants=network.target
 
 [Service]

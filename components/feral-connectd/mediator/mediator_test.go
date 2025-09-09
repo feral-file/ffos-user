@@ -6,6 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/godbus"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
+
 	"github.com/feral-file/ffos-user/components/feral-connectd/cdp"
 	"github.com/feral-file/ffos-user/components/feral-connectd/command"
 	"github.com/feral-file/ffos-user/components/feral-connectd/dbus"
@@ -13,11 +19,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-connectd/mocks"
 	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 	"github.com/feral-file/ffos-user/components/feral-connectd/state"
-	"github.com/feral-file/godbus"
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 type testSetup struct {
@@ -190,11 +191,11 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 					Return(map[string]interface{}{"result": "ok"}, nil).
 					Times(1)
 
-				// Expect IsConnected to be called
+				// Expect IsConnected to be called twice (once for logging, once for condition check)
 				ts.mockRelayer.EXPECT().
 					IsConnected().
 					Return(false).
-					Times(1)
+					Times(2)
 
 				// Expect RetryableConnect to be called
 				ts.mockRelayer.EXPECT().
@@ -222,11 +223,11 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 					Return(map[string]interface{}{"result": "ok"}, nil).
 					Times(1)
 
-				// Expect IsConnected to be called
+				// Expect IsConnected to be called twice (once for logging, once for condition check)
 				ts.mockRelayer.EXPECT().
 					IsConnected().
 					Return(true).
-					Times(1)
+					Times(2)
 
 				payload := godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
@@ -245,6 +246,12 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 						"expression": "window.handleConnectivityChange(false)",
 					}).
 					Return(map[string]interface{}{"result": "ok"}, nil).
+					Times(1)
+
+				// Expect IsConnected to be called once for logging (condition short-circuits since connected=false)
+				ts.mockRelayer.EXPECT().
+					IsConnected().
+					Return(false).
 					Times(1)
 
 				payload := godbus.DBusPayload{
@@ -268,11 +275,11 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 					Return(nil, cdpError).
 					Times(1)
 
-				// Expect IsConnected to be called
+				// Expect IsConnected to be called twice (once for logging, once for condition check)
 				ts.mockRelayer.EXPECT().
 					IsConnected().
 					Return(false).
-					Times(1)
+					Times(2)
 
 				// Expect RetryableConnect to be called
 				ts.mockRelayer.EXPECT().

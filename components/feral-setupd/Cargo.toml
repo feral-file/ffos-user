@@ -27,3 +27,11 @@ regex = "1.0"
 rand = "0.9.1"
 sentry = "0.42.0"
 base64 = "0.22.1"
+
+[build-dependencies]
+
+[profile.qemu]
+inherits = "release"
+
+[lints.clippy]
+too-many-arguments = { level = "allow", threshold = 8 }

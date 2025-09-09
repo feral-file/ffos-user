@@ -1,13 +1,16 @@
 name: Test Watchdog
 
 on:
-  push:
-    branches: [release, develop]
-    paths:
-      - 'components/feral-watchdog/**/*.go'
   pull_request:
     paths:
       - 'components/feral-watchdog/**/*.go'
+  workflow_call:
+    inputs:
+      upload-coverage:
+        description: 'Whether to upload coverage results'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   test:
@@ -37,6 +40,7 @@ jobs:
         run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
 
       - name: Upload coverage to Codecov
+        if: ${{ inputs.upload-coverage == true }}
         uses: codecov/codecov-action@v5
         with:
           files: ./components/feral-watchdog/coverage.out

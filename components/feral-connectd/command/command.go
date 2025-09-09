@@ -6,14 +6,15 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/feral-file/godbus"
+	"go.uber.org/zap"
+
 	"github.com/feral-file/ffos-user/components/feral-connectd/cdp"
 	"github.com/feral-file/ffos-user/components/feral-connectd/dbus"
 	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 	"github.com/feral-file/ffos-user/components/feral-connectd/state"
 	"github.com/feral-file/ffos-user/components/feral-connectd/status"
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
-	"github.com/feral-file/godbus"
-	"go.uber.org/zap"
 )
 
 var CmdOK = struct {
