@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
+	"github.com/feral-file/ffos-user/components/feral-controld/refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -62,6 +63,7 @@ type app struct {
 	DeviceStatus status.DeviceStatus
 	StatusPoller status.Poller
 	Watchdog     watchdog.Watchdog
+	Refresher    refresher.Refresher
 }
 
 func main() {
@@ -221,6 +223,13 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
 
+	// Start Refresher
+	statusProvider := func(ctx context.Context) (map[string]interface{}, error) {
+		return status.FetchPlayerStatus(ctx, app.CDP, app.Logger)
+	}
+	app.Refresher.Start(ctx, statusProvider)
+	defer app.Refresher.Stop()
+
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
 	if err != nil {
@@ -319,8 +328,13 @@ func initializeApp(
 	// CommandHandler
 	commandHandler := command.New(cdp, dbusClient, deviceStatus, json, os, exec, math, logger)
 
+	// refresher
+	refresherConfig := refresher.DefaultConfig()
+	httpWithTimeout := wrapper.NewHTTPWithTimeout(refresherConfig.RequestTimeout)
+	refresher := refresher.New(refresherConfig, httpWithTimeout, json, clock, logger)
+
 	// Mediator
-	mediator := mediator.New(relayer, dbusClient, cdp, commandHandler, clock, logger)
+	mediator := mediator.New(relayer, dbusClient, cdp, commandHandler, clock, json, refresher, logger)
 
 	return &app{
 		Ctx:          context,
@@ -343,6 +357,7 @@ func initializeApp(
 		DeviceStatus: deviceStatus,
 		StatusPoller: poller,
 		Watchdog:     watchdog,
+		Refresher:    refresher,
 	}
 }
 
@@ -367,7 +382,9 @@ func initializeTestApp(
 	statusPoller status.Poller,
 	watchdog watchdog.Watchdog,
 	mediator mediator.Mediator,
-	command command.CommandHandler) *app {
+	command command.CommandHandler,
+	refresher refresher.Refresher,
+) *app {
 	return &app{
 		Ctx:          ctx,
 		Logger:       logger,
@@ -389,5 +406,6 @@ func initializeTestApp(
 		DeviceStatus: deviceStatus,
 		StatusPoller: statusPoller,
 		Watchdog:     watchdog,
+		Refresher:    refresher,
 	}
 }
