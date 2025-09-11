@@ -400,6 +400,15 @@ func (p *playlistRefresher) formatGraphQLParam(key string, value interface{}) st
 		return fmt.Sprintf(`%s: [%s]`, key, strings.Join(items, ", "))
 	}
 
+	if v, ok := value.([]interface{}); ok {
+		var items []string
+		for _, item := range v {
+			// Convert each item to string and quote it
+			items = append(items, fmt.Sprintf(`"%s"`, fmt.Sprintf("%v", item)))
+		}
+		return fmt.Sprintf(`%s: [%s]`, key, strings.Join(items, ", "))
+	}
+
 	return fmt.Sprintf(`%s: %v`, key, value)
 }
 
