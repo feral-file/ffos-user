@@ -2,6 +2,7 @@ package refresher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,8 +10,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-
-	"encoding/json"
 
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 )
@@ -23,62 +22,62 @@ type DynamicQuery struct {
 
 // IndexerToken represents a token from the indexer
 type IndexerToken struct {
-	ID              string `json:"id"`
-	Blockchain      string `json:"blockchain"`
-	ContractAddress string `json:"contractAddress"`
+	ID              string `json:"id,omitempty"`
+	Blockchain      string `json:"blockchain,omitempty"`
+	ContractAddress string `json:"contractAddress,omitempty"`
 	Asset           struct {
 		Metadata struct {
 			Project struct {
-				Latest IndexerArtwork `json:"latest"`
-			} `json:"project"`
-		} `json:"metadata"`
+				Latest IndexerArtwork `json:"latest,omitempty"`
+			} `json:"project,omitempty"`
+		} `json:"metadata,omitempty"`
 	}
 }
 
 // IndexerArtwork represents artwork information from the indexer
 type IndexerArtwork struct {
 	Title      string `json:"title,omitempty"`
-	PreviewURL string `json:"previewURL"`
+	PreviewURL string `json:"previewURL,omitempty"`
 }
 
 // DP1Item represents a playlist item for DP1
 type DP1Item struct {
-	ID         string           `json:"id"`
-	Title      *string          `json:"title"`
-	Source     *string          `json:"source"`
-	Duration   int              `json:"duration"`
-	License    *string          `json:"license"`
-	Ref        *string          `json:"ref"`
-	Override   *json.RawMessage `json:"override"`
-	Display    *json.RawMessage `json:"display"`
-	Repro      *json.RawMessage `json:"repro"`
-	Provenance *json.RawMessage `json:"provenance"`
-	Created    string           `json:"created"`
+	ID         string           `json:"id,omitempty"`
+	Title      *string          `json:"title,omitempty"`
+	Source     *string          `json:"source,omitempty"`
+	Duration   int              `json:"duration,omitempty"`
+	License    *string          `json:"license,omitempty"`
+	Ref        *string          `json:"ref,omitempty"`
+	Override   *json.RawMessage `json:"override,omitempty"`
+	Display    *json.RawMessage `json:"display,omitempty"`
+	Repro      *json.RawMessage `json:"repro,omitempty"`
+	Provenance *json.RawMessage `json:"provenance,omitempty"`
+	Created    string           `json:"created,omitempty"`
 }
 
 type DP1Playlist struct {
-	DPVersion      string          `json:"dpVersion"`
-	ID             string          `json:"id"`
-	Title          string          `json:"title"`
-	Slug           string          `json:"slug"`
-	Created        string          `json:"created"`
-	Defaults       json.RawMessage `json:"defaults"`
-	Items          []DP1Item       `json:"items"`
-	Signature      string          `json:"signature"`
+	DPVersion      string          `json:"dpVersion,omitempty"`
+	ID             string          `json:"id,omitempty"`
+	Title          string          `json:"title,omitempty"`
+	Slug           string          `json:"slug,omitempty"`
+	Created        string          `json:"created,omitempty"`
+	Defaults       json.RawMessage `json:"defaults,omitempty"`
+	Items          []DP1Item       `json:"items,omitempty"`
+	Signature      string          `json:"signature,omitempty"`
 	DynamicQueries []DynamicQuery  `json:"dynamicQueries,omitempty"`
 }
 
 type DP1Provenance struct {
 	Contract struct {
-		TokenID string `json:"tokenId"`
-	} `json:"contract"`
+		TokenID string `json:"tokenId,omitempty"`
+	} `json:"contract,omitempty"`
 }
 
 // GraphQLResponse represents the response structure from GraphQL queries
 type GraphQLResponse struct {
 	Data struct {
-		Tokens []IndexerToken `json:"tokens"`
-	} `json:"data"`
+		Tokens []IndexerToken `json:"tokens,omitempty"`
+	} `json:"data,omitempty"`
 }
 
 //go:generate mockgen -source=playlist_refresher.go -destination=../mocks/playlist_refresher.go -package=mocks -mock_names=PlaylistRefresher=MockPlaylistRefresher
@@ -93,7 +92,7 @@ type PlaylistRefresher interface {
 }
 
 type playlistRefresher struct {
-	http          wrapper.HTTP
+	client        *http.Client
 	json          wrapper.JSON
 	clock         wrapper.Clock
 	logger        *zap.Logger
@@ -102,13 +101,14 @@ type playlistRefresher struct {
 }
 
 func New(
-	http wrapper.HTTP,
 	json wrapper.JSON,
 	clock wrapper.Clock,
 	logger *zap.Logger,
 ) PlaylistRefresher {
 	return &playlistRefresher{
-		http:          http,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 		json:          json,
 		clock:         clock,
 		logger:        logger,
@@ -359,7 +359,6 @@ func (p *playlistRefresher) buildGraphQLQuery(params map[string]interface{}, off
 	}
 
 	// Always add default parameters
-	queryParamsParts = append(queryParamsParts, "burnedIncluded: true")
 	queryParamsParts = append(queryParamsParts, "size: 100")
 	queryParamsParts = append(queryParamsParts, fmt.Sprintf("offset: %d", offset))
 

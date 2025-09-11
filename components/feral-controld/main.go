@@ -321,7 +321,7 @@ func initializeApp(
 	commandHandler := command.New(cdp, dbusClient, deviceStatus, json, os, exec, math, logger)
 
 	// refresher
-	refresher := refresher.New(http, json, clock, logger)
+	refresher := refresher.New(json, clock, logger)
 
 	// Mediator
 	mediator := mediator.New(relayer, dbusClient, cdp, commandHandler, clock, json, refresher, logger)

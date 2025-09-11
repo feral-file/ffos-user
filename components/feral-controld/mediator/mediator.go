@@ -277,13 +277,13 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 							return err
 						}
 
-						payload.Message.Args["playlist"] = dp1Playlist
+						payload.Message.Args["dp1_call"] = dp1Playlist
 					} else {
 						m.logger.Error("CastPlaylist: playlistUrl is not a string or empty")
 					}
 				} else {
 					// No playlistUrl, check provided playlist
-					playlistRaw, ok := payload.Message.Args["playlist"]
+					playlistRaw, ok := payload.Message.Args["dp1_call"]
 					if !ok {
 						parseErr = fmt.Errorf("payload doesn't contain playlist")
 						m.logger.Error("CastPlaylist: missing playlist in args")
@@ -322,11 +322,11 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						return err
 					}
 
-					payload.Message.Args["playlist"] = playlist
+					payload.Message.Args["dp1_call"] = playlist
 				}
 			}
 
-			m.logger.Info("CastPlaylist: playlist", zap.Any("playlist", payload.Message.Args["playlist"]))
+			m.logger.Info("CastPlaylist: playlist", zap.Any("playlist", payload.Message.Args["dp1_call"]))
 
 			// Forward to CDP
 			cdpSpan := m.tracer.StartCDPRequestSpan(tracedCtx)
