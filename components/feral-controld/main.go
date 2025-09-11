@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
+	"github.com/feral-file/ffos-user/components/feral-controld/refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -319,8 +320,11 @@ func initializeApp(
 	// CommandHandler
 	commandHandler := command.New(cdp, dbusClient, deviceStatus, json, os, exec, math, logger)
 
+	// refresher
+	refresher := refresher.New(http, json, clock, logger)
+
 	// Mediator
-	mediator := mediator.New(relayer, dbusClient, cdp, commandHandler, clock, logger)
+	mediator := mediator.New(relayer, dbusClient, cdp, commandHandler, clock, json, refresher, logger)
 
 	return &app{
 		Ctx:          context,

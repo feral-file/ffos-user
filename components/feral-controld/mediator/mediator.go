@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/feral-file/godbus"
+	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/command"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -28,14 +30,16 @@ type Mediator interface {
 }
 
 type mediator struct {
-	relayer      relayer.Relayer
-	dbus         dbus.DBus
-	cdp          cdp.CDP
-	cmd          command.CommandHandler
-	statusPoller status.Poller
-	clock        wrapper.Clock
-	logger       *zap.Logger
-	tracer       *logger.RelayerMessageTracer
+	relayer           relayer.Relayer
+	dbus              dbus.DBus
+	cdp               cdp.CDP
+	cmd               command.CommandHandler
+	statusPoller      status.Poller
+	clock             wrapper.Clock
+	logger            *zap.Logger
+	tracer            *logger.RelayerMessageTracer
+	json              wrapper.JSON
+	playlistRefresher refresher.PlaylistRefresher
 }
 
 func New(
@@ -44,16 +48,20 @@ func New(
 	cdp cdp.CDP,
 	cmd command.CommandHandler,
 	clock wrapper.Clock,
+	json wrapper.JSON,
+	playlistRefresher refresher.PlaylistRefresher,
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
-		relayer: relayer,
-		dbus:    dbus,
-		cdp:     cdp,
-		cmd:     cmd,
-		clock:   clock,
-		logger:  l,
-		tracer:  logger.NewRelayerMessageTracer(l),
+		relayer:           relayer,
+		dbus:              dbus,
+		cdp:               cdp,
+		cmd:               cmd,
+		clock:             clock,
+		logger:            l,
+		tracer:            logger.NewRelayerMessageTracer(l),
+		json:              json,
+		playlistRefresher: playlistRefresher,
 	}
 }
 
@@ -231,6 +239,95 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			return err
 
 		} else {
+			if cmd.CastPlaylistCmd() {
+				playlistURLRaw, hasPlaylistURL := payload.Message.Args["playlistUrl"]
+				if hasPlaylistURL {
+					if urlStr, ok := playlistURLRaw.(string); ok && urlStr != "" {
+						m.logger.Info("CastPlaylist: starting interval to fetch playlist by URL")
+
+						// Start periodic fetch by URL
+						m.playlistRefresher.StartWithURL(tracedCtx, urlStr)
+
+						// Fetch immediately for current request
+						dp1Playlist, err := m.playlistRefresher.FetchPlaylistByURL(tracedCtx, urlStr)
+						if err != nil {
+							m.logger.Error("CastPlaylist: fetch playlist by URL failed", zap.Error(err))
+							m.tracer.FinishSpanWithError(parseSpan, err)
+							finalErr = err
+							return err
+						}
+
+						// Process dynamicQuery inside fetched playlist (optional)
+						if dp1Playlist.DynamicQueries != nil {
+							// Convert single dynamicQuery to array format for consistency
+							dp1Items, err := m.playlistRefresher.BuildPlaylistItems(tracedCtx, dp1Playlist, dp1Playlist.DynamicQueries)
+							if err != nil {
+								m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
+								m.tracer.FinishSpanWithError(parseSpan, err)
+								finalErr = err
+								return err
+							}
+
+							// Update playlist items with dynamic query results
+							dp1Playlist.Items = dp1Items
+						}
+
+						// validate items
+						if err := m.ensurePlaylistHasItems(dp1Playlist, parseSpan, &finalErr); err != nil {
+							return err
+						}
+
+						payload.Message.Args["playlist"] = dp1Playlist
+					} else {
+						m.logger.Error("CastPlaylist: playlistUrl is not a string or empty")
+					}
+				} else {
+					// No playlistUrl, check provided playlist
+					playlistRaw, ok := payload.Message.Args["playlist"]
+					if !ok {
+						parseErr = fmt.Errorf("payload doesn't contain playlist")
+						m.logger.Error("CastPlaylist: missing playlist in args")
+						m.tracer.FinishSpanWithError(parseSpan, parseErr)
+						finalErr = parseErr
+						return parseErr
+					}
+
+					playlist, ok := playlistRaw.(*refresher.DP1Playlist)
+					if !ok {
+						err := fmt.Errorf("invalid playlist format")
+						m.logger.Error("CastPlaylist: playlist is not an object", zap.Error(err))
+						m.tracer.FinishSpanWithError(parseSpan, err)
+						finalErr = err
+						return err
+					}
+
+					// Process dynamicQuery inside playlist (optional)
+					if playlist.DynamicQueries != nil {
+						m.logger.Info("CastPlaylist: starting interval for dynamic query")
+						m.playlistRefresher.StartWithDynamicQueries(tracedCtx, playlist.DynamicQueries)
+
+						dp1Items, err := m.playlistRefresher.BuildPlaylistItems(tracedCtx, playlist, playlist.DynamicQueries)
+						if err != nil {
+							m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
+							m.tracer.FinishSpanWithError(parseSpan, err)
+							finalErr = err
+							return err
+						}
+
+						playlist.Items = dp1Items
+					}
+
+					// Validate items
+					if err := m.ensurePlaylistHasItems(playlist, parseSpan, &finalErr); err != nil {
+						return err
+					}
+
+					payload.Message.Args["playlist"] = playlist
+				}
+			}
+
+			m.logger.Info("CastPlaylist: playlist", zap.Any("playlist", payload.Message.Args["playlist"]))
+
 			// Forward to CDP
 			cdpSpan := m.tracer.StartCDPRequestSpan(tracedCtx)
 
@@ -275,6 +372,18 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 	}
 
 	return nil
+}
+
+func (m *mediator) ensurePlaylistHasItems(playlist *refresher.DP1Playlist, parseSpan *sentry.Span, finalErr *error) error {
+	if len(playlist.Items) > 0 {
+		return nil
+	}
+
+	err := fmt.Errorf("empty playlist")
+	m.logger.Error("CastPlaylist: playlist has no items", zap.Error(err))
+	m.tracer.FinishSpanWithError(parseSpan, err)
+	*finalErr = err
+	return err
 }
 
 // SetStatusPoller sets the StatusPoller reference after initialization
