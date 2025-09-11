@@ -2,6 +2,7 @@ package mediator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -292,13 +293,24 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						return parseErr
 					}
 
-					playlist, ok := playlistRaw.(*refresher.DP1Playlist)
-					if !ok {
-						err := fmt.Errorf("invalid playlist format")
-						m.logger.Error("CastPlaylist: playlist is not an object", zap.Error(err))
-						m.tracer.FinishSpanWithError(parseSpan, err)
-						finalErr = err
-						return err
+					// Convert map[string]interface{} to DP1Playlist struct
+					playlistBytes, err := json.Marshal(playlistRaw)
+					if err != nil {
+						parseErr = fmt.Errorf("failed to marshal playlist: %w", err)
+						m.logger.Error("CastPlaylist: failed to marshal playlist", zap.Error(parseErr))
+						m.tracer.FinishSpanWithError(parseSpan, parseErr)
+						finalErr = parseErr
+						return parseErr
+					}
+
+					var playlist refresher.DP1Playlist
+					err = json.Unmarshal(playlistBytes, &playlist)
+					if err != nil {
+						parseErr = fmt.Errorf("failed to unmarshal playlist: %w", err)
+						m.logger.Error("CastPlaylist: failed to unmarshal playlist", zap.Error(parseErr))
+						m.tracer.FinishSpanWithError(parseSpan, parseErr)
+						finalErr = parseErr
+						return parseErr
 					}
 
 					// Process dynamicQuery inside playlist (optional)
@@ -306,7 +318,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						m.logger.Info("CastPlaylist: starting interval for dynamic query")
 						m.playlistRefresher.StartWithDynamicQueries(tracedCtx, playlist.DynamicQueries)
 
-						dp1Items, err := m.playlistRefresher.BuildPlaylistItems(tracedCtx, playlist, playlist.DynamicQueries)
+						dp1Items, err := m.playlistRefresher.BuildPlaylistItems(tracedCtx, &playlist, playlist.DynamicQueries)
 						if err != nil {
 							m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
 							m.tracer.FinishSpanWithError(parseSpan, err)
@@ -318,7 +330,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 					}
 
 					// Validate items
-					if err := m.ensurePlaylistHasItems(playlist, parseSpan, &finalErr); err != nil {
+					if err := m.ensurePlaylistHasItems(&playlist, parseSpan, &finalErr); err != nil {
 						return err
 					}
 
