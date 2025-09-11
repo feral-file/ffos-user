@@ -343,6 +343,8 @@ func (p *playlistRefresher) executeGraphQLQuery(ctx context.Context, endpoint, q
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
+	p.logger.Info("GraphQL response tokens", zap.Any("response", graphqlResp.Data.Tokens))
+
 	return graphqlResp.Data.Tokens, nil
 }
 
@@ -418,7 +420,7 @@ func (p *playlistRefresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 		"contract": {
 			"chain": "%s",
 			"tokenId": "%s",
-			"address": "%s",
+			"address": "%s"
 		}
 	}`, token.Blockchain, token.ID, token.ContractAddress))
 
