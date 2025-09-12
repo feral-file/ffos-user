@@ -31,16 +31,16 @@ type Mediator interface {
 }
 
 type mediator struct {
-	relayer           relayer.Relayer
-	dbus              dbus.DBus
-	cdp               cdp.CDP
-	cmd               command.CommandHandler
-	statusPoller      status.Poller
-	clock             wrapper.Clock
-	logger            *zap.Logger
-	tracer            *logger.RelayerMessageTracer
-	json              wrapper.JSON
-	playlistRefresher refresher.PlaylistRefresher
+	relayer      relayer.Relayer
+	dbus         dbus.DBus
+	cdp          cdp.CDP
+	cmd          command.CommandHandler
+	statusPoller status.Poller
+	clock        wrapper.Clock
+	logger       *zap.Logger
+	tracer       *logger.RelayerMessageTracer
+	json         wrapper.JSON
+	refresher    refresher.Refresher
 }
 
 func New(
@@ -50,19 +50,19 @@ func New(
 	cmd command.CommandHandler,
 	clock wrapper.Clock,
 	json wrapper.JSON,
-	playlistRefresher refresher.PlaylistRefresher,
+	refresher refresher.Refresher,
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
-		relayer:           relayer,
-		dbus:              dbus,
-		cdp:               cdp,
-		cmd:               cmd,
-		clock:             clock,
-		logger:            l,
-		tracer:            logger.NewRelayerMessageTracer(l),
-		json:              json,
-		playlistRefresher: playlistRefresher,
+		relayer:   relayer,
+		dbus:      dbus,
+		cdp:       cdp,
+		cmd:       cmd,
+		clock:     clock,
+		logger:    l,
+		tracer:    logger.NewRelayerMessageTracer(l),
+		json:      json,
+		refresher: refresher,
 	}
 }
 
@@ -247,10 +247,10 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						m.logger.Info("CastPlaylist: starting interval to fetch playlist by URL")
 
 						// Start periodic fetch by URL
-						m.playlistRefresher.StartWithURL(tracedCtx, urlStr)
+						m.refresher.StartWithURL(tracedCtx, urlStr)
 
 						// Fetch immediately for current request
-						dp1Playlist, err := m.playlistRefresher.FetchPlaylistByURL(tracedCtx, urlStr)
+						dp1Playlist, err := m.refresher.FetchPlaylistByURL(tracedCtx, urlStr)
 						if err != nil {
 							m.logger.Error("CastPlaylist: fetch playlist by URL failed", zap.Error(err))
 							m.tracer.FinishSpanWithError(parseSpan, err)
@@ -261,7 +261,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						// Process dynamicQuery inside fetched playlist (optional)
 						if dp1Playlist.DynamicQueries != nil {
 							// Convert single dynamicQuery to array format for consistency
-							dp1Items, err := m.playlistRefresher.BuildPlaylistItems(tracedCtx, dp1Playlist, dp1Playlist.DynamicQueries)
+							dp1Items, err := m.refresher.BuildPlaylistItems(tracedCtx, dp1Playlist, dp1Playlist.DynamicQueries)
 							if err != nil {
 								m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
 								m.tracer.FinishSpanWithError(parseSpan, err)
@@ -316,9 +316,9 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 					// Process dynamicQuery inside playlist (optional)
 					if playlist.DynamicQueries != nil {
 						m.logger.Info("CastPlaylist: starting interval for dynamic query")
-						m.playlistRefresher.StartWithDynamicQueries(tracedCtx, playlist.DynamicQueries)
+						m.refresher.StartWithDynamicQueries(tracedCtx, playlist.DynamicQueries)
 
-						dp1Items, err := m.playlistRefresher.BuildPlaylistItems(tracedCtx, &playlist, playlist.DynamicQueries)
+						dp1Items, err := m.refresher.BuildPlaylistItems(tracedCtx, &playlist, playlist.DynamicQueries)
 						if err != nil {
 							m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
 							m.tracer.FinishSpanWithError(parseSpan, err)

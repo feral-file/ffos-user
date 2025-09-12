@@ -5,14 +5,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 )
+
+// Config holds configuration for the playlist refresher
+type Config struct {
+	RefreshInterval time.Duration `json:"refreshInterval"`
+	RequestTimeout  time.Duration `json:"requestTimeout"`
+	PageSize        int           `json:"pageSize"`
+	MaxRetries      int           `json:"maxRetries"`
+	RetryBackoff    time.Duration `json:"retryBackoff"`
+}
+
+// DefaultConfig returns a default configuration
+func DefaultConfig() *Config {
+	return &Config{
+		RefreshInterval: 1 * time.Minute,
+		RequestTimeout:  10 * time.Second,
+		PageSize:        100,
+		MaxRetries:      3,
+		RetryBackoff:    1 * time.Second,
+	}
+}
 
 // DynamicQuery represents the structure for dynamic queries
 type DynamicQuery struct {
@@ -80,9 +100,7 @@ type GraphQLResponse struct {
 	} `json:"data,omitempty"`
 }
 
-//go:generate mockgen -source=playlist_refresher.go -destination=../mocks/playlist_refresher.go -package=mocks -mock_names=PlaylistRefresher=MockPlaylistRefresher
-
-type PlaylistRefresher interface {
+type Refresher interface {
 	Stop()
 
 	StartWithURL(ctx context.Context, playlistURL string)
@@ -91,8 +109,10 @@ type PlaylistRefresher interface {
 	BuildPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
 }
 
-type playlistRefresher struct {
-	client        *http.Client
+type refresher struct {
+	mu            sync.RWMutex
+	config        *Config
+	http          wrapper.HTTP
 	json          wrapper.JSON
 	clock         wrapper.Clock
 	logger        *zap.Logger
@@ -101,14 +121,18 @@ type playlistRefresher struct {
 }
 
 func New(
+	config *Config,
+	http wrapper.HTTP,
 	json wrapper.JSON,
 	clock wrapper.Clock,
 	logger *zap.Logger,
-) PlaylistRefresher {
-	return &playlistRefresher{
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+) Refresher {
+	if config == nil {
+		config = DefaultConfig()
+	}
+	return &refresher{
+		config:        config,
+		http:          http,
 		json:          json,
 		clock:         clock,
 		logger:        logger,
@@ -116,33 +140,54 @@ func New(
 	}
 }
 
-func (p *playlistRefresher) Stop() {
+func (p *refresher) Stop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.logger.Info("Stopping playlist refresher")
 
 	// Stop dynamic query ticker
 	if p.queryTicker != nil {
 		p.queryTicker.Stop()
+		p.queryTicker = nil
 	}
 
 	// Signal stop to query goroutine
-	select {
-	case <-p.queryStopChan:
-		// Already closed
-	default:
+	if p.queryStopChan != nil {
 		close(p.queryStopChan)
+		p.queryStopChan = nil
 	}
 }
 
 // StartWithURL starts an interval to fetch playlist object by URL
-func (p *playlistRefresher) StartWithURL(ctx context.Context, playlistURL string) {
+func (p *refresher) StartWithURL(ctx context.Context, playlistURL string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.logger.Info("Starting playlist refresher by URL", zap.String("url", playlistURL))
-	p.queryTicker = p.clock.NewTicker(1 * time.Minute)
+
+	// Create new channels if they don't exist
+	if p.queryStopChan == nil {
+		p.queryStopChan = make(chan struct{})
+	}
+
+	p.queryTicker = p.clock.NewTicker(p.config.RefreshInterval)
 	go func() {
+		defer func() {
+			p.mu.Lock()
+			if p.queryTicker != nil {
+				p.queryTicker.Stop()
+			}
+			p.mu.Unlock()
+		}()
+
 		for {
 			select {
 			case <-ctx.Done():
+				p.logger.Info("StartWithURL goroutine stopped due to context cancellation")
 				return
 			case <-p.queryStopChan:
+				p.logger.Info("StartWithURL goroutine stopped due to stop signal")
 				return
 			case <-p.queryTicker.C:
 				if playlist, err := p.FetchPlaylistByURL(ctx, playlistURL); err != nil {
@@ -156,15 +201,34 @@ func (p *playlistRefresher) StartWithURL(ctx context.Context, playlistURL string
 }
 
 // StartWithDynamicQueries starts an interval to execute dynamic queries periodically
-func (p *playlistRefresher) StartWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery) {
+func (p *refresher) StartWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	p.logger.Info("Starting playlist refresher by dynamic query")
-	p.queryTicker = p.clock.NewTicker(1 * time.Minute)
+
+	// Create new channels if they don't exist
+	if p.queryStopChan == nil {
+		p.queryStopChan = make(chan struct{})
+	}
+
+	p.queryTicker = p.clock.NewTicker(p.config.RefreshInterval)
 	go func() {
+		defer func() {
+			p.mu.Lock()
+			if p.queryTicker != nil {
+				p.queryTicker.Stop()
+			}
+			p.mu.Unlock()
+		}()
+
 		for {
 			select {
 			case <-ctx.Done():
+				p.logger.Info("StartWithDynamicQueries goroutine stopped due to context cancellation")
 				return
 			case <-p.queryStopChan:
+				p.logger.Info("StartWithDynamicQueries goroutine stopped due to stop signal")
 				return
 			case <-p.queryTicker.C:
 				if tokens, err := p.executeDynamicQueries(ctx, dynamicQueries); err != nil {
@@ -178,30 +242,34 @@ func (p *playlistRefresher) StartWithDynamicQueries(ctx context.Context, dynamic
 }
 
 // FetchPlaylistByURL retrieves a playlist JSON from a URL via HTTP GET
-func (p *playlistRefresher) FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error) {
+func (p *refresher) FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error) {
 	p.logger.Info("Fetching playlist by URL", zap.String("url", playlistURL))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, playlistURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fetch playlist failed: %s", resp.Status)
-	}
-
-	bytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
 
 	var playlist DP1Playlist
-	if err := p.json.Unmarshal(bytes, &playlist); err != nil {
+	err := p.executeWithRetry(ctx, func() error {
+		resp, err := p.http.Get(playlistURL)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("fetch playlist failed: %s", resp.Status)
+		}
+
+		bytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+
+		if err := p.json.Unmarshal(bytes, &playlist); err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
 		return nil, err
 	}
 
@@ -210,7 +278,7 @@ func (p *playlistRefresher) FetchPlaylistByURL(ctx context.Context, playlistURL 
 }
 
 // BuildPlaylistItems executes the raw dynamicQueries and returns playlist items (empty slice if none)
-func (p *playlistRefresher) BuildPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error) {
+func (p *refresher) BuildPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error) {
 	p.logger.Info("Building playlist items", zap.Any("dynamicQueries", dynamicQueries))
 	tokens, err := p.executeDynamicQueries(ctx, dynamicQueries)
 	if err != nil {
@@ -227,7 +295,7 @@ func (p *playlistRefresher) BuildPlaylistItems(ctx context.Context, playlist *DP
 }
 
 // mergeItemsAndTokens filters existing playlist items by tokens or converts all tokens to items
-func (p *playlistRefresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []IndexerToken) []DP1Item {
+func (p *refresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []IndexerToken) []DP1Item {
 	p.logger.Info("Merging playlist items and tokens")
 
 	// If playlist items are empty, convert all tokens to items
@@ -265,7 +333,7 @@ func (p *playlistRefresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []
 }
 
 // executeDynamicQueries executes a GraphQL query with offset-based pagination to fetch all tokens
-func (p *playlistRefresher) executeDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery) ([]IndexerToken, error) {
+func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery) ([]IndexerToken, error) {
 	if len(dynamicQueries) == 0 {
 		return nil, fmt.Errorf("no queries provided")
 	}
@@ -281,7 +349,7 @@ func (p *playlistRefresher) executeDynamicQueries(ctx context.Context, dynamicQu
 	// Execute query with offset-based pagination to fetch all tokens
 	var allTokens []IndexerToken
 	offset := 0
-	size := 100
+	size := p.config.PageSize
 
 	for {
 		graphqlQuery := p.buildGraphQLQuery(firstQuery.Params, offset)
@@ -304,52 +372,51 @@ func (p *playlistRefresher) executeDynamicQueries(ctx context.Context, dynamicQu
 }
 
 // executeGraphQLQuery executes a single GraphQL query and returns the results
-func (p *playlistRefresher) executeGraphQLQuery(ctx context.Context, endpoint, query string) ([]IndexerToken, error) {
-	// Create graphql request body
-	requestBody := map[string]interface{}{
-		"query": query,
-	}
+func (p *refresher) executeGraphQLQuery(ctx context.Context, endpoint, query string) ([]IndexerToken, error) {
+	var tokens []IndexerToken
 
-	bodyBytes, err := p.json.Marshal(requestBody)
+	err := p.executeWithRetry(ctx, func() error {
+		// Create graphql request body
+		requestBody := map[string]interface{}{
+			"query": query,
+		}
+
+		bodyBytes, err := p.json.Marshal(requestBody)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request body: %w", err)
+		}
+
+		resp, err := p.http.Post(endpoint, "application/json", strings.NewReader(string(bodyBytes)))
+		if err != nil {
+			return fmt.Errorf("failed to execute request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		// Read response
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		// Parse response
+		var graphqlResp GraphQLResponse
+		if err := p.json.Unmarshal(respBody, &graphqlResp); err != nil {
+			return fmt.Errorf("failed to unmarshal response: %w", err)
+		}
+
+		tokens = graphqlResp.Data.Tokens
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, err
 	}
 
-	// Create HTTP request with POST method
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	// Execute request using standard HTTP client since wrapper only has Get
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read response
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Parse response
-	var graphqlResp GraphQLResponse
-	if err := p.json.Unmarshal(respBody, &graphqlResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	p.logger.Info("GraphQL response tokens", zap.Any("response", graphqlResp.Data.Tokens))
-
-	return graphqlResp.Data.Tokens, nil
+	return tokens, nil
 }
 
 // buildGraphQLQuery builds a GraphQL query string with offset-based pagination
-func (p *playlistRefresher) buildGraphQLQuery(params map[string]interface{}, offset int) string {
+func (p *refresher) buildGraphQLQuery(params map[string]interface{}, offset int) string {
 	var queryParamsParts []string
 
 	// Add dynamic parameters from params map
@@ -361,7 +428,7 @@ func (p *playlistRefresher) buildGraphQLQuery(params map[string]interface{}, off
 	}
 
 	// Always add default parameters
-	queryParamsParts = append(queryParamsParts, "size: 100")
+	queryParamsParts = append(queryParamsParts, fmt.Sprintf("size: %d", p.config.PageSize))
 	queryParamsParts = append(queryParamsParts, fmt.Sprintf("offset: %d", offset))
 
 	// Join all parameters
@@ -391,7 +458,7 @@ func (p *playlistRefresher) buildGraphQLQuery(params map[string]interface{}, off
 	return query
 }
 
-func (p *playlistRefresher) formatGraphQLParam(key string, value interface{}) string {
+func (p *refresher) formatGraphQLParam(key string, value interface{}) string {
 	if v, ok := value.([]string); ok {
 		var items []string
 		for _, item := range v {
@@ -403,7 +470,6 @@ func (p *playlistRefresher) formatGraphQLParam(key string, value interface{}) st
 	if v, ok := value.([]interface{}); ok {
 		var items []string
 		for _, item := range v {
-			// Convert each item to string and quote it
 			items = append(items, fmt.Sprintf(`"%s"`, fmt.Sprintf("%v", item)))
 		}
 		return fmt.Sprintf(`%s: [%s]`, key, strings.Join(items, ", "))
@@ -412,7 +478,7 @@ func (p *playlistRefresher) formatGraphQLParam(key string, value interface{}) st
 	return fmt.Sprintf(`%s: %v`, key, value)
 }
 
-func (p *playlistRefresher) convertAllTokensToItems(tokens []IndexerToken) []DP1Item {
+func (p *refresher) convertAllTokensToItems(tokens []IndexerToken) []DP1Item {
 	res := make([]DP1Item, 0, len(tokens))
 	for _, t := range tokens {
 		res = append(res, p.convertTokenToDP1Item(t))
@@ -420,7 +486,7 @@ func (p *playlistRefresher) convertAllTokensToItems(tokens []IndexerToken) []DP1
 	return res
 }
 
-func (p *playlistRefresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
+func (p *refresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 	title := token.Asset.Metadata.Project.Latest.Title
 	previewURL := token.Asset.Metadata.Project.Latest.PreviewURL
 
@@ -441,4 +507,33 @@ func (p *playlistRefresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 		Duration:   300,
 		Provenance: &provenance,
 	}
+}
+
+// executeWithRetry executes a function with retry logic and exponential backoff
+func (p *refresher) executeWithRetry(ctx context.Context, fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt < p.config.MaxRetries; attempt++ {
+		if err := fn(); err != nil {
+			lastErr = err
+			if attempt == p.config.MaxRetries-1 {
+				return fmt.Errorf("failed after %d attempts: %w", p.config.MaxRetries, err)
+			}
+
+			// Exponential backoff
+			backoff := time.Duration(attempt+1) * p.config.RetryBackoff
+			p.logger.Info("Retrying after error",
+				zap.Error(err),
+				zap.Int("attempt", attempt+1),
+				zap.Duration("backoff", backoff))
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+				continue
+			}
+		}
+		return nil
+	}
+	return lastErr
 }
