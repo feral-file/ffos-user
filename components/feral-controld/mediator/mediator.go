@@ -242,100 +242,25 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 		} else {
 			if cmd.CastPlaylistCmd() {
 				playlistURLRaw, hasPlaylistURL := payload.Message.Args["playlistUrl"]
+				var playlist *refresher.DP1Playlist
+				var err error
+
+				// Handle playlist based on whether URL is provided
 				if hasPlaylistURL {
-					if urlStr, ok := playlistURLRaw.(string); ok && urlStr != "" {
-						m.logger.Info("CastPlaylist: starting interval to fetch playlist by URL")
-
-						// Start periodic fetch by URL
-						m.refresher.StartWithURL(tracedCtx, urlStr)
-
-						// Fetch immediately for current request
-						dp1Playlist, err := m.refresher.FetchPlaylistByURL(tracedCtx, urlStr)
-						if err != nil {
-							m.logger.Error("CastPlaylist: fetch playlist by URL failed", zap.Error(err))
-							m.tracer.FinishSpanWithError(parseSpan, err)
-							finalErr = err
-							return err
-						}
-
-						// Process dynamicQuery inside fetched playlist (optional)
-						if dp1Playlist.DynamicQueries != nil {
-							// Convert single dynamicQuery to array format for consistency
-							dp1Items, err := m.refresher.BuildPlaylistItems(tracedCtx, dp1Playlist, dp1Playlist.DynamicQueries)
-							if err != nil {
-								m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
-								m.tracer.FinishSpanWithError(parseSpan, err)
-								finalErr = err
-								return err
-							}
-
-							// Update playlist items with dynamic query results
-							dp1Playlist.Items = dp1Items
-						}
-
-						// validate items
-						if err := m.ensurePlaylistHasItems(dp1Playlist, parseSpan, &finalErr); err != nil {
-							return err
-						}
-
-						payload.Message.Args["dp1_call"] = dp1Playlist
-					} else {
-						m.logger.Error("CastPlaylist: playlistUrl is not a string or empty")
-					}
+					playlist, err = m.handlePlaylistFromURL(tracedCtx, playlistURLRaw, parseSpan, &finalErr)
 				} else {
-					// No playlistUrl, check provided playlist
-					playlistRaw, ok := payload.Message.Args["dp1_call"]
-					if !ok {
-						parseErr = fmt.Errorf("payload doesn't contain playlist")
-						m.logger.Error("CastPlaylist: missing playlist in args")
-						m.tracer.FinishSpanWithError(parseSpan, parseErr)
-						finalErr = parseErr
-						return parseErr
-					}
-
-					// Convert map[string]interface{} to DP1Playlist struct
-					playlistBytes, err := json.Marshal(playlistRaw)
-					if err != nil {
-						parseErr = fmt.Errorf("failed to marshal playlist: %w", err)
-						m.logger.Error("CastPlaylist: failed to marshal playlist", zap.Error(parseErr))
-						m.tracer.FinishSpanWithError(parseSpan, parseErr)
-						finalErr = parseErr
-						return parseErr
-					}
-
-					var playlist refresher.DP1Playlist
-					err = json.Unmarshal(playlistBytes, &playlist)
-					if err != nil {
-						parseErr = fmt.Errorf("failed to unmarshal playlist: %w", err)
-						m.logger.Error("CastPlaylist: failed to unmarshal playlist", zap.Error(parseErr))
-						m.tracer.FinishSpanWithError(parseSpan, parseErr)
-						finalErr = parseErr
-						return parseErr
-					}
-
-					// Process dynamicQuery inside playlist (optional)
-					if playlist.DynamicQueries != nil {
-						m.logger.Info("CastPlaylist: starting interval for dynamic query")
-						m.refresher.StartWithDynamicQueries(tracedCtx, playlist.DynamicQueries)
-
-						dp1Items, err := m.refresher.BuildPlaylistItems(tracedCtx, &playlist, playlist.DynamicQueries)
-						if err != nil {
-							m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
-							m.tracer.FinishSpanWithError(parseSpan, err)
-							finalErr = err
-							return err
-						}
-
-						playlist.Items = dp1Items
-					}
-
-					// Validate items
-					if err := m.ensurePlaylistHasItems(&playlist, parseSpan, &finalErr); err != nil {
-						return err
-					}
-
-					payload.Message.Args["dp1_call"] = playlist
+					playlist, err = m.handlePlaylistFromArgs(tracedCtx, payload, parseSpan, &finalErr)
 				}
+
+				if err != nil {
+					return err
+				}
+
+				if err := m.processPlaylistDynamicQueries(tracedCtx, playlist, parseSpan, &finalErr, !hasPlaylistURL); err != nil {
+					return err
+				}
+
+				payload.Message.Args["dp1_call"] = playlist
 			}
 
 			m.logger.Info("CastPlaylist: playlist", zap.Any("playlist", payload.Message.Args["dp1_call"]))
@@ -386,6 +311,97 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 	return nil
 }
 
+// SetStatusPoller sets the StatusPoller reference after initialization
+func (m *mediator) SetStatusPoller(statusPoller status.Poller) {
+	m.statusPoller = statusPoller
+}
+
+// handlePlaylistFromURL handles playlist fetching from playlistURL
+func (m *mediator) handlePlaylistFromURL(ctx context.Context, playlistURLRaw interface{}, parseSpan *sentry.Span, finalErr *error) (*refresher.DP1Playlist, error) {
+	urlStr, ok := playlistURLRaw.(string)
+	if !ok || urlStr == "" {
+		err := fmt.Errorf("playlistUrl is not a string or empty")
+		m.logger.Error("CastPlaylist: playlistUrl is not a string or empty")
+		m.tracer.FinishSpanWithError(parseSpan, err)
+		*finalErr = err
+		return nil, err
+	}
+
+	m.logger.Info("CastPlaylist: starting interval to fetch playlist by URL")
+
+	// Start periodic fetch by URL
+	m.refresher.StartWithURL(ctx, urlStr)
+
+	// Fetch immediately for current request
+	playlist, err := m.refresher.FetchPlaylistByURL(ctx, urlStr)
+	if err != nil {
+		m.logger.Error("CastPlaylist: fetch playlist by URL failed", zap.Error(err))
+		m.tracer.FinishSpanWithError(parseSpan, err)
+		*finalErr = err
+		return nil, err
+	}
+
+	return playlist, nil
+}
+
+// handlePlaylistFromArgs handles playlist from provided arguments
+func (m *mediator) handlePlaylistFromArgs(ctx context.Context, payload relayer.Payload, parseSpan *sentry.Span, finalErr *error) (*refresher.DP1Playlist, error) {
+	playlistRaw, ok := payload.Message.Args["dp1_call"]
+	if !ok {
+		err := fmt.Errorf("payload doesn't contain playlist")
+		m.logger.Error("CastPlaylist: missing playlist in args")
+		m.tracer.FinishSpanWithError(parseSpan, err)
+		*finalErr = err
+		return nil, err
+	}
+
+	// Convert map[string]interface{} to DP1Playlist struct
+	playlistBytes, err := json.Marshal(playlistRaw)
+	if err != nil {
+		parseErr := fmt.Errorf("failed to marshal playlist: %w", err)
+		m.logger.Error("CastPlaylist: failed to marshal playlist", zap.Error(parseErr))
+		m.tracer.FinishSpanWithError(parseSpan, parseErr)
+		*finalErr = parseErr
+		return nil, parseErr
+	}
+
+	var playlist refresher.DP1Playlist
+	err = json.Unmarshal(playlistBytes, &playlist)
+	if err != nil {
+		parseErr := fmt.Errorf("failed to unmarshal playlist: %w", err)
+		m.logger.Error("CastPlaylist: failed to unmarshal playlist", zap.Error(parseErr))
+		m.tracer.FinishSpanWithError(parseSpan, parseErr)
+		*finalErr = parseErr
+		return nil, parseErr
+	}
+
+	return &playlist, nil
+}
+
+// processPlaylistDynamicQueries processes dynamic queries and validates items
+func (m *mediator) processPlaylistDynamicQueries(ctx context.Context, playlist *refresher.DP1Playlist, parseSpan *sentry.Span, finalErr *error, startInterval bool) error {
+	// Process dynamic queries if present
+	if playlist.DynamicQueries != nil {
+		if startInterval {
+			m.logger.Info("CastPlaylist: starting interval for dynamic query")
+			m.refresher.StartWithDynamicQueries(ctx, playlist.DynamicQueries)
+		}
+
+		dp1Items, err := m.refresher.BuildPlaylistItems(ctx, playlist, playlist.DynamicQueries)
+		if err != nil {
+			m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
+			m.tracer.FinishSpanWithError(parseSpan, err)
+			*finalErr = err
+			return err
+		}
+
+		playlist.Items = dp1Items
+	}
+
+	// Validate items
+	return m.ensurePlaylistHasItems(playlist, parseSpan, finalErr)
+}
+
 func (m *mediator) ensurePlaylistHasItems(playlist *refresher.DP1Playlist, parseSpan *sentry.Span, finalErr *error) error {
 	if len(playlist.Items) > 0 {
 		return nil
@@ -396,9 +412,4 @@ func (m *mediator) ensurePlaylistHasItems(playlist *refresher.DP1Playlist, parse
 	m.tracer.FinishSpanWithError(parseSpan, err)
 	*finalErr = err
 	return err
-}
-
-// SetStatusPoller sets the StatusPoller reference after initialization
-func (m *mediator) SetStatusPoller(statusPoller status.Poller) {
-	m.statusPoller = statusPoller
 }
