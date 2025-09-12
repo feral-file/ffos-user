@@ -14,33 +14,12 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 )
 
-// Config holds configuration for the playlist refresher
-type Config struct {
-	RefreshInterval time.Duration `json:"refreshInterval"`
-	RequestTimeout  time.Duration `json:"requestTimeout"`
-	PageSize        int           `json:"pageSize"`
-	MaxRetries      int           `json:"maxRetries"`
-	RetryBackoff    time.Duration `json:"retryBackoff"`
+type GraphQLResponse struct {
+	Data struct {
+		Tokens []IndexerToken `json:"tokens,omitempty"`
+	} `json:"data,omitempty"`
 }
 
-// DefaultConfig returns a default configuration
-func DefaultConfig() *Config {
-	return &Config{
-		RefreshInterval: 1 * time.Minute,
-		RequestTimeout:  10 * time.Second,
-		PageSize:        100,
-		MaxRetries:      3,
-		RetryBackoff:    1 * time.Second,
-	}
-}
-
-// DynamicQuery represents the structure for dynamic queries
-type DynamicQuery struct {
-	Endpoint string                 `json:"endpoint"`
-	Params   map[string]interface{} `json:"params"`
-}
-
-// IndexerToken represents a token from the indexer
 type IndexerToken struct {
 	ID              string `json:"id,omitempty"`
 	Blockchain      string `json:"blockchain,omitempty"`
@@ -54,25 +33,9 @@ type IndexerToken struct {
 	}
 }
 
-// IndexerArtwork represents artwork information from the indexer
 type IndexerArtwork struct {
 	Title      string `json:"title,omitempty"`
 	PreviewURL string `json:"previewURL,omitempty"`
-}
-
-// DP1Item represents a playlist item for DP1
-type DP1Item struct {
-	ID         string           `json:"id,omitempty"`
-	Title      *string          `json:"title,omitempty"`
-	Source     *string          `json:"source,omitempty"`
-	Duration   int              `json:"duration,omitempty"`
-	License    *string          `json:"license,omitempty"`
-	Ref        *string          `json:"ref,omitempty"`
-	Override   *json.RawMessage `json:"override,omitempty"`
-	Display    *json.RawMessage `json:"display,omitempty"`
-	Repro      *json.RawMessage `json:"repro,omitempty"`
-	Provenance *json.RawMessage `json:"provenance,omitempty"`
-	Created    string           `json:"created,omitempty"`
 }
 
 type DP1Playlist struct {
@@ -87,17 +50,47 @@ type DP1Playlist struct {
 	DynamicQueries []DynamicQuery  `json:"dynamicQueries,omitempty"`
 }
 
+type DynamicQuery struct {
+	Endpoint string                 `json:"endpoint"`
+	Params   map[string]interface{} `json:"params"`
+}
+
+type DP1Item struct {
+	ID         string           `json:"id,omitempty"`
+	Title      *string          `json:"title,omitempty"`
+	Source     *string          `json:"source,omitempty"`
+	Duration   int              `json:"duration,omitempty"`
+	License    *string          `json:"license,omitempty"`
+	Ref        *string          `json:"ref,omitempty"`
+	Override   *json.RawMessage `json:"override,omitempty"`
+	Display    *json.RawMessage `json:"display,omitempty"`
+	Repro      *json.RawMessage `json:"repro,omitempty"`
+	Provenance *json.RawMessage `json:"provenance,omitempty"`
+	Created    string           `json:"created,omitempty"`
+}
+
 type DP1Provenance struct {
 	Contract struct {
 		TokenID string `json:"tokenId,omitempty"`
 	} `json:"contract,omitempty"`
 }
 
-// GraphQLResponse represents the response structure from GraphQL queries
-type GraphQLResponse struct {
-	Data struct {
-		Tokens []IndexerToken `json:"tokens,omitempty"`
-	} `json:"data,omitempty"`
+type Config struct {
+	RefreshInterval time.Duration `json:"refreshInterval"`
+	RequestTimeout  time.Duration `json:"requestTimeout"`
+	PageSize        int           `json:"pageSize"`
+	MaxRetries      int           `json:"maxRetries"`
+	RetryBackoff    time.Duration `json:"retryBackoff"`
+}
+
+func DefaultConfig() *Config {
+	return &Config{
+		RefreshInterval: 30 * time.Minute,
+		RequestTimeout:  20 * time.Second,
+		PageSize:        100,
+		MaxRetries:      3,
+		RetryBackoff:    1 * time.Second,
+	}
 }
 
 type Refresher interface {
@@ -130,6 +123,7 @@ func New(
 	if config == nil {
 		config = DefaultConfig()
 	}
+
 	return &refresher{
 		config:        config,
 		http:          http,
@@ -190,11 +184,13 @@ func (p *refresher) StartWithURL(ctx context.Context, playlistURL string) {
 				p.logger.Info("StartWithURL goroutine stopped due to stop signal")
 				return
 			case <-p.queryTicker.C:
-				if playlist, err := p.FetchPlaylistByURL(ctx, playlistURL); err != nil {
+				playlist, err := p.FetchPlaylistByURL(ctx, playlistURL)
+				if err != nil {
 					p.logger.Warn("Periodic playlist fetch failed", zap.Error(err))
-				} else {
-					p.logger.Info("Periodic playlist fetch completed", zap.Any("playlist", playlist))
+					continue
 				}
+
+				p.logger.Info("Periodic playlist fetch completed", zap.Any("playlist", playlist))
 			}
 		}
 	}()
@@ -231,11 +227,13 @@ func (p *refresher) StartWithDynamicQueries(ctx context.Context, dynamicQueries 
 				p.logger.Info("StartWithDynamicQueries goroutine stopped due to stop signal")
 				return
 			case <-p.queryTicker.C:
-				if tokens, err := p.executeDynamicQueries(ctx, dynamicQueries); err != nil {
+				tokens, err := p.executeDynamicQueries(ctx, dynamicQueries)
+				if err != nil {
 					p.logger.Warn("Periodic dynamic query failed", zap.Error(err))
-				} else {
-					p.logger.Info("Periodic dynamic query completed", zap.Int("token_count", len(tokens)))
+					continue
 				}
+
+				p.logger.Info("Periodic dynamic query completed", zap.Int("token_count", len(tokens)))
 			}
 		}
 	}()
@@ -359,7 +357,6 @@ func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []
 
 		allTokens = append(allTokens, tokens...)
 
-		// If we got fewer tokens than requested, we've reached the end
 		if len(tokens) < size {
 			break
 		}
