@@ -315,7 +315,6 @@ func (p *refresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []IndexerT
 	var filteredItems []DP1Item
 	for _, item := range playlist.Items {
 		if item.ID != "" {
-			// use item.provenance.contract.tokenId instead of item.ID
 			var provenance DP1Provenance
 			if err := p.json.Unmarshal(*item.Provenance, &provenance); err != nil {
 				p.logger.Warn("Failed to unmarshal provenance", zap.Error(err))
@@ -459,14 +458,6 @@ func (p *refresher) buildGraphQLQuery(params map[string]interface{}, offset int)
 }
 
 func (p *refresher) formatGraphQLParam(key string, value interface{}) string {
-	if v, ok := value.([]string); ok {
-		var items []string
-		for _, item := range v {
-			items = append(items, fmt.Sprintf(`"%s"`, item))
-		}
-		return fmt.Sprintf(`%s: [%s]`, key, strings.Join(items, ", "))
-	}
-
 	if v, ok := value.([]interface{}); ok {
 		var items []string
 		for _, item := range v {
