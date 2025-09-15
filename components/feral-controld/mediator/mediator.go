@@ -261,32 +261,15 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				}
 
 				payload.Message.Args["dp1_call"] = playlist
+				m.logger.Info("CastPlaylist: playlist", zap.Any("playlist", payload.Message.Args["dp1_call"]))
 			}
 
-			m.logger.Info("CastPlaylist: playlist", zap.Any("playlist", payload.Message.Args["dp1_call"]))
-
-			// Forward to CDP
-			cdpSpan := m.tracer.StartCDPRequestSpan(tracedCtx)
-
-			p, err := payload.JSON()
+			// Forward to CDP (final, full data)
+			result, err := m.sendCDPRequest(tracedCtx, payload)
 			if err != nil {
-				m.logger.Error("Failed to marshal payload", zap.Error(err))
-				m.tracer.FinishSpanWithError(cdpSpan, err)
 				finalErr = err
 				return err
 			}
-
-			result, err := m.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-				"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
-			})
-			if err != nil {
-				m.logger.Error("Failed to send CDP request", zap.Error(err))
-				m.tracer.FinishSpanWithError(cdpSpan, err)
-				finalErr = err
-				return err
-			}
-
-			m.tracer.FinishSpanWithError(cdpSpan, nil)
 
 			// Add brief pause as in original code
 			m.clock.Sleep(500 * time.Millisecond)
@@ -387,7 +370,8 @@ func (m *mediator) processPlaylistDynamicQueries(ctx context.Context, playlist *
 			m.refresher.StartWithDynamicQueries(ctx, playlist.DynamicQueries)
 		}
 
-		dp1Items, err := m.refresher.BuildPlaylistItems(ctx, playlist, playlist.DynamicQueries)
+		// Query first 5 tokens and send interim CDP update
+		dp1Items, err := m.refresher.BuildInitialPlaylistItems(ctx, playlist, playlist.DynamicQueries)
 		if err != nil {
 			m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
 			m.tracer.FinishSpanWithError(parseSpan, err)
@@ -412,4 +396,28 @@ func (m *mediator) ensurePlaylistHasItems(playlist *refresher.DP1Playlist, parse
 	m.tracer.FinishSpanWithError(parseSpan, err)
 	*finalErr = err
 	return err
+}
+
+// sendCDPRequest marshals payload and sends to CDP with tracing
+func (m *mediator) sendCDPRequest(ctx context.Context, payload relayer.Payload) (interface{}, error) {
+	cdpSpan := m.tracer.StartCDPRequestSpan(ctx)
+
+	p, err := payload.JSON()
+	if err != nil {
+		m.logger.Error("Failed to marshal payload", zap.Error(err))
+		m.tracer.FinishSpanWithError(cdpSpan, err)
+		return nil, err
+	}
+
+	result, err := m.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
+	})
+	if err != nil {
+		m.logger.Error("Failed to send CDP request", zap.Error(err))
+		m.tracer.FinishSpanWithError(cdpSpan, err)
+		return nil, err
+	}
+
+	m.tracer.FinishSpanWithError(cdpSpan, nil)
+	return result, nil
 }

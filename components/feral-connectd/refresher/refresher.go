@@ -79,6 +79,7 @@ type Config struct {
 	RefreshInterval time.Duration `json:"refreshInterval"`
 	RequestTimeout  time.Duration `json:"requestTimeout"`
 	PageSize        int           `json:"pageSize"`
+	InitialPageSize int           `json:"initialPageSize"`
 	MaxRetries      int           `json:"maxRetries"`
 	RetryBackoff    time.Duration `json:"retryBackoff"`
 }
@@ -88,6 +89,7 @@ func DefaultConfig() *Config {
 		RefreshInterval: 30 * time.Minute,
 		RequestTimeout:  20 * time.Second,
 		PageSize:        100,
+		InitialPageSize: 5,
 		MaxRetries:      3,
 		RetryBackoff:    1 * time.Second,
 	}
@@ -99,7 +101,7 @@ type Refresher interface {
 	StartWithURL(ctx context.Context, playlistURL string)
 	StartWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery)
 	FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error)
-	BuildPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
+	BuildInitialPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
 }
 
 type refresher struct {
@@ -227,7 +229,7 @@ func (p *refresher) StartWithDynamicQueries(ctx context.Context, dynamicQueries 
 				p.logger.Info("StartWithDynamicQueries goroutine stopped due to stop signal")
 				return
 			case <-p.queryTicker.C:
-				tokens, err := p.executeDynamicQueries(ctx, dynamicQueries)
+				tokens, err := p.executeDynamicQueries(ctx, dynamicQueries, -1)
 				if err != nil {
 					p.logger.Warn("Periodic dynamic query failed", zap.Error(err))
 					continue
@@ -275,10 +277,19 @@ func (p *refresher) FetchPlaylistByURL(ctx context.Context, playlistURL string) 
 	return &playlist, nil
 }
 
+func (p *refresher) BuildInitialPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error) {
+	return p.buildPlaylistItems(ctx, playlist, dynamicQueries, p.config.InitialPageSize)
+}
+
 // BuildPlaylistItems executes the raw dynamicQueries and returns playlist items (empty slice if none)
-func (p *refresher) BuildPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error) {
-	p.logger.Info("Building playlist items", zap.Any("dynamicQueries", dynamicQueries))
-	tokens, err := p.executeDynamicQueries(ctx, dynamicQueries)
+func (p *refresher) buildPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery, limit int) ([]DP1Item, error) {
+	if limit <= 0 {
+		p.logger.Info("Building playlist items", zap.Any("dynamicQueries", dynamicQueries))
+	} else {
+		p.logger.Info("Building playlist items with limit", zap.Int("limit", limit))
+	}
+
+	tokens, err := p.executeDynamicQueries(ctx, dynamicQueries, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +299,11 @@ func (p *refresher) BuildPlaylistItems(ctx context.Context, playlist *DP1Playlis
 		return []DP1Item{}, nil
 	}
 
-	p.logger.Info("Built playlist items", zap.Any("items", items))
+	if limit <= 0 {
+		p.logger.Info("Built playlist items", zap.Any("items", items))
+	} else {
+		p.logger.Info("Built limited playlist items", zap.Int("count", len(items)))
+	}
 	return items, nil
 }
 
@@ -329,8 +344,8 @@ func (p *refresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []IndexerT
 	return filteredItems
 }
 
-// executeDynamicQueries executes a GraphQL query with offset-based pagination to fetch all tokens
-func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery) ([]IndexerToken, error) {
+// executeDynamicQueries executes a GraphQL query with offset-based pagination to fetch tokens
+func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, limit int) ([]IndexerToken, error) {
 	if len(dynamicQueries) == 0 {
 		return nil, fmt.Errorf("no queries provided")
 	}
@@ -343,16 +358,34 @@ func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []
 
 	p.logger.Info("Executing dynamic query", zap.String("endpoint", firstQuery.Endpoint))
 
+	fetchTokens := func(offset, size int) ([]IndexerToken, error) {
+		query := p.buildGraphQLQuery(firstQuery.Params, offset, size)
+		tokens, err := p.executeGraphQLQuery(ctx, firstQuery.Endpoint, query)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute GraphQL query: %w", err)
+		}
+
+		return tokens, nil
+	}
+
+	// If limit is specified, fetch only one page
+	if limit > 0 {
+		if limit > p.config.PageSize {
+			limit = p.config.PageSize
+		}
+
+		return fetchTokens(0, limit)
+	}
+
 	// Execute query with offset-based pagination to fetch all tokens
 	var allTokens []IndexerToken
 	offset := 0
 	size := p.config.PageSize
 
 	for {
-		graphqlQuery := p.buildGraphQLQuery(firstQuery.Params, offset)
-		tokens, err := p.executeGraphQLQuery(ctx, firstQuery.Endpoint, graphqlQuery)
+		tokens, err := fetchTokens(offset, size)
 		if err != nil {
-			return nil, fmt.Errorf("failed to execute GraphQL query: %w", err)
+			return nil, err
 		}
 
 		allTokens = append(allTokens, tokens...)
@@ -360,6 +393,7 @@ func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []
 		if len(tokens) < size {
 			break
 		}
+
 		offset += size
 	}
 
@@ -412,7 +446,11 @@ func (p *refresher) executeGraphQLQuery(ctx context.Context, endpoint, query str
 }
 
 // buildGraphQLQuery builds a GraphQL query string with offset-based pagination
-func (p *refresher) buildGraphQLQuery(params map[string]string, offset int) string {
+func (p *refresher) buildGraphQLQuery(params map[string]string, offset int, pageSize int) string {
+	if pageSize <= 0 {
+		pageSize = p.config.PageSize
+	}
+
 	var queryParamsParts []string
 
 	// Add dynamic parameters from params map
@@ -424,7 +462,7 @@ func (p *refresher) buildGraphQLQuery(params map[string]string, offset int) stri
 	}
 
 	// Always add default parameters
-	queryParamsParts = append(queryParamsParts, fmt.Sprintf("size: %d", p.config.PageSize))
+	queryParamsParts = append(queryParamsParts, fmt.Sprintf("size: %d", pageSize))
 	queryParamsParts = append(queryParamsParts, fmt.Sprintf("offset: %d", offset))
 
 	// Join all parameters
