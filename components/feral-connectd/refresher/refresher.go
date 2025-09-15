@@ -556,7 +556,7 @@ func (p *refresher) formatGraphQLParam(key string, value string) string {
 		return fmt.Sprintf(`%s: [%s]`, key, strings.Join(quotedItems, ", "))
 	}
 
-	return fmt.Sprintf(`%s: %v`, key, value)
+	return fmt.Sprintf(`%s: %s`, key, value)
 }
 
 func (p *refresher) convertAllTokensToItems(tokens []IndexerToken) []DP1Item {
