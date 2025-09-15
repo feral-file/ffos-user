@@ -51,8 +51,8 @@ type DP1Playlist struct {
 }
 
 type DynamicQuery struct {
-	Endpoint string                 `json:"endpoint"`
-	Params   map[string]interface{} `json:"params"`
+	Endpoint string            `json:"endpoint"`
+	Params   map[string]string `json:"params"`
 }
 
 type DP1Item struct {
@@ -412,7 +412,7 @@ func (p *refresher) executeGraphQLQuery(ctx context.Context, endpoint, query str
 }
 
 // buildGraphQLQuery builds a GraphQL query string with offset-based pagination
-func (p *refresher) buildGraphQLQuery(params map[string]interface{}, offset int) string {
+func (p *refresher) buildGraphQLQuery(params map[string]string, offset int) string {
 	var queryParamsParts []string
 
 	// Add dynamic parameters from params map
@@ -454,13 +454,17 @@ func (p *refresher) buildGraphQLQuery(params map[string]interface{}, offset int)
 	return query
 }
 
-func (p *refresher) formatGraphQLParam(key string, value interface{}) string {
-	if v, ok := value.([]interface{}); ok {
-		var items []string
-		for _, item := range v {
-			items = append(items, fmt.Sprintf(`"%s"`, fmt.Sprintf("%v", item)))
+func (p *refresher) formatGraphQLParam(key string, value string) string {
+	// Check if the value contains commas (comma-separated values that should be converted to array)
+	if strings.Contains(value, ",") {
+		// Split by comma and format as GraphQL array
+		items := strings.Split(value, ",")
+		var quotedItems []string
+		for _, item := range items {
+			trimmed := strings.TrimSpace(item)
+			quotedItems = append(quotedItems, fmt.Sprintf(`"%s"`, trimmed))
 		}
-		return fmt.Sprintf(`%s: [%s]`, key, strings.Join(items, ", "))
+		return fmt.Sprintf(`%s: [%s]`, key, strings.Join(quotedItems, ", "))
 	}
 
 	return fmt.Sprintf(`%s: %v`, key, value)
