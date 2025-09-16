@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	SYSTEMD_SERVICE_HANG_THRESHOLD_SECOND int64 = 60
+	SYSTEMD_SERVICE_HANG_THRESHOLD_SECOND int64 = 90
 
 	SYSTEMD_SERVICE_STATUS_ACTIVE   SystemdServiceStatus = "active"
 	SYSTEMD_SERVICE_STATUS_FAILED   SystemdServiceStatus = "failed"
