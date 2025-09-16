@@ -1,5 +1,5 @@
 [Unit]
-Description=Feral File Connectd
+Description=Feral File Controld
 PartOf=chromium-ready.target
 After=system-ready.target feral-sys-monitord.service
 StartLimitBurst=5
@@ -10,9 +10,9 @@ Type=notify
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
 Environment="WAYLAND_DISPLAY=wayland-0"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
-ExecStart=/usr/bin/feral-connectd
+ExecStart=/usr/bin/feral-controld
 Restart=always
 RestartSec=5
 WatchdogSec=30s
-StandardOutput=append:/home/feralfile/.logs/connectd.log
-StandardError=append:/home/feralfile/.logs/connectd.log
+StandardOutput=append:/home/feralfile/.logs/controld.log
+StandardError=append:/home/feralfile/.logs/controld.log

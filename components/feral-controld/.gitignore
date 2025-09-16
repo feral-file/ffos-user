@@ -32,4 +32,8 @@ ehthumbs.db
 Thumbs.db
 
 # Config
-sysmonitord.log
+controld.json
+controld.state
+
+controld.log
+logs.txt
