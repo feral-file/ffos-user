@@ -63,6 +63,7 @@ type app struct {
 	DeviceStatus status.DeviceStatus
 	StatusPoller status.Poller
 	Watchdog     watchdog.Watchdog
+	Refresher    refresher.Refresher
 }
 
 func main() {
@@ -222,6 +223,13 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
 
+	// Start Refresher
+	statusProvider := func(ctx context.Context) (map[string]interface{}, error) {
+		return status.FetchPlayerStatus(ctx, app.CDP, app.Logger)
+	}
+	app.Refresher.Start(ctx, statusProvider)
+	defer app.Refresher.Stop()
+
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
 	if err != nil {
@@ -349,6 +357,7 @@ func initializeApp(
 		DeviceStatus: deviceStatus,
 		StatusPoller: poller,
 		Watchdog:     watchdog,
+		Refresher:    refresher,
 	}
 }
 
@@ -373,7 +382,9 @@ func initializeTestApp(
 	statusPoller status.Poller,
 	watchdog watchdog.Watchdog,
 	mediator mediator.Mediator,
-	command command.CommandHandler) *app {
+	command command.CommandHandler,
+	refresher refresher.Refresher,
+) *app {
 	return &app{
 		Ctx:          ctx,
 		Logger:       logger,
@@ -395,5 +406,6 @@ func initializeTestApp(
 		DeviceStatus: deviceStatus,
 		StatusPoller: statusPoller,
 		Watchdog:     watchdog,
+		Refresher:    refresher,
 	}
 }

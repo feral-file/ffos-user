@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
 	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
 )
 
@@ -123,6 +124,15 @@ func normalizeProvenanceChain(blockchain string) ProvenanceChain {
 	}
 }
 
+type PlayerStatus struct {
+	CastCommand *relayer.RelayerCmd `json:"castCommand,omitempty"`
+
+	PlaylistURL *string      `json:"playlistURL,omitempty"`
+	Playlist    *DP1Playlist `json:"playlist,omitempty"`
+	Index       *int         `json:"index,omitempty"`
+	IsPaused    *bool        `json:"isPaused,omitempty"`
+}
+
 type Config struct {
 	RefreshInterval time.Duration `json:"refreshInterval"`
 	RequestTimeout  time.Duration `json:"requestTimeout"`
@@ -144,6 +154,7 @@ func DefaultConfig() *Config {
 }
 
 type Refresher interface {
+	Start(ctx context.Context, playerStatus func(ctx context.Context) (map[string]interface{}, error))
 	Stop()
 
 	StartWithURL(ctx context.Context, playlistURL string)
@@ -184,6 +195,56 @@ func New(
 	}
 }
 
+func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.Context) (map[string]interface{}, error)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.logger.Info("Starting Refresher")
+
+	status, err := statusProvider(ctx)
+	if err != nil {
+		p.logger.Warn("Failed to fetch player status", zap.Error(err))
+		return
+	}
+
+	// convert status to PlayerStatus struct
+	raw, err := p.json.Marshal(status)
+	if err != nil {
+		p.logger.Warn("Failed to marshal player status", zap.Error(err))
+		return
+	}
+	var playerStatus PlayerStatus
+	if err := p.json.Unmarshal(raw, &playerStatus); err != nil {
+		p.logger.Warn("Failed to unmarshal player status", zap.Error(err))
+		return
+	}
+
+	if !playerStatus.CastCommand.CastPlaylistCmd() {
+		p.logger.Debug("Player command is not displayPlaylist; skipping", zap.Any("command", playerStatus.CastCommand))
+		return
+	}
+
+	if playerStatus.PlaylistURL != nil && *playerStatus.PlaylistURL != "" {
+		p.logger.Info("Auto: starting URL refresher", zap.String("url", *playerStatus.PlaylistURL))
+		p.StartWithURL(ctx, *playerStatus.PlaylistURL)
+		return
+	}
+
+	// Otherwise fall back to embedded playlist object with dynamicQueries
+	if playerStatus.Playlist == nil {
+		p.logger.Debug("No playlist URL or embedded playlist present in status; skipping")
+		return
+	}
+
+	if len(playerStatus.Playlist.DynamicQueries) > 0 {
+		p.logger.Info("Auto: starting dynamic queries refresher", zap.Int("query_count", len(playerStatus.Playlist.DynamicQueries)))
+		p.StartWithDynamicQueries(ctx, playerStatus.Playlist.DynamicQueries)
+		return
+	}
+
+	p.logger.Info("Auto: no playlistURL or dynamicQueries; nothing to start")
+}
+
 func (p *refresher) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -210,10 +271,14 @@ func (p *refresher) StartWithURL(ctx context.Context, playlistURL string) {
 
 	p.logger.Info("Starting playlist refresher by URL", zap.String("url", playlistURL))
 
-	// Create new channels if they don't exist
-	if p.queryStopChan == nil {
-		p.queryStopChan = make(chan struct{})
+	// Reset any existing ticker/goroutine
+	if p.queryTicker != nil {
+		p.queryTicker.Stop()
 	}
+	if p.queryStopChan != nil {
+		close(p.queryStopChan)
+	}
+	p.queryStopChan = make(chan struct{})
 
 	p.queryTicker = p.clock.NewTicker(p.config.RefreshInterval)
 	go func() {
@@ -253,10 +318,14 @@ func (p *refresher) StartWithDynamicQueries(ctx context.Context, dynamicQueries 
 
 	p.logger.Info("Starting playlist refresher by dynamic query")
 
-	// Create new channels if they don't exist
-	if p.queryStopChan == nil {
-		p.queryStopChan = make(chan struct{})
+	// Reset any existing ticker/goroutine
+	if p.queryTicker != nil {
+		p.queryTicker.Stop()
 	}
+	if p.queryStopChan != nil {
+		close(p.queryStopChan)
+	}
+	p.queryStopChan = make(chan struct{})
 
 	p.queryTicker = p.clock.NewTicker(p.config.RefreshInterval)
 	go func() {

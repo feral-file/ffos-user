@@ -156,42 +156,9 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 
 	s.logger.Debug("Polling player status from Chromium")
 
-	// Create the payload in the same format as mediator
-	payload := map[string]interface{}{
-		"messageID": "",
-		"message": map[string]interface{}{
-			"command": "checkStatus",
-			"request": map[string]interface{}{},
-		},
-	}
-
-	// Marshal the payload to JSON string
-	payloadBytes, err := json.Marshal(payload)
+	message, err := FetchPlayerStatus(ctx, s.cdp, s.logger)
 	if err != nil {
-		s.logger.Error("Failed to marshal checkStatus payload", zap.Error(err))
-		return
-	}
-
-	// Send CDP request using the same format as mediator
-	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payloadBytes)),
-	})
-	if err != nil {
-		s.logger.Error("Failed to get player status from CDP", zap.Error(err))
-		return
-	}
-
-	s.logger.Debug("Player status result", zap.Any("result", result))
-
-	// Send the status as a notification
-	resultMap, ok := result.(map[string]interface{})
-	if !ok {
-		s.logger.Error("Failed to convert result to map", zap.Any("result", result))
-		return
-	}
-	message, ok := resultMap["message"]
-	if !ok {
-		s.logger.Error("Result map does not contain message key", zap.Any("result", result))
+		s.logger.Error("Failed to fetch player status", zap.Error(err))
 		return
 	}
 
@@ -205,6 +172,74 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	if err != nil {
 		s.logger.Error("Failed to send player status notification", zap.Error(err))
 	}
+}
+
+// FetchPlayerStatus fetches the current player status via CDP once and returns the "message" payload
+func FetchPlayerStatus(ctx context.Context, c cdp.CDP, logger *zap.Logger) (map[string]interface{}, error) {
+	payloadStr, err := buildCheckStatusPayload()
+	if err != nil {
+		return nil, err
+	}
+
+	expr := fmt.Sprintf("window.handleCDPRequest(%s)", payloadStr)
+	resultMap, err := sendCDPRequest(c, expr)
+	if err != nil {
+		return nil, err
+	}
+
+	message, err := extractMessage(resultMap)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Debug("Fetched player status", zap.Any("message", message))
+	return message, nil
+}
+
+// buildCheckStatusPayload constructs the CDP payload for checkStatus command.
+func buildCheckStatusPayload() (string, error) {
+	payload := map[string]interface{}{
+		"messageID": "",
+		"message": map[string]interface{}{
+			"command": "checkStatus",
+			"request": map[string]interface{}{},
+		},
+	}
+	// Marshal the payload to JSON string
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal checkStatus payload: %w", err)
+	}
+	return string(payloadBytes), nil
+}
+
+// sendCDPRequest evaluates a JavaScript expression via CDP and returns the result as map.
+func sendCDPRequest(c cdp.CDP, expression string) (map[string]interface{}, error) {
+	result, err := c.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression": expression,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cdp evaluate failed: %w", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected result type: %T", result)
+	}
+	return resultMap, nil
+}
+
+// extractMessage safely extracts the "message" field as map[string]interface{}.
+func extractMessage(result map[string]interface{}) (map[string]interface{}, error) {
+	message, ok := result["message"]
+	if !ok {
+		return nil, fmt.Errorf("missing 'message' in result")
+	}
+	msg, ok := message.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("'message' has unexpected type: %T", message)
+	}
+	return msg, nil
 }
 
 func (s *poller) pollDeviceStatus(ctx context.Context) {
