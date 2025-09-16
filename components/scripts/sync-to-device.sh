@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # Usage:
-#   ./scripts/sync-to-x4.sh [local-dir] [remote-dir]
+#   ./scripts/sync-to-device.sh [local-dir] [remote-dir] [remote-host]
 # E.g:
-#   ./scripts/sync-to-x4.sh . /home/feralfile/wifi_bt_app
+#   ./scripts/sync-to-device.sh . /home/feralfile/wifi_bt_app 192.168.31.91
 
 LOCAL_DIR="${1:-.}/"
 REMOTE_USER="feralfile"
-REMOTE_HOST="192.168.31.91"
+REMOTE_HOST="${3:-192.168.31.91}"
 REMOTE_PASS="feralfile"
 REMOTE_DIR="${2:-/home/${REMOTE_USER}/src/components/}"
 

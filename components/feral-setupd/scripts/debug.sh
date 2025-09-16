@@ -1,4 +1,3 @@
-rm -f ~/.state/setupd
 cargo build
 if [ $? -ne 0 ]; then
     echo "cargo build failed, stopping script"
