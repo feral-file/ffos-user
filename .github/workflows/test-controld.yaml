@@ -1,0 +1,54 @@
+name: Test Controld
+
+on:
+  pull_request:
+    paths:
+      - 'components/feral-controld/**/*.go'
+  workflow_call:
+    inputs:
+      upload-coverage:
+        description: 'Whether to upload coverage results'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  test:
+    name: Test feral-controld (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./components/feral-controld
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.5'
+          cache: true
+          cache-dependency-path: components/feral-controld/go.sum
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with coverage
+        run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
+
+      - name: Upload coverage to Codecov
+        if: ${{ inputs.upload-coverage == true }}
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./components/feral-controld/coverage.out
+          directory: ./components/feral-controld
+          slug: feral-file/ffos-user
+          flags: feral-controld
+          name: feral-controld-coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          override_branch: ${{ github.ref_name }}
+          override_build: ${{ github.run_id }}-controld

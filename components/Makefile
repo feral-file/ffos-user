@@ -7,9 +7,9 @@ SYNC_SCRIPT := ./scripts/sync-to-device.sh
 sync-feral-setupd:
 	@$(SYNC_SCRIPT) ./feral-setupd $(REMOTE_DIR)/feral-setupd $(REMOTE_HOST)
 
-.PHONY: sync-feral-connectd
-sync-feral-connectd:
-	@$(SYNC_SCRIPT) ./feral-connectd $(REMOTE_DIR)/feral-connectd $(REMOTE_HOST)
+.PHONY: sync-feral-controld
+sync-feral-controld:
+	@$(SYNC_SCRIPT) ./feral-controld $(REMOTE_DIR)/feral-controld $(REMOTE_HOST)
 
 .PHONY: sync-feral-sys-monitord
 sync-feral-sys-monitord:

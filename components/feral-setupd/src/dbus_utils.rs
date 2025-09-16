@@ -286,9 +286,9 @@ pub fn get_relayer_info() -> Result<String> {
     let start_time = Instant::now();
 
     match call_method(
-        constant::DBUS_CONNECTD_DESTINATION,
-        constant::DBUS_CONNECTD_OBJECT,
-        constant::DBUS_CONNECTD_INTERFACE,
+        constant::DBUS_CONTROLD_DESTINATION,
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
         constant::DBUS_RELAYER_TOPIC_ID_METHOD,
         Option::<bool>::None, // payload
         constant::DBUS_RELAYER_CHECK_TIMEOUT,
