@@ -144,7 +144,7 @@ type Config struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		RefreshInterval: 30 * time.Minute,
+		RefreshInterval: 5 * time.Minute,
 		RequestTimeout:  20 * time.Second,
 		PageSize:        100,
 		InitialPageSize: 5,
@@ -161,6 +161,9 @@ type Refresher interface {
 	StartWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery)
 	FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error)
 	BuildInitialPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
+
+	// SetOnPlaylistUpdated registers a callback invoked after each successful URL-based refetch
+	SetOnPlaylistUpdated(callback func(ctx context.Context, playlist *DP1Playlist))
 }
 
 type refresher struct {
@@ -172,6 +175,16 @@ type refresher struct {
 	logger        *zap.Logger
 	queryTicker   *time.Ticker
 	queryStopChan chan struct{}
+
+	// onPlaylistUpdated is called after each successful URL refetch
+	onPlaylistUpdated func(ctx context.Context, playlist *DP1Playlist)
+}
+
+// SetOnPlaylistUpdated registers a callback invoked after each successful URL-based refetch
+func (p *refresher) SetOnPlaylistUpdated(callback func(ctx context.Context, playlist *DP1Playlist)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onPlaylistUpdated = callback
 }
 
 func New(
@@ -196,15 +209,27 @@ func New(
 }
 
 func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.Context) (map[string]interface{}, error)) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	p.logger.Info("Starting Refresher")
 
 	status, err := statusProvider(ctx)
 	if err != nil {
-		p.logger.Warn("Failed to fetch player status", zap.Error(err))
-		return
+		p.logger.Warn("Failed to fetch player status; will retry every 2m until success", zap.Error(err))
+		retryTicker := p.clock.NewTicker(2 * time.Minute)
+		defer retryTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				p.logger.Info("Start cancelled during status fetch retry")
+				return
+			case <-retryTicker.C:
+				status, err = statusProvider(ctx)
+				if err != nil {
+					p.logger.Warn("Retry fetch player status failed", zap.Error(err))
+					continue
+				}
+			}
+			break
+		}
 	}
 
 	// convert status to PlayerStatus struct
@@ -306,6 +331,14 @@ func (p *refresher) StartWithURL(ctx context.Context, playlistURL string) {
 				}
 
 				p.logger.Info("Periodic playlist fetch completed", zap.Any("playlist", playlist))
+
+				// Notify listener for further processing (e.g., update CDP)
+				p.mu.RLock()
+				cb := p.onPlaylistUpdated
+				p.mu.RUnlock()
+				if cb != nil {
+					cb(ctx, playlist)
+				}
 			}
 		}
 	}()

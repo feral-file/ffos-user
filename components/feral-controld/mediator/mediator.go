@@ -53,7 +53,7 @@ func New(
 	refresher refresher.Refresher,
 	l *zap.Logger,
 ) Mediator {
-	return &mediator{
+	m := &mediator{
 		relayer:   relayer,
 		dbus:      dbus,
 		cdp:       cdp,
@@ -64,6 +64,30 @@ func New(
 		json:      json,
 		refresher: refresher,
 	}
+
+	// // When playlist is updated via URL refresher, push an update to the web app
+	// refresher.SetOnPlaylistUpdated(func(ctx context.Context, playlist *refresher.DP1Playlist) {
+	// 	m.logger.Info("Refresher callback: playlist updated, sending CDP update")
+
+	// 	payload := relayer.Payload{}
+	// 	cmd := relayer.CMD_PLAYLIST_REFRESH
+	// 	payload.Message.Command = &cmd
+	// 	payload.Message.Args = map[string]interface{}{
+	// 		"dp1_call": playlist,
+	// 	}
+
+	// 	// Best-effort send; log errors but do not crash
+	// 	if _, err := m.sendCDPRequest(ctx, payload); err != nil {
+	// 		m.logger.Warn("Failed to send CDP request on playlist refresh", zap.Error(err))
+	// 	}
+
+	// 	// Optionally force a status refresh so dashboards reflect changes
+	// 	if m.statusPoller != nil {
+	// 		m.statusPoller.ForceRefresh()
+	// 	}
+	// })
+
+	return m
 }
 
 func (m *mediator) Start() {
