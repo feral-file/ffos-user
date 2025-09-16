@@ -23,6 +23,7 @@ type GraphQLResponse struct {
 type IndexerToken struct {
 	ID              string `json:"id,omitempty"`
 	Blockchain      string `json:"blockchain,omitempty"`
+	ContractType    string `json:"contractType,omitempty"`
 	ContractAddress string `json:"contractAddress,omitempty"`
 	Asset           struct {
 		Metadata struct {
@@ -58,9 +59,9 @@ type DynamicQuery struct {
 type DP1Item struct {
 	ID         string           `json:"id,omitempty"`
 	Title      *string          `json:"title,omitempty"`
-	Source     *string          `json:"source,omitempty"`
-	Duration   int              `json:"duration,omitempty"`
-	License    *string          `json:"license,omitempty"`
+	Source     string           `json:"source,omitempty"`
+	Duration   int              `json:"duration"`
+	License    LicenseType      `json:"license,omitempty"`
 	Ref        *string          `json:"ref,omitempty"`
 	Override   *json.RawMessage `json:"override,omitempty"`
 	Display    *json.RawMessage `json:"display,omitempty"`
@@ -69,10 +70,57 @@ type DP1Item struct {
 	Created    string           `json:"created,omitempty"`
 }
 
+type LicenseType string
+
+const (
+	LicenseOpen         LicenseType = "open"
+	LicenseToken        LicenseType = "token"
+	LicenseSubscription LicenseType = "subscription"
+)
+
 type DP1Provenance struct {
+	Type     ProvenanceType `json:"type,omitempty"`
 	Contract struct {
-		TokenID string `json:"tokenId,omitempty"`
+		Chain    ProvenanceChain `json:"chain,omitempty"`
+		Standard *string         `json:"standard,omitempty"`
+		Address  *string         `json:"address,omitempty"`
+		SeriesID *string         `json:"seriesId,omitempty"`
+		TokenID  *string         `json:"tokenId,omitempty"`
+		URI      *string         `json:"uri,omitempty"`
+		MetaHash *string         `json:"metaHash,omitempty"`
 	} `json:"contract,omitempty"`
+	Dependencies *json.RawMessage `json:"dependencies,omitempty"`
+}
+
+type ProvenanceType string
+
+const (
+	ProvenanceOnChain            ProvenanceType = "onChain"
+	ProvenanceSeriesRegistration ProvenanceType = "seriesRegistration"
+	ProvenanceOffChainURI        ProvenanceType = "offChainURI"
+)
+
+type ProvenanceChain string
+
+const (
+	ProvenanceChainEthereum ProvenanceChain = "evm"
+	ProvenanceChainTezos    ProvenanceChain = "tezos"
+	ProvenanceChainBitmark  ProvenanceChain = "bitmark"
+	ProvenanceChainOther    ProvenanceChain = "other"
+)
+
+func normalizeProvenanceChain(blockchain string) ProvenanceChain {
+	if blockchain == "ethereum" {
+		return ProvenanceChainEthereum
+	}
+
+	casted := ProvenanceChain(blockchain)
+	switch casted {
+	case ProvenanceChainEthereum, ProvenanceChainTezos, ProvenanceChainBitmark:
+		return casted
+	default:
+		return ProvenanceChainOther
+	}
 }
 
 type Config struct {
@@ -334,8 +382,10 @@ func (p *refresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []IndexerT
 				continue
 			}
 
-			if _, ok := tokenIDs[provenance.Contract.TokenID]; ok {
-				filteredItems = append(filteredItems, item)
+			if provenance.Contract.TokenID != nil {
+				if _, ok := tokenIDs[*provenance.Contract.TokenID]; ok {
+					filteredItems = append(filteredItems, item)
+				}
 			}
 		}
 	}
@@ -474,6 +524,7 @@ func (p *refresher) buildGraphQLQuery(params map[string]string, offset int, page
 		) {
 			id
 			blockchain
+			contractType
 			contractAddress
 			asset {
 				metadata {
@@ -519,22 +570,24 @@ func (p *refresher) convertAllTokensToItems(tokens []IndexerToken) []DP1Item {
 func (p *refresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 	title := token.Asset.Metadata.Project.Latest.Title
 	previewURL := token.Asset.Metadata.Project.Latest.PreviewURL
-
+	chain := normalizeProvenanceChain(token.Blockchain)
 	provenance := json.RawMessage(fmt.Sprintf(`{
 		"type": "onChain",
 		"contract": {
 			"chain": "%s",
+			"standard": "%s",
+			"address": "%s",
 			"tokenId": "%s",
-			"address": "%s"
 		}
-	}`, token.Blockchain, token.ID, token.ContractAddress))
+	}`, chain, token.ContractType, token.ContractAddress, token.ID))
 
 	// Create DP1Item from IndexerToken
 	return DP1Item{
 		ID:         token.ID,
 		Title:      &title,
-		Source:     &previewURL,
+		Source:     previewURL,
 		Duration:   300,
+		License:    LicenseOpen,
 		Provenance: &provenance,
 	}
 }
