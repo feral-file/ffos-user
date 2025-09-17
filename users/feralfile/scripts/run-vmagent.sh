@@ -29,4 +29,4 @@ if [[ -n "${REMOTE_URL_BEARER_TOKEN}" ]]; then
   ARGS+=( -remoteWrite.bearerToken="${REMOTE_URL_BEARER_TOKEN}" )
 fi
 
-exec victoria-metrics-prod "${ARGS[@]}"
+exec vmagent-prod "${ARGS[@]}"

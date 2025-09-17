@@ -7,6 +7,8 @@ scrape_configs:
           - "127.0.0.1:9001" # feral-sys-monitord
         labels:
           instance: "${FF_DEVICE_ID}"
+          version: "${FF_VERSION}"
+          branch: "${FF_BRANCH}"
     metric_relabel_configs:
       - source_labels: ["__name__"]
         regex: "^promhttp_.*"
