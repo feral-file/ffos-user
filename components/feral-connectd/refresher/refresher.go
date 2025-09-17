@@ -232,6 +232,8 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 		}
 	}
 
+	p.logger.Info("Fetched player status", zap.Any("status", status))
+
 	// convert status to PlayerStatus struct
 	raw, err := p.json.Marshal(status)
 	if err != nil {
@@ -245,7 +247,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 	}
 
 	if !playerStatus.CastCommand.CastPlaylistCmd() {
-		p.logger.Debug("Player command is not displayPlaylist; skipping", zap.Any("command", playerStatus.CastCommand))
+		p.logger.Warn("Player command is not displayPlaylist; skipping", zap.Any("command", playerStatus.CastCommand))
 		return
 	}
 
