@@ -387,7 +387,7 @@ func (m *mediator) processPlaylistDynamicQueries(ctx context.Context, playlist *
 	if playlist.DynamicQueries != nil {
 		if startInterval {
 			m.logger.Info("CastPlaylist: starting interval for dynamic query")
-			m.refresher.StartWithDynamicQueries(ctx, playlist.DynamicQueries)
+			m.refresher.StartWithDynamicQueries(ctx, playlist.DynamicQueries, playlist, false)
 		}
 
 		// Query first 5 tokens and send interim CDP update
