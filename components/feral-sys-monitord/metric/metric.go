@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
 )
 
@@ -25,6 +27,15 @@ type SystemType int
 const (
 	SystemTypeIntel SystemType = iota
 	SystemTypeAMD
+)
+
+// Prometheus metrics
+var (
+	CPUTemperatureCurrent = promauto.NewGauge(prometheus.GaugeOpts{
+		Name:        "cpu_temperature_celsius",
+		Help:        "Current CPU temperature in Celsius",
+		ConstLabels: prometheus.Labels{"type": "current"},
+	})
 )
 
 type CPUMetrics struct {
@@ -294,6 +305,8 @@ func (p *SysResMonitor) monitorIntelTemperature(ctx context.Context) error {
 			p.lastMetrics.CPU.CurrentTemperature = current
 			p.lastMetrics.GPU.CurrentTemperature = current
 			p.Unlock()
+
+			CPUTemperatureCurrent.Set(current)
 		}
 		if inPackage && strings.Contains(line, "temp1_max:") {
 			fields := strings.Fields(line)

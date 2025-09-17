@@ -103,6 +103,14 @@ func main() {
 	mediator.Start()
 	defer mediator.Stop()
 
+	// Initialize Prometheus server
+	promServer := NewPromServer(logger)
+	err = promServer.Start()
+	if err != nil {
+		logger.Fatal("Prometheus server start failed", zap.Error(err))
+	}
+	defer promServer.Stop()
+
 	// send ready notification to systemd
 	sent, err := daemon.SdNotify(false, daemon.SdNotifyReady)
 	if err != nil {
