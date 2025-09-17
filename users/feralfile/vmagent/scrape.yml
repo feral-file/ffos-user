@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: "${JOB_NAME}"
+    static_configs:
+      - targets:
+          - "127.0.0.1:9001" # feral-sys-monitord
+        labels:
+          instance: "${FF_DEVICE_ID}"
+    metric_relabel_configs:
+      - source_labels: ["__name__"]
+        regex: "^promhttp_.*"
+        action: drop
