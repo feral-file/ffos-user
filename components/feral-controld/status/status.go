@@ -176,23 +176,27 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 
 // FetchPlayerStatus fetches the current player status via CDP once and returns the "message" payload
 func FetchPlayerStatus(ctx context.Context, c cdp.CDP, logger *zap.Logger) (map[string]interface{}, error) {
+	logger.Info("Fetching player status")
+	logger.Info("Building checkStatus payload")
 	payloadStr, err := buildCheckStatusPayload()
 	if err != nil {
 		return nil, err
 	}
 
+	logger.Info("Sending checkStatus payload", zap.String("payload", payloadStr))
 	expr := fmt.Sprintf("window.handleCDPRequest(%s)", payloadStr)
 	resultMap, err := sendCDPRequest(c, expr)
 	if err != nil {
 		return nil, err
 	}
 
+	logger.Info("Received resultMap", zap.Any("resultMap", resultMap))
 	message, err := extractMessage(resultMap)
 	if err != nil {
 		return nil, err
 	}
 
-	logger.Debug("Fetched player status", zap.Any("message", message))
+	logger.Info("Fetched player status", zap.Any("message", message))
 	return message, nil
 }
 
