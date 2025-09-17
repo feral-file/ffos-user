@@ -1,6 +1,7 @@
 package refresher
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -110,20 +111,6 @@ const (
 	ProvenanceChainOther    ProvenanceChain = "other"
 )
 
-func normalizeProvenanceChain(blockchain string) ProvenanceChain {
-	if blockchain == "ethereum" {
-		return ProvenanceChainEthereum
-	}
-
-	casted := ProvenanceChain(blockchain)
-	switch casted {
-	case ProvenanceChainEthereum, ProvenanceChainTezos, ProvenanceChainBitmark:
-		return casted
-	default:
-		return ProvenanceChainOther
-	}
-}
-
 type PlayerStatus struct {
 	CastCommand *relayer.RelayerCmd `json:"castCommand,omitempty"`
 
@@ -158,13 +145,12 @@ type Refresher interface {
 	Stop()
 
 	StartPollingWithPlaylistURL(ctx context.Context, playlistURL string, withInitialSync bool)
-	StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist *DP1Playlist, withInitialSync bool)
+	StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist DP1Playlist, withInitialSync bool)
 
 	FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error)
-	BuildInitialPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
+	BuildInitialPlaylistItems(ctx context.Context, playlist DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
 
-	// SetOnPlaylistUpdated registers a callback invoked after each successful URL-based refetch
-	SetOnPlaylistUpdated(callback func(ctx context.Context, playlist *DP1Playlist))
+	SetOnPlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist))
 }
 
 type refresher struct {
@@ -178,11 +164,11 @@ type refresher struct {
 	queryStopChan chan struct{}
 
 	// onPlaylistUpdated is called after each successful URL refetch
-	onPlaylistUpdated func(ctx context.Context, playlist *DP1Playlist)
+	onPlaylistUpdated func(ctx context.Context, playlist DP1Playlist)
 }
 
 // SetOnPlaylistUpdated registers a callback invoked after each successful URL-based refetch
-func (p *refresher) SetOnPlaylistUpdated(callback func(ctx context.Context, playlist *DP1Playlist)) {
+func (p *refresher) SetOnPlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onPlaylistUpdated = callback
@@ -205,7 +191,7 @@ func New(
 		json:          json,
 		clock:         clock,
 		logger:        logger,
-		queryStopChan: make(chan struct{}),
+		queryStopChan: nil,
 	}
 }
 
@@ -266,7 +252,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 
 	if len(playerStatus.Playlist.DynamicQueries) > 0 {
 		p.logger.Info("Auto: starting dynamic queries refresher", zap.Int("query_count", len(playerStatus.Playlist.DynamicQueries)))
-		p.StartPollingWithDynamicQueries(ctx, playerStatus.Playlist.DynamicQueries, playerStatus.Playlist, true)
+		p.StartPollingWithDynamicQueries(ctx, playerStatus.Playlist.DynamicQueries, *playerStatus.Playlist, true)
 		return
 	}
 
@@ -303,7 +289,7 @@ func (p *refresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL
 		}
 
 		if len(playlist.DynamicQueries) > 0 {
-			playlistItems, err := p.buildPlaylistItems(ctx, playlist, playlist.DynamicQueries, -1)
+			playlistItems, err := p.buildPlaylistItems(ctx, *playlist, playlist.DynamicQueries, -1)
 			if err != nil {
 				return nil, err
 			}
@@ -317,7 +303,7 @@ func (p *refresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL
 }
 
 // StartPollingWithDynamicQueries starts an interval to execute dynamic queries periodically.
-func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist *DP1Playlist, withInitialSync bool) {
+func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist DP1Playlist, withInitialSync bool) {
 	p.logger.Info("Starting playlist refresher by dynamic query", zap.Any("dynamicQueries", dynamicQueries))
 
 	rebuildPlaylistFn := func(ctx context.Context) (*DP1Playlist, error) {
@@ -326,7 +312,7 @@ func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQ
 			return nil, err
 		}
 		playlist.Items = playlistItems
-		return playlist, nil
+		return &playlist, nil
 	}
 
 	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
@@ -358,7 +344,11 @@ func (p *refresher) startRefresher(
 			p.logger.Warn("Rebuild playlist failed", zap.Error(err))
 			return
 		}
-		p.notifyPlaylistUpdated(ctx, playlist)
+		if playlist == nil {
+			p.logger.Warn("Rebuild playlist returned nil")
+			return
+		}
+		p.notifyPlaylistUpdated(ctx, *playlist)
 	}
 
 	// Initial run if requested
@@ -391,7 +381,7 @@ func (p *refresher) startRefresher(
 	}()
 }
 
-func (p *refresher) notifyPlaylistUpdated(ctx context.Context, playlist *DP1Playlist) {
+func (p *refresher) notifyPlaylistUpdated(ctx context.Context, playlist DP1Playlist) {
 	p.mu.RLock()
 	cb := p.onPlaylistUpdated
 	p.mu.RUnlock()
@@ -436,12 +426,12 @@ func (p *refresher) FetchPlaylistByURL(ctx context.Context, playlistURL string) 
 	return &playlist, nil
 }
 
-func (p *refresher) BuildInitialPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error) {
+func (p *refresher) BuildInitialPlaylistItems(ctx context.Context, playlist DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error) {
 	return p.buildPlaylistItems(ctx, playlist, dynamicQueries, p.config.InitialPageSize)
 }
 
 // BuildPlaylistItems executes the raw dynamicQueries and returns playlist items (empty slice if none)
-func (p *refresher) buildPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery, limit int) ([]DP1Item, error) {
+func (p *refresher) buildPlaylistItems(ctx context.Context, playlist DP1Playlist, dynamicQueries []DynamicQuery, limit int) ([]DP1Item, error) {
 	if limit <= 0 {
 		p.logger.Info("Building playlist items", zap.Any("dynamicQueries", dynamicQueries))
 	} else {
@@ -450,7 +440,8 @@ func (p *refresher) buildPlaylistItems(ctx context.Context, playlist *DP1Playlis
 
 	tokens, err := p.executeDynamicQueries(ctx, dynamicQueries, limit)
 	if err != nil {
-		return nil, err
+		p.logger.Error("Failed to execute dynamic queries", zap.Error(err))
+		tokens = []IndexerToken{}
 	}
 
 	items := p.mergeItemsAndTokens(playlist, tokens)
@@ -467,7 +458,7 @@ func (p *refresher) buildPlaylistItems(ctx context.Context, playlist *DP1Playlis
 }
 
 // mergeItemsAndTokens filters existing playlist items by tokens or converts all tokens to items
-func (p *refresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []IndexerToken) []DP1Item {
+func (p *refresher) mergeItemsAndTokens(playlist DP1Playlist, tokens []IndexerToken) []DP1Item {
 	p.logger.Info("Merging playlist items and tokens")
 
 	// If playlist items are empty, convert all tokens to items
@@ -486,17 +477,17 @@ func (p *refresher) mergeItemsAndTokens(playlist *DP1Playlist, tokens []IndexerT
 
 	var filteredItems []DP1Item
 	for _, item := range playlist.Items {
-		if item.ID != "" {
-			var provenance DP1Provenance
-			if err := p.json.Unmarshal(*item.Provenance, &provenance); err != nil {
-				p.logger.Warn("Failed to unmarshal provenance", zap.Error(err))
-				continue
-			}
-
-			if provenance.Contract.TokenID != nil {
-				if _, ok := tokenIDs[*provenance.Contract.TokenID]; ok {
-					filteredItems = append(filteredItems, item)
-				}
+		if item.ID == "" || item.Provenance == nil {
+			continue
+		}
+		var provenance DP1Provenance
+		if err := p.json.Unmarshal(*item.Provenance, &provenance); err != nil {
+			p.logger.Warn("Failed to unmarshal provenance", zap.Error(err))
+			continue
+		}
+		if provenance.Contract.TokenID != nil {
+			if _, ok := tokenIDs[*provenance.Contract.TokenID]; ok {
+				filteredItems = append(filteredItems, item)
 			}
 		}
 	}
@@ -577,7 +568,7 @@ func (p *refresher) executeGraphQLQuery(ctx context.Context, endpoint, query str
 			return fmt.Errorf("failed to marshal request body: %w", err)
 		}
 
-		resp, err := p.http.Post(endpoint, "application/json", strings.NewReader(string(bodyBytes)))
+		resp, err := p.http.Post(endpoint, "application/json", bytes.NewReader(bodyBytes))
 		if err != nil {
 			return fmt.Errorf("failed to execute request: %w", err)
 		}
@@ -682,24 +673,41 @@ func (p *refresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 	title := token.Asset.Metadata.Project.Latest.Title
 	previewURL := token.Asset.Metadata.Project.Latest.PreviewURL
 	chain := normalizeProvenanceChain(token.Blockchain)
-	provenance := json.RawMessage(fmt.Sprintf(`{
-		"type": "onChain",
-		"contract": {
-			"chain": "%s",
-			"standard": "%s",
-			"address": "%s",
-			"tokenId": "%s",
-		}
-	}`, chain, token.ContractType, token.ContractAddress, token.ID))
 
-	// Create DP1Item from IndexerToken
+	contract := map[string]interface{}{
+		"chain":    chain,
+		"standard": token.ContractType,
+		"address":  token.ContractAddress,
+		"tokenId":  token.ID,
+	}
+	provenanceObj := map[string]interface{}{
+		"type":     "onChain",
+		"contract": contract,
+	}
+	provenanceBytes, _ := json.Marshal(provenanceObj)
+	provenanceRaw := json.RawMessage(provenanceBytes)
+
 	return DP1Item{
 		ID:         token.ID,
 		Title:      &title,
 		Source:     previewURL,
 		Duration:   300,
 		License:    LicenseOpen,
-		Provenance: &provenance,
+		Provenance: &provenanceRaw,
+	}
+}
+
+func normalizeProvenanceChain(blockchain string) ProvenanceChain {
+	b := strings.ToLower(strings.TrimSpace(blockchain))
+	switch b {
+	case "ethereum", "evm":
+		return ProvenanceChainEthereum
+	case "tezos":
+		return ProvenanceChainTezos
+	case "bitmark":
+		return ProvenanceChainBitmark
+	default:
+		return ProvenanceChainOther
 	}
 }
 

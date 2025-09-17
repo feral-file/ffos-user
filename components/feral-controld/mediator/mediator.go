@@ -70,7 +70,7 @@ func (m *mediator) Start() {
 	m.dbus.OnBusSignal(m.handleDBusSignal)
 	m.relayer.OnRelayerMessage(m.handleRelayerMessage)
 
-	m.refresher.SetOnPlaylistUpdated(func(ctx context.Context, playlist *refresher.DP1Playlist) {
+	m.refresher.SetOnPlaylistUpdated(func(ctx context.Context, playlist refresher.DP1Playlist) {
 		m.logger.Info("Refresher callback: playlist updated, sending CDP update")
 
 		payload := relayer.Payload{}
@@ -270,7 +270,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				if hasPlaylistURL {
 					playlist, err = m.handlePlaylistFromURL(tracedCtx, playlistURLRaw, parseSpan, &finalErr)
 				} else {
-					playlist, err = m.handlePlaylistFromArgs(tracedCtx, payload, parseSpan, &finalErr)
+					playlist, err = m.handlePlaylistFromArgs(payload, parseSpan, &finalErr)
 				}
 
 				if err != nil {
@@ -348,7 +348,7 @@ func (m *mediator) handlePlaylistFromURL(ctx context.Context, playlistURLRaw int
 }
 
 // handlePlaylistFromArgs handles playlist from provided arguments
-func (m *mediator) handlePlaylistFromArgs(ctx context.Context, payload relayer.Payload, parseSpan *sentry.Span, finalErr *error) (*refresher.DP1Playlist, error) {
+func (m *mediator) handlePlaylistFromArgs(payload relayer.Payload, parseSpan *sentry.Span, finalErr *error) (*refresher.DP1Playlist, error) {
 	playlistRaw, ok := payload.Message.Args["dp1_call"]
 	if !ok {
 		err := fmt.Errorf("payload doesn't contain playlist")
@@ -387,11 +387,11 @@ func (m *mediator) processPlaylistDynamicQueries(ctx context.Context, playlist *
 	if playlist.DynamicQueries != nil {
 		if startInterval {
 			m.logger.Info("CastPlaylist: starting interval for dynamic query")
-			m.refresher.StartPollingWithDynamicQueries(ctx, playlist.DynamicQueries, playlist, false)
+			m.refresher.StartPollingWithDynamicQueries(ctx, playlist.DynamicQueries, *playlist, false)
 		}
 
 		// Query first 5 tokens and send interim CDP update
-		dp1Items, err := m.refresher.BuildInitialPlaylistItems(ctx, playlist, playlist.DynamicQueries)
+		dp1Items, err := m.refresher.BuildInitialPlaylistItems(ctx, *playlist, playlist.DynamicQueries)
 		if err != nil {
 			m.logger.Error("CastPlaylist: dynamic query failed", zap.Error(err))
 			m.tracer.FinishSpanWithError(parseSpan, err)
@@ -403,10 +403,10 @@ func (m *mediator) processPlaylistDynamicQueries(ctx context.Context, playlist *
 	}
 
 	// Validate items
-	return m.ensurePlaylistHasItems(playlist, parseSpan, finalErr)
+	return m.ensurePlaylistHasItems(*playlist, parseSpan, finalErr)
 }
 
-func (m *mediator) ensurePlaylistHasItems(playlist *refresher.DP1Playlist, parseSpan *sentry.Span, finalErr *error) error {
+func (m *mediator) ensurePlaylistHasItems(playlist refresher.DP1Playlist, parseSpan *sentry.Span, finalErr *error) error {
 	if len(playlist.Items) > 0 {
 		return nil
 	}
