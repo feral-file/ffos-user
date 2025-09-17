@@ -157,7 +157,7 @@ type Refresher interface {
 	Start(ctx context.Context, playerStatus func(ctx context.Context) (map[string]interface{}, error))
 	Stop()
 
-	StartWithURL(ctx context.Context, playlistURL string)
+	StartWithURL(ctx context.Context, playlistURL string, immediateFetch bool)
 	StartWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery)
 	FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error)
 	BuildInitialPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
@@ -253,7 +253,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 
 	if playerStatus.PlaylistURL != nil && *playerStatus.PlaylistURL != "" {
 		p.logger.Info("Auto: starting URL refresher", zap.String("url", *playerStatus.PlaylistURL))
-		p.StartWithURL(ctx, *playerStatus.PlaylistURL)
+		p.StartWithURL(ctx, *playerStatus.PlaylistURL, true)
 		return
 	}
 
@@ -291,8 +291,8 @@ func (p *refresher) Stop() {
 	}
 }
 
-// StartWithURL starts an interval to fetch playlist object by URL
-func (p *refresher) StartWithURL(ctx context.Context, playlistURL string) {
+// StartWithURL starts an interval to fetch playlist object by URL.
+func (p *refresher) StartWithURL(ctx context.Context, playlistURL string, immediateFetch bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -306,8 +306,31 @@ func (p *refresher) StartWithURL(ctx context.Context, playlistURL string) {
 		close(p.queryStopChan)
 	}
 	p.queryStopChan = make(chan struct{})
-
 	p.queryTicker = p.clock.NewTicker(p.config.RefreshInterval)
+
+	// Helper: fetch playlist and notify listener
+	fetchAndNotify := func(ctx context.Context) {
+		playlist, err := p.FetchPlaylistByURL(ctx, playlistURL)
+		if err != nil {
+			p.logger.Warn("Playlist fetch failed", zap.Error(err))
+			return
+		}
+		p.logger.Info("Playlist fetch completed", zap.Any("playlist", playlist))
+
+		p.mu.RLock()
+		cb := p.onPlaylistUpdated
+		p.mu.RUnlock()
+		if cb != nil {
+			cb(ctx, playlist)
+		}
+	}
+
+	// Immediate fetch (non-blocking)
+	if immediateFetch {
+		go fetchAndNotify(ctx)
+	}
+
+	// Periodic fetch goroutine
 	go func() {
 		defer func() {
 			p.mu.Lock()
@@ -326,21 +349,7 @@ func (p *refresher) StartWithURL(ctx context.Context, playlistURL string) {
 				p.logger.Info("StartWithURL goroutine stopped due to stop signal")
 				return
 			case <-p.queryTicker.C:
-				playlist, err := p.FetchPlaylistByURL(ctx, playlistURL)
-				if err != nil {
-					p.logger.Warn("Periodic playlist fetch failed", zap.Error(err))
-					continue
-				}
-
-				p.logger.Info("Periodic playlist fetch completed", zap.Any("playlist", playlist))
-
-				// Notify listener for further processing (e.g., update CDP)
-				p.mu.RLock()
-				cb := p.onPlaylistUpdated
-				p.mu.RUnlock()
-				if cb != nil {
-					cb(ctx, playlist)
-				}
+				fetchAndNotify(ctx)
 			}
 		}
 	}()
