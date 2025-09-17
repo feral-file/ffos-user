@@ -157,8 +157,9 @@ type Refresher interface {
 	Start(ctx context.Context, playerStatus func(ctx context.Context) (map[string]interface{}, error))
 	Stop()
 
-	StartWithURL(ctx context.Context, playlistURL string, withInitialSync bool)
-	StartWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist *DP1Playlist, withInitialSync bool)
+	StartPollingWithPlaylistURL(ctx context.Context, playlistURL string, withInitialSync bool)
+	StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist *DP1Playlist, withInitialSync bool)
+
 	FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error)
 	BuildInitialPlaylistItems(ctx context.Context, playlist *DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
 
@@ -253,7 +254,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 
 	if playerStatus.PlaylistURL != nil && *playerStatus.PlaylistURL != "" {
 		p.logger.Info("Auto: starting URL refresher", zap.String("url", *playerStatus.PlaylistURL))
-		p.StartWithURL(ctx, *playerStatus.PlaylistURL, true)
+		p.StartPollingWithPlaylistURL(ctx, *playerStatus.PlaylistURL, true)
 		return
 	}
 
@@ -265,7 +266,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 
 	if len(playerStatus.Playlist.DynamicQueries) > 0 {
 		p.logger.Info("Auto: starting dynamic queries refresher", zap.Int("query_count", len(playerStatus.Playlist.DynamicQueries)))
-		p.StartWithDynamicQueries(ctx, playerStatus.Playlist.DynamicQueries, playerStatus.Playlist, true)
+		p.StartPollingWithDynamicQueries(ctx, playerStatus.Playlist.DynamicQueries, playerStatus.Playlist, true)
 		return
 	}
 
@@ -291,8 +292,8 @@ func (p *refresher) Stop() {
 	}
 }
 
-// StartWithURL starts an interval to fetch playlist object by URL.
-func (p *refresher) StartWithURL(ctx context.Context, playlistURL string, withInitialSync bool) {
+// StartPollingWithPlaylistURL starts an interval to fetch playlist object by URL.
+func (p *refresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL string, withInitialSync bool) {
 	p.logger.Info("Starting playlist refresher by URL", zap.String("url", playlistURL))
 
 	rebuildPlaylistFn := func(ctx context.Context) (*DP1Playlist, error) {
@@ -315,8 +316,8 @@ func (p *refresher) StartWithURL(ctx context.Context, playlistURL string, withIn
 	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
 }
 
-// StartWithDynamicQueries starts an interval to execute dynamic queries periodically.
-func (p *refresher) StartWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist *DP1Playlist, withInitialSync bool) {
+// StartPollingWithDynamicQueries starts an interval to execute dynamic queries periodically.
+func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist *DP1Playlist, withInitialSync bool) {
 	p.logger.Info("Starting playlist refresher by dynamic query", zap.Any("dynamicQueries", dynamicQueries))
 
 	rebuildPlaylistFn := func(ctx context.Context) (*DP1Playlist, error) {

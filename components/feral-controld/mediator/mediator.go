@@ -333,7 +333,7 @@ func (m *mediator) handlePlaylistFromURL(ctx context.Context, playlistURLRaw int
 
 	m.logger.Info("CastPlaylist: starting interval to fetch playlist by URL")
 
-	m.refresher.StartWithURL(ctx, urlStr, false)
+	m.refresher.StartPollingWithPlaylistURL(ctx, urlStr, false)
 
 	// Fetch immediately for current request
 	playlist, err := m.refresher.FetchPlaylistByURL(ctx, urlStr)
@@ -387,7 +387,7 @@ func (m *mediator) processPlaylistDynamicQueries(ctx context.Context, playlist *
 	if playlist.DynamicQueries != nil {
 		if startInterval {
 			m.logger.Info("CastPlaylist: starting interval for dynamic query")
-			m.refresher.StartWithDynamicQueries(ctx, playlist.DynamicQueries, playlist, false)
+			m.refresher.StartPollingWithDynamicQueries(ctx, playlist.DynamicQueries, playlist, false)
 		}
 
 		// Query first 5 tokens and send interim CDP update
