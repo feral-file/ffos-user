@@ -691,7 +691,7 @@ func (p *refresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 		ID:         token.ID,
 		Title:      &title,
 		Source:     previewURL,
-		Duration:   300,
+		Duration:   30,
 		License:    LicenseOpen,
 		Provenance: &provenanceRaw,
 	}
