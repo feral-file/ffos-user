@@ -266,15 +266,21 @@ func (p *SysResMonitor) monitorCPUFrequency(_ context.Context) error {
 func (p *SysResMonitor) monitorCPUTemperature(ctx context.Context) error {
 	switch p.systemType {
 	case SystemTypeIntel:
-		return p.monitorIntelTemperature(ctx)
+		if err := p.monitorIntelTemperature(ctx); err != nil {
+			return err
+		}
 	case SystemTypeAMD:
 		if err := p.monitorAMDCPUTemperature(ctx); err != nil {
 			return err
 		}
-		return p.monitorAMDGPUTemperature(ctx)
+		if err := p.monitorAMDGPUTemperature(ctx); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unsupported system type")
 	}
+	CPUTemperatureCelsius.Set(p.lastMetrics.CPU.CurrentTemperature)
+	return nil
 }
 
 func (p *SysResMonitor) monitorIntelTemperature(ctx context.Context) error {
@@ -312,8 +318,6 @@ func (p *SysResMonitor) monitorIntelTemperature(ctx context.Context) error {
 			p.lastMetrics.CPU.CurrentTemperature = current
 			p.lastMetrics.GPU.CurrentTemperature = current
 			p.Unlock()
-
-			CPUTemperatureCelsius.Set(current)
 		}
 		if inPackage && strings.Contains(line, "temp1_max:") {
 			fields := strings.Fields(line)
