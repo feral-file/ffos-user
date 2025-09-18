@@ -28,8 +28,9 @@ func NewPromServer(logger *zap.Logger) *PromServer {
 
 func (s *PromServer) Start() error {
 	s.server = &http.Server{
-		Addr:    "localhost:9001",
-		Handler: promhttp.Handler(),
+		Addr:              "localhost:9001",
+		Handler:           promhttp.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {

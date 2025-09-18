@@ -109,7 +109,11 @@ func main() {
 	if err != nil {
 		logger.Fatal("Prometheus server start failed", zap.Error(err))
 	}
-	defer promServer.Stop()
+	defer func() {
+		if err := promServer.Stop(); err != nil {
+			logger.Warn("Failed to stop promServer", zap.Error(err))
+		}
+	}()
 
 	// send ready notification to systemd
 	sent, err := daemon.SdNotify(false, daemon.SdNotifyReady)
