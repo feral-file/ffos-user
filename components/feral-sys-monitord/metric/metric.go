@@ -31,10 +31,13 @@ const (
 
 // Prometheus metrics
 var (
-	CPUTemperatureCurrent = promauto.NewGauge(prometheus.GaugeOpts{
-		Name:        "cpu_temperature_celsius",
-		Help:        "Current CPU temperature in Celsius",
-		ConstLabels: prometheus.Labels{"type": "current"},
+	CPUTemperatureCelsius = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cpu_temperature_celsius",
+		Help: "Current CPU temperature in Celsius",
+	})
+	CPUUptimeSeconds = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cpu_uptime_seconds",
+		Help: "Current CPU uptime in seconds",
 	})
 )
 
@@ -306,7 +309,7 @@ func (p *SysResMonitor) monitorIntelTemperature(ctx context.Context) error {
 			p.lastMetrics.GPU.CurrentTemperature = current
 			p.Unlock()
 
-			CPUTemperatureCurrent.Set(current)
+			CPUTemperatureCelsius.Set(current)
 		}
 		if inPackage && strings.Contains(line, "temp1_max:") {
 			fields := strings.Fields(line)
@@ -615,9 +618,12 @@ func (p *SysResMonitor) monitorUptime(_ context.Context) error {
 		return err
 	}
 
+	lastUptimeSec := p.lastMetrics.Uptime
 	p.Lock()
 	p.lastMetrics.Uptime = uptimeSec
 	p.Unlock()
+
+	CPUUptimeSeconds.Add(uptimeSec - lastUptimeSec)
 
 	return nil
 }
