@@ -9,7 +9,6 @@ ExecStartPre=/home/feralfile/scripts/setup-vmagent.sh
 ExecStart=/home/feralfile/scripts/run-vmagent.sh
 Restart=always
 RestartSec=5s
-WatchdogSec=30s
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
 StandardOutput=append:/home/feralfile/.logs/vmagent.log
 StandardError=append:/home/feralfile/.logs/vmagent.log
