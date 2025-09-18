@@ -63,15 +63,15 @@ const (
 	CMD_REBOOT               RelayerCmd = "reboot"
 	CMD_DEVICE_STATUS        RelayerCmd = "getDeviceStatus"
 	CMD_UPDATE_TO_LATEST     RelayerCmd = "updateToLatestVersion"
-	CMD_PLAYLIST_REFRESH     RelayerCmd = "displayPlaylist"
+	CMD_DISPLAY_PLAYLIST     RelayerCmd = "displayPlaylist"
 )
 
 func (c RelayerCmd) ControldCmds() bool {
 	return ControldCmds[c]
 }
 
-func (c RelayerCmd) CastPlaylistCmd() bool {
-	return c == CMD_PLAYLIST_REFRESH
+func (c RelayerCmd) DisplayPlaylistCmd() bool {
+	return c == CMD_DISPLAY_PLAYLIST
 }
 
 type Payload struct {

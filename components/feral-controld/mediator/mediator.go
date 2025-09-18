@@ -74,20 +74,15 @@ func (m *mediator) Start() {
 		m.logger.Info("Refresher callback: playlist updated, sending CDP update")
 
 		payload := relayer.Payload{}
-		cmd := relayer.CMD_PLAYLIST_REFRESH
+		cmd := relayer.CMD_DISPLAY_PLAYLIST
 		payload.Message.Command = &cmd
 		payload.Message.Args = map[string]interface{}{
 			"dp1_call": playlist,
+			"refresh":  true,
 		}
 
-		// Best-effort send; log errors but do not crash
 		if _, err := m.sendCDPRequest(ctx, payload); err != nil {
 			m.logger.Warn("Failed to send CDP request on playlist refresh", zap.Error(err))
-		}
-
-		// Optionally force a status refresh so dashboards reflect changes
-		if m.statusPoller != nil {
-			m.statusPoller.ForceRefresh()
 		}
 	})
 }
@@ -261,7 +256,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			return err
 
 		} else {
-			if cmd.CastPlaylistCmd() {
+			if cmd.DisplayPlaylistCmd() {
 				playlistURLRaw, hasPlaylistURL := payload.Message.Args["playlistUrl"]
 				var playlist *refresher.DP1Playlist
 				var err error

@@ -233,7 +233,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 		return
 	}
 
-	if !playerStatus.CastCommand.CastPlaylistCmd() {
+	if !playerStatus.CastCommand.DisplayPlaylistCmd() {
 		p.logger.Warn("Player command is not displayPlaylist; skipping", zap.Any("command", playerStatus.CastCommand))
 		return
 	}
