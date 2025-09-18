@@ -9,7 +9,7 @@ if [ ! -f "$LOG_CONFIG_FILE" ]; then
   cat > "$LOG_CONFIG_FILE" <<'EOL'
 # Format: LOG_PATH|ROTATED_LOG_DIR
 /home/feralfile/.logs/chromium.log|/home/feralfile/.logs/backup/chromium
-/home/feralfile/.logs/connectd.log|/home/feralfile/.logs/backup/connectd
+/home/feralfile/.logs/controld.log|/home/feralfile/.logs/backup/controld
 /home/feralfile/.logs/setupd.log|/home/feralfile/.logs/backup/setupd
 /home/feralfile/.logs/timesyncd.log|/home/feralfile/.logs/backup/timesyncd
 /home/feralfile/.logs/sys-monitord.log|/home/feralfile/.logs/backup/sys-monitord

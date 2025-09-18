@@ -55,3 +55,10 @@ func closeFile(f *os.File) {
 		logger.Error("Error closing file", zap.Error(err))
 	}
 }
+
+func safeDivide(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
+}

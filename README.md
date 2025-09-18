@@ -5,7 +5,7 @@
 
 | Component | Build Status | Lint Status | Code Coverage |
 |-----------|--------------|--------------- | ---------------|
-| **feral-connectd** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-connectd.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-connectd.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-connectd.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-connectd.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-connectd&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
+| **feral-controld** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-controld.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-controld.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-controld.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-controld.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-controld&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 | **feral-setupd** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-setupd.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-setupd.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-setupd.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-setupd.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-setupd&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 | **feral-sys-monitord** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-sys-monitord.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-sys-monitord.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-sys-monitord.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-sys-monitord.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-sys-monitord&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 | **feral-app-monitord** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-app-monitord.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-app-monitord.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-app-monitord.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-app-monitord.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-app-monitord&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
@@ -25,7 +25,7 @@ FFOS-USER is a pure data repository that provides components and user data to th
 │  │   components/    │    │     users/      │              │
 │  │                  │    │                 │              │
 │  │ ┌──────────────┐ │    │ ┌─────────────┐ │              │
-│  │ │feral-connectd│ │    │ │  feralfile  │ │              │
+│  │ │feral-controld│ │    │ │  feralfile  │ │              │
 │  │ │feral-setupd  │ │    │ │  soaktest   │ │              │
 │  │ │feral-sys-    │ │    │ │             │ │              │
 │  │ │  monitord    │ │    │ │ Configs     │ │              │
@@ -51,7 +51,7 @@ FFOS-USER is a pure data repository that provides components and user data to th
 ```
 ffos-user/
 ├── components/                    # Service components
-│   ├── feral-connectd/           # Connection daemon
+│   ├── feral-controld/           # Connection daemon
 │   │   ├── main.go
 │   │   ├── go.mod
 │   │   └── ...
@@ -76,7 +76,7 @@ ffos-user/
     │   │   │   │   ├── feral-setupd.service
     │   │   │   │   ├── chromium-kiosk.service
     │   │   │   │   └── ...
-    │   │   ├── connectd.json
+    │   │   ├── controld.json
     │   │   └── watchdog.json
     │   ├── .bash_profile         # Shell configuration
     │   └── ...
@@ -91,11 +91,11 @@ ffos-user/
 
 ### Service Components Layer
 
-#### 1. Connection Layer (`feral-connectd`)
+#### 1. Connection Layer (`feral-controld`)
 - **Purpose**: Manages device connectivity and communication
 - **Language**: Go
 - **Dependencies**: WebSocket, HTTP, CDP
-- **Build Output**: `feral-connectd-{version}-x86_64.pkg.tar.zst`
+- **Build Output**: `feral-controld-{version}-x86_64.pkg.tar.zst`
 
 #### 2. Setup Layer (`feral-setupd`)
 - **Purpose**: Handles device initialization and configuration
@@ -129,7 +129,7 @@ users/feralfile/
 │   │   ├── feral-setupd.service
 │   │   ├── chromium-kiosk.service
 │   │   └── ...
-│   ├── connectd.json            # Connection daemon config
+│   ├── controld.json            # Connection daemon config
 │   └── watchdog.json            # Watchdog config
 └── .bash_profile                # Shell environment
 ```
@@ -186,7 +186,7 @@ ffos-user/develop → ffos build → R2/{develop}/
 ### Commit Guidelines
 - Use conventional commit format
 - Prefix with component name for clarity
-- Example: `feral-connectd: add heartbeat functionality`
+- Example: `feral-controld: add heartbeat functionality`
 
 ## Setup Instructions
 
