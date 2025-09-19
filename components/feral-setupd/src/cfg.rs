@@ -11,8 +11,6 @@ static CURRENT_BUILD: OnceLock<RunningBuild> = OnceLock::new();
 struct LocalConfigJSON {
     branch: String,
     version: String,
-    distribution_acc: String,
-    distribution_pass: String,
     endpoint: String,
     webapp_url: Option<String>,
 }
@@ -21,8 +19,6 @@ struct LocalConfigJSON {
 struct RunningBuild {
     pub branch: String,
     pub version: Version,
-    pub acc: String,
-    pub pwd: String,
     pub endpoint: String,
     pub webapp_url: Option<String>,
 }
@@ -35,16 +31,6 @@ pub async fn branch() -> Result<String> {
 pub async fn current_version() -> Result<Version> {
     let current = current_cfg().await?;
     Ok(current.version)
-}
-
-pub async fn acc() -> Result<String> {
-    let current = current_cfg().await?;
-    Ok(current.acc)
-}
-
-pub async fn pwd() -> Result<String> {
-    let current = current_cfg().await?;
-    Ok(current.pwd)
 }
 
 pub async fn endpoint() -> Result<String> {
@@ -70,8 +56,6 @@ async fn current_cfg() -> Result<RunningBuild> {
     let build = RunningBuild {
         branch: cfg.branch,
         version,
-        acc: cfg.distribution_acc,
-        pwd: cfg.distribution_pass,
         endpoint: cfg.endpoint,
         webapp_url: cfg.webapp_url,
     };

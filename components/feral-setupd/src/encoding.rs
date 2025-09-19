@@ -1,5 +1,3 @@
-use crate::constant;
-
 pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut shift = 0;
@@ -50,25 +48,4 @@ pub fn encode_payload(vals: &[&[u8]]) -> Vec<u8> {
         buf.extend_from_slice(val);
     }
     buf
-}
-
-pub fn get_device_id() -> String {
-    let mac_address = mac_address::get_mac_address().unwrap_or(None);
-    let mac_address = match mac_address {
-        Some(mac) => mac.bytes(),
-        None => [0_u8; 6],
-    };
-
-    let digest = md5::compute(mac_address);
-    let mut s = String::with_capacity(constant::MD5_LENGTH);
-    for &b in &digest[..constant::MD5_LENGTH] {
-        let v = b % 36;
-        let c = if v < 10 {
-            (v + 48) as char // '0'..'9'
-        } else {
-            (v + 55) as char // 'A'..'Z'
-        };
-        s.push(c);
-    }
-    format!("{}{}", constant::DEVICE_ID_PREFIX, s)
 }

@@ -5,9 +5,9 @@ on:
     branches: [main, develop]
 
 jobs:
-  test-connectd:
-    name: Test Connectd
-    uses: ./.github/workflows/test-connectd.yaml
+  test-controld:
+    name: Test Controld
+    uses: ./.github/workflows/test-controld.yaml
     with:
       upload-coverage: true
     secrets: inherit

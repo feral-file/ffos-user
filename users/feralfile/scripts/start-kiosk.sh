@@ -29,7 +29,7 @@ exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && 
     --autoplay-policy=no-user-gesture-required \
     --allow-file-access-from-files \
     --enable-logging=stderr \
-    --v=1 \
+    --v=0 \
     --disk-cache-size=1073741824 \
     --hide-scrollbars \
     file:///opt/feral/ui/launcher/index.html?step=logo"

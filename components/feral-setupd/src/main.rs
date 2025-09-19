@@ -182,8 +182,8 @@ async fn run() -> Result<()> {
         println!("MAIN: Bluetooth advertising started successfully");
     }
 
-    // Wait for connectd D-Bus connection before proceeding
-    wait_for_connectd(Duration::from_millis(constant::WAIT_FOR_CONNECTD_TIMEOUT)).await?;
+    // Wait for controld D-Bus connection before proceeding
+    wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await?;
 
     // If the device used to be able to connect to the internet
     // It's likely that it will have internet again really soon
@@ -237,7 +237,7 @@ async fn run() -> Result<()> {
             let topic_id = match dbus_utils::get_relayer_info() {
                 Ok(info) => info,
                 Err(e) => {
-                    eprintln!("QEMU: can't get relayer data from connectd: {e:#?}");
+                    eprintln!("QEMU: can't get relayer data from controld: {e:#?}");
                     String::new()
                 }
             };
@@ -251,8 +251,8 @@ async fn run() -> Result<()> {
     let qrcode_switch_cb = create_qrcode_switch_cb(app_state.clone(), chrome.clone());
     let stop_dbus_listener = Arc::new(AtomicBool::new(false));
     dbus_utils::listen_for_signal(
-        constant::DBUS_CONNECTD_OBJECT,
-        constant::DBUS_CONNECTD_INTERFACE,
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
         constant::DBUS_EVENT_QRCODE_SWITCH,
         stop_dbus_listener.clone(),
         qrcode_switch_cb,
@@ -417,11 +417,11 @@ async fn internet_setup_successfully_cb(
         }
     }
 
-    // Get topic id from connectd
+    // Get topic id from controld
     let topic_id = match dbus_utils::get_relayer_info() {
         Ok(info) => info,
         Err(e) => {
-            eprintln!("BLE: can't get relayer data from connectd: {e:#?}");
+            eprintln!("BLE: can't get relayer data from controld: {e:#?}");
             return Err(constant::BLE_ERR_CODE_SERVER_UNREACHABLE);
         }
     };
@@ -588,7 +588,10 @@ async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
                         .await;
             }
             Err(e) => {
-                return Err(e).context("update process failed");
+                let _ =
+                    show_system_upgrade(&chrome, &app_state, &format!("{base_msg}&subtext={e}"))
+                        .await;
+                return Err(e.context("update process failed"));
             }
         }
     }
@@ -665,18 +668,18 @@ async fn show_factory_reset(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) -> Res
     Ok(())
 }
 
-async fn wait_for_connectd(timeout: Duration) -> Result<()> {
-    println!("MAIN: Waiting for connectd connection...");
+async fn wait_for_controld(timeout: Duration) -> Result<()> {
+    println!("MAIN: Waiting for controld connection...");
 
     let wait_future = async {
         loop {
             match dbus_utils::check_dbus_connection(
-                constant::DBUS_CONNECTD_DESTINATION,
-                constant::DBUS_CONNECTD_OBJECT,
+                constant::DBUS_CONTROLD_DESTINATION,
+                constant::DBUS_CONTROLD_OBJECT,
             ) {
                 Ok(_) => break,
                 Err(e) => {
-                    println!("MAIN: connectd not available yet: {e:#?}, retrying in 2 seconds...");
+                    println!("MAIN: controld not available yet: {e:#?}, retrying in 2 seconds...");
                     time::sleep(Duration::from_secs(2)).await;
                 }
             }
@@ -685,6 +688,6 @@ async fn wait_for_connectd(timeout: Duration) -> Result<()> {
 
     match time::timeout(timeout, wait_future).await {
         Ok(_) => Ok(()),
-        Err(_) => Err(anyhow::anyhow!("Timeout waiting for connectd connection")),
+        Err(_) => Err(anyhow::anyhow!("Timeout waiting for controld connection")),
     }
 }

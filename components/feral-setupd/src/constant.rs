@@ -14,7 +14,7 @@ pub const WIFI_WEBAPP_DELAY: u64 = 3 * 1000; // 3 seconds
 pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 3 * 1000; // 10 seconds
 pub const AGGRESSIVE_INTERNET_CHECK_INTERVAL: u64 = 2 * 1000; // 2 seconds
 pub const RELAXED_INTERNET_CHECK_INTERVAL: u64 = 10 * 1000; // 10 seconds
-pub const WAIT_FOR_CONNECTD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
+pub const WAIT_FOR_CONTROLD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
 
 // Updater configuration
 pub const UPDATER_LOCAL_CONFIG_PATH: &str = "/home/feralfile/ff1-config.json";
@@ -34,8 +34,6 @@ pub const CMD_KEEP_WIFI: &str = "keep_wifi";
 pub const CMD_FACTORY_RESET: &str = "factory_reset";
 pub const CMD_SEND_LOGS: &str = "send_log";
 pub const MAX_SSIDS: usize = 9;
-pub const MD5_LENGTH: usize = 8; // Used for conversion to device ID
-pub const DEVICE_ID_PREFIX: &str = "FF1-";
 // Bluetooth communication codes
 pub const BLE_SUCCESS_CODE: u8 = 0;
 pub const BLE_ERR_CODE_WRONG_WIFI_PWD: u8 = 1;
@@ -69,15 +67,15 @@ pub const FACTORY_RESET_MSG: &str = "Factory resetting…";
 
 // D-Bus configuration
 pub const DBUS_SETUPD_OBJECT: &str = "/com/feralfile/setupd";
-pub const DBUS_CONNECTD_OBJECT: &str = "/com/feralfile/connectd";
+pub const DBUS_CONTROLD_OBJECT: &str = "/com/feralfile/controld";
 pub const DBUS_SYSMONITORD_OBJECT: &str = "/com/feralfile/sysmonitord";
 
 pub const DBUS_SETUPD_DESTINATION: &str = "com.feralfile.setupd";
 pub const DBUS_SYSMONITORD_DESTINATION: &str = "com.feralfile.sysmonitord";
-pub const DBUS_CONNECTD_DESTINATION: &str = "com.feralfile.connectd";
+pub const DBUS_CONTROLD_DESTINATION: &str = "com.feralfile.controld";
 
 pub const DBUS_SETUPD_INTERFACE: &str = "com.feralfile.setupd.general";
-pub const DBUS_CONNECTD_INTERFACE: &str = "com.feralfile.connectd.general";
+pub const DBUS_CONTROLD_INTERFACE: &str = "com.feralfile.controld.general";
 pub const DBUS_SYSMONITORD_INTERFACE: &str = "com.feralfile.sysmonitord";
 
 // pub const DBUS_EVENT_WIFI_CONNECTED: &str = "wifi_connected";
@@ -88,7 +86,7 @@ pub const DBUS_RELAYER_TOPIC_ID_METHOD: &str = "GetRelayerTopicID";
 
 pub const DBUS_GET_PAGE_STATE: &str = "GetPageState";
 
-// pub const DBUS_CONNECTD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
+// pub const DBUS_CONTROLD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
 pub const DBUS_MAX_RETRIES: usize = 6;
 pub const DBUS_ACK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
 pub const DBUS_INTERNET_CHECK_TIMEOUT: u64 = 1000; // 1 second

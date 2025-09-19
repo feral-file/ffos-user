@@ -38,22 +38,22 @@ type HeartbeatPayload struct {
 func SendHeartbeat() {
 	sysMetric, err := GetSysMetrics()
 	if err != nil {
-		logger.Fatal("Failed to get sysMetric: %v", zap.Error(err))
+		logger.Error("Failed to get sysMetric: %v", zap.Error(err))
 		return
 	}
 	if sysMetric == nil {
-		logger.Fatal("SysMetric is nil, cannot send heartbeat")
+		logger.Error("SysMetric is nil, cannot send heartbeat")
 		return
 	}
 	logger.Info("Gathered sysMetric data", zap.Any("sysMetric", sysMetric))
 
 	pageState, err := GetPageState()
 	if err != nil {
-		logger.Fatal("Failed to get pageState: %v", zap.Error(err))
+		logger.Error("Failed to get pageState: %v", zap.Error(err))
 		return
 	}
 	if pageState == nil {
-		logger.Fatal("pageState is nil, cannot send heartbeat")
+		logger.Error("pageState is nil, cannot send heartbeat")
 		return
 	}
 	logger.Info("Gathered pageState data", zap.Any("pageState", pageState))
@@ -68,10 +68,10 @@ func SendHeartbeat() {
 			sysMetric.Screen.Width, sysMetric.Screen.Height, sysMetric.Screen.RefreshRate,
 		),
 		CPUTemp:     sysMetric.CPU.CurrentTemperature,
-		CPUUsage:    sysMetric.CPU.CurrentFrequency / sysMetric.CPU.MaxFrequency,
-		GPUUsage:    sysMetric.GPU.CurrentFrequency / sysMetric.GPU.MaxFrequency,
-		MemoryUsage: sysMetric.Memory.UsedCapacity / sysMetric.Memory.MaxCapacity,
-		DiskUsage:   sysMetric.Disk.UsedCapacity / sysMetric.Disk.TotalCapacity,
+		CPUUsage:    safeDivide(sysMetric.CPU.CurrentFrequency, sysMetric.CPU.MaxFrequency),
+		GPUUsage:    safeDivide(sysMetric.GPU.CurrentFrequency, sysMetric.GPU.MaxFrequency),
+		MemoryUsage: safeDivide(sysMetric.Memory.UsedCapacity, sysMetric.Memory.MaxCapacity),
+		DiskUsage:   safeDivide(sysMetric.Disk.UsedCapacity, sysMetric.Disk.TotalCapacity),
 		Uptime:      humanizeDuration(int64(sysMetric.Uptime)),
 
 		Page:       string(pageState.Page),
@@ -80,19 +80,19 @@ func SendHeartbeat() {
 
 	rawJson, err := json.Marshal(message)
 	if err != nil {
-		logger.Fatal("Failed to marshal message to JSON: %v", zap.Error(err))
+		logger.Error("Failed to marshal message to JSON: %v", zap.Error(err))
 		return
 	}
 
 	canonical, err := jcs.Transform(rawJson)
 	if err != nil {
-		logger.Fatal("Failed to jcs.Transform: %v", zap.Error(err))
+		logger.Error("Failed to jcs.Transform: %v", zap.Error(err))
 		return
 	}
 
 	signatureHex, err := SignMessage(canonical)
 	if err != nil {
-		logger.Fatal("Failed to sign message", zap.Error(err))
+		logger.Error("Failed to sign message", zap.Error(err))
 		return
 	}
 	logger.Info("Message signed successfully.")
@@ -104,12 +104,12 @@ func SendHeartbeat() {
 	}
 	finalPayloadJSON, err := json.Marshal(finalPayload)
 	if err != nil {
-		logger.Fatal("Failed to marshal final payload", zap.Error(err))
+		logger.Error("Failed to marshal final payload", zap.Error(err))
 		return
 	}
 
 	if err := SendPayload(finalPayloadJSON); err != nil {
-		logger.Fatal("Failed to send payload", zap.Error(err))
+		logger.Error("Failed to send payload", zap.Error(err))
 		return
 	}
 

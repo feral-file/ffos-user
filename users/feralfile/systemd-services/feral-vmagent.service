@@ -1,0 +1,17 @@
+[Unit]
+Description=FeralFile vmagent
+After=system-ready.target feral-sys-monitord.service network.target
+ConditionPathExists=/run/user/1000/bus
+
+[Service]
+Type=simple
+ExecStartPre=/home/feralfile/scripts/setup-vmagent.sh
+ExecStart=/home/feralfile/scripts/run-vmagent.sh
+Restart=always
+RestartSec=5s
+Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+StandardOutput=append:/home/feralfile/.logs/vmagent.log
+StandardError=append:/home/feralfile/.logs/vmagent.log
+
+[Install]
+WantedBy=default.target

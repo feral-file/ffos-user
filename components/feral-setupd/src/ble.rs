@@ -49,7 +49,7 @@ pub struct Ble {
 
 impl Ble {
     pub fn new() -> Self {
-        let device_id = encoding::get_device_id();
+        let device_id = system::get_device_id();
         Self {
             inner: Mutex::new(Inner {
                 device_id,
