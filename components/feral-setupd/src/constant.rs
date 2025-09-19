@@ -34,8 +34,6 @@ pub const CMD_KEEP_WIFI: &str = "keep_wifi";
 pub const CMD_FACTORY_RESET: &str = "factory_reset";
 pub const CMD_SEND_LOGS: &str = "send_log";
 pub const MAX_SSIDS: usize = 9;
-pub const MD5_LENGTH: usize = 8; // Used for conversion to device ID
-pub const DEVICE_ID_PREFIX: &str = "FF1-";
 // Bluetooth communication codes
 pub const BLE_SUCCESS_CODE: u8 = 0;
 pub const BLE_ERR_CODE_WRONG_WIFI_PWD: u8 = 1;

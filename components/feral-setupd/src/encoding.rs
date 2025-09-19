@@ -1,5 +1,3 @@
-use crate::constant;
-
 pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut shift = 0;
