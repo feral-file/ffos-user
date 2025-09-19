@@ -162,6 +162,8 @@ type refresher struct {
 	logger        *zap.Logger
 	queryTicker   *time.Ticker
 	queryStopChan chan struct{}
+	runCtx        context.Context
+	runCancel     context.CancelFunc
 
 	// onPlaylistUpdated is called after each successful URL refetch
 	onPlaylistUpdated func(ctx context.Context, playlist DP1Playlist)
@@ -196,6 +198,13 @@ func New(
 }
 
 func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.Context) (map[string]interface{}, error)) {
+	// Initialize long-lived context from app-level ctx if not set
+	p.mu.Lock()
+	if p.runCtx == nil || p.runCancel == nil {
+		p.runCtx, p.runCancel = context.WithCancel(ctx)
+	}
+	p.mu.Unlock()
+
 	p.logger.Info("Starting Refresher")
 
 	status, err := statusProvider(ctx)
@@ -276,6 +285,13 @@ func (p *refresher) Stop() {
 		close(p.queryStopChan)
 		p.queryStopChan = nil
 	}
+
+	// Cancel long-lived context
+	if p.runCancel != nil {
+		p.runCancel()
+		p.runCtx = nil
+		p.runCancel = nil
+	}
 }
 
 // StartPollingWithPlaylistURL starts an interval to fetch playlist object by URL.
@@ -299,7 +315,7 @@ func (p *refresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL
 		return playlist, nil
 	}
 
-	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
+	p.startRefresher(withInitialSync, rebuildPlaylistFn)
 }
 
 // StartPollingWithDynamicQueries starts an interval to execute dynamic queries periodically.
@@ -315,13 +331,12 @@ func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQ
 		return &playlist, nil
 	}
 
-	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
+	p.startRefresher(withInitialSync, rebuildPlaylistFn)
 }
 
 // startRefresher is a shared helper that manages ticker, stopChan, and periodic execution.
 // It ensures that after each rebuildFn, the playlist will be notified if no error occurs.
 func (p *refresher) startRefresher(
-	ctx context.Context,
 	withInitialSync bool,
 	rebuildPlaylistFn func(ctx context.Context) (*DP1Playlist, error),
 ) {
@@ -338,6 +353,11 @@ func (p *refresher) startRefresher(
 	p.queryStopChan = make(chan struct{})
 	p.queryTicker = p.clock.NewTicker(p.config.RefreshInterval)
 
+	// Ensure long-lived context exists
+	if p.runCtx == nil || p.runCancel == nil {
+		p.runCtx, p.runCancel = context.WithCancel(context.Background())
+	}
+
 	refreshPlaylist := func(ctx context.Context) {
 		playlist, err := rebuildPlaylistFn(ctx)
 		if err != nil {
@@ -353,7 +373,7 @@ func (p *refresher) startRefresher(
 
 	// Initial run if requested
 	if withInitialSync {
-		go refreshPlaylist(ctx)
+		go refreshPlaylist(p.runCtx)
 	}
 
 	// Periodic goroutine
@@ -368,14 +388,14 @@ func (p *refresher) startRefresher(
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-p.runCtx.Done():
 				p.logger.Info("Refresher goroutine stopped due to context cancellation")
 				return
 			case <-p.queryStopChan:
 				p.logger.Info("Refresher goroutine stopped due to stop signal")
 				return
 			case <-p.queryTicker.C:
-				refreshPlaylist(ctx)
+				refreshPlaylist(p.runCtx)
 			}
 		}
 	}()
