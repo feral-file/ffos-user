@@ -121,22 +121,24 @@ type PlayerStatus struct {
 }
 
 type Config struct {
-	RefreshInterval time.Duration `json:"refreshInterval"`
-	RequestTimeout  time.Duration `json:"requestTimeout"`
-	PageSize        int           `json:"pageSize"`
-	InitialPageSize int           `json:"initialPageSize"`
-	MaxRetries      int           `json:"maxRetries"`
-	RetryBackoff    time.Duration `json:"retryBackoff"`
+	StatusRetryInterval time.Duration `json:"statusRetryInterval"`
+	RefreshInterval     time.Duration `json:"refreshInterval"`
+	RequestTimeout      time.Duration `json:"requestTimeout"`
+	PageSize            int           `json:"pageSize"`
+	InitialPageSize     int           `json:"initialPageSize"`
+	MaxRetries          int           `json:"maxRetries"`
+	RetryBackoff        time.Duration `json:"retryBackoff"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		RefreshInterval: 1 * time.Minute,
-		RequestTimeout:  20 * time.Second,
-		PageSize:        100,
-		InitialPageSize: 5,
-		MaxRetries:      3,
-		RetryBackoff:    1 * time.Second,
+		StatusRetryInterval: 20 * time.Second,
+		RefreshInterval:     1 * time.Minute,
+		RequestTimeout:      20 * time.Second,
+		PageSize:            1000,
+		InitialPageSize:     50,
+		MaxRetries:          3,
+		RetryBackoff:        1 * time.Second,
 	}
 }
 
@@ -160,8 +162,9 @@ type refresher struct {
 	json          wrapper.JSON
 	clock         wrapper.Clock
 	logger        *zap.Logger
-	queryTicker   *time.Ticker
 	queryStopChan chan struct{}
+	runCtx        context.Context
+	runCancel     context.CancelFunc
 
 	// onPlaylistUpdated is called after each successful URL refetch
 	onPlaylistUpdated func(ctx context.Context, playlist DP1Playlist)
@@ -196,12 +199,16 @@ func New(
 }
 
 func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.Context) (map[string]interface{}, error)) {
-	p.logger.Info("Starting Refresher")
+	p.mu.Lock()
+	if p.runCtx == nil || p.runCancel == nil {
+		p.runCtx, p.runCancel = context.WithCancel(ctx)
+	}
+	p.mu.Unlock()
 
 	status, err := statusProvider(ctx)
 	if err != nil {
-		p.logger.Warn("Failed to fetch player status; will retry every 2m until success", zap.Error(err))
-		retryTicker := p.clock.NewTicker(2 * time.Minute)
+		p.logger.Warn("Failed to fetch player status; will retry until success", zap.Error(err))
+		retryTicker := p.clock.NewTicker(p.config.StatusRetryInterval)
 		defer retryTicker.Stop()
 		for {
 			select {
@@ -219,7 +226,8 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 		}
 	}
 
-	p.logger.Info("Fetched player status", zap.Any("status", status))
+	p.logger.Info("Fetched player status")
+	p.logger.Debug("Player status", zap.Any("status", status))
 
 	// convert status to PlayerStatus struct
 	raw, err := p.json.Marshal(status)
@@ -239,48 +247,41 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 	}
 
 	if playerStatus.PlaylistURL != nil && *playerStatus.PlaylistURL != "" {
-		p.logger.Info("Auto: starting URL refresher", zap.String("url", *playerStatus.PlaylistURL))
 		p.StartPollingWithPlaylistURL(ctx, *playerStatus.PlaylistURL, true)
 		return
 	}
 
-	// Otherwise fall back to embedded playlist object with dynamicQueries
 	if playerStatus.Playlist == nil {
 		p.logger.Debug("No playlist URL or embedded playlist present in status; skipping")
 		return
 	}
 
 	if len(playerStatus.Playlist.DynamicQueries) > 0 {
-		p.logger.Info("Auto: starting dynamic queries refresher", zap.Int("query_count", len(playerStatus.Playlist.DynamicQueries)))
 		p.StartPollingWithDynamicQueries(ctx, playerStatus.Playlist.DynamicQueries, *playerStatus.Playlist, true)
 		return
 	}
-
-	p.logger.Info("Auto: no playlistURL or dynamicQueries; nothing to start")
 }
 
 func (p *refresher) Stop() {
+	p.logger.Info("Stopping refresher")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.logger.Info("Stopping playlist refresher")
-
-	// Stop dynamic query ticker
-	if p.queryTicker != nil {
-		p.queryTicker.Stop()
-		p.queryTicker = nil
-	}
-
-	// Signal stop to query goroutine
 	if p.queryStopChan != nil {
 		close(p.queryStopChan)
 		p.queryStopChan = nil
+	}
+
+	if p.runCancel != nil {
+		p.runCancel()
+		p.runCtx = nil
+		p.runCancel = nil
 	}
 }
 
 // StartPollingWithPlaylistURL starts an interval to fetch playlist object by URL.
 func (p *refresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL string, withInitialSync bool) {
-	p.logger.Info("Starting playlist refresher by URL", zap.String("url", playlistURL))
+	p.logger.Info("StartPollingWithPlaylistURL", zap.String("url", playlistURL))
 
 	rebuildPlaylistFn := func(ctx context.Context) (*DP1Playlist, error) {
 		playlist, err := p.FetchPlaylistByURL(ctx, playlistURL)
@@ -299,12 +300,12 @@ func (p *refresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL
 		return playlist, nil
 	}
 
-	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
+	p.startRefresher(withInitialSync, rebuildPlaylistFn)
 }
 
 // StartPollingWithDynamicQueries starts an interval to execute dynamic queries periodically.
 func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []DynamicQuery, playlist DP1Playlist, withInitialSync bool) {
-	p.logger.Info("Starting playlist refresher by dynamic query", zap.Any("dynamicQueries", dynamicQueries))
+	p.logger.Info("StartPollingWithDynamicQueries", zap.Any("dynamicQueries", dynamicQueries))
 
 	rebuildPlaylistFn := func(ctx context.Context) (*DP1Playlist, error) {
 		playlistItems, err := p.buildPlaylistItems(ctx, playlist, dynamicQueries, -1)
@@ -315,30 +316,21 @@ func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQ
 		return &playlist, nil
 	}
 
-	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
+	p.startRefresher(withInitialSync, rebuildPlaylistFn)
 }
 
 // startRefresher is a shared helper that manages ticker, stopChan, and periodic execution.
-// It ensures that after each rebuildFn, the playlist will be notified if no error occurs.
 func (p *refresher) startRefresher(
-	ctx context.Context,
 	withInitialSync bool,
 	rebuildPlaylistFn func(ctx context.Context) (*DP1Playlist, error),
 ) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Reset any existing ticker/goroutine
-	if p.queryTicker != nil {
-		p.queryTicker.Stop()
-	}
-	if p.queryStopChan != nil {
-		close(p.queryStopChan)
-	}
-	p.queryStopChan = make(chan struct{})
-	p.queryTicker = p.clock.NewTicker(p.config.RefreshInterval)
-
 	refreshPlaylist := func(ctx context.Context) {
+		if ctx.Err() != nil {
+			p.logger.Info("context canceled, refreshPlaylist skipped",
+				zap.String("ctxErr", ctx.Err().Error()))
+			return
+		}
+
 		playlist, err := rebuildPlaylistFn(ctx)
 		if err != nil {
 			p.logger.Warn("Rebuild playlist failed", zap.Error(err))
@@ -348,37 +340,53 @@ func (p *refresher) startRefresher(
 			p.logger.Warn("Rebuild playlist returned nil")
 			return
 		}
+		p.logger.Info("Playlist rebuilt successfully, notifying update")
 		p.notifyPlaylistUpdated(ctx, *playlist)
+	}
+
+	p.logger.Info("Starting refresher", zap.Bool("withInitialSync", withInitialSync))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.queryStopChan != nil {
+		close(p.queryStopChan)
+	}
+	p.queryStopChan = make(chan struct{})
+
+	if p.runCtx == nil || p.runCancel == nil {
+		p.logger.Error("Refresher runCtx is nil.")
+		return
 	}
 
 	// Initial run if requested
 	if withInitialSync {
-		go refreshPlaylist(ctx)
+		go func() {
+			if p.runCtx != nil {
+				refreshPlaylist(p.runCtx)
+			} else {
+				p.logger.Warn("Cannot perform initial sync: context is nil")
+			}
+		}()
 	}
 
-	// Periodic goroutine
-	go func() {
-		defer func() {
-			p.mu.Lock()
-			if p.queryTicker != nil {
-				p.queryTicker.Stop()
-			}
-			p.mu.Unlock()
-		}()
-
+	p.logger.Info("Starting periodic goroutine")
+	ticker := p.clock.NewTicker(p.config.RefreshInterval)
+	go func(localTicker *time.Ticker, stopChan <-chan struct{}) {
+		defer localTicker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-p.runCtx.Done():
 				p.logger.Info("Refresher goroutine stopped due to context cancellation")
 				return
-			case <-p.queryStopChan:
+			case <-stopChan:
 				p.logger.Info("Refresher goroutine stopped due to stop signal")
 				return
-			case <-p.queryTicker.C:
-				refreshPlaylist(ctx)
+			case <-localTicker.C:
+				p.logger.Info("Refresh tick received, calling refreshPlaylist")
+				refreshPlaylist(p.runCtx)
 			}
 		}
-	}()
+	}(ticker, p.queryStopChan)
 }
 
 func (p *refresher) notifyPlaylistUpdated(ctx context.Context, playlist DP1Playlist) {
@@ -422,7 +430,8 @@ func (p *refresher) FetchPlaylistByURL(ctx context.Context, playlistURL string) 
 		return nil, err
 	}
 
-	p.logger.Info("Fetched playlist", zap.Any("playlist", playlist))
+	p.logger.Info("Fetched playlist")
+	p.logger.Debug("Playlist", zap.Any("playlist", playlist))
 	return &playlist, nil
 }
 
@@ -432,11 +441,7 @@ func (p *refresher) BuildInitialPlaylistItems(ctx context.Context, playlist DP1P
 
 // BuildPlaylistItems executes the raw dynamicQueries and returns playlist items (empty slice if none)
 func (p *refresher) buildPlaylistItems(ctx context.Context, playlist DP1Playlist, dynamicQueries []DynamicQuery, limit int) ([]DP1Item, error) {
-	if limit <= 0 {
-		p.logger.Info("Building playlist items", zap.Any("dynamicQueries", dynamicQueries))
-	} else {
-		p.logger.Info("Building playlist items with limit", zap.Int("limit", limit))
-	}
+	p.logger.Info("Building playlist items", zap.Any("dynamicQueries", dynamicQueries), zap.Int("limit", limit))
 
 	tokens, err := p.executeDynamicQueries(ctx, dynamicQueries, limit)
 	if err != nil {
@@ -449,11 +454,7 @@ func (p *refresher) buildPlaylistItems(ctx context.Context, playlist DP1Playlist
 		return []DP1Item{}, nil
 	}
 
-	if limit <= 0 {
-		p.logger.Info("Built playlist items", zap.Any("items", items))
-	} else {
-		p.logger.Info("Built limited playlist items", zap.Int("count", len(items)))
-	}
+	p.logger.Info("Built playlist items", zap.Any("items", items), zap.Int("count", len(items)))
 	return items, nil
 }
 
@@ -492,7 +493,7 @@ func (p *refresher) mergeItemsAndTokens(playlist DP1Playlist, tokens []IndexerTo
 		}
 	}
 
-	p.logger.Info("Filtered playlist items", zap.Any("filteredItems", filteredItems))
+	p.logger.Info("Filtered playlist items", zap.Int("count", len(filteredItems)))
 	return filteredItems
 }
 
@@ -508,7 +509,7 @@ func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []
 		return nil, fmt.Errorf("first query has empty endpoint")
 	}
 
-	p.logger.Info("Executing dynamic query", zap.String("endpoint", firstQuery.Endpoint))
+	p.logger.Info("Executing dynamic query", zap.String("endpoint", firstQuery.Endpoint), zap.Int("limit", limit))
 
 	fetchTokens := func(offset, size int) ([]IndexerToken, error) {
 		query := p.buildGraphQLQuery(firstQuery.Params, offset, size)
