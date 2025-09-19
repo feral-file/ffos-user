@@ -1,9 +1,16 @@
-use std::process::Command;
-
 use anyhow::anyhow;
+use std::fs;
+use std::process::Command;
 use tokio::task;
 
 use crate::constant;
+
+pub fn get_device_id() -> String {
+    fs::read_to_string("/etc/hostname")
+        .unwrap_or_else(|_| "FF1".to_string())
+        .trim()
+        .to_string()
+}
 
 pub async fn factory_reset() -> Result<(), anyhow::Error> {
     println!("System: Factory resetting");
