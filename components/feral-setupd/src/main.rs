@@ -588,9 +588,12 @@ async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
                         .await;
             }
             Err(e) => {
-                let _ =
-                    show_system_upgrade(&chrome, &app_state, &format!("{base_msg}&subtext={}", e.to_string()))
-                        .await;
+                let _ = show_system_upgrade(
+                    &chrome,
+                    &app_state,
+                    &format!("{base_msg}&subtext={}", e.to_string()),
+                )
+                .await;
                 return Err(e.context("update process failed"));
             }
         }
