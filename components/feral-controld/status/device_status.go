@@ -118,11 +118,9 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		}
 
 		var config struct {
-			Version          string `json:"version"`
-			Branch           string `json:"branch"`
-			DistributionAcc  string `json:"distribution_acc"`
-			DistributionPass string `json:"distribution_pass"`
-			Endpoint         string `json:"endpoint"`
+			Version  string `json:"version"`
+			Branch   string `json:"branch"`
+			Endpoint string `json:"endpoint"`
 		}
 
 		if err := d.json.Unmarshal(configBytes, &config); err != nil {
@@ -132,8 +130,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		installedVersion = config.Version
 
 		// Get latest version from API if credentials are available
-		if config.Branch != "" && config.DistributionAcc != "" && config.DistributionPass != "" && config.Endpoint != "" {
-			version, err := d.fetchLatestVersion(ctx, config.Endpoint, config.Branch, config.DistributionAcc, config.DistributionPass)
+		if config.Branch != "" && config.Endpoint != "" {
+			version, err := d.fetchLatestVersion(ctx, config.Endpoint, config.Branch)
 			if err != nil {
 				return fmt.Errorf("failed to fetch latest version: %w", err)
 			}
@@ -158,7 +156,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 }
 
 // fetchLatestVersion retrieves the latest version from the distribution API
-func (d deviceStatus) fetchLatestVersion(ctx context.Context, endpoint, branch, account, pass string) (string, error) {
+func (d deviceStatus) fetchLatestVersion(ctx context.Context, endpoint, branch string) (string, error) {
 	apiURL := fmt.Sprintf("%s/api/latest/%s", endpoint, branch)
 
 	// Create HTTP client with 2-second timeout
@@ -170,9 +168,6 @@ func (d deviceStatus) fetchLatestVersion(ctx context.Context, endpoint, branch, 
 	if err != nil {
 		return "", err
 	}
-
-	// Set basic auth
-	req.SetBasicAuth(account, pass)
 
 	resp, err := client.Do(req)
 	if err != nil {

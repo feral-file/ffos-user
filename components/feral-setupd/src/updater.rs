@@ -205,7 +205,6 @@ async fn fetch_remote_version() -> Result<UpstreamVersion> {
     );
     let resp = reqwest::Client::new()
         .get(&url)
-        .basic_auth(cfg::acc().await?, Some(cfg::pwd().await?))
         .send()
         .await
         .with_context(|| format!("fetching {url}"))?;
