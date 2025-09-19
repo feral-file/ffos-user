@@ -131,7 +131,7 @@ type Config struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		RefreshInterval: 5 * time.Minute,
+		RefreshInterval: 1 * time.Minute,
 		RequestTimeout:  20 * time.Second,
 		PageSize:        100,
 		InitialPageSize: 5,
@@ -691,7 +691,7 @@ func (p *refresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 		ID:         token.ID,
 		Title:      &title,
 		Source:     previewURL,
-		Duration:   30,
+		Duration:   20,
 		License:    LicenseOpen,
 		Provenance: &provenanceRaw,
 	}
