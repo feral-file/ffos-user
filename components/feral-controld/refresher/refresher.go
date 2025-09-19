@@ -12,8 +12,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-connectd/relayer"
-	"github.com/feral-file/ffos-user/components/feral-connectd/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 type GraphQLResponse struct {
