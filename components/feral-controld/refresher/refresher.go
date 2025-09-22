@@ -128,17 +128,19 @@ type Config struct {
 	InitialPageSize     int           `json:"initialPageSize"`
 	MaxRetries          int           `json:"maxRetries"`
 	RetryBackoff        time.Duration `json:"retryBackoff"`
+	DefaultItemDuration int           `json:"defaultItemDuration"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
 		StatusRetryInterval: 20 * time.Second,
-		RefreshInterval:     1 * time.Minute,
+		RefreshInterval:     5 * time.Minute,
 		RequestTimeout:      20 * time.Second,
 		PageSize:            1000,
 		InitialPageSize:     50,
 		MaxRetries:          3,
 		RetryBackoff:        1 * time.Second,
+		DefaultItemDuration: 300, // seconds
 	}
 }
 
@@ -692,7 +694,7 @@ func (p *refresher) convertTokenToDP1Item(token IndexerToken) DP1Item {
 		ID:         token.ID,
 		Title:      &title,
 		Source:     previewURL,
-		Duration:   20,
+		Duration:   p.config.DefaultItemDuration,
 		License:    LicenseOpen,
 		Provenance: &provenanceRaw,
 	}
