@@ -228,7 +228,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 		}
 	}
 
-	p.logger.Info("Fetched player status", zap.Any("status", status))
+	p.logger.Debug("Fetched player status", zap.Any("status", status))
 
 	// convert status to PlayerStatus struct
 	raw, err := p.json.Marshal(status)
@@ -442,7 +442,7 @@ func (p *refresher) FetchPlaylistByURL(ctx context.Context, playlistURL string) 
 		return nil, err
 	}
 
-	p.logger.Info("Fetched playlist", zap.Any("playlist", playlist))
+	p.logger.Debug("Fetched playlist", zap.Any("playlist", playlist))
 	return &playlist, nil
 }
 
@@ -470,9 +470,9 @@ func (p *refresher) buildPlaylistItems(ctx context.Context, playlist DP1Playlist
 	}
 
 	if limit <= 0 {
-		p.logger.Info("Built playlist items", zap.Any("items", items))
+		p.logger.Debug("Built playlist items", zap.Any("items", items))
 	} else {
-		p.logger.Info("Built limited playlist items", zap.Int("count", len(items)))
+		p.logger.Debug("Built limited playlist items", zap.Int("count", len(items)))
 	}
 	return items, nil
 }
@@ -512,7 +512,7 @@ func (p *refresher) mergeItemsAndTokens(playlist DP1Playlist, tokens []IndexerTo
 		}
 	}
 
-	p.logger.Info("Filtered playlist items", zap.Any("filteredItems", filteredItems))
+	p.logger.Debug("Filtered playlist items", zap.Any("filteredItems", filteredItems))
 	return filteredItems
 }
 
@@ -569,7 +569,7 @@ func (p *refresher) executeDynamicQueries(ctx context.Context, dynamicQueries []
 		offset += size
 	}
 
-	p.logger.Info("Dynamic query completed", zap.Int("total_tokens", len(allTokens)))
+	p.logger.Debug("Dynamic query completed", zap.Int("total_tokens", len(allTokens)))
 	return allTokens, nil
 }
 
@@ -661,7 +661,7 @@ func (p *refresher) buildGraphQLQuery(params map[string]string, offset int, page
 		}
 	}`, queryParams)
 
-	p.logger.Info("Built GraphQL query", zap.String("query", query))
+	p.logger.Debug("Built GraphQL query", zap.String("query", query))
 	return query
 }
 
