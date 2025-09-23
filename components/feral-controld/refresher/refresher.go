@@ -12,7 +12,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -145,7 +147,7 @@ func DefaultConfig() *Config {
 }
 
 type Refresher interface {
-	Start(ctx context.Context, playerStatus func(ctx context.Context) (map[string]interface{}, error))
+	Start(ctx context.Context)
 	Stop()
 
 	StartPollingWithPlaylistURL(ctx context.Context, playlistURL string, withInitialSync bool)
@@ -164,6 +166,7 @@ type refresher struct {
 	json          wrapper.JSON
 	clock         wrapper.Clock
 	logger        *zap.Logger
+	cdp           cdp.CDP
 	queryStopChan chan struct{}
 	runCtx        context.Context
 	runCancel     context.CancelFunc
@@ -184,6 +187,7 @@ func New(
 	http wrapper.HTTP,
 	json wrapper.JSON,
 	clock wrapper.Clock,
+	cdp cdp.CDP,
 	logger *zap.Logger,
 ) Refresher {
 	if config == nil {
@@ -195,19 +199,20 @@ func New(
 		http:          http,
 		json:          json,
 		clock:         clock,
+		cdp:           cdp,
 		logger:        logger,
 		queryStopChan: nil,
 	}
 }
 
-func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.Context) (map[string]interface{}, error)) {
+func (p *refresher) Start(ctx context.Context) {
 	p.mu.Lock()
 	if p.runCtx == nil || p.runCancel == nil {
 		p.runCtx, p.runCancel = context.WithCancel(ctx)
 	}
 	p.mu.Unlock()
 
-	status, err := statusProvider(ctx)
+	playerStatus, err := status.FetchPlayerStatus(ctx, p.cdp, p.logger)
 	if err != nil {
 		p.logger.Warn("Failed to fetch player status; will retry until success", zap.Error(err))
 		retryTicker := p.clock.NewTicker(p.config.StatusRetryInterval)
@@ -218,7 +223,7 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 				p.logger.Info("Start cancelled during status fetch retry")
 				return
 			case <-retryTicker.C:
-				status, err = statusProvider(ctx)
+				playerStatus, err = status.FetchPlayerStatus(ctx, p.cdp, p.logger)
 				if err != nil {
 					p.logger.Warn("Retry fetch player status failed", zap.Error(err))
 					continue
@@ -229,37 +234,37 @@ func (p *refresher) Start(ctx context.Context, statusProvider func(ctx context.C
 	}
 
 	p.logger.Info("Fetched player status")
-	p.logger.Debug("Player status", zap.Any("status", status))
+	p.logger.Debug("Player status", zap.Any("status", playerStatus))
 
-	// convert status to PlayerStatus struct
-	raw, err := p.json.Marshal(status)
+	// convert playerStatus to PlayerStatus struct
+	raw, err := p.json.Marshal(playerStatus)
 	if err != nil {
 		p.logger.Warn("Failed to marshal player status", zap.Error(err))
 		return
 	}
-	var playerStatus PlayerStatus
-	if err := p.json.Unmarshal(raw, &playerStatus); err != nil {
+	var playerStatusStruct PlayerStatus
+	if err := p.json.Unmarshal(raw, &playerStatusStruct); err != nil {
 		p.logger.Warn("Failed to unmarshal player status", zap.Error(err))
 		return
 	}
 
-	if !playerStatus.CastCommand.DisplayPlaylistCmd() {
-		p.logger.Warn("Player command is not displayPlaylist; skipping", zap.Any("command", playerStatus.CastCommand))
+	if !playerStatusStruct.CastCommand.DisplayPlaylistCmd() {
+		p.logger.Warn("Player command is not displayPlaylist; skipping", zap.Any("command", playerStatusStruct.CastCommand))
 		return
 	}
 
-	if playerStatus.PlaylistURL != nil && *playerStatus.PlaylistURL != "" {
-		p.StartPollingWithPlaylistURL(ctx, *playerStatus.PlaylistURL, true)
+	if playerStatusStruct.PlaylistURL != nil && *playerStatusStruct.PlaylistURL != "" {
+		p.StartPollingWithPlaylistURL(ctx, *playerStatusStruct.PlaylistURL, true)
 		return
 	}
 
-	if playerStatus.Playlist == nil {
+	if playerStatusStruct.Playlist == nil {
 		p.logger.Debug("No playlist URL or embedded playlist present in status; skipping")
 		return
 	}
 
-	if len(playerStatus.Playlist.DynamicQueries) > 0 {
-		p.StartPollingWithDynamicQueries(ctx, playerStatus.Playlist.DynamicQueries, *playerStatus.Playlist, true)
+	if len(playerStatusStruct.Playlist.DynamicQueries) > 0 {
+		p.StartPollingWithDynamicQueries(ctx, playerStatusStruct.Playlist.DynamicQueries, *playerStatusStruct.Playlist, true)
 		return
 	}
 }
@@ -302,7 +307,7 @@ func (p *refresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL
 		return playlist, nil
 	}
 
-	p.startRefresher(withInitialSync, rebuildPlaylistFn)
+	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
 }
 
 // StartPollingWithDynamicQueries starts an interval to execute dynamic queries periodically.
@@ -318,11 +323,12 @@ func (p *refresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQ
 		return &playlist, nil
 	}
 
-	p.startRefresher(withInitialSync, rebuildPlaylistFn)
+	p.startRefresher(ctx, withInitialSync, rebuildPlaylistFn)
 }
 
 // startRefresher is a shared helper that manages ticker, stopChan, and periodic execution.
 func (p *refresher) startRefresher(
+	ctx context.Context,
 	withInitialSync bool,
 	rebuildPlaylistFn func(ctx context.Context) (*DP1Playlist, error),
 ) {
@@ -384,7 +390,16 @@ func (p *refresher) startRefresher(
 				p.logger.Info("Refresher goroutine stopped due to stop signal")
 				return
 			case <-localTicker.C:
-				p.logger.Info("Refresh tick received, calling refreshPlaylist")
+				p.logger.Info("Refresh tick received")
+
+				shouldStartRefreshPlaylist := p.shouldStartRefreshPlaylist()
+				if !shouldStartRefreshPlaylist {
+					p.logger.Info("Player status does not indicate a need to refresh playlist; skipping")
+					close(p.queryStopChan)
+					p.queryStopChan = nil
+					return
+				}
+
 				refreshPlaylist(p.runCtx)
 			}
 		}
@@ -741,4 +756,37 @@ func (p *refresher) executeWithRetry(ctx context.Context, fn func() error) error
 		return nil
 	}
 	return lastErr
+}
+
+// create function to check if we should start refresh playlist with the param is PlayerStatus
+func (p *refresher) shouldStartRefreshPlaylist() bool {
+	playerStatus, err := status.FetchPlayerStatus(p.runCtx, p.cdp, p.logger)
+	if err != nil {
+		p.logger.Warn("Failed to fetch player status", zap.Error(err))
+		return false
+	}
+
+	raw, err := p.json.Marshal(playerStatus)
+	if err != nil {
+		p.logger.Warn("Failed to marshal player status", zap.Error(err))
+		return false
+	}
+
+	var playerStatusStruct PlayerStatus
+	if err := p.json.Unmarshal(raw, &playerStatusStruct); err != nil {
+		p.logger.Warn("Failed to unmarshal player status", zap.Error(err))
+		return false
+	}
+
+	if !playerStatusStruct.CastCommand.DisplayPlaylistCmd() {
+		p.logger.Warn("Player command is not displayPlaylist; skipping", zap.Any("command", playerStatusStruct.CastCommand))
+		return false
+	}
+
+	if (playerStatusStruct.PlaylistURL != nil && *playerStatusStruct.PlaylistURL != "") || (playerStatusStruct.Playlist != nil && len(playerStatusStruct.Playlist.DynamicQueries) > 0) {
+		return true
+	}
+
+	return false
+
 }

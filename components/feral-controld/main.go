@@ -224,10 +224,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	defer app.StatusPoller.Stop()
 
 	// Start Refresher
-	statusProvider := func(ctx context.Context) (map[string]interface{}, error) {
-		return status.FetchPlayerStatus(ctx, app.CDP, app.Logger)
-	}
-	app.Refresher.Start(ctx, statusProvider)
+	app.Refresher.Start(ctx)
 	defer app.Refresher.Stop()
 
 	// send ready notification to systemd
@@ -331,7 +328,7 @@ func initializeApp(
 	// refresher
 	refresherConfig := refresher.DefaultConfig()
 	httpWithTimeout := wrapper.NewHTTPWithTimeout(refresherConfig.RequestTimeout)
-	refresher := refresher.New(refresherConfig, httpWithTimeout, json, clock, logger)
+	refresher := refresher.New(refresherConfig, httpWithTimeout, json, clock, cdp, logger)
 
 	// Mediator
 	mediator := mediator.New(relayer, dbusClient, cdp, commandHandler, clock, json, refresher, logger)
