@@ -136,13 +136,13 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		StatusRetryInterval: 20 * time.Second,
-		RefreshInterval:     5 * time.Minute,
+		RefreshInterval:     1 * time.Minute,
 		RequestTimeout:      20 * time.Second,
 		PageSize:            1000,
 		InitialPageSize:     50,
 		MaxRetries:          3,
 		RetryBackoff:        1 * time.Second,
-		DefaultItemDuration: 300, // seconds
+		DefaultItemDuration: 20, // seconds
 	}
 }
 
