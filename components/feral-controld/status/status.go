@@ -176,18 +176,18 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 
 // FetchPlayerStatus fetches the current player status via CDP once and returns the "message" payload
 func FetchPlayerStatus(ctx context.Context, c cdp.CDP, logger *zap.Logger) (map[string]interface{}, error) {
-	payloadStr, err := buildCheckStatusPayload()
+	payloadStr, err := buildCheckStatusPayloadFn()
 	if err != nil {
 		return nil, err
 	}
 
 	expr := fmt.Sprintf("window.handleCDPRequest(%s)", payloadStr)
-	resultMap, err := sendCDPRequest(c, expr)
+	resultMap, err := sendCDPRequestFn(c, expr)
 	if err != nil {
 		return nil, err
 	}
 
-	message, err := extractMessage(resultMap)
+	message, err := extractMessageFn(resultMap)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +195,13 @@ func FetchPlayerStatus(ctx context.Context, c cdp.CDP, logger *zap.Logger) (map[
 	logger.Debug("Fetched player status", zap.Any("message", message))
 	return message, nil
 }
+
+// injection seams for testing; default to real implementations
+var (
+	buildCheckStatusPayloadFn = buildCheckStatusPayload
+	sendCDPRequestFn          = sendCDPRequest
+	extractMessageFn          = extractMessage
+)
 
 // buildCheckStatusPayload constructs the CDP payload for checkStatus command.
 func buildCheckStatusPayload() (string, error) {
