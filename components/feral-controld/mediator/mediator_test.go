@@ -30,6 +30,8 @@ type testSetup struct {
 	mockCmd          *mocks.MockCommandHandler
 	mockStatusPoller *mocks.MockStatusPoller
 	mockClock        *mocks.MockClock
+	mockJSON         *mocks.MockJSON
+	mockRefresher    *mocks.MockRefresher
 	mediator         mediator.Mediator
 	logger           *zap.Logger
 }
@@ -45,6 +47,8 @@ func setup(t *testing.T) *testSetup {
 	mockCmd := mocks.NewMockCommandHandler(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockRefresher := mocks.NewMockRefresher(ctrl)
 
 	med := mediator.New(
 		mockRelayer,
@@ -52,6 +56,8 @@ func setup(t *testing.T) *testSetup {
 		mockCDP,
 		mockCmd,
 		mockClock,
+		mockJSON,
+		mockRefresher,
 		logger,
 	)
 
@@ -64,6 +70,8 @@ func setup(t *testing.T) *testSetup {
 		mockCmd:          mockCmd,
 		mockStatusPoller: mockStatusPoller,
 		mockClock:        mockClock,
+		mockJSON:         mockJSON,
+		mockRefresher:    mockRefresher,
 		mediator:         med,
 		logger:           logger,
 	}
@@ -80,10 +88,12 @@ func TestMediator_StartStop(t *testing.T) {
 	// Expect Start to register handlers
 	ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
 	ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+	ts.mockRefresher.EXPECT().OnPlaylistUpdated(gomock.Any()).Times(1)
 
 	// Expect Stop to remove handlers
 	ts.mockRelayer.EXPECT().RemoveRelayerMessage(gomock.Any()).Times(1)
 	ts.mockDbus.EXPECT().RemoveBusSignal(gomock.Any()).Times(1)
+	ts.mockRefresher.EXPECT().RemovePlaylistUpdated(gomock.Any()).Times(1)
 
 	// Test Start
 	ts.mediator.Start()
@@ -156,6 +166,11 @@ func TestMediator_HandleDBusSignal_SysMetrics(t *testing.T) {
 			// Expect OnRelayerMessage to be called
 			ts.mockRelayer.EXPECT().
 				OnRelayerMessage(gomock.Any()).
+				Times(1)
+
+			// Expect refresher callback to be set
+			ts.mockRefresher.EXPECT().
+				OnPlaylistUpdated(gomock.Any()).
 				Times(1)
 
 			ts.mediator.Start()
@@ -328,6 +343,11 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 				OnRelayerMessage(gomock.Any()).
 				Times(1)
 
+			// Expect refresher callback to be set
+			ts.mockRefresher.EXPECT().
+				OnPlaylistUpdated(gomock.Any()).
+				Times(1)
+
 			ts.mediator.Start()
 
 			// Call handler directly
@@ -366,6 +386,11 @@ func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {
 	// Expect OnRelayerMessage to be called
 	ts.mockRelayer.EXPECT().
 		OnRelayerMessage(gomock.Any()).
+		Times(1)
+
+	// Expect refresher callback to be set
+	ts.mockRefresher.EXPECT().
+		OnPlaylistUpdated(gomock.Any()).
 		Times(1)
 
 	ts.mediator.Start()
@@ -500,6 +525,11 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 				OnRelayerMessage(gomock.Any()).DoAndReturn(func(handler relayer.Handler) {
 				capturedHandler = handler
 			}).Times(1)
+
+			// Expect refresher callback to be set
+			ts.mockRefresher.EXPECT().
+				OnPlaylistUpdated(gomock.Any()).
+				Times(1)
 
 			ts.mediator.Start()
 
@@ -688,6 +718,11 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 				DoAndReturn(func(handler relayer.Handler) {
 					capturedHandler = handler
 				}).Times(1)
+
+			// Expect refresher callback to be set
+			ts.mockRefresher.EXPECT().
+				OnPlaylistUpdated(gomock.Any()).
+				Times(1)
 
 			ts.mediator.Start()
 
