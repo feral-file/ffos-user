@@ -18,7 +18,7 @@ type http struct {
 }
 
 func NewHTTP() HTTP {
-	return NewHTTPWithTimeout(30 * time.Second) // Default 30s timeout
+	return http{}
 }
 
 func NewHTTPWithTimeout(timeout time.Duration) HTTP {
