@@ -69,27 +69,13 @@ func New(
 func (m *mediator) Start() {
 	m.dbus.OnBusSignal(m.handleDBusSignal)
 	m.relayer.OnRelayerMessage(m.handleRelayerMessage)
-
-	m.refresher.SetOnPlaylistUpdated(func(ctx context.Context, playlist refresher.DP1Playlist) {
-		m.logger.Info("Refresher callback: playlist updated, sending CDP update")
-
-		payload := relayer.Payload{}
-		cmd := relayer.CMD_DISPLAY_PLAYLIST
-		payload.Message.Command = &cmd
-		payload.Message.Args = map[string]interface{}{
-			"dp1_call": playlist,
-			"refresh":  true,
-		}
-
-		if _, err := m.sendCDPRequest(ctx, payload); err != nil {
-			m.logger.Warn("Failed to send CDP request on playlist refresh", zap.Error(err))
-		}
-	})
+	m.refresher.OnPlaylistUpdated(m.handlePlaylistUpdated)
 }
 
 func (m *mediator) Stop() {
 	m.relayer.RemoveRelayerMessage(m.handleRelayerMessage)
 	m.dbus.RemoveBusSignal(m.handleDBusSignal)
+	m.refresher.RemovePlaylistUpdated(m.handlePlaylistUpdated)
 }
 
 func (m *mediator) handleDBusSignal(
@@ -308,6 +294,22 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 	}
 
 	return nil
+}
+
+func (m *mediator) handlePlaylistUpdated(ctx context.Context, playlist refresher.DP1Playlist) {
+	m.logger.Info("Refresher callback: playlist updated, sending CDP update")
+
+	payload := relayer.Payload{}
+	cmd := relayer.CMD_DISPLAY_PLAYLIST
+	payload.Message.Command = &cmd
+	payload.Message.Args = map[string]interface{}{
+		"dp1_call": playlist,
+		"refresh":  true,
+	}
+
+	if _, err := m.sendCDPRequest(ctx, payload); err != nil {
+		m.logger.Warn("Failed to send CDP request on playlist refresh", zap.Error(err))
+	}
 }
 
 // SetStatusPoller sets the StatusPoller reference after initialization

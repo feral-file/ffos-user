@@ -156,7 +156,8 @@ type Refresher interface {
 	FetchPlaylistByURL(ctx context.Context, playlistURL string) (*DP1Playlist, error)
 	BuildInitialPlaylistItems(ctx context.Context, playlist DP1Playlist, dynamicQueries []DynamicQuery) ([]DP1Item, error)
 
-	SetOnPlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist))
+	OnPlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist))
+	RemovePlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist))
 }
 
 type refresher struct {
@@ -175,11 +176,18 @@ type refresher struct {
 	onPlaylistUpdated func(ctx context.Context, playlist DP1Playlist)
 }
 
-// SetOnPlaylistUpdated registers a callback invoked after each successful URL-based refetch
-func (p *refresher) SetOnPlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist)) {
+// OnPlaylistUpdated registers a callback invoked after each successful URL-based refetch
+func (p *refresher) OnPlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onPlaylistUpdated = callback
+}
+
+// RemovePlaylistUpdated removes a callback from the refresher
+func (p *refresher) RemovePlaylistUpdated(callback func(ctx context.Context, playlist DP1Playlist)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onPlaylistUpdated = nil
 }
 
 func New(

@@ -65,16 +65,28 @@ func (mr *MockRefresherMockRecorder) FetchPlaylistByURL(ctx, playlistURL interfa
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchPlaylistByURL", reflect.TypeOf((*MockRefresher)(nil).FetchPlaylistByURL), ctx, playlistURL)
 }
 
-// SetOnPlaylistUpdated mocks base method.
-func (m *MockRefresher) SetOnPlaylistUpdated(callback func(context.Context, refresher.DP1Playlist)) {
+// OnPlaylistUpdated mocks base method.
+func (m *MockRefresher) OnPlaylistUpdated(callback func(context.Context, refresher.DP1Playlist)) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetOnPlaylistUpdated", callback)
+	m.ctrl.Call(m, "OnPlaylistUpdated", callback)
 }
 
-// SetOnPlaylistUpdated indicates an expected call of SetOnPlaylistUpdated.
-func (mr *MockRefresherMockRecorder) SetOnPlaylistUpdated(callback interface{}) *gomock.Call {
+// OnPlaylistUpdated indicates an expected call of OnPlaylistUpdated.
+func (mr *MockRefresherMockRecorder) OnPlaylistUpdated(callback interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetOnPlaylistUpdated", reflect.TypeOf((*MockRefresher)(nil).SetOnPlaylistUpdated), callback)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnPlaylistUpdated", reflect.TypeOf((*MockRefresher)(nil).OnPlaylistUpdated), callback)
+}
+
+// RemovePlaylistUpdated mocks base method.
+func (m *MockRefresher) RemovePlaylistUpdated(callback func(context.Context, refresher.DP1Playlist)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "RemovePlaylistUpdated", callback)
+}
+
+// RemovePlaylistUpdated indicates an expected call of RemovePlaylistUpdated.
+func (mr *MockRefresherMockRecorder) RemovePlaylistUpdated(callback interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemovePlaylistUpdated", reflect.TypeOf((*MockRefresher)(nil).RemovePlaylistUpdated), callback)
 }
 
 // Start mocks base method.
