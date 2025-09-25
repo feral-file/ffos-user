@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 )
@@ -556,6 +557,23 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 		setupFunc func(*testSetup) (relayer.Payload, error)
 	}{
 		{
+			name: "message with no command",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: nil,
+					},
+				}
+
+				return payload, nil // Should not return error
+			},
+		},
+		{
 			name: "controld command execution success",
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
 				cmd := relayer.CMD_CONNECT // Use a real controld command
@@ -678,20 +696,155 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 			},
 		},
 		{
-			name: "message with no command",
+			name: "displayPlaylist with playlistURL success",
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				payload := relayer.Payload{
-					MessageID: "test-message",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
-						Command: nil,
-					},
-				}
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				url := "https://example.com/playlist.json"
 
-				return payload, nil // Should not return error
+				// Expect refresher to start polling by URL and fetch immediately
+				ts.mockRefresher.EXPECT().
+					StartPollingWithPlaylistURL(gomock.Any(), url, false).
+					Times(1)
+
+				playlist := &refresher.DP1Playlist{ID: "p1", Items: []refresher.DP1Item{{ID: "i1"}}}
+				ts.mockRefresher.EXPECT().
+					FetchPlaylistByURL(gomock.Any(), url).
+					Return(playlist, nil).
+					Times(1)
+
+				// Expect CDP send, ForceRefresh, relayer send, and Sleep
+				payload := relayer.Payload{MessageID: "test-message"}
+				payload.Message.Command = &cmd
+				payload.Message.Args = map[string]interface{}{"playlistUrl": url}
+
+				payloadJSON, _ := payload.JSON()
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+						"expression": "window.handleCDPRequest(" + string(payloadJSON) + ")",
+					}).
+					Return(map[string]interface{}{"ok": true}, nil).
+					Times(1)
+
+				ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+				ts.mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+				ts.mockClock.EXPECT().Sleep(500 * time.Millisecond).Times(1)
+
+				return payload, nil
+			},
+		},
+		{
+			name: "displayPlaylist with playlistURL fetch error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				url := "https://example.com/playlist.json"
+
+				ts.mockRefresher.EXPECT().
+					StartPollingWithPlaylistURL(gomock.Any(), url, false).
+					Times(1)
+
+				fetchErr := errors.New("fetch failed")
+				ts.mockRefresher.EXPECT().
+					FetchPlaylistByURL(gomock.Any(), url).
+					Return(nil, fetchErr).
+					Times(1)
+
+				payload := relayer.Payload{MessageID: "test-message"}
+				payload.Message.Command = &cmd
+				payload.Message.Args = map[string]interface{}{"playlistUrl": url}
+
+				return payload, fetchErr
+			},
+		},
+		{
+			name: "displayPlaylist with args playlist success (no dynamic queries)",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				pl := refresher.DP1Playlist{ID: "p1", Items: []refresher.DP1Item{{ID: "i1"}}}
+
+				payload := relayer.Payload{MessageID: "test-message"}
+				payload.Message.Command = &cmd
+				payload.Message.Args = map[string]interface{}{"dp1_call": pl}
+
+				payloadJSON, _ := payload.JSON()
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+						"expression": "window.handleCDPRequest(" + string(payloadJSON) + ")",
+					}).
+					Return(map[string]interface{}{"ok": true}, nil).
+					Times(1)
+
+				ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+				ts.mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+				ts.mockClock.EXPECT().Sleep(500 * time.Millisecond).Times(1)
+
+				return payload, nil
+			},
+		},
+		{
+			name: "displayPlaylist with args and dynamic queries success",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				pl := refresher.DP1Playlist{ID: "p1", DynamicQueries: []refresher.DynamicQuery{{Endpoint: "ep", Params: map[string]string{"k": "v"}}}}
+
+				// Expect StartPollingWithDynamicQueries and initial items build
+				ts.mockRefresher.EXPECT().
+					StartPollingWithDynamicQueries(gomock.Any(), pl.DynamicQueries, pl, false).
+					Times(1)
+				ts.mockRefresher.EXPECT().
+					BuildInitialPlaylistItems(gomock.Any(), pl, pl.DynamicQueries).
+					Return([]refresher.DP1Item{{ID: "i1"}}, nil).
+					Times(1)
+
+				// After items are built, the playlist in args is enriched inside mediator
+				payload := relayer.Payload{MessageID: "test-message"}
+				payload.Message.Command = &cmd
+				payload.Message.Args = map[string]interface{}{"dp1_call": pl}
+				payloadJSON, _ := payload.JSON()
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+						"expression": "window.handleCDPRequest(" + string(payloadJSON) + ")",
+					}).
+					Return(map[string]interface{}{"ok": true}, nil).
+					Times(1)
+
+				ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+				ts.mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+				ts.mockClock.EXPECT().Sleep(500 * time.Millisecond).Times(1)
+
+				return payload, nil
+			},
+		},
+		{
+			name: "displayPlaylist with args missing playlist error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				payload := relayer.Payload{MessageID: "test-message"}
+				payload.Message.Command = &cmd
+				payload.Message.Args = map[string]interface{}{}
+				return payload, errors.New("payload doesn't contain playlist")
+			},
+		},
+		{
+			name: "displayPlaylist with args invalid playlist JSON error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				payload := relayer.Payload{MessageID: "test-message"}
+				payload.Message.Command = &cmd
+				payload.Message.Args = map[string]interface{}{"dp1_call": make(chan int)}
+				return payload, errors.New("failed to marshal playlist")
+			},
+		},
+		{
+			name: "displayPlaylist with args empty playlist error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				pl := refresher.DP1Playlist{ID: "p1", Items: []refresher.DP1Item{}}
+				payload := relayer.Payload{MessageID: "test-message"}
+				payload.Message.Command = &cmd
+				payload.Message.Args = map[string]interface{}{"dp1_call": pl}
+
+				// ensurePlaylistHasItems should error
+				return payload, errors.New("empty playlist")
 			},
 		},
 	}
