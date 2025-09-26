@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DEFAULT_DURATION             = 300
+	DEFAULT_DURATION             = 20
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
 )
