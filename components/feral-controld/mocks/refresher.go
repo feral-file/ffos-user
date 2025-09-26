@@ -5,10 +5,8 @@
 package mocks
 
 import (
-	context "context"
 	reflect "reflect"
 
-	refresher "github.com/feral-file/ffos-user/components/feral-controld/refresher"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -35,94 +33,16 @@ func (m *MockRefresher) EXPECT() *MockRefresherMockRecorder {
 	return m.recorder
 }
 
-// BuildInitialPlaylistItems mocks base method.
-func (m *MockRefresher) BuildInitialPlaylistItems(ctx context.Context, playlist refresher.DP1Playlist, dynamicQueries []refresher.DynamicQuery) ([]refresher.DP1Item, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "BuildInitialPlaylistItems", ctx, playlist, dynamicQueries)
-	ret0, _ := ret[0].([]refresher.DP1Item)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// BuildInitialPlaylistItems indicates an expected call of BuildInitialPlaylistItems.
-func (mr *MockRefresherMockRecorder) BuildInitialPlaylistItems(ctx, playlist, dynamicQueries interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BuildInitialPlaylistItems", reflect.TypeOf((*MockRefresher)(nil).BuildInitialPlaylistItems), ctx, playlist, dynamicQueries)
-}
-
-// FetchPlaylistByURL mocks base method.
-func (m *MockRefresher) FetchPlaylistByURL(ctx context.Context, playlistURL string) (*refresher.DP1Playlist, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FetchPlaylistByURL", ctx, playlistURL)
-	ret0, _ := ret[0].(*refresher.DP1Playlist)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// FetchPlaylistByURL indicates an expected call of FetchPlaylistByURL.
-func (mr *MockRefresherMockRecorder) FetchPlaylistByURL(ctx, playlistURL interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchPlaylistByURL", reflect.TypeOf((*MockRefresher)(nil).FetchPlaylistByURL), ctx, playlistURL)
-}
-
-// OnPlaylistUpdated mocks base method.
-func (m *MockRefresher) OnPlaylistUpdated(callback func(context.Context, refresher.DP1Playlist)) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnPlaylistUpdated", callback)
-}
-
-// OnPlaylistUpdated indicates an expected call of OnPlaylistUpdated.
-func (mr *MockRefresherMockRecorder) OnPlaylistUpdated(callback interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnPlaylistUpdated", reflect.TypeOf((*MockRefresher)(nil).OnPlaylistUpdated), callback)
-}
-
-// RemovePlaylistUpdated mocks base method.
-func (m *MockRefresher) RemovePlaylistUpdated(callback func(context.Context, refresher.DP1Playlist)) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "RemovePlaylistUpdated", callback)
-}
-
-// RemovePlaylistUpdated indicates an expected call of RemovePlaylistUpdated.
-func (mr *MockRefresherMockRecorder) RemovePlaylistUpdated(callback interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemovePlaylistUpdated", reflect.TypeOf((*MockRefresher)(nil).RemovePlaylistUpdated), callback)
-}
-
 // Start mocks base method.
-func (m *MockRefresher) Start(ctx context.Context) {
+func (m *MockRefresher) Start() {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Start", ctx)
+	m.ctrl.Call(m, "Start")
 }
 
 // Start indicates an expected call of Start.
-func (mr *MockRefresherMockRecorder) Start(ctx interface{}) *gomock.Call {
+func (mr *MockRefresherMockRecorder) Start() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockRefresher)(nil).Start), ctx)
-}
-
-// StartPollingWithDynamicQueries mocks base method.
-func (m *MockRefresher) StartPollingWithDynamicQueries(ctx context.Context, dynamicQueries []refresher.DynamicQuery, playlist refresher.DP1Playlist, withInitialSync bool) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "StartPollingWithDynamicQueries", ctx, dynamicQueries, playlist, withInitialSync)
-}
-
-// StartPollingWithDynamicQueries indicates an expected call of StartPollingWithDynamicQueries.
-func (mr *MockRefresherMockRecorder) StartPollingWithDynamicQueries(ctx, dynamicQueries, playlist, withInitialSync interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartPollingWithDynamicQueries", reflect.TypeOf((*MockRefresher)(nil).StartPollingWithDynamicQueries), ctx, dynamicQueries, playlist, withInitialSync)
-}
-
-// StartPollingWithPlaylistURL mocks base method.
-func (m *MockRefresher) StartPollingWithPlaylistURL(ctx context.Context, playlistURL string, withInitialSync bool) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "StartPollingWithPlaylistURL", ctx, playlistURL, withInitialSync)
-}
-
-// StartPollingWithPlaylistURL indicates an expected call of StartPollingWithPlaylistURL.
-func (mr *MockRefresherMockRecorder) StartPollingWithPlaylistURL(ctx, playlistURL, withInitialSync interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartPollingWithPlaylistURL", reflect.TypeOf((*MockRefresher)(nil).StartPollingWithPlaylistURL), ctx, playlistURL, withInitialSync)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockRefresher)(nil).Start))
 }
 
 // Stop mocks base method.

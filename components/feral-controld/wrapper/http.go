@@ -18,13 +18,9 @@ type http struct {
 }
 
 func NewHTTP() HTTP {
-	return http{}
-}
-
-func NewHTTPWithTimeout(timeout time.Duration) HTTP {
 	return http{
 		client: &go_http.Client{
-			Timeout: timeout,
+			Timeout: 30 * time.Second,
 		},
 	}
 }

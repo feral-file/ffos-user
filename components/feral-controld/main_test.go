@@ -185,7 +185,7 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Stop()
 
 				// Mock Refresher start and stop
-				ts.mockRefresher.EXPECT().Start(gomock.Any())
+				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
 
 				// Mock Daemon notify
@@ -239,7 +239,7 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Stop()
 
 				// Mock Refresher start and stop
-				ts.mockRefresher.EXPECT().Start(gomock.Any())
+				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
 
 				// Mock Daemon notify
@@ -443,7 +443,7 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Stop()
 
 				// Mock Refresher start and stop
-				ts.mockRefresher.EXPECT().Start(gomock.Any())
+				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
 
 				// Mock Daemon notify failure
@@ -494,7 +494,7 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Stop()
 
 				// Mock Refresher start and stop
-				ts.mockRefresher.EXPECT().Start(gomock.Any())
+				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
 
 				// Mock daemon notify
@@ -631,7 +631,7 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.DeviceStatus)
 	assert.NotNil(t, app.StatusPoller)
 	assert.NotNil(t, app.Watchdog)
-	assert.NotNil(t, app.Refresher)
+	assert.NotNil(t, app.PlaylistRefresher)
 
 	// Test all wrappers are initialized
 	assert.NotNil(t, app.Clock)
@@ -709,7 +709,7 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.Equal(t, mockDeviceStatus, app.DeviceStatus)
 	assert.Equal(t, mockStatusPoller, app.StatusPoller)
 	assert.Equal(t, mockWatchdog, app.Watchdog)
-	assert.Equal(t, mockRefresher, app.Refresher)
+	assert.Equal(t, mockRefresher, app.PlaylistRefresher)
 
 	// Test all wrappers are initialized
 	assert.Equal(t, mockClock, app.Clock)

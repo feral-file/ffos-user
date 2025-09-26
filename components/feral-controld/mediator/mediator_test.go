@@ -17,7 +17,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 )
@@ -47,6 +46,7 @@ func setup(t *testing.T) *testSetup {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCmd := mocks.NewMockCommandHandler(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockRefresher := mocks.NewMockRefresher(ctrl)
@@ -56,6 +56,7 @@ func setup(t *testing.T) *testSetup {
 		mockDbus,
 		mockCDP,
 		mockCmd,
+		mockDP1,
 		mockClock,
 		mockJSON,
 		mockRefresher,
@@ -89,12 +90,10 @@ func TestMediator_StartStop(t *testing.T) {
 	// Expect Start to register handlers
 	ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
 	ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
-	ts.mockRefresher.EXPECT().OnPlaylistUpdated(gomock.Any()).Times(1)
 
 	// Expect Stop to remove handlers
 	ts.mockRelayer.EXPECT().RemoveRelayerMessage(gomock.Any()).Times(1)
 	ts.mockDbus.EXPECT().RemoveBusSignal(gomock.Any()).Times(1)
-	ts.mockRefresher.EXPECT().RemovePlaylistUpdated(gomock.Any()).Times(1)
 
 	// Test Start
 	ts.mediator.Start()
@@ -167,11 +166,6 @@ func TestMediator_HandleDBusSignal_SysMetrics(t *testing.T) {
 			// Expect OnRelayerMessage to be called
 			ts.mockRelayer.EXPECT().
 				OnRelayerMessage(gomock.Any()).
-				Times(1)
-
-			// Expect refresher callback to be set
-			ts.mockRefresher.EXPECT().
-				OnPlaylistUpdated(gomock.Any()).
 				Times(1)
 
 			ts.mediator.Start()
@@ -344,11 +338,6 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 				OnRelayerMessage(gomock.Any()).
 				Times(1)
 
-			// Expect refresher callback to be set
-			ts.mockRefresher.EXPECT().
-				OnPlaylistUpdated(gomock.Any()).
-				Times(1)
-
 			ts.mediator.Start()
 
 			// Call handler directly
@@ -387,11 +376,6 @@ func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {
 	// Expect OnRelayerMessage to be called
 	ts.mockRelayer.EXPECT().
 		OnRelayerMessage(gomock.Any()).
-		Times(1)
-
-	// Expect refresher callback to be set
-	ts.mockRefresher.EXPECT().
-		OnPlaylistUpdated(gomock.Any()).
 		Times(1)
 
 	ts.mediator.Start()
@@ -526,11 +510,6 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 				OnRelayerMessage(gomock.Any()).DoAndReturn(func(handler relayer.Handler) {
 				capturedHandler = handler
 			}).Times(1)
-
-			// Expect refresher callback to be set
-			ts.mockRefresher.EXPECT().
-				OnPlaylistUpdated(gomock.Any()).
-				Times(1)
 
 			ts.mediator.Start()
 
@@ -695,158 +674,6 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 				return payload, nil
 			},
 		},
-		{
-			name: "displayPlaylist with playlistURL success",
-			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				url := "https://example.com/playlist.json"
-
-				// Expect refresher to start polling by URL and fetch immediately
-				ts.mockRefresher.EXPECT().
-					StartPollingWithPlaylistURL(gomock.Any(), url, false).
-					Times(1)
-
-				playlist := &refresher.DP1Playlist{ID: "p1", Items: []refresher.DP1Item{{ID: "i1"}}}
-				ts.mockRefresher.EXPECT().
-					FetchPlaylistByURL(gomock.Any(), url).
-					Return(playlist, nil).
-					Times(1)
-
-				// Expect CDP send, ForceRefresh, relayer send, and Sleep
-				payload := relayer.Payload{MessageID: "test-message"}
-				payload.Message.Command = &cmd
-				payload.Message.Args = map[string]interface{}{"playlistUrl": url}
-
-				payloadJSON, _ := payload.JSON()
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleCDPRequest(" + string(payloadJSON) + ")",
-					}).
-					Return(map[string]interface{}{"ok": true}, nil).
-					Times(1)
-
-				ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
-				ts.mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil).Times(1)
-				ts.mockClock.EXPECT().Sleep(500 * time.Millisecond).Times(1)
-
-				return payload, nil
-			},
-		},
-		{
-			name: "displayPlaylist with playlistURL fetch error",
-			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				url := "https://example.com/playlist.json"
-
-				ts.mockRefresher.EXPECT().
-					StartPollingWithPlaylistURL(gomock.Any(), url, false).
-					Times(1)
-
-				fetchErr := errors.New("fetch failed")
-				ts.mockRefresher.EXPECT().
-					FetchPlaylistByURL(gomock.Any(), url).
-					Return(nil, fetchErr).
-					Times(1)
-
-				payload := relayer.Payload{MessageID: "test-message"}
-				payload.Message.Command = &cmd
-				payload.Message.Args = map[string]interface{}{"playlistUrl": url}
-
-				return payload, fetchErr
-			},
-		},
-		{
-			name: "displayPlaylist with args playlist success (no dynamic queries)",
-			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				pl := refresher.DP1Playlist{ID: "p1", Items: []refresher.DP1Item{{ID: "i1"}}}
-
-				payload := relayer.Payload{MessageID: "test-message"}
-				payload.Message.Command = &cmd
-				payload.Message.Args = map[string]interface{}{"dp1_call": pl}
-
-				payloadJSON, _ := payload.JSON()
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleCDPRequest(" + string(payloadJSON) + ")",
-					}).
-					Return(map[string]interface{}{"ok": true}, nil).
-					Times(1)
-
-				ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
-				ts.mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil).Times(1)
-				ts.mockClock.EXPECT().Sleep(500 * time.Millisecond).Times(1)
-
-				return payload, nil
-			},
-		},
-		{
-			name: "displayPlaylist with args and dynamic queries success",
-			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				pl := refresher.DP1Playlist{ID: "p1", DynamicQueries: []refresher.DynamicQuery{{Endpoint: "ep", Params: map[string]string{"k": "v"}}}}
-
-				// Expect StartPollingWithDynamicQueries and initial items build
-				ts.mockRefresher.EXPECT().
-					StartPollingWithDynamicQueries(gomock.Any(), pl.DynamicQueries, pl, false).
-					Times(1)
-				ts.mockRefresher.EXPECT().
-					BuildInitialPlaylistItems(gomock.Any(), pl, pl.DynamicQueries).
-					Return([]refresher.DP1Item{{ID: "i1"}}, nil).
-					Times(1)
-
-				// After items are built, the playlist in args is enriched inside mediator
-				payload := relayer.Payload{MessageID: "test-message"}
-				payload.Message.Command = &cmd
-				payload.Message.Args = map[string]interface{}{"dp1_call": pl}
-				payloadJSON, _ := payload.JSON()
-				ts.mockCDP.EXPECT().
-					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleCDPRequest(" + string(payloadJSON) + ")",
-					}).
-					Return(map[string]interface{}{"ok": true}, nil).
-					Times(1)
-
-				ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
-				ts.mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).Return(nil).Times(1)
-				ts.mockClock.EXPECT().Sleep(500 * time.Millisecond).Times(1)
-
-				return payload, nil
-			},
-		},
-		{
-			name: "displayPlaylist with args missing playlist error",
-			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				payload := relayer.Payload{MessageID: "test-message"}
-				payload.Message.Command = &cmd
-				payload.Message.Args = map[string]interface{}{}
-				return payload, errors.New("payload doesn't contain playlist")
-			},
-		},
-		{
-			name: "displayPlaylist with args invalid playlist JSON error",
-			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				payload := relayer.Payload{MessageID: "test-message"}
-				payload.Message.Command = &cmd
-				payload.Message.Args = map[string]interface{}{"dp1_call": make(chan int)}
-				return payload, errors.New("failed to marshal playlist")
-			},
-		},
-		{
-			name: "displayPlaylist with args empty playlist error",
-			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				pl := refresher.DP1Playlist{ID: "p1", Items: []refresher.DP1Item{}}
-				payload := relayer.Payload{MessageID: "test-message"}
-				payload.Message.Command = &cmd
-				payload.Message.Args = map[string]interface{}{"dp1_call": pl}
-
-				// ensurePlaylistHasItems should error
-				return payload, errors.New("empty playlist")
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -871,11 +698,6 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 				DoAndReturn(func(handler relayer.Handler) {
 					capturedHandler = handler
 				}).Times(1)
-
-			// Expect refresher callback to be set
-			ts.mockRefresher.EXPECT().
-				OnPlaylistUpdated(gomock.Any()).
-				Times(1)
 
 			ts.mediator.Start()
 

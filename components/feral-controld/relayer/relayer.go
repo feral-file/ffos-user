@@ -70,10 +70,6 @@ func (c RelayerCmd) ControldCmds() bool {
 	return ControldCmds[c]
 }
 
-func (c RelayerCmd) DisplayPlaylistCmd() bool {
-	return c == CMD_DISPLAY_PLAYLIST
-}
-
 type Payload struct {
 	MessageID string `json:"messageID"`
 	Message   struct {

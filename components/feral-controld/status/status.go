@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"go.uber.org/zap"
 )
@@ -19,12 +21,21 @@ const (
 	POLL_INTERVAL = 5 * time.Second
 )
 
+type PlayerStatus struct {
+	Command     relayer.RelayerCmd `json:"castCommand,omitempty"`
+	PlaylistURL *string            `json:"playlistURL,omitempty"`
+	Playlist    *dp1.Playlist      `json:"playlist,omitempty"`
+	Index       *int               `json:"index,omitempty"`
+	IsPaused    *bool              `json:"isPaused,omitempty"`
+}
+
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
 
 type Poller interface {
 	Start(ctx context.Context)
 	Stop()
 	ForceRefresh()
+	FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -36,6 +47,7 @@ type poller struct {
 	logger       *zap.Logger
 	stopChan     chan struct{}
 	refreshChan  chan struct{}
+	json         wrapper.JSON
 
 	// Store last status hashes for each notification type to avoid duplicate notifications
 	lastStatusHashes map[relayer.NotificationType]string
@@ -45,6 +57,7 @@ func NewPoller(
 	cdp cdp.CDP,
 	r relayer.Relayer,
 	ds DeviceStatus,
+	json wrapper.JSON,
 	logger *zap.Logger,
 ) Poller {
 	return &poller{
@@ -52,6 +65,7 @@ func NewPoller(
 		relayer:          r,
 		deviceStatus:     ds,
 		logger:           logger,
+		json:             json,
 		stopChan:         make(chan struct{}),
 		refreshChan:      make(chan struct{}, 10), // Buffered channel to prevent blocking
 		lastStatusHashes: make(map[relayer.NotificationType]string),
@@ -156,55 +170,25 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 
 	s.logger.Debug("Polling player status from Chromium")
 
-	message, err := FetchPlayerStatus(ctx, s.cdp, s.logger)
+	playerStatus, err := s.FetchPlayerStatus(ctx)
 	if err != nil {
 		s.logger.Error("Failed to fetch player status", zap.Error(err))
 		return
 	}
 
 	// Check if we should send this notification
-	if !s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, message) {
+	if !s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus) {
 		s.logger.Debug("Player status unchanged, skipping notification")
 		return
 	}
 
-	err = s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, message)
+	err = s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
 	if err != nil {
 		s.logger.Error("Failed to send player status notification", zap.Error(err))
 	}
 }
 
-// FetchPlayerStatus fetches the current player status via CDP once and returns the "message" payload
-func FetchPlayerStatus(ctx context.Context, c cdp.CDP, logger *zap.Logger) (map[string]interface{}, error) {
-	payloadStr, err := buildCheckStatusPayloadFn()
-	if err != nil {
-		return nil, err
-	}
-
-	expr := fmt.Sprintf("window.handleCDPRequest(%s)", payloadStr)
-	resultMap, err := sendCDPRequestFn(c, expr)
-	if err != nil {
-		return nil, err
-	}
-
-	message, err := extractMessageFn(resultMap)
-	if err != nil {
-		return nil, err
-	}
-
-	logger.Debug("Fetched player status", zap.Any("message", message))
-	return message, nil
-}
-
-// injection seams for testing; default to real implementations
-var (
-	buildCheckStatusPayloadFn = buildCheckStatusPayload
-	sendCDPRequestFn          = sendCDPRequest
-	extractMessageFn          = extractMessage
-)
-
-// buildCheckStatusPayload constructs the CDP payload for checkStatus command.
-func buildCheckStatusPayload() (string, error) {
+func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 	payload := map[string]interface{}{
 		"messageID": "",
 		"message": map[string]interface{}{
@@ -215,38 +199,43 @@ func buildCheckStatusPayload() (string, error) {
 	// Marshal the payload to JSON string
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal checkStatus payload: %w", err)
+		return nil, fmt.Errorf("failed to marshal checkStatus payload: %w", err)
 	}
-	return string(payloadBytes), nil
-}
 
-// sendCDPRequest evaluates a JavaScript expression via CDP and returns the result as map.
-func sendCDPRequest(c cdp.CDP, expression string) (map[string]interface{}, error) {
-	result, err := c.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": expression,
+	// Send the payload to the CDP
+	expr := fmt.Sprintf("window.handleCDPRequest(%s)", string(payloadBytes))
+	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression": expr,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cdp evaluate failed: %w", err)
 	}
 
+	// Check if the result is a map
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("unexpected result type: %T", result)
 	}
-	return resultMap, nil
-}
 
-// extractMessage safely extracts the "message" field as map[string]interface{}.
-func extractMessage(result map[string]interface{}) (map[string]interface{}, error) {
-	message, ok := result["message"]
+	// Get the message from the result
+	message, ok := resultMap["message"]
 	if !ok {
-		return nil, fmt.Errorf("missing 'message' in result")
+		return nil, fmt.Errorf("missing message in result")
 	}
-	msg, ok := message.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("'message' has unexpected type: %T", message)
+
+	// Marshal the message
+	jsonMessage, err := s.json.Marshal(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal message: %w", err)
 	}
-	return msg, nil
+
+	// Unmarshal the message
+	playerStatus := &PlayerStatus{}
+	if err := s.json.Unmarshal(jsonMessage, playerStatus); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+	}
+
+	return playerStatus, nil
 }
 
 func (s *poller) pollDeviceStatus(ctx context.Context) {
