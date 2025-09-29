@@ -10,9 +10,10 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-const (
-	FF_INDEXER_HOST = "indexer.feralfile.com"
-)
+var FF_INDEXER_HOSTS = map[string]bool{
+	"indexer.feralfile.com": true,
+	"indexer.autonomy.io":   true,
+}
 
 type ProjectMetadata struct {
 	Title      string `json:"title,omitempty"`
@@ -103,8 +104,8 @@ func validateEndpoint(endpoint string) error {
 	if err != nil {
 		return err
 	}
-	if url.Host != FF_INDEXER_HOST {
-		return fmt.Errorf("invalid endpoint: %s, expected %s", endpoint, FF_INDEXER_HOST)
+	if !FF_INDEXER_HOSTS[url.Host] {
+		return fmt.Errorf("invalid endpoint: %s", endpoint)
 	}
 	return nil
 }
