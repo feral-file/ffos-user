@@ -12,9 +12,11 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
+	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/command"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -28,6 +30,7 @@ type testSetup struct {
 	mockDbus         *mocks.MockDBus
 	mockCDP          *mocks.MockCDP
 	mockCmd          *mocks.MockCommandHandler
+	mockDP1          *mocks.MockDP1
 	mockStatusPoller *mocks.MockStatusPoller
 	mockClock        *mocks.MockClock
 	mockJSON         *mocks.MockJSON
@@ -70,6 +73,7 @@ func setup(t *testing.T) *testSetup {
 		mockDbus:         mockDbus,
 		mockCDP:          mockCDP,
 		mockCmd:          mockCmd,
+		mockDP1:          mockDP1,
 		mockStatusPoller: mockStatusPoller,
 		mockClock:        mockClock,
 		mockJSON:         mockJSON,
@@ -674,6 +678,494 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 				return payload, nil
 			},
 		},
+		{
+			name: "display playlist command with playlistUrl",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				playlistUrl := "https://example.com/playlist.json"
+				mockPlaylist := &dp1.Playlist{
+					Playlist: dp1playlist.Playlist{
+						Items: []dp1playlist.PlaylistItem{
+							{
+								ID:       "item1",
+								Title:    stringPtr("Test Item"),
+								Source:   "https://example.com/video.mp4",
+								Duration: 300,
+								License:  "open",
+							},
+						},
+					},
+				}
+				cdpResult := map[string]interface{}{"result": "cdp-success"}
+
+				// Expect ProcessPlaylistURL to be called
+				ts.mockDP1.EXPECT().
+					ProcessPlaylistURL(gomock.Any(), playlistUrl, true).
+					Return(mockPlaylist, nil).
+					Times(1)
+
+				// Expect CDP send to be called
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, gomock.Any()).
+					Return(cdpResult, nil).
+					Times(1)
+
+				// Expect ForceRefresh to be called
+				ts.mockStatusPoller.EXPECT().
+					ForceRefresh().
+					Times(1)
+
+				// Expect Sleep to be called
+				ts.mockClock.EXPECT().
+					Sleep(500 * time.Millisecond).
+					Times(1)
+
+				// Expect the result to be sent
+				ts.mockRelayer.EXPECT().
+					Send(gomock.Any(), cdpResult).
+					Return(nil).
+					Times(1)
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlistUrl": playlistUrl,
+						},
+					},
+				}
+
+				return payload, nil
+			},
+		},
+		{
+			name: "display playlist command with playlist object",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				playlistMap := map[string]interface{}{
+					"items": []interface{}{
+						map[string]interface{}{
+							"id":       "item1",
+							"title":    "Test Item",
+							"source":   "https://example.com/video.mp4",
+							"duration": 300,
+							"license":  "open",
+						},
+					},
+				}
+				playlistBytes := []byte(`{"items":[{"id":"item1","title":"Test Item","source":"https://example.com/video.mp4","duration":300,"license":"open"}]}`)
+				mockPlaylist := &dp1.Playlist{
+					Playlist: dp1playlist.Playlist{
+						Items: []dp1playlist.PlaylistItem{
+							{
+								ID:       "item1",
+								Title:    stringPtr("Test Item"),
+								Source:   "https://example.com/video.mp4",
+								Duration: 300,
+								License:  "open",
+							},
+						},
+					},
+				}
+				cdpResult := map[string]interface{}{"result": "cdp-success"}
+
+				// Expect JSON marshal and unmarshal
+				ts.mockJSON.EXPECT().
+					Marshal(playlistMap).
+					Return(playlistBytes, nil).
+					Times(1)
+
+				ts.mockJSON.EXPECT().
+					Unmarshal(playlistBytes, gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						playlist := v.(**dp1.Playlist)
+						*playlist = mockPlaylist
+						return nil
+					}).
+					Times(1)
+
+				// Expect CDP send to be called
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, gomock.Any()).
+					Return(cdpResult, nil).
+					Times(1)
+
+				// Expect ForceRefresh to be called
+				ts.mockStatusPoller.EXPECT().
+					ForceRefresh().
+					Times(1)
+
+				// Expect Sleep to be called
+				ts.mockClock.EXPECT().
+					Sleep(500 * time.Millisecond).
+					Times(1)
+
+				// Expect the result to be sent
+				ts.mockRelayer.EXPECT().
+					Send(gomock.Any(), cdpResult).
+					Return(nil).
+					Times(1)
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlist": playlistMap,
+						},
+					},
+				}
+
+				return payload, nil
+			},
+		},
+		{
+			name: "display playlist command with dynamic playlist",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				playlistMap := map[string]interface{}{
+					"items": []interface{}{},
+					"dynamicQueries": []interface{}{
+						map[string]interface{}{
+							"endpoint": "https://api.example.com/graphql",
+							"params": map[string]interface{}{
+								"query": "test query",
+							},
+						},
+					},
+				}
+				playlistBytes := []byte(`{"items":[],"dynamicQueries":[{"endpoint":"https://api.example.com/graphql","params":{"query":"test query"}}]}`)
+				mockPlaylist := &dp1.Playlist{
+					Playlist: dp1playlist.Playlist{
+						Items: []dp1playlist.PlaylistItem{},
+					},
+					DynamicQueries: []dp1.DynamicQuery{
+						{
+							Endpoint: "https://api.example.com/graphql",
+							Params: map[string]string{
+								"query": "test query",
+							},
+						},
+					},
+				}
+				processedPlaylist := &dp1.Playlist{
+					Playlist: dp1playlist.Playlist{
+						Items: []dp1playlist.PlaylistItem{
+							{
+								ID:       "processed1",
+								Title:    stringPtr("Processed Item"),
+								Source:   "https://example.com/processed.mp4",
+								Duration: 300,
+								License:  "open",
+							},
+						},
+					},
+				}
+				cdpResult := map[string]interface{}{"result": "cdp-success"}
+
+				// Expect JSON marshal and unmarshal
+				ts.mockJSON.EXPECT().
+					Marshal(playlistMap).
+					Return(playlistBytes, nil).
+					Times(1)
+
+				ts.mockJSON.EXPECT().
+					Unmarshal(playlistBytes, gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						playlist := v.(**dp1.Playlist)
+						*playlist = mockPlaylist
+						return nil
+					}).
+					Times(1)
+
+				// Expect ProcessDynamicPlaylist to be called
+				ts.mockDP1.EXPECT().
+					ProcessDynamicPlaylist(gomock.Any(), *mockPlaylist, true).
+					Return(processedPlaylist, nil).
+					Times(1)
+
+				// Expect CDP send to be called
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, gomock.Any()).
+					Return(cdpResult, nil).
+					Times(1)
+
+				// Expect ForceRefresh to be called
+				ts.mockStatusPoller.EXPECT().
+					ForceRefresh().
+					Times(1)
+
+				// Expect Sleep to be called
+				ts.mockClock.EXPECT().
+					Sleep(500 * time.Millisecond).
+					Times(1)
+
+				// Expect the result to be sent
+				ts.mockRelayer.EXPECT().
+					Send(gomock.Any(), cdpResult).
+					Return(nil).
+					Times(1)
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlist": playlistMap,
+						},
+					},
+				}
+
+				return payload, nil
+			},
+		},
+		{
+			name: "display playlist command with invalid playlistUrl",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlistUrl": "", // Empty URL should cause error
+						},
+					},
+				}
+
+				return payload, errors.New("playlistUrl is not a string or empty")
+			},
+		},
+		{
+			name: "display playlist command with invalid playlist type",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlist": "not-a-map", // Invalid type should cause error
+						},
+					},
+				}
+
+				return payload, errors.New("playlist is not a map")
+			},
+		},
+		{
+			name: "display playlist command with unknown payload type",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args:    map[string]interface{}{}, // No playlistUrl or playlist
+					},
+				}
+
+				return payload, errors.New("unknown payload type")
+			},
+		},
+		{
+			name: "display playlist command with ProcessPlaylistURL error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				playlistUrl := "https://example.com/playlist.json"
+				processError := errors.New("failed to process playlist URL")
+
+				// Expect ProcessPlaylistURL to be called and return error
+				ts.mockDP1.EXPECT().
+					ProcessPlaylistURL(gomock.Any(), playlistUrl, true).
+					Return(nil, processError).
+					Times(1)
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlistUrl": playlistUrl,
+						},
+					},
+				}
+
+				return payload, processError
+			},
+		},
+		{
+			name: "display playlist command with JSON marshal error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				playlistMap := map[string]interface{}{
+					"items": []interface{}{},
+				}
+				marshalError := errors.New("failed to marshal playlist")
+
+				// Expect JSON marshal to return error
+				ts.mockJSON.EXPECT().
+					Marshal(playlistMap).
+					Return(nil, marshalError).
+					Times(1)
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlist": playlistMap,
+						},
+					},
+				}
+
+				return payload, marshalError
+			},
+		},
+		{
+			name: "display playlist command with JSON unmarshal error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				playlistMap := map[string]interface{}{
+					"items": []interface{}{},
+				}
+				playlistBytes := []byte(`{"items":[]}`)
+				unmarshalError := errors.New("failed to unmarshal playlist")
+
+				// Expect JSON marshal to succeed
+				ts.mockJSON.EXPECT().
+					Marshal(playlistMap).
+					Return(playlistBytes, nil).
+					Times(1)
+
+				// Expect JSON unmarshal to return error
+				ts.mockJSON.EXPECT().
+					Unmarshal(playlistBytes, gomock.Any()).
+					Return(unmarshalError).
+					Times(1)
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlist": playlistMap,
+						},
+					},
+				}
+
+				return payload, unmarshalError
+			},
+		},
+		{
+			name: "display playlist command with ProcessDynamicPlaylist error",
+			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				cmd := relayer.CMD_DISPLAY_PLAYLIST
+				playlistMap := map[string]interface{}{
+					"items": []interface{}{},
+					"dynamicQueries": []interface{}{
+						map[string]interface{}{
+							"endpoint": "https://api.example.com/graphql",
+							"params": map[string]interface{}{
+								"query": "test query",
+							},
+						},
+					},
+				}
+				playlistBytes := []byte(`{"items":[],"dynamicQueries":[{"endpoint":"https://api.example.com/graphql","params":{"query":"test query"}}]}`)
+				mockPlaylist := &dp1.Playlist{
+					Playlist: dp1playlist.Playlist{
+						Items: []dp1playlist.PlaylistItem{},
+					},
+					DynamicQueries: []dp1.DynamicQuery{
+						{
+							Endpoint: "https://api.example.com/graphql",
+							Params: map[string]string{
+								"query": "test query",
+							},
+						},
+					},
+				}
+				processError := errors.New("failed to process dynamic playlist")
+
+				// Expect JSON marshal and unmarshal
+				ts.mockJSON.EXPECT().
+					Marshal(playlistMap).
+					Return(playlistBytes, nil).
+					Times(1)
+
+				ts.mockJSON.EXPECT().
+					Unmarshal(playlistBytes, gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						playlist := v.(**dp1.Playlist)
+						*playlist = mockPlaylist
+						return nil
+					}).
+					Times(1)
+
+				// Expect ProcessDynamicPlaylist to be called and return error
+				ts.mockDP1.EXPECT().
+					ProcessDynamicPlaylist(gomock.Any(), *mockPlaylist, true).
+					Return(nil, processError).
+					Times(1)
+
+				payload := relayer.Payload{
+					MessageID: "test-message",
+					Message: struct {
+						Command *relayer.RelayerCmd    `json:"command,omitempty"`
+						Args    map[string]interface{} `json:"request,omitempty"`
+						TopicID *string                `json:"topicID,omitempty"`
+					}{
+						Command: &cmd,
+						Args: map[string]interface{}{
+							"playlist": playlistMap,
+						},
+					},
+				}
+
+				return payload, processError
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -713,4 +1205,9 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Helper function to create string pointers for test data
+func stringPtr(s string) *string {
+	return &s
 }
