@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	PLAYLIST_REFRESH_INTERVAL      = 20 * time.Second
+	PLAYLIST_REFRESH_INTERVAL      = 5 * time.Minute
 	PLAYER_STATUS_POLLING_INTERVAL = 5 * time.Second
 )
 
