@@ -172,7 +172,19 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 
 	playerStatus, err := s.FetchPlayerStatus(ctx)
 	if err != nil {
-		s.logger.Error("Failed to fetch player status", zap.Error(err))
+		s.logger.Error("Failed to get player status from CDP", zap.Error(err))
+
+		// Notify relayer about the CDP error in the expected format
+		errorMessage := map[string]interface{}{
+			"ok":    false,
+			"error": err.Error(),
+		}
+		// Only send if it differs from the last notification to prevent spam
+		if s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, errorMessage) {
+			if sendErr := s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, errorMessage); sendErr != nil {
+				s.logger.Error("Failed to send player status error notification", zap.Error(sendErr))
+			}
+		}
 		return
 	}
 
