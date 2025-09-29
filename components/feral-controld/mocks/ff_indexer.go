@@ -8,8 +8,9 @@ import (
 	context "context"
 	reflect "reflect"
 
-	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 	gomock "github.com/golang/mock/gomock"
+
+	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 )
 
 // MockFFIndexer is a mock of FFIndexer interface.

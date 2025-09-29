@@ -7,9 +7,10 @@ package mocks
 import (
 	reflect "reflect"
 
-	state "github.com/feral-file/ffos-user/components/feral-controld/state"
 	gomock "github.com/golang/mock/gomock"
 	zap "go.uber.org/zap"
+
+	state "github.com/feral-file/ffos-user/components/feral-controld/state"
 )
 
 // MockStateManager is a mock of StateManager interface.

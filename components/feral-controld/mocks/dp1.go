@@ -8,8 +8,9 @@ import (
 	context "context"
 	reflect "reflect"
 
-	dp1 "github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	gomock "github.com/golang/mock/gomock"
+
+	dp1 "github.com/feral-file/ffos-user/components/feral-controld/dp1"
 )
 
 // MockDP1 is a mock of DP1 interface.

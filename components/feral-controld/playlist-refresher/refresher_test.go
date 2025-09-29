@@ -8,6 +8,7 @@ import (
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -711,7 +712,7 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 
 	// Expect ticker to be stopped exactly twice:
 	// 1. Once by the defer statement when the goroutine exits
-	// 2. Once explicitly when context is cancelled
+	// 2. Once explicitly when context is canceled
 	mockTicker.EXPECT().
 		Stop().
 		Times(2)

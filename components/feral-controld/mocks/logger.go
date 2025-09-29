@@ -8,9 +8,10 @@ import (
 	reflect "reflect"
 	time "time"
 
-	logger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 	gomock "github.com/golang/mock/gomock"
 	zap "go.uber.org/zap"
+
+	logger "github.com/feral-file/ffos-user/components/feral-controld/logger"
 )
 
 // MockLoggerManager is a mock of LoggerManager interface.
