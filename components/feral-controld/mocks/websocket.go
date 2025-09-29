@@ -10,9 +10,8 @@ import (
 	reflect "reflect"
 	time "time"
 
-	gomock "github.com/golang/mock/gomock"
-
 	wrapper "github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+	gomock "github.com/golang/mock/gomock"
 )
 
 // MockWebSocketDialer is a mock of WebSocketDialer interface.

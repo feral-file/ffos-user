@@ -306,7 +306,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 			case <-r.pingDoneChan:
 				ticker.Stop()
 				return
-			case <-ticker.C:
+			case <-ticker.C():
 				r.ping()
 			}
 		}

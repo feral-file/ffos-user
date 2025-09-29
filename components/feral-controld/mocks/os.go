@@ -9,9 +9,8 @@ import (
 	os "os"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
-
 	wrapper "github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+	gomock "github.com/golang/mock/gomock"
 )
 
 // MockOS is a mock of OS interface.

@@ -83,7 +83,7 @@ func (r *refresher) background() {
 	for {
 		if err := r.processPlayingPlaylist(); err != nil {
 			r.logger.Error("Failed to process playing playlist", zap.Error(err))
-			time.Sleep(PLAYER_STATUS_POLLING_INTERVAL)
+			r.clock.Sleep(PLAYER_STATUS_POLLING_INTERVAL)
 			continue
 		}
 		break
@@ -94,7 +94,7 @@ func (r *refresher) background() {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker.C():
 			if err := r.processPlayingPlaylist(); err != nil {
 				r.logger.Error("Failed to process playing playlist", zap.Error(err))
 			}
