@@ -9,8 +9,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/cenkalti/backoff/v4"
-
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -72,6 +70,7 @@ func (r *refresher) Start() {
 	}
 
 	r.started = true
+	r.done = make(chan struct{}) // Recreate the done channel for each start
 	r.mu.Unlock()
 
 	go r.background()
@@ -80,15 +79,15 @@ func (r *refresher) Start() {
 func (r *refresher) background() {
 	r.logger.Info("Refresher background goroutine started")
 
-	// Process playing playlist with backoff
-	bo := backoff.NewConstantBackOff(PLAYER_STATUS_POLLING_INTERVAL)
-	_ = backoff.Retry(func() error {
+	// Process playing playlist until it succeeds
+	for {
 		if err := r.processPlayingPlaylist(); err != nil {
 			r.logger.Error("Failed to process playing playlist", zap.Error(err))
-			return err
+			time.Sleep(PLAYER_STATUS_POLLING_INTERVAL)
+			continue
 		}
-		return nil
-	}, bo)
+		break
+	}
 
 	// Start ticker to refresh playlist
 	ticker := r.clock.NewTicker(PLAYLIST_REFRESH_INTERVAL)

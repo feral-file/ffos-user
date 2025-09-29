@@ -89,7 +89,7 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 		}
 	}`, qp)
 
-	resp, err := i.execGraphQLQuery(ctx, endpoint, query)
+	resp, err := i.execGraphQLQuery(endpoint, query)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func formatGraphQLParam(key string, value string) string {
 }
 
 // execGraphQLQuery executes a GraphQL query
-func (i *ffIndexer) execGraphQLQuery(ctx context.Context, endpoint string, query string) (*GraphQLResponse, error) {
+func (i *ffIndexer) execGraphQLQuery(endpoint string, query string) (*GraphQLResponse, error) {
 	reqBody := map[string]any{
 		"query": query,
 	}
