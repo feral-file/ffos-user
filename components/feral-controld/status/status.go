@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -22,11 +23,14 @@ const (
 )
 
 type PlayerStatus struct {
-	Command     relayer.RelayerCmd `json:"castCommand,omitempty"`
-	PlaylistURL *string            `json:"playlistURL,omitempty"`
-	Playlist    *dp1.Playlist      `json:"playlist,omitempty"`
-	Index       *int               `json:"index,omitempty"`
-	IsPaused    *bool              `json:"isPaused,omitempty"`
+	Command     relayer.RelayerCmd          `json:"castCommand,omitempty"`
+	PlaylistURL *string                     `json:"playlistURL,omitempty"`
+	Playlist    *dp1.Playlist               `json:"playlist,omitempty"`
+	Index       *int                        `json:"index,omitempty"`
+	IsPaused    *bool                       `json:"isPaused,omitempty"`
+	Items       *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
+	Ok          bool                        `json:"ok,omitempty"`
+	Error       *string                     `json:"error,omitempty"`
 }
 
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
