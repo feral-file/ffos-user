@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/command"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
