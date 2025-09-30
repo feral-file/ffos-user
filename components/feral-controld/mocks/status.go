@@ -9,6 +9,8 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
+
+	status "github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
 // MockStatusPoller is a mock of Poller interface.
@@ -32,6 +34,21 @@ func NewMockStatusPoller(ctrl *gomock.Controller) *MockStatusPoller {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockStatusPoller) EXPECT() *MockStatusPollerMockRecorder {
 	return m.recorder
+}
+
+// FetchPlayerStatus mocks base method.
+func (m *MockStatusPoller) FetchPlayerStatus(ctx context.Context) (*status.PlayerStatus, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FetchPlayerStatus", ctx)
+	ret0, _ := ret[0].(*status.PlayerStatus)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FetchPlayerStatus indicates an expected call of FetchPlayerStatus.
+func (mr *MockStatusPollerMockRecorder) FetchPlayerStatus(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FetchPlayerStatus", reflect.TypeOf((*MockStatusPoller)(nil).FetchPlayerStatus), ctx)
 }
 
 // ForceRefresh mocks base method.

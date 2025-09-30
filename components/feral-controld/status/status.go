@@ -9,15 +9,30 @@ import (
 	"sync"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
 
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 const (
 	POLL_INTERVAL = 5 * time.Second
 )
+
+type PlayerStatus struct {
+	Command     relayer.RelayerCmd          `json:"castCommand,omitempty"`
+	PlaylistURL *string                     `json:"playlistURL,omitempty"`
+	Playlist    *dp1.Playlist               `json:"playlist,omitempty"`
+	Index       *int                        `json:"index,omitempty"`
+	IsPaused    *bool                       `json:"isPaused,omitempty"`
+	Items       *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
+	Ok          bool                        `json:"ok,omitempty"`
+	Error       *string                     `json:"error,omitempty"`
+}
 
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
 
@@ -25,6 +40,7 @@ type Poller interface {
 	Start(ctx context.Context)
 	Stop()
 	ForceRefresh()
+	FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -36,6 +52,7 @@ type poller struct {
 	logger       *zap.Logger
 	stopChan     chan struct{}
 	refreshChan  chan struct{}
+	json         wrapper.JSON
 
 	// Store last status hashes for each notification type to avoid duplicate notifications
 	lastStatusHashes map[relayer.NotificationType]string
@@ -45,6 +62,7 @@ func NewPoller(
 	cdp cdp.CDP,
 	r relayer.Relayer,
 	ds DeviceStatus,
+	json wrapper.JSON,
 	logger *zap.Logger,
 ) Poller {
 	return &poller{
@@ -52,6 +70,7 @@ func NewPoller(
 		relayer:          r,
 		deviceStatus:     ds,
 		logger:           logger,
+		json:             json,
 		stopChan:         make(chan struct{}),
 		refreshChan:      make(chan struct{}, 10), // Buffered channel to prevent blocking
 		lastStatusHashes: make(map[relayer.NotificationType]string),
@@ -156,7 +175,37 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 
 	s.logger.Debug("Polling player status from Chromium")
 
-	// Create the payload in the same format as mediator
+	playerStatus, err := s.FetchPlayerStatus(ctx)
+	if err != nil {
+		s.logger.Error("Failed to get player status from CDP", zap.Error(err))
+
+		// Notify relayer about the CDP error in the expected format
+		errorMessage := map[string]interface{}{
+			"ok":    false,
+			"error": err.Error(),
+		}
+		// Only send if it differs from the last notification to prevent spam
+		if s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, errorMessage) {
+			if sendErr := s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, errorMessage); sendErr != nil {
+				s.logger.Error("Failed to send player status error notification", zap.Error(sendErr))
+			}
+		}
+		return
+	}
+
+	// Check if we should send this notification
+	if !s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus) {
+		s.logger.Debug("Player status unchanged, skipping notification")
+		return
+	}
+
+	err = s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
+	if err != nil {
+		s.logger.Error("Failed to send player status notification", zap.Error(err))
+	}
+}
+
+func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 	payload := map[string]interface{}{
 		"messageID": "",
 		"message": map[string]interface{}{
@@ -164,47 +213,46 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 			"request": map[string]interface{}{},
 		},
 	}
-
 	// Marshal the payload to JSON string
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		s.logger.Error("Failed to marshal checkStatus payload", zap.Error(err))
-		return
+		return nil, fmt.Errorf("failed to marshal checkStatus payload: %w", err)
 	}
 
-	// Send CDP request using the same format as mediator
+	// Send the payload to the CDP
+	expr := fmt.Sprintf("window.handleCDPRequest(%s)", string(payloadBytes))
 	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payloadBytes)),
+		"expression": expr,
 	})
 	if err != nil {
-		s.logger.Error("Failed to get player status from CDP", zap.Error(err))
-		return
+		return nil, fmt.Errorf("cdp evaluate failed: %w", err)
 	}
 
-	s.logger.Debug("Player status result", zap.Any("result", result))
-
-	// Send the status as a notification
+	// Check if the result is a map
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {
-		s.logger.Error("Failed to convert result to map", zap.Any("result", result))
-		return
+		return nil, fmt.Errorf("unexpected result type: %T", result)
 	}
+
+	// Get the message from the result
 	message, ok := resultMap["message"]
 	if !ok {
-		s.logger.Error("Result map does not contain message key", zap.Any("result", result))
-		return
+		return nil, fmt.Errorf("missing message in result")
 	}
 
-	// Check if we should send this notification
-	if !s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, message) {
-		s.logger.Debug("Player status unchanged, skipping notification")
-		return
-	}
-
-	err = s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, message)
+	// Marshal the message
+	jsonMessage, err := s.json.Marshal(message)
 	if err != nil {
-		s.logger.Error("Failed to send player status notification", zap.Error(err))
+		return nil, fmt.Errorf("failed to marshal message: %w", err)
 	}
+
+	// Unmarshal the message
+	playerStatus := &PlayerStatus{}
+	if err := s.json.Unmarshal(jsonMessage, playerStatus); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+	}
+
+	return playerStatus, nil
 }
 
 func (s *poller) pollDeviceStatus(ctx context.Context) {

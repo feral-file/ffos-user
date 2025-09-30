@@ -5,6 +5,7 @@
 package mocks
 
 import (
+	io "io"
 	http "net/http"
 	reflect "reflect"
 
@@ -47,4 +48,19 @@ func (m *MockHTTP) Get(url string) (*http.Response, error) {
 func (mr *MockHTTPMockRecorder) Get(url interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockHTTP)(nil).Get), url)
+}
+
+// Post mocks base method.
+func (m *MockHTTP) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Post", url, contentType, body)
+	ret0, _ := ret[0].(*http.Response)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Post indicates an expected call of Post.
+func (mr *MockHTTPMockRecorder) Post(url, contentType, body interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Post", reflect.TypeOf((*MockHTTP)(nil).Post), url, contentType, body)
 }
