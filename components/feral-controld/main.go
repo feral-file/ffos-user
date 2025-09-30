@@ -120,8 +120,8 @@ func main() {
 	app := initializeApp(
 		finalLogger,
 		config.CDPConfig.Endpoint,
-		config.RelayerConfig.Endpoint,
-		config.RelayerConfig.APIKey,
+		"wss://tv-cast-coordination.bitmark-development.workers.dev",
+		"test",
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
