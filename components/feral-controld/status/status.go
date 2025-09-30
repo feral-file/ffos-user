@@ -10,12 +10,13 @@ import (
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+
+	"go.uber.org/zap"
+
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
-
-	"go.uber.org/zap"
 )
 
 const (

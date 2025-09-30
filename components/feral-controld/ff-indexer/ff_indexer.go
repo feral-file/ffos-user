@@ -7,8 +7,9 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 var FF_INDEXER_HOSTS = map[string]bool{
