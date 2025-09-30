@@ -63,6 +63,7 @@ const (
 	CMD_REBOOT               RelayerCmd = "reboot"
 	CMD_DEVICE_STATUS        RelayerCmd = "getDeviceStatus"
 	CMD_UPDATE_TO_LATEST     RelayerCmd = "updateToLatestVersion"
+	CMD_DISPLAY_PLAYLIST     RelayerCmd = "displayPlaylist"
 )
 
 func (c RelayerCmd) ControldCmds() bool {
@@ -305,7 +306,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 			case <-r.pingDoneChan:
 				ticker.Stop()
 				return
-			case <-ticker.C:
+			case <-ticker.C():
 				r.ping()
 			}
 		}
