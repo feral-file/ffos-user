@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+	"go.uber.org/zap"
 )
 
 var FF_INDEXER_HOSTS = map[string]bool{
@@ -46,16 +47,18 @@ type FFIndexer interface {
 
 //go:generate mockgen -source=ff_indexer.go -destination=../mocks/ff_indexer.go -package=mocks -mock_names=FFIndexer=MockFFIndexer
 type ffIndexer struct {
-	http wrapper.HTTP
-	json wrapper.JSON
-	io   wrapper.IO
+	http   wrapper.HTTP
+	json   wrapper.JSON
+	io     wrapper.IO
+	logger *zap.Logger
 }
 
-func New(http wrapper.HTTP, json wrapper.JSON, io wrapper.IO) FFIndexer {
-	return &ffIndexer{http: http, json: json, io: io}
+func New(http wrapper.HTTP, json wrapper.JSON, io wrapper.IO, logger *zap.Logger) FFIndexer {
+	return &ffIndexer{http: http, json: json, io: io, logger: logger}
 }
 
 func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map[string]string) ([]Token, error) {
+	i.logger.Info("Querying tokens", zap.String("endpoint", endpoint), zap.Any("params", params))
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, err
 	}
@@ -131,6 +134,7 @@ func formatGraphQLParam(key string, value string) string {
 
 // execGraphQLQuery executes a GraphQL query
 func (i *ffIndexer) execGraphQLQuery(endpoint string, query string) (*GraphQLResponse, error) {
+	i.logger.Info("Executing GraphQL query", zap.String("endpoint", endpoint), zap.String("query", query))
 	reqBody := map[string]any{
 		"query": query,
 	}

@@ -225,6 +225,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 					if len(playlist.DynamicQueries) > 0 {
 						playlist, err = m.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
 						if err != nil {
+							m.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 							return err
 						}
 					}

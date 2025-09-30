@@ -328,7 +328,7 @@ func initializeApp(
 	commandHandler := command.New(cdp, dbusClient, deviceStatus, json, os, exec, math, logger)
 
 	// FFIndexer
-	ffIndexer := ffindexer.New(http, json, io)
+	ffIndexer := ffindexer.New(http, json, io, logger)
 
 	// DP1
 	dp1 := dp1.New(ffIndexer, http, json, io, logger)

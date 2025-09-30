@@ -13,6 +13,8 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 )
 
 type testSetup struct {
@@ -27,13 +29,14 @@ type testSetup struct {
 func setup(t *testing.T) *testSetup {
 	ctrl := gomock.NewController(t)
 	ctx := context.Background()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 
 	// Dependencies
 	mockHTTP := mocks.NewMockHTTP(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := ffindexer.New(mockHTTP, mockJSON, mockIO)
+	client := ffindexer.New(mockHTTP, mockJSON, mockIO, logger)
 
 	return &testSetup{
 		ctrl:     ctrl,
