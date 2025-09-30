@@ -821,7 +821,7 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 					}{
 						Command: &cmd,
 						Args: map[string]interface{}{
-							"playlist": playlistMap,
+							"dp1_call": playlistMap,
 						},
 					},
 				}
@@ -925,7 +925,7 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 					}{
 						Command: &cmd,
 						Args: map[string]interface{}{
-							"playlist": playlistMap,
+							"dp1_call": playlistMap,
 						},
 					},
 				}
@@ -969,7 +969,7 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 					}{
 						Command: &cmd,
 						Args: map[string]interface{}{
-							"playlist": "not-a-map", // Invalid type should cause error
+							"dp1_call": "not-a-map", // Invalid type should cause error
 						},
 					},
 				}
@@ -1051,7 +1051,7 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 					}{
 						Command: &cmd,
 						Args: map[string]interface{}{
-							"playlist": playlistMap,
+							"dp1_call": playlistMap,
 						},
 					},
 				}
@@ -1090,7 +1090,7 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 					}{
 						Command: &cmd,
 						Args: map[string]interface{}{
-							"playlist": playlistMap,
+							"dp1_call": playlistMap,
 						},
 					},
 				}
@@ -1159,7 +1159,7 @@ func TestMediator_HandleRelayerMessage_Command(t *testing.T) {
 					}{
 						Command: &cmd,
 						Args: map[string]interface{}{
-							"playlist": playlistMap,
+							"dp1_call": playlistMap,
 						},
 					},
 				}
