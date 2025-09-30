@@ -73,15 +73,45 @@ func (ts *testSetup) teardown() {
 	ts.ctrl.Finish()
 }
 
+// Helper function to set up mock ticker expectations
+func setupMockTicker(ts *testSetup) *mocks.MockTicker {
+	// Create a mock ticker
+	mockTicker := mocks.NewMockTicker(ts.ctrl)
+	tickerChan := make(chan time.Time, 10) // Buffer for multiple ticks
+
+	// Mock the ticker's C() method to return our controllable channel
+	mockTicker.EXPECT().
+		C().
+		Return(tickerChan).
+		AnyTimes()
+
+	// Mock the ticker's Stop() method
+	mockTicker.EXPECT().
+		Stop().
+		AnyTimes()
+
+	// Expect clock to create ticker
+	ts.mockClock.EXPECT().
+		NewTicker(gomock.Any()).
+		DoAndReturn(func(d time.Duration) wrapper.Ticker {
+			// Send a tick immediately to trigger ping
+			go func() {
+				time.Sleep(10 * time.Millisecond) // Small delay to let connection establish
+				tickerChan <- time.Now()
+			}()
+			return mockTicker
+		}).
+		AnyTimes()
+
+	return mockTicker
+}
+
 func TestClient_Connect_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time to return default time
 	ts.mockClock.EXPECT().
@@ -143,11 +173,8 @@ func TestClient_Connect_Async(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time to return default time
 	ts.mockClock.EXPECT().
@@ -409,11 +436,8 @@ func TestClient_RetryableConnect_FailsThenSucceeds(t *testing.T) {
 		}).
 		AnyTimes()
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time to return default time
 	ts.mockClock.EXPECT().
@@ -610,11 +634,8 @@ func TestClient_RetryableConnect_UnknownError_RetryLimitNotExceeded(t *testing.T
 		}).
 		Times(5) // 5 retries
 
-	// Expect ticker to return a 100ms ticker (only when connection succeeds)
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		Times(1) // 1 ticker when connection succeeds
+	// Set up mock ticker (only when connection succeeds)
+	setupMockTicker(ts)
 
 	// Expect time to return default time (only when ticker is created)
 	ts.mockClock.EXPECT().
@@ -704,11 +725,8 @@ func TestClient_SendMessage_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -796,11 +814,8 @@ func TestClient_Close_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -868,11 +883,8 @@ func TestClient_Close_Error(t *testing.T) {
 	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
 
 	// 2. Close already closed client
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -935,11 +947,8 @@ func TestClient_Close_Async(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -1088,11 +1097,8 @@ func TestClient_ReceiveMessage_Success(t *testing.T) {
 	// Remove handler2
 	ts.client.RemoveRelayerMessage(handler2)
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -1175,11 +1181,8 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 	// Create a second mock connection for the reconnection
 	mockConn2 := mocks.NewMockWebSocketConn(ts.ctrl)
 
-	// Expect ticker to return a 100ms ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -1317,11 +1320,8 @@ func TestClient_Ping_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect ticker to return a 100ms ticker so ping fires quickly
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker so ping fires quickly
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -1398,11 +1398,8 @@ func TestClient_Ping_Error(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect ticker to return a 100ms ticker so ping fires quickly
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker so ping fires quickly
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -1476,11 +1473,8 @@ func TestClient_Ping_ContextCanceled(t *testing.T) {
 	// Create a context that we can cancel
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Expect ticker to return a 100ms ticker so ping fires quickly
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker so ping fires quickly
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().
@@ -1578,11 +1572,8 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 	ts := setup(t)
 	defer ts.ctrl.Finish()
 
-	// Expect clock to return ticker
-	ts.mockClock.EXPECT().
-		NewTicker(gomock.Any()).
-		Return(time.NewTicker(100 * time.Millisecond)).
-		AnyTimes()
+	// Set up mock ticker
+	setupMockTicker(ts)
 
 	// Expect time.Now() to return default time
 	ts.mockClock.EXPECT().

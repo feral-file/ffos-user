@@ -38,6 +38,7 @@ type testSetup struct {
 	mockDeviceStatus *mocks.MockDeviceStatus
 	mockStatusPoller *mocks.MockStatusPoller
 	mockWatchdog     *mocks.MockWatchdog
+	mockRefresher    *mocks.MockRefresher
 
 	// Mocked wrappers
 	mockClock  *mocks.MockClock
@@ -73,6 +74,7 @@ func setup(t *testing.T) *testSetup {
 		mockDeviceStatus:  mocks.NewMockDeviceStatus(ctrl),
 		mockStatusPoller:  mocks.NewMockStatusPoller(ctrl),
 		mockWatchdog:      mocks.NewMockWatchdog(ctrl),
+		mockRefresher:     mocks.NewMockRefresher(ctrl),
 		mockClock:         mocks.NewMockClock(ctrl),
 		mockOS:            mocks.NewMockOS(ctrl),
 		mockSignal:        mocks.NewMockSignal(ctrl),
@@ -122,6 +124,7 @@ func setup(t *testing.T) *testSetup {
 		ts.mockWatchdog,
 		ts.mockMediator,
 		ts.mockCommand,
+		ts.mockRefresher,
 	)
 	ts.app = app
 
@@ -181,6 +184,10 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
 				ts.mockStatusPoller.EXPECT().Stop()
 
+				// Mock Refresher start and stop
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+
 				// Mock Daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
@@ -230,6 +237,10 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
 				ts.mockStatusPoller.EXPECT().Stop()
+
+				// Mock Refresher start and stop
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
 
 				// Mock Daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
@@ -431,6 +442,10 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
 				ts.mockStatusPoller.EXPECT().Stop()
 
+				// Mock Refresher start and stop
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+
 				// Mock Daemon notify failure
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(false, errors.New("daemon notify failed"))
 			},
@@ -477,6 +492,10 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
 				ts.mockStatusPoller.EXPECT().Stop()
+
+				// Mock Refresher start and stop
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
 
 				// Mock daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
@@ -612,6 +631,7 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.DeviceStatus)
 	assert.NotNil(t, app.StatusPoller)
 	assert.NotNil(t, app.Watchdog)
+	assert.NotNil(t, app.PlaylistRefresher)
 
 	// Test all wrappers are initialized
 	assert.NotNil(t, app.Clock)
@@ -642,6 +662,7 @@ func TestInitializeTestApp(t *testing.T) {
 	mockDeviceStatus := mocks.NewMockDeviceStatus(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockWatchdog := mocks.NewMockWatchdog(ctrl)
+	mockRefresher := mocks.NewMockRefresher(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
 	mockSignal := mocks.NewMockSignal(ctrl)
@@ -674,6 +695,7 @@ func TestInitializeTestApp(t *testing.T) {
 		mockWatchdog,
 		mockMediator,
 		mockCommand,
+		mockRefresher,
 	)
 
 	assert.NotNil(t, app)
@@ -687,6 +709,7 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.Equal(t, mockDeviceStatus, app.DeviceStatus)
 	assert.Equal(t, mockStatusPoller, app.StatusPoller)
 	assert.Equal(t, mockWatchdog, app.Watchdog)
+	assert.Equal(t, mockRefresher, app.PlaylistRefresher)
 
 	// Test all wrappers are initialized
 	assert.Equal(t, mockClock, app.Clock)

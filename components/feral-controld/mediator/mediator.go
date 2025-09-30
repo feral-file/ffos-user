@@ -12,7 +12,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/command"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -33,9 +34,11 @@ type mediator struct {
 	cdp          cdp.CDP
 	cmd          command.CommandHandler
 	statusPoller status.Poller
+	dp1          dp1.DP1
 	clock        wrapper.Clock
 	logger       *zap.Logger
-	tracer       *logger.RelayerMessageTracer
+	json         wrapper.JSON
+	refresher    playlist_refresher.Refresher
 }
 
 func New(
@@ -43,17 +46,22 @@ func New(
 	dbus dbus.DBus,
 	cdp cdp.CDP,
 	cmd command.CommandHandler,
+	dp1 dp1.DP1,
 	clock wrapper.Clock,
+	json wrapper.JSON,
+	refresher playlist_refresher.Refresher,
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
-		relayer: relayer,
-		dbus:    dbus,
-		cdp:     cdp,
-		cmd:     cmd,
-		clock:   clock,
-		logger:  l,
-		tracer:  logger.NewRelayerMessageTracer(l),
+		relayer:   relayer,
+		dbus:      dbus,
+		cdp:       cdp,
+		cmd:       cmd,
+		dp1:       dp1,
+		clock:     clock,
+		logger:    l,
+		json:      json,
+		refresher: refresher,
 	}
 }
 
@@ -136,37 +144,14 @@ func (m *mediator) handleDBusSignal(
 func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Payload) error {
 	m.logger.Info("handle received relayer message", zap.Any("payload", payload))
 
-	// Start Sentry transaction for this relayer message
-	transaction, tracedCtx := m.tracer.StartTransaction(ctx, payload)
-	var finalErr error
-	defer func() {
-		// Always finish the transaction at the end
-		m.tracer.FinishTransactionWithError(transaction, finalErr)
-	}()
-
-	// Create parsing span
-	parseSpan := m.tracer.StartParsingSpan(tracedCtx)
-	var parseErr error
-
 	switch payload.MessageID {
 	case relayer.MESSAGE_ID_SYSTEM:
 		topicID := payload.Message.TopicID
 		if topicID == nil {
-			parseErr = fmt.Errorf("payload doesn't contain topicID")
+			err := fmt.Errorf("payload doesn't contain topicID")
 			m.logger.Error("Payload doesn't contain topicID", zap.Any("payload", payload))
-			m.tracer.FinishSpanWithError(parseSpan, parseErr)
-			finalErr = parseErr
-			return parseErr
+			return err
 		}
-
-		// Parsing successful
-		m.tracer.FinishSpanWithError(parseSpan, nil)
-
-		// Create system handling span
-		systemSpan := m.tracer.StartSpan(tracedCtx, "relayer.system")
-		systemSpan.Description = "handle_system_message"
-		systemSpan.SetData("stage", "system_handling")
-		systemSpan.SetData("topic_id", *topicID)
 
 		// Save state
 		s := state.GetState()
@@ -174,85 +159,90 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 		err := s.Save()
 		if err != nil {
 			m.logger.Error("Failed to persist state", zap.Error(err))
-			m.tracer.FinishSpanWithError(systemSpan, err)
-			finalErr = err
 			return err
 		}
-
-		// Update global Sentry scope with new topic ID
-		m.tracer.SetTopicIDGlobally(*topicID)
-
-		m.tracer.FinishSpanWithError(systemSpan, nil)
 
 	default:
 		cmd := payload.Message.Command
 		if cmd == nil {
-			parseErr = fmt.Errorf("received relayer message with no command")
 			m.logger.Warn("Received relayer message with no command", zap.Any("payload", payload))
-			m.tracer.FinishSpanWithError(parseSpan, parseErr)
-			// Not setting finalErr since this is not really an error, just no command
 			return nil
 		}
 
-		// Parsing successful
-		m.tracer.FinishSpanWithError(parseSpan, nil)
-
 		if cmd.ControldCmds() {
 			// Handle command directly
-			execSpan := m.tracer.StartCommandExecutionSpan(tracedCtx, *cmd)
-
-			result, err := m.cmd.Execute(tracedCtx,
+			result, err := m.cmd.Execute(ctx,
 				command.Command{
 					Command:   *cmd,
 					Arguments: payload.Message.Args,
 				})
 			if err != nil {
 				m.logger.Error("Failed to execute command", zap.Error(err))
-				m.tracer.FinishSpanWithError(execSpan, err)
-				finalErr = err
 				return err
 			}
 
-			m.tracer.FinishSpanWithError(execSpan, nil)
-
 			// Send response
-			responseSpan := m.tracer.StartResponseSpan(tracedCtx)
-			responseSpan.SetData("response_type", "RPC")
-
-			err = m.relayer.Send(tracedCtx,
+			err = m.relayer.Send(ctx,
 				map[string]interface{}{
 					"type":      "RPC",
 					"messageID": payload.MessageID,
 					"message":   result,
 				})
 
-			m.tracer.FinishSpanWithError(responseSpan, err)
-			finalErr = err
 			return err
 
 		} else {
-			// Forward to CDP
-			cdpSpan := m.tracer.StartCDPRequestSpan(tracedCtx)
+			if *cmd == relayer.CMD_DISPLAY_PLAYLIST {
+				var playlist *dp1.Playlist
+				var err error
+				switch {
+				case payload.Message.Args["playlistUrl"] != nil:
+					url, ok := payload.Message.Args["playlistUrl"].(string)
+					if !ok || url == "" {
+						return fmt.Errorf("playlistUrl is not a string or empty")
+					}
 
-			p, err := payload.JSON()
-			if err != nil {
-				m.logger.Error("Failed to marshal payload", zap.Error(err))
-				m.tracer.FinishSpanWithError(cdpSpan, err)
-				finalErr = err
-				return err
+					playlist, err = m.dp1.ProcessPlaylistURL(ctx, url, true)
+					if err != nil {
+						return err
+					}
+
+				case payload.Message.Args["playlist"] != nil:
+					playlistMap, ok := payload.Message.Args["playlist"].(map[string]interface{})
+					if !ok {
+						return fmt.Errorf("playlist is not a map")
+					}
+
+					playlistBytes, err := m.json.Marshal(playlistMap)
+					if err != nil {
+						return fmt.Errorf("failed to marshal playlist: %w", err)
+					}
+
+					if err := m.json.Unmarshal(playlistBytes, &playlist); err != nil {
+						return fmt.Errorf("failed to unmarshal playlist: %w", err)
+					}
+
+					if len(playlist.DynamicQueries) > 0 {
+						playlist, err = m.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
+						if err != nil {
+							m.logger.Error("Failed to process dynamic playlist", zap.Error(err))
+							return err
+						}
+					}
+
+				default:
+					return fmt.Errorf("unknown payload type")
+				}
+
+				payload.Message.Args["dp1_call"] = playlist
+
 			}
 
-			result, err := m.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-				"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
-			})
+			// Forward to CDP (final, full data)
+			result, err := m.sendCDPRequest(payload)
 			if err != nil {
-				m.logger.Error("Failed to send CDP request", zap.Error(err))
-				m.tracer.FinishSpanWithError(cdpSpan, err)
-				finalErr = err
 				return err
 			}
-
-			m.tracer.FinishSpanWithError(cdpSpan, nil)
 
 			// Add brief pause as in original code
 			m.clock.Sleep(500 * time.Millisecond)
@@ -262,15 +252,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 				m.statusPoller.ForceRefresh()
 			}
 
-			// Send response
-			responseSpan := m.tracer.StartResponseSpan(tracedCtx)
-			responseSpan.SetData("response_type", "CDP_RESULT")
-
-			err = m.relayer.Send(tracedCtx, result)
-
-			m.tracer.FinishSpanWithError(responseSpan, err)
-			finalErr = err
-			return err
+			return m.relayer.Send(ctx, result)
 		}
 	}
 
@@ -280,4 +262,23 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 // SetStatusPoller sets the StatusPoller reference after initialization
 func (m *mediator) SetStatusPoller(statusPoller status.Poller) {
 	m.statusPoller = statusPoller
+}
+
+// sendCDPRequest marshals payload and sends to CDP with tracing
+func (m *mediator) sendCDPRequest(payload relayer.Payload) (interface{}, error) {
+	p, err := payload.JSON()
+	if err != nil {
+		m.logger.Error("Failed to marshal payload", zap.Error(err))
+		return nil, err
+	}
+
+	result, err := m.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
+	})
+	if err != nil {
+		m.logger.Error("Failed to send CDP request", zap.Error(err))
+		return nil, err
+	}
+
+	return result, nil
 }

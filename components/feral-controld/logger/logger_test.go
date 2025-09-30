@@ -319,17 +319,6 @@ func TestPackageLevelFunctions_RealImplementation(t *testing.T) {
 				return nil
 			},
 		},
-		{
-			name: "NewRelayerMessageTracer function",
-			setupFunc: func() error {
-				testLogger := zaptest.NewLogger(&testing.T{})
-				tracer := logger.NewRelayerMessageTracer(testLogger)
-				if tracer == nil {
-					return errors.New("tracer is nil")
-				}
-				return nil
-			},
-		},
 	}
 
 	for _, tt := range tests {
