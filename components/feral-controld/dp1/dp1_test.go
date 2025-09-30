@@ -104,7 +104,7 @@ func createDynamicPlaylistJSON() string {
 			{
 				"endpoint": "https://indexer.feralfile.com/graphql",
 				"params": {
-					"limit": "50",
+					"size": "50",
 					"offset": "0"
 				}
 			}
@@ -258,7 +258,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 				{
 					Endpoint: "https://indexer.feralfile.com/graphql",
 					Params: map[string]string{
-						"limit":  "50",
+						"size":   "50",
 						"offset": "0",
 					},
 				},
@@ -271,7 +271,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 		QueryTokens(ts.ctx,
 			"https://indexer.feralfile.com/graphql",
 			map[string]string{
-				"limit":  "100", // minimal is false so it uses MAX_PLAYLIST_ITEMS_LIMIT
+				"size":   "100", // minimal is false so it uses MAX_PLAYLIST_ITEMS_LIMIT
 				"offset": "0",
 			}).
 		Return(mockTokens, nil)
@@ -395,7 +395,7 @@ func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
 				Params: map[string]string{
-					"limit":  "50",
+					"size":   "50",
 					"offset": "0",
 				},
 			},
@@ -407,7 +407,7 @@ func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
 		QueryTokens(ts.ctx,
 			"https://indexer.feralfile.com/graphql",
 			map[string]string{
-				"limit":  "50", // minimal is true so it uses MINIMAL_PLAYLIST_ITEMS_LIMIT
+				"size":   "50", // minimal is true so it uses MINIMAL_PLAYLIST_ITEMS_LIMIT
 				"offset": "0",
 			}).
 		Return(mockTokens, nil)
@@ -430,11 +430,11 @@ func TestDP1_ProcessDynamicPlaylist_MultipleQueriesError(t *testing.T) {
 		DynamicQueries: []dp1.DynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
-				Params:   map[string]string{"limit": "50"},
+				Params:   map[string]string{"size": "50"},
 			},
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
-				Params:   map[string]string{"limit": "50"},
+				Params:   map[string]string{"size": "50"},
 			},
 		},
 	}
@@ -469,7 +469,7 @@ func TestDP1_ProcessDynamicPlaylist_FFIndexerError(t *testing.T) {
 		DynamicQueries: []dp1.DynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
-				Params:   map[string]string{"limit": "50"},
+				Params:   map[string]string{"size": "50"},
 			},
 		},
 	}
@@ -495,16 +495,16 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlag(t *testing.T) {
 		DynamicQueries: []dp1.DynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
-				Params:   map[string]string{"limit": "50"},
+				Params:   map[string]string{"size": "50"},
 			},
 		},
 	}
 
-	// Expect FFIndexer query with minimal limit
+	// Expect FFIndexer query with minimal size
 	ts.mockFFIndexer.EXPECT().
 		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
 		DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
-			assert.Equal(t, "50", params["limit"]) // Should use MINIMAL_PLAYLIST_ITEMS_LIMIT
+			assert.Equal(t, "50", params["size"]) // Should use MINIMAL_PLAYLIST_ITEMS_LIMIT
 			return mockTokens, nil
 		})
 
@@ -538,7 +538,7 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 		DynamicQueries: []dp1.DynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
-				Params:   map[string]string{"limit": "50"},
+				Params:   map[string]string{"size": "50"},
 			},
 		},
 	}
@@ -548,14 +548,14 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 		ts.mockFFIndexer.EXPECT().
 			QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
 			DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
-				assert.Equal(t, "100", params["limit"]) // MAX_PLAYLIST_ITEMS_LIMIT
+				assert.Equal(t, "100", params["size"]) // MAX_PLAYLIST_ITEMS_LIMIT
 				assert.Equal(t, "0", params["offset"])
 				return firstBatch, nil
 			}),
 		ts.mockFFIndexer.EXPECT().
 			QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
 			DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
-				assert.Equal(t, "100", params["limit"])
+				assert.Equal(t, "100", params["size"])
 				assert.Equal(t, "100", params["offset"])
 				return secondBatch, nil
 			}),
@@ -578,7 +578,7 @@ func TestDP1_ProcessDynamicPlaylist_WithDefaults(t *testing.T) {
 		DynamicQueries: []dp1.DynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
-				Params:   map[string]string{"limit": "50"},
+				Params:   map[string]string{"size": "50"},
 			},
 		},
 	}
@@ -611,7 +611,7 @@ func TestDP1_ProcessDynamicPlaylist_WithoutDefaults(t *testing.T) {
 		DynamicQueries: []dp1.DynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
-				Params:   map[string]string{"limit": "50"},
+				Params:   map[string]string{"size": "50"},
 			},
 		},
 	}
@@ -730,7 +730,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 				DynamicQueries: []dp1.DynamicQuery{
 					{
 						Endpoint: "https://indexer.feralfile.com/graphql",
-						Params:   map[string]string{"limit": "50"},
+						Params:   map[string]string{"size": "50"},
 					},
 				},
 			}

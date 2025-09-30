@@ -88,11 +88,11 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	// Process dynamic query by executing the GraphQL query
 	dynamicQuery := playlist.DynamicQueries[0]
 	var ffTokens []ffindexer.Token
-	limit := MAX_PLAYLIST_ITEMS_LIMIT
+	size := MAX_PLAYLIST_ITEMS_LIMIT
 	if minimal {
-		limit = MINIMAL_PLAYLIST_ITEMS_LIMIT
+		size = MINIMAL_PLAYLIST_ITEMS_LIMIT
 	}
-	dynamicQuery.Params["limit"] = fmt.Sprintf("%d", limit)
+	dynamicQuery.Params["size"] = fmt.Sprintf("%d", size)
 	offset := 0
 
 	for {
@@ -103,11 +103,11 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 		}
 		ffTokens = append(ffTokens, tokens...)
 
-		if len(tokens) < limit || minimal {
+		if len(tokens) < size || minimal {
 			break
 		}
 
-		offset += limit
+		offset += size
 	}
 
 	// Build playlist items
