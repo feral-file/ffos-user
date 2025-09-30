@@ -207,8 +207,8 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 						return err
 					}
 
-				case payload.Message.Args["playlist"] != nil:
-					playlistMap, ok := payload.Message.Args["playlist"].(map[string]interface{})
+				case payload.Message.Args["dp1_call"] != nil:
+					playlistMap, ok := payload.Message.Args["dp1_call"].(map[string]interface{})
 					if !ok {
 						return fmt.Errorf("playlist is not a map")
 					}
