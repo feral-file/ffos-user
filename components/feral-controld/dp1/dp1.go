@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DEFAULT_DURATION             = 300
+	DEFAULT_DURATION             = 20
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
 )
@@ -122,9 +122,9 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 
 	// Build playlist items
 	duration := DEFAULT_DURATION
-	if playlist.Defaults != nil {
-		duration = playlist.Defaults.Duration
-	}
+	// if playlist.Defaults != nil {
+	// 	duration = playlist.Defaults.Duration
+	// }
 
 	// Merge original items with new items
 	originalItems := playlist.Items
