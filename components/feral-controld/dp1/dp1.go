@@ -86,7 +86,17 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	}
 
 	// Process dynamic query by executing the GraphQL query
-	dynamicQuery := playlist.DynamicQueries[0]
+	// Create a copy to avoid modifying the original playlist
+	originalQuery := playlist.DynamicQueries[0]
+	dynamicQuery := DynamicQuery{
+		Endpoint: originalQuery.Endpoint,
+		Params:   make(map[string]string),
+	}
+	// Copy the original params
+	for k, v := range originalQuery.Params {
+		dynamicQuery.Params[k] = v
+	}
+
 	var ffTokens []ffindexer.Token
 	size := MAX_PLAYLIST_ITEMS_LIMIT
 	if minimal {
