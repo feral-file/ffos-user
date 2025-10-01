@@ -7,6 +7,43 @@ CONFIG_FILE="/home/feralfile/ff1-config.json"
 HTTP_HOST="0.0.0.0"   # 0.0.0.0 so you can open UI from your laptop
 HTTP_PORT="9431"
 
+# Check if the JSON config file exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: Configuration file $CONFIG_FILE not found!"
+    exit 1
+fi
+
+# Read BRANCH and VERSION from ff1-config.json
+BRANCH=$(jq -r '.branch' "$CONFIG_FILE" 2>/dev/null)
+VERSION=$(jq -r '.version' "$CONFIG_FILE" 2>/dev/null)
+
+# Check if BRANCH and VERSION are non-empty
+if [ -z "$BRANCH" ]; then
+    echo "Error: Failed to read 'branch' from $CONFIG_FILE or it is empty!"
+    exit 1
+fi
+if [ -z "$VERSION" ]; then
+    echo "Error: Failed to read 'version' from $CONFIG_FILE or it is empty!"
+    exit 1
+fi
+
+# Read FF_DEVICE_ID from /etc/hostname
+if [ ! -f "/etc/hostname" ]; then
+    echo "Error: /etc/hostname file not found!"
+    exit 1
+fi
+
+device_id=$(cat /etc/hostname)
+if [ -z "$device_id" ]; then
+    echo "Error: FF_DEVICE_ID read from /etc/hostname is empty!"
+    exit 1
+fi
+
+# Sanitize variables by escaping special characters for sed
+device_id_esc=$(printf '%s' "$device_id" | sed 's/[\/&]/\\&/g')
+VERSION_esc=$(printf '%s' "$VERSION" | sed 's/[\/&]/\\&/g')
+BRANCH_esc=$(printf '%s' "$BRANCH" | sed 's/[\/&]/\\&/g')
+
 mkdir -p /home/feralfile/.state
 
 # Read values from ff1-config.json
@@ -28,6 +65,9 @@ ARGS=(
   -remoteWrite.url="${REMOTE_URL}"
   -remoteWrite.tmpDataPath="${QUEUE_FILE}"
   -remoteWrite.maxDiskUsagePerURL=256MB
+  -remoteWrite.label="instance=${device_id_esc}"
+  -remoteWrite.label="version=${VERSION_esc}"
+  -remoteWrite.label="branch=${BRANCH_esc}"
 )
 
 # Add bearer token only if provided

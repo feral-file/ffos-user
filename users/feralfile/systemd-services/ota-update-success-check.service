@@ -5,7 +5,7 @@ After=system-ready.target
 
 [Service]
 Type=simple
-ExecStart=/home/feralfile/ota-update-success-check.sh
+ExecStart=/home/feralfile/scripts/ota-update-success-check.sh
 
 [Install]
 WantedBy=default.target

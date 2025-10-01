@@ -53,7 +53,7 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
     if [ $CONFIRM_COUNT -ge $CONFIRMATIONS_NEEDED ]; then
       echo "All services confirmed active $CONFIRMATIONS_NEEDED times"
       METRIC="ff_ota_success_total{} 1"
-      if curl -sS -X POST "$VMAGENT_IMPORT_API" --data-binary "$METRIC" -w "%{http_code}" | grep -q "200"; then
+      if curl -sS -X POST "$VMAGENT_IMPORT_API" --data-binary "$METRIC" -w "%{http_code}" | grep -q "204"; then
         echo "Successfully sent OTA update done notification to $VMAGENT_IMPORT_API"
       else
         echo "Failed to send OTA update done notification to $VMAGENT_IMPORT_API"
