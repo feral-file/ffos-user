@@ -25,6 +25,7 @@ systemctl --user start "feral-app-monitord.service"
 systemctl --user start "feral-vmagent.service"
 systemctl --user start "display-restore.service"
 systemctl --user start "chromium-kiosk.service"
+systemctl --user start "ota-update-success-check.service"
 
 # Enable hourly timers for time sync and log rotation
 if ! systemctl --user is-enabled "feral-timesyncd.timer" >/dev/null 2>&1; then

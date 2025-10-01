@@ -1,0 +1,11 @@
+[Unit]
+Description=Feral File OTA Update Auto Test
+ConditionPathExists=/etc/FF_OS_OTA_AUTO_TEST
+After=system-ready.target
+
+[Service]
+Type=simple
+ExecStart=/home/feralfile/ota-update-success-check.sh
+
+[Install]
+WantedBy=default.target
