@@ -174,3 +174,41 @@ func (mr *MockWebSocketConnMockRecorder) WriteMessage(messageType, data interfac
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteMessage", reflect.TypeOf((*MockWebSocketConn)(nil).WriteMessage), messageType, data)
 }
+
+// MockWebsocketUpgrader is a mock of WebsocketUpgrader interface.
+type MockWebsocketUpgrader struct {
+	ctrl     *gomock.Controller
+	recorder *MockWebsocketUpgraderMockRecorder
+}
+
+// MockWebsocketUpgraderMockRecorder is the mock recorder for MockWebsocketUpgrader.
+type MockWebsocketUpgraderMockRecorder struct {
+	mock *MockWebsocketUpgrader
+}
+
+// NewMockWebsocketUpgrader creates a new mock instance.
+func NewMockWebsocketUpgrader(ctrl *gomock.Controller) *MockWebsocketUpgrader {
+	mock := &MockWebsocketUpgrader{ctrl: ctrl}
+	mock.recorder = &MockWebsocketUpgraderMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockWebsocketUpgrader) EXPECT() *MockWebsocketUpgraderMockRecorder {
+	return m.recorder
+}
+
+// Upgrade mocks base method.
+func (m *MockWebsocketUpgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeader http.Header) (wrapper.WebSocketConn, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Upgrade", w, r, responseHeader)
+	ret0, _ := ret[0].(wrapper.WebSocketConn)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Upgrade indicates an expected call of Upgrade.
+func (mr *MockWebsocketUpgraderMockRecorder) Upgrade(w, r, responseHeader interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Upgrade", reflect.TypeOf((*MockWebsocketUpgrader)(nil).Upgrade), w, r, responseHeader)
+}

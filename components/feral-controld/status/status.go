@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
 
 const (
@@ -48,6 +49,7 @@ type poller struct {
 	sync.RWMutex
 	cdp          cdp.CDP
 	relayer      relayer.Relayer
+	ws           ws.WS
 	deviceStatus DeviceStatus
 	logger       *zap.Logger
 	stopChan     chan struct{}
@@ -61,6 +63,7 @@ type poller struct {
 func NewPoller(
 	cdp cdp.CDP,
 	r relayer.Relayer,
+	ws ws.WS,
 	ds DeviceStatus,
 	json wrapper.JSON,
 	logger *zap.Logger,
@@ -184,24 +187,32 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 			"ok":    false,
 			"error": err.Error(),
 		}
-		// Only send if it differs from the last notification to prevent spam
-		if s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, errorMessage) {
-			if sendErr := s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, errorMessage); sendErr != nil {
-				s.logger.Error("Failed to send player status error notification", zap.Error(sendErr))
-			}
-		}
+		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, errorMessage)
 		return
 	}
 
-	// Check if we should send this notification
-	if !s.shouldSendNotification(relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus) {
+	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
+}
+
+func (s *poller) sendNotification(ctx context.Context, notificationType relayer.NotificationType, data interface{}) {
+	if !s.shouldSendNotification(notificationType, data) {
 		s.logger.Debug("Player status unchanged, skipping notification")
 		return
 	}
 
-	err = s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
-	if err != nil {
-		s.logger.Error("Failed to send player status notification", zap.Error(err))
+	// Send the notification via relayer
+	if err := s.relayer.SendNotification(ctx, notificationType, data); err != nil {
+		s.logger.Error("Failed to send notification via relayer", zap.Error(err))
+	}
+
+	// Send the noti via websocket
+	noti := map[string]interface{}{
+		"type":              "notification",
+		"notification_type": string(notificationType),
+		"message":           data,
+	}
+	if err := s.ws.SendAll(noti); err != nil {
+		s.logger.Error("Failed to send notification via websocket", zap.Error(err))
 	}
 }
 
@@ -271,15 +282,5 @@ func (s *poller) pollDeviceStatus(ctx context.Context) {
 		return
 	}
 
-	// Check if we should send this notification
-	if !s.shouldSendNotification(relayer.NOTIFICATION_TYPE_DEVICE_STATUS, deviceStatus) {
-		s.logger.Debug("Device status unchanged, skipping notification")
-		return
-	}
-
-	// Send the device status as a notification
-	err = s.relayer.SendNotification(ctx, relayer.NOTIFICATION_TYPE_DEVICE_STATUS, deviceStatus)
-	if err != nil {
-		s.logger.Error("Failed to send device status notification", zap.Error(err))
-	}
+	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DEVICE_STATUS, deviceStatus)
 }

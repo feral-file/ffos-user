@@ -72,3 +72,24 @@ func (c *webSocketConn) SetReadDeadline(t time.Time) error {
 func (c *webSocketConn) Close() error {
 	return c.conn.Close()
 }
+
+//go:generate mockgen -source=websocket.go -destination=../mocks/websocket.go -package=mocks -mock_names=WebsocketUpgrader=MockWebsocketUpgrader
+type WebsocketUpgrader interface {
+	Upgrade(w go_http.ResponseWriter, r *go_http.Request, responseHeader go_http.Header) (WebSocketConn, error)
+}
+
+type websocketUpgrader struct {
+	upgrader *websocket.Upgrader
+}
+
+func NewWebsocketUpgrader(upgrader *websocket.Upgrader) WebsocketUpgrader {
+	return &websocketUpgrader{upgrader: upgrader}
+}
+
+func (u *websocketUpgrader) Upgrade(w go_http.ResponseWriter, r *go_http.Request, responseHeader go_http.Header) (WebSocketConn, error) {
+	conn, err := u.upgrader.Upgrade(w, r, responseHeader)
+	if err != nil {
+		return nil, err
+	}
+	return &webSocketConn{conn: conn}, nil
+}

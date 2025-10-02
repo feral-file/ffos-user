@@ -34,23 +34,24 @@ type testSetup struct {
 	mockRelayer      *mocks.MockRelayer
 	mockDBus         *mocks.MockDBus
 	mockMediator     *mocks.MockMediator
-	mockCommand      *mocks.MockCommandHandler
+	mockExecutor     *mocks.MockExecutor
 	mockDeviceStatus *mocks.MockDeviceStatus
 	mockStatusPoller *mocks.MockStatusPoller
 	mockWatchdog     *mocks.MockWatchdog
 	mockRefresher    *mocks.MockRefresher
+	mockHub          *mocks.MockHub
 
 	// Mocked wrappers
-	mockClock  *mocks.MockClock
-	mockOS     *mocks.MockOS
-	mockSignal *mocks.MockSignal
-	mockDaemon *mocks.MockDaemon
-	mockHTTP   *mocks.MockHTTP
-	mockIO     *mocks.MockIO
-	mockJSON   *mocks.MockJSON
-	mockRandom *mocks.MockRandomizer
-	mockExec   *mocks.MockExec
-	mockMath   *mocks.MockMath
+	mockClock      *mocks.MockClock
+	mockOS         *mocks.MockOS
+	mockSignal     *mocks.MockSignal
+	mockDaemon     *mocks.MockDaemon
+	mockHTTPClient *mocks.MockHTTPClient
+	mockIO         *mocks.MockIO
+	mockJSON       *mocks.MockJSON
+	mockRandom     *mocks.MockRandomizer
+	mockExec       *mocks.MockExec
+	mockMath       *mocks.MockMath
 }
 
 func setup(t *testing.T) *testSetup {
@@ -70,7 +71,7 @@ func setup(t *testing.T) *testSetup {
 		mockRelayer:       mocks.NewMockRelayer(ctrl),
 		mockDBus:          mocks.NewMockDBus(ctrl),
 		mockMediator:      mocks.NewMockMediator(ctrl),
-		mockCommand:       mocks.NewMockCommandHandler(ctrl),
+		mockExecutor:      mocks.NewMockExecutor(ctrl),
 		mockDeviceStatus:  mocks.NewMockDeviceStatus(ctrl),
 		mockStatusPoller:  mocks.NewMockStatusPoller(ctrl),
 		mockWatchdog:      mocks.NewMockWatchdog(ctrl),
@@ -79,12 +80,13 @@ func setup(t *testing.T) *testSetup {
 		mockOS:            mocks.NewMockOS(ctrl),
 		mockSignal:        mocks.NewMockSignal(ctrl),
 		mockDaemon:        mocks.NewMockDaemon(ctrl),
-		mockHTTP:          mocks.NewMockHTTP(ctrl),
+		mockHTTPClient:    mocks.NewMockHTTPClient(ctrl),
 		mockIO:            mocks.NewMockIO(ctrl),
 		mockJSON:          mocks.NewMockJSON(ctrl),
 		mockRandom:        mocks.NewMockRandomizer(ctrl),
 		mockExec:          mocks.NewMockExec(ctrl),
 		mockMath:          mocks.NewMockMath(ctrl),
+		mockHub:           mocks.NewMockHub(ctrl),
 	}
 
 	// Create test config
@@ -110,7 +112,7 @@ func setup(t *testing.T) *testSetup {
 		ts.mockOS,
 		ts.mockSignal,
 		ts.mockDaemon,
-		ts.mockHTTP,
+		ts.mockHTTPClient,
 		ts.mockIO,
 		ts.mockJSON,
 		ts.mockRandom,
@@ -123,8 +125,9 @@ func setup(t *testing.T) *testSetup {
 		ts.mockStatusPoller,
 		ts.mockWatchdog,
 		ts.mockMediator,
-		ts.mockCommand,
+		ts.mockExecutor,
 		ts.mockRefresher,
+		ts.mockHub,
 	)
 	ts.app = app
 
@@ -177,8 +180,8 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockMediator.EXPECT().Stop()
 				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
-				// Mock CommandHandler set status poller
-				ts.mockCommand.EXPECT().SetStatusPoller(ts.mockStatusPoller)
+				// Mock Executor set status poller
+				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -187,6 +190,10 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Refresher start and stop
 				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
+
+				// Mock Hub start and stop
+				ts.mockHub.EXPECT().Start()
+				ts.mockHub.EXPECT().Stop().Return(nil)
 
 				// Mock Daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
@@ -231,8 +238,8 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockMediator.EXPECT().Stop()
 				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
-				// Mock CommandHandler set status poller
-				ts.mockCommand.EXPECT().SetStatusPoller(ts.mockStatusPoller)
+				// Mock Executor set status poller
+				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -249,6 +256,10 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return([]interface{}{true}, nil)
+
+				// Mock Hub start and stop
+				ts.mockHub.EXPECT().Start()
+				ts.mockHub.EXPECT().Stop().Return(nil)
 
 				// Mock Relayer connect and close
 				ts.mockRelayer.EXPECT().Connect(gomock.Any()).Return(nil)
@@ -435,8 +446,8 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock Mediator set status poller
 				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
-				// Mock CommandHandler set status poller
-				ts.mockCommand.EXPECT().SetStatusPoller(ts.mockStatusPoller)
+				// Mock Executor set status poller
+				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -445,6 +456,10 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock Refresher start and stop
 				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
+
+				// Mock Hub start and stop
+				ts.mockHub.EXPECT().Start()
+				ts.mockHub.EXPECT().Stop().Return(nil)
 
 				// Mock Daemon notify failure
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(false, errors.New("daemon notify failed"))
@@ -486,8 +501,8 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock Mediator set status poller
 				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
-				// Mock CommandHandler set status poller
-				ts.mockCommand.EXPECT().SetStatusPoller(ts.mockStatusPoller)
+				// Mock Executor set status poller
+				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -496,6 +511,10 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock Refresher start and stop
 				ts.mockRefresher.EXPECT().Start()
 				ts.mockRefresher.EXPECT().Stop()
+
+				// Mock Hub start and stop
+				ts.mockHub.EXPECT().Start()
+				ts.mockHub.EXPECT().Stop().Return(nil)
 
 				// Mock daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
@@ -627,18 +646,19 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.Relayer)
 	assert.NotNil(t, app.DBus)
 	assert.NotNil(t, app.Mediator)
-	assert.NotNil(t, app.Command)
+	assert.NotNil(t, app.Executor)
 	assert.NotNil(t, app.DeviceStatus)
 	assert.NotNil(t, app.StatusPoller)
 	assert.NotNil(t, app.Watchdog)
 	assert.NotNil(t, app.PlaylistRefresher)
+	assert.NotNil(t, app.Hub)
 
 	// Test all wrappers are initialized
 	assert.NotNil(t, app.Clock)
 	assert.NotNil(t, app.OS)
 	assert.NotNil(t, app.Signal)
 	assert.NotNil(t, app.Daemon)
-	assert.NotNil(t, app.HTTP)
+	assert.NotNil(t, app.HTTPClient)
 	assert.NotNil(t, app.IO)
 	assert.NotNil(t, app.JSON)
 	assert.NotNil(t, app.Random)
@@ -658,16 +678,19 @@ func TestInitializeTestApp(t *testing.T) {
 	mockRelayer := mocks.NewMockRelayer(ctrl)
 	mockDBus := mocks.NewMockDBus(ctrl)
 	mockMediator := mocks.NewMockMediator(ctrl)
-	mockCommand := mocks.NewMockCommandHandler(ctrl)
+	mockExecutor := mocks.NewMockExecutor(ctrl)
 	mockDeviceStatus := mocks.NewMockDeviceStatus(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockWatchdog := mocks.NewMockWatchdog(ctrl)
 	mockRefresher := mocks.NewMockRefresher(ctrl)
+	mockHub := mocks.NewMockHub(ctrl)
+
+	// Mocked wrappers
 	mockClock := mocks.NewMockClock(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
 	mockSignal := mocks.NewMockSignal(ctrl)
 	mockDaemon := mocks.NewMockDaemon(ctrl)
-	mockHTTP := mocks.NewMockHTTP(ctrl)
+	mockHTTPClient := mocks.NewMockHTTPClient(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockRandom := mocks.NewMockRandomizer(ctrl)
@@ -681,7 +704,7 @@ func TestInitializeTestApp(t *testing.T) {
 		mockOS,
 		mockSignal,
 		mockDaemon,
-		mockHTTP,
+		mockHTTPClient,
 		mockIO,
 		mockJSON,
 		mockRandom,
@@ -694,8 +717,9 @@ func TestInitializeTestApp(t *testing.T) {
 		mockStatusPoller,
 		mockWatchdog,
 		mockMediator,
-		mockCommand,
+		mockExecutor,
 		mockRefresher,
+		mockHub,
 	)
 
 	assert.NotNil(t, app)
@@ -705,18 +729,19 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.Equal(t, mockRelayer, app.Relayer)
 	assert.Equal(t, mockDBus, app.DBus)
 	assert.Equal(t, mockMediator, app.Mediator)
-	assert.Equal(t, mockCommand, app.Command)
+	assert.Equal(t, mockExecutor, app.Executor)
 	assert.Equal(t, mockDeviceStatus, app.DeviceStatus)
 	assert.Equal(t, mockStatusPoller, app.StatusPoller)
 	assert.Equal(t, mockWatchdog, app.Watchdog)
 	assert.Equal(t, mockRefresher, app.PlaylistRefresher)
+	assert.Equal(t, mockHub, app.Hub)
 
 	// Test all wrappers are initialized
 	assert.Equal(t, mockClock, app.Clock)
 	assert.Equal(t, mockOS, app.OS)
 	assert.Equal(t, mockSignal, app.Signal)
 	assert.Equal(t, mockDaemon, app.Daemon)
-	assert.Equal(t, mockHTTP, app.HTTP)
+	assert.Equal(t, mockHTTPClient, app.HTTPClient)
 	assert.Equal(t, mockIO, app.IO)
 	assert.Equal(t, mockJSON, app.JSON)
 	assert.Equal(t, mockRandom, app.Random)

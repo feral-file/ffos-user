@@ -20,7 +20,7 @@ import (
 type testSetup struct {
 	ctrl     *gomock.Controller
 	ctx      context.Context
-	mockHTTP *mocks.MockHTTP
+	mockHTTP *mocks.MockHTTPClient
 	mockJSON *mocks.MockJSON
 	mockIO   *mocks.MockIO
 	client   ffindexer.FFIndexer
@@ -32,16 +32,16 @@ func setup(t *testing.T) *testSetup {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 
 	// Dependencies
-	mockHTTP := mocks.NewMockHTTP(ctrl)
+	mockHTTPClient := mocks.NewMockHTTPClient(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := ffindexer.New(mockHTTP, mockJSON, mockIO, logger)
+	client := ffindexer.New(mockHTTPClient, mockJSON, mockIO, logger)
 
 	return &testSetup{
 		ctrl:     ctrl,
 		ctx:      ctx,
-		mockHTTP: mockHTTP,
+		mockHTTP: mockHTTPClient,
 		mockJSON: mockJSON,
 		mockIO:   mockIO,
 		client:   client,
