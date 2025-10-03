@@ -2480,7 +2480,7 @@ func TestExecutor_GetSysMetrics_Success(t *testing.T) {
 
 			// Setup test data
 			cmd := operation.Command{
-				Command:   relayer.RELAYER_CMD_SYS_METRICS,
+				Command:   relayer.CMD_PROFILE,
 				Arguments: map[string]interface{}{},
 			}
 
@@ -2510,7 +2510,7 @@ func TestExecutor_GetSysMetrics_Failure(t *testing.T) {
 
 	// Setup test data
 	cmd := operation.Command{
-		Command:   relayer.RELAYER_CMD_SYS_METRICS,
+		Command:   relayer.CMD_PROFILE,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2555,7 +2555,7 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 			Return([]byte(`{}`), nil)
 
 		cmd := operation.Command{
-			Command:   relayer.RELAYER_CMD_SYS_METRICS,
+			Command:   relayer.CMD_PROFILE,
 			Arguments: map[string]interface{}{},
 		}
 
@@ -2603,7 +2603,7 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 			})
 
 		cmd := operation.Command{
-			Command:   relayer.RELAYER_CMD_SYS_METRICS,
+			Command:   relayer.CMD_PROFILE,
 			Arguments: map[string]interface{}{},
 		}
 

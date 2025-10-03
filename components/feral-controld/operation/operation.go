@@ -125,7 +125,7 @@ func (e *executor) Execute(ctx context.Context, cmd Command) (interface{}, error
 		result, err = e.handleMouseMoveEvent(bytes)
 	case relayer.CMD_MOUSE_TAP_EVENT:
 		result, err = e.handleMouseTapEvent()
-	case relayer.RELAYER_CMD_SYS_METRICS:
+	case relayer.CMD_PROFILE:
 		result, err = e.getSysMetrics()
 	case relayer.CMD_SCREEN_ROTATION:
 		result, err = e.handleScreenRotation(ctx, bytes)
