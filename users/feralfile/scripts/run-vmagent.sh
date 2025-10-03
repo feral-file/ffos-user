@@ -1,36 +1,25 @@
 #!/bin/bash
 set -euo pipefail
 
-# Function to detect CPU type
-detect_cpu_type() {
-  # Check if /proc/cpuinfo exists
-  if [[ ! -f /proc/cpuinfo ]]; then
-      echo "intel"
-      return
-  fi
-
-  # Read /proc/cpuinfo and look for vendor_id
-  while IFS= read -r line; do
-      # Convert line to lowercase for case-insensitive matching
-      line=$(echo "$line" | tr '[:upper:]' '[:lower:]')
-      
-      # Check if line contains vendor_id
-      if [[ "$line" =~ vendor_id ]]; then
-          if [[ "$line" =~ genuineintel ]]; then
-              echo "intel"
-              return
-          elif [[ "$line" =~ authenticamd ]]; then
-              echo "amd"
-              return
-          fi
-      fi
-  done < /proc/cpuinfo
-
-  # Default to intel if no match found
-  echo "intel"
+detect_cpu_model() {
+    if [[ ! -r /proc/cpuinfo ]]; then
+        echo "unknown"
+        return
+    fi
+    model=$(awk -F': ' '/model name/ {print $2; exit}' /proc/cpuinfo | tr -s ' ')
+    echo "${model:-unknown}"
 }
 
-CPU_TYPE=$(detect_cpu_type)
+detect_memory_model() {
+    if ! command -v dmidecode >/dev/null 2>&1 || ! sudo dmidecode -t memory >/dev/null 2>&1; then
+        echo "unknown"
+        return
+    fi
+    model=$(sudo dmidecode -t memory | grep -m 1 "Part Number" | awk -F': ' '{print $2}' | tr -s ' ')
+    echo "${model:-unknown}"
+}
+CPU_MODEL=$(detect_cpu_model)
+MEMORY_MODEL=$(detect_memory_model)
 SCRAPE_FILE="/home/feralfile/vmagent/scrape.yml"
 QUEUE_FILE="/home/feralfile/.state/vmagent_queue"
 CONFIG_FILE="/home/feralfile/ff1-config.json"
@@ -98,7 +87,8 @@ ARGS=(
   -remoteWrite.label="instance=${device_id_esc}"
   -remoteWrite.label="version=${VERSION_esc}"
   -remoteWrite.label="branch=${BRANCH_esc}"
-  -remoteWrite.label="cpu=${CPU_TYPE}"
+  -remoteWrite.label="cpu_model=${CPU_MODEL}"
+  -remoteWrite.label="memory_model=${MEMORY_MODEL}"
 )
 
 # Add bearer token only if provided
