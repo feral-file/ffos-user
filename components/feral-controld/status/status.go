@@ -71,6 +71,7 @@ func NewPoller(
 	return &poller{
 		cdp:              cdp,
 		relayer:          r,
+		ws:               ws,
 		deviceStatus:     ds,
 		logger:           logger,
 		json:             json,
