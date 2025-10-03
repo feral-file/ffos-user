@@ -27,7 +27,7 @@ VERSION=$(jq -r '.version' "$CONFIG_FILE" 2>/dev/null)
 # Trap: always delete the flag file on exit
 cleanup() {
   if [ -f "$FILE_TO_DELETE" ]; then
-    rm -f "$FILE_TO_DELETE" && echo "Deleted $FILE_TO_DELETE"
+    sudo rm -f "$FILE_TO_DELETE" && echo "Deleted $FILE_TO_DELETE"
   fi
 }
 trap cleanup EXIT
