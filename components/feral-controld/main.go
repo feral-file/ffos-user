@@ -234,13 +234,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.PlaylistRefresher.Start()
 	defer app.PlaylistRefresher.Stop()
 
-	// Start Hub
-	app.Hub.Start()
-	defer func() {
-		if err := app.Hub.Stop(); err != nil {
-			app.Logger.Warn("Failed to stop hub", zap.Error(err))
-		}
-	}()
+	// Start Hub if enabled
+	if conf.EnableHub {
+		app.Hub.Start()
+		defer func() {
+			if err := app.Hub.Stop(); err != nil {
+				app.Logger.Warn("Failed to stop hub", zap.Error(err))
+			}
+		}()
+	}
 
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)

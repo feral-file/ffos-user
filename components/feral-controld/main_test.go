@@ -102,6 +102,7 @@ func setup(t *testing.T) *testSetup {
 			DSN:         "",
 			Environment: "test",
 		},
+		EnableHub: true,
 	}
 
 	// Create test app with mocked components
@@ -264,6 +265,56 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Relayer connect and close
 				ts.mockRelayer.EXPECT().Connect(gomock.Any()).Return(nil)
 				ts.mockRelayer.EXPECT().Close()
+			},
+		},
+		{
+			name: "successful startup with hub disabled",
+			setupFunc: func(ts *testSetup) {
+				ts.config.EnableHub = false
+
+				// Mock successful state loading
+				ts.mockStateManager.EXPECT().
+					Load(ts.logger).
+					Return(&state.State{
+						Relayer: &state.RelayerState{TopicID: ""},
+					}, nil)
+
+				// Mock CDP initialization and close
+				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				ts.mockCDP.EXPECT().Close()
+
+				// Mock Watchdog start and stop
+				ts.mockWatchdog.EXPECT().Start(gomock.Any())
+				ts.mockWatchdog.EXPECT().Stop()
+
+				// Mock DBus start and stop
+				ts.mockDBus.EXPECT().Start().Return(nil)
+				ts.mockDBus.EXPECT().Stop().Return(nil)
+				ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
+
+				// Mock Mediator start and stop
+				ts.mockMediator.EXPECT().Start()
+				ts.mockMediator.EXPECT().Stop()
+				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
+
+				// Mock Executor set status poller
+				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
+
+				// Mock StatusPoller start and stop
+				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+				ts.mockStatusPoller.EXPECT().Stop()
+
+				// Mock Refresher start and stop
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+
+				// Mock Daemon notify
+				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+
+				// Mock DBus call
+				ts.mockDBus.EXPECT().
+					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+					Return([]interface{}{false}, nil)
 			},
 		},
 	}
