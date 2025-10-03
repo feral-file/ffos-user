@@ -1,6 +1,36 @@
 #!/bin/bash
 set -euo pipefail
 
+# Function to detect CPU type
+detect_cpu_type() {
+  # Check if /proc/cpuinfo exists
+  if [[ ! -f /proc/cpuinfo ]]; then
+      echo "intel"
+      return
+  fi
+
+  # Read /proc/cpuinfo and look for vendor_id
+  while IFS= read -r line; do
+      # Convert line to lowercase for case-insensitive matching
+      line=$(echo "$line" | tr '[:upper:]' '[:lower:]')
+      
+      # Check if line contains vendor_id
+      if [[ "$line" =~ vendor_id ]]; then
+          if [[ "$line" =~ genuineintel ]]; then
+              echo "intel"
+              return
+          elif [[ "$line" =~ authenticamd ]]; then
+              echo "amd"
+              return
+          fi
+      fi
+  done < /proc/cpuinfo
+
+  # Default to intel if no match found
+  echo "intel"
+}
+
+CPU_TYPE=$(detect_cpu_type)
 SCRAPE_FILE="/home/feralfile/vmagent/scrape.yml"
 QUEUE_FILE="/home/feralfile/.state/vmagent_queue"
 CONFIG_FILE="/home/feralfile/ff1-config.json"
@@ -68,6 +98,7 @@ ARGS=(
   -remoteWrite.label="instance=${device_id_esc}"
   -remoteWrite.label="version=${VERSION_esc}"
   -remoteWrite.label="branch=${BRANCH_esc}"
+  -remoteWrite.label="cpu=${CPU_TYPE}"
 )
 
 # Add bearer token only if provided
