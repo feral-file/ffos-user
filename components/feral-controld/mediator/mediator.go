@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"time"
 
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
@@ -12,12 +11,11 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/command"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
-	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/operation"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 //go:generate mockgen -source=mediator.go -destination=../mocks/mediator.go -package=mocks -mock_names=Mediator=MockMediator
@@ -32,12 +30,10 @@ type mediator struct {
 	relayer      relayer.Relayer
 	dbus         dbus.DBus
 	cdp          cdp.CDP
-	cmd          command.CommandHandler
+	cmd          command.Handler
+	executor     operation.Executor
 	statusPoller status.Poller
-	dp1          dp1.DP1
-	clock        wrapper.Clock
 	logger       *zap.Logger
-	json         wrapper.JSON
 	refresher    playlist_refresher.Refresher
 }
 
@@ -45,10 +41,8 @@ func New(
 	relayer relayer.Relayer,
 	dbus dbus.DBus,
 	cdp cdp.CDP,
-	cmd command.CommandHandler,
-	dp1 dp1.DP1,
-	clock wrapper.Clock,
-	json wrapper.JSON,
+	cmd command.Handler,
+	executor operation.Executor,
 	refresher playlist_refresher.Refresher,
 	l *zap.Logger,
 ) Mediator {
@@ -57,10 +51,8 @@ func New(
 		dbus:      dbus,
 		cdp:       cdp,
 		cmd:       cmd,
-		dp1:       dp1,
-		clock:     clock,
+		executor:  executor,
 		logger:    l,
-		json:      json,
 		refresher: refresher,
 	}
 }
@@ -100,7 +92,7 @@ func (m *mediator) handleDBusSignal(
 		}
 
 		m.logger.Debug("Received sysmetrics", zap.String("metrics", string(body)))
-		m.cmd.SaveLastSysMetrics(body)
+		m.executor.SaveLastSysMetrics(body)
 
 	case dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE:
 		if len(payload.Body) != 1 {
@@ -163,97 +155,17 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 		}
 
 	default:
-		cmd := payload.Message.Command
-		if cmd == nil {
-			m.logger.Warn("Received relayer message with no command", zap.Any("payload", payload))
+		result, err := m.cmd.Process(ctx, payload)
+		if err != nil {
+			m.logger.Error("Failed to process command", zap.Error(err))
+			return err
+		}
+		if result == nil {
+			m.logger.Warn("Processed command returned no result", zap.Any("payload", payload))
 			return nil
 		}
 
-		if cmd.ControldCmds() {
-			// Handle command directly
-			result, err := m.cmd.Execute(ctx,
-				command.Command{
-					Command:   *cmd,
-					Arguments: payload.Message.Args,
-				})
-			if err != nil {
-				m.logger.Error("Failed to execute command", zap.Error(err))
-				return err
-			}
-
-			// Send response
-			err = m.relayer.Send(ctx,
-				map[string]interface{}{
-					"type":      "RPC",
-					"messageID": payload.MessageID,
-					"message":   result,
-				})
-
-			return err
-
-		} else {
-			if *cmd == relayer.CMD_DISPLAY_PLAYLIST {
-				var playlist *dp1.Playlist
-				var err error
-				switch {
-				case payload.Message.Args["playlistUrl"] != nil:
-					url, ok := payload.Message.Args["playlistUrl"].(string)
-					if !ok || url == "" {
-						return fmt.Errorf("playlistUrl is not a string or empty")
-					}
-
-					playlist, err = m.dp1.ProcessPlaylistURL(ctx, url, true)
-					if err != nil {
-						return err
-					}
-
-				case payload.Message.Args["dp1_call"] != nil:
-					playlistMap, ok := payload.Message.Args["dp1_call"].(map[string]interface{})
-					if !ok {
-						return fmt.Errorf("playlist is not a map")
-					}
-
-					playlistBytes, err := m.json.Marshal(playlistMap)
-					if err != nil {
-						return fmt.Errorf("failed to marshal playlist: %w", err)
-					}
-
-					if err := m.json.Unmarshal(playlistBytes, &playlist); err != nil {
-						return fmt.Errorf("failed to unmarshal playlist: %w", err)
-					}
-
-					if len(playlist.DynamicQueries) > 0 {
-						playlist, err = m.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
-						if err != nil {
-							m.logger.Error("Failed to process dynamic playlist", zap.Error(err))
-							return err
-						}
-					}
-
-				default:
-					return fmt.Errorf("unknown payload type")
-				}
-
-				payload.Message.Args["dp1_call"] = playlist
-
-			}
-
-			// Forward to CDP (final, full data)
-			result, err := m.sendCDPRequest(payload)
-			if err != nil {
-				return err
-			}
-
-			// Add brief pause as in original code
-			m.clock.Sleep(500 * time.Millisecond)
-
-			// Force refresh status poller
-			if m.statusPoller != nil {
-				m.statusPoller.ForceRefresh()
-			}
-
-			return m.relayer.Send(ctx, result)
-		}
+		return m.relayer.Send(ctx, result)
 	}
 
 	return nil
@@ -262,23 +174,5 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 // SetStatusPoller sets the StatusPoller reference after initialization
 func (m *mediator) SetStatusPoller(statusPoller status.Poller) {
 	m.statusPoller = statusPoller
-}
-
-// sendCDPRequest marshals payload and sends to CDP with tracing
-func (m *mediator) sendCDPRequest(payload relayer.Payload) (interface{}, error) {
-	p, err := payload.JSON()
-	if err != nil {
-		m.logger.Error("Failed to marshal payload", zap.Error(err))
-		return nil, err
-	}
-
-	result, err := m.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
-	})
-	if err != nil {
-		m.logger.Error("Failed to send CDP request", zap.Error(err))
-		return nil, err
-	}
-
-	return result, nil
+	m.cmd.SetStatusPoller(statusPoller)
 }

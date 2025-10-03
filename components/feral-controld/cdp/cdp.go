@@ -44,10 +44,10 @@ type cdp struct {
 	mu sync.Mutex
 
 	// Wrappers to be injected
-	dialer wrapper.WebSocketDialer
-	io     wrapper.IO
-	json   wrapper.JSON
-	http   wrapper.HTTP
+	dialer     wrapper.WebSocketDialer
+	io         wrapper.IO
+	json       wrapper.JSON
+	httpClient wrapper.HTTPClient
 
 	// Internal state
 	conn     wrapper.WebSocketConn
@@ -65,18 +65,18 @@ func New(
 	dialer wrapper.WebSocketDialer,
 	io wrapper.IO,
 	json wrapper.JSON,
-	http wrapper.HTTP,
+	httpClient wrapper.HTTPClient,
 	logger *zap.Logger,
 ) CDP {
 	return &cdp{
-		dialer:   dialer,
-		io:       io,
-		json:     json,
-		http:     http,
-		endpoint: endpoint,
-		reqID:    0,
-		doneChan: make(chan struct{}),
-		logger:   logger,
+		dialer:     dialer,
+		io:         io,
+		json:       json,
+		httpClient: httpClient,
+		endpoint:   endpoint,
+		reqID:      0,
+		doneChan:   make(chan struct{}),
+		logger:     logger,
 	}
 }
 
@@ -99,7 +99,7 @@ func (c *cdp) Init(ctx context.Context) error {
 	}
 
 	// Fetch JSON with websocket debugger URL
-	resp, err := c.http.Get(c.endpoint + "/json")
+	resp, err := c.httpClient.Get(c.endpoint + "/json")
 	if err != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("failed to fetch debug targets: %w", err)

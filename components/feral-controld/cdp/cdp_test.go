@@ -29,7 +29,7 @@ type testSetup struct {
 	mockConn   *mocks.MockWebSocketConn
 	mockIO     *mocks.MockIO
 	mockJSON   *mocks.MockJSON
-	mockHTTP   *mocks.MockHTTP
+	mockHTTP   *mocks.MockHTTPClient
 	client     cdp.CDP
 }
 
@@ -43,9 +43,9 @@ func setup(t *testing.T) *testSetup {
 	mockConn := mocks.NewMockWebSocketConn(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	mockHTTP := mocks.NewMockHTTP(ctrl)
+	mockHTTPClient := mocks.NewMockHTTPClient(ctrl)
 
-	client := cdp.New("http://localhost:9222", mockDialer, mockIO, mockJSON, mockHTTP, logger)
+	client := cdp.New("http://localhost:9222", mockDialer, mockIO, mockJSON, mockHTTPClient, logger)
 
 	return &testSetup{
 		ctrl:       ctrl,
@@ -54,7 +54,7 @@ func setup(t *testing.T) *testSetup {
 		mockConn:   mockConn,
 		mockIO:     mockIO,
 		mockJSON:   mockJSON,
-		mockHTTP:   mockHTTP,
+		mockHTTP:   mockHTTPClient,
 		client:     client,
 	}
 }

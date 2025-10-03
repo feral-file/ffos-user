@@ -46,20 +46,20 @@ type DP1 interface {
 }
 
 type dp1 struct {
-	ffIndexer ffindexer.FFIndexer
-	http      wrapper.HTTP
-	json      wrapper.JSON
-	io        wrapper.IO
-	logger    *zap.Logger
+	ffIndexer  ffindexer.FFIndexer
+	httpClient wrapper.HTTPClient
+	json       wrapper.JSON
+	io         wrapper.IO
+	logger     *zap.Logger
 }
 
-func New(ffIndexer ffindexer.FFIndexer, http wrapper.HTTP, json wrapper.JSON, io wrapper.IO, logger *zap.Logger) DP1 {
+func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger) DP1 {
 	return &dp1{
-		ffIndexer: ffIndexer,
-		http:      http,
-		json:      json,
-		io:        io,
-		logger:    logger,
+		ffIndexer:  ffIndexer,
+		httpClient: httpClient,
+		json:       json,
+		io:         io,
+		logger:     logger,
 	}
 }
 
@@ -136,7 +136,7 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 
 func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	d.logger.Info("Fetching playlist from URL", zap.String("url", url))
-	resp, err := d.http.Get(url)
+	resp, err := d.httpClient.Get(url)
 	if err != nil {
 		return Playlist{}, err
 	}

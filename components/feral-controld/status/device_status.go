@@ -18,26 +18,26 @@ type DeviceStatus interface {
 }
 
 type deviceStatus struct {
-	json wrapper.JSON
-	os   wrapper.OS
-	exec wrapper.Exec
-	http wrapper.HTTP
-	io   wrapper.IO
+	json       wrapper.JSON
+	os         wrapper.OS
+	exec       wrapper.Exec
+	httpClient wrapper.HTTPClient
+	io         wrapper.IO
 }
 
 func NewDeviceStatus(
 	json wrapper.JSON,
 	os wrapper.OS,
 	exec wrapper.Exec,
-	http wrapper.HTTP,
+	httpClient wrapper.HTTPClient,
 	io wrapper.IO,
 ) DeviceStatus {
 	return &deviceStatus{
-		json: json,
-		os:   os,
-		exec: exec,
-		http: http,
-		io:   io,
+		json:       json,
+		os:         os,
+		exec:       exec,
+		httpClient: httpClient,
+		io:         io,
 	}
 }
 

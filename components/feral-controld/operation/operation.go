@@ -1,4 +1,4 @@
-package command
+package operation
 
 import (
 	"context"
@@ -34,14 +34,14 @@ type Device struct {
 	Platform int    `json:"platform"`
 }
 
-//go:generate mockgen -source=command.go -destination=../mocks/command.go -package=mocks -mock_names=CommandHandler=MockCommandHandler
-type CommandHandler interface {
+//go:generate mockgen -source=operation.go -destination=../mocks/operation.go -package=mocks -mock_names=Executor=MockExecutor
+type Executor interface {
 	SaveLastSysMetrics(metrics []byte)
 	Execute(ctx context.Context, cmd Command) (interface{}, error)
 	SetStatusPoller(statusPoller status.Poller)
 }
 
-type handler struct {
+type executor struct {
 	sync.Mutex
 	cdp          cdp.CDP
 	dbus         dbus.DBus
@@ -78,8 +78,8 @@ func New(
 	exec wrapper.Exec,
 	math wrapper.Math,
 	l *zap.Logger,
-) CommandHandler {
-	return &handler{
+) Executor {
+	return &executor{
 		cdp:          cdp,
 		dbus:         dbus,
 		deviceStatus: deviceStatus,
@@ -91,24 +91,24 @@ func New(
 	}
 }
 
-func (c *handler) SaveLastSysMetrics(metrics []byte) {
-	c.Lock()
-	defer c.Unlock()
-	c.lastSysMetrics = metrics
+func (e *executor) SaveLastSysMetrics(metrics []byte) {
+	e.Lock()
+	defer e.Unlock()
+	e.lastSysMetrics = metrics
 }
 
 // SetStatusPoller sets the StatusPoller reference after initialization
-func (c *handler) SetStatusPoller(statusPoller status.Poller) {
-	c.statusPoller = statusPoller
+func (e *executor) SetStatusPoller(statusPoller status.Poller) {
+	e.statusPoller = statusPoller
 }
 
-func (c *handler) Execute(ctx context.Context, cmd Command) (interface{}, error) {
-	c.logger.Info("Executing command", zap.String("command", string(cmd.Command)))
+func (e *executor) Execute(ctx context.Context, cmd Command) (interface{}, error) {
+	e.logger.Info("Executing command", zap.String("command", string(cmd.Command)))
 
 	var err error
 	var bytes []byte
 
-	bytes, err = c.json.Marshal(cmd.Arguments)
+	bytes, err = e.json.Marshal(cmd.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -116,27 +116,27 @@ func (c *handler) Execute(ctx context.Context, cmd Command) (interface{}, error)
 	var result interface{}
 	switch cmd.Command {
 	case relayer.CMD_CONNECT:
-		result, err = c.connect(bytes)
+		result, err = e.connect(bytes)
 	case relayer.CMD_SHOW_PAIRING_QR_CODE:
-		result, err = c.showPairingQRCode(ctx, bytes)
+		result, err = e.showPairingQRCode(ctx, bytes)
 	case relayer.CMD_KEYBOARD_EVENT:
-		result, err = c.handleKeyboardEvent(bytes)
+		result, err = e.handleKeyboardEvent(bytes)
 	case relayer.CMD_MOUSE_DRAG_EVENT:
-		result, err = c.handleMouseMoveEvent(bytes)
+		result, err = e.handleMouseMoveEvent(bytes)
 	case relayer.CMD_MOUSE_TAP_EVENT:
-		result, err = c.handleMouseTapEvent()
-	case relayer.RELAYER_CMD_SYS_METRICS:
-		result, err = c.getSysMetrics()
+		result, err = e.handleMouseTapEvent()
+	case relayer.CMD_PROFILE:
+		result, err = e.getSysMetrics()
 	case relayer.CMD_SCREEN_ROTATION:
-		result, err = c.handleScreenRotation(ctx, bytes)
+		result, err = e.handleScreenRotation(ctx, bytes)
 	case relayer.CMD_SHUTDOWN:
-		result, err = c.shutdown(ctx)
+		result, err = e.shutdown(ctx)
 	case relayer.CMD_REBOOT:
-		result, err = c.reboot(ctx)
+		result, err = e.reboot(ctx)
 	case relayer.CMD_DEVICE_STATUS:
-		result, err = c.getDeviceStatus(ctx)
+		result, err = e.getDeviceStatus(ctx)
 	case relayer.CMD_UPDATE_TO_LATEST:
-		result, err = c.updateToLatest(ctx)
+		result, err = e.updateToLatest(ctx)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -144,12 +144,12 @@ func (c *handler) Execute(ctx context.Context, cmd Command) (interface{}, error)
 	return result, err
 }
 
-func (c *handler) connect(args []byte) (interface{}, error) {
+func (e *executor) connect(args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Device         Device `json:"clientDevice"`
 		PrimaryAddress string `json:"primaryAddress"`
 	}
-	err := c.json.Unmarshal(args, &cmdArgs)
+	err := e.json.Unmarshal(args, &cmdArgs)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -168,16 +168,16 @@ func (c *handler) connect(args []byte) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (c *handler) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {
+func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Show bool `json:"show"`
 	}
-	err := c.json.Unmarshal(args, &cmdArgs)
+	err := e.json.Unmarshal(args, &cmdArgs)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	err = c.dbus.RetryableSend(ctx,
+	err = e.dbus.RetryableSend(ctx,
 		godbus.DBusPayload{
 			Interface: dbus.INTERFACE,
 			Path:      dbus.PATH,
@@ -191,31 +191,31 @@ func (c *handler) showPairingQRCode(ctx context.Context, args []byte) (interface
 	return CmdOK, nil
 }
 
-func (c *handler) getDeviceStatus(ctx context.Context) (interface{}, error) {
-	return c.deviceStatus.GetStatus(ctx)
+func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
+	return e.deviceStatus.GetStatus(ctx)
 }
 
-func (c *handler) handleScreenRotation(ctx context.Context, args []byte) (interface{}, error) {
+func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Clockwise bool `json:"clockwise"`
 	}
 
-	err := c.json.Unmarshal(args, &cmdArgs)
+	err := e.json.Unmarshal(args, &cmdArgs)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
 	clockwise := cmdArgs.Clockwise
-	c.logger.Info("Screen rotation request",
+	e.logger.Info("Screen rotation request",
 		zap.Bool("clockwise", clockwise))
 
 	// Execute wlr-randr command
-	cmd := c.exec.CommandContext(ctx, "wlr-randr")
+	cmd := e.exec.CommandContext(ctx, "wlr-randr")
 
 	// Get current outputs
 	output, err := cmd.Output()
 	if err != nil {
-		c.logger.Error("Failed to execute wlr-randr", zap.Error(err))
+		e.logger.Error("Failed to execute wlr-randr", zap.Error(err))
 		return nil, fmt.Errorf("failed to get display info: %w", err)
 	}
 
@@ -251,7 +251,7 @@ func (c *handler) handleScreenRotation(ctx context.Context, args []byte) (interf
 	// Read current orientation from config file (this is what user perceives)
 	currentIndex := 0 // Default to normal
 	configPath := "/home/feralfile/.config/screen-orientation"
-	configData, err := c.os.ReadFile(configPath)
+	configData, err := e.os.ReadFile(configPath)
 	if err == nil && len(configData) > 0 {
 		savedRotation := strings.TrimSpace(string(configData))
 		for i, rot := range rotations {
@@ -260,9 +260,9 @@ func (c *handler) handleScreenRotation(ctx context.Context, args []byte) (interf
 				break
 			}
 		}
-		c.logger.Info("Using perceived rotation from config", zap.String("rotation", savedRotation))
+		e.logger.Info("Using perceived rotation from config", zap.String("rotation", savedRotation))
 	} else {
-		c.logger.Warn("No saved rotation found, assuming normal orientation")
+		e.logger.Warn("No saved rotation found, assuming normal orientation")
 	}
 
 	// Calculate new orientation based on perceived current orientation
@@ -278,26 +278,26 @@ func (c *handler) handleScreenRotation(ctx context.Context, args []byte) (interf
 	// Apply with wlr-randr (force absolute orientation)
 	// This makes wlr-randr and config file stay in sync
 	//nolint:gosec
-	rotateCmd := c.exec.CommandContext(ctx, "wlr-randr", "--output", outputName, "--transform", newRotation)
+	rotateCmd := e.exec.CommandContext(ctx, "wlr-randr", "--output", outputName, "--transform", newRotation)
 	err = rotateCmd.Run()
 	if err != nil {
-		c.logger.Error("Failed to rotate screen", zap.Error(err))
+		e.logger.Error("Failed to rotate screen", zap.Error(err))
 		return nil, fmt.Errorf("failed to rotate screen: %w", err)
 	}
 
 	// Write rotation value to file
-	if err := c.os.WriteFile(configPath, []byte(newRotation), 0600); err != nil {
-		c.logger.Warn("Failed to save screen orientation", zap.Error(err))
+	if err := e.os.WriteFile(configPath, []byte(newRotation), 0600); err != nil {
+		e.logger.Warn("Failed to save screen orientation", zap.Error(err))
 	}
 
-	c.logger.Info("Screen rotated and saved",
+	e.logger.Info("Screen rotated and saved",
 		zap.String("output", outputName),
 		zap.String("rotation", newRotation))
 
-	c.screenInitialized = false
+	e.screenInitialized = false
 
 	// Force refresh status poller
-	c.statusPoller.ForceRefresh()
+	e.statusPoller.ForceRefresh()
 
 	orientationReplyMsg := "landscape"
 	switch newRotation {
@@ -311,25 +311,25 @@ func (c *handler) handleScreenRotation(ctx context.Context, args []byte) (interf
 	return map[string]string{"orientation": orientationReplyMsg}, nil
 }
 
-func (c *handler) handleKeyboardEvent(args []byte) (interface{}, error) {
+func (e *executor) handleKeyboardEvent(args []byte) (interface{}, error) {
 	var cmdArgs struct {
 		Code int `json:"code"`
 	}
 
-	err := c.json.Unmarshal(args, &cmdArgs)
+	err := e.json.Unmarshal(args, &cmdArgs)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
 	// Always map special keys first
-	keyName := c.mapToYdoKey(cmdArgs.Code)
+	keyName := e.mapToYdoKey(cmdArgs.Code)
 	isPrintable := false
 	if keyName == "" && cmdArgs.Code >= 32 && cmdArgs.Code <= 126 {
 		keyName = string(rune(cmdArgs.Code))
 		isPrintable = true
 	}
 
-	c.logger.Info("Keyboard event", zap.Int("code", cmdArgs.Code), zap.String("key", keyName))
+	e.logger.Info("Keyboard event", zap.Int("code", cmdArgs.Code), zap.String("key", keyName))
 
 	// Prepare CDP command to dispatch a key event
 	keyEventParams := map[string]interface{}{
@@ -342,26 +342,26 @@ func (c *handler) handleKeyboardEvent(args []byte) (interface{}, error) {
 	}
 
 	// Send key directly via CDP
-	_, err = c.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
+	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
 	if err != nil {
-		c.logger.Error("Failed to send key via CDP", zap.Error(err))
+		e.logger.Error("Failed to send key via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to send keyboard event: %w", err)
 	}
 
 	// Only send keyUp for printable ASCII (not for special keys)
 	if isPrintable {
 		keyEventParams["type"] = "keyUp"
-		_, err := c.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
+		_, err := e.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
 		if err != nil {
-			c.logger.Error("Failed to send keyUp via CDP", zap.Error(err))
+			e.logger.Error("Failed to send keyUp via CDP", zap.Error(err))
 		}
 	}
 
 	return CmdOK, nil
 }
 
-func (c *handler) initializeScreenDimensions() {
-	if c.screenInitialized {
+func (e *executor) initializeScreenDimensions() {
+	if e.screenInitialized {
 		return
 	}
 
@@ -371,43 +371,43 @@ func (c *handler) initializeScreenDimensions() {
 		"returnByValue": true,
 	}
 
-	result, err := c.cdp.Send("Runtime.evaluate", evalParams)
+	result, err := e.cdp.Send("Runtime.evaluate", evalParams)
 	if err != nil {
-		c.logger.Error("Failed to get screen dimensions", zap.Error(err))
+		e.logger.Error("Failed to get screen dimensions", zap.Error(err))
 		// Use default values
-		c.screenWidth = 1920
-		c.screenHeight = 1080
+		e.screenWidth = 1920
+		e.screenHeight = 1080
 	} else if result != nil {
 		if dimensions, ok := result.(map[string]interface{}); ok {
 			if width, ok := dimensions["width"].(float64); ok {
-				c.screenWidth = width
+				e.screenWidth = width
 			} else {
-				c.screenWidth = 1920
+				e.screenWidth = 1920
 			}
 			if height, ok := dimensions["height"].(float64); ok {
-				c.screenHeight = height
+				e.screenHeight = height
 			} else {
-				c.screenHeight = 1080
+				e.screenHeight = 1080
 			}
 		}
 	}
 
 	// Initialize cursor at the center of the screen
-	c.cursorPositionX = c.screenWidth / 2
-	c.cursorPositionY = c.screenHeight / 2
-	c.screenInitialized = true
-	c.movingScaleFactor = c.screenWidth / 1920
+	e.cursorPositionX = e.screenWidth / 2
+	e.cursorPositionY = e.screenHeight / 2
+	e.screenInitialized = true
+	e.movingScaleFactor = e.screenWidth / 1920
 
-	c.logger.Info("Screen dimensions initialized",
-		zap.Float64("width", c.screenWidth),
-		zap.Float64("height", c.screenHeight),
-		zap.Float64("cursorX", c.cursorPositionX),
-		zap.Float64("cursorY", c.cursorPositionY))
+	e.logger.Info("Screen dimensions initialized",
+		zap.Float64("width", e.screenWidth),
+		zap.Float64("height", e.screenHeight),
+		zap.Float64("cursorX", e.cursorPositionX),
+		zap.Float64("cursorY", e.cursorPositionY))
 }
 
-func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
+func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
 	// Initialize screen dimensions if not done already
-	c.initializeScreenDimensions()
+	e.initializeScreenDimensions()
 
 	// Parse cursor offsets
 	var cursorArgs struct {
@@ -418,7 +418,7 @@ func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
 		} `json:"cursorOffsets"`
 	}
 
-	err := c.json.Unmarshal(args, &cursorArgs)
+	err := e.json.Unmarshal(args, &cursorArgs)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -428,7 +428,7 @@ func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
 
 	for i, offset := range cursorArgs.CursorOffsets {
 		// Calculate the magnitude of this offset
-		magnitude := c.math.Sqrt(offset.DX*offset.DX + offset.DY*offset.DY)
+		magnitude := e.math.Sqrt(offset.DX*offset.DX + offset.DY*offset.DY)
 
 		var clampedDX, clampedDY float64
 
@@ -436,10 +436,10 @@ func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
 		if magnitude > 150 {
 			// This is likely a catch-up jump, clamp aggressively
 			maxOffset := 25.0
-			clampedDX = c.math.Max(-maxOffset, c.math.Min(maxOffset, offset.DX))
-			clampedDY = c.math.Max(-maxOffset, c.math.Min(maxOffset, offset.DY))
+			clampedDX = e.math.Max(-maxOffset, e.math.Min(maxOffset, offset.DX))
+			clampedDY = e.math.Max(-maxOffset, e.math.Min(maxOffset, offset.DY))
 
-			c.logger.Debug("Clamping outlier offset",
+			e.logger.Debug("Clamping outlier offset",
 				zap.Int("index", i),
 				zap.Float64("magnitude", magnitude),
 				zap.Float64("originalDX", offset.DX),
@@ -453,17 +453,17 @@ func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
 		}
 
 		// Update cursor position with the offset
-		c.cursorPositionX += (clampedDX * c.movingScaleFactor)
-		c.cursorPositionY += (clampedDY * c.movingScaleFactor)
+		e.cursorPositionX += (clampedDX * e.movingScaleFactor)
+		e.cursorPositionY += (clampedDY * e.movingScaleFactor)
 
 		// Ensure position stays within screen bounds
-		c.cursorPositionX = c.math.Max(0, c.math.Min(c.cursorPositionX, c.screenWidth))
-		c.cursorPositionY = c.math.Max(0, c.math.Min(c.cursorPositionY, c.screenHeight))
+		e.cursorPositionX = e.math.Max(0, e.math.Min(e.cursorPositionX, e.screenWidth))
+		e.cursorPositionY = e.math.Max(0, e.math.Min(e.cursorPositionY, e.screenHeight))
 
 		// Add to absolute positions array
 		absolutePositions = append(absolutePositions, map[string]float64{
-			"x": c.cursorPositionX,
-			"y": c.cursorPositionY,
+			"x": e.cursorPositionX,
+			"y": e.cursorPositionY,
 		})
 	}
 
@@ -473,7 +473,7 @@ func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
 	}
 
 	// 1. Pass the entire array of absolute positions to JavaScript via CDP
-	positionsJSON, err := c.json.Marshal(map[string]interface{}{
+	positionsJSON, err := e.json.Marshal(map[string]interface{}{
 		"messageID": cursorArgs.MessageID,
 		"message": map[string]interface{}{
 			"command": "cursorUpdate",
@@ -487,11 +487,11 @@ func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
 	}
 
 	// Call JavaScript function to process all positions
-	_, err = c.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(positionsJSON)),
 	})
 	if err != nil {
-		c.logger.Error("Failed to execute JavaScript cursor positions", zap.Error(err))
+		e.logger.Error("Failed to execute JavaScript cursor positions", zap.Error(err))
 		return nil, fmt.Errorf("failed to process cursor positions: %w", err)
 	}
 
@@ -500,71 +500,71 @@ func (c *handler) handleMouseMoveEvent(args []byte) (interface{}, error) {
 		// Get the last position for the final mouseMoved event
 		moveParams := map[string]interface{}{
 			"type":       "mouseMoved",
-			"x":          c.cursorPositionX,
-			"y":          c.cursorPositionY,
+			"x":          e.cursorPositionX,
+			"y":          e.cursorPositionY,
 			"button":     "none",
 			"buttons":    0,
 			"clickCount": 0,
 		}
 
-		_, err = c.cdp.Send("Input.dispatchMouseEvent", moveParams)
+		_, err = e.cdp.Send("Input.dispatchMouseEvent", moveParams)
 		if err != nil {
-			c.logger.Error("Failed to move mouse via CDP", zap.Error(err))
+			e.logger.Error("Failed to move mouse via CDP", zap.Error(err))
 			return nil, fmt.Errorf("failed to move mouse: %w", err)
 		}
 
-		c.logger.Info("Mouse moved to final position",
-			zap.Float64("x", c.cursorPositionX),
-			zap.Float64("y", c.cursorPositionY))
+		e.logger.Info("Mouse moved to final position",
+			zap.Float64("x", e.cursorPositionX),
+			zap.Float64("y", e.cursorPositionY))
 	}
 
 	return CmdOK, nil
 }
 
-func (c *handler) handleMouseTapEvent() (interface{}, error) {
+func (e *executor) handleMouseTapEvent() (interface{}, error) {
 	// Initialize screen dimensions if not done already
-	c.initializeScreenDimensions()
+	e.initializeScreenDimensions()
 
-	c.logger.Info("Mouse tap event at current position",
-		zap.Float64("x", c.cursorPositionX),
-		zap.Float64("y", c.cursorPositionY))
+	e.logger.Info("Mouse tap event at current position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
 
 	// 1. Press mouse button at current position
 	downParams := map[string]interface{}{
 		"type":       "mousePressed",
-		"x":          c.cursorPositionX,
-		"y":          c.cursorPositionY,
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
 		"button":     "left",
 		"buttons":    1,
 		"clickCount": 1,
 	}
 
-	_, err := c.cdp.Send("Input.dispatchMouseEvent", downParams)
+	_, err := e.cdp.Send("Input.dispatchMouseEvent", downParams)
 	if err != nil {
-		c.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to press mouse button: %w", err)
 	}
 
 	// 2. Release mouse button
 	upParams := map[string]interface{}{
 		"type":       "mouseReleased",
-		"x":          c.cursorPositionX,
-		"y":          c.cursorPositionY,
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
 		"button":     "left",
 		"buttons":    0,
 		"clickCount": 1,
 	}
 
-	_, err = c.cdp.Send("Input.dispatchMouseEvent", upParams)
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
 	if err != nil {
-		c.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
+		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to release mouse button: %w", err)
 	}
 
 	return CmdOK, nil
 }
 
-func (c *handler) mapToYdoKey(keyCode int) string {
+func (e *executor) mapToYdoKey(keyCode int) string {
 	switch keyCode {
 	case 32:
 		return "space"
@@ -585,15 +585,15 @@ func (c *handler) mapToYdoKey(keyCode int) string {
 	case 40:
 		return "down"
 	default:
-		c.logger.Warn("Unhandled key code", zap.Int("code", keyCode))
+		e.logger.Warn("Unhandled key code", zap.Int("code", keyCode))
 		return ""
 	}
 }
 
-func (c *handler) shutdown(ctx context.Context) (interface{}, error) {
-	c.logger.Info("Executing shutdown command")
+func (e *executor) shutdown(ctx context.Context) (interface{}, error) {
+	e.logger.Info("Executing shutdown command")
 
-	cmd := c.exec.CommandContext(ctx, "sudo", "shutdown", "-h", "now")
+	cmd := e.exec.CommandContext(ctx, "sudo", "shutdown", "-h", "now")
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to execute shutdown command: %w", err)
@@ -602,9 +602,9 @@ func (c *handler) shutdown(ctx context.Context) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (c *handler) reboot(ctx context.Context) (interface{}, error) {
+func (e *executor) reboot(ctx context.Context) (interface{}, error) {
 
-	cmd := c.exec.CommandContext(ctx, "sudo", "reboot", "-h", "now")
+	cmd := e.exec.CommandContext(ctx, "sudo", "reboot", "-h", "now")
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to execute reboot command: %w", err)
@@ -613,13 +613,13 @@ func (c *handler) reboot(ctx context.Context) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (c *handler) getSysMetrics() (interface{}, error) {
-	c.Lock()
-	defer c.Unlock()
+func (e *executor) getSysMetrics() (interface{}, error) {
+	e.Lock()
+	defer e.Unlock()
 
 	var sysMetrics map[string]interface{}
-	if c.lastSysMetrics != nil {
-		err := c.json.Unmarshal(c.lastSysMetrics, &sysMetrics)
+	if e.lastSysMetrics != nil {
+		err := e.json.Unmarshal(e.lastSysMetrics, &sysMetrics)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal last sys metrics: %w", err)
 		}
@@ -628,11 +628,11 @@ func (c *handler) getSysMetrics() (interface{}, error) {
 	return sysMetrics, nil
 }
 
-func (c *handler) updateToLatest(ctx context.Context) (interface{}, error) {
-	c.logger.Info("Executing update to latest version command")
+func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
+	e.logger.Info("Executing update to latest version command")
 
 	// execute command systemctl start feral-updater@00:00.service
-	cmd := c.exec.CommandContext(ctx, "systemctl", "start", "feral-updater@00:00.service")
+	cmd := e.exec.CommandContext(ctx, "systemctl", "start", "feral-updater@00:00.service")
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to execute update to latest command: %w", err)
