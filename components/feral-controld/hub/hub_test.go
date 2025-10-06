@@ -16,7 +16,6 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -362,12 +361,9 @@ func TestHandleCast_Success(t *testing.T) {
 
 	// Test payload
 	cmd := string(commands.CMD_DEVICE_STATUS)
-	payload := relayer.Payload{
-		MessageID: "test-123",
-		Message: relayer.Message{
-			Command: &cmd,
-			Request: map[string]interface{}{"test": "value"},
-		},
+	payload := commands.Command{
+		Type:      commands.Type(cmd),
+		Arguments: map[string]interface{}{"test": "value"},
 	}
 
 	expectedResult := map[string]string{"status": "success"}
@@ -375,7 +371,7 @@ func TestHandleCast_Success(t *testing.T) {
 	// Mock JSON decoder to return the payload
 	ts.mockJSONDec.EXPECT().
 		Decode(gomock.Any()).
-		DoAndReturn(func(p *relayer.Payload) error {
+		DoAndReturn(func(p *commands.Command) error {
 			*p = payload
 			return nil
 		}).
@@ -404,7 +400,7 @@ func TestHandleCast_Success(t *testing.T) {
 		Times(1)
 
 	// Create a test request with actual JSON payload
-	jsonPayload := `{"messageID":"test-123","message":{"command":"DEVICE_STATUS","request":{"test":"value"}}}`
+	jsonPayload := `{"command":"getDeviceStatus","request":{"test":"value"}}`
 	req, err := http.NewRequest("POST", "/api/cast", strings.NewReader(jsonPayload))
 	assert.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
@@ -477,19 +473,16 @@ func TestHandleCast_ProcessError(t *testing.T) {
 	defer ts.teardown()
 
 	// Test payload
-	cmd := string(commands.CMD_DEVICE_STATUS)
-	payload := relayer.Payload{
-		MessageID: "test-123",
-		Message: relayer.Message{
-			Command: &cmd,
-			Request: map[string]interface{}{"test": "value"},
-		},
+	cmd := commands.CMD_DEVICE_STATUS
+	payload := commands.Command{
+		Type:      cmd,
+		Arguments: map[string]interface{}{"test": "value"},
 	}
 
 	// Mock JSON decoder to return the payload
 	ts.mockJSONDec.EXPECT().
 		Decode(gomock.Any()).
-		DoAndReturn(func(p *relayer.Payload) error {
+		DoAndReturn(func(p *commands.Command) error {
 			*p = payload
 			return nil
 		}).
@@ -530,19 +523,16 @@ func TestHandleCast_ProcessNilResult(t *testing.T) {
 	defer ts.teardown()
 
 	// Test payload
-	cmd := string(commands.CMD_DEVICE_STATUS)
-	payload := relayer.Payload{
-		MessageID: "test-123",
-		Message: relayer.Message{
-			Command: &cmd,
-			Request: map[string]interface{}{"test": "value"},
-		},
+	cmd := commands.CMD_DEVICE_STATUS
+	payload := commands.Command{
+		Type:      cmd,
+		Arguments: map[string]interface{}{"test": "value"},
 	}
 
 	// Mock JSON decoder to return the payload
 	ts.mockJSONDec.EXPECT().
 		Decode(gomock.Any()).
-		DoAndReturn(func(p *relayer.Payload) error {
+		DoAndReturn(func(p *commands.Command) error {
 			*p = payload
 			return nil
 		}).

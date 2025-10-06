@@ -10,7 +10,6 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
@@ -112,26 +111,22 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload relayer.Payload
+	var payload commands.Command
 	if err := h.json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		h.logger.Error("Failed to decode cast payload", zap.Error(err))
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
-	h.logger.Info("Received cast request", zap.String("messageID", payload.MessageID), zap.Any("message", payload.Message))
+	h.logger.Info("Received cast request", zap.Any("payload", payload))
 
-	if payload.Message.Command == nil {
-		h.logger.Error("Command is required", zap.Any("payload", payload))
-		http.Error(w, "Command is required", http.StatusBadRequest)
+	if payload.Type == "" {
+		h.logger.Error("Command type is required", zap.Any("payload", payload))
+		http.Error(w, "Command type is required", http.StatusBadRequest)
 		return
 	}
 
-	result, err := h.cmdHandler.Process(h.ctx,
-		commands.Command{
-			Type:      commands.Type(*payload.Message.Command),
-			Arguments: payload.Message.Request,
-		})
+	result, err := h.cmdHandler.Process(h.ctx, payload)
 	if err != nil {
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
