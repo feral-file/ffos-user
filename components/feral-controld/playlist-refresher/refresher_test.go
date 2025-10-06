@@ -10,10 +10,10 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 
 	"github.com/golang/mock/gomock"
@@ -64,7 +64,7 @@ func (ts *testSetup) teardown() {
 }
 
 // Helper function to create a mock player status
-func createMockPlayerStatus(command relayer.RelayerCmd, playlistURL *string, playlist *dp1.Playlist) *status.PlayerStatus {
+func createMockPlayerStatus(command string, playlistURL *string, playlist *dp1.Playlist) *status.PlayerStatus {
 	return &status.PlayerStatus{
 		Command:     command,
 		PlaylistURL: playlistURL,
@@ -315,7 +315,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlaylistURL(t *testing.T) {
 	// Expect status poller to return player status with playlist URL
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, &playlistURL, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 
 	// Expect DP1 to process playlist URL
@@ -357,7 +357,7 @@ func TestRefresher_ProcessPlayingPlaylist_DynamicPlaylist(t *testing.T) {
 	// Expect status poller to return player status with dynamic playlist
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, nil, mockPlaylist), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
 
 	// Expect DP1 to process dynamic playlist
@@ -393,7 +393,7 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 	// Expect status poller to return player status with playlist but no dynamic queries
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, nil, mockPlaylist), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
 
 	// Should not call DP1.ProcessDynamicPlaylist since there are no dynamic queries
@@ -418,7 +418,7 @@ func TestRefresher_ProcessPlayingPlaylist_WrongCommand(t *testing.T) {
 	// Expect status poller to return player status with wrong command
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_SHUTDOWN, nil, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_SHUTDOWN), nil, nil), nil).
 		AnyTimes()
 
 	// Should not call DP1 or CDP since command is not CMD_DISPLAY_PLAYLIST
@@ -440,7 +440,7 @@ func TestRefresher_ProcessPlayingPlaylist_NoPlaylistData(t *testing.T) {
 	// Expect status poller to return player status with no playlist data
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, nil, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, nil), nil).
 		AnyTimes()
 
 	// Expect Sleep to be called during retry logic
@@ -520,7 +520,7 @@ func TestRefresher_ProcessPlayingPlaylist_DP1ProcessPlaylistURLError(t *testing.
 	// Expect status poller to return player status with playlist URL
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, &playlistURL, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 
 	// Expect DP1 to fail processing playlist URL
@@ -555,7 +555,7 @@ func TestRefresher_ProcessPlayingPlaylist_DP1ProcessDynamicPlaylistError(t *test
 	// Expect status poller to return player status with dynamic playlist
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, nil, mockPlaylist), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
 		AnyTimes()
 
 	// Expect DP1 to fail processing dynamic playlist
@@ -591,7 +591,7 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendError(t *testing.T) {
 	// Expect status poller to return player status with playlist URL
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, &playlistURL, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 
 	// Expect DP1 to process playlist URL successfully
@@ -628,7 +628,7 @@ func TestRefresher_ProcessPlayingPlaylist_InvalidPlayerStatus(t *testing.T) {
 	// Test with invalid player status (no playlist URL or playlist)
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, nil, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, nil), nil).
 		AnyTimes()
 
 	// Expect Sleep to be called during retry logic
@@ -660,7 +660,7 @@ func TestRefresher_SendCDPRequest_Success(t *testing.T) {
 	// Expect status poller to return player status with playlist URL
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, &playlistURL, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 
 	// Expect DP1 to process playlist URL
@@ -729,7 +729,7 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 	// Expect status poller to return player status (needed for processPlayingPlaylist to succeed)
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, &playlistURL, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 
 	// Expect DP1 to process playlist (needed for processPlayingPlaylist to succeed)
@@ -793,7 +793,7 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// Expect status poller to return player status (needed for processPlayingPlaylist to succeed)
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
-		Return(createMockPlayerStatus(relayer.CMD_DISPLAY_PLAYLIST, &playlistURL, nil), nil).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
 		AnyTimes()
 
 	// Expect DP1 to process playlist (needed for processPlayingPlaylist to succeed)

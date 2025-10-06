@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -53,6 +54,7 @@ func setup(t *testing.T) *testSetup {
 		mockCommandHandler,
 		mockExecutor,
 		mockRefresher,
+		mockStatusPoller,
 		logger,
 	)
 
@@ -413,11 +415,7 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 
 				payload := relayer.Payload{
 					MessageID: relayer.MESSAGE_ID_SYSTEM,
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
+					Message: relayer.Message{
 						TopicID: &topicID,
 					},
 				}
@@ -430,11 +428,7 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
 				payload := relayer.Payload{
 					MessageID: relayer.MESSAGE_ID_SYSTEM,
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
+					Message: relayer.Message{
 						TopicID: nil,
 					},
 				}
@@ -470,11 +464,7 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 
 				payload := relayer.Payload{
 					MessageID: relayer.MESSAGE_ID_SYSTEM,
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
+					Message: relayer.Message{
 						TopicID: &topicID,
 					},
 				}
@@ -530,7 +520,7 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 		{
 			name: "command processing success",
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_CONNECT // Use a real controld command
+				cmd := string(commands.CMD_CONNECT)
 				args := map[string]interface{}{"arg1": "value1"}
 				result := map[string]interface{}{
 					"type":      "RPC",
@@ -540,25 +530,28 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 
 				payload := relayer.Payload{
 					MessageID: "test-message",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
+					Message: relayer.Message{
 						Command: &cmd,
-						Args:    args,
+						Request: args,
 					},
 				}
 
 				// Expect the command handler to process
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), payload).
+					Process(gomock.Any(), commands.Command{
+						Type:      commands.Type(cmd),
+						Arguments: args,
+					}).
 					Return(result, nil).
 					Times(1)
 
 				// Expect the result to be sent
 				ts.mockRelayer.EXPECT().
-					Send(gomock.Any(), result).
+					Send(gomock.Any(), relayer.Response{
+						Type:      "RPC",
+						MessageID: "test-message",
+						Message:   result,
+					}).
 					Return(nil).
 					Times(1)
 
@@ -568,25 +561,24 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 		{
 			name: "command processing error",
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_CONNECT // Use a real controld command
+				cmd := string(commands.CMD_CONNECT)
 				args := map[string]interface{}{"arg1": "value1"}
 				execError := errors.New("execution failed")
 
 				payload := relayer.Payload{
 					MessageID: "test-message",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
+					Message: relayer.Message{
 						Command: &cmd,
-						Args:    args,
+						Request: args,
 					},
 				}
 
 				// Expect the command handler to process and return error
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), payload).
+					Process(gomock.Any(), commands.Command{
+						Type:      commands.Type(cmd),
+						Arguments: args,
+					}).
 					Return(nil, execError).
 					Times(1)
 
@@ -596,23 +588,22 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 		{
 			name: "command processing nil result",
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
-				cmd := relayer.CMD_CONNECT // Use a real controld command
+				cmd := string(commands.CMD_CONNECT)
 				args := map[string]interface{}{"arg1": "value1"}
 				payload := relayer.Payload{
 					MessageID: "test-message",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
+					Message: relayer.Message{
 						Command: &cmd,
-						Args:    args,
+						Request: args,
 					},
 				}
 
 				// Expect the command handler to process and return nil result
 				ts.mockCommandHandler.EXPECT().
-					Process(gomock.Any(), payload).
+					Process(gomock.Any(), commands.Command{
+						Type:      commands.Type(cmd),
+						Arguments: args,
+					}).
 					Return(nil, nil).
 					Times(1)
 
@@ -627,12 +618,6 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 			defer ts.teardown()
 
 			payload, expectedError := tt.setupFunc(ts)
-
-			// Set status poller to test SetStatusPoller propagation
-			ts.mockCommandHandler.EXPECT().
-				SetStatusPoller(ts.mockStatusPoller).
-				Times(1)
-			ts.mediator.SetStatusPoller(ts.mockStatusPoller)
 
 			// Register handler
 			var capturedHandler relayer.Handler

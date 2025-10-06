@@ -179,10 +179,6 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
 				ts.mockMediator.EXPECT().Stop()
-				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
-
-				// Mock Executor set status poller
-				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -237,10 +233,6 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
 				ts.mockMediator.EXPECT().Stop()
-				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
-
-				// Mock Executor set status poller
-				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -295,10 +287,6 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
 				ts.mockMediator.EXPECT().Stop()
-				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
-
-				// Mock Executor set status poller
-				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -494,12 +482,6 @@ func TestApp_Run_Errors(t *testing.T) {
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return([]interface{}{false}, nil)
 
-				// Mock Mediator set status poller
-				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
-
-				// Mock Executor set status poller
-				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
-
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
 				ts.mockStatusPoller.EXPECT().Stop()
@@ -548,12 +530,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return(nil, errors.New("DBus call failed"))
-
-				// Mock Mediator set status poller
-				ts.mockMediator.EXPECT().SetStatusPoller(ts.mockStatusPoller)
-
-				// Mock Executor set status poller
-				ts.mockExecutor.EXPECT().SetStatusPoller(ts.mockStatusPoller)
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())

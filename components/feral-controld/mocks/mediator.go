@@ -8,8 +8,6 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
-
-	status "github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
 // MockMediator is a mock of Mediator interface.
@@ -33,18 +31,6 @@ func NewMockMediator(ctrl *gomock.Controller) *MockMediator {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockMediator) EXPECT() *MockMediatorMockRecorder {
 	return m.recorder
-}
-
-// SetStatusPoller mocks base method.
-func (m *MockMediator) SetStatusPoller(statusPoller status.Poller) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetStatusPoller", statusPoller)
-}
-
-// SetStatusPoller indicates an expected call of SetStatusPoller.
-func (mr *MockMediatorMockRecorder) SetStatusPoller(statusPoller interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetStatusPoller", reflect.TypeOf((*MockMediator)(nil).SetStatusPoller), statusPoller)
 }
 
 // Start mocks base method.
