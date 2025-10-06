@@ -10,8 +10,7 @@ import (
 
 	gomock "github.com/golang/mock/gomock"
 
-	relayer "github.com/feral-file/ffos-user/components/feral-controld/relayer"
-	status "github.com/feral-file/ffos-user/components/feral-controld/status"
+	commands "github.com/feral-file/ffos-user/components/feral-controld/commands"
 )
 
 // MockCommandHandler is a mock of Handler interface.
@@ -38,28 +37,16 @@ func (m *MockCommandHandler) EXPECT() *MockCommandHandlerMockRecorder {
 }
 
 // Process mocks base method.
-func (m *MockCommandHandler) Process(ctx context.Context, payload relayer.Payload) (interface{}, error) {
+func (m *MockCommandHandler) Process(ctx context.Context, command commands.Command) (interface{}, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Process", ctx, payload)
+	ret := m.ctrl.Call(m, "Process", ctx, command)
 	ret0, _ := ret[0].(interface{})
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Process indicates an expected call of Process.
-func (mr *MockCommandHandlerMockRecorder) Process(ctx, payload interface{}) *gomock.Call {
+func (mr *MockCommandHandlerMockRecorder) Process(ctx, command interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Process", reflect.TypeOf((*MockCommandHandler)(nil).Process), ctx, payload)
-}
-
-// SetStatusPoller mocks base method.
-func (m *MockCommandHandler) SetStatusPoller(statusPoller status.Poller) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetStatusPoller", statusPoller)
-}
-
-// SetStatusPoller indicates an expected call of SetStatusPoller.
-func (mr *MockCommandHandlerMockRecorder) SetStatusPoller(statusPoller interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetStatusPoller", reflect.TypeOf((*MockCommandHandler)(nil).SetStatusPoller), statusPoller)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Process", reflect.TypeOf((*MockCommandHandler)(nil).Process), ctx, command)
 }

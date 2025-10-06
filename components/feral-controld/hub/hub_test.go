@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -360,16 +361,12 @@ func TestHandleCast_Success(t *testing.T) {
 	defer ts.teardown()
 
 	// Test payload
-	cmd := relayer.CMD_DEVICE_STATUS
+	cmd := string(commands.CMD_DEVICE_STATUS)
 	payload := relayer.Payload{
 		MessageID: "test-123",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
+		Message: relayer.Message{
 			Command: &cmd,
-			Args:    map[string]interface{}{"test": "value"},
+			Request: map[string]interface{}{"test": "value"},
 		},
 	}
 
@@ -480,16 +477,12 @@ func TestHandleCast_ProcessError(t *testing.T) {
 	defer ts.teardown()
 
 	// Test payload
-	cmd := relayer.CMD_DEVICE_STATUS
+	cmd := string(commands.CMD_DEVICE_STATUS)
 	payload := relayer.Payload{
 		MessageID: "test-123",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
+		Message: relayer.Message{
 			Command: &cmd,
-			Args:    map[string]interface{}{"test": "value"},
+			Request: map[string]interface{}{"test": "value"},
 		},
 	}
 
@@ -537,16 +530,12 @@ func TestHandleCast_ProcessNilResult(t *testing.T) {
 	defer ts.teardown()
 
 	// Test payload
-	cmd := relayer.CMD_DEVICE_STATUS
+	cmd := string(commands.CMD_DEVICE_STATUS)
 	payload := relayer.Payload{
 		MessageID: "test-123",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
+		Message: relayer.Message{
 			Command: &cmd,
-			Args:    map[string]interface{}{"test": "value"},
+			Request: map[string]interface{}{"test": "value"},
 		},
 	}
 

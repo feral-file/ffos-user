@@ -1,4 +1,4 @@
-package command
+package commandrouter
 
 import (
 	"context"
@@ -7,21 +7,20 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
-	"github.com/feral-file/ffos-user/components/feral-controld/operation"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 //go:generate mockgen -source=handler.go -destination=../mocks/command.go -package=mocks -mock_names=Handler=MockCommandHandler
 type Handler interface {
-	Process(ctx context.Context, payload relayer.Payload) (interface{}, error)
-	SetStatusPoller(statusPoller status.Poller)
+	Process(ctx context.Context, command commands.Command) (interface{}, error)
 }
 
 type handler struct {
-	executor     operation.Executor
+	executor     devicectl.Executor
 	cdp          cdp.CDP
 	dp1          dp1.DP1
 	json         wrapper.JSON
@@ -30,58 +29,52 @@ type handler struct {
 }
 
 func New(
-	executor operation.Executor,
+	executor devicectl.Executor,
 	cdp cdp.CDP,
 	dp1 dp1.DP1,
+	statusPoller status.Poller,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
 	return &handler{
-		executor: executor,
-		cdp:      cdp,
-		dp1:      dp1,
-		json:     json,
-		logger:   logger,
+		executor:     executor,
+		cdp:          cdp,
+		dp1:          dp1,
+		statusPoller: statusPoller,
+		json:         json,
+		logger:       logger,
 	}
-}
-
-func (h *handler) SetStatusPoller(statusPoller status.Poller) {
-	h.statusPoller = statusPoller
 }
 
 // Process processes the command and returns the result
-func (h *handler) Process(ctx context.Context, payload relayer.Payload) (interface{}, error) {
-	cmd := payload.Message.Command
-	if cmd == nil {
-		h.logger.Warn("Received relayer message with no command", zap.Any("payload", payload))
+func (h *handler) Process(ctx context.Context, command commands.Command) (interface{}, error) {
+	commandType := command.Type
+	if commandType == "" {
+		h.logger.Warn("Received command with no type", zap.Any("command", command))
 		return nil, nil
 	}
 
-	if cmd.ControldCmds() {
-		// Handle command directly
+	if commandType.DeviceCtlCommand() {
+		// Handle device control command
 		result, err := h.executor.Execute(ctx,
-			operation.Command{
-				Command:   *cmd,
-				Arguments: payload.Message.Args,
+			commands.Command{
+				Type:      commandType,
+				Arguments: command.Arguments,
 			})
 		if err != nil {
 			h.logger.Error("Failed to execute command", zap.Error(err))
 			return nil, err
 		}
 
-		return map[string]interface{}{
-			"type":      "RPC",
-			"messageID": payload.MessageID,
-			"message":   result,
-		}, nil
+		return result, nil
 
 	} else {
-		if *cmd == relayer.CMD_DISPLAY_PLAYLIST {
+		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			var playlist *dp1.Playlist
 			var err error
 			switch {
-			case payload.Message.Args["playlistUrl"] != nil:
-				url, ok := payload.Message.Args["playlistUrl"].(string)
+			case command.Arguments["playlistUrl"] != nil:
+				url, ok := command.Arguments["playlistUrl"].(string)
 				if !ok || url == "" {
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
@@ -91,8 +84,8 @@ func (h *handler) Process(ctx context.Context, payload relayer.Payload) (interfa
 					return nil, err
 				}
 
-			case payload.Message.Args["dp1_call"] != nil:
-				playlistMap, ok := payload.Message.Args["dp1_call"].(map[string]interface{})
+			case command.Arguments["dp1_call"] != nil:
+				playlistMap, ok := command.Arguments["dp1_call"].(map[string]interface{})
 				if !ok {
 					return nil, fmt.Errorf("playlist is not a map")
 				}
@@ -118,12 +111,12 @@ func (h *handler) Process(ctx context.Context, payload relayer.Payload) (interfa
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
-			payload.Message.Args["dp1_call"] = playlist
+			command.Arguments["dp1_call"] = playlist
 
 		}
 
 		// Forward to CDP (final, full data)
-		result, err := h.sendCDPRequest(payload)
+		result, err := h.sendCDPRequest(command)
 		if err != nil {
 			return nil, err
 		}
@@ -137,9 +130,9 @@ func (h *handler) Process(ctx context.Context, payload relayer.Payload) (interfa
 	}
 }
 
-// sendCDPRequest marshals payload and sends to CDP with tracing
-func (h *handler) sendCDPRequest(payload relayer.Payload) (interface{}, error) {
-	p, err := payload.JSON()
+// sendCDPRequest marshals payload and sends to CDP
+func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) {
+	p, err := command.JSON()
 	if err != nil {
 		h.logger.Error("Failed to marshal payload", zap.Error(err))
 		return nil, err

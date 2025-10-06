@@ -1,4 +1,4 @@
-package operation
+package devicectl
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -23,22 +23,16 @@ var CmdOK = struct {
 	OK: true,
 }
 
-type Command struct {
-	Command   relayer.RelayerCmd
-	Arguments map[string]interface{}
-}
-
 type Device struct {
 	ID       string `json:"device_id"`
 	Name     string `json:"device_name"`
 	Platform int    `json:"platform"`
 }
 
-//go:generate mockgen -source=operation.go -destination=../mocks/operation.go -package=mocks -mock_names=Executor=MockExecutor
+//go:generate mockgen -source=executor.go -destination=../mocks/executor.go -package=mocks -mock_names=Executor=MockExecutor
 type Executor interface {
 	SaveLastSysMetrics(metrics []byte)
-	Execute(ctx context.Context, cmd Command) (interface{}, error)
-	SetStatusPoller(statusPoller status.Poller)
+	Execute(ctx context.Context, cmd commands.Command) (interface{}, error)
 }
 
 type executor struct {
@@ -73,6 +67,7 @@ func New(
 	cdp cdp.CDP,
 	dbus dbus.DBus,
 	deviceStatus status.DeviceStatus,
+	statusPoller status.Poller,
 	json wrapper.JSON,
 	os wrapper.OS,
 	exec wrapper.Exec,
@@ -83,6 +78,7 @@ func New(
 		cdp:          cdp,
 		dbus:         dbus,
 		deviceStatus: deviceStatus,
+		statusPoller: statusPoller,
 		logger:       l,
 		json:         json,
 		os:           os,
@@ -97,13 +93,8 @@ func (e *executor) SaveLastSysMetrics(metrics []byte) {
 	e.lastSysMetrics = metrics
 }
 
-// SetStatusPoller sets the StatusPoller reference after initialization
-func (e *executor) SetStatusPoller(statusPoller status.Poller) {
-	e.statusPoller = statusPoller
-}
-
-func (e *executor) Execute(ctx context.Context, cmd Command) (interface{}, error) {
-	e.logger.Info("Executing command", zap.String("command", string(cmd.Command)))
+func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface{}, error) {
+	e.logger.Info("Executing command", zap.Any("command", cmd))
 
 	var err error
 	var bytes []byte
@@ -114,28 +105,28 @@ func (e *executor) Execute(ctx context.Context, cmd Command) (interface{}, error
 	}
 
 	var result interface{}
-	switch cmd.Command {
-	case relayer.CMD_CONNECT:
+	switch cmd.Type {
+	case commands.CMD_CONNECT:
 		result, err = e.connect(bytes)
-	case relayer.CMD_SHOW_PAIRING_QR_CODE:
+	case commands.CMD_SHOW_PAIRING_QR_CODE:
 		result, err = e.showPairingQRCode(ctx, bytes)
-	case relayer.CMD_KEYBOARD_EVENT:
+	case commands.CMD_KEYBOARD_EVENT:
 		result, err = e.handleKeyboardEvent(bytes)
-	case relayer.CMD_MOUSE_DRAG_EVENT:
+	case commands.CMD_MOUSE_DRAG_EVENT:
 		result, err = e.handleMouseMoveEvent(bytes)
-	case relayer.CMD_MOUSE_TAP_EVENT:
+	case commands.CMD_MOUSE_TAP_EVENT:
 		result, err = e.handleMouseTapEvent()
-	case relayer.CMD_PROFILE:
+	case commands.CMD_PROFILE:
 		result, err = e.getSysMetrics()
-	case relayer.CMD_SCREEN_ROTATION:
+	case commands.CMD_SCREEN_ROTATION:
 		result, err = e.handleScreenRotation(ctx, bytes)
-	case relayer.CMD_SHUTDOWN:
+	case commands.CMD_SHUTDOWN:
 		result, err = e.shutdown(ctx)
-	case relayer.CMD_REBOOT:
+	case commands.CMD_REBOOT:
 		result, err = e.reboot(ctx)
-	case relayer.CMD_DEVICE_STATUS:
+	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
-	case relayer.CMD_UPDATE_TO_LATEST:
+	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)

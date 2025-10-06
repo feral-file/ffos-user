@@ -8,7 +8,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/command"
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -29,18 +30,18 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx       context.Context
-	logger    *zap.Logger
-	server    wrapper.HTTPServer
-	wsHandler ws.WS
-	cmd       command.Handler
-	json      wrapper.JSON
+	ctx        context.Context
+	logger     *zap.Logger
+	server     wrapper.HTTPServer
+	wsHandler  ws.WS
+	cmdHandler commandrouter.Handler
+	json       wrapper.JSON
 }
 
 func New(
 	ctx context.Context,
 	wsHandler ws.WS,
-	cmd command.Handler,
+	cmdHandler commandrouter.Handler,
 	server wrapper.HTTPServer,
 	json wrapper.JSON,
 	logger *zap.Logger,
@@ -57,12 +58,12 @@ func New(
 		server = wrapper.NewHTTPServer(httpServer)
 	}
 	h := &hub{
-		ctx:       ctx,
-		wsHandler: wsHandler,
-		cmd:       cmd,
-		json:      json,
-		server:    server,
-		logger:    logger,
+		ctx:        ctx,
+		wsHandler:  wsHandler,
+		cmdHandler: cmdHandler,
+		json:       json,
+		server:     server,
+		logger:     logger,
 	}
 	h.routes()
 	return h
@@ -120,7 +121,17 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("Received cast request", zap.String("messageID", payload.MessageID), zap.Any("message", payload.Message))
 
-	result, err := h.cmd.Process(h.ctx, payload)
+	if payload.Message.Command == nil {
+		h.logger.Error("Command is required", zap.Any("payload", payload))
+		http.Error(w, "Command is required", http.StatusBadRequest)
+		return
+	}
+
+	result, err := h.cmdHandler.Process(h.ctx,
+		commands.Command{
+			Type:      commands.Type(*payload.Message.Command),
+			Arguments: payload.Message.Request,
+		})
 	if err != nil {
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)

@@ -17,15 +17,15 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/command"
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
-	"github.com/feral-file/ffos-user/components/feral-controld/operation"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -65,7 +65,7 @@ type app struct {
 	Relayer           relayer.Relayer
 	DBus              dbus.DBus
 	Mediator          mediator.Mediator
-	Executor          operation.Executor
+	Executor          devicectl.Executor
 	DeviceStatus      status.DeviceStatus
 	StatusPoller      status.Poller
 	Watchdog          watchdog.Watchdog
@@ -220,12 +220,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.Relayer.Close()
 	}
 
-	// Set the StatusPoller reference in mediator for force refresh
-	app.Mediator.SetStatusPoller(app.StatusPoller)
-
-	// Set the StatusPoller reference in executor for force refresh
-	app.Executor.SetStatusPoller(app.StatusPoller)
-
 	// Start StatusPoller - it will handle relayer connection status internally
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
@@ -351,7 +345,7 @@ func initializeApp(
 	watchdog := watchdog.New(logger)
 
 	// Executor
-	executor := operation.New(cdp, dbusClient, deviceStatus, json, os, exec, math, logger)
+	executor := devicectl.New(cdp, dbusClient, deviceStatus, poller, json, os, exec, math, logger)
 
 	// FFIndexer
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
@@ -360,17 +354,16 @@ func initializeApp(
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger)
 
 	// Command handler
-	cmdHandler := command.New(executor, cdp, dp1, json, logger)
+	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
 
 	// Mediator
-	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, logger)
+	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, poller, logger)
 
 	// Hub
-	commandHandler := command.New(executor, cdp, dp1, json, logger)
-	hub := hub.New(context, wsHandler, commandHandler, nil, json, logger)
+	hub := hub.New(context, wsHandler, cmdHandler, nil, json, logger)
 
 	return &app{
 		Ctx:               context,
@@ -419,7 +412,7 @@ func initializeTestApp(
 	statusPoller status.Poller,
 	watchdog watchdog.Watchdog,
 	mediator mediator.Mediator,
-	executor operation.Executor,
+	executor devicectl.Executor,
 	dynamicPlaylistRefresher playlist_refresher.Refresher,
 	hub hub.Hub,
 ) *app {

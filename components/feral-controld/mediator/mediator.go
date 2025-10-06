@@ -9,9 +9,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/command"
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
-	"github.com/feral-file/ffos-user/components/feral-controld/operation"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -23,15 +24,14 @@ import (
 type Mediator interface {
 	Start()
 	Stop()
-	SetStatusPoller(statusPoller status.Poller)
 }
 
 type mediator struct {
 	relayer      relayer.Relayer
 	dbus         dbus.DBus
 	cdp          cdp.CDP
-	cmd          command.Handler
-	executor     operation.Executor
+	cmdHandler   commandrouter.Handler
+	executor     devicectl.Executor
 	statusPoller status.Poller
 	logger       *zap.Logger
 	refresher    playlist_refresher.Refresher
@@ -41,19 +41,21 @@ func New(
 	relayer relayer.Relayer,
 	dbus dbus.DBus,
 	cdp cdp.CDP,
-	cmd command.Handler,
-	executor operation.Executor,
+	cmdHandler commandrouter.Handler,
+	executor devicectl.Executor,
 	refresher playlist_refresher.Refresher,
+	statusPoller status.Poller,
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
-		relayer:   relayer,
-		dbus:      dbus,
-		cdp:       cdp,
-		cmd:       cmd,
-		executor:  executor,
-		logger:    l,
-		refresher: refresher,
+		relayer:      relayer,
+		dbus:         dbus,
+		cdp:          cdp,
+		cmdHandler:   cmdHandler,
+		executor:     executor,
+		statusPoller: statusPoller,
+		logger:       l,
+		refresher:    refresher,
 	}
 }
 
@@ -155,7 +157,15 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 		}
 
 	default:
-		result, err := m.cmd.Process(ctx, payload)
+		var commandType commands.Type
+		if payload.Message.Command != nil {
+			commandType = commands.Type(*payload.Message.Command)
+		}
+		command := commands.Command{
+			Type:      commandType,
+			Arguments: payload.Message.Request,
+		}
+		result, err := m.cmdHandler.Process(ctx, command)
 		if err != nil {
 			m.logger.Error("Failed to process command", zap.Error(err))
 			return err
@@ -165,14 +175,14 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			return nil
 		}
 
-		return m.relayer.Send(ctx, result)
+		resp := relayer.Response{
+			Type:      "RPC",
+			MessageID: payload.MessageID,
+			Message:   result,
+		}
+
+		return m.relayer.Send(ctx, resp)
 	}
 
 	return nil
-}
-
-// SetStatusPoller sets the StatusPoller reference after initialization
-func (m *mediator) SetStatusPoller(statusPoller status.Poller) {
-	m.statusPoller = statusPoller
-	m.cmd.SetStatusPoller(statusPoller)
 }

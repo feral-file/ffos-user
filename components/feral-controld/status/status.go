@@ -25,7 +25,7 @@ const (
 )
 
 type PlayerStatus struct {
-	Command     relayer.RelayerCmd          `json:"castCommand,omitempty"`
+	Command     string                      `json:"castCommand,omitempty"`
 	PlaylistURL *string                     `json:"playlistURL,omitempty"`
 	Playlist    *dp1.Playlist               `json:"playlist,omitempty"`
 	Index       *int                        `json:"index,omitempty"`

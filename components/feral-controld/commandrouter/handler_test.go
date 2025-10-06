@@ -1,4 +1,4 @@
-package command_test
+package commandrouter_test
 
 import (
 	"context"
@@ -13,11 +13,10 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/command"
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/operation"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 )
 
 type testSetup struct {
@@ -28,7 +27,7 @@ type testSetup struct {
 	mockDP1          *mocks.MockDP1
 	mockJSON         *mocks.MockJSON
 	mockStatusPoller *mocks.MockStatusPoller
-	handler          command.Handler
+	handler          commandrouter.Handler
 	logger           *zap.Logger
 }
 
@@ -40,10 +39,10 @@ func setup(t *testing.T) *testSetup {
 	mockExecutor := mocks.NewMockExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
-	mockJSON := mocks.NewMockJSON(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
 
-	handler := command.New(mockExecutor, mockCDP, mockDP1, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -71,18 +70,12 @@ func TestCommandHandler_Process_NoCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: nil,
-		},
+	command := commands.Command{
+		Type:      "",
+		Arguments: map[string]any{},
 	}
 
-	result, err := ts.handler.Process(ts.ctx, payload)
+	result, err := ts.handler.Process(ts.ctx, command)
 
 	assert.NoError(t, err)
 	assert.Nil(t, result)
@@ -92,25 +85,18 @@ func TestCommandHandler_Process_ControldCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	cmd := relayer.CMD_CONNECT
+	cmd := commands.CMD_CONNECT
 	args := map[string]interface{}{"clientDevice": map[string]interface{}{"device_id": "test-device"}}
 	execResult := map[string]interface{}{"ok": true}
 
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: &cmd,
-			Args:    args,
-		},
+	payload := commands.Command{
+		Type:      cmd,
+		Arguments: args,
 	}
 
 	ts.mockExecutor.EXPECT().
-		Execute(ts.ctx, operation.Command{
-			Command:   cmd,
+		Execute(ts.ctx, commands.Command{
+			Type:      cmd,
 			Arguments: args,
 		}).
 		Return(execResult, nil).
@@ -120,42 +106,31 @@ func TestCommandHandler_Process_ControldCommand(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	resultMap, ok := result.(map[string]interface{})
-	assert.True(t, ok)
-	assert.Equal(t, "RPC", resultMap["type"])
-	assert.Equal(t, "test-id", resultMap["messageID"])
-	assert.Equal(t, execResult, resultMap["message"])
+	assert.Equal(t, execResult, result)
 }
 
 func TestCommandHandler_Process_ControldCommand_Error(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	cmd := relayer.CMD_SHUTDOWN
+	cmd := commands.CMD_SHUTDOWN
 	args := map[string]interface{}{}
 	execError := errors.New("failed to shutdown")
 
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: &cmd,
-			Args:    args,
-		},
+	command := commands.Command{
+		Type:      cmd,
+		Arguments: args,
 	}
 
 	ts.mockExecutor.EXPECT().
-		Execute(ts.ctx, operation.Command{
-			Command:   cmd,
+		Execute(ts.ctx, commands.Command{
+			Type:      cmd,
 			Arguments: args,
 		}).
 		Return(nil, execError).
 		Times(1)
 
-	result, err := ts.handler.Process(ts.ctx, payload)
+	result, err := ts.handler.Process(ts.ctx, command)
 
 	assert.Error(t, err)
 	assert.Equal(t, execError, err)
@@ -166,7 +141,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	cmd := relayer.CMD_DISPLAY_PLAYLIST
+	cmd := commands.CMD_DISPLAY_PLAYLIST
 	playlistURL := "https://example.com/playlist.json"
 	mockPlaylist := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
@@ -183,17 +158,10 @@ func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	}
 	cdpResult := map[string]interface{}{"result": "success"}
 
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: &cmd,
-			Args: map[string]interface{}{
-				"playlistUrl": playlistURL,
-			},
+	command := commands.Command{
+		Type: cmd,
+		Arguments: map[string]interface{}{
+			"playlistUrl": playlistURL,
 		},
 	}
 
@@ -207,12 +175,11 @@ func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 		Return(cdpResult, nil).
 		Times(1)
 
-	ts.handler.SetStatusPoller(ts.mockStatusPoller)
 	ts.mockStatusPoller.EXPECT().
 		ForceRefresh().
 		Times(1)
 
-	result, err := ts.handler.Process(ts.ctx, payload)
+	result, err := ts.handler.Process(ts.ctx, command)
 
 	assert.NoError(t, err)
 	assert.Equal(t, cdpResult, result)
@@ -222,7 +189,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 	ts := setup(t)
 	defer ts.teardown()
 
-	cmd := relayer.CMD_DISPLAY_PLAYLIST
+	cmd := commands.CMD_DISPLAY_PLAYLIST
 	playlistMap := map[string]interface{}{
 		"items": []interface{}{
 			map[string]interface{}{
@@ -250,17 +217,10 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 	}
 	cdpResult := map[string]interface{}{"result": "success"}
 
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: &cmd,
-			Args: map[string]interface{}{
-				"dp1_call": playlistMap,
-			},
+	command := commands.Command{
+		Type: cmd,
+		Arguments: map[string]interface{}{
+			"dp1_call": playlistMap,
 		},
 	}
 
@@ -283,12 +243,11 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 		Return(cdpResult, nil).
 		Times(1)
 
-	ts.handler.SetStatusPoller(ts.mockStatusPoller)
 	ts.mockStatusPoller.EXPECT().
 		ForceRefresh().
 		Times(1)
 
-	result, err := ts.handler.Process(ts.ctx, payload)
+	result, err := ts.handler.Process(ts.ctx, command)
 
 	assert.NoError(t, err)
 	assert.Equal(t, cdpResult, result)
@@ -298,7 +257,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 	ts := setup(t)
 	defer ts.teardown()
 
-	cmd := relayer.CMD_DISPLAY_PLAYLIST
+	cmd := commands.CMD_DISPLAY_PLAYLIST
 	playlistMap := map[string]interface{}{
 		"items": []interface{}{},
 		"dynamicQueries": []interface{}{
@@ -337,17 +296,10 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 	}
 	cdpResult := map[string]interface{}{"result": "success"}
 
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: &cmd,
-			Args: map[string]interface{}{
-				"dp1_call": playlistMap,
-			},
+	command := commands.Command{
+		Type: cmd,
+		Arguments: map[string]interface{}{
+			"dp1_call": playlistMap,
 		},
 	}
 
@@ -375,12 +327,11 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Return(cdpResult, nil).
 		Times(1)
 
-	ts.handler.SetStatusPoller(ts.mockStatusPoller)
 	ts.mockStatusPoller.EXPECT().
 		ForceRefresh().
 		Times(1)
 
-	result, err := ts.handler.Process(ts.ctx, payload)
+	result, err := ts.handler.Process(ts.ctx, command)
 
 	assert.NoError(t, err)
 	assert.Equal(t, cdpResult, result)
@@ -389,24 +340,17 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 func TestCommandHandler_Process_DisplayPlaylist_Errors(t *testing.T) {
 	tests := []struct {
 		name          string
-		setupFunc     func(*testSetup) relayer.Payload
+		setupFunc     func(*testSetup) commands.Command
 		expectedError string
 	}{
 		{
 			name: "invalid playlistUrl type",
-			setupFunc: func(ts *testSetup) relayer.Payload {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				return relayer.Payload{
-					MessageID: "test-id",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
-						Command: &cmd,
-						Args: map[string]interface{}{
-							"playlistUrl": 123, // Invalid type
-						},
+			setupFunc: func(ts *testSetup) commands.Command {
+				cmd := commands.CMD_DISPLAY_PLAYLIST
+				return commands.Command{
+					Type: cmd,
+					Arguments: map[string]interface{}{
+						"playlistUrl": 123, // Invalid type
 					},
 				}
 			},
@@ -414,19 +358,12 @@ func TestCommandHandler_Process_DisplayPlaylist_Errors(t *testing.T) {
 		},
 		{
 			name: "empty playlistUrl",
-			setupFunc: func(ts *testSetup) relayer.Payload {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				return relayer.Payload{
-					MessageID: "test-id",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
-						Command: &cmd,
-						Args: map[string]interface{}{
-							"playlistUrl": "",
-						},
+			setupFunc: func(ts *testSetup) commands.Command {
+				cmd := commands.CMD_DISPLAY_PLAYLIST
+				return commands.Command{
+					Type: cmd,
+					Arguments: map[string]interface{}{
+						"playlistUrl": "",
 					},
 				}
 			},
@@ -434,19 +371,12 @@ func TestCommandHandler_Process_DisplayPlaylist_Errors(t *testing.T) {
 		},
 		{
 			name: "invalid playlist type",
-			setupFunc: func(ts *testSetup) relayer.Payload {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				return relayer.Payload{
-					MessageID: "test-id",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
-						Command: &cmd,
-						Args: map[string]interface{}{
-							"dp1_call": "not a map", // Invalid type
-						},
+			setupFunc: func(ts *testSetup) commands.Command {
+				cmd := commands.CMD_DISPLAY_PLAYLIST
+				return commands.Command{
+					Type: cmd,
+					Arguments: map[string]interface{}{
+						"dp1_call": "not a map", // Invalid type
 					},
 				}
 			},
@@ -454,18 +384,11 @@ func TestCommandHandler_Process_DisplayPlaylist_Errors(t *testing.T) {
 		},
 		{
 			name: "unknown payload type",
-			setupFunc: func(ts *testSetup) relayer.Payload {
-				cmd := relayer.CMD_DISPLAY_PLAYLIST
-				return relayer.Payload{
-					MessageID: "test-id",
-					Message: struct {
-						Command *relayer.RelayerCmd    `json:"command,omitempty"`
-						Args    map[string]interface{} `json:"request,omitempty"`
-						TopicID *string                `json:"topicID,omitempty"`
-					}{
-						Command: &cmd,
-						Args:    map[string]interface{}{}, // Neither playlistUrl nor dp1_call
-					},
+			setupFunc: func(ts *testSetup) commands.Command {
+				cmd := commands.CMD_DISPLAY_PLAYLIST
+				return commands.Command{
+					Type:      cmd,
+					Arguments: map[string]interface{}{}, // Neither playlistUrl nor dp1_call
 				}
 			},
 			expectedError: "unknown payload type",
@@ -491,20 +414,13 @@ func TestCommandHandler_Process_NonControldCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	cmd := relayer.RelayerCmd("someCustomCommand")
+	cmd := commands.Type("someCustomCommand")
 	args := map[string]interface{}{"key": "value"}
 	cdpResult := map[string]interface{}{"result": "success"}
 
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: &cmd,
-			Args:    args,
-		},
+	payload := commands.Command{
+		Type:      cmd,
+		Arguments: args,
 	}
 
 	ts.mockCDP.EXPECT().
@@ -512,7 +428,6 @@ func TestCommandHandler_Process_NonControldCommand(t *testing.T) {
 		Return(cdpResult, nil).
 		Times(1)
 
-	ts.handler.SetStatusPoller(ts.mockStatusPoller)
 	ts.mockStatusPoller.EXPECT().
 		ForceRefresh().
 		Times(1)
@@ -521,38 +436,4 @@ func TestCommandHandler_Process_NonControldCommand(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, cdpResult, result)
-}
-
-func TestCommandHandler_SetStatusPoller(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// This should not panic
-	ts.handler.SetStatusPoller(ts.mockStatusPoller)
-
-	// Test that it's actually used
-	cmd := relayer.RelayerCmd("test")
-	payload := relayer.Payload{
-		MessageID: "test-id",
-		Message: struct {
-			Command *relayer.RelayerCmd    `json:"command,omitempty"`
-			Args    map[string]interface{} `json:"request,omitempty"`
-			TopicID *string                `json:"topicID,omitempty"`
-		}{
-			Command: &cmd,
-			Args:    map[string]interface{}{},
-		},
-	}
-
-	ts.mockCDP.EXPECT().
-		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return(map[string]interface{}{}, nil).
-		Times(1)
-
-	ts.mockStatusPoller.EXPECT().
-		ForceRefresh().
-		Times(1)
-
-	_, err := ts.handler.Process(ts.ctx, payload)
-	assert.NoError(t, err)
 }

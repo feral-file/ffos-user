@@ -1082,7 +1082,7 @@ func TestClient_ReceiveMessage_Success(t *testing.T) {
 	handler1 := func(ctx context.Context, payload relayer.Payload) error {
 		assert.Equal(t, messageID, payload.MessageID, "expected messageID to be %s but got %s", messageID, payload.MessageID)
 		assert.NotNil(t, payload.Message.Command, "expected command to be not nil")
-		assert.Equal(t, command, string(*payload.Message.Command), "expected command to be %s but got %s", command, *payload.Message.Command)
+		assert.Equal(t, command, *payload.Message.Command, "expected command to be %s but got %s", command, *payload.Message.Command)
 		handler1Called <- struct{}{}
 		return nil
 	}

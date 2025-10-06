@@ -120,11 +120,7 @@ func TestClient_GetRelayerTopicID_Success(t *testing.T) {
 
 							payload := relayer.Payload{
 								MessageID: relayer.MESSAGE_ID_SYSTEM,
-								Message: struct {
-									Command *relayer.RelayerCmd    `json:"command,omitempty"`
-									Args    map[string]interface{} `json:"request,omitempty"`
-									TopicID *string                `json:"topicID,omitempty"`
-								}{
+								Message: relayer.Message{
 									TopicID: &expectedTopicID,
 								},
 							}
@@ -208,11 +204,7 @@ func TestClient_GetRelayerTopicID_Success(t *testing.T) {
 							// First send a non-system message (should be ignored)
 							nonSystemPayload := relayer.Payload{
 								MessageID: "non-system-message",
-								Message: struct {
-									Command *relayer.RelayerCmd    `json:"command,omitempty"`
-									Args    map[string]interface{} `json:"request,omitempty"`
-									TopicID *string                `json:"topicID,omitempty"`
-								}{
+								Message: relayer.Message{
 									TopicID: &expectedTopicID,
 								},
 							}
@@ -225,11 +217,7 @@ func TestClient_GetRelayerTopicID_Success(t *testing.T) {
 							time.Sleep(50 * time.Millisecond)
 							systemPayload := relayer.Payload{
 								MessageID: relayer.MESSAGE_ID_SYSTEM,
-								Message: struct {
-									Command *relayer.RelayerCmd    `json:"command,omitempty"`
-									Args    map[string]interface{} `json:"request,omitempty"`
-									TopicID *string                `json:"topicID,omitempty"`
-								}{
+								Message: relayer.Message{
 									TopicID: &expectedTopicID,
 								},
 							}
@@ -339,11 +327,7 @@ func TestClient_GetRelayerTopicID_Failures(t *testing.T) {
 
 							payload := relayer.Payload{
 								MessageID: relayer.MESSAGE_ID_SYSTEM,
-								Message: struct {
-									Command *relayer.RelayerCmd    `json:"command,omitempty"`
-									Args    map[string]interface{} `json:"request,omitempty"`
-									TopicID *string                `json:"topicID,omitempty"`
-								}{
+								Message: relayer.Message{
 									TopicID: nil, // Missing topicID
 								},
 							}
@@ -398,11 +382,7 @@ func TestClient_GetRelayerTopicID_Failures(t *testing.T) {
 
 							payload := relayer.Payload{
 								MessageID: relayer.MESSAGE_ID_SYSTEM,
-								Message: struct {
-									Command *relayer.RelayerCmd    `json:"command,omitempty"`
-									Args    map[string]interface{} `json:"request,omitempty"`
-									TopicID *string                `json:"topicID,omitempty"`
-								}{
+								Message: relayer.Message{
 									TopicID: &expectedTopicID,
 								},
 							}
