@@ -120,6 +120,7 @@ func createMockTokens() []ffindexer.Token {
 			Blockchain:      "ethereum",
 			ContractType:    "ERC721",
 			ContractAddress: "0x1234567890abcdef",
+			Balance:         1,
 			Asset: struct {
 				Metadata struct {
 					Project struct {
@@ -148,6 +149,7 @@ func createMockTokens() []ffindexer.Token {
 			Blockchain:      "tezos",
 			ContractType:    "FA2",
 			ContractAddress: "0xabcdef1234567890",
+			Balance:         1,
 			Asset: struct {
 				Metadata struct {
 					Project struct {
@@ -525,13 +527,14 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 		firstBatch[i] = ffindexer.Token{
 			ID:         fmt.Sprintf("token%d", i+1),
 			Blockchain: "ethereum",
+			Balance:    1,
 		}
 	}
 
 	// Second batch has fewer tokens to stop pagination
 	secondBatch := []ffindexer.Token{
-		{ID: "token101", Blockchain: "ethereum"},
-		{ID: "token102", Blockchain: "ethereum"},
+		{ID: "token101", Blockchain: "ethereum", Balance: 1},
+		{ID: "token102", Blockchain: "ethereum", Balance: 1},
 	}
 
 	playlist := dp1.Playlist{
@@ -702,6 +705,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 				Blockchain:      tt.input,
 				ContractType:    "ERC721",
 				ContractAddress: "0x123",
+				Balance:         1,
 				Asset: struct {
 					Metadata struct {
 						Project struct {
@@ -752,6 +756,179 @@ func TestDP1_NormalizeChain(t *testing.T) {
 			assert.Equal(t, tt.expected, result.Items[0].Provenance.Contract.Chain)
 		})
 	}
+}
+
+func TestDP1_ProcessDynamicPlaylist_FiltersZeroBalanceTokens(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Create tokens with mixed balances - some zero, some non-zero
+	mockTokens := []ffindexer.Token{
+		{
+			ID:              "token1",
+			Blockchain:      "ethereum",
+			ContractType:    "ERC721",
+			ContractAddress: "0x1234567890abcdef",
+			Balance:         1, // Non-zero balance - should be included
+			Asset: struct {
+				Metadata struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				} `json:"metadata,omitempty"`
+			}{
+				Metadata: struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				}{
+					Project: struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					}{
+						Latest: ffindexer.ProjectMetadata{
+							Title:      "Token with Balance",
+							PreviewURL: "http://example.com/preview1.jpg",
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:              "token2",
+			Blockchain:      "ethereum",
+			ContractType:    "ERC721",
+			ContractAddress: "0x1234567890abcdef",
+			Balance:         0, // Zero balance - should be filtered out
+			Asset: struct {
+				Metadata struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				} `json:"metadata,omitempty"`
+			}{
+				Metadata: struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				}{
+					Project: struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					}{
+						Latest: ffindexer.ProjectMetadata{
+							Title:      "Token with Zero Balance",
+							PreviewURL: "http://example.com/preview2.jpg",
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:              "token3",
+			Blockchain:      "tezos",
+			ContractType:    "FA2",
+			ContractAddress: "0xabcdef1234567890",
+			Balance:         2, // Non-zero balance - should be included
+			Asset: struct {
+				Metadata struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				} `json:"metadata,omitempty"`
+			}{
+				Metadata: struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				}{
+					Project: struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					}{
+						Latest: ffindexer.ProjectMetadata{
+							Title:      "Another Token with Balance",
+							PreviewURL: "http://example.com/preview3.jpg",
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:              "token4",
+			Blockchain:      "bitmark",
+			ContractType:    "Bitmark",
+			ContractAddress: "0x0000000000000000",
+			Balance:         0, // Zero balance - should be filtered out
+			Asset: struct {
+				Metadata struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				} `json:"metadata,omitempty"`
+			}{
+				Metadata: struct {
+					Project struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					} `json:"project,omitempty"`
+				}{
+					Project: struct {
+						Latest ffindexer.ProjectMetadata `json:"latest,omitempty"`
+					}{
+						Latest: ffindexer.ProjectMetadata{
+							Title:      "Another Token with Zero Balance",
+							PreviewURL: "http://example.com/preview4.jpg",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	playlist := dp1.Playlist{
+		DynamicQueries: []dp1.DynamicQuery{
+			{
+				Endpoint: "https://indexer.feralfile.com/graphql",
+				Params:   map[string]string{"size": "50"},
+			},
+		},
+	}
+
+	// Expect FFIndexer query to return tokens with mixed balances
+	ts.mockFFIndexer.EXPECT().
+		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		Return(mockTokens, nil)
+
+	// Test
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+
+	// Should only have 2 items (tokens with non-zero balance), not 4
+	assert.Len(t, result.Items, 2)
+
+	// Verify that only tokens with non-zero balance are included
+	// Check that the zero-balance tokens are not in the result
+	tokenIDs := make(map[string]bool)
+	for _, item := range result.Items {
+		tokenIDs[item.ID] = true
+	}
+
+	// Token1 (balance=1) should be included
+	assert.True(t, tokenIDs["token1"], "Token with balance 1 should be included")
+	// Token2 (balance=0) should be filtered out
+	assert.False(t, tokenIDs["token2"], "Token with balance 0 should be filtered out")
+	// Token3 (balance=2) should be included
+	assert.True(t, tokenIDs["token3"], "Token with balance 2 should be included")
+	// Token4 (balance=0) should be filtered out
+	assert.False(t, tokenIDs["token4"], "Token with balance 0 should be filtered out")
+
+	// Verify the titles of included tokens
+	titles := make([]string, len(result.Items))
+	for i, item := range result.Items {
+		titles[i] = *item.Title
+	}
+	assert.Contains(t, titles, "Token with Balance")
+	assert.Contains(t, titles, "Another Token with Balance")
+	assert.NotContains(t, titles, "Token with Zero Balance")
+	assert.NotContains(t, titles, "Another Token with Zero Balance")
 }
 
 // Helper function to create string pointers
