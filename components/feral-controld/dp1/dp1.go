@@ -111,7 +111,13 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 		if err != nil {
 			return nil, err
 		}
-		ffTokens = append(ffTokens, tokens...)
+
+		// Filter tokens with balance > 0 so it only includes the tokens actually owned by the owner
+		for _, token := range tokens {
+			if token.Balance > 0 {
+				ffTokens = append(ffTokens, token)
+			}
+		}
 
 		if len(tokens) < size || minimal {
 			break
