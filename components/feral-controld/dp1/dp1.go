@@ -14,7 +14,7 @@ import (
 
 const (
 	DEFAULT_DURATION             = 300
-	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
+	MINIMAL_PLAYLIST_ITEMS_LIMIT = 25
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
 )
 
@@ -119,7 +119,7 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 			}
 		}
 
-		if len(tokens) < size || minimal {
+		if len(tokens) < size || (minimal && len(ffTokens) >= MINIMAL_PLAYLIST_ITEMS_LIMIT) {
 			break
 		}
 
