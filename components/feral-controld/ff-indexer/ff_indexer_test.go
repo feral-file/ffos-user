@@ -147,6 +147,7 @@ func TestFFIndexer_QueryTokens_Success(t *testing.T) {
 					Blockchain:      "ethereum",
 					ContractType:    "ERC721",
 					ContractAddress: "0x1234567890abcdef",
+					Balance:         1,
 					Asset: struct {
 						Metadata struct {
 							Project struct {
@@ -175,6 +176,7 @@ func TestFFIndexer_QueryTokens_Success(t *testing.T) {
 					Blockchain:      "tezos",
 					ContractType:    "FA2",
 					ContractAddress: "0xabcdef1234567890",
+					Balance:         1,
 					Asset: struct {
 						Metadata struct {
 							Project struct {
@@ -210,6 +212,11 @@ func TestFFIndexer_QueryTokens_Success(t *testing.T) {
 	assert.Equal(t, "token1", result[0].ID)
 	assert.Equal(t, "ethereum", result[0].Blockchain)
 	assert.Equal(t, "Test Token 1", result[0].Asset.Metadata.Project.Latest.Title)
+	assert.Equal(t, 1, result[0].Balance)
+	assert.Equal(t, "token2", result[1].ID)
+	assert.Equal(t, "tezos", result[1].Blockchain)
+	assert.Equal(t, "Test Token 2", result[1].Asset.Metadata.Project.Latest.Title)
+	assert.Equal(t, 1, result[1].Balance)
 }
 
 func TestFFIndexer_QueryTokens_InvalidEndpoint(t *testing.T) {

@@ -27,6 +27,7 @@ type Token struct {
 	Blockchain      string `json:"blockchain,omitempty"`
 	ContractType    string `json:"contractType,omitempty"`
 	ContractAddress string `json:"contractAddress,omitempty"`
+	Balance         int    `json:"balance"`
 	Asset           struct {
 		Metadata struct {
 			Project struct {
@@ -81,6 +82,7 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 			blockchain
 			contractType
 			contractAddress
+			balance
 			asset {
 				metadata {
 					project {
