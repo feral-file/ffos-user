@@ -25,7 +25,7 @@ func EnsureKeyPair() error {
 
 	// Try to read the public key
 	cmd := tpm2.ReadPublic{
-		ObjectHandle: tpm2.TPMIDHObject(tpmKeyHandle),
+		ObjectHandle: tpm2.TPMHandle(tpmKeyHandle),
 	}
 	_, err = cmd.Execute(tpm)
 	if err != nil {
@@ -46,7 +46,8 @@ func SignMessage(data []byte) (string, error) {
 
 	keyHandle := tpm2.TPMHandle(tpmKeyHandle)
 
-	digest := tpm2.Digest(data) // Simplified; assumes data is already the digest (e.g., SHA-256)
+	// Use []byte directly as the digest (no tpm2.Digest)
+	digest := data // Assumes data is already a SHA-256 hash
 
 	sign := tpm2.Sign{
 		KeyHandle: keyHandle,
@@ -55,7 +56,7 @@ func SignMessage(data []byte) (string, error) {
 			Scheme: tpm2.TPMAlgECDSA,
 			Details: tpm2.NewTPMUSigScheme(
 				tpm2.TPMAlgECDSA,
-				&tpm2.TPMSASchemeHash{
+				&tpm2.TPMSSchemeHash{
 					HashAlg: tpm2.TPMAlgSHA256,
 				},
 			),
@@ -71,9 +72,12 @@ func SignMessage(data []byte) (string, error) {
 	}
 
 	// Extract ECDSA signature components
-	ecSig := rsp.Signature.signature.ecDsa
-	r := ecSig.R.Buffer
-	s := ecSig.S.Buffer
+	ecSig, err := rsp.Signature.Signature.ECDSA()
+	if err != nil {
+		return "", fmt.Errorf("failed to get ECDSA sig : %w", err)
+	}
+	r := ecSig.SignatureR.Buffer
+	s := ecSig.SignatureS.Buffer
 	signature := append(r, s...)
 
 	return hex.EncodeToString(signature), nil
@@ -88,7 +92,7 @@ func CleanPublicKeyBase64() (string, error) {
 	defer tpm.Close()
 
 	cmd := tpm2.ReadPublic{
-		ObjectHandle: tpm2.TPMIDHObject(tpmKeyHandle),
+		ObjectHandle: tpm2.TPMHandle(tpmKeyHandle),
 	}
 	response, err := cmd.Execute(tpm)
 	if err != nil {
