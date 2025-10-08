@@ -46,12 +46,24 @@ func SignMessage(data []byte) (string, error) {
 
 	keyHandle := tpm2.TPMHandle(tpmKeyHandle)
 
+	// Try to read the public key
+	cmd := tpm2.ReadPublic{
+		ObjectHandle: keyHandle,
+	}
+	pk, err := cmd.Execute(tpm)
+	if err != nil {
+		return "", fmt.Errorf("failed to read public key from TPM: %w", err)
+	}
+
 	// Use []byte directly as the digest (no tpm2.Digest)
 	digest := data // Assumes data is already a SHA-256 hash
 
 	sign := tpm2.Sign{
-		KeyHandle: keyHandle,
-		Digest:    tpm2.TPM2BDigest{Buffer: digest},
+		KeyHandle: tpm2.NamedHandle{
+			Handle: keyHandle,
+			Name:   pk.Name,
+		},
+		Digest: tpm2.TPM2BDigest{Buffer: digest},
 		InScheme: tpm2.TPMTSigScheme{
 			Scheme: tpm2.TPMAlgECDSA,
 			Details: tpm2.NewTPMUSigScheme(
