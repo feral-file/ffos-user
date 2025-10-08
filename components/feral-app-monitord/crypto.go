@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/go-tpm/tpm2"
-	"github.com/google/go-tpm/tpm2/transport"
+	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 )
 
 const (
@@ -17,7 +17,7 @@ const (
 // EnsureKeyPair checks for the ECDSA TPM key pair
 func EnsureKeyPair() error {
 	// Try to open TPM device
-	tpm, err := transport.OpenTPM(tpmDevice)
+	tpm, err := linuxtpm.Open(tpmDevice)
 	if err != nil {
 		return fmt.Errorf("failed to open TPM: %w", err)
 	}
@@ -38,7 +38,7 @@ func EnsureKeyPair() error {
 // SignMessage signs the given data using the TPM-resident private key and returns the signature in hex format.
 // Note: data should be the SHA-256 hash of the message to sign.
 func SignMessage(data []byte) (string, error) {
-	tpm, err := transport.OpenTPM(tpmDevice)
+	tpm, err := linuxtpm.Open(tpmDevice)
 	if err != nil {
 		return "", fmt.Errorf("failed to open TPM: %w", err)
 	}
@@ -85,7 +85,7 @@ func SignMessage(data []byte) (string, error) {
 
 // CleanPublicKeyBase64 reads the public key and returns it as base64-encoded string.
 func CleanPublicKeyBase64() (string, error) {
-	tpm, err := transport.OpenTPM(tpmDevice)
+	tpm, err := linuxtpm.Open(tpmDevice)
 	if err != nil {
 		return "", fmt.Errorf("failed to open TPM: %w", err)
 	}
