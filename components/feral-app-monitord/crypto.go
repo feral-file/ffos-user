@@ -11,7 +11,7 @@ import (
 
 const (
 	tpmDevice    = "/dev/tpmrm0"
-	tpmKeyHandle = 0x81010002
+	tpmKeyHandle = 0x81F3A7C2
 )
 
 // EnsureKeyPair checks for the ECDSA TPM key pair
