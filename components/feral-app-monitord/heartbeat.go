@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -89,8 +90,9 @@ func SendHeartbeat() {
 		logger.Error("Failed to jcs.Transform: %v", zap.Error(err))
 		return
 	}
+	hash := sha256.Sum256(canonical)
 
-	signatureHex, err := SignMessage(canonical)
+	signatureHex, err := SignMessage(hash[:])
 	if err != nil {
 		logger.Error("Failed to sign message", zap.Error(err))
 		return

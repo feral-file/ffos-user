@@ -24,7 +24,10 @@ func EnsureKeyPair() error {
 	defer tpm.Close()
 
 	// Try to read the public key
-	_, err = tpm2.ReadPublic(tpm, tpm2.TPMHandle(tpmKeyHandle))
+	cmd := tpm2.ReadPublic{
+		ObjectHandle: tpm2.TPMIDHObject(tpmKeyHandle),
+	}
+	_, err = cmd.Execute(tpm)
 	if err != nil {
 		return fmt.Errorf("failed to read public key from TPM: %w", err)
 	}
@@ -33,6 +36,7 @@ func EnsureKeyPair() error {
 }
 
 // SignMessage signs the given data using the TPM-resident private key and returns the signature in hex format.
+// Note: data should be the SHA-256 hash of the message to sign.
 func SignMessage(data []byte) (string, error) {
 	tpm, err := transport.OpenTPM(tpmDevice)
 	if err != nil {
@@ -42,22 +46,16 @@ func SignMessage(data []byte) (string, error) {
 
 	keyHandle := tpm2.TPMHandle(tpmKeyHandle)
 
-	digest := tpm2.TPM2BDigest{
-		Buffer: data,
-	}
+	digest := tpm2.Digest(data) // Simplified; assumes data is already the digest (e.g., SHA-256)
 
 	sign := tpm2.Sign{
-		KeyHandle: tpm2.AuthHandle{
-			Handle: keyHandle,
-			Name:   tpm2.TPM2BName{},
-			Auth:   tpm2.PasswordAuth(nil),
-		},
-		Digest: digest,
+		KeyHandle: keyHandle,
+		Digest:    tpm2.TPM2BDigest{Buffer: digest},
 		InScheme: tpm2.TPMTSigScheme{
 			Scheme: tpm2.TPMAlgECDSA,
 			Details: tpm2.NewTPMUSigScheme(
 				tpm2.TPMAlgECDSA,
-				&tpm2.TPMSSchemeHash{
+				&tpm2.TPMSASchemeHash{
 					HashAlg: tpm2.TPMAlgSHA256,
 				},
 			),
@@ -72,19 +70,16 @@ func SignMessage(data []byte) (string, error) {
 		return "", fmt.Errorf("failed to sign with TPM: %w", err)
 	}
 
-	ecdsaSig, err := rsp.Signature.Signature.ECDSA()
-	if err != nil {
-		return "", fmt.Errorf("failed to get ECDSA signature: %w", err)
-	}
-
-	r := ecdsaSig.SignatureR.Buffer
-	s := ecdsaSig.SignatureS.Buffer
+	// Extract ECDSA signature components
+	ecSig := rsp.Signature.signature.ecDsa
+	r := ecSig.R.Buffer
+	s := ecSig.S.Buffer
 	signature := append(r, s...)
 
 	return hex.EncodeToString(signature), nil
 }
 
-// CleanPublicKey reads the public key
+// CleanPublicKeyBase64 reads the public key and returns it as base64-encoded string.
 func CleanPublicKeyBase64() (string, error) {
 	tpm, err := transport.OpenTPM(tpmDevice)
 	if err != nil {
@@ -92,15 +87,14 @@ func CleanPublicKeyBase64() (string, error) {
 	}
 	defer tpm.Close()
 
-	pub, _, _, err := tpm2.ReadPublic(tpm, tpm2.TPMHandle(tpmKeyHandle))
+	cmd := tpm2.ReadPublic{
+		ObjectHandle: tpm2.TPMIDHObject(tpmKeyHandle),
+	}
+	response, err := cmd.Execute(tpm)
 	if err != nil {
 		return "", fmt.Errorf("failed to read public key from TPM: %w", err)
 	}
 
-	pubBytes, err := pub.Encode()
-
-	if err != nil {
-		return "", fmt.Errorf("failed to encode public key: %w", err)
-	}
+	pubBytes := response.OutPublic.Bytes()
 	return base64.StdEncoding.EncodeToString(pubBytes), nil
 }
