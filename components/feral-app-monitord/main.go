@@ -62,12 +62,6 @@ func main() {
 	go watchdog.Start(ctx)
 	defer watchdog.Stop()
 
-	if err := EnsureKeyPair(); err != nil {
-		logger.Error("Failed to ensure key pair exists.", zap.Error(err))
-		return
-	}
-	logger.Info("Key pair check passed.")
-
 	if err := LoadConfig(); err != nil {
 		logger.Error("Failed to load config.", zap.Error(err))
 		return
