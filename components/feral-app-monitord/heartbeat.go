@@ -79,25 +79,26 @@ func SendHeartbeat() {
 		PageUptime: humanizeDuration(int64(time.Since(time.Unix(pageState.PageChangedUnix, 0)).Seconds())),
 	}
 
-	rawJson, err := json.Marshal(message)
-	if err != nil {
-		logger.Error("Failed to marshal message to JSON: %v", zap.Error(err))
-		return
+	var signatureHex string
+	if config.Pubkey != "" {
+		rawJson, err := json.Marshal(message)
+		if err != nil {
+			logger.Error("Failed to marshal message to JSON: %v", zap.Error(err))
+			return
+		}
+		canonical, err := jcs.Transform(rawJson)
+		if err != nil {
+			logger.Error("Failed to jcs.Transform: %v", zap.Error(err))
+			return
+		}
+		hash := sha256.Sum256(canonical)
+		signatureHex, err = SignMessage(hash[:])
+		if err != nil {
+			logger.Error("Failed to sign message", zap.Error(err))
+			return
+		}
+		logger.Info("Message signed successfully.")
 	}
-
-	canonical, err := jcs.Transform(rawJson)
-	if err != nil {
-		logger.Error("Failed to jcs.Transform: %v", zap.Error(err))
-		return
-	}
-	hash := sha256.Sum256(canonical)
-
-	signatureHex, err := SignMessage(hash[:])
-	if err != nil {
-		logger.Error("Failed to sign message", zap.Error(err))
-		return
-	}
-	logger.Info("Message signed successfully.")
 
 	finalPayload := &HeartbeatPayload{
 		Data:      message,

@@ -14,27 +14,6 @@ const (
 	tpmKeyHandle = 0x81010002
 )
 
-// EnsureKeyPair checks for the ECDSA TPM key pair
-func EnsureKeyPair() error {
-	// Try to open TPM device
-	tpm, err := linuxtpm.Open(tpmDevice)
-	if err != nil {
-		return fmt.Errorf("failed to open TPM: %w", err)
-	}
-	defer tpm.Close()
-
-	// Try to read the public key
-	cmd := tpm2.ReadPublic{
-		ObjectHandle: tpm2.TPMHandle(tpmKeyHandle),
-	}
-	_, err = cmd.Execute(tpm)
-	if err != nil {
-		return fmt.Errorf("failed to read public key from TPM: %w", err)
-	}
-
-	return nil
-}
-
 // SignMessage signs the given data using the TPM-resident private key and returns the signature in hex format.
 // Note: data should be the SHA-256 hash of the message to sign.
 func SignMessage(data []byte) (string, error) {

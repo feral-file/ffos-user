@@ -51,10 +51,8 @@ func LoadConfig() error {
 		return fmt.Errorf("failed to parse config JSON: %w", err)
 	}
 
-	config.Pubkey, err = CleanPublicKeyBase64()
-	if err != nil {
-		return fmt.Errorf("failed to get public key: %w", err)
-	}
+	// ignore the error here, as the pubkey might not exist yet for QEMU
+	config.Pubkey, _ = CleanPublicKeyBase64()
 
 	return nil
 }
