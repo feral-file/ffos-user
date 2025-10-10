@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
@@ -90,6 +94,45 @@ func CleanPublicKeyBase64() (string, error) {
 		return "", fmt.Errorf("failed to read public key from TPM: %w", err)
 	}
 
-	pubBytes := response.OutPublic.Bytes()
-	return base64.StdEncoding.EncodeToString(pubBytes), nil
+	pub, err := response.OutPublic.Contents()
+	if err != nil {
+		return "", fmt.Errorf("failed to get public key contents: %w", err)
+	}
+
+	eccDetail, err := pub.Parameters.ECCDetail()
+	if err != nil {
+		return "", fmt.Errorf("not an ECC key: %w", err)
+	}
+	eccUnique, err := pub.Unique.ECC()
+	if err != nil {
+		return "", fmt.Errorf("failed to get ECC point: %w", err)
+	}
+
+	x := new(big.Int).SetBytes(eccUnique.X.Buffer)
+	y := new(big.Int).SetBytes(eccUnique.Y.Buffer)
+
+	var curve elliptic.Curve
+	switch eccDetail.CurveID {
+	case tpm2.TPMECCNistP256:
+		curve = elliptic.P256()
+	case tpm2.TPMECCNistP384:
+		curve = elliptic.P384()
+	case tpm2.TPMECCNistP521:
+		curve = elliptic.P521()
+	default:
+		return "", fmt.Errorf("unsupported curve: %v", eccDetail.CurveID)
+	}
+
+	pubKey := &ecdsa.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
+	}
+
+	derBytes, err := x509.MarshalPKIXPublicKey(pubKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal public key: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(derBytes), nil
 }
