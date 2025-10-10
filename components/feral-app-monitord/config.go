@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"go.uber.org/zap"
 )
 
 // Constants for configuration paths.
@@ -52,7 +54,11 @@ func LoadConfig() error {
 	}
 
 	// ignore the error here, as the pubkey might not exist yet for QEMU
-	config.Pubkey, _ = CleanPublicKeyBase64()
+	config.Pubkey, err = CleanPublicKeyBase64()
+	if err != nil {
+		logger.Error("Failed to read public key.", zap.Error(err))
+		return nil
+	}
 
 	return nil
 }
