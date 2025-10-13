@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	go_os "os"
 	"syscall"
 	"time"
@@ -16,11 +17,13 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
-	"github.com/feral-file/ffos-user/components/feral-controld/command"
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
+	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
@@ -29,6 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/watchdog"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
 
 const (
@@ -45,27 +49,28 @@ type app struct {
 	Logger *zap.Logger
 
 	// Wrappers
-	Clock  wrapper.Clock
-	OS     wrapper.OS
-	Signal wrapper.Signal
-	Daemon wrapper.Daemon
-	HTTP   wrapper.HTTP
-	IO     wrapper.IO
-	JSON   wrapper.JSON
-	Random wrapper.Randomizer
-	Exec   wrapper.Exec
-	Math   wrapper.Math
+	Clock      wrapper.Clock
+	OS         wrapper.OS
+	Signal     wrapper.Signal
+	Daemon     wrapper.Daemon
+	HTTPClient wrapper.HTTPClient
+	IO         wrapper.IO
+	JSON       wrapper.JSON
+	Random     wrapper.Randomizer
+	Exec       wrapper.Exec
+	Math       wrapper.Math
 
 	// Components
 	CDP               cdp.CDP
 	Relayer           relayer.Relayer
 	DBus              dbus.DBus
 	Mediator          mediator.Mediator
-	Command           command.CommandHandler
+	Executor          devicectl.Executor
 	DeviceStatus      status.DeviceStatus
 	StatusPoller      status.Poller
 	Watchdog          watchdog.Watchdog
 	PlaylistRefresher playlist_refresher.Refresher
+	Hub               hub.Hub
 }
 
 func main() {
@@ -215,19 +220,23 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.Relayer.Close()
 	}
 
-	// Set the StatusPoller reference in mediator for force refresh
-	app.Mediator.SetStatusPoller(app.StatusPoller)
-
-	// Set the StatusPoller reference in command handler for force refresh
-	app.Command.SetStatusPoller(app.StatusPoller)
-
 	// Start StatusPoller - it will handle relayer connection status internally
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
 
-	// Start Refresher
+	// Start Playlist Refresher
 	app.PlaylistRefresher.Start()
 	defer app.PlaylistRefresher.Stop()
+
+	// Start Hub if enabled
+	if conf.EnableHub {
+		app.Hub.Start()
+		defer func() {
+			if err := app.Hub.Stop(); err != nil {
+				app.Logger.Warn("Failed to stop hub", zap.Error(err))
+			}
+		}()
+	}
 
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
@@ -294,7 +303,7 @@ func initializeApp(
 	os := wrapper.NewOS()
 	signal := wrapper.NewSignal()
 	daemon := wrapper.NewDaemon()
-	http := wrapper.NewHTTP()
+	httpClient := wrapper.NewHTTPClient()
 	io := wrapper.NewIO()
 	json := wrapper.NewJSON()
 	randomizer := wrapper.NewRandomizer()
@@ -307,7 +316,7 @@ func initializeApp(
 
 	// Components
 	// CDP
-	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, http, logger)
+	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, logger)
 
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, logger)
@@ -316,28 +325,45 @@ func initializeApp(
 	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
 
 	// DeviceStatus
-	deviceStatus := status.NewDeviceStatus(json, os, exec, http, io)
+	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io)
+
+	// Websocket handler
+	wsUpgrader := wrapper.NewWebsocketUpgrader(&websocket.Upgrader{
+		ReadBufferSize:  ws.BUFFER_SIZE,
+		WriteBufferSize: ws.BUFFER_SIZE,
+		CheckOrigin: func(r *http.Request) bool {
+			// Allow all origins
+			return true
+		},
+	})
+	wsHandler := ws.NewWSHandler(context, wsUpgrader, clock, logger)
 
 	// StatusPoller
-	poller := status.NewPoller(cdp, relayer, deviceStatus, json, logger)
+	poller := status.NewPoller(cdp, relayer, wsHandler, deviceStatus, json, logger)
 
 	// Watchdog
 	watchdog := watchdog.New(logger)
 
-	// CommandHandler
-	commandHandler := command.New(cdp, dbusClient, deviceStatus, json, os, exec, math, logger)
+	// Executor
+	executor := devicectl.New(cdp, dbusClient, deviceStatus, poller, json, os, exec, math, logger)
 
 	// FFIndexer
-	ffIndexer := ffindexer.New(http, json, io, logger)
+	ffIndexer := ffindexer.New(httpClient, json, io, logger)
 
 	// DP1
-	dp1 := dp1.New(ffIndexer, http, json, io, logger)
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger)
+
+	// Command handler
+	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
 
 	// Mediator
-	mediator := mediator.New(relayer, dbusClient, cdp, commandHandler, dp1, clock, json, playlistRefresher, logger)
+	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, poller, logger)
+
+	// Hub
+	hub := hub.New(context, wsHandler, cmdHandler, nil, json, logger)
 
 	return &app{
 		Ctx:               context,
@@ -346,7 +372,7 @@ func initializeApp(
 		OS:                os,
 		Signal:            signal,
 		Daemon:            daemon,
-		HTTP:              http,
+		HTTPClient:        httpClient,
 		IO:                io,
 		JSON:              json,
 		Random:            randomizer,
@@ -356,11 +382,12 @@ func initializeApp(
 		Relayer:           relayer,
 		DBus:              dbusClient,
 		Mediator:          mediator,
-		Command:           commandHandler,
+		Executor:          executor,
 		DeviceStatus:      deviceStatus,
 		StatusPoller:      poller,
 		Watchdog:          watchdog,
 		PlaylistRefresher: playlistRefresher,
+		Hub:               hub,
 	}
 }
 
@@ -372,7 +399,7 @@ func initializeTestApp(
 	os wrapper.OS,
 	signal wrapper.Signal,
 	daemon wrapper.Daemon,
-	http wrapper.HTTP,
+	http wrapper.HTTPClient,
 	io wrapper.IO,
 	json wrapper.JSON,
 	random wrapper.Randomizer,
@@ -385,8 +412,9 @@ func initializeTestApp(
 	statusPoller status.Poller,
 	watchdog watchdog.Watchdog,
 	mediator mediator.Mediator,
-	command command.CommandHandler,
+	executor devicectl.Executor,
 	dynamicPlaylistRefresher playlist_refresher.Refresher,
+	hub hub.Hub,
 ) *app {
 	return &app{
 		Ctx:               ctx,
@@ -395,7 +423,7 @@ func initializeTestApp(
 		OS:                os,
 		Signal:            signal,
 		Daemon:            daemon,
-		HTTP:              http,
+		HTTPClient:        http,
 		IO:                io,
 		JSON:              json,
 		Random:            random,
@@ -405,10 +433,11 @@ func initializeTestApp(
 		Relayer:           relayer,
 		DBus:              dbus,
 		Mediator:          mediator,
-		Command:           command,
+		Executor:          executor,
 		DeviceStatus:      deviceStatus,
 		StatusPoller:      statusPoller,
 		Watchdog:          watchdog,
 		PlaylistRefresher: dynamicPlaylistRefresher,
+		Hub:               hub,
 	}
 }

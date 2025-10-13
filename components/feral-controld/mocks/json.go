@@ -5,9 +5,12 @@
 package mocks
 
 import (
+	io "io"
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
+
+	wrapper "github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // MockJSON is a mock of JSON interface.
@@ -34,7 +37,7 @@ func (m *MockJSON) EXPECT() *MockJSONMockRecorder {
 }
 
 // Marshal mocks base method.
-func (m *MockJSON) Marshal(v interface{}) ([]byte, error) {
+func (m *MockJSON) Marshal(v any) ([]byte, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Marshal", v)
 	ret0, _ := ret[0].([]byte)
@@ -48,8 +51,36 @@ func (mr *MockJSONMockRecorder) Marshal(v interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Marshal", reflect.TypeOf((*MockJSON)(nil).Marshal), v)
 }
 
+// NewDecoder mocks base method.
+func (m *MockJSON) NewDecoder(r io.Reader) wrapper.JSONDecoder {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NewDecoder", r)
+	ret0, _ := ret[0].(wrapper.JSONDecoder)
+	return ret0
+}
+
+// NewDecoder indicates an expected call of NewDecoder.
+func (mr *MockJSONMockRecorder) NewDecoder(r interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewDecoder", reflect.TypeOf((*MockJSON)(nil).NewDecoder), r)
+}
+
+// NewEncoder mocks base method.
+func (m *MockJSON) NewEncoder(w io.Writer) wrapper.JSONEncoder {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NewEncoder", w)
+	ret0, _ := ret[0].(wrapper.JSONEncoder)
+	return ret0
+}
+
+// NewEncoder indicates an expected call of NewEncoder.
+func (mr *MockJSONMockRecorder) NewEncoder(w interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewEncoder", reflect.TypeOf((*MockJSON)(nil).NewEncoder), w)
+}
+
 // Unmarshal mocks base method.
-func (m *MockJSON) Unmarshal(data []byte, v interface{}) error {
+func (m *MockJSON) Unmarshal(data []byte, v any) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Unmarshal", data, v)
 	ret0, _ := ret[0].(error)
@@ -60,4 +91,78 @@ func (m *MockJSON) Unmarshal(data []byte, v interface{}) error {
 func (mr *MockJSONMockRecorder) Unmarshal(data, v interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Unmarshal", reflect.TypeOf((*MockJSON)(nil).Unmarshal), data, v)
+}
+
+// MockJSONEncoder is a mock of JSONEncoder interface.
+type MockJSONEncoder struct {
+	ctrl     *gomock.Controller
+	recorder *MockJSONEncoderMockRecorder
+}
+
+// MockJSONEncoderMockRecorder is the mock recorder for MockJSONEncoder.
+type MockJSONEncoderMockRecorder struct {
+	mock *MockJSONEncoder
+}
+
+// NewMockJSONEncoder creates a new mock instance.
+func NewMockJSONEncoder(ctrl *gomock.Controller) *MockJSONEncoder {
+	mock := &MockJSONEncoder{ctrl: ctrl}
+	mock.recorder = &MockJSONEncoderMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockJSONEncoder) EXPECT() *MockJSONEncoderMockRecorder {
+	return m.recorder
+}
+
+// Encode mocks base method.
+func (m *MockJSONEncoder) Encode(v any) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Encode", v)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Encode indicates an expected call of Encode.
+func (mr *MockJSONEncoderMockRecorder) Encode(v interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Encode", reflect.TypeOf((*MockJSONEncoder)(nil).Encode), v)
+}
+
+// MockJSONDecoder is a mock of JSONDecoder interface.
+type MockJSONDecoder struct {
+	ctrl     *gomock.Controller
+	recorder *MockJSONDecoderMockRecorder
+}
+
+// MockJSONDecoderMockRecorder is the mock recorder for MockJSONDecoder.
+type MockJSONDecoderMockRecorder struct {
+	mock *MockJSONDecoder
+}
+
+// NewMockJSONDecoder creates a new mock instance.
+func NewMockJSONDecoder(ctrl *gomock.Controller) *MockJSONDecoder {
+	mock := &MockJSONDecoder{ctrl: ctrl}
+	mock.recorder = &MockJSONDecoderMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockJSONDecoder) EXPECT() *MockJSONDecoderMockRecorder {
+	return m.recorder
+}
+
+// Decode mocks base method.
+func (m *MockJSONDecoder) Decode(v any) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Decode", v)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Decode indicates an expected call of Decode.
+func (mr *MockJSONDecoderMockRecorder) Decode(v interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Decode", reflect.TypeOf((*MockJSONDecoder)(nil).Decode), v)
 }

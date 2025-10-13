@@ -1,108 +1,138 @@
 package main
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/pem"
 	"fmt"
-	"os"
+	"math/big"
 
-	"go.uber.org/zap"
+	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 )
 
-// EnsureKeyPair checks for the private key and generates a new ED25519 keypair if it's missing.
-func EnsureKeyPair() error {
-	if _, err := os.Stat(privateKeyFile); err == nil {
-		return nil // Key already exists
-	}
+const (
+	tpmDevice    = "/dev/tpmrm0"
+	tpmKeyHandle = 0x81010002
+)
 
-	logger.Warn("Private key not found. Generating new key pair...")
-
-	publicKey, privateKey, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		return fmt.Errorf("failed to generate key pair: %w", err)
-	}
-
-	if err := savePrivateKey(privateKey, privateKeyFile); err != nil {
-		return err
-	}
-	if err := savePublicKey(publicKey, publicKeyFile); err != nil {
-		return err
-	}
-
-	logger.Info("Successfully generated and saved key pair.", zap.String("configDir", configDir))
-	return nil
-}
-
-// savePrivateKey saves the private key to a PEM file.
-func savePrivateKey(privateKey ed25519.PrivateKey, path string) error {
-	pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
-	if err != nil {
-		return fmt.Errorf("failed to marshal private key: %w", err)
-	}
-	privateKeyPEM := &pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8Bytes}
-	// #nosec G304 -- path is constructed from constants
-	file, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("failed to create private key file: %w", err)
-	}
-	defer closeFile(file)
-	return pem.Encode(file, privateKeyPEM)
-}
-
-// savePublicKey saves the public key to a PEM file.
-func savePublicKey(publicKey ed25519.PublicKey, path string) error {
-	pkixBytes, err := x509.MarshalPKIXPublicKey(publicKey)
-	if err != nil {
-		return fmt.Errorf("failed to marshal public key: %w", err)
-	}
-	publicKeyPEM := &pem.Block{Type: "PUBLIC KEY", Bytes: pkixBytes}
-	// #nosec G304 -- path is constructed from constants
-	file, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("failed to create public key file: %w", err)
-	}
-	defer closeFile(file)
-	return pem.Encode(file, publicKeyPEM)
-}
-
-// SignMessage loads the private key, signs the given data, and returns the signature as a hex string.
+// SignMessage signs the given data using the TPM-resident private key and returns the signature in hex format.
+// Note: data should be the SHA-256 hash of the message to sign.
 func SignMessage(data []byte) (string, error) {
-	pemBytes, err := os.ReadFile(privateKeyFile)
+	tpm, err := linuxtpm.Open(tpmDevice)
 	if err != nil {
-		return "", fmt.Errorf("failed to read private key file: %w", err)
+		return "", fmt.Errorf("failed to open TPM: %w", err)
 	}
-	block, _ := pem.Decode(pemBytes)
-	if block == nil {
-		return "", fmt.Errorf("failed to decode PEM block containing private key")
+	defer func() { _ = tpm.Close() }()
+
+	keyHandle := tpm2.TPMHandle(tpmKeyHandle)
+
+	// Try to read the public key
+	cmd := tpm2.ReadPublic{
+		ObjectHandle: keyHandle,
 	}
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	pk, err := cmd.Execute(tpm)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse private key: %w", err)
+		return "", fmt.Errorf("failed to read public key from TPM: %w", err)
 	}
 
-	privateKey, ok := key.(ed25519.PrivateKey)
-	if !ok {
-		return "", fmt.Errorf("key is not an ED25519 private key")
+	// Use []byte directly as the digest (no tpm2.Digest)
+	digest := data // Assumes data is already a SHA-256 hash
+
+	sign := tpm2.Sign{
+		KeyHandle: tpm2.NamedHandle{
+			Handle: keyHandle,
+			Name:   pk.Name,
+		},
+		Digest: tpm2.TPM2BDigest{Buffer: digest},
+		InScheme: tpm2.TPMTSigScheme{
+			Scheme: tpm2.TPMAlgECDSA,
+			Details: tpm2.NewTPMUSigScheme(
+				tpm2.TPMAlgECDSA,
+				&tpm2.TPMSSchemeHash{
+					HashAlg: tpm2.TPMAlgSHA256,
+				},
+			),
+		},
+		Validation: tpm2.TPMTTKHashCheck{
+			Tag: tpm2.TPMSTHashCheck,
+		},
 	}
 
-	signature := ed25519.Sign(privateKey, data)
+	rsp, err := sign.Execute(tpm)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign with TPM: %w", err)
+	}
+
+	// Extract ECDSA signature components
+	ecSig, err := rsp.Signature.Signature.ECDSA()
+	if err != nil {
+		return "", fmt.Errorf("failed to get ECDSA sig : %w", err)
+	}
+	r := ecSig.SignatureR.Buffer
+	s := ecSig.SignatureS.Buffer
+	signature := append(r, s...)
+
 	return hex.EncodeToString(signature), nil
 }
 
-// CleanPublicKey reads the public key, removes the PEM headers/footers and newlines.
+// CleanPublicKeyBase64 reads the public key and returns it as base64-encoded string.
 func CleanPublicKeyBase64() (string, error) {
-	data, err := os.ReadFile(publicKeyFile)
+	tpm, err := linuxtpm.Open(tpmDevice)
 	if err != nil {
-		return "", fmt.Errorf("read public key: %w", err)
+		return "", fmt.Errorf("failed to open TPM: %w", err)
+	}
+	defer func() { _ = tpm.Close() }()
+
+	cmd := tpm2.ReadPublic{
+		ObjectHandle: tpm2.TPMHandle(tpmKeyHandle),
+	}
+	response, err := cmd.Execute(tpm)
+	if err != nil {
+		return "", fmt.Errorf("failed to read public key from TPM: %w", err)
 	}
 
-	block, _ := pem.Decode(data)
-	if block == nil || block.Type != "PUBLIC KEY" {
-		return "", fmt.Errorf("invalid PEM block")
+	pub, err := response.OutPublic.Contents()
+	if err != nil {
+		return "", fmt.Errorf("failed to get public key contents: %w", err)
 	}
 
-	return base64.StdEncoding.EncodeToString(block.Bytes), nil
+	eccDetail, err := pub.Parameters.ECCDetail()
+	if err != nil {
+		return "", fmt.Errorf("not an ECC key: %w", err)
+	}
+	eccUnique, err := pub.Unique.ECC()
+	if err != nil {
+		return "", fmt.Errorf("failed to get ECC point: %w", err)
+	}
+
+	x := new(big.Int).SetBytes(eccUnique.X.Buffer)
+	y := new(big.Int).SetBytes(eccUnique.Y.Buffer)
+
+	var curve elliptic.Curve
+	switch eccDetail.CurveID {
+	case tpm2.TPMECCNistP256:
+		curve = elliptic.P256()
+	case tpm2.TPMECCNistP384:
+		curve = elliptic.P384()
+	case tpm2.TPMECCNistP521:
+		curve = elliptic.P521()
+	default:
+		return "", fmt.Errorf("unsupported curve: %v", eccDetail.CurveID)
+	}
+
+	pubKey := &ecdsa.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
+	}
+
+	derBytes, err := x509.MarshalPKIXPublicKey(pubKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal public key: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(derBytes), nil
 }

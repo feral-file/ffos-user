@@ -1,4 +1,4 @@
-package command_test
+package devicectl_test
 
 import (
 	"context"
@@ -13,10 +13,10 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/command"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
@@ -24,7 +24,7 @@ import (
 type testSetup struct {
 	ctrl             *gomock.Controller
 	ctx              context.Context
-	handler          command.CommandHandler
+	executor         devicectl.Executor
 	mockCDP          *mocks.MockCDP
 	mockDBus         *mocks.MockDBus
 	mockStatus       *mocks.MockStatusPoller
@@ -56,14 +56,13 @@ func setup(t *testing.T) *testSetup {
 	mockStateManager := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(mockStateManager)
 
-	// Create handler with mocks
-	handler := command.New(mockCDP, mockDBus, mockDeviceStatus, mockJSON, mockOS, mockExec, mockMath, logger)
-	handler.SetStatusPoller(mockStatus)
+	// Create executor with mocks
+	executor := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, mockJSON, mockOS, mockExec, mockMath, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
 		ctx:              ctx,
-		handler:          handler,
+		executor:         executor,
 		mockCDP:          mockCDP,
 		mockDBus:         mockDBus,
 		mockStatus:       mockStatus,
@@ -83,13 +82,13 @@ func (ts *testSetup) teardown() {
 	ts.ctrl.Finish()
 }
 
-func TestHandler_Execute_InvalidCommand(t *testing.T) {
+func TestExecutor_Execute_InvalidCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command: "invalid_command",
+	cmd := commands.Command{
+		Type: "invalid_command",
 		Arguments: map[string]interface{}{
 			"test": "value",
 		},
@@ -100,19 +99,19 @@ func TestHandler_Execute_InvalidCommand(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{"test":"value"}`), nil)
 
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "invalid command")
 }
 
-func TestHandler_Execute_InvalidArguments(t *testing.T) {
+func TestExecutor_Execute_InvalidArguments(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command: relayer.CMD_CONNECT,
+	cmd := commands.Command{
+		Type: commands.CMD_CONNECT,
 		Arguments: map[string]interface{}{
 			"invalid": make(chan int), // This can't be marshaled to JSON
 		},
@@ -123,26 +122,26 @@ func TestHandler_Execute_InvalidArguments(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return(nil, errors.New("json: unsupported type: chan int"))
 
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "invalid arguments")
 }
 
-func TestHandler_Connect_Success(t *testing.T) {
+func TestExecutor_Connect_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
 	primaryAddress := "192.168.1.100"
-	device := command.Device{
+	device := devicectl.Device{
 		ID:       "test-device-id",
 		Name:     "Test Device",
 		Platform: 1,
 	}
 
-	cmd := command.Command{
-		Command: relayer.CMD_CONNECT,
+	cmd := commands.Command{
+		Type: commands.CMD_CONNECT,
 		Arguments: map[string]interface{}{
 			"clientDevice":   device,
 			"primaryAddress": primaryAddress,
@@ -162,8 +161,8 @@ func TestHandler_Connect_Success(t *testing.T) {
 		DoAndReturn(func(data []byte, v interface{}) error {
 			// Set the struct fields
 			args := v.(*struct {
-				Device         command.Device `json:"clientDevice"`
-				PrimaryAddress string         `json:"primaryAddress"`
+				Device         devicectl.Device `json:"clientDevice"`
+				PrimaryAddress string           `json:"primaryAddress"`
 			})
 			args.Device = device
 			args.PrimaryAddress = primaryAddress
@@ -187,9 +186,9 @@ func TestHandler_Connect_Success(t *testing.T) {
 		Return(nil)
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 
 	// Verify state was saved
 	savedState := state.GetState()
@@ -199,7 +198,7 @@ func TestHandler_Connect_Success(t *testing.T) {
 	assert.Equal(t, device.Platform, savedState.ConnectedDevice.Platform)
 }
 
-func TestHandler_Connect_Errors(t *testing.T) {
+func TestExecutor_Connect_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
 		setupFunc func(*testSetup)
@@ -243,10 +242,10 @@ func TestHandler_Connect_Errors(t *testing.T) {
 					Unmarshal(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(data []byte, v interface{}) error {
 						args := v.(*struct {
-							Device         command.Device `json:"clientDevice"`
-							PrimaryAddress string         `json:"primaryAddress"`
+							Device         devicectl.Device `json:"clientDevice"`
+							PrimaryAddress string           `json:"primaryAddress"`
 						})
-						args.Device = command.Device{
+						args.Device = devicectl.Device{
 							ID:       "test-device-id",
 							Name:     "Test Device",
 							Platform: 1,
@@ -281,10 +280,10 @@ func TestHandler_Connect_Errors(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command: relayer.CMD_CONNECT,
+			cmd := commands.Command{
+				Type: commands.CMD_CONNECT,
 				Arguments: map[string]interface{}{
-					"clientDevice": command.Device{
+					"clientDevice": devicectl.Device{
 						ID:       "test-device-id",
 						Name:     "Test Device",
 						Platform: 1,
@@ -297,7 +296,7 @@ func TestHandler_Connect_Errors(t *testing.T) {
 			tt.setupFunc(ts)
 
 			// Execute the method under test
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 
 			// Assert error occurred and contains expected message
 			assert.Error(t, err, "expected error, got %v", err)
@@ -307,13 +306,13 @@ func TestHandler_Connect_Errors(t *testing.T) {
 	}
 }
 
-func TestHandler_ShowPairingQRCode_Success(t *testing.T) {
+func TestExecutor_ShowPairingQRCode_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command: relayer.CMD_SHOW_PAIRING_QR_CODE,
+	cmd := commands.Command{
+		Type: commands.CMD_SHOW_PAIRING_QR_CODE,
 		Arguments: map[string]interface{}{
 			"show": true,
 		},
@@ -348,18 +347,18 @@ func TestHandler_ShowPairingQRCode_Success(t *testing.T) {
 		Return(nil)
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestHandler_ShowPairingQRCode_DBusError(t *testing.T) {
+func TestExecutor_ShowPairingQRCode_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command: relayer.CMD_SHOW_PAIRING_QR_CODE,
+	cmd := commands.Command{
+		Type: commands.CMD_SHOW_PAIRING_QR_CODE,
 		Arguments: map[string]interface{}{
 			"show": true,
 		},
@@ -389,19 +388,19 @@ func TestHandler_ShowPairingQRCode_DBusError(t *testing.T) {
 		Return(errors.New("dbus error"))
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "failed to send show pairing QR code")
 }
 
-func TestHandler_DeviceStatus_Success(t *testing.T) {
+func TestExecutor_DeviceStatus_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_DEVICE_STATUS,
+	cmd := commands.Command{
+		Type:      commands.CMD_DEVICE_STATUS,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -423,7 +422,7 @@ func TestHandler_DeviceStatus_Success(t *testing.T) {
 		}, nil)
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 
@@ -437,13 +436,13 @@ func TestHandler_DeviceStatus_Success(t *testing.T) {
 	assert.Equal(t, "1.0.1", statusResponse.LatestVersion)
 }
 
-func TestHandler_DeviceStatus_Error(t *testing.T) {
+func TestExecutor_DeviceStatus_Error(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_DEVICE_STATUS,
+	cmd := commands.Command{
+		Type:      commands.CMD_DEVICE_STATUS,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -460,13 +459,13 @@ func TestHandler_DeviceStatus_Error(t *testing.T) {
 		Return(nil, errors.New("device status error"))
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "device status error")
 }
 
-func TestHandler_KeyboardEvent_Success(t *testing.T) {
+func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -508,8 +507,8 @@ func TestHandler_KeyboardEvent_Success(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup test data
-			cmd := command.Command{
-				Command: relayer.CMD_KEYBOARD_EVENT,
+			cmd := commands.Command{
+				Type: commands.CMD_KEYBOARD_EVENT,
 				Arguments: map[string]interface{}{
 					"code": tc.keyCode,
 				},
@@ -564,14 +563,14 @@ func TestHandler_KeyboardEvent_Success(t *testing.T) {
 			}
 
 			// Execute command
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 			assert.NoError(t, err)
-			assert.Equal(t, command.CmdOK, result)
+			assert.Equal(t, devicectl.CmdOK, result)
 		})
 	}
 }
 
-func TestHandler_KeyboardEvent_Errors(t *testing.T) {
+func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
 		setupFunc func(*testSetup)
@@ -718,8 +717,8 @@ func TestHandler_KeyboardEvent_Errors(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command: relayer.CMD_KEYBOARD_EVENT,
+			cmd := commands.Command{
+				Type: commands.CMD_KEYBOARD_EVENT,
 				Arguments: map[string]interface{}{
 					"code": 65, // Default value, overridden in setupFunc if needed
 				},
@@ -729,7 +728,7 @@ func TestHandler_KeyboardEvent_Errors(t *testing.T) {
 			tt.setupFunc(ts)
 
 			// Execute the method under test
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 
 			// Assert error occurred and contains expected message or success
 			if tt.wantErr != "" {
@@ -738,19 +737,19 @@ func TestHandler_KeyboardEvent_Errors(t *testing.T) {
 				assert.Nil(t, result, "expected nil result on error")
 			} else {
 				assert.NoError(t, err, "expected no error, got %v", err)
-				assert.Equal(t, command.CmdOK, result, "expected CmdOK result on success")
+				assert.Equal(t, devicectl.CmdOK, result, "expected CmdOK result on success")
 			}
 		})
 	}
 }
 
-func TestHandler_MouseMoveEvent_Success(t *testing.T) {
+func TestExecutor_MouseMoveEvent_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command: relayer.CMD_MOUSE_DRAG_EVENT,
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_DRAG_EVENT,
 		Arguments: map[string]interface{}{
 			"messageID": "test-msg-id",
 			"cursorOffsets": []map[string]interface{}{
@@ -864,19 +863,19 @@ func TestHandler_MouseMoveEvent_Success(t *testing.T) {
 		})
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 	assert.InEpsilon(t, 985.0, gotX, 0.0001, "final X position should match")
 	assert.InEpsilon(t, 542.0, gotY, 0.0001, "final Y position should match")
 }
 
-func TestHandler_MouseMoveEvent_EmptyOffsets(t *testing.T) {
+func TestExecutor_MouseMoveEvent_EmptyOffsets(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	cmd := command.Command{
-		Command: relayer.CMD_MOUSE_DRAG_EVENT,
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_DRAG_EVENT,
 		Arguments: map[string]interface{}{
 			"messageID":     "test-msg-id",
 			"cursorOffsets": []map[string]interface{}{},
@@ -922,12 +921,12 @@ func TestHandler_MouseMoveEvent_EmptyOffsets(t *testing.T) {
 		})
 
 	// Execute command - should return early without any CDP calls
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestHandler_MouseMoveEvent_CalculationScenarios(t *testing.T) {
+func TestExecutor_MouseMoveEvent_CalculationScenarios(t *testing.T) {
 	testCases := []struct {
 		name                     string
 		cursorOffsets            []map[string]interface{}
@@ -1015,8 +1014,8 @@ func TestHandler_MouseMoveEvent_CalculationScenarios(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command: relayer.CMD_MOUSE_DRAG_EVENT,
+			cmd := commands.Command{
+				Type: commands.CMD_MOUSE_DRAG_EVENT,
 				Arguments: map[string]interface{}{
 					"messageID":     "test-msg-id",
 					"cursorOffsets": tc.cursorOffsets,
@@ -1168,9 +1167,9 @@ func TestHandler_MouseMoveEvent_CalculationScenarios(t *testing.T) {
 				})
 
 			// Execute command
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 			assert.NoError(t, err)
-			assert.Equal(t, command.CmdOK, result)
+			assert.Equal(t, devicectl.CmdOK, result)
 
 			// Assert final position matches our assumed final position
 			assert.InEpsilon(t, finalPos.x, gotX, 0.0001, "final X position should match")
@@ -1179,7 +1178,7 @@ func TestHandler_MouseMoveEvent_CalculationScenarios(t *testing.T) {
 	}
 }
 
-func TestHandler_MouseMoveEvent_Errors(t *testing.T) {
+func TestExecutor_MouseMoveEvent_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
 		setupFunc func(*testSetup)
@@ -1472,8 +1471,8 @@ func TestHandler_MouseMoveEvent_Errors(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command: relayer.CMD_MOUSE_DRAG_EVENT,
+			cmd := commands.Command{
+				Type: commands.CMD_MOUSE_DRAG_EVENT,
 				Arguments: map[string]interface{}{
 					"messageID": "test-msg-id",
 					"cursorOffsets": []map[string]interface{}{
@@ -1486,7 +1485,7 @@ func TestHandler_MouseMoveEvent_Errors(t *testing.T) {
 			tt.setupFunc(ts)
 
 			// Execute the method under test
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 
 			// Assert error occurred and contains expected message or success
 			if tt.wantErr != "" {
@@ -1495,13 +1494,13 @@ func TestHandler_MouseMoveEvent_Errors(t *testing.T) {
 				assert.Nil(t, result, "expected nil result on error")
 			} else {
 				assert.NoError(t, err, "expected no error, got %v", err)
-				assert.Equal(t, command.CmdOK, result, "expected CmdOK result on success")
+				assert.Equal(t, devicectl.CmdOK, result, "expected CmdOK result on success")
 			}
 		})
 	}
 }
 
-func TestHandler_MouseTapEvent_Success(t *testing.T) {
+func TestExecutor_MouseTapEvent_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -1511,8 +1510,8 @@ func TestHandler_MouseTapEvent_Success(t *testing.T) {
 	centerX := screenWidth / 2
 	centerY := screenHeight / 2
 
-	cmd := command.Command{
-		Command:   relayer.CMD_MOUSE_TAP_EVENT,
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_TAP_EVENT,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -1556,12 +1555,12 @@ func TestHandler_MouseTapEvent_Success(t *testing.T) {
 		Return(nil, nil)
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestHandler_MouseTapEvent_Errors(t *testing.T) {
+func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
 		setupFunc func(*testSetup)
@@ -1688,8 +1687,8 @@ func TestHandler_MouseTapEvent_Errors(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command:   relayer.CMD_MOUSE_TAP_EVENT,
+			cmd := commands.Command{
+				Type:      commands.CMD_MOUSE_TAP_EVENT,
 				Arguments: map[string]interface{}{},
 			}
 
@@ -1697,7 +1696,7 @@ func TestHandler_MouseTapEvent_Errors(t *testing.T) {
 			tt.setupFunc(ts)
 
 			// Execute the method under test
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 
 			// Assert error occurred and contains expected message or success
 			if tt.wantErr != "" {
@@ -1706,13 +1705,13 @@ func TestHandler_MouseTapEvent_Errors(t *testing.T) {
 				assert.Nil(t, result, "expected nil result on error")
 			} else {
 				assert.NoError(t, err, "expected no error, got %v", err)
-				assert.Equal(t, command.CmdOK, result, "expected CmdOK result on success")
+				assert.Equal(t, devicectl.CmdOK, result, "expected CmdOK result on success")
 			}
 		})
 	}
 }
 
-func TestHandler_ScreenRotation_Success(t *testing.T) {
+func TestExecutor_ScreenRotation_Success(t *testing.T) {
 	testCases := []struct {
 		name                string
 		clockwise           bool
@@ -1794,8 +1793,8 @@ func TestHandler_ScreenRotation_Success(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command: relayer.CMD_SCREEN_ROTATION,
+			cmd := commands.Command{
+				Type: commands.CMD_SCREEN_ROTATION,
 				Arguments: map[string]interface{}{
 					"clockwise": tc.clockwise,
 				},
@@ -1861,7 +1860,7 @@ func TestHandler_ScreenRotation_Success(t *testing.T) {
 				ForceRefresh()
 
 			// Execute command
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 			assert.NoError(t, err)
 			assert.NotNil(t, result)
 
@@ -1873,7 +1872,7 @@ func TestHandler_ScreenRotation_Success(t *testing.T) {
 	}
 }
 
-func TestHandler_ScreenRotation_Errors(t *testing.T) {
+func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
 		setupFunc func(*testSetup)
@@ -2268,8 +2267,8 @@ func TestHandler_ScreenRotation_Errors(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command: relayer.CMD_SCREEN_ROTATION,
+			cmd := commands.Command{
+				Type: commands.CMD_SCREEN_ROTATION,
 				Arguments: map[string]interface{}{
 					"clockwise": true, // Default value, overridden in setupFunc if needed
 				},
@@ -2279,7 +2278,7 @@ func TestHandler_ScreenRotation_Errors(t *testing.T) {
 			tt.setupFunc(ts)
 
 			// Execute the method under test
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 
 			// Assert error occurred and contains expected message or success
 			if tt.wantErr != "" {
@@ -2294,13 +2293,13 @@ func TestHandler_ScreenRotation_Errors(t *testing.T) {
 	}
 }
 
-func TestHandler_Shutdown_Success(t *testing.T) {
+func TestExecutor_Shutdown_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_SHUTDOWN,
+	cmd := commands.Command{
+		Type:      commands.CMD_SHUTDOWN,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2320,18 +2319,18 @@ func TestHandler_Shutdown_Success(t *testing.T) {
 		Return(nil)
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestHandler_Shutdown_CommandError(t *testing.T) {
+func TestExecutor_Shutdown_CommandError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_SHUTDOWN,
+	cmd := commands.Command{
+		Type:      commands.CMD_SHUTDOWN,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2351,19 +2350,19 @@ func TestHandler_Shutdown_CommandError(t *testing.T) {
 		Return(errors.New("shutdown command failed"))
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "failed to execute shutdown command")
 }
 
-func TestHandler_Reboot_Success(t *testing.T) {
+func TestExecutor_Reboot_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_REBOOT,
+	cmd := commands.Command{
+		Type:      commands.CMD_REBOOT,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2383,18 +2382,18 @@ func TestHandler_Reboot_Success(t *testing.T) {
 		Return(nil)
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestHandler_Reboot_CommandError(t *testing.T) {
+func TestExecutor_Reboot_CommandError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_REBOOT,
+	cmd := commands.Command{
+		Type:      commands.CMD_REBOOT,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2414,13 +2413,13 @@ func TestHandler_Reboot_CommandError(t *testing.T) {
 		Return(fmt.Errorf("command failed"))
 
 	// Execute command and expect error
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to execute reboot command")
 	assert.Nil(t, result)
 }
 
-func TestHandler_GetSysMetrics_Success(t *testing.T) {
+func TestExecutor_GetSysMetrics_Success(t *testing.T) {
 	tests := []struct {
 		name        string
 		setupFunc   func(*testSetup)
@@ -2437,7 +2436,7 @@ func TestHandler_GetSysMetrics_Success(t *testing.T) {
 
 				// Set last sys metrics
 				testMetrics := []byte(`{"cpu": 50.0, "memory": 75.0}`)
-				ts.handler.SaveLastSysMetrics(testMetrics)
+				ts.executor.SaveLastSysMetrics(testMetrics)
 
 				// Mock JSON unmarshaling for saved metrics
 				ts.mockJSON.EXPECT().
@@ -2479,8 +2478,8 @@ func TestHandler_GetSysMetrics_Success(t *testing.T) {
 			defer ts.teardown()
 
 			// Setup test data
-			cmd := command.Command{
-				Command:   relayer.RELAYER_CMD_SYS_METRICS,
+			cmd := commands.Command{
+				Type:      commands.CMD_PROFILE,
 				Arguments: map[string]interface{}{},
 			}
 
@@ -2488,7 +2487,7 @@ func TestHandler_GetSysMetrics_Success(t *testing.T) {
 			tt.setupFunc(ts)
 
 			// Execute command
-			result, err := ts.handler.Execute(ts.ctx, cmd)
+			result, err := ts.executor.Execute(ts.ctx, cmd)
 			assert.NoError(t, err, "expected no error for %s", tt.description)
 
 			// Verify result
@@ -2504,13 +2503,13 @@ func TestHandler_GetSysMetrics_Success(t *testing.T) {
 	}
 }
 
-func TestHandler_GetSysMetrics_Failure(t *testing.T) {
+func TestExecutor_GetSysMetrics_Failure(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.RELAYER_CMD_SYS_METRICS,
+	cmd := commands.Command{
+		Type:      commands.CMD_PROFILE,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2521,7 +2520,7 @@ func TestHandler_GetSysMetrics_Failure(t *testing.T) {
 
 	// Set invalid JSON metrics
 	invalidMetrics := []byte(`{"cpu": invalid_json}`)
-	ts.handler.SaveLastSysMetrics(invalidMetrics)
+	ts.executor.SaveLastSysMetrics(invalidMetrics)
 
 	// Mock JSON unmarshaling to fail
 	ts.mockJSON.EXPECT().
@@ -2529,13 +2528,13 @@ func TestHandler_GetSysMetrics_Failure(t *testing.T) {
 		Return(errors.New("json unmarshal failed"))
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err, "expected error when JSON unmarshal fails")
 	assert.Contains(t, err.Error(), "failed to unmarshal last sys metrics", "error should mention unmarshal failure")
 	assert.Nil(t, result, "expected nil result on error")
 }
 
-func TestHandler_SysMetrics_ConcurrentAccess(t *testing.T) {
+func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -2554,12 +2553,12 @@ func TestHandler_SysMetrics_ConcurrentAccess(t *testing.T) {
 			Marshal(gomock.Any()).
 			Return([]byte(`{}`), nil)
 
-		cmd := command.Command{
-			Command:   relayer.RELAYER_CMD_SYS_METRICS,
+		cmd := commands.Command{
+			Type:      commands.CMD_PROFILE,
 			Arguments: map[string]interface{}{},
 		}
 
-		firstResult, firstErr = ts.handler.Execute(ts.ctx, cmd)
+		firstResult, firstErr = ts.executor.Execute(ts.ctx, cmd)
 		readFirst <- true
 
 		// Wait for save to complete before continuing
@@ -2573,7 +2572,7 @@ func TestHandler_SysMetrics_ConcurrentAccess(t *testing.T) {
 
 		// Save metrics
 		testMetrics := []byte(`{"cpu": 85.5, "memory": 60.2, "disk": 45.0}`)
-		ts.handler.SaveLastSysMetrics(testMetrics)
+		ts.executor.SaveLastSysMetrics(testMetrics)
 
 		saveComplete <- true
 	}()
@@ -2602,12 +2601,12 @@ func TestHandler_SysMetrics_ConcurrentAccess(t *testing.T) {
 				return nil
 			})
 
-		cmd := command.Command{
-			Command:   relayer.RELAYER_CMD_SYS_METRICS,
+		cmd := commands.Command{
+			Type:      commands.CMD_PROFILE,
 			Arguments: map[string]interface{}{},
 		}
 
-		secondResult, secondErr = ts.handler.Execute(ts.ctx, cmd)
+		secondResult, secondErr = ts.executor.Execute(ts.ctx, cmd)
 		readSecond <- true
 	}()
 
@@ -2629,13 +2628,13 @@ func TestHandler_SysMetrics_ConcurrentAccess(t *testing.T) {
 	assert.Equal(t, 45.0, resultMap["disk"], "disk metric should match saved value")
 }
 
-func TestHandler_UpdateToLatest_Success(t *testing.T) {
+func TestExecutor_UpdateToLatest_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_UPDATE_TO_LATEST,
+	cmd := commands.Command{
+		Type:      commands.CMD_UPDATE_TO_LATEST,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2655,18 +2654,18 @@ func TestHandler_UpdateToLatest_Success(t *testing.T) {
 		Return(nil)
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
-	assert.Equal(t, command.CmdOK, result)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestHandler_UpdateToLatest_CommandError(t *testing.T) {
+func TestExecutor_UpdateToLatest_CommandError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	// Setup test data
-	cmd := command.Command{
-		Command:   relayer.CMD_UPDATE_TO_LATEST,
+	cmd := commands.Command{
+		Type:      commands.CMD_UPDATE_TO_LATEST,
 		Arguments: map[string]interface{}{},
 	}
 
@@ -2686,13 +2685,13 @@ func TestHandler_UpdateToLatest_CommandError(t *testing.T) {
 		Return(errors.New("update to latest command failed"))
 
 	// Execute command
-	result, err := ts.handler.Execute(ts.ctx, cmd)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "failed to execute update to latest command")
 }
 
-func TestHandler_NewHandler(t *testing.T) {
+func TestExecutor_NewHandler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -2700,11 +2699,12 @@ func TestHandler_NewHandler(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDBus := mocks.NewMockDBus(ctrl)
 	mockDeviceStatus := mocks.NewMockDeviceStatus(ctrl)
+	mockStatus := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
 	mockExec := mocks.NewMockExec(ctrl)
 	mockMath := mocks.NewMockMath(ctrl)
 
-	handler := command.New(mockCDP, mockDBus, mockDeviceStatus, mockJSON, mockOS, mockExec, mockMath, logger)
+	handler := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, mockJSON, mockOS, mockExec, mockMath, logger)
 	assert.NotNil(t, handler)
 }

@@ -5,6 +5,7 @@
 package mocks
 
 import (
+	context "context"
 	io "io"
 	http "net/http"
 	reflect "reflect"
@@ -12,31 +13,31 @@ import (
 	gomock "github.com/golang/mock/gomock"
 )
 
-// MockHTTP is a mock of HTTP interface.
-type MockHTTP struct {
+// MockHTTPClient is a mock of HTTPClient interface.
+type MockHTTPClient struct {
 	ctrl     *gomock.Controller
-	recorder *MockHTTPMockRecorder
+	recorder *MockHTTPClientMockRecorder
 }
 
-// MockHTTPMockRecorder is the mock recorder for MockHTTP.
-type MockHTTPMockRecorder struct {
-	mock *MockHTTP
+// MockHTTPClientMockRecorder is the mock recorder for MockHTTPClient.
+type MockHTTPClientMockRecorder struct {
+	mock *MockHTTPClient
 }
 
-// NewMockHTTP creates a new mock instance.
-func NewMockHTTP(ctrl *gomock.Controller) *MockHTTP {
-	mock := &MockHTTP{ctrl: ctrl}
-	mock.recorder = &MockHTTPMockRecorder{mock}
+// NewMockHTTPClient creates a new mock instance.
+func NewMockHTTPClient(ctrl *gomock.Controller) *MockHTTPClient {
+	mock := &MockHTTPClient{ctrl: ctrl}
+	mock.recorder = &MockHTTPClientMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockHTTP) EXPECT() *MockHTTPMockRecorder {
+func (m *MockHTTPClient) EXPECT() *MockHTTPClientMockRecorder {
 	return m.recorder
 }
 
 // Get mocks base method.
-func (m *MockHTTP) Get(url string) (*http.Response, error) {
+func (m *MockHTTPClient) Get(url string) (*http.Response, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Get", url)
 	ret0, _ := ret[0].(*http.Response)
@@ -45,13 +46,13 @@ func (m *MockHTTP) Get(url string) (*http.Response, error) {
 }
 
 // Get indicates an expected call of Get.
-func (mr *MockHTTPMockRecorder) Get(url interface{}) *gomock.Call {
+func (mr *MockHTTPClientMockRecorder) Get(url interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockHTTP)(nil).Get), url)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockHTTPClient)(nil).Get), url)
 }
 
 // Post mocks base method.
-func (m *MockHTTP) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+func (m *MockHTTPClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Post", url, contentType, body)
 	ret0, _ := ret[0].(*http.Response)
@@ -60,7 +61,72 @@ func (m *MockHTTP) Post(url, contentType string, body io.Reader) (*http.Response
 }
 
 // Post indicates an expected call of Post.
-func (mr *MockHTTPMockRecorder) Post(url, contentType, body interface{}) *gomock.Call {
+func (mr *MockHTTPClientMockRecorder) Post(url, contentType, body interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Post", reflect.TypeOf((*MockHTTP)(nil).Post), url, contentType, body)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Post", reflect.TypeOf((*MockHTTPClient)(nil).Post), url, contentType, body)
+}
+
+// MockHTTPServer is a mock of HTTPServer interface.
+type MockHTTPServer struct {
+	ctrl     *gomock.Controller
+	recorder *MockHTTPServerMockRecorder
+}
+
+// MockHTTPServerMockRecorder is the mock recorder for MockHTTPServer.
+type MockHTTPServerMockRecorder struct {
+	mock *MockHTTPServer
+}
+
+// NewMockHTTPServer creates a new mock instance.
+func NewMockHTTPServer(ctrl *gomock.Controller) *MockHTTPServer {
+	mock := &MockHTTPServer{ctrl: ctrl}
+	mock.recorder = &MockHTTPServerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockHTTPServer) EXPECT() *MockHTTPServerMockRecorder {
+	return m.recorder
+}
+
+// Handler mocks base method.
+func (m *MockHTTPServer) Handler() http.Handler {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Handler")
+	ret0, _ := ret[0].(http.Handler)
+	return ret0
+}
+
+// Handler indicates an expected call of Handler.
+func (mr *MockHTTPServerMockRecorder) Handler() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Handler", reflect.TypeOf((*MockHTTPServer)(nil).Handler))
+}
+
+// ListenAndServe mocks base method.
+func (m *MockHTTPServer) ListenAndServe() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListenAndServe")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ListenAndServe indicates an expected call of ListenAndServe.
+func (mr *MockHTTPServerMockRecorder) ListenAndServe() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListenAndServe", reflect.TypeOf((*MockHTTPServer)(nil).ListenAndServe))
+}
+
+// Shutdown mocks base method.
+func (m *MockHTTPServer) Shutdown(ctx context.Context) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Shutdown", ctx)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Shutdown indicates an expected call of Shutdown.
+func (mr *MockHTTPServerMockRecorder) Shutdown(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Shutdown", reflect.TypeOf((*MockHTTPServer)(nil).Shutdown), ctx)
 }
