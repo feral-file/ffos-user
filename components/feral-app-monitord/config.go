@@ -13,18 +13,12 @@ import (
 // Constants for configuration paths.
 const (
 	homeDir            = "/home/feralfile"
-	configDirName      = ".config"
 	configFileBasename = "ff1-config.json"
-	privateKeyFilename = "device.pem"
-	publicKeyFilename  = "device.pub"
 )
 
 var (
-	configDir      = filepath.Join(homeDir, configDirName)
-	configFile     = filepath.Join(homeDir, configFileBasename)
-	privateKeyFile = filepath.Join(configDir, privateKeyFilename)
-	publicKeyFile  = filepath.Join(configDir, publicKeyFilename)
-	config         *Config
+	configFile = filepath.Join(homeDir, configFileBasename)
+	config     *Config
 )
 
 // Config holds the configuration loaded from the ff1-config.json file.

@@ -25,7 +25,7 @@ func SignMessage(data []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to open TPM: %w", err)
 	}
-	defer tpm.Close()
+	defer func() { _ = tpm.Close() }()
 
 	keyHandle := tpm2.TPMHandle(tpmKeyHandle)
 
@@ -84,7 +84,7 @@ func CleanPublicKeyBase64() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to open TPM: %w", err)
 	}
-	defer tpm.Close()
+	defer func() { _ = tpm.Close() }()
 
 	cmd := tpm2.ReadPublic{
 		ObjectHandle: tpm2.TPMHandle(tpmKeyHandle),
