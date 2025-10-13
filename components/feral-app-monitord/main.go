@@ -96,7 +96,7 @@ func main() {
 	}
 
 	// Create a ticker that fires every minute.
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 
 	// Run the first heartbeat immediately without waiting for the ticker.
