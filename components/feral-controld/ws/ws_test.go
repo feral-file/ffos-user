@@ -1117,3 +1117,337 @@ func TestConcurrentNewConnectionAndClose(t *testing.T) {
 	// At least some connections should have been created before close
 	assert.Greater(t, successCount, 0, "Expected at least some connections to be created")
 }
+
+// TestRaceCondition_ConcurrentWritesToSameConnection tests that multiple
+// concurrent SendAll calls can safely write to the same connection without
+// data races. Run with: go test -race
+func TestRaceCondition_ConcurrentWritesToSameConnection(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const numConnections = 10
+	const numConcurrentBroadcasts = 20
+
+	// Create multiple mock connections
+	mockConns := make([]*mocks.MockWebSocketConn, numConnections)
+	for i := range numConnections {
+		mockConns[i] = mocks.NewMockWebSocketConn(ts.ctrl)
+	}
+
+	// Mock the upgrader
+	for i := range numConnections {
+		ts.mockUpgrader.EXPECT().
+			Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(mockConns[i], nil).
+			Times(1)
+	}
+
+	// Mock connection methods - make ReadMessage block to keep connections alive
+	for i := range numConnections {
+		mockConns[i].EXPECT().
+			ReadMessage().
+			DoAndReturn(func() (int, []byte, error) {
+				time.Sleep(500 * time.Millisecond)
+				return 0, nil, errors.New("connection closed")
+			}).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			Close().
+			Return(nil).
+			AnyTimes()
+	}
+
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Now()).
+		AnyTimes()
+
+	// Create all connections first
+	var wg sync.WaitGroup
+	for range numConnections {
+		req := httptest.NewRequest("GET", "/ws", nil)
+		w := httptest.NewRecorder()
+		_, err := ts.ws.NewConnection(w, req)
+		assert.NoError(t, err)
+	}
+
+	// Give connections time to be established
+	time.Sleep(10 * time.Millisecond)
+
+	// Mock WriteJSON - each connection will receive numConcurrentBroadcasts messages
+	// Use a mutex to track concurrent writes to each connection
+	writeCounts := make([]int, numConnections)
+	var writeCountMu sync.Mutex
+
+	for i := range numConnections {
+		connIndex := i
+		mockConns[i].EXPECT().
+			WriteJSON(gomock.Any()).
+			DoAndReturn(func(v interface{}) error {
+				// Simulate network I/O delay
+				time.Sleep(1 * time.Millisecond)
+
+				writeCountMu.Lock()
+				writeCounts[connIndex]++
+				writeCountMu.Unlock()
+
+				return nil
+			}).
+			Times(numConcurrentBroadcasts)
+	}
+
+	// Launch multiple concurrent SendAll calls
+	// This tests that writes to each connection are properly serialized
+	for i := range numConcurrentBroadcasts {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			message := map[string]interface{}{
+				"type":  "test",
+				"index": index,
+				"time":  time.Now().UnixNano(),
+			}
+			err := ts.ws.SendAll(message)
+			assert.NoError(t, err)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify all messages were sent
+	writeCountMu.Lock()
+	for i, count := range writeCounts {
+		assert.Equal(t, numConcurrentBroadcasts, count,
+			"Connection %d should have received all broadcasts", i)
+	}
+	writeCountMu.Unlock()
+}
+
+// TestRaceCondition_SendAllWhileModifyingConnections tests that SendAll
+// can safely iterate over connections while other goroutines are adding/removing
+// connections. Run with: go test -race
+func TestRaceCondition_SendAllWhileModifyingConnections(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const numInitialConnections = 5
+	const numDynamicConnections = 10
+	const numBroadcasts = 15
+
+	// Setup initial connections
+	for range numInitialConnections {
+		mockConn := mocks.NewMockWebSocketConn(ts.ctrl)
+
+		ts.mockUpgrader.EXPECT().
+			Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(mockConn, nil)
+
+		mockConn.EXPECT().
+			ReadMessage().
+			DoAndReturn(func() (int, []byte, error) {
+				time.Sleep(500 * time.Millisecond)
+				return 0, nil, errors.New("connection closed")
+			}).
+			AnyTimes()
+
+		mockConn.EXPECT().
+			WriteJSON(gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConn.EXPECT().
+			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConn.EXPECT().
+			Close().
+			Return(nil).
+			AnyTimes()
+	}
+
+	// Setup connections that will be added during the test
+	for range numDynamicConnections {
+		mockConn := mocks.NewMockWebSocketConn(ts.ctrl)
+
+		ts.mockUpgrader.EXPECT().
+			Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(mockConn, nil)
+
+		mockConn.EXPECT().
+			ReadMessage().
+			DoAndReturn(func() (int, []byte, error) {
+				time.Sleep(500 * time.Millisecond)
+				return 0, nil, errors.New("connection closed")
+			}).
+			AnyTimes()
+
+		mockConn.EXPECT().
+			WriteJSON(gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConn.EXPECT().
+			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConn.EXPECT().
+			Close().
+			Return(nil).
+			AnyTimes()
+	}
+
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Now()).
+		AnyTimes()
+
+	// Create initial connections
+	for range numInitialConnections {
+		req := httptest.NewRequest("GET", "/ws", nil)
+		w := httptest.NewRecorder()
+		_, err := ts.ws.NewConnection(w, req)
+		assert.NoError(t, err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+
+	// Goroutine 1: Continuously broadcast messages
+	for i := range numBroadcasts {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			message := map[string]interface{}{
+				"type":  "broadcast",
+				"index": index,
+			}
+			// This should safely iterate over a snapshot of connections
+			_ = ts.ws.SendAll(message)
+		}(i)
+	}
+
+	// Goroutine 2: Add new connections while broadcasting
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range numDynamicConnections {
+			select {
+			case <-done:
+				return
+			default:
+				req := httptest.NewRequest("GET", "/ws", nil)
+				w := httptest.NewRecorder()
+				_, _ = ts.ws.NewConnection(w, req)
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Wait for all operations to complete
+	wg.Wait()
+	close(done)
+
+	// No assertions needed - the race detector will catch any issues
+	// If we get here without panic, the test passed
+}
+
+// TestRaceCondition_ConcurrentSendAndClose tests that Send operations
+// can happen concurrently with connection closes without races.
+// Run with: go test -race
+func TestRaceCondition_ConcurrentSendAndClose(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const numConnections = 20
+	const numSendAttempts = 50
+
+	mockConns := make([]*mocks.MockWebSocketConn, numConnections)
+	connectionIDs := make([]string, numConnections)
+
+	// Setup all connections
+	for i := range numConnections {
+		mockConns[i] = mocks.NewMockWebSocketConn(ts.ctrl)
+
+		ts.mockUpgrader.EXPECT().
+			Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(mockConns[i], nil)
+
+		mockConns[i].EXPECT().
+			ReadMessage().
+			DoAndReturn(func() (int, []byte, error) {
+				time.Sleep(500 * time.Millisecond)
+				return 0, nil, errors.New("connection closed")
+			}).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			WriteJSON(gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			Close().
+			Return(nil).
+			AnyTimes()
+	}
+
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Now()).
+		AnyTimes()
+
+	// Create all connections
+	for i := range numConnections {
+		req := httptest.NewRequest("GET", "/ws", nil)
+		w := httptest.NewRecorder()
+		connID, err := ts.ws.NewConnection(w, req)
+		assert.NoError(t, err)
+		connectionIDs[i] = connID
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	var wg sync.WaitGroup
+
+	// Goroutine set 1: Continuously send messages to random connections
+	for i := range numSendAttempts {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			connIndex := index % numConnections
+			message := map[string]interface{}{
+				"type":  "message",
+				"index": index,
+			}
+			// Some of these will fail if connection is closed - that's expected
+			_ = ts.ws.Send(connectionIDs[connIndex], message)
+		}(i)
+	}
+
+	// Goroutine set 2: Close connections while sends are happening
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(5 * time.Millisecond) // Let some sends start
+		ts.ws.Close()
+	}()
+
+	wg.Wait()
+
+	// No assertions needed - the race detector will catch any issues
+}
