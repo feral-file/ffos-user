@@ -1240,12 +1240,9 @@ func TestRaceCondition_SendAllWhileModifyingConnections(t *testing.T) {
 	const numDynamicConnections = 10
 	const numBroadcasts = 15
 
-	var allMockConns []*mocks.MockWebSocketConn
-
 	// Setup initial connections
 	for range numInitialConnections {
 		mockConn := mocks.NewMockWebSocketConn(ts.ctrl)
-		allMockConns = append(allMockConns, mockConn)
 
 		ts.mockUpgrader.EXPECT().
 			Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -1278,7 +1275,6 @@ func TestRaceCondition_SendAllWhileModifyingConnections(t *testing.T) {
 	// Setup connections that will be added during the test
 	for range numDynamicConnections {
 		mockConn := mocks.NewMockWebSocketConn(ts.ctrl)
-		allMockConns = append(allMockConns, mockConn)
 
 		ts.mockUpgrader.EXPECT().
 			Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
