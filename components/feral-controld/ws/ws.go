@@ -31,10 +31,16 @@ type WS interface {
 	Close()
 }
 
+// syncConn wraps a WebSocket connection with a mutex to serialize writes
+type syncConn struct {
+	mu   sync.Mutex
+	conn wrapper.WebSocketConn
+}
+
 type ws struct {
 	mu          sync.RWMutex
 	ctx         context.Context
-	connections map[string]wrapper.WebSocketConn
+	connections map[string]*syncConn
 	nextID      int
 	upgrader    wrapper.WebsocketUpgrader
 
@@ -46,7 +52,7 @@ type ws struct {
 func NewWSHandler(ctx context.Context, upgrader wrapper.WebsocketUpgrader, clock wrapper.Clock, logger *zap.Logger) WS {
 	return &ws{
 		ctx:         ctx,
-		connections: make(map[string]wrapper.WebSocketConn),
+		connections: make(map[string]*syncConn),
 		nextID:      1,
 		upgrader:    upgrader,
 		clock:       clock,
@@ -61,29 +67,32 @@ func (ws *ws) NewConnection(w http.ResponseWriter, r *http.Request) (string, err
 		return "", err
 	}
 
+	wrapped := &syncConn{conn: conn}
+
 	ws.mu.Lock()
 	connID := fmt.Sprintf("conn-%d", ws.nextID)
 	ws.nextID++
-	ws.connections[connID] = conn
+	ws.connections[connID] = wrapped
+	totalConnections := len(ws.connections)
 	ws.mu.Unlock()
 
 	ws.logger.Info("New websocket connection established",
 		zap.String("connID", connID),
-		zap.Int("total_connections", len(ws.connections)))
+		zap.Int("total_connections", totalConnections))
 
-	go ws.background(connID, conn)
+	go ws.background(connID, wrapped)
 
 	return connID, nil
 }
 
 // background handles the connection and closes it when it's done
-func (ws *ws) background(connID string, conn wrapper.WebSocketConn) {
+func (ws *ws) background(connID string, wrapped *syncConn) {
 	// Create a channel to signal when ReadMessage completes
 	done := make(chan error, 1)
 
 	go func() {
 		for {
-			_, _, err := conn.ReadMessage()
+			_, _, err := wrapped.conn.ReadMessage()
 			if err != nil {
 				done <- err
 				return
@@ -115,15 +124,18 @@ func (ws *ws) background(connID string, conn wrapper.WebSocketConn) {
 
 func (ws *ws) Send(connID string, message any) error {
 	ws.mu.RLock()
-	conn, exists := ws.connections[connID]
+	wrapped, exists := ws.connections[connID]
 	ws.mu.RUnlock()
 
 	if !exists {
 		return fmt.Errorf("connection %s not found", connID)
 	}
 
-	// Write message
-	err := conn.WriteJSON(message)
+	// Lock the connection's mutex to serialize writes
+	wrapped.mu.Lock()
+	err := wrapped.conn.WriteJSON(message)
+	wrapped.mu.Unlock()
+
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
@@ -141,15 +153,20 @@ func (ws *ws) SendAll(message any) error {
 		return nil
 	}
 
-	connections := make(map[string]wrapper.WebSocketConn, len(ws.connections))
+	// Copy the connections map to avoid holding the lock during writes
+	connections := make(map[string]*syncConn, len(ws.connections))
 	maps.Copy(connections, ws.connections)
 	ws.mu.RUnlock()
 
 	var lastErr error
 	successCount := 0
 
-	for connID, conn := range connections {
-		err := conn.WriteJSON(message)
+	for connID, wrapped := range connections {
+		// Lock the connection's mutex to serialize writes
+		wrapped.mu.Lock()
+		err := wrapped.conn.WriteJSON(message)
+		wrapped.mu.Unlock()
+
 		if err != nil {
 			ws.logger.Error("Failed to send message to client",
 				zap.String("connID", connID),
@@ -170,12 +187,15 @@ func (ws *ws) SendAll(message any) error {
 }
 
 // closeConn close the connection
-// This function is not thread safe, so it should be called with the lock held
+// This function is not thread safe for the connections map, so it should be called with ws.mu lock held
 func (ws *ws) closeConn(connID string) {
 	ws.logger.Info("Closing connection", zap.String("connID", connID))
-	if conn, exists := ws.connections[connID]; exists {
+	if wrapped, exists := ws.connections[connID]; exists {
+		// Lock the connection's mutex to serialize writes with any ongoing operations
+		wrapped.mu.Lock()
+
 		// Write close message
-		err := conn.WriteControl(
+		err := wrapped.conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			ws.clock.Now().Add(2*time.Second),
@@ -185,10 +205,12 @@ func (ws *ws) closeConn(connID string) {
 		}
 
 		// Close the connection
-		err = conn.Close()
+		err = wrapped.conn.Close()
 		if err != nil {
 			ws.logger.Warn("Failed to close connection", zap.String("connID", connID), zap.Error(err))
 		}
+
+		wrapped.mu.Unlock()
 
 		// Remove the connection from the tracker
 		delete(ws.connections, connID)
@@ -207,6 +229,6 @@ func (ws *ws) Close() {
 		ws.closeConn(connID)
 	}
 
-	ws.connections = make(map[string]wrapper.WebSocketConn)
+	ws.connections = make(map[string]*syncConn)
 	ws.logger.Info("All websocket connections closed")
 }
