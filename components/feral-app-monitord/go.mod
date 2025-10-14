@@ -7,6 +7,7 @@ require (
 	github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818091311-c9dee9df5ca2
 	github.com/feral-file/godbus v0.0.6-0.20250716043107-25b56328d11e
 	github.com/godbus/dbus/v5 v5.1.0
+	github.com/google/go-tpm v0.9.6
 	github.com/gowebpki/jcs v1.0.1
 	go.uber.org/zap v1.27.0
 )
@@ -14,4 +15,5 @@ require (
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
+	golang.org/x/sys v0.8.0 // indirect
 )

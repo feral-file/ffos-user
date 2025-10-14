@@ -6,23 +6,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"go.uber.org/zap"
 )
 
 // Constants for configuration paths.
 const (
 	homeDir            = "/home/feralfile"
-	configDirName      = ".config"
 	configFileBasename = "ff1-config.json"
-	privateKeyFilename = "device.pem"
-	publicKeyFilename  = "device.pub"
 )
 
 var (
-	configDir      = filepath.Join(homeDir, configDirName)
-	configFile     = filepath.Join(homeDir, configFileBasename)
-	privateKeyFile = filepath.Join(configDir, privateKeyFilename)
-	publicKeyFile  = filepath.Join(configDir, publicKeyFilename)
-	config         *Config
+	configFile = filepath.Join(homeDir, configFileBasename)
+	config     *Config
 )
 
 // Config holds the configuration loaded from the ff1-config.json file.
@@ -51,9 +47,11 @@ func LoadConfig() error {
 		return fmt.Errorf("failed to parse config JSON: %w", err)
 	}
 
+	// ignore the error here, as the pubkey might not exist yet for QEMU
 	config.Pubkey, err = CleanPublicKeyBase64()
 	if err != nil {
-		return fmt.Errorf("failed to get public key: %w", err)
+		logger.Error("Failed to read public key.", zap.Error(err))
+		return nil
 	}
 
 	return nil

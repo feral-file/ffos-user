@@ -28,6 +28,7 @@ type Config struct {
 	CDPConfig     *CDPConfig           `json:"cdp"`
 	RelayerConfig *RelayerConfig       `json:"relayer"`
 	SentryConfig  *logger.SentryConfig `json:"sentry"`
+	EnableHub     bool                 `json:"enableHub"`
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager

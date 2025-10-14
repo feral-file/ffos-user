@@ -49,14 +49,14 @@ type FFIndexer interface {
 
 //go:generate mockgen -source=ff_indexer.go -destination=../mocks/ff_indexer.go -package=mocks -mock_names=FFIndexer=MockFFIndexer
 type ffIndexer struct {
-	http   wrapper.HTTP
-	json   wrapper.JSON
-	io     wrapper.IO
-	logger *zap.Logger
+	httpClient wrapper.HTTPClient
+	json       wrapper.JSON
+	io         wrapper.IO
+	logger     *zap.Logger
 }
 
-func New(http wrapper.HTTP, json wrapper.JSON, io wrapper.IO, logger *zap.Logger) FFIndexer {
-	return &ffIndexer{http: http, json: json, io: io, logger: logger}
+func New(httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger) FFIndexer {
+	return &ffIndexer{httpClient: httpClient, json: json, io: io, logger: logger}
 }
 
 func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map[string]string) ([]Token, error) {
@@ -147,7 +147,7 @@ func (i *ffIndexer) execGraphQLQuery(endpoint string, query string) (*GraphQLRes
 		return nil, err
 	}
 
-	resp, err := i.http.Post(endpoint, "application/json", bytes.NewReader(bodyBytes))
+	resp, err := i.httpClient.Post(endpoint, "application/json", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}

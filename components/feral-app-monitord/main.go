@@ -62,12 +62,6 @@ func main() {
 	go watchdog.Start(ctx)
 	defer watchdog.Stop()
 
-	if err := EnsureKeyPair(); err != nil {
-		logger.Error("Failed to ensure key pair exists.", zap.Error(err))
-		return
-	}
-	logger.Info("Key pair check passed.")
-
 	if err := LoadConfig(); err != nil {
 		logger.Error("Failed to load config.", zap.Error(err))
 		return
@@ -102,7 +96,7 @@ func main() {
 	}
 
 	// Create a ticker that fires every minute.
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 
 	// Run the first heartbeat immediately without waiting for the ticker.

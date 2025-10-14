@@ -25,21 +25,6 @@ var (
 	// Errors
 	ErrAlreadyConnected = fmt.Errorf("relayer is already connected")
 	ErrNotConnected     = fmt.Errorf("relayer is not connected")
-
-	// Constants
-	ControldCmds = map[RelayerCmd]bool{
-		CMD_CONNECT:              true,
-		CMD_SHOW_PAIRING_QR_CODE: true,
-		CMD_PROFILE:              true,
-		CMD_KEYBOARD_EVENT:       true,
-		CMD_MOUSE_DRAG_EVENT:     true,
-		CMD_MOUSE_TAP_EVENT:      true,
-		CMD_SCREEN_ROTATION:      true,
-		CMD_SHUTDOWN:             true,
-		CMD_REBOOT:               true,
-		CMD_DEVICE_STATUS:        true,
-		CMD_UPDATE_TO_LATEST:     true,
-	}
 )
 
 const (
@@ -48,47 +33,21 @@ const (
 	PONG_WAIT         = 3 * time.Second
 )
 
-type RelayerCmd string
+type Message struct {
+	Command *string        `json:"command,omitempty"`
+	Request map[string]any `json:"request,omitempty"`
+	TopicID *string        `json:"topicID,omitempty"`
+}
 
-const (
-	CMD_CONNECT              RelayerCmd = "connect"
-	CMD_SHOW_PAIRING_QR_CODE RelayerCmd = "showPairingQRCode"
-	CMD_PROFILE              RelayerCmd = "deviceMetrics"
-	CMD_KEYBOARD_EVENT       RelayerCmd = "sendKeyboardEvent"
-	CMD_MOUSE_DRAG_EVENT     RelayerCmd = "dragGesture"
-	CMD_MOUSE_TAP_EVENT      RelayerCmd = "tapGesture"
-	RELAYER_CMD_SYS_METRICS  RelayerCmd = "deviceMetrics"
-	CMD_SCREEN_ROTATION      RelayerCmd = "rotate"
-	CMD_SHUTDOWN             RelayerCmd = "shutdown"
-	CMD_REBOOT               RelayerCmd = "reboot"
-	CMD_DEVICE_STATUS        RelayerCmd = "getDeviceStatus"
-	CMD_UPDATE_TO_LATEST     RelayerCmd = "updateToLatestVersion"
-	CMD_DISPLAY_PLAYLIST     RelayerCmd = "displayPlaylist"
-)
-
-func (c RelayerCmd) ControldCmds() bool {
-	return ControldCmds[c]
+type Response struct {
+	Type      string `json:"type"`
+	MessageID string `json:"messageID"`
+	Message   any    `json:"message"`
 }
 
 type Payload struct {
-	MessageID string `json:"messageID"`
-	Message   struct {
-		Command *RelayerCmd            `json:"command,omitempty"`
-		Args    map[string]interface{} `json:"request,omitempty"`
-		TopicID *string                `json:"topicID,omitempty"`
-	} `json:"message"`
-}
-
-func (p Payload) JSON() ([]byte, error) {
-	return json.Marshal(p)
-}
-
-func (p Payload) Arguments(key string) (interface{}, error) {
-	v, ok := p.Message.Args[key]
-	if !ok {
-		return nil, fmt.Errorf("key %s not found", key)
-	}
-	return v, nil
+	MessageID string  `json:"messageID"`
+	Message   Message `json:"message"`
 }
 
 type Handler func(ctx context.Context, payload Payload) error

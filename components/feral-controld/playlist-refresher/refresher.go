@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
-	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -143,7 +143,7 @@ func (r *refresher) processPlayingPlaylist() error {
 		return nil
 	}
 
-	if playerStatus.Command != relayer.CMD_DISPLAY_PLAYLIST {
+	if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
 		r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
 		return nil
 	}
@@ -171,15 +171,15 @@ func (r *refresher) processPlayingPlaylist() error {
 	}
 
 	// Send playlist to CDP
-	payload := relayer.Payload{}
-	cmd := relayer.CMD_DISPLAY_PLAYLIST
-	payload.Message.Command = &cmd
-	payload.Message.Args = map[string]interface{}{
-		"dp1_call": playlist,
-		"refresh":  true,
+	command := commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{
+			"dp1_call": playlist,
+			"refresh":  true,
+		},
 	}
 
-	if _, err := r.sendCDPRequest(payload); err != nil {
+	if _, err := r.sendCDPRequest(command); err != nil {
 		return err
 	}
 
@@ -187,8 +187,8 @@ func (r *refresher) processPlayingPlaylist() error {
 }
 
 // sendCDPRequest marshals payload and sends to CDP
-func (r *refresher) sendCDPRequest(payload relayer.Payload) (interface{}, error) {
-	p, err := payload.JSON()
+func (r *refresher) sendCDPRequest(command commands.Command) (interface{}, error) {
+	p, err := command.JSON()
 	if err != nil {
 		return nil, err
 	}

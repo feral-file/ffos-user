@@ -35,7 +35,7 @@ var (
 		Name: "cpu_temperature_celsius",
 		Help: "Current CPU temperature in Celsius",
 	})
-	CPUUptimeSeconds = promauto.NewCounter(prometheus.CounterOpts{
+	CPUUptimeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "cpu_uptime_seconds",
 		Help: "Current CPU uptime in seconds",
 	})
@@ -626,12 +626,11 @@ func (p *SysResMonitor) monitorUptime(_ context.Context) error {
 		return err
 	}
 
-	lastUptimeSec := p.lastMetrics.Uptime
 	p.Lock()
 	p.lastMetrics.Uptime = uptimeSec
 	p.Unlock()
 
-	CPUUptimeSeconds.Add(uptimeSec - lastUptimeSec)
+	CPUUptimeSeconds.Set(uptimeSec)
 
 	return nil
 }

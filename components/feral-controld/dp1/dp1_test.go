@@ -25,7 +25,7 @@ type testSetup struct {
 	ctrl          *gomock.Controller
 	ctx           context.Context
 	mockFFIndexer *mocks.MockFFIndexer
-	mockHTTP      *mocks.MockHTTP
+	mockHTTP      *mocks.MockHTTPClient
 	mockJSON      *mocks.MockJSON
 	mockIO        *mocks.MockIO
 	client        dp1.DP1
@@ -38,17 +38,17 @@ func setup(t *testing.T) *testSetup {
 
 	// Dependencies
 	mockFFIndexer := mocks.NewMockFFIndexer(ctrl)
-	mockHTTP := mocks.NewMockHTTP(ctrl)
+	mockHTTPClient := mocks.NewMockHTTPClient(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := dp1.New(mockFFIndexer, mockHTTP, mockJSON, mockIO, logger)
+	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger)
 
 	return &testSetup{
 		ctrl:          ctrl,
 		ctx:           ctx,
 		mockFFIndexer: mockFFIndexer,
-		mockHTTP:      mockHTTP,
+		mockHTTP:      mockHTTPClient,
 		mockJSON:      mockJSON,
 		mockIO:        mockIO,
 		client:        client,
