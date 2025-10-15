@@ -1,0 +1,126 @@
+
+ ▄████████    ▄████████    ▄████████  ▄█     █▄   ▄█       
+███    ███   ███    ███   ███    ███ ███     ███ ███       
+███    █▀    ███    ███   ███    ███ ███     ███ ███       
+███         ▄███▄▄▄▄██▀   ███    ███ ███     ███ ███       
+███        ▀▀███▀▀▀▀▀   ▀███████████ ███     ███ ███       
+███    █▄  ▀███████████   ███    ███ ███     ███ ███       
+███    ███   ███    ███   ███    ███ ███ ▄█▄ ███ ███▌    ▄ 
+████████▀    ███    ███   ███    █▀   ▀███▀███▀  █████▄▄██ 
+             ███    ███                          ▀         
+
+CRAWL BY TRAVESS SMALLEY, 2024
+A SERIES OF 512 MAPS
+DESIGNED TO BE 
+EXPLORED & CONNECTED.
+
+MADE FOR THE EXHIBITION 
+CRAWL, ON FERAL FILE
+CURATED BY CASEY REAS.
+
+MAZE GENERATED | ASCII VERSION:
+
+#########################
+#           #           #
+########### # ### ##### #
+#         # #   # #   # #
+# ####### # ### # # ### #
+# #   #   # #   # #     #
+# # ### # # ##### # #####
+# # #   # #   #   #     #
+# # # ### ### # ####### #
+# # # #     #   #   #   #
+# # # ##### ##### # # ###
+# # #     # # #   # # # #
+# # ##### # # # # ### # #
+#     #   #   # #   #   #
+# ##### # ##### ### ### #
+# #     # #     # #     #
+### ### ### ##### #######
+#   #   #   #           #
+# ### ### ######### ### #
+#   # #   #         # # #
+### ### ##### ####### # #
+#   #   #   #   #     # #
+# ### ### # ### # ### # #
+#         #     #   #   #
+#########################
+
+
+💾 CRAWL MAP GENERATION LOG
+
+🐍 PYTHON VERSION: 3.12.3
+🐍 SCRIPT VERSION: V_1_0.PY
+📅 DATE: 2024-06-26_11-31-28-653703
+🌱 SEED #: 1719415888653
+🗺️ MAP #: 056 of 512
+📇 NAME: TRACHYTEMALEVOLENTPLAZA
+🧩 MAZE GRID SIZE: 12
+⬆️ RESIZED TO: 2560 X 2560 PIXELS
+🚫 NO SOFTEN MAZE.
+🎲 WALL CORRODED BY 5 PIXELS. 0.107 seconds
+🌿 3 PLANTS CARVING WALLS.
+🌀 SPIRAL PATH CARVED WALLS.
+🌫️ GAUSSIAN BLUR (11).
+🌊 WAVE. AMP((1, 10)). HORIZONTAL(100). VERTICAL(100).
+🔳 THRESHOLD (128).
+😵‍💫 ROTATION: 90
+🌊 ALTERNATE WAVE FILTER - AMP: 80, FREQ: 0.2
+🏠 ROOMS: 2, COLOR: (255, 0, 0)
+🦴 FOSSILS: 4, COLOR: (30, 30, 30)
+🌿 PLANTS: 4, COLOR: (40, 40, 40)
+✳️ SPAWNS: 8, COLOR: (0, 255, 0)
+🐄 CREATURES: 1, COLOR: (24, 40, 36)
+🌀 SPIRALS: 5, COLOR: (0, 0, 255)
+⬆️ ASCENDING STEPS CREATED.
+⬇️ DESCENDING STEPS CREATED.
+🚪 DOOR CREATED.
+🧪 REACTION DIFFUSION LOOP APPLIED (1X).
+📖 ADDED MAP TEXT.
+⛔️ IMAGE IS LESS THAN 20% BLACK.
+🌈 APPLY COLOR OR GRADIENT.
+🔘 APPLIED RADIAL GRADIENT.
+🚪 APPLING RADIAL GRADIENT TO DOOR.
+👾 QUANTIZED COLOR.
+👺 APPLIED MASKS.
+🏁 PATTERN SHRUNK BY 10.
+🏁 PATTERN SHRUNK BY 5.
+⏱️ TOTAL TIME 28.314 seconds
+
+
+
+++++++++++++++++++++++++++++++++
+SPECIAL THANKS TO            
+                                        
+MY FAMILY                
+KAELA, ALICE, LUCY, DIANA, LEILA    
+                                        
+THE FERAL FILE TEAM           
+CASEY ALT                
+ANAIS BARTHE              
+BUI THI ANH DUYEN            
+CUONG LE                
+WHITNEY HART              
+HO VU THAO HIEN             
+LAUREN JONES              
+WILLA KÖERNER              
+SEAN MOSS-PULTZ             
+NGUYEN LE VIET HOANG          
+NGUYEN THANH THIEN           
+NGUYEN THI NU              
+PHAM MANH HIEU             
+RITA WU                 
+BRANDON YEH               
+                                        
+PLAYTESTERS               
+JEFFREY SCUDDER             
+CLEMENT VALLA              
+DANIEL LEFCOURT             
+JOHN PROVENCHER             
+NICHOLAS O'BRIEN            
+BILLY RENNEKAMP             
+EVERETT WILLIAMS            
+MITCHELL F CHAN             
+MATTO    
+++++++++++++++++++++++++++++++++          
+

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Max CPU Load Only</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #000;
+    }
+    #info-box {
+      position: absolute;
+      top: 0;
+      right: 0;
+      background: rgba(0, 0, 0, 0.4);
+      color: #00FF00;
+      font-family: sans-serif;
+      font-size: 1.5em;
+      padding: 0.4em 0.8em;
+      pointer-events: none;
+      z-index: 9999;
+      text-align: right;
+      line-height: 1.4em;
+    }
+  </style>
+</head>
+<body>
+
+<div id="info-box">
+  CPU Temp: <span id="temp">Loading...</span><br>
+  CPU Freq: <span id="freq">Loading...</span><br>
+  Resolution: <span id="resolution">Loading...</span><br>
+  Refresh Rate: <span id="refresh">Loading...</span>
+</div>
+
+<script>
+  // Launch 1 Web Workers to maximize CPU usage
+  const numWorkers = 1;
+  const workers = [];
+
+  const workerCode = `
+    self.onmessage = () => {
+      while (true) {
+        const a = Math.random();
+        const b = Math.random();
+        Math.sqrt(a * b);
+      }
+    };
+  `;
+
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const blobUrl = URL.createObjectURL(blob);
+
+  for (let i = 0; i < numWorkers; i++) {
+    const w = new Worker(blobUrl);
+    w.postMessage('start');
+    workers.push(w);
+  }
+
+  // Info box update
+  async function fetchInfo() {
+    try {
+      const res = await fetch('http://localhost:8000/info');
+      const data = await res.json();
+      document.getElementById('temp').textContent = `${data.temp} °C`;
+      document.getElementById('freq').textContent = `${data.freq} MHz`;
+      document.getElementById('resolution').textContent = data.screen.width && data.screen.height
+        ? `${data.screen.width}x${data.screen.height}`
+        : 'N/A';
+      document.getElementById('refresh').textContent = data.screen.refresh_rate
+        ? `${data.screen.refresh_rate.toFixed(1)} Hz`
+        : 'N/A';
+    } catch {
+      document.getElementById('temp').textContent = 'Error';
+      document.getElementById('freq').textContent = 'Error';
+      document.getElementById('resolution').textContent = 'Error';
+      document.getElementById('refresh').textContent = 'Error';
+    }
+  }
+
+  setInterval(fetchInfo, 5000);
+  window.onload = fetchInfo;
+</script>
+
+</body>
+</html>

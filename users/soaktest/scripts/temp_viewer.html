@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>CPU Temp</title>
+  <style>
+    body { margin: 0; background: black; color: lime; font-family: sans-serif; font-size: 2em; padding: 0.5em; }
+  </style>
+  <script>
+    async function fetchTemp() {
+      try {
+        const res = await fetch('/temp');
+        const data = await res.json();
+        document.getElementById('temp').textContent = `${data.temp} °C`;
+      } catch {
+        document.getElementById('temp').textContent = 'Error';
+      }
+    }
+    setInterval(fetchTemp, 5000);
+    window.onload = fetchTemp;
+  </script>
+</head>
+<body>
+  <div>CPU Temp: <span id="temp">Loading...</span></div>
+</body>
+</html>
