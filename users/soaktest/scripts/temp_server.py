@@ -7,24 +7,53 @@ FLUSH_INTERVAL_SECONDS = 15
 CSV_FILE = None
 HTML_FILE = "/home/soaktest/scripts/temp_viewer.html"
 
-def get_cpu_temp():
+def detect_cpu_type():
+    """Detect CPU type by reading /proc/cpuinfo."""
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                line = line.lower()
+                if "vendor_id" in line:
+                    if "genuineintel" in line:
+                        return "intel"
+                    elif "authenticamd" in line:
+                        return "amd"
+    except Exception as e:
+        print(f"[WARN] Failed to detect CPU type: {e}")
+    return "intel"  # Default to Intel if detection fails
+
+def get_cpu_temp(cpu_type):
+    """Get CPU temperature based on CPU type."""
     try:
         output = subprocess.check_output(["sensors", "-u"], encoding="utf-8")
         lines = output.splitlines()
-        in_package = False
-        for line in lines:
-            if "Package id 0" in line:
-                in_package = True
-                continue
-            if in_package and "temp1_input:" in line:
-                return float(line.strip().split(":")[1])
-            if line.strip() == "":
-                in_package = False
-    except:
-        return 0.0
+        
+        if cpu_type == "intel":
+            in_package = False
+            for line in lines:
+                if "Package id 0" in line:
+                    in_package = True
+                    continue
+                if in_package and "temp1_input:" in line:
+                    return float(line.strip().split(":")[1])
+                if in_package and line.strip() == "":
+                    in_package = False
+        elif cpu_type == "amd":
+            in_k10temp = False
+            for line in lines:
+                if line.startswith("k10temp-pci-"):
+                    in_k10temp = True
+                    continue
+                if in_k10temp and "temp1_input:" in line:
+                    return float(line.strip().split(":")[1])
+                if in_k10temp and line.strip() == "":
+                    in_k10temp = False
+    except Exception as e:
+        print(f"[WARN] Failed to get CPU temperature: {e}")
     return 0.0
 
 def get_cpu_frequencies():
+    """Get average CPU frequency in MHz."""
     try:
         cur_freq_paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq")
         if not cur_freq_paths:
@@ -35,13 +64,13 @@ def get_cpu_frequencies():
             with open(path, 'r') as f:
                 cur_sum += int(f.read().strip())
         current_mhz = cur_sum / len(cur_freq_paths) / 1000.0  # kHz → MHz
-
         return round(current_mhz, 1)
     except Exception as e:
         print(f"[WARN] Failed to get CPU frequencies: {e}")
         return None
 
 def get_screen_info():
+    """Get screen resolution and refresh rate."""
     try:
         output = subprocess.check_output(["wlr-randr"], encoding="utf-8")
         for line in output.splitlines():
@@ -66,7 +95,8 @@ def get_screen_info():
         "refresh_rate": None
     }
 
-def background_logger(csv_path):
+def background_logger(csv_path, cpu_type):
+    """Background thread to log system metrics to CSV."""
     print(f"[INFO] Logger started → writing to: {csv_path}")
     last_flush_time = time.time()
 
@@ -77,7 +107,7 @@ def background_logger(csv_path):
 
         while True:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            temp = get_cpu_temp()
+            temp = get_cpu_temp(cpu_type)
             screen = get_screen_info()
             freq = get_cpu_frequencies()
 
@@ -112,7 +142,8 @@ class TempHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(content)
-        except:
+        except Exception as e:
+            print(f"[WARN] Failed to serve HTML: {e}")
             self.send_response(404)
             self.end_headers()
 
@@ -128,7 +159,8 @@ class TempHandler(BaseHTTPRequestHandler):
                         "height": int(height) if height else None,
                         "refresh_rate": float(refresh) if refresh else None
                     }
-            except:
+            except Exception as e:
+                print(f"[WARN] Failed to read CSV: {e}")
                 timestamp, temp, freq = '', 'N/A', 'N/A'
                 screen_info = get_screen_info()
 
@@ -155,9 +187,17 @@ def run():
 
     timestamp = sys.argv[1]
     CSV_FILE = f"/home/soaktest/run_results/cpu_temp_log_{timestamp}.csv"
+    cpu_type = detect_cpu_type()
+    print(f"[INFO] Detected CPU type: {cpu_type}")
 
-    threading.Thread(target=background_logger, args=(CSV_FILE,), daemon=True).start()
-    HTTPServer(('', 8000), TempHandler).serve_forever()
+    threading.Thread(target=background_logger, args=(CSV_FILE, cpu_type), daemon=True).start()
+    server = HTTPServer(('', 8000), TempHandler)
+    print(f"[INFO] Server started at http://localhost:8000")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("[INFO] Server shutting down")
+        server.server_close()
 
 if __name__ == '__main__':
     run()
