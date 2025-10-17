@@ -33,8 +33,9 @@ type PlayerStatus struct {
 	Items          *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
 	Ok             bool                        `json:"ok,omitempty"`
 	Error          *string                     `json:"error,omitempty"`
-	DeviceSettings struct {
-		Scaling string `json:"scaling,omitempty"`
+	DeviceSettings *struct {
+		Scaling     *string `json:"scaling,omitempty"`
+		Orientation *string `json:"orientation,omitempty"`
 	} `json:"deviceSettings,omitempty"`
 }
 
