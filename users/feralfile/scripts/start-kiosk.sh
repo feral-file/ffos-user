@@ -17,7 +17,6 @@ exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && 
     --ozone-platform=wayland \
     --enable-features=UseOzonePlatform \
     --remote-debugging-port=9222 \
-    --show-fps-counter \
     --no-first-run \
     --disable-sync \
     --disable-translate \
