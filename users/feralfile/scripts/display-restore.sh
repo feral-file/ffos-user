@@ -1,6 +1,6 @@
 #!/bin/bash
 
-STATE_FILE="/home/feralfile/.config/screen-orientation"
+STATE_FILE="/home/feralfile/.state/screen-orientation"
 
 get_rotation() {
     if [ -f "$STATE_FILE" ]; then

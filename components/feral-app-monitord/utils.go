@@ -52,7 +52,7 @@ func humanizeDuration(seconds int64) string {
 
 func closeFile(f *os.File) {
 	if err := f.Close(); err != nil {
-		logger.Error("Error closing file", zap.Error(err))
+		log.Error("Error closing file", zap.Error(err))
 	}
 }
 

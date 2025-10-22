@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/feral-file/ffos-user/components/feral-watchdog/logger"
 	"go.uber.org/zap"
 )
 
@@ -19,9 +20,14 @@ var (
 	config     *Config
 )
 
+type CDPConfig struct {
+	Endpoint string `json:"endpoint"`
+}
+
 // Config represents the configuration for the watchdog daemon
 type Config struct {
-	CDPEndpoint string `json:"cdp_endpoint"`
+	CDPConfig    *CDPConfig           `json:"cdp"`
+	SentryConfig *logger.SentryConfig `json:"sentry"`
 }
 
 // LoadConfig loads the configuration from a JSON file
@@ -44,7 +50,7 @@ func LoadConfig(logger *zap.Logger) (*Config, error) {
 	}
 
 	// Set default endpoint if not provided
-	if c.CDPEndpoint == "" {
+	if c.CDPConfig.Endpoint == "" {
 		return nil, fmt.Errorf("cdp_endpoint is not provided")
 	}
 

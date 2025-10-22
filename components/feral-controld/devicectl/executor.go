@@ -241,7 +241,7 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 
 	// Read current orientation from config file (this is what user perceives)
 	currentIndex := 0 // Default to normal
-	configPath := "/home/feralfile/.config/screen-orientation"
+	configPath := "/home/feralfile/.state/screen-orientation"
 	configData, err := e.os.ReadFile(configPath)
 	if err == nil && len(configData) > 0 {
 		savedRotation := strings.TrimSpace(string(configData))
