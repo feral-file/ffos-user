@@ -2,9 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-
-	"go.uber.org/zap"
 )
 
 func humanizeDuration(seconds int64) string {
@@ -48,12 +45,6 @@ func humanizeDuration(seconds int64) string {
 	}
 
 	return result
-}
-
-func closeFile(f *os.File) {
-	if err := f.Close(); err != nil {
-		log.Error("Error closing file", zap.Error(err))
-	}
 }
 
 func safeDivide(a, b float64) float64 {

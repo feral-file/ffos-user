@@ -331,4 +331,3 @@ func InjectLoggerManagerForTesting(lm LoggerManager) {
 func ResetForTesting() {
 	globalLoggerManager = NewLoggerManager()
 }
-

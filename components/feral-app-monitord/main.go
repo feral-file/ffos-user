@@ -8,8 +8,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/ffos-user/components/feral-app-monitord/logger"
+
+	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
 	dbus_v5 "github.com/godbus/dbus/v5"
 	"go.uber.org/zap"

@@ -726,4 +726,3 @@ func TestLoggerManager_InjectionAndReset(t *testing.T) {
 	assert.NotNil(t, result2)
 	assert.NotEqual(t, ts.testLogger, result2) // Should be different from mocked logger
 }
-
