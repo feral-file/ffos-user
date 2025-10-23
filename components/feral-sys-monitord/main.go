@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"os/signal"
@@ -65,6 +66,36 @@ func main() {
 	defer func() {
 		_ = log.Sync()
 	}()
+
+	// Test Sentry integration - intentionally trigger errors for testing
+	log.Info("Testing Sentry integration...")
+
+	// Test warning level
+	log.Warn("This is a test warning for Sentry",
+		zap.String("component", "feral-sys-monitord"),
+		zap.String("test", "sentry-integration"))
+
+	// Test error level
+	log.Error("This is a test error for Sentry",
+		zap.Error(errors.New("intentional test error")),
+		zap.String("component", "feral-sys-monitord"),
+		zap.String("test", "sentry-integration"))
+
+	// Test panic recovery
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("Recovered from panic",
+				zap.Any("panic", r),
+				zap.String("component", "feral-sys-monitord"),
+				zap.String("test", "sentry-integration"))
+		}
+	}()
+
+	// Trigger a panic for testing
+	if config.SysMonitordConfig.SentryConfig.IsEnabled() {
+		log.Info("Triggering test panic for Sentry testing...")
+		panic("intentional test panic for Sentry integration testing")
+	}
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

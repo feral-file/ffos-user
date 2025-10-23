@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"os/signal"
@@ -74,6 +75,36 @@ func main() {
 	defer func() {
 		_ = finalLogger.Sync()
 	}()
+
+	// Test Sentry integration - intentionally trigger errors for testing
+	finalLogger.Info("Testing Sentry integration...")
+
+	// Test warning level
+	finalLogger.Warn("This is a test warning for Sentry",
+		zap.String("component", "feral-watchdog"),
+		zap.String("test", "sentry-integration"))
+
+	// Test error level
+	finalLogger.Error("This is a test error for Sentry",
+		zap.Error(errors.New("intentional test error")),
+		zap.String("component", "feral-watchdog"),
+		zap.String("test", "sentry-integration"))
+
+	// Test panic recovery
+	defer func() {
+		if r := recover(); r != nil {
+			finalLogger.Error("Recovered from panic",
+				zap.Any("panic", r),
+				zap.String("component", "feral-watchdog"),
+				zap.String("test", "sentry-integration"))
+		}
+	}()
+
+	// Trigger a panic for testing
+	if config.SentryConfig.IsEnabled() {
+		finalLogger.Info("Triggering test panic for Sentry testing...")
+		panic("intentional test panic for Sentry integration testing")
+	}
 
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
