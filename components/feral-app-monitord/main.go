@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,6 +35,7 @@ func main() {
 	c, cancel := context.WithCancel(context.Background())
 	ctx = c
 	defer cancel()
+	fmt.Println("TESTSTST:")
 
 	// Initialize logger with debug enabled for development
 	basicLogger, err := logger.New(debug)

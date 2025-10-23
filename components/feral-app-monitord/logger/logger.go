@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,8 @@ func NewSentryCore(core zapcore.Core, sentryConfig *SentryConfig) *SentryCore {
 // Write intercepts log entries and sends them to Sentry based on level
 func (s *SentryCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
 	// First write to the original core
+	fmt.Println("Fields:", s.FieldsToMap(fields))
+	fmt.Println("ErrorField:", s.FindErrorField(fields))
 	if err := s.Core.Write(entry, fields); err != nil {
 		return err
 	}
