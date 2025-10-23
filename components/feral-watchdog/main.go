@@ -40,13 +40,6 @@ func main() {
 		_ = basicLogger.Sync()
 	}()
 
-	// Initialize Sentry if needed
-	err = logger.InitSentry(config.SentryConfig)
-	if err != nil {
-		basicLogger.Error("Failed to initialize Sentry", zap.Error(err))
-		// Don't fail the application if Sentry initialization fails
-	}
-
 	basicLogger.Info("Starting feral-watchdog daemon")
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -60,6 +53,10 @@ func main() {
 
 	var finalLogger *zap.Logger
 	if config.SentryConfig.IsEnabled() {
+		err = logger.InitSentry(config.SentryConfig)
+		if err != nil {
+			basicLogger.Error("Failed to initialize Sentry", zap.Error(err))
+		}
 		finalLogger, err = logger.NewWithSentry(debug, config.SentryConfig)
 		if err != nil {
 			basicLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))

@@ -50,7 +50,7 @@ func LoadConfig(logger *zap.Logger) (*Config, error) {
 	}
 
 	// Set default endpoint if not provided
-	if c.CDPConfig.Endpoint == "" {
+	if c.CDPConfig == nil || c.CDPConfig.Endpoint == "" {
 		return nil, fmt.Errorf("cdp_endpoint is not provided")
 	}
 

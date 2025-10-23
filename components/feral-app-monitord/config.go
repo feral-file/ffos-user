@@ -38,6 +38,7 @@ type Config struct {
 
 // LoadConfig reads and parses the JSON configuration file from the given path.
 func LoadConfig() error {
+	config = &Config{}
 	data, err := os.ReadFile(ff1ConfigFile)
 	if err != nil {
 		return fmt.Errorf("failed to open config file %s: %w", ff1ConfigFile, err)

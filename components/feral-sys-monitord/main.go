@@ -45,6 +45,10 @@ func main() {
 	log.Info("Configuration loaded successfully.")
 
 	if config.SysMonitordConfig.SentryConfig.IsEnabled() {
+		err = logger.InitSentry(config.SysMonitordConfig.SentryConfig)
+		if err != nil {
+			basicLogger.Error("Failed to initialize Sentry", zap.Error(err))
+		}
 		finalLogger, err := logger.NewWithSentry(debug, config.SysMonitordConfig.SentryConfig)
 		if err != nil {
 			log.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))

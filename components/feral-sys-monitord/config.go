@@ -28,6 +28,7 @@ type Config struct {
 
 // LoadConfig reads and parses the JSON configuration file from the given path.
 func LoadConfig() error {
+	config = &Config{}
 	// Try to read the app monitord config file
 	data, err := os.ReadFile(sysMonitordConfigFile)
 	if err != nil {
