@@ -11,6 +11,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-sys-monitord/logger"
 	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
+	"github.com/getsentry/sentry-go"
 
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
@@ -30,14 +31,13 @@ func main() {
 	flag.Parse()
 
 	// Initialize logger with debug enabled for development
-	basicLogger, err := logger.New(debug)
+	log, err := logger.New(debug)
 	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 	defer func() {
-		_ = basicLogger.Sync()
+		_ = log.Sync()
 	}()
-	log := basicLogger
 
 	if err := LoadConfig(); err != nil {
 		log.Error("Failed to load config.", zap.Error(err))
@@ -45,12 +45,23 @@ func main() {
 	}
 	log.Info("Configuration loaded successfully.")
 
+	// Initialize Sentry if configured
 	if config.SysMonitordConfig.SentryConfig.IsEnabled() {
-		err = logger.InitSentry(config.SysMonitordConfig.SentryConfig)
+		sc, err := sentry.NewClient(sentry.ClientOptions{
+			Dsn:              config.SysMonitordConfig.SentryConfig.DSN,
+			Debug:            config.SysMonitordConfig.SentryConfig.GetDebug(),
+			SampleRate:       config.SysMonitordConfig.SentryConfig.GetSampleRate(),
+			Environment:      config.SysMonitordConfig.SentryConfig.Environment,
+			Release:          config.SysMonitordConfig.SentryConfig.Release,
+			SendDefaultPII:   true,
+			AttachStacktrace: true,
+		})
 		if err != nil {
-			basicLogger.Error("Failed to initialize Sentry", zap.Error(err))
+			log.Error("Failed to init sentry.NewClient.", zap.Error(err))
+			return
 		}
-		finalLogger, err := logger.NewWithSentry(debug, config.SysMonitordConfig.SentryConfig)
+		defer sc.Flush(2 * time.Second)
+		finalLogger, err := logger.AddSentry(log, sc)
 		if err != nil {
 			log.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
 		} else {
@@ -63,9 +74,6 @@ func main() {
 	} else {
 		log.Info("Sentry not configured, using basic logger")
 	}
-	defer func() {
-		_ = log.Sync()
-	}()
 
 	// Test Sentry integration - intentionally trigger errors for testing
 	log.Info("Testing Sentry integration...")

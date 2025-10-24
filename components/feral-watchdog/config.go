@@ -32,13 +32,13 @@ type Config struct {
 }
 
 // LoadConfig loads the configuration from a JSON file
-func LoadConfig(logger *zap.Logger) (*Config, error) {
+func LoadConfig(logger *zap.Logger) error {
 	logger.Info("Loading config", zap.String("file", CONFIG_FILE))
 
 	// Try to read the file
 	data, err := os.ReadFile(CONFIG_FILE)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	// Lock during unmarshaling to prevent concurrent access
@@ -47,14 +47,14 @@ func LoadConfig(logger *zap.Logger) (*Config, error) {
 
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+		return fmt.Errorf("failed to parse config file: %w", err)
 	}
 
 	// Set default endpoint if not provided
 	if c.CDPConfig == nil || c.CDPConfig.Endpoint == "" {
-		return nil, fmt.Errorf("cdp_endpoint is not provided")
+		return fmt.Errorf("cdp_endpoint is not provided")
 	}
 
 	config = &c
-	return config, nil
+	return nil
 }

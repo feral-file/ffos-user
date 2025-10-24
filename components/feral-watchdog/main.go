@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/feral-file/godbus"
+	"github.com/getsentry/sentry-go"
 	"github.com/godbus/dbus/v5"
 	"go.uber.org/zap"
 
@@ -32,60 +33,64 @@ func main() {
 	flag.BoolVar(&debug, "debug", false, "Enable debug mode")
 	flag.Parse()
 
-	// Initialize logger
-	basicLogger, err := logger.New(debug)
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Initialize logger with debug enabled for development
+	log, err := logger.New(debug)
 	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 	defer func() {
-		_ = basicLogger.Sync()
+		_ = log.Sync()
 	}()
 
-	basicLogger.Info("Starting feral-watchdog daemon")
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Load configuration
-	config, err := LoadConfig(basicLogger)
-	if err != nil {
-		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
+	if err := LoadConfig(log); err != nil {
+		log.Error("Failed to load config.", zap.Error(err))
+		return
 	}
+	log.Info("Configuration loaded successfully.")
 
-	var finalLogger *zap.Logger
+	// Initialize Sentry if configured
 	if config.SentryConfig.IsEnabled() {
-		err = logger.InitSentry(config.SentryConfig)
+		sc, err := sentry.NewClient(sentry.ClientOptions{
+			Dsn:              config.SentryConfig.DSN,
+			Debug:            config.SentryConfig.GetDebug(),
+			SampleRate:       config.SentryConfig.GetSampleRate(),
+			Environment:      config.SentryConfig.Environment,
+			Release:          config.SentryConfig.Release,
+			SendDefaultPII:   true,
+			AttachStacktrace: true,
+		})
 		if err != nil {
-			basicLogger.Error("Failed to initialize Sentry", zap.Error(err))
+			log.Error("Failed to init sentry.NewClient.", zap.Error(err))
+			return
 		}
-		finalLogger, err = logger.NewWithSentry(debug, config.SentryConfig)
+		defer sc.Flush(2 * time.Second)
+		finalLogger, err := logger.AddSentry(log, sc)
 		if err != nil {
-			basicLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
-			finalLogger = basicLogger
+			log.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
 		} else {
-			finalLogger.Info("Sentry initialized successfully",
+			log = finalLogger
+			log.Info("Sentry initialized successfully",
 				zap.String("environment", config.SentryConfig.Environment),
 				zap.String("release", config.SentryConfig.Release))
 			defer logger.FlushSentry(2 * time.Second)
 		}
 	} else {
-		finalLogger = basicLogger
-		finalLogger.Info("Sentry not configured, using basic logger")
+		log.Info("Sentry not configured, using basic logger")
 	}
-	defer func() {
-		_ = finalLogger.Sync()
-	}()
 
 	// Test Sentry integration - intentionally trigger errors for testing
-	finalLogger.Info("Testing Sentry integration...")
+	log.Info("Testing Sentry integration...")
 
 	// Test warning level
-	finalLogger.Warn("This is a test warning for Sentry",
+	log.Warn("This is a test warning for Sentry",
 		zap.String("component", "feral-watchdog"),
 		zap.String("test", "sentry-integration"))
 
 	// Test error level
-	finalLogger.Error("This is a test error for Sentry",
+	log.Error("This is a test error for Sentry",
 		zap.Error(errors.New("intentional test error")),
 		zap.String("component", "feral-watchdog"),
 		zap.String("test", "sentry-integration"))
@@ -93,7 +98,7 @@ func main() {
 	// Test panic recovery
 	defer func() {
 		if r := recover(); r != nil {
-			finalLogger.Error("Recovered from panic",
+			log.Error("Recovered from panic",
 				zap.Any("panic", r),
 				zap.String("component", "feral-watchdog"),
 				zap.String("test", "sentry-integration"))
@@ -102,7 +107,7 @@ func main() {
 
 	// Trigger a panic for testing
 	if config.SentryConfig.IsEnabled() {
-		finalLogger.Info("Triggering test panic for Sentry testing...")
+		log.Info("Triggering test panic for Sentry testing...")
 		panic("intentional test panic for Sentry integration testing")
 	}
 
@@ -111,42 +116,42 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		finalLogger.Info("Received signal, initiating shutdown...",
+		log.Info("Received signal, initiating shutdown...",
 			zap.String("signal", sig.String()))
 		cancel()
 	}()
 
 	// Initialize DBus client
 	mo := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile/sysmonitord"))
-	dbusClient := godbus.NewDBusClient(ctx, finalLogger, DBUS_NAME, mo)
+	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME, mo)
 	err = dbusClient.Start()
 	if err != nil {
-		finalLogger.Fatal("DBus init failed", zap.Error(err))
+		log.Fatal("DBus init failed", zap.Error(err))
 	}
 	defer func() {
 		_ = dbusClient.Stop()
 	}()
 
 	// Initialize system command executor
-	commandHandler := NewCommandHandler(finalLogger)
+	commandHandler := NewCommandHandler(log)
 
 	// Initialize CDP client
-	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, finalLogger)
+	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, log)
 	err = cdpClient.Init(ctx)
 	if err != nil {
-		finalLogger.Fatal("CDP init failed", zap.Error(err))
+		log.Fatal("CDP init failed", zap.Error(err))
 	}
 	defer cdpClient.Close()
 
 	// Initialize resource monitors
-	ramHandler := NewMemoryHandler(finalLogger, commandHandler)
-	diskHandler := NewDiskHandler(finalLogger, commandHandler)
-	gpuHandler := NewGPUHandler(finalLogger, commandHandler)
-	cpuHandler := NewCPUHandler(finalLogger, cdpClient)
+	ramHandler := NewMemoryHandler(log, commandHandler)
+	diskHandler := NewDiskHandler(log, commandHandler)
+	gpuHandler := NewGPUHandler(log, commandHandler)
+	cpuHandler := NewCPUHandler(log, cdpClient)
 	defer gpuHandler.GracefulShutdown(ctx)
 
 	// Initialize mediator
-	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, finalLogger)
+	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, log)
 	mediator.Start()
 	defer mediator.Stop()
 
@@ -154,7 +159,7 @@ func main() {
 	var wg sync.WaitGroup
 
 	// Start systemd watchdog
-	systemdWatchdog := NewSystemdWatchdog(finalLogger)
+	systemdWatchdog := NewSystemdWatchdog(log)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -162,7 +167,7 @@ func main() {
 	}()
 
 	// Start Chromium monitor
-	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, finalLogger, commandHandler)
+	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
 	defer chromiumMonitor.Stop()
 	wg.Add(1)
 	go func() {
@@ -171,7 +176,7 @@ func main() {
 	}()
 
 	// Start Systemd monitor
-	systemdMonitor := NewSystemdMonitor(cdpClient, finalLogger, commandHandler)
+	systemdMonitor := NewSystemdMonitor(cdpClient, log, commandHandler)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -180,12 +185,12 @@ func main() {
 
 	// Notify systemd that we're ready
 	if err := systemdWatchdog.NotifyReady(); err != nil {
-		finalLogger.Warn("Failed to notify systemd, but continuing", zap.Error(err))
+		log.Warn("Failed to notify systemd, but continuing", zap.Error(err))
 	}
 
 	// Block until context is done (cancel is called)
 	<-ctx.Done()
-	finalLogger.Info("Shutdown signal received, cleaning up...")
+	log.Info("Shutdown signal received, cleaning up...")
 
 	// Wait for all goroutines to finish (with timeout)
 	waitCh := make(chan struct{})
@@ -196,10 +201,10 @@ func main() {
 
 	select {
 	case <-waitCh:
-		finalLogger.Info("All goroutines have terminated cleanly")
+		log.Info("All goroutines have terminated cleanly")
 	case <-time.After(GOROUTINE_TIMEOUT):
-		finalLogger.Warn("Some goroutines did not terminate in time")
+		log.Warn("Some goroutines did not terminate in time")
 	}
 
-	finalLogger.Info("feral-watchdog daemon shutdown complete")
+	log.Info("feral-watchdog daemon shutdown complete")
 }

@@ -5,6 +5,7 @@ go 1.23.5
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
+	github.com/feral-file/zapsentry v1.0.0
 	github.com/getsentry/sentry-go v0.33.0
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
