@@ -7,13 +7,12 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-app-monitord/logger"
 	"github.com/feral-file/ffos-user/components/feral-app-monitord/mocks"
+	"github.com/getsentry/sentry-go"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 type testSetup struct {
@@ -43,102 +42,92 @@ func (ts *testSetup) teardown() {
 	ts.ctrl.Finish()
 }
 
-// Test SentryCore functionality
-func TestSentryCore_Write(t *testing.T) {
-	// Create an observed core to capture logs
-	observedCore, logs := observer.New(zapcore.InfoLevel)
-
-	// Create a mock Sentry config (disabled)
-	sentryConfig := &logger.SentryConfig{
-		DSN: "", // Empty DSN means disabled
-	}
-
-	// Create Sentry core with the observed core
-	sentryCore := logger.NewSentryCore(observedCore, sentryConfig)
-
-	// Create logger with the Sentry core
-	testLogger := zap.New(sentryCore)
-
-	// Test different log levels
-	testLogger.Info("This is an info message", zap.String("key", "value"))
-	testLogger.Warn("This is a warning message", zap.Int("number", 42))
-	testLogger.Error("This is an error message", zap.Error(errors.New("test error")))
-
-	// Verify logs were written to the observed core
-	entries := logs.All()
-	assert.Len(t, entries, 3, "Expected 3 log entries")
-
-	// Verify log levels
-	expectedLevels := []zapcore.Level{zapcore.InfoLevel, zapcore.WarnLevel, zapcore.ErrorLevel}
-	for i, entry := range entries {
-		assert.Equal(t, expectedLevels[i], entry.Level, "Log level mismatch at index %d", i)
-	}
-}
-
-func TestSentryCore_FieldsToMap(t *testing.T) {
-	sentryCore := &logger.SentryCore{}
-
-	fields := []zapcore.Field{
-		zap.String("string_field", "test"),
-		zap.Int("int_field", 123),
-		zap.Bool("bool_field", true),
-		zap.Duration("duration_field", time.Second),
-		zap.Error(errors.New("test error")),
-	}
-
-	result := sentryCore.FieldsToMap(fields)
-
-	// Verify all field types are converted correctly
-	assert.Equal(t, "test", result["string_field"])
-	assert.Equal(t, int64(123), result["int_field"])
-	assert.Equal(t, true, result["bool_field"])
-	assert.Equal(t, "1s", result["duration_field"])
-	assert.Equal(t, "test error", result["error"])
-}
-
-func TestSentryCore_FindErrorField(t *testing.T) {
+// Test SentryConfig methods
+func TestSentryConfig_Methods(t *testing.T) {
 	tests := []struct {
-		name        string
-		fields      []zapcore.Field
-		expectError bool
-		errorMsg    string
+		name     string
+		config   *logger.SentryConfig
+		testFunc func(*logger.SentryConfig) interface{}
+		expected interface{}
 	}{
 		{
-			name: "error field found",
-			fields: []zapcore.Field{
-				zap.String("string_field", "test"),
-				zap.Error(errors.New("test error")),
-				zap.Int("int_field", 123),
-			},
-			expectError: true,
-			errorMsg:    "test error",
+			name:     "GetDebug with true",
+			config:   &logger.SentryConfig{Debug: "true"},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
+			expected: true,
 		},
 		{
-			name: "no error field",
-			fields: []zapcore.Field{
-				zap.String("string_field", "test"),
-				zap.Int("int_field", 123),
-			},
-			expectError: false,
+			name:     "GetDebug with false",
+			config:   &logger.SentryConfig{Debug: "false"},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
+			expected: false,
 		},
 		{
-			name:        "empty fields",
-			fields:      []zapcore.Field{},
-			expectError: false,
+			name:     "GetDebug with empty string",
+			config:   &logger.SentryConfig{Debug: ""},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
+			expected: false,
+		},
+		{
+			name:     "GetDebug with invalid value",
+			config:   &logger.SentryConfig{Debug: "invalid"},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
+			expected: false,
+		},
+		{
+			name:     "GetDebug with TRUE (case insensitive)",
+			config:   &logger.SentryConfig{Debug: "TRUE"},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
+			expected: true,
+		},
+		{
+			name:     "GetSampleRate with valid value",
+			config:   &logger.SentryConfig{SampleRate: "0.5"},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetSampleRate() },
+			expected: 0.5,
+		},
+		{
+			name:     "GetSampleRate with empty string",
+			config:   &logger.SentryConfig{SampleRate: ""},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetSampleRate() },
+			expected: 1.0,
+		},
+		{
+			name:     "GetSampleRate with invalid value",
+			config:   &logger.SentryConfig{SampleRate: "invalid"},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetSampleRate() },
+			expected: 1.0,
+		},
+		{
+			name:     "IsEnabled with valid DSN",
+			config:   &logger.SentryConfig{DSN: "https://test@sentry.io/123"},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
+			expected: true,
+		},
+		{
+			name:     "IsEnabled with empty DSN",
+			config:   &logger.SentryConfig{DSN: ""},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
+			expected: false,
+		},
+		{
+			name:     "IsEnabled with whitespace DSN",
+			config:   &logger.SentryConfig{DSN: "   "},
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
+			expected: false,
+		},
+		{
+			name:     "IsEnabled with nil config",
+			config:   nil,
+			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
+			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sentryCore := &logger.SentryCore{}
-			foundError := sentryCore.FindErrorField(tt.fields)
-
-			if tt.expectError {
-				assert.NotNil(t, foundError, "Expected to find an error field")
-				assert.Equal(t, tt.errorMsg, foundError.Error())
-			} else {
-				assert.Nil(t, foundError, "Expected no error field")
-			}
+			result := tt.testFunc(tt.config)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
@@ -161,31 +150,6 @@ func TestLoggerManager_RealImplementation(t *testing.T) {
 				return ts.realManager.New(false)
 			},
 		},
-		{
-			name: "NewDefault",
-			setupFunc: func(ts *testSetup) (*zap.Logger, error) {
-				return ts.realManager.NewDefault()
-			},
-		},
-		{
-			name: "NewWithSentry disabled",
-			setupFunc: func(ts *testSetup) (*zap.Logger, error) {
-				sentryConfig := &logger.SentryConfig{DSN: ""}
-				return ts.realManager.NewWithSentry(true, sentryConfig)
-			},
-		},
-		{
-			name: "NewWithSentry with config",
-			setupFunc: func(ts *testSetup) (*zap.Logger, error) {
-				sentryConfig := &logger.SentryConfig{
-					DSN:         "https://test@sentry.io/123",
-					Environment: "test",
-					Debug:       "false",
-					SampleRate:  "0.5",
-				}
-				return ts.realManager.NewWithSentry(false, sentryConfig)
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -200,56 +164,34 @@ func TestLoggerManager_RealImplementation(t *testing.T) {
 	}
 }
 
-func TestLoggerManager_SentryOperations(t *testing.T) {
-	tests := []struct {
-		name      string
-		setupFunc func(*testSetup) error
-	}{
-		{
-			name: "InitSentry with disabled config",
-			setupFunc: func(ts *testSetup) error {
-				sentryConfig := &logger.SentryConfig{DSN: ""}
-				return ts.realManager.InitSentry(sentryConfig)
-			},
-		},
-		{
-			name: "InitSentry with nil config",
-			setupFunc: func(ts *testSetup) error {
-				return ts.realManager.InitSentry(nil)
-			},
-		},
-		{
-			name: "SetGlobalTag with valid values",
-			setupFunc: func(ts *testSetup) error {
-				ts.realManager.SetGlobalTag("key", "value")
-				return nil
-			},
-		},
-		{
-			name: "SetGlobalTag with empty key",
-			setupFunc: func(ts *testSetup) error {
-				ts.realManager.SetGlobalTag("", "value")
-				return nil
-			},
-		},
-		{
-			name: "FlushSentry",
-			setupFunc: func(ts *testSetup) error {
-				ts.realManager.FlushSentry(1 * time.Second)
-				return nil
-			},
-		},
-	}
+// Test AddSentry functionality
+func TestLoggerManager_AddSentry(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ts := setup(t)
-			defer ts.teardown()
+	// Create a test logger
+	testLogger, err := ts.realManager.New(false)
+	assert.NoError(t, err)
+	assert.NotNil(t, testLogger)
 
-			err := tt.setupFunc(ts)
-			assert.NoError(t, err)
-		})
-	}
+	// Create a mock Sentry client
+	sentryClient := &sentry.Client{}
+
+	// Test AddSentry
+	enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryClient)
+	assert.NoError(t, err)
+	assert.NotNil(t, enhancedLogger)
+	assert.NotEqual(t, testLogger, enhancedLogger) // Should be a different logger instance
+}
+
+// Test FlushSentry functionality
+func TestLoggerManager_FlushSentry(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Test FlushSentry - should not panic
+	ts.realManager.FlushSentry(1 * time.Second)
+	ts.realManager.FlushSentry(0) // Test with zero timeout
 }
 
 // Test package-level functions (backward compatibility)
@@ -259,7 +201,7 @@ func TestPackageLevelFunctions_RealImplementation(t *testing.T) {
 		setupFunc func() error
 	}{
 		{
-			name: "New function",
+			name: "New function with debug",
 			setupFunc: func() error {
 				l, err := logger.New(true)
 				if err != nil {
@@ -272,9 +214,9 @@ func TestPackageLevelFunctions_RealImplementation(t *testing.T) {
 			},
 		},
 		{
-			name: "NewDefault function",
+			name: "New function with production",
 			setupFunc: func() error {
-				l, err := logger.NewDefault()
+				l, err := logger.New(false)
 				if err != nil {
 					return err
 				}
@@ -285,30 +227,20 @@ func TestPackageLevelFunctions_RealImplementation(t *testing.T) {
 			},
 		},
 		{
-			name: "NewWithSentry function",
+			name: "AddSentry function",
 			setupFunc: func() error {
-				sentryConfig := &logger.SentryConfig{DSN: ""}
-				l, err := logger.NewWithSentry(true, sentryConfig)
+				l, err := logger.New(false)
 				if err != nil {
 					return err
 				}
-				if l == nil {
-					return errors.New("logger is nil")
+				sentryClient := &sentry.Client{}
+				enhancedLogger, err := logger.AddSentry(l, sentryClient)
+				if err != nil {
+					return err
 				}
-				return nil
-			},
-		},
-		{
-			name: "InitSentry function",
-			setupFunc: func() error {
-				sentryConfig := &logger.SentryConfig{DSN: ""}
-				return logger.InitSentry(sentryConfig)
-			},
-		},
-		{
-			name: "SetGlobalTag function",
-			setupFunc: func() error {
-				logger.SetGlobalTag("test-key", "test-value")
+				if enhancedLogger == nil {
+					return errors.New("enhanced logger is nil")
+				}
 				return nil
 			},
 		},
@@ -359,15 +291,15 @@ func TestLoggerManager_Mocking_Success(t *testing.T) {
 			},
 		},
 		{
-			name: "Mock NewDefault function",
+			name: "Mock New function with production mode",
 			setupFunc: func(ts *testSetup) {
 				ts.mockLoggerManager.EXPECT().
-					NewDefault().
+					New(false).
 					Return(ts.testLogger, nil).
 					Times(1)
 			},
 			testFunc: func(ts *testSetup) error {
-				l, err := logger.NewDefault()
+				l, err := logger.New(false)
 				if err != nil {
 					return err
 				}
@@ -378,49 +310,23 @@ func TestLoggerManager_Mocking_Success(t *testing.T) {
 			},
 		},
 		{
-			name: "Mock NewWithSentry function",
+			name: "Mock AddSentry function",
 			setupFunc: func(ts *testSetup) {
-				sentryConfig := &logger.SentryConfig{DSN: "test"}
+				sentryClient := &sentry.Client{}
 				ts.mockLoggerManager.EXPECT().
-					NewWithSentry(false, sentryConfig).
+					AddSentry(ts.testLogger, sentryClient).
 					Return(ts.testLogger, nil).
 					Times(1)
 			},
 			testFunc: func(ts *testSetup) error {
-				sentryConfig := &logger.SentryConfig{DSN: "test"}
-				l, err := logger.NewWithSentry(false, sentryConfig)
+				sentryClient := &sentry.Client{}
+				enhancedLogger, err := logger.AddSentry(ts.testLogger, sentryClient)
 				if err != nil {
 					return err
 				}
-				if l != ts.testLogger {
-					return errors.New("expected mocked logger")
+				if enhancedLogger != ts.testLogger {
+					return errors.New("expected mocked enhanced logger")
 				}
-				return nil
-			},
-		},
-		{
-			name: "Mock InitSentry function",
-			setupFunc: func(ts *testSetup) {
-				sentryConfig := &logger.SentryConfig{DSN: "test"}
-				ts.mockLoggerManager.EXPECT().
-					InitSentry(sentryConfig).
-					Return(nil).
-					Times(1)
-			},
-			testFunc: func(ts *testSetup) error {
-				sentryConfig := &logger.SentryConfig{DSN: "test"}
-				return logger.InitSentry(sentryConfig)
-			},
-		},
-		{
-			name: "Mock SetGlobalTag function",
-			setupFunc: func(ts *testSetup) {
-				ts.mockLoggerManager.EXPECT().
-					SetGlobalTag("test-key", "test-value").
-					Times(1)
-			},
-			testFunc: func(ts *testSetup) error {
-				logger.SetGlobalTag("test-key", "test-value")
 				return nil
 			},
 		},
@@ -484,61 +390,26 @@ func TestLoggerManager_Mocking_Errors(t *testing.T) {
 			wantErr: "logger creation failed",
 		},
 		{
-			name: "NewDefault function returns error",
+			name: "AddSentry function returns error",
 			setupFunc: func(ts *testSetup) {
+				sentryClient := &sentry.Client{}
 				ts.mockLoggerManager.EXPECT().
-					NewDefault().
-					Return(nil, errors.New("default logger failed")).
+					AddSentry(ts.testLogger, sentryClient).
+					Return(nil, errors.New("sentry integration failed")).
 					Times(1)
 			},
 			testFunc: func(ts *testSetup) error {
-				l, err := logger.NewDefault()
+				sentryClient := &sentry.Client{}
+				enhancedLogger, err := logger.AddSentry(ts.testLogger, sentryClient)
 				if err == nil {
 					return errors.New("expected error")
 				}
-				if l != nil {
-					return errors.New("expected nil logger")
+				if enhancedLogger != nil {
+					return errors.New("expected nil enhanced logger")
 				}
 				return err
 			},
-			wantErr: "default logger failed",
-		},
-		{
-			name: "NewWithSentry function returns error",
-			setupFunc: func(ts *testSetup) {
-				sentryConfig := &logger.SentryConfig{DSN: "invalid"}
-				ts.mockLoggerManager.EXPECT().
-					NewWithSentry(true, sentryConfig).
-					Return(nil, errors.New("sentry logger failed")).
-					Times(1)
-			},
-			testFunc: func(ts *testSetup) error {
-				sentryConfig := &logger.SentryConfig{DSN: "invalid"}
-				l, err := logger.NewWithSentry(true, sentryConfig)
-				if err == nil {
-					return errors.New("expected error")
-				}
-				if l != nil {
-					return errors.New("expected nil logger")
-				}
-				return err
-			},
-			wantErr: "sentry logger failed",
-		},
-		{
-			name: "InitSentry function returns error",
-			setupFunc: func(ts *testSetup) {
-				sentryConfig := &logger.SentryConfig{DSN: "invalid"}
-				ts.mockLoggerManager.EXPECT().
-					InitSentry(sentryConfig).
-					Return(errors.New("sentry init failed")).
-					Times(1)
-			},
-			testFunc: func(ts *testSetup) error {
-				sentryConfig := &logger.SentryConfig{DSN: "invalid"}
-				return logger.InitSentry(sentryConfig)
-			},
-			wantErr: "sentry init failed",
+			wantErr: "sentry integration failed",
 		},
 	}
 
@@ -589,19 +460,23 @@ func TestLoggerManager_ConcurrentAccess(t *testing.T) {
 		}
 	})
 
-	t.Run("concurrent Sentry operations", func(t *testing.T) {
+	t.Run("concurrent AddSentry operations", func(t *testing.T) {
+		// Create a base logger first
+		baseLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, baseLogger)
+
 		done := make(chan bool, numGoroutines)
 
 		for i := range numGoroutines {
 			go func(id int) {
-				// Test different operations concurrently
-				switch id % 3 {
-				case 0:
-					ts.realManager.SetGlobalTag("concurrent-key", "concurrent-value")
-				case 1:
-					ts.realManager.FlushSentry(1 * time.Millisecond)
-				case 2:
-					_ = ts.realManager.InitSentry(&logger.SentryConfig{DSN: ""})
+				sentryClient := &sentry.Client{}
+				enhancedLogger, err := ts.realManager.AddSentry(baseLogger, sentryClient)
+				if err != nil {
+					t.Errorf("AddSentry failed: %v", err)
+				}
+				if enhancedLogger == nil {
+					t.Error("Enhanced logger is nil")
 				}
 				done <- true
 			}(i)
@@ -612,90 +487,22 @@ func TestLoggerManager_ConcurrentAccess(t *testing.T) {
 			<-done
 		}
 	})
-}
 
-// Test SentryConfig methods
-func TestSentryConfig_Methods(t *testing.T) {
-	tests := []struct {
-		name     string
-		config   *logger.SentryConfig
-		testFunc func(*logger.SentryConfig) interface{}
-		expected interface{}
-	}{
-		{
-			name:     "GetDebug with true",
-			config:   &logger.SentryConfig{Debug: "true"},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
-			expected: true,
-		},
-		{
-			name:     "GetDebug with false",
-			config:   &logger.SentryConfig{Debug: "false"},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
-			expected: false,
-		},
-		{
-			name:     "GetDebug with empty string",
-			config:   &logger.SentryConfig{Debug: ""},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
-			expected: false,
-		},
-		{
-			name:     "GetDebug with invalid value",
-			config:   &logger.SentryConfig{Debug: "invalid"},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetDebug() },
-			expected: false,
-		},
-		{
-			name:     "GetSampleRate with valid value",
-			config:   &logger.SentryConfig{SampleRate: "0.5"},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetSampleRate() },
-			expected: 0.5,
-		},
-		{
-			name:     "GetSampleRate with empty string",
-			config:   &logger.SentryConfig{SampleRate: ""},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetSampleRate() },
-			expected: 1.0,
-		},
-		{
-			name:     "GetSampleRate with invalid value",
-			config:   &logger.SentryConfig{SampleRate: "invalid"},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.GetSampleRate() },
-			expected: 1.0,
-		},
-		{
-			name:     "IsEnabled with valid DSN",
-			config:   &logger.SentryConfig{DSN: "https://test@sentry.io/123"},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
-			expected: true,
-		},
-		{
-			name:     "IsEnabled with empty DSN",
-			config:   &logger.SentryConfig{DSN: ""},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
-			expected: false,
-		},
-		{
-			name:     "IsEnabled with whitespace DSN",
-			config:   &logger.SentryConfig{DSN: "   "},
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
-			expected: false,
-		},
-		{
-			name:     "IsEnabled with nil config",
-			config:   nil,
-			testFunc: func(sc *logger.SentryConfig) interface{} { return sc.IsEnabled() },
-			expected: false,
-		},
-	}
+	t.Run("concurrent FlushSentry operations", func(t *testing.T) {
+		done := make(chan bool, numGoroutines)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := tt.testFunc(tt.config)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
+		for i := range numGoroutines {
+			go func(id int) {
+				ts.realManager.FlushSentry(time.Duration(id) * time.Millisecond)
+				done <- true
+			}(i)
+		}
+
+		// Wait for all goroutines to complete
+		for range numGoroutines {
+			<-done
+		}
+	})
 }
 
 // Test injection and reset functionality
@@ -725,4 +532,85 @@ func TestLoggerManager_InjectionAndReset(t *testing.T) {
 	assert.NoError(t, err2)
 	assert.NotNil(t, result2)
 	assert.NotEqual(t, ts.testLogger, result2) // Should be different from mocked logger
+}
+
+// Test logger configuration
+func TestLoggerManager_LoggerConfiguration(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	t.Run("debug logger configuration", func(t *testing.T) {
+		logger, err := ts.realManager.New(true)
+		assert.NoError(t, err)
+		assert.NotNil(t, logger)
+
+		// Test that debug logger works
+		logger.Info("Debug logger test")
+		logger.Debug("Debug message")
+		logger.Warn("Warning message")
+		logger.Error("Error message")
+	})
+
+	t.Run("production logger configuration", func(t *testing.T) {
+		logger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, logger)
+
+		// Test that production logger works
+		logger.Info("Production logger test")
+		logger.Warn("Warning message")
+		logger.Error("Error message")
+	})
+}
+
+// Test Sentry integration edge cases
+func TestLoggerManager_SentryIntegration_EdgeCases(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Test that AddSentry works with a valid sentry client
+	t.Run("AddSentry with valid sentry client", func(t *testing.T) {
+		logger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, logger)
+
+		sentryClient := &sentry.Client{}
+		enhancedLogger, err := ts.realManager.AddSentry(logger, sentryClient)
+		assert.NoError(t, err)
+		assert.NotNil(t, enhancedLogger)
+		assert.NotEqual(t, logger, enhancedLogger)
+	})
+}
+
+// Test multiple logger manager instances
+func TestLoggerManager_MultipleInstances(t *testing.T) {
+	// Create multiple instances
+	manager1 := logger.NewLoggerManager()
+	manager2 := logger.NewLoggerManager()
+
+	// Test that they are independent
+	logger1, err1 := manager1.New(true)
+	assert.NoError(t, err1)
+	assert.NotNil(t, logger1)
+
+	logger2, err2 := manager2.New(false)
+	assert.NoError(t, err2)
+	assert.NotNil(t, logger2)
+
+	// Test that they can be used concurrently
+	done := make(chan bool, 2)
+
+	go func() {
+		manager1.FlushSentry(1 * time.Second)
+		done <- true
+	}()
+
+	go func() {
+		manager2.FlushSentry(1 * time.Second)
+		done <- true
+	}()
+
+	// Wait for both to complete
+	<-done
+	<-done
 }

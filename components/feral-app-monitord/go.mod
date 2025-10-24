@@ -6,6 +6,7 @@ require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818091311-c9dee9df5ca2
 	github.com/feral-file/godbus v0.0.6-0.20250716043107-25b56328d11e
+	github.com/feral-file/zapsentry v1.0.0
 	github.com/getsentry/sentry-go v0.33.0
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0

@@ -9,6 +9,8 @@ github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818091
 github.com/feral-file/ffos-user/components/feral-sys-monitord v0.0.0-20250818091311-c9dee9df5ca2/go.mod h1:1rNUMWlKEuPynvggsSGaMLzx7sx+ZLbtfX5Vfp28TOc=
 github.com/feral-file/godbus v0.0.6-0.20250716043107-25b56328d11e h1:hI6GdD65NWy8i//KM7RDUbPw829nWLhCdzaBxLKp7fE=
 github.com/feral-file/godbus v0.0.6-0.20250716043107-25b56328d11e/go.mod h1:fJiQvR6JLa2TKwwzOoxKg+/qfjM2MeWxpjFhrleOEMA=
+github.com/feral-file/zapsentry v1.0.0 h1:2cX1SbJNpIc7ldagxauVrl+dyJZzrMMo6hEgQrZ6iF8=
+github.com/feral-file/zapsentry v1.0.0/go.mod h1:PxN+lF5aX/bj61QWX5Y/ckXLELgmHhU5p/PP5OWw+yk=
 github.com/getsentry/sentry-go v0.33.0 h1:YWyDii0KGVov3xOaamOnF0mjOrqSjBqwv48UEzn7QFg=
 github.com/getsentry/sentry-go v0.33.0/go.mod h1:C55omcY9ChRQIUcVcGcs+Zdy4ZpQGvNJ7JYHIoSWOtE=
 github.com/go-errors/errors v1.4.2 h1:J6MZopCL4uSllY1OfXM374weqZFFItUbrImctkmUxIA=
