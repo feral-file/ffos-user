@@ -9,6 +9,8 @@ github.com/display-protocol/dp1-validator v1.0.0 h1:xZ8JuFPDw/GcJZfPRZE+h/R7Tt7S
 github.com/display-protocol/dp1-validator v1.0.0/go.mod h1:Ov2nbtT3055Yb3sOHV2exmtOpkrTO0vHfpdHXdEUmDU=
 github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7 h1:/INaxTD9dwqT1BvY5aED+QIRs+jWER4TSiSfJFCg0OU=
 github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7/go.mod h1:fJiQvR6JLa2TKwwzOoxKg+/qfjM2MeWxpjFhrleOEMA=
+github.com/feral-file/zapsentry v1.0.0 h1:2cX1SbJNpIc7ldagxauVrl+dyJZzrMMo6hEgQrZ6iF8=
+github.com/feral-file/zapsentry v1.0.0/go.mod h1:PxN+lF5aX/bj61QWX5Y/ckXLELgmHhU5p/PP5OWw+yk=
 github.com/gabriel-vasile/mimetype v1.4.3 h1:in2uUcidCuFcDKtdcBxlR0rJ1+fsokWf+uqxgUFjbI0=
 github.com/gabriel-vasile/mimetype v1.4.3/go.mod h1:d8uq/6HKRL6CGdk+aubisF/M5GcPfT7nKyLpA0lbSSk=
 github.com/getsentry/sentry-go v0.33.0 h1:YWyDii0KGVov3xOaamOnF0mjOrqSjBqwv48UEzn7QFg=

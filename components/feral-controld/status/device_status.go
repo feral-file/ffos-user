@@ -65,7 +65,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		// Default to landscape
 		screenRotation = "landscape"
 
-		configPath := "/home/feralfile/.config/screen-orientation"
+		configPath := "/home/feralfile/.state/screen-orientation"
 		configData, err := d.os.ReadFile(configPath)
 		if err != nil {
 			return nil // Don't fail if config file doesn't exist
