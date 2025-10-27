@@ -144,7 +144,7 @@ func (m *defaultLoggerManager) SetGlobalTopicID(topicID string) {
 	m.loggerLock.Lock()
 	defer m.loggerLock.Unlock()
 
-	if topicID == "" {
+	if topicID == "" || m.sentryHub == nil {
 		return
 	}
 	m.sentryHub.ConfigureScope(func(scope *sentry.Scope) {

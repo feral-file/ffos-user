@@ -3,6 +3,7 @@ package logger_test
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,14 +228,145 @@ func TestLoggerManager_SetGlobalTopicID(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Test SetGlobalTopicID with valid topic ID
-	ts.realManager.SetGlobalTopicID("test-topic-123")
+	t.Run("SetGlobalTopicID with valid topic ID", func(t *testing.T) {
+		// Test SetGlobalTopicID with valid topic ID
+		ts.realManager.SetGlobalTopicID("test-topic-123")
+		// Should not panic and should complete successfully
+	})
 
-	// Test SetGlobalTopicID with empty topic ID (should not panic)
-	ts.realManager.SetGlobalTopicID("")
+	t.Run("SetGlobalTopicID with empty topic ID", func(t *testing.T) {
+		// Test SetGlobalTopicID with empty topic ID (should return early)
+		ts.realManager.SetGlobalTopicID("")
+		// Should not panic and should return early without configuring Sentry
+	})
 
-	// Test SetGlobalTopicID with whitespace topic ID (should not panic)
-	ts.realManager.SetGlobalTopicID("   ")
+	t.Run("SetGlobalTopicID with whitespace topic ID", func(t *testing.T) {
+		// Test SetGlobalTopicID with whitespace topic ID (should not return early)
+		ts.realManager.SetGlobalTopicID("   ")
+		// Should not panic and should configure Sentry with whitespace topic ID
+	})
+
+	t.Run("SetGlobalTopicID with nil sentry hub", func(t *testing.T) {
+		// Test SetGlobalTopicID when Sentry is not initialized
+		// This should not panic even if sentryHub is nil
+		ts.realManager.SetGlobalTopicID("test-topic")
+	})
+
+	t.Run("SetGlobalTopicID with special characters", func(t *testing.T) {
+		// Test SetGlobalTopicID with special characters
+		specialTopicIDs := []string{
+			"topic-with-dashes",
+			"topic_with_underscores",
+			"topic.with.dots",
+			"topic@with@symbols",
+			"topic with spaces",
+			"topic\nwith\nnewlines",
+			"topic\twith\ttabs",
+		}
+
+		for _, topicID := range specialTopicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic
+		}
+	})
+}
+
+// Test SetGlobalTopicID with Sentry integration
+func TestLoggerManager_SetGlobalTopicID_WithSentry(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	t.Run("SetGlobalTopicID after AddSentry", func(t *testing.T) {
+		// Create a test logger
+		testLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, testLogger)
+
+		// Create a test SentryConfig
+		sentryConfig := logger.SentryConfig{
+			DSN:         "https://test@sentry.io/123",
+			Debug:       "true",
+			SampleRate:  "0.5",
+			Environment: "test",
+			Release:     "1.0.0",
+			Repository:  "test-repo",
+		}
+
+		// Add Sentry integration
+		enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
+		assert.NoError(t, err)
+		assert.NotNil(t, enhancedLogger)
+
+		// Now test SetGlobalTopicID with Sentry initialized
+		ts.realManager.SetGlobalTopicID("test-topic-after-sentry")
+		// Should not panic and should configure the Sentry scope
+	})
+
+	t.Run("SetGlobalTopicID before AddSentry", func(t *testing.T) {
+		// Test SetGlobalTopicID before Sentry is initialized
+		ts.realManager.SetGlobalTopicID("test-topic-before-sentry")
+		// Should not panic even though Sentry is not initialized
+
+		// Create a test logger
+		testLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, testLogger)
+
+		// Create a test SentryConfig
+		sentryConfig := logger.SentryConfig{
+			DSN:         "https://test@sentry.io/123",
+			Debug:       "true",
+			SampleRate:  "0.5",
+			Environment: "test",
+			Release:     "1.0.0",
+			Repository:  "test-repo",
+		}
+
+		// Add Sentry integration
+		enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
+		assert.NoError(t, err)
+		assert.NotNil(t, enhancedLogger)
+
+		// Set topic ID again after Sentry is initialized
+		ts.realManager.SetGlobalTopicID("test-topic-after-sentry-init")
+		// Should not panic and should configure the Sentry scope
+	})
+
+	t.Run("Multiple SetGlobalTopicID calls", func(t *testing.T) {
+		// Create a test logger
+		testLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, testLogger)
+
+		// Create a test SentryConfig
+		sentryConfig := logger.SentryConfig{
+			DSN:         "https://test@sentry.io/123",
+			Debug:       "true",
+			SampleRate:  "0.5",
+			Environment: "test",
+			Release:     "1.0.0",
+			Repository:  "test-repo",
+		}
+
+		// Add Sentry integration
+		enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
+		assert.NoError(t, err)
+		assert.NotNil(t, enhancedLogger)
+
+		// Test multiple SetGlobalTopicID calls
+		topicIDs := []string{
+			"topic-1",
+			"topic-2",
+			"topic-3",
+			"", // Empty topic ID
+			"topic-4",
+		}
+
+		for _, topicID := range topicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic for any of these calls
+		}
+	})
 }
 
 // Test package-level functions (backward compatibility)
@@ -422,6 +554,30 @@ func TestLoggerManager_Mocking_Success(t *testing.T) {
 			},
 			testFunc: func(ts *testSetup) error {
 				logger.SetGlobalTopicID("test-topic")
+				return nil
+			},
+		},
+		{
+			name: "Mock SetGlobalTopicID function with empty topic ID",
+			setupFunc: func(ts *testSetup) {
+				ts.mockLoggerManager.EXPECT().
+					SetGlobalTopicID("").
+					Times(1)
+			},
+			testFunc: func(ts *testSetup) error {
+				logger.SetGlobalTopicID("")
+				return nil
+			},
+		},
+		{
+			name: "Mock SetGlobalTopicID function with special characters",
+			setupFunc: func(ts *testSetup) {
+				ts.mockLoggerManager.EXPECT().
+					SetGlobalTopicID("topic-with-special@chars").
+					Times(1)
+			},
+			testFunc: func(ts *testSetup) error {
+				logger.SetGlobalTopicID("topic-with-special@chars")
 				return nil
 			},
 		},
@@ -622,6 +778,180 @@ func TestLoggerManager_ConcurrentAccess(t *testing.T) {
 		for range numGoroutines {
 			<-done
 		}
+	})
+
+	t.Run("concurrent SetGlobalTopicID with empty topic IDs", func(t *testing.T) {
+		done := make(chan bool, numGoroutines)
+
+		for i := range numGoroutines {
+			go func(id int) {
+				// Mix of empty and non-empty topic IDs
+				if id%2 == 0 {
+					ts.realManager.SetGlobalTopicID("")
+				} else {
+					ts.realManager.SetGlobalTopicID("test-topic-" + strconv.Itoa(id))
+				}
+				done <- true
+			}(i)
+		}
+
+		// Wait for all goroutines to complete
+		for range numGoroutines {
+			<-done
+		}
+	})
+
+	t.Run("concurrent SetGlobalTopicID with Sentry integration", func(t *testing.T) {
+		// Create a test logger
+		testLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, testLogger)
+
+		// Create a test SentryConfig
+		sentryConfig := logger.SentryConfig{
+			DSN:         "https://test@sentry.io/123",
+			Debug:       "true",
+			SampleRate:  "0.5",
+			Environment: "test",
+			Release:     "1.0.0",
+			Repository:  "test-repo",
+		}
+
+		// Add Sentry integration
+		enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
+		assert.NoError(t, err)
+		assert.NotNil(t, enhancedLogger)
+
+		done := make(chan bool, numGoroutines)
+
+		for i := range numGoroutines {
+			go func(id int) {
+				ts.realManager.SetGlobalTopicID("sentry-topic-" + strconv.Itoa(id))
+				done <- true
+			}(i)
+		}
+
+		// Wait for all goroutines to complete
+		for range numGoroutines {
+			<-done
+		}
+	})
+}
+
+// Test SetGlobalTopicID edge cases and error scenarios
+func TestLoggerManager_SetGlobalTopicID_EdgeCases(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	t.Run("SetGlobalTopicID with very long topic ID", func(t *testing.T) {
+		// Create a very long topic ID
+		longTopicID := strings.Repeat("a", 10000)
+		ts.realManager.SetGlobalTopicID(longTopicID)
+		// Should not panic
+	})
+
+	t.Run("SetGlobalTopicID with unicode characters", func(t *testing.T) {
+		unicodeTopicIDs := []string{
+			"topic-中文",
+			"topic-🚀",
+			"topic-émojis-🎉",
+			"topic-αβγδε",
+			"topic-العربية",
+		}
+
+		for _, topicID := range unicodeTopicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic
+		}
+	})
+
+	t.Run("SetGlobalTopicID with control characters", func(t *testing.T) {
+		controlTopicIDs := []string{
+			"topic\x00with\x00nulls",
+			"topic\x01with\x02control",
+			"topic\x1bwith\x1fescapes",
+		}
+
+		for _, topicID := range controlTopicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic
+		}
+	})
+
+	t.Run("SetGlobalTopicID with JSON-like strings", func(t *testing.T) {
+		jsonTopicIDs := []string{
+			`{"topic": "value"}`,
+			`["topic1", "topic2"]`,
+			`topic"with"quotes`,
+			`topic'with'single'quotes`,
+		}
+
+		for _, topicID := range jsonTopicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic
+		}
+	})
+
+	t.Run("SetGlobalTopicID with SQL-like strings", func(t *testing.T) {
+		sqlTopicIDs := []string{
+			"topic'; DROP TABLE topics; --",
+			"topic OR 1=1",
+			"topic UNION SELECT * FROM topics",
+		}
+
+		for _, topicID := range sqlTopicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic
+		}
+	})
+
+	t.Run("SetGlobalTopicID with URL-like strings", func(t *testing.T) {
+		urlTopicIDs := []string{
+			"https://example.com/topic",
+			"http://user:pass@example.com/topic",
+			"ftp://example.com/topic",
+			"topic?param=value&other=123",
+		}
+
+		for _, topicID := range urlTopicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic
+		}
+	})
+
+	t.Run("SetGlobalTopicID with whitespace variations", func(t *testing.T) {
+		whitespaceTopicIDs := []string{
+			" ",        // single space
+			"\t",       // tab
+			"\n",       // newline
+			"\r",       // carriage return
+			"\r\n",     // CRLF
+			" \t\n\r ", // mixed whitespace
+			"\u00A0",   // non-breaking space
+			"\u2000",   // en quad
+			"\u2001",   // em quad
+		}
+
+		for _, topicID := range whitespaceTopicIDs {
+			ts.realManager.SetGlobalTopicID(topicID)
+			// Should not panic
+		}
+	})
+
+	t.Run("SetGlobalTopicID rapid succession", func(t *testing.T) {
+		// Test rapid succession of SetGlobalTopicID calls
+		for i := 0; i < 1000; i++ {
+			ts.realManager.SetGlobalTopicID("rapid-topic-" + strconv.Itoa(i))
+		}
+		// Should not panic
+	})
+
+	t.Run("SetGlobalTopicID with nil pointer check", func(t *testing.T) {
+		// This test ensures the method handles nil sentryHub gracefully
+		// We can't directly test this, but we can ensure it doesn't panic
+		// when called before Sentry is initialized
+		ts.realManager.SetGlobalTopicID("test-nil-check")
+		// Should not panic
 	})
 }
 
