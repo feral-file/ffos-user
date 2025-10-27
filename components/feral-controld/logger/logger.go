@@ -62,6 +62,7 @@ type LoggerManager interface {
 type defaultLoggerManager struct {
 	loggerLock   sync.Mutex
 	sentryClient *sentry.Client
+	sentryHub    *sentry.Hub
 }
 
 func NewLoggerManager() LoggerManager {
@@ -110,11 +111,13 @@ func (m *defaultLoggerManager) AddSentry(logger *zap.Logger, config SentryConfig
 		return nil, err
 	}
 	m.sentryClient = sc
+	m.sentryHub = sentry.NewHub(m.sentryClient, sentry.NewScope())
 
 	cfg := zapsentry.Configuration{
 		Level:             zapcore.ErrorLevel, // when to send message to sentry
 		EnableBreadcrumbs: false,
 		Tags:              map[string]string{},
+		Hub:               m.sentryHub,
 	}
 
 	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(m.sentryClient))
@@ -144,7 +147,7 @@ func (m *defaultLoggerManager) SetGlobalTopicID(topicID string) {
 	if topicID == "" {
 		return
 	}
-	sentry.ConfigureScope(func(scope *sentry.Scope) {
+	m.sentryHub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTag("topic_id", topicID)
 		scope.SetContext("relayer", map[string]interface{}{
 			"topic_id": topicID,
