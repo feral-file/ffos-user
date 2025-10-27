@@ -11,10 +11,10 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-sys-monitord/logger"
 	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
-	"github.com/getsentry/sentry-go"
 
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
+	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
 )
 

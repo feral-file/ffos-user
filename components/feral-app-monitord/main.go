@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-app-monitord/logger"
-	"github.com/getsentry/sentry-go"
 
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/feral-file/godbus"
+	"github.com/getsentry/sentry-go"
 	dbus_v5 "github.com/godbus/dbus/v5"
 	"go.uber.org/zap"
 )

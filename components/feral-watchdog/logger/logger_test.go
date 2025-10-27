@@ -7,8 +7,8 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-watchdog/logger"
 	"github.com/feral-file/ffos-user/components/feral-watchdog/mocks"
-	"github.com/getsentry/sentry-go"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
