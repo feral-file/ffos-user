@@ -9,7 +9,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
@@ -175,14 +174,42 @@ func TestLoggerManager_AddSentry(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, testLogger)
 
-	// Create a mock Sentry client
-	sentryClient := &sentry.Client{}
+	// Create a test SentryConfig
+	sentryConfig := logger.SentryConfig{
+		DSN:         "https://test@sentry.io/123",
+		Debug:       "true",
+		SampleRate:  "0.5",
+		Environment: "test",
+		Release:     "1.0.0",
+		Repository:  "test-repo",
+	}
 
 	// Test AddSentry
-	enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryClient)
+	enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
 	assert.NoError(t, err)
 	assert.NotNil(t, enhancedLogger)
 	assert.NotEqual(t, testLogger, enhancedLogger) // Should be a different logger instance
+}
+
+// Test AddSentry with invalid DSN
+func TestLoggerManager_AddSentry_InvalidDSN(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Create a test logger
+	testLogger, err := ts.realManager.New(false)
+	assert.NoError(t, err)
+	assert.NotNil(t, testLogger)
+
+	// Create a test SentryConfig with invalid DSN
+	sentryConfig := logger.SentryConfig{
+		DSN: "invalid-dsn",
+	}
+
+	// Test AddSentry with invalid DSN - should return error
+	enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
+	assert.Error(t, err)
+	assert.Nil(t, enhancedLogger)
 }
 
 // Test FlushSentry functionality
@@ -249,8 +276,15 @@ func TestPackageLevelFunctions_RealImplementation(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				sentryClient := &sentry.Client{}
-				enhancedLogger, err := logger.AddSentry(l, sentryClient)
+				sentryConfig := logger.SentryConfig{
+					DSN:         "https://test@sentry.io/123",
+					Debug:       "true",
+					SampleRate:  "0.5",
+					Environment: "test",
+					Release:     "1.0.0",
+					Repository:  "test-repo",
+				}
+				enhancedLogger, err := logger.AddSentry(l, sentryConfig)
 				if err != nil {
 					return err
 				}
@@ -335,15 +369,29 @@ func TestLoggerManager_Mocking_Success(t *testing.T) {
 		{
 			name: "Mock AddSentry function",
 			setupFunc: func(ts *testSetup) {
-				sentryClient := &sentry.Client{}
+				sentryConfig := logger.SentryConfig{
+					DSN:         "https://test@sentry.io/123",
+					Debug:       "true",
+					SampleRate:  "0.5",
+					Environment: "test",
+					Release:     "1.0.0",
+					Repository:  "test-repo",
+				}
 				ts.mockLoggerManager.EXPECT().
-					AddSentry(ts.testLogger, sentryClient).
+					AddSentry(ts.testLogger, sentryConfig).
 					Return(ts.testLogger, nil).
 					Times(1)
 			},
 			testFunc: func(ts *testSetup) error {
-				sentryClient := &sentry.Client{}
-				enhancedLogger, err := logger.AddSentry(ts.testLogger, sentryClient)
+				sentryConfig := logger.SentryConfig{
+					DSN:         "https://test@sentry.io/123",
+					Debug:       "true",
+					SampleRate:  "0.5",
+					Environment: "test",
+					Release:     "1.0.0",
+					Repository:  "test-repo",
+				}
+				enhancedLogger, err := logger.AddSentry(ts.testLogger, sentryConfig)
 				if err != nil {
 					return err
 				}
@@ -427,15 +475,29 @@ func TestLoggerManager_Mocking_Errors(t *testing.T) {
 		{
 			name: "AddSentry function returns error",
 			setupFunc: func(ts *testSetup) {
-				sentryClient := &sentry.Client{}
+				sentryConfig := logger.SentryConfig{
+					DSN:         "https://test@sentry.io/123",
+					Debug:       "true",
+					SampleRate:  "0.5",
+					Environment: "test",
+					Release:     "1.0.0",
+					Repository:  "test-repo",
+				}
 				ts.mockLoggerManager.EXPECT().
-					AddSentry(ts.testLogger, sentryClient).
+					AddSentry(ts.testLogger, sentryConfig).
 					Return(nil, errors.New("sentry integration failed")).
 					Times(1)
 			},
 			testFunc: func(ts *testSetup) error {
-				sentryClient := &sentry.Client{}
-				enhancedLogger, err := logger.AddSentry(ts.testLogger, sentryClient)
+				sentryConfig := logger.SentryConfig{
+					DSN:         "https://test@sentry.io/123",
+					Debug:       "true",
+					SampleRate:  "0.5",
+					Environment: "test",
+					Release:     "1.0.0",
+					Repository:  "test-repo",
+				}
+				enhancedLogger, err := logger.AddSentry(ts.testLogger, sentryConfig)
 				if err == nil {
 					return errors.New("expected error")
 				}
@@ -505,8 +567,15 @@ func TestLoggerManager_ConcurrentAccess(t *testing.T) {
 
 		for i := range numGoroutines {
 			go func(id int) {
-				sentryClient := &sentry.Client{}
-				enhancedLogger, err := ts.realManager.AddSentry(baseLogger, sentryClient)
+				sentryConfig := logger.SentryConfig{
+					DSN:         "https://test@sentry.io/123",
+					Debug:       "true",
+					SampleRate:  "0.5",
+					Environment: "test",
+					Release:     "1.0.0",
+					Repository:  "test-repo",
+				}
+				enhancedLogger, err := ts.realManager.AddSentry(baseLogger, sentryConfig)
 				if err != nil {
 					t.Errorf("AddSentry failed: %v", err)
 				}
@@ -619,17 +688,98 @@ func TestLoggerManager_SentryIntegration_EdgeCases(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Test that AddSentry works with a valid sentry client
-	t.Run("AddSentry with valid sentry client", func(t *testing.T) {
-		logger, err := ts.realManager.New(false)
+	// Test that AddSentry works with a valid sentry config
+	t.Run("AddSentry with valid sentry config", func(t *testing.T) {
+		testLogger, err := ts.realManager.New(false)
 		assert.NoError(t, err)
-		assert.NotNil(t, logger)
+		assert.NotNil(t, testLogger)
 
-		sentryClient := &sentry.Client{}
-		enhancedLogger, err := ts.realManager.AddSentry(logger, sentryClient)
+		sentryConfig := logger.SentryConfig{
+			DSN:         "https://test@sentry.io/123",
+			Debug:       "true",
+			SampleRate:  "0.5",
+			Environment: "test",
+			Release:     "1.0.0",
+			Repository:  "test-repo",
+		}
+		enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
 		assert.NoError(t, err)
 		assert.NotNil(t, enhancedLogger)
-		assert.NotEqual(t, logger, enhancedLogger)
+		assert.NotEqual(t, testLogger, enhancedLogger)
+	})
+
+	// Test AddSentry with empty DSN
+	t.Run("AddSentry with empty DSN", func(t *testing.T) {
+		testLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, testLogger)
+
+		sentryConfig := logger.SentryConfig{
+			DSN: "",
+		}
+		enhancedLogger, err := ts.realManager.AddSentry(testLogger, sentryConfig)
+		// Empty DSN is actually accepted by Sentry (uses noop transport)
+		assert.NoError(t, err)
+		assert.NotNil(t, enhancedLogger)
+	})
+
+	// Test AddSentry with various debug values
+	t.Run("AddSentry with different debug values", func(t *testing.T) {
+		testLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, testLogger)
+
+		testCases := []struct {
+			name   string
+			debug  string
+			expect bool
+		}{
+			{"true", "true", true},
+			{"false", "false", false},
+			{"TRUE", "TRUE", true},
+			{"FALSE", "FALSE", false},
+			{"empty", "", false},
+			{"invalid", "invalid", false},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				sentryConfig := logger.SentryConfig{
+					DSN:   "https://test@sentry.io/123",
+					Debug: tc.debug,
+				}
+				assert.Equal(t, tc.expect, sentryConfig.GetDebug())
+			})
+		}
+	})
+
+	// Test AddSentry with various sample rates
+	t.Run("AddSentry with different sample rates", func(t *testing.T) {
+		testLogger, err := ts.realManager.New(false)
+		assert.NoError(t, err)
+		assert.NotNil(t, testLogger)
+
+		testCases := []struct {
+			name     string
+			rate     string
+			expected float64
+		}{
+			{"0.5", "0.5", 0.5},
+			{"1.0", "1.0", 1.0},
+			{"0.0", "0.0", 0.0},
+			{"empty", "", 1.0},
+			{"invalid", "invalid", 1.0},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				sentryConfig := logger.SentryConfig{
+					DSN:        "https://test@sentry.io/123",
+					SampleRate: tc.rate,
+				}
+				assert.Equal(t, tc.expected, sentryConfig.GetSampleRate())
+			})
+		}
 	})
 }
 
@@ -664,4 +814,81 @@ func TestLoggerManager_MultipleInstances(t *testing.T) {
 	// Wait for both to complete
 	<-done
 	<-done
+}
+
+// Test SentryConfig edge cases
+func TestSentryConfig_EdgeCases(t *testing.T) {
+	t.Run("IsEnabled with various DSN formats", func(t *testing.T) {
+		testCases := []struct {
+			name     string
+			dsn      string
+			expected bool
+		}{
+			{"valid HTTPS DSN", "https://test@sentry.io/123", true},
+			{"valid HTTP DSN", "http://test@sentry.io/123", true},
+			{"empty DSN", "", false},
+			{"whitespace DSN", "   ", false},
+			{"tab DSN", "\t", false},
+			{"newline DSN", "\n", false},
+			{"mixed whitespace DSN", " \t\n ", false},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				config := &logger.SentryConfig{DSN: tc.dsn}
+				assert.Equal(t, tc.expected, config.IsEnabled())
+			})
+		}
+	})
+
+	t.Run("GetDebug with case variations", func(t *testing.T) {
+		testCases := []struct {
+			name     string
+			debug    string
+			expected bool
+		}{
+			{"lowercase true", "true", true},
+			{"uppercase TRUE", "TRUE", true},
+			{"mixed case TrUe", "TrUe", true},
+			{"lowercase false", "false", false},
+			{"uppercase FALSE", "FALSE", false},
+			{"mixed case FaLsE", "FaLsE", false},
+			{"empty", "", false},
+			{"invalid", "invalid", false},
+			{"1", "1", true},  // strconv.ParseBool accepts "1" as true
+			{"0", "0", false}, // strconv.ParseBool accepts "0" as false
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				config := &logger.SentryConfig{Debug: tc.debug}
+				assert.Equal(t, tc.expected, config.GetDebug())
+			})
+		}
+	})
+
+	t.Run("GetSampleRate with various values", func(t *testing.T) {
+		testCases := []struct {
+			name     string
+			rate     string
+			expected float64
+		}{
+			{"0.0", "0.0", 0.0},
+			{"0.5", "0.5", 0.5},
+			{"1.0", "1.0", 1.0},
+			{"1", "1", 1.0},
+			{"0", "0", 0.0},
+			{"empty", "", 1.0},
+			{"invalid", "invalid", 1.0},
+			{"negative", "-0.5", -0.5},
+			{"greater than 1", "1.5", 1.5},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				config := &logger.SentryConfig{SampleRate: tc.rate}
+				assert.Equal(t, tc.expected, config.GetSampleRate())
+			})
+		}
+	})
 }

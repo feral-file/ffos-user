@@ -96,21 +96,7 @@ func main() {
 	// Create the final logger (with Sentry if configured)
 	finalLogger := basicLogger
 	if config.SentryConfig.IsEnabled() {
-		sc, err := sentry.NewClient(sentry.ClientOptions{
-			Dsn:              config.SentryConfig.DSN,
-			Debug:            config.SentryConfig.GetDebug(),
-			SampleRate:       config.SentryConfig.GetSampleRate(),
-			Environment:      config.SentryConfig.Environment,
-			Release:          config.SentryConfig.Release,
-			SendDefaultPII:   true,
-			AttachStacktrace: true,
-		})
-		if err != nil {
-			finalLogger.Error("Failed to init sentry.NewClient.", zap.Error(err))
-			return
-		}
-		defer sc.Flush(2 * time.Second)
-		sentryLogger, err := logger.AddSentry(finalLogger, sc)
+		sentryLogger, err := logger.AddSentry(finalLogger, *config.SentryConfig)
 		if err != nil {
 			finalLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
 		} else {
