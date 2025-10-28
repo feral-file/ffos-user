@@ -244,6 +244,12 @@ func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 		return nil, fmt.Errorf("cdp evaluate failed: %w", err)
 	}
 
+	if result == nil {
+		// FIXME: This should not happen, resolve the root cause
+		s.logger.Warn("CDP returned nil result for player status")
+		return nil, nil
+	}
+
 	// Check if the result is a map
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {

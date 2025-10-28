@@ -93,33 +93,22 @@ func main() {
 		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
 	}
 
-	// Initialize Sentry if needed
-	err = logger.InitSentry(config.SentryConfig)
-	if err != nil {
-		basicLogger.Error("Failed to initialize Sentry", zap.Error(err))
-		// Don't fail the application if Sentry initialization fails
-	}
-
 	// Create the final logger (with Sentry if configured)
-	var finalLogger *zap.Logger
+	finalLogger := basicLogger
 	if config.SentryConfig.IsEnabled() {
-		finalLogger, err = logger.NewWithSentry(debug, config.SentryConfig)
+		sentryLogger, err := logger.AddSentry(finalLogger, *config.SentryConfig)
 		if err != nil {
-			basicLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
-			finalLogger = basicLogger
+			finalLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
 		} else {
+			finalLogger = sentryLogger
 			finalLogger.Info("Sentry initialized successfully",
 				zap.String("environment", config.SentryConfig.Environment),
 				zap.String("release", config.SentryConfig.Release))
 			defer logger.FlushSentry(2 * time.Second)
 		}
 	} else {
-		finalLogger = basicLogger
 		finalLogger.Info("Sentry not configured, using basic logger")
 	}
-	defer func() {
-		_ = finalLogger.Sync()
-	}()
 
 	// Initialize app
 	app := initializeApp(

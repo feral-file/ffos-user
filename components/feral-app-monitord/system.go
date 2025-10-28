@@ -10,7 +10,7 @@ import (
 )
 
 func GetConnectivityStatus() (bool, error) {
-	logger.Info("Getting connectivity status")
+	log.Info("Getting connectivity status")
 
 	deadlineCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -23,7 +23,7 @@ func GetConnectivityStatus() (bool, error) {
 		MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
 		true,
 	)
-	logger.Debug("Connectivity status", zap.Any("resp", resp), zap.Error(err))
+	log.Debug("Connectivity status", zap.Any("resp", resp), zap.Error(err))
 	if err != nil {
 		return false, err
 	}
@@ -42,7 +42,7 @@ func GetConnectivityStatus() (bool, error) {
 
 // GetSysMetrics retrieves system metrics from the sysmonitord service.
 func GetSysMetrics() (*metric.SysDBusMetrics, error) {
-	logger.Info("Getting system metrics")
+	log.Info("Getting system metrics")
 
 	deadlineCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -83,7 +83,7 @@ type PageState struct {
 
 // GetSysMetrics retrieves system metrics from the sysmonitord service.
 func GetPageState() (*PageState, error) {
-	logger.Info("Getting page state")
+	log.Info("Getting page state")
 
 	deadlineCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -99,10 +99,10 @@ func GetPageState() (*PageState, error) {
 		SETUPD_METHOD_GET_PAGE_STATE,
 	)
 	if err != nil {
-		logger.Error("Getting page state error", zap.Error(err))
+		log.Error("Getting page state error", zap.Error(err))
 		return nil, err
 	}
-	logger.Info("Getting page state:", zap.Any("pg", pg))
+	log.Info("Getting page state:", zap.Any("pg", pg))
 
 	return &pg, nil
 }

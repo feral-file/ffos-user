@@ -17,14 +17,14 @@ func CheckConnectivity() bool {
 		return false
 	}
 	if err := conn.Close(); err != nil {
-		logger.Warn("Failed to close conn", zap.Error(err))
+		log.Warn("Failed to close conn", zap.Error(err))
 	}
 	return true
 }
 
 // SendPayload sends the given JSON payload to the specified URL.
 func SendPayload(payload []byte) error {
-	req, err := http.NewRequest("POST", config.HeartbeatEndpoint, bytes.NewBuffer(payload))
+	req, err := http.NewRequest("POST", config.FF1Config.HeartbeatEndpoint, bytes.NewBuffer(payload))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -38,7 +38,7 @@ func SendPayload(payload []byte) error {
 
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			logger.Error("Error closing resp.Body", zap.Error(err))
+			log.Error("Error closing resp.Body", zap.Error(err))
 		}
 	}()
 
