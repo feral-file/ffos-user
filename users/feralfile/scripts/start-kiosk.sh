@@ -2,8 +2,8 @@
 
 # Read saved rotation
 ROTATION="normal"
-if [ -f /home/feralfile/.config/screen-orientation ]; then
-    ROTATION=$(cat /home/feralfile/.config/screen-orientation)
+if [ -f /home/feralfile/.state/screen-orientation ]; then
+    ROTATION=$(cat /home/feralfile/.state/screen-orientation)
 fi
 
 # Set Wayland/wlroots environment variables

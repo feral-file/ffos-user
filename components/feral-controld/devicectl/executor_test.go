@@ -1829,7 +1829,7 @@ func TestExecutor_ScreenRotation_Success(t *testing.T) {
 				Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 			// Mock OS ReadFile for config
-			configPath := "/home/feralfile/.config/screen-orientation"
+			configPath := "/home/feralfile/.state/screen-orientation"
 			if tc.configFileReadError != nil {
 				ts.mockOS.EXPECT().
 					ReadFile(configPath).
@@ -2134,7 +2134,7 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 					Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 				// Mock OS ReadFile for config (normal rotation)
-				configPath := "/home/feralfile/.config/screen-orientation"
+				configPath := "/home/feralfile/.state/screen-orientation"
 				ts.mockOS.EXPECT().
 					ReadFile(configPath).
 					Return([]byte("normal"), nil)
@@ -2179,7 +2179,7 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 					Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 				// Mock OS ReadFile for config
-				configPath := "/home/feralfile/.config/screen-orientation"
+				configPath := "/home/feralfile/.state/screen-orientation"
 				ts.mockOS.EXPECT().
 					ReadFile(configPath).
 					Return([]byte("normal"), nil)
@@ -2233,7 +2233,7 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 					Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 				// Mock OS ReadFile for config with invalid content
-				configPath := "/home/feralfile/.config/screen-orientation"
+				configPath := "/home/feralfile/.state/screen-orientation"
 				ts.mockOS.EXPECT().
 					ReadFile(configPath).
 					Return([]byte("invalid_rotation_value"), nil)

@@ -39,30 +39,30 @@ type HeartbeatPayload struct {
 func SendHeartbeat() {
 	sysMetric, err := GetSysMetrics()
 	if err != nil {
-		logger.Error("Failed to get sysMetric: %v", zap.Error(err))
+		log.Error("Failed to get sysMetric: %v", zap.Error(err))
 		return
 	}
 	if sysMetric == nil {
-		logger.Error("SysMetric is nil, cannot send heartbeat")
+		log.Error("SysMetric is nil, cannot send heartbeat")
 		return
 	}
-	logger.Info("Gathered sysMetric data", zap.Any("sysMetric", sysMetric))
+	log.Info("Gathered sysMetric data", zap.Any("sysMetric", sysMetric))
 
 	pageState, err := GetPageState()
 	if err != nil {
-		logger.Error("Failed to get pageState: %v", zap.Error(err))
+		log.Error("Failed to get pageState: %v", zap.Error(err))
 		return
 	}
 	if pageState == nil {
-		logger.Error("pageState is nil, cannot send heartbeat")
+		log.Error("pageState is nil, cannot send heartbeat")
 		return
 	}
-	logger.Info("Gathered pageState data", zap.Any("pageState", pageState))
+	log.Info("Gathered pageState data", zap.Any("pageState", pageState))
 
 	message := &HeartbeatData{
 		ID:        pageState.ID,
 		Timestamp: time.Now().UnixMilli(),
-		Build:     fmt.Sprintf("%s-%s", config.Branch, config.Version),
+		Build:     fmt.Sprintf("%s-%s", config.FF1Config.Branch, config.FF1Config.Version),
 
 		ScreenInfo: fmt.Sprintf(
 			"%dx%d@%.0fHz",
@@ -83,21 +83,21 @@ func SendHeartbeat() {
 	if config.Pubkey != "" {
 		rawJson, err := json.Marshal(message)
 		if err != nil {
-			logger.Error("Failed to marshal message to JSON: %v", zap.Error(err))
+			log.Error("Failed to marshal message to JSON: %v", zap.Error(err))
 			return
 		}
 		canonical, err := jcs.Transform(rawJson)
 		if err != nil {
-			logger.Error("Failed to jcs.Transform: %v", zap.Error(err))
+			log.Error("Failed to jcs.Transform: %v", zap.Error(err))
 			return
 		}
 		hash := sha256.Sum256(canonical)
 		signatureHex, err = SignMessage(hash[:])
 		if err != nil {
-			logger.Error("Failed to sign message", zap.Error(err))
+			log.Error("Failed to sign message", zap.Error(err))
 			return
 		}
-		logger.Info("Message signed successfully.")
+		log.Info("Message signed successfully.")
 	}
 
 	finalPayload := &HeartbeatPayload{
@@ -107,14 +107,14 @@ func SendHeartbeat() {
 	}
 	finalPayloadJSON, err := json.Marshal(finalPayload)
 	if err != nil {
-		logger.Error("Failed to marshal final payload", zap.Error(err))
+		log.Error("Failed to marshal final payload", zap.Error(err))
 		return
 	}
 
 	if err := SendPayload(finalPayloadJSON); err != nil {
-		logger.Error("Failed to send payload", zap.Error(err))
+		log.Error("Failed to send payload", zap.Error(err))
 		return
 	}
 
-	logger.Info("Heartbeat sent successfully.")
+	log.Info("Heartbeat sent successfully.")
 }
