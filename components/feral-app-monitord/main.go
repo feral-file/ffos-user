@@ -36,13 +36,14 @@ func main() {
 	defer cancel()
 
 	// Initialize logger with debug enabled for development
-	log, err := logger.New(debug)
+	basicLogger, err := logger.New(debug)
 	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 	defer func() {
-		_ = log.Sync()
+		_ = basicLogger.Sync()
 	}()
+	log = basicLogger
 
 	if err := LoadConfig(); err != nil {
 		log.Error("Failed to load config.", zap.Error(err))
