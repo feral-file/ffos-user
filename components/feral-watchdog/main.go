@@ -25,17 +25,11 @@ const (
 	DBUS_NAME = "com.feralfile.watchdog"
 )
 
-var (
-	debug     = false
-	testMode  = ""
-	testDelay = 10 * time.Second
-)
+var debug = false
 
 func main() {
 	// Read from options
 	flag.BoolVar(&debug, "debug", false, "Enable debug mode")
-	flag.StringVar(&testMode, "test", "", "Test crash reboot metrics: chromium_crash, gpu_hang, disk_full, ram_critical")
-	flag.DurationVar(&testDelay, "test-delay", 10*time.Second, "Delay before triggering test scenario")
 	flag.Parse()
 
 	// Create context for graceful shutdown
@@ -114,9 +108,8 @@ func main() {
 	}
 	vmagentClient := NewVmagentClient(vmagentURL, log)
 
-	// Initialize system command executor with test mode
+	// Initialize system command executor
 	commandHandler := NewCommandHandler(log, vmagentClient)
-	commandHandler.SetTestMode(testMode != "")
 
 	// Initialize CDP client
 	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, log)
@@ -169,39 +162,6 @@ func main() {
 	// Notify systemd that we're ready
 	if err := systemdWatchdog.NotifyReady(); err != nil {
 		log.Warn("Failed to notify systemd, but continuing", zap.Error(err))
-	}
-
-	// Run test scenario if enabled
-	if testMode != "" {
-		log.Info("Test mode enabled, will trigger test scenario",
-			zap.String("type", testMode),
-			zap.Duration("delay", testDelay))
-
-		go func() {
-			time.Sleep(testDelay)
-			log.Info("Triggering test scenario", zap.String("type", testMode))
-
-			switch testMode {
-			case "chromium_crash":
-				log.Info("Simulating Chromium crash scenario")
-				commandHandler.rebootSystem(ctx, "chromium_crash")
-			case "gpu_hang":
-				log.Info("Simulating GPU hang scenario")
-				commandHandler.rebootSystem(ctx, "gpu_hang")
-			case "disk_full":
-				log.Info("Simulating disk full scenario")
-				commandHandler.rebootSystem(ctx, "disk_full")
-			case "ram_critical":
-				log.Info("Simulating RAM critical scenario")
-				commandHandler.rebootSystem(ctx, "ram_critical")
-			default:
-				log.Error("Unknown test mode", zap.String("mode", testMode))
-			}
-
-			log.Info("Test scenario completed, shutting down in 5 seconds...")
-			time.Sleep(5 * time.Second)
-			cancel()
-		}()
 	}
 
 	// Block until context is done (cancel is called)
