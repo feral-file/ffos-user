@@ -68,3 +68,34 @@ Where `<reason>` can be:
 - `gpu_hang` - GPU hanging detected
 - `disk_full` - Disk remains full after cleanup
 - `ram_critical` - RAM usage remains critical after kiosk restart
+
+### Testing Crash Reboot Metrics
+
+You can test the crash reboot metric functionality without actually rebooting the system:
+
+```bash
+# Test chromium crash scenario (default 10s delay)
+./feral-watchdog -debug -test=chromium_crash
+
+# Test with custom delay
+./feral-watchdog -debug -test=gpu_hang -test-delay=5s
+
+# Test all scenarios
+./feral-watchdog -debug -test=chromium_crash -test-delay=3s
+./feral-watchdog -debug -test=gpu_hang -test-delay=3s
+./feral-watchdog -debug -test=disk_full -test-delay=3s
+./feral-watchdog -debug -test=ram_critical -test-delay=3s
+```
+
+Available test modes:
+
+- `chromium_crash` - Simulate Chromium crash scenario
+- `gpu_hang` - Simulate GPU hang scenario
+- `disk_full` - Simulate disk full scenario
+- `ram_critical` - Simulate RAM critical scenario
+
+When running in test mode:
+
+- The system will **NOT** actually reboot
+- The crash_reboot metric **WILL** be sent to vmagent
+- All logs are displayed showing the metric being sent
