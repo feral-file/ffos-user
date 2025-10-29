@@ -27,14 +27,16 @@ func (s SystemdServiceStatus) AsPointer() *SystemdServiceStatus {
 // CommandHandler implements system health checking and remediation actions
 type CommandHandler struct {
 	logger            *zap.Logger
+	vmagentClient     *VmagentClient
 	mu                sync.Mutex
 	isRestartingKiosk bool
 	isCleaningDisk    bool
 }
 
-func NewCommandHandler(logger *zap.Logger) *CommandHandler {
+func NewCommandHandler(logger *zap.Logger, vmagentClient *VmagentClient) *CommandHandler {
 	return &CommandHandler{
-		logger: logger,
+		logger:        logger,
+		vmagentClient: vmagentClient,
 	}
 }
 
@@ -66,9 +68,16 @@ func (c *CommandHandler) restartKiosk(ctx context.Context) {
 }
 
 // rebootSystem initiates a system reboot
-func (c *CommandHandler) rebootSystem(ctx context.Context) {
+func (c *CommandHandler) rebootSystem(ctx context.Context, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Send crash_reboot metric to vmagent before rebooting
+	if c.vmagentClient != nil {
+		c.vmagentClient.SendCrashRebootMetric(ctx, reason)
+	} else {
+		c.logger.Warn("Vmagent client is nil, skipping crash_reboot metric")
+	}
 
 	cmd := exec.CommandContext(ctx, "sudo", "systemctl", "reboot")
 	if output, err := cmd.CombinedOutput(); err != nil {

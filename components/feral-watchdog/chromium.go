@@ -151,7 +151,7 @@ func (m *ChromiumMonitor) restartChromium(ctx context.Context) {
 	// Check if we need to trigger a reboot
 	if m.shouldTriggerReboot() {
 		m.logger.Error("Chromium: Too many chromium restarts in a short period, triggering system reboot")
-		m.commandHandler.rebootSystem(ctx)
+		m.commandHandler.rebootSystem(ctx, "chromium_crash")
 		return
 	}
 

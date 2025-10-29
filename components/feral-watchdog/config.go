@@ -25,10 +25,15 @@ type CDPConfig struct {
 	Endpoint string `json:"endpoint"`
 }
 
+type VmagentConfig struct {
+	URL string `json:"url"`
+}
+
 // Config represents the configuration for the watchdog daemon
 type Config struct {
-	CDPConfig    *CDPConfig           `json:"cdp"`
-	SentryConfig *logger.SentryConfig `json:"sentry"`
+	CDPConfig     *CDPConfig           `json:"cdp"`
+	SentryConfig  *logger.SentryConfig `json:"sentry"`
+	VmagentConfig *VmagentConfig       `json:"vmagent"`
 }
 
 // LoadConfig loads the configuration from a JSON file
