@@ -23,6 +23,15 @@ type VmagentClient struct {
 	url    string
 }
 
+type CrashReason string
+
+const (
+	CrashReasonChromiumCrash CrashReason = "chromium_crash"
+	CrashReasonGPUHang       CrashReason = "gpu_hang"
+	CrashReasonDiskFull      CrashReason = "disk_full"
+	CrashReasonRamCritical   CrashReason = "ram_critical"
+)
+
 // NewVmagentClient creates a new vmagent client instance
 func NewVmagentClient(url string, logger *zap.Logger) *VmagentClient {
 	if url == "" {
@@ -97,7 +106,7 @@ func (v *VmagentClient) isReachable(ctx context.Context) bool {
 }
 
 // SendCrashRebootMetric sends the crash_reboot metric to vmagent
-func (v *VmagentClient) SendCrashRebootMetric(ctx context.Context, reason string) {
+func (v *VmagentClient) SendCrashRebootMetric(ctx context.Context, reason CrashReason) {
 	metric := fmt.Sprintf("ff_crash_reboot{reason=\"%s\"} 1", reason)
 
 	v.logger.Info("Sending crash_reboot metric to vmagent",

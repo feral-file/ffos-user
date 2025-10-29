@@ -68,7 +68,7 @@ func (c *CommandHandler) restartKiosk(ctx context.Context) {
 }
 
 // rebootSystem initiates a system reboot
-func (c *CommandHandler) rebootSystem(ctx context.Context, reason string) {
+func (c *CommandHandler) rebootSystem(ctx context.Context, reason CrashReason) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

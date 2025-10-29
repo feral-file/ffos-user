@@ -57,7 +57,7 @@ func (c *DiskHandler) checkDiskUsage(ctx context.Context, metrics *SysMetrics) {
 	if diskUsage > DISK_CRITICAL_THRESHOLD {
 		if c.isCleaned {
 			c.logger.Error("DISK: Rebooting, usage remains critical after cleanup.", zap.Float64("usage_percent", diskUsage))
-			c.commandHandler.rebootSystem(ctx, "disk_full")
+			c.commandHandler.rebootSystem(ctx, CrashReasonDiskFull)
 		} else {
 			c.logger.Warn("DISK: Critical usage high, cleaning disk", zap.Float64("usage_percent", diskUsage))
 			c.cleanupDiskSpace(ctx, diskUsage)

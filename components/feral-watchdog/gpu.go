@@ -56,7 +56,7 @@ func (g *GPUHandler) scheduleGPUReboot(ctx context.Context) {
 			g.rebootTimer = nil
 			g.mu.Unlock()
 			g.logger.Info("GPU: executing reboot")
-			g.commandHandler.rebootSystem(ctx, "gpu_hang")
+			g.commandHandler.rebootSystem(ctx, CrashReasonGPUHang)
 		}
 	})
 }

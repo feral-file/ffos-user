@@ -90,7 +90,7 @@ func (c *MemoryHandler) checkMemoryUsage(ctx context.Context, metrics *SysMetric
 
 	if !c.lastKioskRestart.IsZero() && time.Since(c.lastKioskRestart) < RAM_REBOOT_DURATION_THRESHOLD {
 		c.logger.Error("RAM: Rebooting. Usage remains critical after kiosk restart.")
-		c.commandHandler.rebootSystem(ctx, "ram_critical")
+		c.commandHandler.rebootSystem(ctx, CrashReasonRamCritical)
 	} else {
 		c.logger.Error("RAM: Restarting kiosk")
 		c.commandHandler.restartKiosk(ctx)

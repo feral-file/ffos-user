@@ -100,23 +100,23 @@ func TestVmagentClient_SendCrashRebootMetric(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		reason string
+		reason CrashReason
 	}{
 		{
 			name:   "chromium crash",
-			reason: "chromium_crash",
+			reason: CrashReasonChromiumCrash,
 		},
 		{
 			name:   "gpu hang",
-			reason: "gpu_hang",
+			reason: CrashReasonGPUHang,
 		},
 		{
 			name:   "disk full",
-			reason: "disk_full",
+			reason: CrashReasonDiskFull,
 		},
 		{
 			name:   "ram critical",
-			reason: "ram_critical",
+			reason: CrashReasonRamCritical,
 		},
 	}
 
