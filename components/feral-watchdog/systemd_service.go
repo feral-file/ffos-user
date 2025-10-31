@@ -81,8 +81,9 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 			m.logger.Debug("Systemd: Service is active",
 				zap.String("service", service))
 		case SYSTEMD_SERVICE_STATUS_FAILED:
-			m.logger.Warn("Systemd: Service is failed",
-				zap.String("service", service))
+			m.logger.Error("Systemd: Service is failed",
+				zap.String("service", service),
+				zap.String("dependency", service))
 			// Send service failed to start notification to website via CDP
 			if m.cdpClient != nil {
 				if err := m.cdpClient.ShowServiceFailedToStartPage(ctx); err != nil {
@@ -95,8 +96,9 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 				}
 			}
 		case SYSTEMD_SERVICE_STATUS_INACTIVE:
-			m.logger.Warn("Systemd: Service is inactive",
-				zap.String("service", service))
+			m.logger.Error("Systemd: Service is inactive",
+				zap.String("service", service),
+				zap.String("dependency", service))
 		default:
 			m.logger.Error("Systemd: Unknown service state",
 				zap.String("service", service),
