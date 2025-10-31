@@ -197,7 +197,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Get connectivity status and connect to relayer if ready
 	connected, err := getConnectivityStatus(ctx, app.DBus, app.Logger)
 	if err != nil {
-		app.Logger.Warn("Failed to get connectivity status", zap.Error(err))
+		app.Logger.Error("Failed to get connectivity status", zap.Error(err))
 	} else {
 		app.Logger.Info("Connectivity status", zap.Bool("connected", connected))
 	}
