@@ -159,9 +159,9 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 func (d deviceStatus) fetchLatestVersion(ctx context.Context, endpoint, branch string) (string, error) {
 	apiURL := fmt.Sprintf("%s/api/latest/%s", endpoint, branch)
 
-	// Create HTTP client with 2-second timeout
+	// Create HTTP client with 30-second timeout
 	client := &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout: 30 * time.Second,
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
