@@ -21,18 +21,37 @@ static REMOTE_VERSIONS: OnceLock<UpstreamVersion> = OnceLock::new();
 
 // ---------- Public API ----------
 
-/// Return `Ok(true)` when the running build is **below** the distributor’s
+/// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum supported version and an update is therefore required.
 pub async fn is_update_required() -> Result<bool> {
     let current = cfg::current_version().await?;
     let remote_versions = fetch_remote_version().await?;
-    Ok(current < remote_versions.min_version)
+    Ok(current < remote_versions.min_runtime_version)
 }
 
 /// Return the latest version from the remote server.
 pub async fn latest_version() -> Result<String> {
     let remote_versions = fetch_remote_version().await?;
     Ok(remote_versions.latest_version.to_string())
+}
+
+/// Return `Ok(true)` when the running build is **below** the distributor's
+/// minimum upgradeable version, meaning the device needs to be reflashed.
+pub async fn is_too_old_to_upgrade() -> Result<bool> {
+    let current = cfg::current_version().await?;
+    let remote_versions = fetch_remote_version().await?;
+    
+    if let Some(min_upgradeable) = &remote_versions.min_upgradeable_version {
+        Ok(current < *min_upgradeable)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Return the flashing guide URL from the remote server, if available.
+pub async fn flashing_guide_url() -> Result<Option<String>> {
+    let remote_versions = fetch_remote_version().await?;
+    Ok(remote_versions.flashing_guide.clone())
 }
 
 /// Spawn the updater in a background task and return a channel receiver that
@@ -182,13 +201,17 @@ async fn run_update_and_send(tx: mpsc::Sender<Result<String, anyhow::Error>>) ->
 
 #[derive(Deserialize)]
 struct UpstreamInfo {
-    min_version: String,
+    min_runtime_version: String,
+    min_upgradeable_version: Option<String>,
+    flashing_guide: Option<String>,
     latest_version: String,
 }
 
 #[derive(Debug, Clone)]
 struct UpstreamVersion {
-    min_version: Version,
+    min_runtime_version: Version,
+    min_upgradeable_version: Option<Version>,
+    flashing_guide: Option<String>,
     latest_version: Version,
 }
 
@@ -222,7 +245,12 @@ async fn fetch_remote_version() -> Result<UpstreamVersion> {
 
     let info: UpstreamInfo = resp.json().await.context("decoding distributor JSON")?;
     let versions = UpstreamVersion {
-        min_version: Version::parse(&info.min_version).context("parsing upstream semver")?,
+        min_runtime_version: Version::parse(&info.min_runtime_version).context("parsing upstream semver")?,
+        min_upgradeable_version: info.min_upgradeable_version
+            .as_ref()
+            .map(|v| Version::parse(v).context("parsing min_upgradeable_version semver"))
+            .transpose()?,
+        flashing_guide: info.flashing_guide,
         latest_version: Version::parse(&info.latest_version).context("parsing upstream semver")?,
     };
     REMOTE_VERSIONS.set(versions.clone()).unwrap();

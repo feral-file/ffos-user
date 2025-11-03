@@ -395,6 +395,37 @@ async fn internet_setup_successfully_cb(
     app_state: &Arc<AppState>,
     chromium: &Arc<Cdp>,
 ) -> Result<String, u8> {
+    // First check if device is too old to auto-upgrade
+    match updater::is_too_old_to_upgrade().await {
+        Ok(true) => {
+            // Device is too old, show reflashing QR code
+            if let Ok(Some(flashing_guide)) = updater::flashing_guide_url().await {
+                task::spawn({
+                    let app_state = app_state.clone();
+                    let chromium = chromium.clone();
+                    async move {
+                        let _ = show_reflashing_qrcode(&app_state, &chromium, &flashing_guide).await;
+                    }
+                });
+            } else {
+                // Fallback to showing message without QR code if no flashing guide URL
+                task::spawn({
+                    let app_state = app_state.clone();
+                    let chromium = chromium.clone();
+                    async move {
+                        let _ = show_message(&chromium, &app_state, constant::REFLASHING_REQUIRED_MSG).await;
+                    }
+                });
+            }
+            return Err(constant::BLE_ERR_CODE_VERSION_CHECK_FAILED);
+        }
+        Ok(false) => {} // Device can be upgraded, continue with normal flow
+        Err(e) => {
+            eprintln!("MAIN: Error checking if device is too old: {e:#?}");
+            // Continue with normal flow if check fails
+        }
+    }
+
     // Update the firmware / software if required
     match updater::is_update_required().await {
         Ok(true) => {
@@ -538,7 +569,45 @@ async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
     Ok(())
 }
 
+async fn show_reflashing_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>, flashing_guide_url: &str) -> Result<()> {
+    // Build URL with QR code step and flashing guide as the QR content
+    let qrcode_url = format!(
+        "{}&qr_content={}&message={}",
+        constant::QRCODE_URL_PREFIX,
+        urlencoding::encode(flashing_guide_url),
+        urlencoding::encode(constant::REFLASHING_REQUIRED_MSG)
+    );
+    
+    let mut page = app_state.page.lock().await;
+    chrome
+        .navigate(&qrcode_url)
+        .await
+        .with_context(|| format!("navigating to {qrcode_url}"))?;
+    println!("MAIN: Navigated to reflashing QR code: {qrcode_url}");
+    *page = Page::Message(unix_s(), constant::REFLASHING_REQUIRED_MSG.to_string());
+    Ok(())
+}
+
 async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
+    // First check if device is too old to auto-upgrade
+    match updater::is_too_old_to_upgrade().await {
+        Ok(true) => {
+            // Device is too old, show reflashing QR code and stop here
+            if let Ok(Some(flashing_guide)) = updater::flashing_guide_url().await {
+                show_reflashing_qrcode(&app_state, &chrome, &flashing_guide).await?;
+            } else {
+                // Fallback to showing message without QR code if no flashing guide URL
+                show_message(&chrome, &app_state, constant::REFLASHING_REQUIRED_MSG).await?;
+            }
+            return Ok(());
+        }
+        Ok(false) => {} // Device can be upgraded, continue with normal flow
+        Err(e) => {
+            eprintln!("MAIN: Error checking if device is too old: {e:#?}");
+            // Continue with normal flow if check fails
+        }
+    }
+
     // If the update process is triggered and it takes over the chromium
     // We should not proceed with the normal flow any more
     // The device needs to automatically restart to apply the update
