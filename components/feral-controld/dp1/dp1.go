@@ -14,7 +14,7 @@ import (
 
 const (
 	DEFAULT_DURATION             = 300
-	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
+	MINIMAL_PLAYLIST_ITEMS_LIMIT = 25
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
 )
 
@@ -111,9 +111,15 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 		if err != nil {
 			return nil, err
 		}
-		ffTokens = append(ffTokens, tokens...)
 
-		if len(tokens) < size || minimal {
+		// Filter tokens with balance > 0 so it only includes the tokens actually owned by the owner
+		for _, token := range tokens {
+			if token.Balance > 0 {
+				ffTokens = append(ffTokens, token)
+			}
+		}
+
+		if len(tokens) < size || (minimal && len(ffTokens) >= MINIMAL_PLAYLIST_ITEMS_LIMIT) {
 			break
 		}
 
