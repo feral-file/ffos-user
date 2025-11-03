@@ -54,6 +54,12 @@ pub async fn flashing_guide_url() -> Result<Option<String>> {
     Ok(remote_versions.flashing_guide.clone())
 }
 
+/// Return the minimum upgradeable version from the remote server, if available.
+pub async fn min_upgradeable_version() -> Result<Option<String>> {
+    let remote_versions = fetch_remote_version().await?;
+    Ok(remote_versions.min_upgradeable_version.as_ref().map(|v| v.to_string()))
+}
+
 /// Spawn the updater in a background task and return a channel receiver that
 /// yields each `[progress] …` payload or error. The caller can `recv().await` and forward
 /// the message however it likes (e.g. to CDP).
