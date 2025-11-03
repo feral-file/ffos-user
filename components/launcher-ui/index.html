@@ -32,6 +32,15 @@
         }
 
 
+        #qrScreen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding: 24px;
+        }
+
         #qrcode {
             display: flex;
             justify-content: center;
@@ -66,7 +75,7 @@
     <div id="qrScreen" class="hidden">
         <div id="qrcode"></div>
         <div id="qrError" style="margin-top: 12px; padding-top: 32px; color: #ff4d4f; font-size: 16px; display: none;"></div>
-        <div id="qrMessage" style="margin-top: 8px; color: #fffbe0; font-size: 16px; display: none;"></div>
+        <div id="qrMessage" style="margin-top: 24px; padding: 0 48px; max-width: 80%; color: #fffbe0; font-size: 20px; line-height: 1.6; text-align: center; display: none;"></div>
     </div>
     <div id="welcomeScreen" class="hidden">
         <p id="welcomeText"></p>
@@ -93,10 +102,27 @@
             },
             qr: {
                 id: "qrScreen",
-                requiredParams: ["device_info"],
+                requiredParams: [],
                 render: (params) => {
+                    // Support two modes:
+                    // 1. Custom QR content via qr_content parameter
+                    // 2. Device info mode via device_info parameter
+                    const qrContent = params.get("qr_content");
                     const deviceInfo = params.get("device_info");
-                    const qrData = `https://link.feralfile.com/device_connect/${deviceInfo}`;
+                    
+                    let qrData;
+                    if (qrContent) {
+                        // Use custom QR content directly
+                        qrData = decodeURIComponent(qrContent);
+                    } else if (deviceInfo) {
+                        // Use device info to build connection URL
+                        qrData = `https://link.feralfile.com/device_connect/${deviceInfo}`;
+                    } else {
+                        // No QR data available
+                        document.getElementById("qrcode").innerHTML = '<div style="color: #ff4d4f;">No QR data available</div>';
+                        return;
+                    }
+                    
                     // Calculate QR code size based on viewport
                     const minEdge = Math.min(window.innerWidth, window.innerHeight);
                     const qrSize = Math.floor(minEdge / 2);
@@ -119,7 +145,7 @@
                     const errorMsg = params.get("error");
                     const qrError = document.getElementById("qrError");
                     if (errorMsg) {
-                        qrError.textContent = errorMsg;
+                        qrError.textContent = decodeURIComponent(errorMsg);
                         qrError.style.display = '';
                     } else {
                         qrError.textContent = '';
@@ -129,7 +155,7 @@
                     const message = params.get("message");
                     const qrMessage = document.getElementById("qrMessage");
                     if (message) {
-                        qrMessage.textContent = message;
+                        qrMessage.textContent = decodeURIComponent(message);
                         qrMessage.style.display = '';
                     } else {
                         qrMessage.textContent = '';
@@ -157,11 +183,11 @@
                 id: "messageScreen",
                 requiredParams: ["message"],
                 render: (params) => {
-                    document.getElementById("messageText").textContent = params.get("message");
+                    document.getElementById("messageText").textContent = decodeURIComponent(params.get("message"));
                     const subText = params.get("subtext");
                     const subTextDiv = document.getElementById("messageSubText");
                     if (subText) {
-                        subTextDiv.textContent = subText;
+                        subTextDiv.textContent = decodeURIComponent(subText);
                         subTextDiv.style.display = '';
                     } else {
                         subTextDiv.textContent = '';

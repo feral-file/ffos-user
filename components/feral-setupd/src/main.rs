@@ -310,7 +310,9 @@ fn create_bt_disconnected_cb(
         Box::pin(async move {
             let should_go_qrcode = {
                 let page = app_state.page.lock().await;
-                matches!(*page, Page::Message(_, ref msg) if msg != constant::SETUP_SUCCESSFULLY_MSG)
+                matches!(*page, Page::Message(_, ref msg) 
+                    if msg != constant::SETUP_SUCCESSFULLY_MSG 
+                    && msg != constant::REFLASHING_REQUIRED_MSG)
             };
             if should_go_qrcode {
                 let _ = show_qrcode(&app_state, &chromium).await;
