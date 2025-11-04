@@ -135,6 +135,7 @@ func main() {
 	// Run the first heartbeat immediately without waiting for the ticker.
 	log.Info("Performing initial heartbeat...")
 	if !CheckConnectivity() {
+		// We accept device under no network condition, just skip heartbeat
 		log.Warn("Network not connected. Skipping heartbeat.")
 	} else {
 		SendHeartbeat()

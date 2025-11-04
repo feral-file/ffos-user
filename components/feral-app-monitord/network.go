@@ -17,6 +17,7 @@ func CheckConnectivity() bool {
 		return false
 	}
 	if err := conn.Close(); err != nil {
+		// we accept the connectivity even if close fails
 		log.Warn("Failed to close conn", zap.Error(err))
 	}
 	return true

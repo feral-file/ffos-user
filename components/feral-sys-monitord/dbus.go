@@ -37,6 +37,7 @@ func (s *SysMonitordDBus) GetConnectivityStatus(refresh bool) (bool, *dbus.Error
 	if refresh {
 		connected, err := s.connectivity.CheckConnectivity(RPC_PING_TIMEOUT)
 		if err != nil {
+			// We accept not being able to check connectivity and push the error to the caller
 			return false, dbus.NewError(err.Error(), []interface{}{})
 		}
 		return connected, nil

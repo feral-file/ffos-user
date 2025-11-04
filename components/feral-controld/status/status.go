@@ -246,6 +246,7 @@ func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 
 	if result == nil {
 		// FIXME: This should not happen, resolve the root cause
+		// We accept it for now to avoid flooding sentry with errors
 		s.logger.Warn("CDP returned nil result for player status")
 		return nil, nil
 	}
