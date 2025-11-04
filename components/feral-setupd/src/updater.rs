@@ -40,7 +40,7 @@ pub async fn latest_version() -> Result<String> {
 pub async fn is_too_old_to_upgrade() -> Result<bool> {
     let current = cfg::current_version().await?;
     let remote_versions = fetch_remote_version().await?;
-    
+
     if let Some(min_upgradeable) = &remote_versions.min_upgradeable_version {
         Ok(current < *min_upgradeable)
     } else {
@@ -57,7 +57,10 @@ pub async fn flashing_guide_url() -> Result<Option<String>> {
 /// Return the minimum upgradeable version from the remote server, if available.
 pub async fn min_upgradeable_version() -> Result<Option<String>> {
     let remote_versions = fetch_remote_version().await?;
-    Ok(remote_versions.min_upgradeable_version.as_ref().map(|v| v.to_string()))
+    Ok(remote_versions
+        .min_upgradeable_version
+        .as_ref()
+        .map(|v| v.to_string()))
 }
 
 /// Spawn the updater in a background task and return a channel receiver that
@@ -251,8 +254,10 @@ async fn fetch_remote_version() -> Result<UpstreamVersion> {
 
     let info: UpstreamInfo = resp.json().await.context("decoding distributor JSON")?;
     let versions = UpstreamVersion {
-        min_runtime_version: Version::parse(&info.min_runtime_version).context("parsing upstream semver")?,
-        min_upgradeable_version: info.min_upgradeable_version
+        min_runtime_version: Version::parse(&info.min_runtime_version)
+            .context("parsing upstream semver")?,
+        min_upgradeable_version: info
+            .min_upgradeable_version
             .as_ref()
             .map(|v| Version::parse(v).context("parsing min_upgradeable_version semver"))
             .transpose()?,
