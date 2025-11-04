@@ -132,6 +132,7 @@ func (c *Connectivity) background() {
 		if lastConnected == nil {
 			connected, err := c.CheckConnectivity(BACKGROUND_PING_TIMEOUT)
 			if err != nil {
+				// We accept not being able to check connectivity and only log the warning
 				c.logger.Warn("Connectivity check failed", zap.Error(err))
 			}
 			c.Lock()
@@ -166,6 +167,7 @@ func (c *Connectivity) background() {
 				connected, err := c.CheckConnectivity(BACKGROUND_PING_TIMEOUT)
 				c.logger.Info("Connectivity check result", zap.Bool("connected", connected))
 				if err != nil {
+					// We accept not being able to check connectivity and only log the warning
 					c.logger.Warn("Connectivity check failed", zap.Error(err))
 					continue
 				}
@@ -219,6 +221,7 @@ func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
 
 	err := eg.Wait()
 	if err != nil {
+		// We accept not being able to check connectivity and only log the warning
 		c.logger.Warn("Connectivity check failed", zap.Error(err))
 	}
 

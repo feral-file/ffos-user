@@ -64,6 +64,7 @@ pub const UPDATING_MSG_SUBTEXT: &str =
     "This process may take 5–10 minutes depending on your internet speed.";
 pub const SETUP_SUCCESSFULLY_MSG: &str = "Bringing art to your screen…";
 pub const FACTORY_RESET_MSG: &str = "Factory resetting…";
+pub const REFLASHING_REQUIRED_MSG: &str = "We're sorry—we've moved too far ahead for this version to catch up. Your FF1 is too far behind to auto-upgrade. Scan the code below for step-by-step reflashing instructions, or contact us for help. support@feralfile.com";
 
 // D-Bus configuration
 pub const DBUS_SETUPD_OBJECT: &str = "/com/feralfile/setupd";

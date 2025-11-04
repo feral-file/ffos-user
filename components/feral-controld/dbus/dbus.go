@@ -125,6 +125,7 @@ func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
 	// Connect to the relayer
 	err := c.relayer.RetryableConnect(retryCtx)
 	if err != nil {
+		c.logger.Error("Failed to reconnect to relayer", zap.Error(err))
 		retryCancel()
 		return "", dbus.NewError(err.Error(), []interface{}{})
 	}

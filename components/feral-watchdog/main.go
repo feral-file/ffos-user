@@ -101,8 +101,15 @@ func main() {
 		_ = dbusClient.Stop()
 	}()
 
+	// Initialize vmagent client
+	var vmagentURL string
+	if config.VmagentConfig != nil && config.VmagentConfig.URL != "" {
+		vmagentURL = config.VmagentConfig.URL
+	}
+	vmagentClient := NewVmagentClient(vmagentURL, log)
+
 	// Initialize system command executor
-	commandHandler := NewCommandHandler(log)
+	commandHandler := NewCommandHandler(log, vmagentClient)
 
 	// Initialize CDP client
 	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, log)
