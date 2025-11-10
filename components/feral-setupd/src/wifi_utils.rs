@@ -1,12 +1,11 @@
 use std::collections::HashSet;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{Mutex, Notify};
 use tokio::task;
 
-use crate::constant;
+use crate::{command, constant};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -147,9 +146,15 @@ pub fn connect(ssid: &str, pass: &str) -> Result<()> {
     }
 
     println!("Wifi: connecting to {ssid}");
-    let output = Command::new("nmcli")
-        .args(["device", "wifi", "connect", ssid, "password", pass])
-        .output()?;
+    let args = [
+        "device",
+        "wifi",
+        "connect",
+        ssid,
+        "password",
+        pass,
+    ];
+    let output = command::run_command("nmcli", &args)?;
 
     if output.status.success() {
         Ok(())
@@ -162,9 +167,8 @@ pub fn connect(ssid: &str, pass: &str) -> Result<()> {
 }
 
 fn delete(ssid: &str) -> Result<()> {
-    let output = Command::new("nmcli")
-        .args(["connection", "delete", ssid])
-        .output()?;
+    let args = ["connection", "delete", ssid];
+    let output = command::run_command("nmcli", &args)?;
 
     if output.status.success() {
         Ok(())
@@ -183,7 +187,7 @@ pub async fn list_ssids(force: bool) -> Result<Vec<String>> {
             args.push("--rescan");
             args.push("yes");
         }
-        Command::new("nmcli").args(&args).output()
+        command::run_command("nmcli", &args)
     })
     .await? // JoinError → Error::Join
     ?; // IoError → Error::Io
@@ -215,4 +219,158 @@ pub async fn list_ssids(force: bool) -> Result<Vec<String>> {
         }
     }
     Ok(ssids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command;
+    use parking_lot::Mutex as ParkingMutex;
+    use std::io;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Output;
+    use std::sync::Arc;
+    use serial_test::serial;
+
+    struct MockCommandExecutor {
+        outputs: ParkingMutex<Vec<io::Result<Output>>>,
+        calls: ParkingMutex<Vec<(String, Vec<String>)>>,
+    }
+
+    impl MockCommandExecutor {
+        fn new(outputs: Vec<io::Result<Output>>) -> Self {
+            Self {
+                outputs: ParkingMutex::new(outputs),
+                calls: ParkingMutex::new(Vec::new()),
+            }
+        }
+
+        fn success_output(stdout: &str) -> io::Result<Output> {
+            Ok(Output {
+                status: ExitStatusExt::from_raw(0),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn failure_output(stderr: &str) -> io::Result<Output> {
+            Ok(Output {
+                status: ExitStatusExt::from_raw(1),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        }
+
+        fn default_success_output() -> io::Result<Output> {
+            Ok(Output {
+                status: ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    impl command::CommandExecutor for MockCommandExecutor {
+        fn output(&self, program: &str, args: &[&str]) -> io::Result<Output> {
+            self.calls.lock().push((
+                program.to_string(),
+                args.iter().map(|s| s.to_string()).collect(),
+            ));
+            let mut outputs = self.outputs.lock();
+            if outputs.is_empty() {
+                Self::default_success_output()
+            } else {
+                outputs.remove(0)
+            }
+        }
+    }
+
+    fn install_executor(executor: Arc<MockCommandExecutor>) {
+        command::set_command_executor(executor);
+    }
+
+    fn uninstall_executor() {
+        command::clear_command_executor();
+    }
+
+    #[test]
+    #[serial]
+    fn connect_successful() {
+        let executor = Arc::new(MockCommandExecutor::new(vec![
+            MockCommandExecutor::success_output(""),
+            MockCommandExecutor::success_output(""),
+        ]));
+        install_executor(executor.clone());
+
+        assert!(connect("my-ssid", "secret").is_ok());
+        assert_eq!(executor.calls.lock().len(), 2);
+
+        uninstall_executor();
+    }
+
+    #[test]
+    #[serial]
+    fn connect_failure_returns_error() {
+        let stderr = "Error: password incorrect";
+        let executor = Arc::new(MockCommandExecutor::new(vec![
+            MockCommandExecutor::success_output(""),
+            MockCommandExecutor::failure_output(stderr),
+        ]));
+        install_executor(executor.clone());
+
+        let err = connect("ssid", "pwd").unwrap_err();
+        assert!(matches!(err, Error::NmcliFailure { .. }));
+        assert_eq!(executor.calls.lock().len(), 2);
+
+        uninstall_executor();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_ssids_parses_unique_values() {
+        let executor = Arc::new(MockCommandExecutor::new(vec![
+            MockCommandExecutor::success_output("Home\nOffice\nHome\n\n"),
+        ]));
+        install_executor(executor.clone());
+
+        let ssids = list_ssids(false).await.unwrap();
+        assert_eq!(ssids, vec!["Home".to_string(), "Office".to_string()]);
+        assert_eq!(executor.calls.lock().len(), 1);
+
+        uninstall_executor();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ssids_cacher_returns_cached_results() {
+        let executor = Arc::new(MockCommandExecutor::new(vec![
+            MockCommandExecutor::success_output("Cafe\nLibrary\n"),
+        ]));
+        install_executor(executor.clone());
+
+        let cacher = SSIDsCacher::new();
+        let first = cacher.get().await.unwrap();
+        assert_eq!(first, vec!["Cafe".to_string(), "Library".to_string()]);
+
+        let second = cacher.get().await.unwrap();
+        assert_eq!(second, first);
+        assert_eq!(executor.calls.lock().len(), 1);
+
+        uninstall_executor();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ssids_cacher_propagates_errors() {
+        let executor = Arc::new(MockCommandExecutor::new(vec![
+            MockCommandExecutor::failure_output("nmcli failed"),
+        ]));
+        install_executor(executor);
+
+        let cacher = SSIDsCacher::new();
+        let err = cacher.get().await.unwrap_err();
+        assert!(matches!(err, Error::NmcliFailure { .. }));
+
+        uninstall_executor();
+    }
 }

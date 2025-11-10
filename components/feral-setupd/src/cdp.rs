@@ -158,3 +158,82 @@ impl Cdp {
         Ok(socket)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn start_ws_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(msg) = ws.next().await {
+                if let Ok(tokio_tungstenite::tungstenite::Message::Text(text)) = msg {
+                    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let id = parsed.get("id").and_then(|v| v.as_u64()).unwrap();
+                    let response = json!({ "id": id, "result": { "ack": true } });
+                    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                        response.to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+
+        url
+    }
+
+    async fn setup_http_server(ws_url: &str) -> MockServer {
+        let server = MockServer::start().await;
+        let body = json!([
+            { "type": "background_page" },
+            {
+                "type": "page",
+                "webSocketDebuggerUrl": ws_url
+            }
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn connects_and_navigates() {
+        let ws_url = start_ws_server().await;
+        let http_server = setup_http_server(&ws_url).await;
+
+        let cdp = Cdp::connect(&format!("{}/json", http_server.uri()))
+            .await
+            .expect("should connect");
+        cdp.navigate("http://example.com")
+            .await
+            .expect("navigation should succeed");
+    }
+
+    #[tokio::test]
+    async fn returns_error_when_no_page_target() {
+        let server = MockServer::start().await;
+        let body = json!([{ "type": "background_page" }]);
+        Mock::given(method("GET"))
+            .and(path("/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let result = Cdp::connect(&format!("{}/json", server.uri())).await;
+        assert!(matches!(result, Err(Error::Chromium(_))));
+    }
+}

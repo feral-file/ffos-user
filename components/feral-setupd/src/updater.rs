@@ -1,6 +1,7 @@
 //! Firmware / software updater support for setupd.
 use crate::{cfg, constant};
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use rand::Rng;
 use regex::Regex;
 use semver::Version;
@@ -17,7 +18,11 @@ use tokio::{
 };
 
 // ---------- Cache ----------
-static REMOTE_VERSIONS: OnceLock<UpstreamVersion> = OnceLock::new();
+static REMOTE_VERSIONS: OnceLock<Mutex<Option<UpstreamVersion>>> = OnceLock::new();
+
+fn versions_cache() -> &'static Mutex<Option<UpstreamVersion>> {
+    REMOTE_VERSIONS.get_or_init(|| Mutex::new(None))
+}
 
 // ---------- Public API ----------
 
@@ -225,8 +230,8 @@ struct UpstreamVersion {
 }
 
 async fn fetch_remote_version() -> Result<UpstreamVersion> {
-    if let Some(versions) = REMOTE_VERSIONS.get() {
-        return Ok(versions.clone());
+    if let Some(versions) = versions_cache().lock().clone() {
+        return Ok(versions);
     }
 
     let url = format!(
@@ -264,6 +269,196 @@ async fn fetch_remote_version() -> Result<UpstreamVersion> {
         flashing_guide: info.flashing_guide,
         latest_version: Version::parse(&info.latest_version).context("parsing upstream semver")?,
     };
-    REMOTE_VERSIONS.set(versions.clone()).unwrap();
+    versions_cache().lock().replace(versions.clone());
     Ok(versions)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_cached_versions() {
+    if let Some(cache) = REMOTE_VERSIONS.get() {
+        cache.lock().take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cfg;
+    use serde_json::json;
+    use tempfile::NamedTempFile;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use serial_test::serial;
+
+    async fn setup_environment(
+        branch: &str,
+        current_version: &str,
+        response: serde_json::Value,
+    ) -> (MockServer, NamedTempFile) {
+        reset_cached_versions();
+        cfg::reset_current_build();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "{}{}",
+                constant::UPDATER_UPSTREAM_CONFIG_URL_SUFFIX,
+                branch
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+
+        let config = NamedTempFile::new().unwrap();
+        let config_body = format!(
+            r#"{{
+                "branch": "{branch}",
+                "version": "{current_version}",
+                "endpoint": "{endpoint}",
+                "webapp_url": null
+            }}"#,
+            endpoint = server.uri()
+        );
+        std::fs::write(config.path(), config_body).unwrap();
+        cfg::set_config_path_override(Some(config.path().to_path_buf()));
+
+        (server, config)
+    }
+
+    fn cleanup_environment() {
+        cfg::set_config_path_override(None);
+        reset_cached_versions();
+        cfg::reset_current_build();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn detects_when_update_is_required() {
+        let branch = "main";
+        let current_version = "1.0.0";
+        let response = json!({
+            "min_runtime_version": "2.0.0",
+            "min_upgradeable_version": "1.5.0",
+            "flashing_guide": "https://example.com/guide",
+            "latest_version": "2.5.0"
+        });
+
+        let (_server, _config) = setup_environment(branch, current_version, response).await;
+
+        assert!(is_update_required().await.unwrap());
+        assert_eq!(latest_version().await.unwrap(), "2.5.0");
+        assert_eq!(
+            flashing_guide_url().await.unwrap(),
+            Some("https://example.com/guide".to_string())
+        );
+        assert_eq!(
+            min_upgradeable_version().await.unwrap(),
+            Some("1.5.0".to_string())
+        );
+
+        cleanup_environment();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn detects_when_update_is_not_required() {
+        let branch = "stable";
+        let current_version = "2.1.0";
+        let response = json!({
+            "min_runtime_version": "2.0.0",
+            "min_upgradeable_version": "1.9.0",
+            "flashing_guide": null,
+            "latest_version": "2.1.5"
+        });
+
+        let (_server, _config) = setup_environment(branch, current_version, response).await;
+
+        assert!(!is_update_required().await.unwrap());
+        assert!(!is_too_old_to_upgrade().await.unwrap());
+
+        cleanup_environment();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn detects_when_device_is_too_old() {
+        let branch = "beta";
+        let current_version = "1.0.0";
+        let response = json!({
+            "min_runtime_version": "1.0.1",
+            "min_upgradeable_version": "1.1.0",
+            "flashing_guide": "https://example.com/reflash",
+            "latest_version": "1.5.0"
+        });
+
+        let (_server, _config) = setup_environment(branch, current_version, response).await;
+
+        assert!(is_too_old_to_upgrade().await.unwrap());
+        assert!(is_update_required().await.unwrap());
+
+        cleanup_environment();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn caches_remote_versions() {
+        let branch = "cache";
+        let current_version = "1.0.0";
+        let first_response = json!({
+            "min_runtime_version": "1.0.1",
+            "min_upgradeable_version": null,
+            "flashing_guide": null,
+            "latest_version": "1.0.5"
+        });
+
+        let (server, config) = setup_environment(branch, current_version, first_response).await;
+        assert!(is_update_required().await.unwrap());
+
+        // Drop the server and ensure cached value is still used without panic.
+        drop(server);
+        assert!(is_update_required().await.unwrap());
+
+        drop(config);
+        cleanup_environment();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn returns_error_on_http_failure() {
+        let branch = "error";
+        let current_version = "1.0.0";
+
+        reset_cached_versions();
+        cfg::reset_current_build();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "{}{}",
+                constant::UPDATER_UPSTREAM_CONFIG_URL_SUFFIX,
+                branch
+            )))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let config = NamedTempFile::new().unwrap();
+        let config_body = format!(
+            r#"{{
+                "branch": "{branch}",
+                "version": "{current_version}",
+                "endpoint": "{endpoint}",
+                "webapp_url": null
+            }}"#,
+            endpoint = server.uri()
+        );
+        std::fs::write(config.path(), config_body).unwrap();
+        cfg::set_config_path_override(Some(config.path().to_path_buf()));
+
+        let result = is_update_required().await;
+        assert!(result.is_err());
+
+        cfg::set_config_path_override(None);
+        reset_cached_versions();
+        cfg::reset_current_build();
+    }
 }

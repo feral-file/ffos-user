@@ -1,25 +1,84 @@
-mod ble;
-mod cache;
-mod cdp;
-mod cfg;
-mod connectivity;
-mod constant;
-mod dbus_utils;
-mod encoding;
-mod log_uploader;
-mod system;
-mod updater;
-mod wifi_utils;
 use std::env;
 
-use crate::dbus_utils::PageStateProvider;
-use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
+use feral_setupd::cache::{self, Cache};
+use feral_setupd::cdp::Cdp;
+use feral_setupd::connectivity::Connectivity;
+use feral_setupd::constant;
+use feral_setupd::dbus_client;
+use feral_setupd::dbus_utils::{self, PageStateProvider};
+use feral_setupd::updater;
+use feral_setupd::wifi_utils::{self, Error as WifiError, SSIDsCacher};
+use feral_setupd::cfg;
+
+#[cfg(target_os = "linux")]
+use feral_setupd::ble::{self, Ble};
+#[cfg(not(target_os = "linux"))]
+mod ble_stub {
+    use anyhow::Result;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use feral_setupd::system;
+    use feral_setupd::wifi_utils::SSIDsCacher;
+    use tokio::sync::Mutex;
+
+    pub type BTConnectedCallback =
+        Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
+    pub type BTDisconnectedCallback = BTConnectedCallback;
+    pub type ConnectWifiCallback = Box<
+        dyn Fn(&str, &str) -> Pin<Box<dyn Future<Output = std::result::Result<String, u8>> + Send>>
+            + Send
+            + Sync,
+    >;
+    pub type KeepWifiCallback = Box<
+        dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<String, u8>> + Send>>
+            + Send
+            + Sync,
+    >;
+    pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
+    pub type FactoryResetCallback = BTConnectedCallback;
+
+    #[derive(Default)]
+    pub struct Ble {
+        device_id: Mutex<String>,
+    }
+
+    impl Ble {
+        pub fn new() -> Self {
+            Self {
+                device_id: Mutex::new(system::get_device_id()),
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub async fn start(
+            &self,
+            _bt_connected_cb: BTConnectedCallback,
+            _bt_disconnected_cb: BTDisconnectedCallback,
+            _factory_reset_cb: FactoryResetCallback,
+            _connect_wifi_cb: ConnectWifiCallback,
+            _keep_wifi_cb: KeepWifiCallback,
+            _get_info_cb: GetInfoCallback,
+            _ssids_cacher: Arc<SSIDsCacher>,
+        ) -> Result<()> {
+            println!("BLE: Not supported on this platform; skipping Bluetooth initialization");
+            Ok(())
+        }
+
+        pub async fn get_device_id(&self) -> String {
+            self.device_id.lock().await.clone()
+        }
+
+        pub async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+}
+#[cfg(not(target_os = "linux"))]
+use ble_stub::{self as ble, Ble};
 use anyhow::Context;
 use anyhow::Result;
-use ble::Ble;
-use cache::Cache;
-use cdp::Cdp;
-use connectivity::Connectivity;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -249,7 +308,7 @@ async fn run() -> Result<()> {
             app_state.app_cache.save(constant::CACHE_FILEPATH)?;
         }
         if qemu {
-            let topic_id = match dbus_utils::get_relayer_info() {
+            let topic_id = match dbus_client::get_relayer_info() {
                 Ok(info) => info,
                 Err(e) => {
                     eprintln!("QEMU: can't get relayer data from controld: {e:#?}");
@@ -484,7 +543,7 @@ async fn internet_setup_successfully_cb(
     }
 
     // Get topic id from controld
-    let topic_id = match dbus_utils::get_relayer_info() {
+    let topic_id = match dbus_client::get_relayer_info() {
         Ok(info) => info,
         Err(e) => {
             eprintln!("BLE: can't get relayer data from controld: {e:#?}");
@@ -807,7 +866,7 @@ async fn wait_for_controld(timeout: Duration) -> Result<()> {
 
     let wait_future = async {
         loop {
-            match dbus_utils::check_dbus_connection(
+            match dbus_client::check_connection(
                 constant::DBUS_CONTROLD_DESTINATION,
                 constant::DBUS_CONTROLD_OBJECT,
             ) {
@@ -823,5 +882,127 @@ async fn wait_for_controld(timeout: Duration) -> Result<()> {
     match time::timeout(timeout, wait_future).await {
         Ok(_) => Ok(()),
         Err(_) => Err(anyhow::anyhow!("Timeout waiting for controld connection")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use feral_setupd::{cache, dbus_client};
+    use parking_lot::Mutex as ParkingMutex;
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+    use tokio::sync::Mutex;
+    use serial_test::serial;
+
+    struct MockDbusClient {
+        online: ParkingMutex<bool>,
+    }
+
+    impl MockDbusClient {
+        fn new(initial: bool) -> Arc<Self> {
+            Arc::new(Self {
+                online: ParkingMutex::new(initial),
+            })
+        }
+    }
+
+    impl dbus_client::DbusClient for MockDbusClient {
+        fn internet_availability(&self) -> bool {
+            *self.online.lock()
+        }
+
+        fn get_relayer_info(&self) -> anyhow::Result<String> {
+            Ok("topic".to_string())
+        }
+
+        fn check_connection(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn page_helpers_behave_as_expected() {
+        let ts = 42;
+
+        let qrcode = Page::QRCode(ts);
+        assert_eq!(qrcode.timestamp(), ts);
+        assert_eq!(qrcode.page_type(), "QRCode");
+        assert!(!qrcode.should_keep_on_bt_disconnect());
+
+        let success_message = Page::Message(ts, constant::SETUP_SUCCESSFULLY_MSG.to_string());
+        assert!(success_message.should_keep_on_bt_disconnect());
+
+        let other_message = Page::Message(ts, "hello".to_string());
+        assert!(!other_message.should_keep_on_bt_disconnect());
+
+        let reset = Page::FactoryReset(ts);
+        assert!(reset.should_keep_on_bt_disconnect());
+
+        let reflashing = Page::ReflashingRequired(ts, "msg".to_string());
+        assert!(reflashing.should_keep_on_bt_disconnect());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn build_qrcode_url_includes_expected_fields() {
+        dbus_client::set_dbus_client(MockDbusClient::new(true));
+
+        let temp = NamedTempFile::new().unwrap();
+        let cache = cache::Cache::new(temp.path().to_str().unwrap()).unwrap();
+        cache.set(cache::TOPIC_ID, "topic123");
+
+        let connectivity = Connectivity::spawn().await;
+        let app_state = Arc::new(AppState {
+            device_id: "device-42".to_string(),
+            branch: "feature/new".to_string(),
+            current_version: "3.2.1".to_string(),
+            app_cache: cache,
+            internet: connectivity,
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            qemu: false,
+        });
+
+        let url = build_qrcode_url(&app_state).await;
+        let expected_branch = "feature%2Fnew";
+        let expected = format!(
+            "{}&device_info=device-42|topic123|true|{}|3.2.1&version=3.2.1&device_id=device-42",
+            constant::QRCODE_URL_PREFIX, expected_branch
+        );
+        assert_eq!(url, expected);
+
+        dbus_client::clear_dbus_client();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn app_state_page_state_provider_returns_values() {
+        dbus_client::set_dbus_client(MockDbusClient::new(false));
+
+        let temp = NamedTempFile::new().unwrap();
+        let cache = cache::Cache::new(temp.path().to_str().unwrap()).unwrap();
+
+        let connectivity = Connectivity::spawn().await;
+        let app_state = Arc::new(AppState {
+            device_id: "device-id".to_string(),
+            branch: "main".to_string(),
+            current_version: "1.0.0".to_string(),
+            app_cache: cache,
+            internet: connectivity,
+            page: Mutex::new(Page::QRCode(123)),
+            auto_proceed: AtomicBool::new(false),
+            qemu: false,
+        });
+
+        let state = app_state.clone();
+        let (id, page, ts) = tokio::task::spawn_blocking(move || state.get_page_state())
+            .await
+            .unwrap();
+        assert_eq!(id, "device-id");
+        assert_eq!(page, "QRCode");
+        assert_eq!(ts, 123);
+
+        dbus_client::clear_dbus_client();
     }
 }

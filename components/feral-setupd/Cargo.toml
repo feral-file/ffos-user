@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bluer         = { version = "0.17.3", features = ["bluetoothd"] }
 tokio         = { version = "1.45.0", features = ["full"] }
 uuid          = "1.16.0"
 futures-util  = "0.3"
@@ -31,8 +30,23 @@ urlencoding = "2.1"
 
 [build-dependencies]
 
+[dev-dependencies]
+mockall = "0.13"
+tempfile = "3.13"
+tokio-test = "0.4"
+assert_matches = "1.5"
+serial_test = "3.2"
+wiremock = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17.3", features = ["bluetoothd"] }
+
+[lib]
+name = "feral_setupd"
+path = "src/lib.rs"
+
 [profile.qemu]
 inherits = "release"
 
 [lints.clippy]
-too-many-arguments = { level = "allow", threshold = 8 }
+too-many-arguments = "allow"

@@ -1,7 +1,7 @@
 //! connectivity.rs
 //! Drop-in helper for “am I online?” logic.
 
-use crate::dbus_utils;
+use crate::dbus_client;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -31,7 +31,7 @@ impl Connectivity {
     // ---------------------------------------------------------------------
     /// Spawns the background refresher and returns a usable handle.
     pub async fn spawn() -> Self {
-        let initial = dbus_utils::internet_availability();
+        let initial = dbus_client::internet_availability();
         let (tx, rx) = watch::channel(initial);
 
         let inner = Arc::new(Inner {
@@ -62,7 +62,7 @@ impl Connectivity {
 
         // Serialize concurrent “force” calls.
         let _guard = self.inner.force_lock.lock().await;
-        let fresh = dbus_utils::internet_availability();
+        let fresh = dbus_client::internet_availability();
         let _ = self.inner.tx.send_if_modified(|old| {
             if *old != fresh {
                 *old = fresh;
@@ -104,7 +104,7 @@ async fn background_refresher(tx: watch::Sender<bool>) {
 
     loop {
         ticker.tick().await;
-        let ok = dbus_utils::internet_availability();
+        let ok = dbus_client::internet_availability();
         let _ = tx.send_if_modified(|old| {
             if *old != ok {
                 *old = ok;
@@ -113,5 +113,98 @@ async fn background_refresher(tx: watch::Sender<bool>) {
                 false
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dbus_client;
+    use anyhow::Result;
+    use parking_lot::Mutex as ParkingMutex;
+    use std::sync::Arc;
+    use serial_test::serial;
+
+    struct MockDbusClient {
+        states: Arc<ParkingMutex<Vec<bool>>>,
+    }
+
+    impl MockDbusClient {
+        fn new(states: Vec<bool>) -> Self {
+            Self {
+                states: Arc::new(ParkingMutex::new(states)),
+            }
+        }
+
+        fn next_state(&self) -> bool {
+            let mut guard = self.states.lock();
+            if guard.len() > 1 {
+                guard.remove(0)
+            } else {
+                guard.get(0).copied().unwrap_or(false)
+            }
+        }
+    }
+
+    impl dbus_client::DbusClient for MockDbusClient {
+        fn internet_availability(&self) -> bool {
+            self.next_state()
+        }
+
+        fn get_relayer_info(&self) -> Result<String> {
+            Ok("topic".to_string())
+        }
+
+        fn check_connection(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn is_online_uses_cached_and_forced_values() {
+        dbus_client::set_dbus_client(Arc::new(MockDbusClient::new(vec![false, true, true])));
+
+        let connectivity = Connectivity::spawn().await;
+        assert!(!connectivity.is_online(false).await);
+        assert!(connectivity.is_online(true).await);
+
+        dbus_client::clear_dbus_client();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn wait_until_online_stops_when_online() {
+        dbus_client::set_dbus_client(Arc::new(MockDbusClient::new(vec![
+            false, false, true, true,
+        ])));
+
+        let connectivity = Connectivity::spawn().await;
+        connectivity
+            .wait_until_online(
+                Duration::from_millis(5),
+                Some(Duration::from_millis(100)),
+            )
+            .await;
+        assert!(connectivity.is_online(false).await);
+
+        dbus_client::clear_dbus_client();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn wait_until_online_respects_timeout() {
+        dbus_client::set_dbus_client(Arc::new(MockDbusClient::new(vec![false, false, false])));
+
+        let connectivity = Connectivity::spawn().await;
+        connectivity
+            .wait_until_online(
+                Duration::from_millis(5),
+                Some(Duration::from_millis(20)),
+            )
+            .await;
+        assert!(!connectivity.is_online(false).await);
+
+        dbus_client::clear_dbus_client();
     }
 }

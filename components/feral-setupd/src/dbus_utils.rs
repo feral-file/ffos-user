@@ -18,6 +18,14 @@ pub trait PageStateProvider: Send + Sync {
     fn get_page_state(&self) -> (String, String, i64);
 }
 
+fn ack_member_name(member: &str) -> String {
+    format!("{member}_ack")
+}
+
+fn signal_rule(interface: &str, member: &str, object_path: &str) -> String {
+    format!("type='signal',interface='{interface}',member='{member}',path='{object_path}'")
+}
+
 pub fn start_dbus_service<T: PageStateProvider + 'static>(state_provider: Arc<T>) {
     std::thread::spawn(move || {
         println!("DBUS: start_dbus_service started");
@@ -59,9 +67,8 @@ pub fn send_signal(object_path: &str, interface: &str, member: &str, payload: &s
     let conn = Connection::new_session()?;
 
     // Listen for the expected ack
-    let ack_member = format!("{member}_ack");
-    let rule =
-        format!("type='signal',interface='{interface}',member='{ack_member}',path='{object_path}'");
+    let ack_member = ack_member_name(member);
+    let rule = signal_rule(interface, &ack_member, object_path);
     conn.add_match_no_cb(&rule)?;
 
     // Send the signal up to `MAX_RETRIES` times
@@ -122,8 +129,7 @@ pub fn receive_signal(
     timeout_ms: u64,
 ) -> Result<Message> {
     let conn = Connection::new_session()?;
-    let rule =
-        format!("type='signal',interface='{interface}',member='{member}',path='{object_path}'");
+    let rule = signal_rule(interface, member, object_path);
     println!("DBUS: Rule: {rule}");
     conn.add_match_no_cb(&rule)?;
 
@@ -174,8 +180,9 @@ fn receive_internal(
     }
 
     // Send acknowledgement
-    println!("DBUS: Sending ack signal '{member}_ack' to {object_path}, {interface}");
-    let mut ack_msg = Message::new_signal(object_path, interface, format!("{member}_ack"))
+    let ack_member = ack_member_name(member);
+    println!("DBUS: Sending ack signal '{ack_member}' to {object_path}, {interface}");
+    let mut ack_msg = Message::new_signal(object_path, interface, ack_member.clone())
         .map_err(anyhow::Error::msg)?;
     ack_msg = ack_msg.append1("");
     if conn.send(ack_msg).is_err() {
@@ -198,8 +205,7 @@ pub fn listen_for_signal(
     let member = member.to_string();
     task::spawn_blocking(move || {
         let conn = Connection::new_session().expect("DBUS: failed to create connection");
-        let rule =
-            format!("type='signal',interface='{interface}',member='{member}',path='{object_path}'");
+        let rule = signal_rule(&interface, &member, &object_path);
         conn.add_match_no_cb(&rule)
             .expect("DBUS: failed to add match");
 
@@ -316,4 +322,23 @@ pub fn check_dbus_connection(destination: &str, object_path: &str) -> Result<()>
 
     println!("DBUS: Connection check successful via Peer.Ping");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ack_member_name_appends_suffix() {
+        assert_eq!(ack_member_name("signal"), "signal_ack");
+    }
+
+    #[test]
+    fn signal_rule_formats_correctly() {
+        let rule = signal_rule("iface", "Signal", "/com/example/object");
+        assert_eq!(
+            rule,
+            "type='signal',interface='iface',member='Signal',path='/com/example/object'"
+        );
+    }
 }

@@ -62,3 +62,74 @@ impl Cache {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn new_without_existing_file_creates_empty_cache() {
+        let file = NamedTempFile::new().expect("create temp file");
+        let path = file.path().to_str().unwrap().to_string();
+        std::fs::remove_file(&path).expect("delete temp file to simulate missing file");
+
+        let cache = Cache::new(&path).expect("cache should be created");
+        assert!(cache.get("any").is_none());
+    }
+
+    #[test]
+    fn new_with_existing_file_loads_entries() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "foo=bar").unwrap();
+        writeln!(file, "baz=qux").unwrap();
+
+        let cache = Cache::new(file.path().to_str().unwrap()).expect("cache should load");
+        assert_eq!(cache.get("foo").as_deref(), Some("bar"));
+        assert_eq!(cache.get("baz").as_deref(), Some("qux"));
+    }
+
+    #[test]
+    fn new_with_invalid_format_returns_error() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "invalid_line_without_equal").unwrap();
+
+        let err = Cache::new(file.path().to_str().unwrap()).unwrap_err();
+        match err {
+            Error::InvalidFormat(line) => {
+                assert_eq!(line.trim(), "invalid_line_without_equal");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_get_and_save_roundtrip() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap();
+
+        let cache = Cache::new(path).expect("cache should be created");
+        cache.set("key", "value");
+        cache.set("another", "entry");
+        assert_eq!(cache.get("key").as_deref(), Some("value"));
+
+        cache.save(path).expect("save should succeed");
+
+        let reloaded = Cache::new(path).expect("cache should reload");
+        assert_eq!(reloaded.get("key").as_deref(), Some("value"));
+        assert_eq!(reloaded.get("another").as_deref(), Some("entry"));
+    }
+
+    #[test]
+    fn save_preserves_empty_cache() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap();
+
+        let cache = Cache::new(path).expect("cache should be created");
+        cache.save(path).expect("save should succeed");
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.is_empty());
+    }
+}
