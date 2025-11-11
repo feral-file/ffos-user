@@ -6,8 +6,16 @@ if [ -f /home/feralfile/.state/screen-orientation ]; then
     ROTATION=$(cat /home/feralfile/.state/screen-orientation)
 fi
 
-# Set Wayland/wlroots environment variables
 export WLR_DRM_FORMATS="XR24/I915_FORMAT_MOD_Y_TILED;XR24/I915_FORMAT_MOD_Yf_TILED"
+
+# Detect SOC vendor
+VENDOR=$(cat /proc/cpuinfo | grep -m1 vendor_id | awk '{print $3}')
+if [ "$VENDOR" = "GenuineIntel" ]; then
+    FEATURES="UseOzonePlatform,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
+else
+    # Default to AMD
+    FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+fi
 
 /home/feralfile/scripts/cdp-ready-check.sh &
 
@@ -15,7 +23,9 @@ export WLR_DRM_FORMATS="XR24/I915_FORMAT_MOD_Y_TILED;XR24/I915_FORMAT_MOD_Yf_TIL
 exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && exec /usr/bin/chromium \
     --kiosk \
     --ozone-platform=wayland \
-    --enable-features=UseOzonePlatform \
+    --enable-features=$FEATURES \
+    --ignore-gpu-blocklist \
+    --enable-gpu-rasterization \
     --remote-debugging-port=9222 \
     --no-first-run \
     --disable-sync \
