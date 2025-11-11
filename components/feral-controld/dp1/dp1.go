@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
@@ -98,11 +99,11 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	}
 
 	var ffTokens []ffindexer.Token
-	size := MAX_PLAYLIST_ITEMS_LIMIT
+	limit := MAX_PLAYLIST_ITEMS_LIMIT
 	if minimal {
-		size = MINIMAL_PLAYLIST_ITEMS_LIMIT
+		limit = MINIMAL_PLAYLIST_ITEMS_LIMIT
 	}
-	dynamicQuery.Params["size"] = fmt.Sprintf("%d", size)
+	dynamicQuery.Params["limit"] = fmt.Sprintf("%d", limit)
 	offset := 0
 
 	for {
@@ -111,19 +112,13 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 		if err != nil {
 			return nil, err
 		}
+		ffTokens = append(ffTokens, tokens...)
 
-		// Filter tokens with balance > 0 so it only includes the tokens actually owned by the owner
-		for _, token := range tokens {
-			if token.Balance > 0 {
-				ffTokens = append(ffTokens, token)
-			}
-		}
-
-		if len(tokens) < size || (minimal && len(ffTokens) >= MINIMAL_PLAYLIST_ITEMS_LIMIT) {
+		if len(tokens) < limit || (minimal && len(ffTokens) >= MINIMAL_PLAYLIST_ITEMS_LIMIT) {
 			break
 		}
 
-		offset += size
+		offset += limit
 	}
 
 	// Build playlist items
@@ -175,14 +170,13 @@ func buildPlaylistItems(duration int, tokens []ffindexer.Token) []dp1playlist.Pl
 	}
 	return items
 }
-
 func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.PlaylistItem {
-	title := token.Asset.Metadata.Project.Latest.Title
-	previewURL := token.Asset.Metadata.Project.Latest.PreviewURL
-	chain := normalizeChain(token.Blockchain)
+	title := token.GetTitle()
+	previewURL := token.GetPreviewURL()
+	chain := normalizeChain(token.Chain)
 
 	return dp1playlist.PlaylistItem{
-		ID:       token.ID,
+		ID:       uuid.New().String(),
 		Title:    &title,
 		Source:   previewURL,
 		Duration: duration,
@@ -191,9 +185,9 @@ func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.Playlist
 			Type: "onChain",
 			Contract: &dp1playlist.Contract{
 				Chain:    chain,
-				Standard: &token.ContractType,
+				Standard: &token.Standard,
 				Address:  &token.ContractAddress,
-				TokenID:  &token.ID,
+				TokenID:  &token.TokenNumber,
 			},
 		},
 	}
@@ -201,14 +195,13 @@ func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.Playlist
 
 func normalizeChain(blockchain string) string {
 	b := strings.ToLower(strings.TrimSpace(blockchain))
-	switch b {
-	case "ethereum":
+
+	// Support CAIP-2 format from ff-indexer-v2
+	if strings.HasPrefix(b, "eip155:") {
 		return "evm"
-	case "tezos":
-		return "tezos"
-	case "bitmark":
-		return "bitmark"
-	default:
-		return "other"
 	}
+	if strings.HasPrefix(b, "tezos:") {
+		return "tezos"
+	}
+	return "other"
 }
