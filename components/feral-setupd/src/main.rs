@@ -756,7 +756,7 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
 }
 
 async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &str) -> Result<()> {
-    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, urlencoding::encode(message));
+    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, message);
     chrome
         .navigate(&message_url)
         .await
@@ -773,21 +773,7 @@ async fn show_system_upgrade(
     app_state: &Arc<AppState>,
     message: &str,
 ) -> Result<()> {
-    // Parse message and subtext from the input string
-    // The message parameter comes in format: "message&subtext=subtext_content"
-    let message_url = if let Some(subtext_pos) = message.find("&subtext=") {
-        let msg = &message[..subtext_pos];
-        let subtext = &message[subtext_pos + 9..]; // Skip "&subtext="
-        format!(
-            "{}{}&subtext={}",
-            constant::MSG_URL_PREFIX,
-            urlencoding::encode(msg),
-            urlencoding::encode(subtext)
-        )
-    } else {
-        format!("{}{}", constant::MSG_URL_PREFIX, urlencoding::encode(message))
-    };
-    
+    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, message);
     chrome
         .navigate(&message_url)
         .await
@@ -803,7 +789,7 @@ async fn show_factory_reset(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) -> Res
     let message_url = format!(
         "{}{}",
         constant::MSG_URL_PREFIX,
-        urlencoding::encode(constant::FACTORY_RESET_MSG)
+        constant::FACTORY_RESET_MSG
     );
     chrome
         .navigate(&message_url)
