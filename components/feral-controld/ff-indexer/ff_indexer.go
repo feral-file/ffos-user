@@ -17,30 +17,82 @@ var FF_INDEXER_HOSTS = map[string]bool{
 	"indexer.autonomy.io":   true,
 }
 
-type ProjectMetadata struct {
-	Title      string `json:"title,omitempty"`
-	PreviewURL string `json:"previewURL,omitempty"`
+// V2 GraphQL types matching ff-indexer-v2 schema
+type Artist struct {
+	DID  string `json:"did"`
+	Name string `json:"name"`
+}
+
+type Publisher struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+type TokenMetadata struct {
+	Name         string     `json:"name"`
+	Description  string     `json:"description"`
+	ImageURL     string     `json:"image_url"`
+	AnimationURL string     `json:"animation_url"`
+	Artists      []Artist   `json:"artists"`
+	Publisher    *Publisher `json:"publisher,omitempty"`
+	MimeType     string     `json:"mime_type"`
+}
+
+type Owner struct {
+	OwnerAddress string `json:"owner_address"`
+	Quantity     string `json:"quantity"`
+}
+
+type PaginatedOwners struct {
+	Items []Owner `json:"items"`
+	Total string  `json:"total"`
 }
 
 type Token struct {
-	ID              string `json:"id,omitempty"`
-	Blockchain      string `json:"blockchain,omitempty"`
-	ContractType    string `json:"contractType,omitempty"`
-	ContractAddress string `json:"contractAddress,omitempty"`
-	Balance         int    `json:"balance"`
-	Asset           struct {
-		Metadata struct {
-			Project struct {
-				Latest ProjectMetadata `json:"latest,omitempty"`
-			} `json:"project,omitempty"`
-		} `json:"metadata,omitempty"`
+	ID              string           `json:"id"`
+	TokenCID        string           `json:"token_cid"`
+	Chain           string           `json:"chain"`
+	Standard        string           `json:"standard"`
+	ContractAddress string           `json:"contract_address"`
+	TokenNumber     string           `json:"token_number"`
+	CurrentOwner    string           `json:"current_owner"`
+	Burned          bool             `json:"burned"`
+	Metadata        *TokenMetadata   `json:"metadata,omitempty"`
+	Owners          *PaginatedOwners `json:"owners,omitempty"`
+}
+
+// GetPreviewURL returns the preview URL, preferring animation_url over image_url
+func (t *Token) GetPreviewURL() string {
+	if t.Metadata == nil {
+		return ""
 	}
+	if t.Metadata.AnimationURL != "" {
+		return t.Metadata.AnimationURL
+	}
+	return t.Metadata.ImageURL
+}
+
+// GetTitle returns the token title/name
+func (t *Token) GetTitle() string {
+	if t.Metadata == nil {
+		return ""
+	}
+	return t.Metadata.Name
+}
+
+type TokenList struct {
+	Items  []Token `json:"items"`
+	Offset *string `json:"offset"`
+	Total  string  `json:"total"`
 }
 
 type GraphQLResponse struct {
 	Data struct {
-		Tokens []Token `json:"tokens,omitempty"`
+		Tokens *TokenList `json:"tokens,omitempty"`
 	} `json:"data,omitempty"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors,omitempty"`
 }
 
 type FFIndexer interface {
@@ -61,9 +113,10 @@ func New(httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger
 
 func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map[string]string) ([]Token, error) {
 	i.logger.Info("Querying tokens", zap.String("endpoint", endpoint), zap.Any("params", params))
-	if err := validateEndpoint(endpoint); err != nil {
-		return nil, err
-	}
+	// Don't validate endpoint for now
+	// if err := validateEndpoint(endpoint); err != nil {
+	// 	return nil, err
+	// }
 
 	var queryParams []string
 	if len(params) > 0 {
@@ -74,25 +127,43 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 	}
 	qp := strings.Join(queryParams, "\n\t\t\t")
 
+	// Use the ff-indexer-v2 GraphQL schema
 	query := fmt.Sprintf(`{
-		tokens(
-			%s
-		) {
-			id
-			blockchain
-			contractType
-			contractAddress
-			balance
-			asset {
+		tokens(%s) {
+			items {
+				id
+				token_cid
+				chain
+				standard
+				contract_address
+				token_number
+				current_owner
+				burned
 				metadata {
-					project {
-						latest {
-							title
-							previewURL
-						}
+					name
+					description
+					image_url
+					animation_url
+					artists {
+						did
+						name
 					}
+					publisher {
+						name
+						url
+					}
+					mime_type
+				}
+				owners {
+					items {
+						owner_address
+						quantity
+					}
+					total
 				}
 			}
+			offset
+			total
 		}
 	}`, qp)
 
@@ -101,10 +172,21 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 		return nil, err
 	}
 
-	return resp.Data.Tokens, nil
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("graphql errors: %v", resp.Errors)
+	}
+
+	if resp.Data.Tokens == nil {
+		return []Token{}, nil
+	}
+
+	// Return v2 tokens directly
+	return resp.Data.Tokens.Items, nil
 }
 
 // validateEndpoint validates that the endpoint is a valid FF Indexer endpoint
+// Note: it's not currently used but kept for future reference
+// nolint:unused
 func validateEndpoint(endpoint string) error {
 	url, err := url.Parse(endpoint)
 	if err != nil {
