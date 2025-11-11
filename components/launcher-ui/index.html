@@ -183,11 +183,11 @@
                 id: "messageScreen",
                 requiredParams: ["message"],
                 render: (params) => {
-                    document.getElementById("messageText").textContent = decodeURIComponent(params.get("message"));
+                    document.getElementById("messageText").textContent = params.get("message");
                     const subText = params.get("subtext");
                     const subTextDiv = document.getElementById("messageSubText");
                     if (subText) {
-                        subTextDiv.textContent = decodeURIComponent(subText);
+                        subTextDiv.textContent = subText;
                         subTextDiv.style.display = '';
                     } else {
                         subTextDiv.textContent = '';
