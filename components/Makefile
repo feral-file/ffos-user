@@ -27,6 +27,9 @@ sync-feral-app-monitord:
 sync-feral-watchdog:
 	@$(SYNC_SCRIPT) ./feral-watchdog $(REMOTE_DIR)/feral-watchdog $(REMOTE_HOST)
 
+.PHONY: sync-feral-player-ui
+sync-feral-player-ui:
+	@$(SYNC_SCRIPT) ./feral-player-ui $(REMOTE_DIR)/feral-player-ui $(REMOTE_HOST)
 
 .PHONY: sync-all
 sync-all:

@@ -1,0 +1,55 @@
+name: Test Player UI
+
+on:
+  pull_request:
+    paths:
+      - 'components/feral-player-ui/**/*.go'
+  workflow_call:
+    inputs:
+      upload-coverage:
+        description: 'Whether to upload coverage results'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  test:
+    name: Test feral-player-ui (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./components/feral-player-ui
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.5'
+          cache: true
+          cache-dependency-path: components/feral-player-ui/go.sum
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with coverage
+        run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        if: ${{ inputs.upload-coverage == true }}
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./components/feral-player-ui/coverage.out
+          directory: ./components/feral-player-ui
+          slug: feral-file/ffos-user
+          flags: feral-player-ui
+          name: feral-player-ui-coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          override_branch: ${{ github.ref_name }}
+          override_build: ${{ github.run_id }}-player-ui
+

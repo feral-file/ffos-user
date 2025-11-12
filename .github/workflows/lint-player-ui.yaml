@@ -1,0 +1,48 @@
+name: Lint Player UI
+
+on:
+  push:
+    branches: [release, develop]
+    paths:
+      - 'components/feral-player-ui/**/*.go'
+  pull_request:
+    paths:
+      - 'components/feral-player-ui/**/*.go'
+
+jobs:
+  lint:
+    name: Lint feral-player-ui (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./components/feral-player-ui
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.5'
+          cache: true
+          cache-dependency-path: components/feral-player-ui/go.sum
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          working-directory: ./components/feral-player-ui
+
+      - name: Run go fmt check
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "Code is not formatted. Please run 'gofmt -s -w .'"
+            gofmt -s -l .
+            exit 1
+          fi
