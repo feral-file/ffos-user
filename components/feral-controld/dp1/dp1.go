@@ -18,6 +18,7 @@ const (
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 25
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
 	// Namespace UUID for generating deterministic UUIDs from token identifiers
+	//nolint:gosec
 	TOKEN_NAMESPACE_UUID = "8c95b1c2-4ef7-4ad9-a89a-84e410c1b4b1"
 )
 
