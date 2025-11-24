@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 
@@ -34,13 +35,29 @@ pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
 
-#[derive(Default)]
 struct Inner {
     device_id: String,
     advertised: bool,
+    session: Option<Session>,
     adapter: Option<Adapter>,
     adv_handle: Option<AdvertisementHandle>,
     app_handle: Option<ApplicationHandle>,
+    // Cancellation token for disconnect monitor
+    disconnect_monitor_cancel: Option<CancellationToken>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            device_id: String::new(),
+            advertised: false,
+            session: None,
+            adapter: None,
+            adv_handle: None,
+            app_handle: None,
+            disconnect_monitor_cancel: None,
+        }
+    }
 }
 
 pub struct Ble {
@@ -118,6 +135,7 @@ impl Ble {
         let app_handle = adapter.serve_gatt_application(app).await?;
         println!("BLE: GATT app registered; ready to receive commands");
 
+        inner.session = Some(session);
         inner.adapter = Some(adapter);
         inner.adv_handle = Some(adv_handle);
         inner.app_handle = Some(app_handle);
@@ -126,18 +144,30 @@ impl Ble {
     }
 
     pub async fn stop(&self) -> Result<()> {
-        let (adv, app, adapter) = {
+        let (adv, app, adapter, session, cancel_token) = {
             let mut inner = self.inner.lock().await;
             if !inner.advertised {
                 return Ok(());
             }
             inner.advertised = false;
+            
+            // Cancel the disconnect monitor if it exists
+            if let Some(token) = inner.disconnect_monitor_cancel.take() {
+                println!("BLE: Cancelling disconnect monitor");
+                token.cancel();
+            }
+            
             (
                 inner.adv_handle.take(),
                 inner.app_handle.take(),
                 inner.adapter.take(),
+                inner.session.take(),
+                inner.disconnect_monitor_cancel.take(),
             )
         };
+
+        // Wait a moment for the monitor to acknowledge cancellation
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Disconnect all devices (to make sure BlueZ doesn't block adv unregistration)
         if let Some(adapter) = adapter {
@@ -154,11 +184,16 @@ impl Ble {
             }
             drop(adv);
             drop(app);
-            tokio::time::sleep(std::time::Duration::from_millis(
-                constant::BLE_SHUTDOWN_DELAY,
-            ))
-            .await;
+            drop(adapter);
+            
+            // Give more time for BlueZ to clean up (increased from 1s to 2s)
+            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
         }
+        
+        // Finally drop the session
+        drop(session);
+        drop(cancel_token);
+        println!("BLE: All resources cleaned up");
         Ok(())
     }
 
@@ -182,6 +217,10 @@ impl Ble {
         let notifier_for_write = notifier.clone();
         let notifier_for_notify = notifier.clone();
         let notifier_for_monitor = notifier.clone();
+        
+        // Shared storage for the current disconnect monitor cancellation token
+        let cancel_token_storage: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+        let cancel_token_for_notify = cancel_token_storage.clone();
 
         let bt_connected_callback = Arc::new(bt_connected_cb);
         let bt_disconnected_callback = Arc::new(bt_disconnected_cb);
@@ -195,20 +234,44 @@ impl Ble {
             // Enable notifications on this characteristic
             notify: Some(CharacteristicNotify {
                 notify: true,
-                method: CharacteristicNotifyMethod::Fun(Box::new(move |notifier| {
+                method: CharacteristicNotifyMethod::Fun(Box::new(move |new_notifier| {
                     println!("BLE: a device is connected");
                     let handle = notifier_for_notify.clone();
                     let monitor_handle = notifier_for_monitor.clone();
                     let bt_connected_callback = bt_connected_callback.clone();
                     let bt_disconnected_callback = bt_disconnected_callback.clone();
+                    let cancel_storage = cancel_token_for_notify.clone();
 
                     async move {
-                        // Store the notifier for later use in the write callback
-                        *handle.lock().await = Some(notifier);
+                        // Cancel any existing disconnect monitor from previous connection
+                        {
+                            let mut old_token = cancel_storage.lock().await;
+                            if let Some(token) = old_token.take() {
+                                println!("BLE: Cancelling previous disconnect monitor");
+                                token.cancel();
+                                // Give the old monitor a moment to stop
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        }
+                        
+                        // Replace the old notifier with the new one
+                        {
+                            let mut old_notifier = handle.lock().await;
+                            if old_notifier.is_some() {
+                                println!("BLE: Replacing previous notifier");
+                            }
+                            *old_notifier = Some(new_notifier);
+                        }
 
+                        // Create a new cancellation token for this connection
+                        let cancel_token = CancellationToken::new();
+                        *cancel_storage.lock().await = Some(cancel_token.clone());
+
+                        // Start new disconnect monitor
                         let disconnect_monitor = Self::start_disconnect_monitor(
                             monitor_handle.clone(),
                             bt_disconnected_callback.clone(),
+                            cancel_token,
                         );
                         tokio::spawn(disconnect_monitor);
 
@@ -295,29 +358,36 @@ impl Ble {
     async fn start_disconnect_monitor(
         notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
         bt_disconnected_cb: Arc<BTDisconnectedCallback>,
+        cancel_token: CancellationToken,
     ) {
         println!("BLE: Starting disconnect monitor for connected device");
 
         let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(1));
 
         loop {
-            check_interval.tick().await;
-
-            let is_disconnected = {
-                let mut guard = notifier.lock().await;
-                if let Some(notifier) = guard.as_mut() {
-                    notifier.is_stopped()
-                } else {
-                    true
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    println!("BLE: Disconnect monitor cancelled");
+                    break;
                 }
-            };
+                _ = check_interval.tick() => {
+                    let is_disconnected = {
+                        let mut guard = notifier.lock().await;
+                        if let Some(notifier) = guard.as_mut() {
+                            notifier.is_stopped()
+                        } else {
+                            true
+                        }
+                    };
 
-            if is_disconnected {
-                println!("BLE: Device disconnected (session stopped)");
-                if let Some(cb) = bt_disconnected_cb.as_ref() {
-                    cb().await;
+                    if is_disconnected {
+                        println!("BLE: Device disconnected (session stopped)");
+                        if let Some(cb) = bt_disconnected_cb.as_ref() {
+                            cb().await;
+                        }
+                        break;
+                    }
                 }
-                break;
             }
         }
 
@@ -558,14 +628,14 @@ async fn notify_central(
     let mut guard = notifier.lock().await;
     if let Some(notifier) = guard.as_mut() {
         let payload = encoding::encode_payload(&payload);
-        match notifier.notify(payload).await {
-            Ok(_) => (),
-            Err(e) => {
-                eprintln!("BLE: Failed to notify central: {e}");
-            }
-        }
+        notifier.notify(payload).await.map_err(|e| {
+            eprintln!("BLE: Failed to notify central: {e}");
+            ReqError::Failed
+        })?;
+        Ok(())
     } else {
         eprintln!("BLE: Notifier not yet available; skipping reply");
+        // Return Ok here as this is not a critical error - the device might not be ready yet
+        Ok(())
     }
-    Ok(())
 }
