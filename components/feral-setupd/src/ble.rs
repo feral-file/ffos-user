@@ -105,6 +105,8 @@ impl Ble {
             service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
             discoverable: Some(true),
             local_name: Some(inner.device_id.clone()),
+            min_interval: Some(std::time::Duration::from_millis(20)),
+            max_interval: Some(std::time::Duration::from_millis(100)),
             ..Default::default()
         };
         let adv_handle = adapter.advertise(adv).await?;
