@@ -100,18 +100,6 @@ impl Ble {
             inner.device_id
         );
 
-        // Start advertising our service UUID
-        let adv = Advertisement {
-            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
-            discoverable: Some(true),
-            local_name: Some(inner.device_id.clone()),
-            min_interval: Some(std::time::Duration::from_millis(20)),
-            max_interval: Some(std::time::Duration::from_millis(100)),
-            ..Default::default()
-        };
-        let adv_handle = adapter.advertise(adv).await?;
-        println!("BLE: Advertising GATT service {}", constant::SERVICE_UUID);
-
         // Group into a GATT service and register it
         let svc = Service {
             uuid: constant::SERVICE_UUID,
@@ -135,7 +123,22 @@ impl Ble {
             ..Default::default()
         };
         let app_handle = adapter.serve_gatt_application(app).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
         println!("BLE: GATT app registered; ready to receive commands");
+
+        // Start advertising our service UUID
+        let adv = Advertisement {
+            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
+            discoverable: Some(true),
+            local_name: Some(inner.device_id.clone()),
+            min_interval: Some(std::time::Duration::from_millis(20)),
+            max_interval: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        };
+        let adv_handle = adapter.advertise(adv).await?;
+        println!("BLE: Advertising GATT service {}", constant::SERVICE_UUID);
 
         inner.session = Some(session);
         inner.adapter = Some(adapter);
