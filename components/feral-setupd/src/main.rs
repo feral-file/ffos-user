@@ -184,6 +184,7 @@ async fn run() -> Result<()> {
     if !qemu {
         ble_service
             .start(
+                Arc::downgrade(&ble_service),
                 create_bt_connected_cb(app_state.clone(), chrome.clone()),
                 create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
                 create_factory_reset_cb(app_state.clone(), chrome.clone()),
