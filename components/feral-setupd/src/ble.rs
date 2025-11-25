@@ -223,13 +223,54 @@ impl Ble {
             return Ok(());
         }
 
-        // 1. Drop the old advertisement handle
+        // 1. Force disconnect all devices before restarting advertising
+        // This is especially important for iOS devices which may leave connections in a "hanging" state
+        println!("BLE: Forcefully disconnecting all devices before restart...");
+        {
+            let adapter = inner.adapter.as_ref().unwrap();
+            match adapter.device_addresses().await {
+                Ok(addresses) => {
+                    for addr in addresses {
+                        match adapter.device(addr) {
+                            Ok(dev) => {
+                                match dev.is_connected().await {
+                                    Ok(true) => {
+                                        println!("BLE: Disconnecting device {addr:?}");
+                                        if let Err(e) = dev.disconnect().await {
+                                            eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
+                                        }
+                                    }
+                                    Ok(false) => {
+                                        println!("BLE: Device {addr:?} already disconnected");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("BLE: Failed to check connection status for {addr:?}: {e}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("BLE: Failed to get device {addr:?}: {e}");
+                            }
+                        }
+                    }
+                    // Give BlueZ time to process disconnections
+                    println!("BLE: Waiting for BlueZ to process disconnections...");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    eprintln!("BLE: Failed to get device addresses: {e}");
+                    // Continue anyway, try to restart advertising
+                }
+            }
+        } // Drop adapter reference here
+
+        // 2. Drop the old advertisement handle
         if let Some(old_handle) = inner.adv_handle.take() {
             drop(old_handle);
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
 
-        // 2. Create a new advertisement with the same configuration
+        // 3. Create a new advertisement with the same configuration
         let adv = Advertisement {
             service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
             discoverable: Some(true),
@@ -239,8 +280,8 @@ impl Ble {
             ..Default::default()
         };
 
-        // 3. Register the new advertisement
-        // We know adapter is Some because we checked above
+        // 4. Register the new advertisement
+        // Get adapter reference again for advertising
         let adapter = inner.adapter.as_ref().unwrap();
         match adapter.advertise(adv).await {
             Ok(handle) => {
