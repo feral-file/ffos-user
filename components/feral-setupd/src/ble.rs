@@ -226,6 +226,7 @@ impl Ble {
         // 1. Drop the old advertisement handle
         if let Some(old_handle) = inner.adv_handle.take() {
             drop(old_handle);
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
 
         // 2. Create a new advertisement with the same configuration
