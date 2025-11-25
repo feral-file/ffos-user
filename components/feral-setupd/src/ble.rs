@@ -15,7 +15,7 @@ use bluer::{
 };
 use futures_util::future::FutureExt;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -77,6 +77,7 @@ impl Ble {
 
     pub async fn start(
         &self,
+        me: Weak<Self>,
         bt_connected_cb: BTConnectedCallback,
         bt_disconnected_cb: BTDisconnectedCallback,
         factory_reset_cb: FactoryResetCallback,
@@ -106,6 +107,7 @@ impl Ble {
             primary: true,
             characteristics: vec![
                 self.create_cmd_char(
+                    me,
                     bt_connected_cb,
                     bt_disconnected_cb,
                     factory_reset_cb,
@@ -202,6 +204,98 @@ impl Ble {
         Ok(())
     }
 
+    /// Restarts advertising after a disconnection
+    /// This is called automatically when a device disconnects to ensure immediate re-advertising
+    pub async fn restart_advertising(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        
+        // If stop() has been called, advertised will be false, so we should not restart
+        if !inner.advertised {
+            println!("BLE: Not restarting advertising - service has been stopped");
+            return Ok(());
+        }
+
+        println!("BLE: Connection lost, immediately restarting advertising...");
+
+        // Check if adapter exists before proceeding
+        if inner.adapter.is_none() {
+            eprintln!("BLE: Cannot restart advertising - adapter not available");
+            return Ok(());
+        }
+
+        // 1. Force disconnect all devices before restarting advertising
+        // This is especially important for iOS devices which may leave connections in a "hanging" state
+        println!("BLE: Forcefully disconnecting all devices before restart...");
+        {
+            let adapter = inner.adapter.as_ref().unwrap();
+            match adapter.device_addresses().await {
+                Ok(addresses) => {
+                    for addr in addresses {
+                        match adapter.device(addr) {
+                            Ok(dev) => {
+                                match dev.is_connected().await {
+                                    Ok(true) => {
+                                        println!("BLE: Disconnecting device {addr:?}");
+                                        if let Err(e) = dev.disconnect().await {
+                                            eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
+                                        }
+                                    }
+                                    Ok(false) => {
+                                        println!("BLE: Device {addr:?} already disconnected");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("BLE: Failed to check connection status for {addr:?}: {e}");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("BLE: Failed to get device {addr:?}: {e}");
+                            }
+                        }
+                    }
+                    // Give BlueZ time to process disconnections
+                    println!("BLE: Waiting for BlueZ to process disconnections...");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    eprintln!("BLE: Failed to get device addresses: {e}");
+                    // Continue anyway, try to restart advertising
+                }
+            }
+        } // Drop adapter reference here
+
+        // 2. Drop the old advertisement handle
+        if let Some(old_handle) = inner.adv_handle.take() {
+            drop(old_handle);
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+
+        // 3. Create a new advertisement with the same configuration
+        let adv = Advertisement {
+            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
+            discoverable: Some(true),
+            local_name: Some(inner.device_id.clone()),
+            min_interval: Some(std::time::Duration::from_millis(20)),
+            max_interval: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        };
+
+        // 4. Register the new advertisement
+        // Get adapter reference again for advertising
+        let adapter = inner.adapter.as_ref().unwrap();
+        match adapter.advertise(adv).await {
+            Ok(handle) => {
+                inner.adv_handle = Some(handle);
+                println!("BLE: Advertising restarted successfully");
+            }
+            Err(e) => {
+                eprintln!("BLE: Failed to restart advertising: {e}");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
     pub async fn get_device_id(&self) -> String {
         let st = self.inner.lock().await;
         st.device_id.clone()
@@ -209,6 +303,7 @@ impl Ble {
 
     async fn create_cmd_char(
         &self,
+        me: Weak<Self>,
         bt_connected_cb: BTConnectedCallback,
         bt_disconnected_cb: BTDisconnectedCallback,
         factory_reset_cb: FactoryResetCallback,
@@ -246,6 +341,7 @@ impl Ble {
                     let bt_connected_callback = bt_connected_callback.clone();
                     let bt_disconnected_callback = bt_disconnected_callback.clone();
                     let cancel_storage = cancel_token_for_notify.clone();
+                    let me_for_monitor = me.clone();
 
                     async move {
                         // Cancel any existing disconnect monitor from previous connection
@@ -274,6 +370,7 @@ impl Ble {
 
                         // Start new disconnect monitor
                         let disconnect_monitor = Self::start_disconnect_monitor(
+                            me_for_monitor,
                             monitor_handle.clone(),
                             bt_disconnected_callback.clone(),
                             cancel_token,
@@ -361,6 +458,7 @@ impl Ble {
     }
 
     async fn start_disconnect_monitor(
+        me: Weak<Self>,
         notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
         bt_disconnected_cb: Arc<BTDisconnectedCallback>,
         cancel_token: CancellationToken,
@@ -387,6 +485,21 @@ impl Ble {
 
                     if is_disconnected {
                         println!("BLE: Device disconnected (session stopped)");
+                        
+                        // Step 1: Immediately restart advertising (most important change)
+                        // This happens before UI callback to minimize downtime
+                        if let Some(ble) = me.upgrade() {
+                            println!("BLE: Triggering automatic advertising restart...");
+                            // Spawn in background to avoid blocking the callback
+                            let restart_result = ble.restart_advertising().await;
+                            if let Err(e) = restart_result {
+                                eprintln!("BLE: Auto-restart advertising failed: {e}");
+                            }
+                        } else {
+                            println!("BLE: Ble instance dropped, cannot restart advertising");
+                        }
+                        
+                        // Step 2: Notify UI to update (e.g., show QR code)
                         if let Some(cb) = bt_disconnected_cb.as_ref() {
                             cb().await;
                         }
