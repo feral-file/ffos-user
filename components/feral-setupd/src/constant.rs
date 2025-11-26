@@ -9,7 +9,6 @@ pub const TIMEZONE_CMD: &str = "/home/feralfile/scripts/feral-timesyncd.sh";
 pub const LOG_UPLOAD_API: &str = "https://support.autonomy.io/v1/issues/";
 pub const TIMEZONE_INSTRUCTION: &str = "set-time";
 pub const SSID_CACHE_TTL: u64 = 10 * 60 * 1000; // 10 minutes
-pub const BLE_SHUTDOWN_DELAY: u64 = 1000; // 1 second
 pub const WIFI_WEBAPP_DELAY: u64 = 3 * 1000; // 3 seconds
 pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 3 * 1000; // 10 seconds
 pub const AGGRESSIVE_INTERNET_CHECK_INTERVAL: u64 = 2 * 1000; // 2 seconds
