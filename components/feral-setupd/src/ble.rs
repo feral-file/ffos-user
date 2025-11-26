@@ -35,6 +35,7 @@ pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
 
+#[derive(Default)]
 struct Inner {
     device_id: String,
     advertised: bool,
@@ -44,20 +45,6 @@ struct Inner {
     app_handle: Option<ApplicationHandle>,
     // Cancellation token for disconnect monitor
     disconnect_monitor_cancel: Option<CancellationToken>,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Self {
-            device_id: String::new(),
-            advertised: false,
-            session: None,
-            adapter: None,
-            adv_handle: None,
-            app_handle: None,
-            disconnect_monitor_cancel: None,
-        }
-    }
 }
 
 pub struct Ble {
@@ -157,13 +144,13 @@ impl Ble {
                 return Ok(());
             }
             inner.advertised = false;
-            
+
             // Cancel the disconnect monitor if it exists
             if let Some(token) = inner.disconnect_monitor_cancel.take() {
                 println!("BLE: Cancelling disconnect monitor");
                 token.cancel();
             }
-            
+
             (
                 inner.adv_handle.take(),
                 inner.app_handle.take(),
@@ -192,11 +179,11 @@ impl Ble {
             drop(adv);
             drop(app);
             drop(adapter);
-            
+
             // Give more time for BlueZ to clean up (increased from 1s to 2s)
             tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
         }
-        
+
         // Finally drop the session
         drop(session);
         drop(cancel_token);
@@ -208,7 +195,7 @@ impl Ble {
     /// This is called automatically when a device disconnects to ensure immediate re-advertising
     pub async fn restart_advertising(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        
+
         // If stop() has been called, advertised will be false, so we should not restart
         if !inner.advertised {
             println!("BLE: Not restarting advertising - service has been stopped");
@@ -232,22 +219,22 @@ impl Ble {
                 Ok(addresses) => {
                     for addr in addresses {
                         match adapter.device(addr) {
-                            Ok(dev) => {
-                                match dev.is_connected().await {
-                                    Ok(true) => {
-                                        println!("BLE: Disconnecting device {addr:?}");
-                                        if let Err(e) = dev.disconnect().await {
-                                            eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
-                                        }
-                                    }
-                                    Ok(false) => {
-                                        println!("BLE: Device {addr:?} already disconnected");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("BLE: Failed to check connection status for {addr:?}: {e}");
+                            Ok(dev) => match dev.is_connected().await {
+                                Ok(true) => {
+                                    println!("BLE: Disconnecting device {addr:?}");
+                                    if let Err(e) = dev.disconnect().await {
+                                        eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
                                     }
                                 }
-                            }
+                                Ok(false) => {
+                                    println!("BLE: Device {addr:?} already disconnected");
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "BLE: Failed to check connection status for {addr:?}: {e}"
+                                    );
+                                }
+                            },
                             Err(e) => {
                                 eprintln!("BLE: Failed to get device {addr:?}: {e}");
                             }
@@ -317,9 +304,10 @@ impl Ble {
         let notifier_for_write = notifier.clone();
         let notifier_for_notify = notifier.clone();
         let notifier_for_monitor = notifier.clone();
-        
+
         // Shared storage for the current disconnect monitor cancellation token
-        let cancel_token_storage: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
+        let cancel_token_storage: Arc<Mutex<Option<CancellationToken>>> =
+            Arc::new(Mutex::new(None));
         let cancel_token_for_notify = cancel_token_storage.clone();
 
         let bt_connected_callback = Arc::new(bt_connected_cb);
@@ -354,7 +342,7 @@ impl Ble {
                                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                             }
                         }
-                        
+
                         // Replace the old notifier with the new one
                         {
                             let mut old_notifier = handle.lock().await;
@@ -485,7 +473,7 @@ impl Ble {
 
                     if is_disconnected {
                         println!("BLE: Device disconnected (session stopped)");
-                        
+
                         // Step 1: Immediately restart advertising (most important change)
                         // This happens before UI callback to minimize downtime
                         if let Some(ble) = me.upgrade() {
@@ -498,7 +486,7 @@ impl Ble {
                         } else {
                             println!("BLE: Ble instance dropped, cannot restart advertising");
                         }
-                        
+
                         // Step 2: Notify UI to update (e.g., show QR code)
                         if let Some(cb) = bt_disconnected_cb.as_ref() {
                             cb().await;

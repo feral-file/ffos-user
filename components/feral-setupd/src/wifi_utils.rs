@@ -99,7 +99,7 @@ impl SSIDsCacher {
         // Subscribe to notifications BEFORE checking state
         // This ensures we won't miss any notification (lost wakeup problem)
         let notified = self.notify.notified();
-        
+
         // Check if already refreshing
         {
             let st = self.state.lock().await;
@@ -127,7 +127,7 @@ impl SSIDsCacher {
         println!("SSIDsCacher: refreshing...");
         let res = list_ssids(true).await;
         println!("SSIDsCacher: refreshed: \n{res:?}");
-        
+
         {
             let mut st = self.state.lock().await;
             match res {

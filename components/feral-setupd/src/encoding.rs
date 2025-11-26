@@ -35,22 +35,25 @@ pub fn parse_payload(buf: &[u8]) -> Option<Vec<String>> {
         }
 
         let (val_len, varint_len) = decode_varint(&buf[cursor..])?;
-        
+
         // Check if the value length is reasonable
         if val_len > MAX_VALUE_LENGTH {
             eprintln!("BLE: Value length {val_len} exceeds maximum of {MAX_VALUE_LENGTH}");
             return None;
         }
-        
+
         let val_start = cursor + varint_len;
         let val_end = val_start + val_len as usize;
-        
+
         // Check bounds before slicing
         if val_end > buf.len() {
-            eprintln!("BLE: Value end {val_end} exceeds buffer length {}", buf.len());
+            eprintln!(
+                "BLE: Value end {val_end} exceeds buffer length {}",
+                buf.len()
+            );
             return None;
         }
-        
+
         let val = std::str::from_utf8(&buf[val_start..val_end])
             .ok()?
             .to_string();
