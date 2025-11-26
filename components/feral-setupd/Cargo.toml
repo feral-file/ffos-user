@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 bluer         = { version = "0.17.3", features = ["bluetoothd"] }
 tokio         = { version = "1.45.0", features = ["full"] }
+tokio-util    = "0.7"
 uuid          = "1.16.0"
 futures-util  = "0.3"
 dbus          = "0.9"
