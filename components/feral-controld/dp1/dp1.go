@@ -17,6 +17,9 @@ const (
 	DEFAULT_DURATION             = 300
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 25
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
+	// Namespace UUID for generating deterministic UUIDs from token identifiers
+	//nolint:gosec
+	TOKEN_NAMESPACE_UUID = "8c95b1c2-4ef7-4ad9-a89a-84e410c1b4b1"
 )
 
 type DynamicQuery struct {
@@ -175,8 +178,11 @@ func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.Playlist
 	previewURL := token.GetPreviewURL()
 	chain := normalizeChain(token.Chain)
 
+	// Generate deterministic UUID from contractAddress, blockchain, and tokenNumber
+	itemID := generateTokenUUID(token.ContractAddress, token.Chain, token.TokenNumber)
+
 	return dp1playlist.PlaylistItem{
-		ID:       uuid.New().String(),
+		ID:       itemID,
 		Title:    &title,
 		Source:   previewURL,
 		Duration: duration,
@@ -191,6 +197,15 @@ func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.Playlist
 			},
 		},
 	}
+}
+
+// generateTokenUUID creates a deterministic UUID from contractAddress, blockchain, and tokenNumber.
+// This ensures the same token always gets the same UUID.
+func generateTokenUUID(contractAddress, blockchain, tokenNumber string) string {
+	namespace := uuid.MustParse(TOKEN_NAMESPACE_UUID)
+	// Combine the three fields with a delimiter to create a unique identifier
+	identifier := fmt.Sprintf("%s:%s:%s", contractAddress, blockchain, tokenNumber)
+	return uuid.NewSHA1(namespace, []byte(identifier)).String()
 }
 
 func normalizeChain(blockchain string) string {

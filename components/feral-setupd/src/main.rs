@@ -184,6 +184,7 @@ async fn run() -> Result<()> {
     if !qemu {
         ble_service
             .start(
+                Arc::downgrade(&ble_service),
                 create_bt_connected_cb(app_state.clone(), chrome.clone()),
                 create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
                 create_factory_reset_cb(app_state.clone(), chrome.clone()),
@@ -219,7 +220,7 @@ async fn run() -> Result<()> {
 
     if !app_state.internet.is_online(true).await {
         // Show the QRCode so the user can do something with the internet
-        ssids_cacher.trigger_refresh();
+        ssids_cacher.trigger_refresh_and_wait().await;
         let _ = show_qrcode(&app_state, &chrome).await;
         app_state.auto_proceed.store(true, Ordering::Release);
         // If somehow, the device has internet

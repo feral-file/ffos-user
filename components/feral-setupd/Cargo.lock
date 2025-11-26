@@ -560,6 +560,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tungstenite",
  "url",
  "urlencoding",
