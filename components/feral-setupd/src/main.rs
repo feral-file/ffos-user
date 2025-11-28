@@ -153,49 +153,13 @@ async fn run() -> Result<()> {
     }
     // Initialize state
     let ble_service = Arc::new(Ble::new());
-    let app_state = Arc::new(AppState {
-        device_id: ble_service.get_device_id().await,
-        branch: cfg::branch().await?.to_string(),
-        current_version: cfg::current_version().await?.to_string(),
-        app_cache: Cache::new(constant::CACHE_FILEPATH)?,
-        internet: Connectivity::spawn().await,
-        page: Mutex::new(Page::None(unix_s())),
-        auto_proceed: AtomicBool::new(false),
-        qemu,
-    });
-    sentry::configure_scope(|scope| {
-        scope.set_tag("branch", app_state.branch.clone());
-        scope.set_tag("version", app_state.current_version.clone());
-        scope.set_user(Some(sentry::User {
-            id: Some(app_state.device_id.clone()),
-            ..Default::default()
-        }));
-    });
-    println!("MAIN: App state initialized: {app_state:?}");
-
-    // Initialize CDP
-    let chrome = Cdp::connect(constant::CDP_URL)
-        .await
-        .context("connecting to CDP")?;
-    let chrome = Arc::new(chrome);
+    let app_state = init_app_state(&ble_service, qemu).await?;
+    let chrome = init_cdp().await?;
 
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());
     if !qemu {
-        let ble_callbacks = BleCallbacks {
-            bt_connected: create_bt_connected_cb(app_state.clone(), chrome.clone()),
-            bt_disconnected: create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
-            factory_reset: create_factory_reset_cb(app_state.clone(), chrome.clone()),
-            connect_wifi: create_connect_wifi_cb(app_state.clone(), chrome.clone()),
-            keep_wifi: create_keep_wifi_cb(app_state.clone(), chrome.clone()),
-            get_info: create_get_info_cb(app_state.clone()),
-        };
-
-        ble_service
-            .start(ble_callbacks, ssids_cacher.clone())
-            .await
-            .context("starting Bluetooth advertising")?;
-        println!("MAIN: Bluetooth advertising started successfully");
+        start_ble(&ble_service, &app_state, &chrome, &ssids_cacher).await?;
     }
 
     // Wait for controld D-Bus connection before proceeding
@@ -219,63 +183,14 @@ async fn run() -> Result<()> {
     }
 
     if !app_state.internet.is_online(true).await {
-        // Show the QRCode so the user can do something with the internet
-        let _ = ssids_cacher.get().await;
-        let _ = show_qrcode(&app_state, &chrome).await;
-        app_state.auto_proceed.store(true, Ordering::Release);
-        // If somehow, the device has internet
-        // 1. Users fix the previous internet
-        // 2. Users plug in the LAN cable (instead of setting up wifi via bluetooth)
-        // We will take action immediately
-        let urgency = if used_to_connect.is_some() {
-            Duration::from_millis(constant::AGGRESSIVE_INTERNET_CHECK_INTERVAL)
-        } else {
-            Duration::from_millis(constant::RELAXED_INTERNET_CHECK_INTERVAL)
-        };
-        app_state.internet.wait_until_online(urgency, None).await;
-        if used_to_connect.is_none() {
-            app_state.app_cache.set(cache::CONNECTED, "true");
-            app_state.app_cache.save(constant::CACHE_FILEPATH)?;
-        }
-        // We now have internet, but we need to check if
-        // the internet comes from bluetooth (auto_proceed is set to false)
-        // if it's from bluetooth, we shouldn't do anything else as the bluetooth
-        // flow will handle it
-        if app_state.auto_proceed.load(Ordering::Acquire) {
-            on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
-        }
+        startup_without_internet(&app_state, &chrome, &ssids_cacher, used_to_connect.as_ref())
+            .await?;
     } else {
-        if used_to_connect.is_none() {
-            app_state.app_cache.set(cache::CONNECTED, "true");
-            app_state.app_cache.save(constant::CACHE_FILEPATH)?;
-        }
-        if qemu {
-            let topic_id = match dbus_utils::get_relayer_info() {
-                Ok(info) => info,
-                Err(e) => {
-                    eprintln!("QEMU: can't get relayer data from controld: {e:#?}");
-                    String::new()
-                }
-            };
-            app_state.app_cache.set(cache::TOPIC_ID, &topic_id);
-            app_state.app_cache.save(constant::CACHE_FILEPATH)?;
-        }
-        on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
+        startup_with_internet(&app_state, &chrome, used_to_connect.as_ref(), qemu).await?;
     }
 
-    // Listen for QRCode switch signal
-    let qrcode_switch_cb = create_qrcode_switch_cb(app_state.clone(), chrome.clone());
-    let stop_dbus_listener = Arc::new(AtomicBool::new(false));
-    dbus_utils::listen_for_signal(
-        constant::DBUS_CONTROLD_OBJECT,
-        constant::DBUS_CONTROLD_INTERFACE,
-        constant::DBUS_EVENT_QRCODE_SWITCH,
-        stop_dbus_listener.clone(),
-        qrcode_switch_cb,
-    );
-
-    // Start the D-Bus service
-    dbus_utils::start_dbus_service(app_state.clone());
+    let stop_dbus_listener =
+        setup_dbus_listeners(&app_state, &chrome);
 
     // Wait for Ctrl+C or shutdown event
     wait_for_shutdown().await; // Ignore any errors
@@ -293,6 +208,141 @@ async fn run() -> Result<()> {
     }
     println!("MAIN: Shutting down...");
     Ok(())
+}
+
+async fn init_app_state(ble_service: &Arc<Ble>, qemu: bool) -> Result<Arc<AppState>> {
+    let app_state = Arc::new(AppState {
+        device_id: ble_service.get_device_id().await,
+        branch: cfg::branch().await?.to_string(),
+        current_version: cfg::current_version().await?.to_string(),
+        app_cache: Cache::new(constant::CACHE_FILEPATH)?,
+        internet: Connectivity::spawn().await,
+        page: Mutex::new(Page::None(unix_s())),
+        auto_proceed: AtomicBool::new(false),
+        qemu,
+    });
+    sentry::configure_scope(|scope| {
+        scope.set_tag("branch", app_state.branch.clone());
+        scope.set_tag("version", app_state.current_version.clone());
+        scope.set_user(Some(sentry::User {
+            id: Some(app_state.device_id.clone()),
+            ..Default::default()
+        }));
+    });
+    println!("MAIN: App state initialized: {app_state:?}");
+    Ok(app_state)
+}
+
+async fn init_cdp() -> Result<Arc<Cdp>> {
+    let chrome = Cdp::connect(constant::CDP_URL)
+        .await
+        .context("connecting to CDP")?;
+    Ok(Arc::new(chrome))
+}
+
+async fn start_ble(
+    ble_service: &Arc<Ble>,
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    ssids_cacher: &Arc<SSIDsCacher>,
+) -> Result<()> {
+    let ble_callbacks = BleCallbacks {
+        bt_connected: create_bt_connected_cb(app_state.clone(), chrome.clone()),
+        bt_disconnected: create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
+        factory_reset: create_factory_reset_cb(app_state.clone(), chrome.clone()),
+        connect_wifi: create_connect_wifi_cb(app_state.clone(), chrome.clone()),
+        keep_wifi: create_keep_wifi_cb(app_state.clone(), chrome.clone()),
+        get_info: create_get_info_cb(app_state.clone()),
+    };
+
+    ble_service
+        .start(ble_callbacks, ssids_cacher.clone())
+        .await
+        .context("starting Bluetooth advertising")?;
+    println!("MAIN: Bluetooth advertising started successfully");
+    Ok(())
+}
+
+async fn startup_without_internet(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    ssids_cacher: &Arc<SSIDsCacher>,
+    used_to_connect: Option<&String>,
+) -> Result<()> {
+    // Show the QRCode so the user can do something with the internet
+    let _ = ssids_cacher.get().await;
+    let _ = show_qrcode(app_state, chrome).await;
+    app_state.auto_proceed.store(true, Ordering::Release);
+    // If somehow, the device has internet
+    // 1. Users fix the previous internet
+    // 2. Users plug in the LAN cable (instead of setting up wifi via bluetooth)
+    // We will take action immediately
+    let urgency = if used_to_connect.is_some() {
+        Duration::from_millis(constant::AGGRESSIVE_INTERNET_CHECK_INTERVAL)
+    } else {
+        Duration::from_millis(constant::RELAXED_INTERNET_CHECK_INTERVAL)
+    };
+    app_state.internet.wait_until_online(urgency, None).await;
+    if used_to_connect.is_none() {
+        app_state.app_cache.set(cache::CONNECTED, "true");
+        app_state.app_cache
+            .save(constant::CACHE_FILEPATH)?;
+    }
+    // We now have internet, but we need to check if
+    // the internet comes from bluetooth (auto_proceed is set to false)
+    // if it's from bluetooth, we shouldn't do anything else as the bluetooth
+    // flow will handle it
+    if app_state.auto_proceed.load(Ordering::Acquire) {
+        on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
+    }
+    Ok(())
+}
+
+async fn startup_with_internet(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    used_to_connect: Option<&String>,
+    qemu: bool,
+) -> Result<()> {
+    if used_to_connect.is_none() {
+        app_state.app_cache.set(cache::CONNECTED, "true");
+        app_state.app_cache.save(constant::CACHE_FILEPATH)?;
+    }
+    if qemu {
+        let topic_id = match dbus_utils::get_relayer_info() {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("QEMU: can't get relayer data from controld: {e:#?}");
+                String::new()
+            }
+        };
+        app_state.app_cache.set(cache::TOPIC_ID, &topic_id);
+        app_state
+            .app_cache
+            .save(constant::CACHE_FILEPATH)?;
+    }
+    on_startup_with_internet(app_state.clone(), chrome.clone()).await
+}
+
+fn setup_dbus_listeners(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+) -> Arc<AtomicBool> {
+    // Listen for QRCode switch signal
+    let qrcode_switch_cb = create_qrcode_switch_cb(app_state.clone(), chrome.clone());
+    let stop_dbus_listener = Arc::new(AtomicBool::new(false));
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_QRCODE_SWITCH,
+        stop_dbus_listener.clone(),
+        qrcode_switch_cb,
+    );
+
+    // Start the D-Bus service
+    dbus_utils::start_dbus_service(app_state.clone());
+
+    stop_dbus_listener
 }
 
 fn create_bt_connected_cb(
