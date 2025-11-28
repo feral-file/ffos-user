@@ -246,12 +246,12 @@ async fn start_ble(
     ssids_cacher: &Arc<SSIDsCacher>,
 ) -> Result<()> {
     let ble_callbacks = BleCallbacks {
-        bt_connected: create_bt_connected_cb(app_state.clone(), chrome.clone()),
-        bt_disconnected: create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
-        factory_reset: create_factory_reset_cb(app_state.clone(), chrome.clone()),
-        connect_wifi: create_connect_wifi_cb(app_state.clone(), chrome.clone()),
-        keep_wifi: create_keep_wifi_cb(app_state.clone(), chrome.clone()),
-        get_info: create_get_info_cb(app_state.clone()),
+        bt_connected: callbacks::create_bt_connected_cb(app_state.clone(), chrome.clone()),
+        bt_disconnected: callbacks::create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
+        factory_reset: callbacks::create_factory_reset_cb(app_state.clone(), chrome.clone()),
+        connect_wifi: callbacks::create_connect_wifi_cb(app_state.clone(), chrome.clone()),
+        keep_wifi: callbacks::create_keep_wifi_cb(app_state.clone(), chrome.clone()),
+        get_info: callbacks::create_get_info_cb(app_state.clone()),
     };
 
     ble_service
@@ -327,7 +327,7 @@ async fn startup_with_internet(
 
 fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<AtomicBool> {
     // Listen for QRCode switch signal
-    let qrcode_switch_cb = create_qrcode_switch_cb(app_state.clone(), chrome.clone());
+    let qrcode_switch_cb = callbacks::create_qrcode_switch_cb(app_state.clone(), chrome.clone());
     let stop_dbus_listener = Arc::new(AtomicBool::new(false));
     dbus_utils::listen_for_signal(
         constant::DBUS_CONTROLD_OBJECT,
@@ -341,118 +341,6 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
     dbus_utils::start_dbus_service(app_state.clone());
 
     stop_dbus_listener
-}
-
-fn create_bt_connected_cb(
-    app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
-) -> ble::BTConnectedCallback {
-    Some(Box::new(move || {
-        let app_state = app_state.clone();
-        let chromium = chromium.clone();
-
-        Box::pin(async move {
-            let should_show_welcome = {
-                let page = app_state.page.lock().await;
-                matches!(*page, Page::QRCode(_))
-            };
-            if should_show_welcome {
-                let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
-            }
-        })
-    }))
-}
-
-fn create_bt_disconnected_cb(
-    app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
-) -> ble::BTDisconnectedCallback {
-    Some(Box::new(move || {
-        let app_state = app_state.clone();
-        let chromium = chromium.clone();
-
-        Box::pin(async move {
-            let should_go_qrcode = {
-                let page = app_state.page.lock().await;
-                !page.should_keep_on_bt_disconnect()
-            };
-            if should_go_qrcode {
-                let _ = show_qrcode(&app_state, &chromium).await;
-            }
-        })
-    }))
-}
-
-fn create_connect_wifi_cb(
-    app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
-) -> ble::ConnectWifiCallback {
-    Box::new(move |ssid, pwd| {
-        let app_state = app_state.clone();
-        let chromium = chromium.clone();
-        let ssid = ssid.to_string();
-        let pwd = pwd.to_string();
-        Box::pin(async move {
-            let start_time = Instant::now();
-            // Show message
-            let connecting_msg = format!("{}{}", constant::WIFI_CONNECTING_MSG_PREFIX, ssid);
-            let _ = show_message(&chromium, &app_state, &connecting_msg).await;
-
-            // Disable auto proceed since users want to setup another wifi
-            // Instead of fixing the current internet (if there is any)
-            app_state.auto_proceed.store(false, Ordering::Release);
-
-            // Connect to wifi & return early if failed
-            if let Err(e) = wifi_utils::connect(&ssid, &pwd).await {
-                eprintln!(
-                    "MAIN: Failed to connect to wifi \"{ssid}\" in {:?} ms: {e: }",
-                    start_time.elapsed().as_millis()
-                );
-                // Tell user that the wifi connection failed
-                task::spawn(async move {
-                    let _ =
-                        show_message(&chromium, &app_state, constant::WIFI_FAILED_TO_CONNECT_MSG)
-                            .await;
-                });
-                // This is a bit of a hack to detect wrong password
-                // But the command doesn't provide a reliable way to detect this
-                let err_code = match &e {
-                    WifiError::NmcliFailure { stderr, .. } if stderr.contains("password") => {
-                        constant::BLE_ERR_CODE_WRONG_WIFI_PWD
-                    }
-                    _ => constant::BLE_ERR_CODE_UNKNOWN_ERROR,
-                };
-                return Err(err_code);
-            }
-
-            // Return early if there is no internet
-            if !app_state.internet.is_online(true).await {
-                task::spawn(async move {
-                    let _ = show_message(
-                        &chromium,
-                        &app_state,
-                        constant::INTERNET_FAILED_TO_CONNECT_MSG,
-                    )
-                    .await;
-                });
-                return Err(constant::BLE_ERR_CODE_NO_INTERNET);
-            }
-            internet_setup_successfully_cb(&app_state, &chromium).await
-        })
-    })
-}
-
-fn create_keep_wifi_cb(app_state: Arc<AppState>, chromium: Arc<Cdp>) -> ble::KeepWifiCallback {
-    Box::new(move || {
-        let app_state = app_state.clone();
-        let chromium = chromium.clone();
-        Box::pin(async move {
-            if !app_state.internet.is_online(true).await {
-                return Err(constant::BLE_ERR_CODE_WIFI_REQUIRED);
-            }
-            internet_setup_successfully_cb(&app_state, &chromium).await
-        })
-    })
 }
 
 async fn internet_setup_successfully_cb(
@@ -561,50 +449,176 @@ async fn internet_setup_successfully_cb(
     Ok(topic_id)
 }
 
-fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
-    Some(Box::new(move || {
-        app_state
-            .app_cache
-            .get(cache::TOPIC_ID)
-            .map(|topic_id| vec![topic_id.to_string()])
-            .unwrap_or_default()
-    }))
-}
+mod callbacks {
+    use super::{
+        internet_setup_successfully_cb, show_factory_reset, show_message, show_qrcode,
+        show_webapp, AppState, Cdp, WifiError, ble, cache, constant, dbus_utils, wifi_utils,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+    use tokio::task;
 
-fn create_qrcode_switch_cb(
-    app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
-) -> dbus_utils::ListenCallback {
-    Box::new(move |msg| {
-        let chromium = chromium.clone();
-        let app_state = app_state.clone();
-        let mut qrcode_requested = false;
-        match msg.read1::<bool>() {
-            Ok(true) => qrcode_requested = true,
-            Err(e) => println!("MAIN: Error reading message: {e: }"),
-            _ => {}
-        }
-        task::spawn(async move {
-            if qrcode_requested {
-                let _ = show_qrcode(&app_state, &chromium).await;
-            } else {
-                let _ = show_webapp(&app_state, &chromium).await;
-            }
-        });
-    })
-}
+    pub fn create_bt_connected_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> ble::BTConnectedCallback {
+        Some(Box::new(move || {
+            let app_state = app_state.clone();
+            let chromium = chromium.clone();
 
-fn create_factory_reset_cb(
-    app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
-) -> ble::FactoryResetCallback {
-    Some(Box::new(move || {
-        let chromium = chromium.clone();
-        let app_state = app_state.clone();
-        Box::pin(async move {
-            let _ = show_factory_reset(&chromium, &app_state).await;
+            Box::pin(async move {
+                let should_show_welcome = {
+                    let page = app_state.page.lock().await;
+                    matches!(*page, super::Page::QRCode(_))
+                };
+                if should_show_welcome {
+                    let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
+                }
+            })
+        }))
+    }
+
+    pub fn create_bt_disconnected_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> ble::BTDisconnectedCallback {
+        Some(Box::new(move || {
+            let app_state = app_state.clone();
+            let chromium = chromium.clone();
+
+            Box::pin(async move {
+                let should_go_qrcode = {
+                    let page = app_state.page.lock().await;
+                    !page.should_keep_on_bt_disconnect()
+                };
+                if should_go_qrcode {
+                    let _ = show_qrcode(&app_state, &chromium).await;
+                }
+            })
+        }))
+    }
+
+    pub fn create_connect_wifi_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> ble::ConnectWifiCallback {
+        Box::new(move |ssid, pwd| {
+            let app_state = app_state.clone();
+            let chromium = chromium.clone();
+            let ssid = ssid.to_string();
+            let pwd = pwd.to_string();
+            Box::pin(async move {
+                let start_time = Instant::now();
+                // Show message
+                let connecting_msg = format!("{}{}", constant::WIFI_CONNECTING_MSG_PREFIX, ssid);
+                let _ = show_message(&chromium, &app_state, &connecting_msg).await;
+
+                // Disable auto proceed since users want to setup another wifi
+                // Instead of fixing the current internet (if there is any)
+                app_state.auto_proceed.store(false, Ordering::Release);
+
+                // Connect to wifi & return early if failed
+                if let Err(e) = wifi_utils::connect(&ssid, &pwd).await {
+                    eprintln!(
+                        "MAIN: Failed to connect to wifi \"{ssid}\" in {:?} ms: {e: }",
+                        start_time.elapsed().as_millis()
+                    );
+                    // Tell user that the wifi connection failed
+                    task::spawn(async move {
+                        let _ =
+                            show_message(&chromium, &app_state, constant::WIFI_FAILED_TO_CONNECT_MSG)
+                                .await;
+                    });
+                    // This is a bit of a hack to detect wrong password
+                    // But the command doesn't provide a reliable way to detect this
+                    let err_code = match &e {
+                        WifiError::NmcliFailure { stderr, .. } if stderr.contains("password") => {
+                            constant::BLE_ERR_CODE_WRONG_WIFI_PWD
+                        }
+                        _ => constant::BLE_ERR_CODE_UNKNOWN_ERROR,
+                    };
+                    return Err(err_code);
+                }
+
+                // Return early if there is no internet
+                if !app_state.internet.is_online(true).await {
+                    task::spawn(async move {
+                        let _ = show_message(
+                            &chromium,
+                            &app_state,
+                            constant::INTERNET_FAILED_TO_CONNECT_MSG,
+                        )
+                        .await;
+                    });
+                    return Err(constant::BLE_ERR_CODE_NO_INTERNET);
+                }
+                internet_setup_successfully_cb(&app_state, &chromium).await
+            })
         })
-    }))
+    }
+
+    pub fn create_keep_wifi_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> ble::KeepWifiCallback {
+        Box::new(move || {
+            let app_state = app_state.clone();
+            let chromium = chromium.clone();
+            Box::pin(async move {
+                if !app_state.internet.is_online(true).await {
+                    return Err(constant::BLE_ERR_CODE_WIFI_REQUIRED);
+                }
+                internet_setup_successfully_cb(&app_state, &chromium).await
+            })
+        })
+    }
+
+    pub fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
+        Some(Box::new(move || {
+            app_state
+                .app_cache
+                .get(cache::TOPIC_ID)
+                .map(|topic_id| vec![topic_id.to_string()])
+                .unwrap_or_default()
+        }))
+    }
+
+    pub fn create_qrcode_switch_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> dbus_utils::ListenCallback {
+        Box::new(move |msg| {
+            let chromium = chromium.clone();
+            let app_state = app_state.clone();
+            let mut qrcode_requested = false;
+            match msg.read1::<bool>() {
+                Ok(true) => qrcode_requested = true,
+                Err(e) => println!("MAIN: Error reading message: {e: }"),
+                _ => {}
+            }
+            task::spawn(async move {
+                if qrcode_requested {
+                    let _ = show_qrcode(&app_state, &chromium).await;
+                } else {
+                    let _ = show_webapp(&app_state, &chromium).await;
+                }
+            });
+        })
+    }
+
+    pub fn create_factory_reset_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> ble::FactoryResetCallback {
+        Some(Box::new(move || {
+            let chromium = chromium.clone();
+            let app_state = app_state.clone();
+            Box::pin(async move {
+                let _ = show_factory_reset(&chromium, &app_state).await;
+            })
+        }))
+    }
 }
 
 // The url format is like this
