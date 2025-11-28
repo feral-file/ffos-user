@@ -61,6 +61,15 @@ pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
 
+pub struct BleCallbacks {
+    pub bt_connected: BTConnectedCallback,
+    pub bt_disconnected: BTDisconnectedCallback,
+    pub factory_reset: FactoryResetCallback,
+    pub connect_wifi: ConnectWifiCallback,
+    pub keep_wifi: KeepWifiCallback,
+    pub get_info: GetInfoCallback,
+}
+
 #[derive(Default)]
 struct Inner {
     device_id: String,
@@ -91,12 +100,7 @@ impl Ble {
     pub async fn start(
         &self,
         me: Weak<Self>,
-        bt_connected_cb: BTConnectedCallback,
-        bt_disconnected_cb: BTDisconnectedCallback,
-        factory_reset_cb: FactoryResetCallback,
-        connect_wifi_cb: ConnectWifiCallback,
-        keep_wifi_cb: KeepWifiCallback,
-        get_info_cb: GetInfoCallback,
+        callbacks: BleCallbacks,
         ssids_cacher: Arc<SSIDsCacher>,
     ) -> Result<()> {
         let mut inner = self.inner.lock().await;
@@ -114,18 +118,9 @@ impl Ble {
             inner.device_id
         );
 
+        // Group into a GATT service and register it
         let app_handle = self
-            .register_gatt_application(
-                &adapter,
-                me,
-                bt_connected_cb,
-                bt_disconnected_cb,
-                factory_reset_cb,
-                connect_wifi_cb,
-                keep_wifi_cb,
-                get_info_cb,
-                ssids_cacher,
-            )
+            .register_gatt_application(&adapter, me, callbacks, ssids_cacher)
             .await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -294,14 +289,18 @@ impl Ble {
     async fn create_cmd_char(
         &self,
         me: Weak<Self>,
-        bt_connected_cb: BTConnectedCallback,
-        bt_disconnected_cb: BTDisconnectedCallback,
-        factory_reset_cb: FactoryResetCallback,
-        connect_wifi_cb: ConnectWifiCallback,
-        keep_wifi_cb: KeepWifiCallback,
-        get_info_cb: GetInfoCallback,
+        callbacks: BleCallbacks,
         ssids_cacher: Arc<SSIDsCacher>,
     ) -> Characteristic {
+        let BleCallbacks {
+            bt_connected,
+            bt_disconnected,
+            factory_reset,
+            connect_wifi,
+            keep_wifi,
+            get_info,
+        } = callbacks;
+
         // Shared storage for the notifier handle
         let notifier: Arc<Mutex<Option<CharacteristicNotifier>>> = Arc::new(Mutex::new(None));
         let notifier_for_write = notifier.clone();
@@ -313,12 +312,12 @@ impl Ble {
             Arc::new(Mutex::new(None));
         let cancel_token_for_notify = cancel_token_storage.clone();
 
-        let bt_connected_callback = Arc::new(bt_connected_cb);
-        let bt_disconnected_callback = Arc::new(bt_disconnected_cb);
-        let factory_reset_callback = Arc::new(factory_reset_cb);
-        let connect_wifi_callback = Arc::new(connect_wifi_cb);
-        let keep_wifi_callback = Arc::new(keep_wifi_cb);
-        let get_info_callback = Arc::new(get_info_cb);
+        let bt_connected_callback = Arc::new(bt_connected);
+        let bt_disconnected_callback = Arc::new(bt_disconnected);
+        let factory_reset_callback = Arc::new(factory_reset);
+        let connect_wifi_callback = Arc::new(connect_wifi);
+        let keep_wifi_callback = Arc::new(keep_wifi);
+        let get_info_callback = Arc::new(get_info);
 
         Characteristic {
             uuid: constant::CMD_CHAR_UUID,
@@ -507,12 +506,7 @@ impl Ble {
         &self,
         adapter: &Adapter,
         me: Weak<Self>,
-        bt_connected_cb: BTConnectedCallback,
-        bt_disconnected_cb: BTDisconnectedCallback,
-        factory_reset_cb: FactoryResetCallback,
-        connect_wifi_cb: ConnectWifiCallback,
-        keep_wifi_cb: KeepWifiCallback,
-        get_info_cb: GetInfoCallback,
+        callbacks: BleCallbacks,
         ssids_cacher: Arc<SSIDsCacher>,
     ) -> Result<ApplicationHandle> {
         let svc = Service {
@@ -521,12 +515,7 @@ impl Ble {
             characteristics: vec![
                 self.create_cmd_char(
                     me,
-                    bt_connected_cb,
-                    bt_disconnected_cb,
-                    factory_reset_cb,
-                    connect_wifi_cb,
-                    keep_wifi_cb,
-                    get_info_cb,
+                    callbacks,
                     ssids_cacher,
                 )
                 .await,

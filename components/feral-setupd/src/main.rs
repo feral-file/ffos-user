@@ -16,7 +16,7 @@ use crate::dbus_utils::PageStateProvider;
 use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
 use anyhow::Context;
 use anyhow::Result;
-use ble::Ble;
+use ble::{Ble, BleCallbacks};
 use cache::Cache;
 use cdp::Cdp;
 use connectivity::Connectivity;
@@ -182,15 +182,19 @@ async fn run() -> Result<()> {
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());
     if !qemu {
+        let ble_callbacks = BleCallbacks {
+            bt_connected: create_bt_connected_cb(app_state.clone(), chrome.clone()),
+            bt_disconnected: create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
+            factory_reset: create_factory_reset_cb(app_state.clone(), chrome.clone()),
+            connect_wifi: create_connect_wifi_cb(app_state.clone(), chrome.clone()),
+            keep_wifi: create_keep_wifi_cb(app_state.clone(), chrome.clone()),
+            get_info: create_get_info_cb(app_state.clone()),
+        };
+
         ble_service
             .start(
                 Arc::downgrade(&ble_service),
-                create_bt_connected_cb(app_state.clone(), chrome.clone()),
-                create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
-                create_factory_reset_cb(app_state.clone(), chrome.clone()),
-                create_connect_wifi_cb(app_state.clone(), chrome.clone()),
-                create_keep_wifi_cb(app_state.clone(), chrome.clone()),
-                create_get_info_cb(app_state.clone()),
+                ble_callbacks,
                 ssids_cacher.clone(),
             )
             .await
