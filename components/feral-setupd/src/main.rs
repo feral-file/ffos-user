@@ -355,7 +355,7 @@ fn create_connect_wifi_cb(
             app_state.auto_proceed.store(false, Ordering::Release);
 
             // Connect to wifi & return early if failed
-            if let Err(e) = wifi_utils::connect(&ssid, &pwd) {
+            if let Err(e) = wifi_utils::connect(&ssid, &pwd).await {
                 eprintln!(
                     "MAIN: Failed to connect to wifi \"{ssid}\" in {:?} ms: {e: }",
                     start_time.elapsed().as_millis()

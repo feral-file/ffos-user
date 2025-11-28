@@ -1,8 +1,8 @@
 use std::collections::HashSet;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task;
 
@@ -194,19 +194,20 @@ impl SSIDsCacher {
     }
 }
 
-pub fn connect(ssid: &str, pass: &str) -> Result<()> {
+pub async fn connect(ssid: &str, pass: &str) -> Result<()> {
     // delete any existing connection, don't care if it fails
     // we need this because of a bug with nmcli
     // https://bbs.archlinux.org/viewtopic.php?id=300321&p=2
 
-    if let Err(err) = delete(ssid) {
+    if let Err(err) = delete(ssid).await {
         eprintln!("Wifi: failed to delete existing connection: {err}");
     }
 
     println!("Wifi: connecting to {ssid}");
     let output = Command::new("nmcli")
         .args(["device", "wifi", "connect", ssid, "password", pass])
-        .output()?;
+        .output()
+        .await?;
 
     if output.status.success() {
         Ok(())
@@ -218,10 +219,11 @@ pub fn connect(ssid: &str, pass: &str) -> Result<()> {
     }
 }
 
-fn delete(ssid: &str) -> Result<()> {
+async fn delete(ssid: &str) -> Result<()> {
     let output = Command::new("nmcli")
         .args(["connection", "delete", ssid])
-        .output()?;
+        .output()
+        .await?;
 
     if output.status.success() {
         Ok(())
@@ -234,16 +236,12 @@ fn delete(ssid: &str) -> Result<()> {
 }
 
 pub async fn list_ssids(force: bool) -> Result<Vec<String>> {
-    let output = task::spawn_blocking(move || {
-        let mut args = vec!["-t", "-f", "SSID", "device", "wifi", "list"];
-        if force {
-            args.push("--rescan");
-            args.push("yes");
-        }
-        Command::new("nmcli").args(&args).output()
-    })
-    .await? // JoinError → Error::Join
-    ?; // IoError → Error::Io
+    let mut args = vec!["-t", "-f", "SSID", "device", "wifi", "list"];
+    if force {
+        args.push("--rescan");
+        args.push("yes");
+    }
+    let output = Command::new("nmcli").args(&args).output().await?;
 
     if !output.status.success() {
         return Err(Error::NmcliFailure {
