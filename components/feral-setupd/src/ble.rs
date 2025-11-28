@@ -88,44 +88,26 @@ impl Ble {
             inner.device_id
         );
 
-        // Group into a GATT service and register it
-        let svc = Service {
-            uuid: constant::SERVICE_UUID,
-            primary: true,
-            characteristics: vec![
-                self.create_cmd_char(
-                    me,
-                    bt_connected_cb,
-                    bt_disconnected_cb,
-                    factory_reset_cb,
-                    connect_wifi_cb,
-                    keep_wifi_cb,
-                    get_info_cb,
-                    ssids_cacher,
-                )
-                .await,
-            ],
-            ..Default::default()
-        };
-        let app = Application {
-            services: vec![svc],
-            ..Default::default()
-        };
-        let app_handle = adapter.serve_gatt_application(app).await?;
+        let app_handle = self
+            .register_gatt_application(
+                &adapter,
+                me,
+                bt_connected_cb,
+                bt_disconnected_cb,
+                factory_reset_cb,
+                connect_wifi_cb,
+                keep_wifi_cb,
+                get_info_cb,
+                ssids_cacher,
+            )
+            .await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         println!("BLE: GATT app registered; ready to receive commands");
 
         // Start advertising our service UUID
-        let adv = Advertisement {
-            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
-            discoverable: Some(true),
-            local_name: Some(inner.device_id.clone()),
-            min_interval: Some(std::time::Duration::from_millis(20)),
-            max_interval: Some(std::time::Duration::from_millis(100)),
-            ..Default::default()
-        };
+        let adv = Self::build_advertisement(&inner.device_id);
         let adv_handle = adapter.advertise(adv).await?;
         println!("BLE: Advertising GATT service {}", constant::SERVICE_UUID);
 
@@ -258,14 +240,7 @@ impl Ble {
         }
 
         // 3. Create a new advertisement with the same configuration
-        let adv = Advertisement {
-            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
-            discoverable: Some(true),
-            local_name: Some(inner.device_id.clone()),
-            min_interval: Some(std::time::Duration::from_millis(20)),
-            max_interval: Some(std::time::Duration::from_millis(100)),
-            ..Default::default()
-        };
+        let adv = Self::build_advertisement(&inner.device_id);
 
         // 4. Register the new advertisement
         // Get adapter reference again for advertising
@@ -287,6 +262,8 @@ impl Ble {
         let st = self.inner.lock().await;
         st.device_id.clone()
     }
+
+    // --- Internal helpers ---
 
     async fn create_cmd_char(
         &self,
@@ -498,6 +475,57 @@ impl Ble {
         }
 
         println!("BLE: Disconnect monitor stopped");
+    }
+
+    async fn register_gatt_application(
+        &self,
+        adapter: &Adapter,
+        me: Weak<Self>,
+        bt_connected_cb: BTConnectedCallback,
+        bt_disconnected_cb: BTDisconnectedCallback,
+        factory_reset_cb: FactoryResetCallback,
+        connect_wifi_cb: ConnectWifiCallback,
+        keep_wifi_cb: KeepWifiCallback,
+        get_info_cb: GetInfoCallback,
+        ssids_cacher: Arc<SSIDsCacher>,
+    ) -> Result<ApplicationHandle> {
+        let svc = Service {
+            uuid: constant::SERVICE_UUID,
+            primary: true,
+            characteristics: vec![
+                self.create_cmd_char(
+                    me,
+                    bt_connected_cb,
+                    bt_disconnected_cb,
+                    factory_reset_cb,
+                    connect_wifi_cb,
+                    keep_wifi_cb,
+                    get_info_cb,
+                    ssids_cacher,
+                )
+                .await,
+            ],
+            ..Default::default()
+        };
+
+        let app = Application {
+            services: vec![svc],
+            ..Default::default()
+        };
+
+        let app_handle = adapter.serve_gatt_application(app).await?;
+        Ok(app_handle)
+    }
+
+    fn build_advertisement(device_id: &str) -> Advertisement {
+        Advertisement {
+            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
+            discoverable: Some(true),
+            local_name: Some(device_id.to_string()),
+            min_interval: Some(std::time::Duration::from_millis(20)),
+            max_interval: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        }
     }
 }
 
