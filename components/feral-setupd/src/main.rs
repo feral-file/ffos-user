@@ -189,8 +189,7 @@ async fn run() -> Result<()> {
         startup_with_internet(&app_state, &chrome, used_to_connect.as_ref(), qemu).await?;
     }
 
-    let stop_dbus_listener =
-        setup_dbus_listeners(&app_state, &chrome);
+    let stop_dbus_listener = setup_dbus_listeners(&app_state, &chrome);
 
     // Wait for Ctrl+C or shutdown event
     wait_for_shutdown().await; // Ignore any errors
@@ -270,7 +269,12 @@ async fn startup_without_internet(
     used_to_connect: Option<&String>,
 ) -> Result<()> {
     // Show the QRCode so the user can do something with the internet
+    let start_time = Instant::now();
     let _ = ssids_cacher.get().await;
+    println!(
+        "MAIN: Get SSIDs in {:?} ms",
+        start_time.elapsed().as_millis()
+    );
     let _ = show_qrcode(app_state, chrome).await;
     app_state.auto_proceed.store(true, Ordering::Release);
     // If somehow, the device has internet
@@ -285,8 +289,7 @@ async fn startup_without_internet(
     app_state.internet.wait_until_online(urgency, None).await;
     if used_to_connect.is_none() {
         app_state.app_cache.set(cache::CONNECTED, "true");
-        app_state.app_cache
-            .save(constant::CACHE_FILEPATH)?;
+        app_state.app_cache.save(constant::CACHE_FILEPATH)?;
     }
     // We now have internet, but we need to check if
     // the internet comes from bluetooth (auto_proceed is set to false)
@@ -317,17 +320,12 @@ async fn startup_with_internet(
             }
         };
         app_state.app_cache.set(cache::TOPIC_ID, &topic_id);
-        app_state
-            .app_cache
-            .save(constant::CACHE_FILEPATH)?;
+        app_state.app_cache.save(constant::CACHE_FILEPATH)?;
     }
     on_startup_with_internet(app_state.clone(), chrome.clone()).await
 }
 
-fn setup_dbus_listeners(
-    app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
-) -> Arc<AtomicBool> {
+fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<AtomicBool> {
     // Listen for QRCode switch signal
     let qrcode_switch_cb = create_qrcode_switch_cb(app_state.clone(), chrome.clone());
     let stop_dbus_listener = Arc::new(AtomicBool::new(false));

@@ -8,12 +8,11 @@ fn get_build_profile_name() -> Result<String, std::env::VarError> {
     let path = Path::new(&out_dir);
     let components: Vec<_> = path.components().collect();
 
-    if components.len() >= 4 {
-        if let Some(profile_component) = components.get(components.len() - 4) {
-            if let Some(profile_name) = profile_component.as_os_str().to_str() {
-                return Ok(profile_name.to_string());
-            }
-        }
+    if components.len() >= 4
+        && let Some(profile_component) = components.get(components.len() - 4)
+        && let Some(profile_name) = profile_component.as_os_str().to_str()
+    {
+        return Ok(profile_name.to_string());
     }
 
     // 如果無法解析，返回 "unknown"

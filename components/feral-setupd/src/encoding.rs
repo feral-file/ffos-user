@@ -75,14 +75,6 @@ pub fn encode_varint(mut value: u64) -> Vec<u8> {
     buf
 }
 
-pub fn encode_payload(vals: &[&[u8]]) -> Vec<u8> {
-    let mut encoder = PayloadEncoder::new();
-    for val in vals {
-        encoder.push_bytes(val);
-    }
-    encoder.finish()
-}
-
 pub struct PayloadEncoder {
     buf: Vec<u8>,
 }
