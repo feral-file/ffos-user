@@ -560,29 +560,28 @@ async fn handle_scan_wifi(
     reply_id: String,
     ssids_cacher: Arc<SSIDsCacher>,
 ) -> Result<(), ReqError> {
-    // Scan available SSIDs using the helper
-    let mut payload = Vec::with_capacity(2);
-    payload.push(reply_id.as_bytes());
-
     let start_time = Instant::now();
-    let ssids: Vec<String>; // To own the returned value
-    let error_code: [u8; 1]; // To own the returned value
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
+
     match ssids_cacher.get().await {
         Ok(v) => {
             println!(
                 "BLE: Found SSIDs \n{v:?} in {:?} ms",
                 start_time.elapsed().as_millis()
             );
-            ssids = v;
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
-            payload.extend(ssids.iter().map(|s| s.as_bytes()));
+            encoder.push_code(constant::BLE_SUCCESS_CODE);
+            for ssid in &v {
+                encoder.push_str(ssid);
+            }
         }
         Err(e) => {
             eprintln!("BLE: Failed to scan wifi: {e}");
-            error_code = [constant::BLE_ERR_CODE_UNKNOWN_ERROR];
-            payload.push(&error_code);
+            encoder.push_code(constant::BLE_ERR_CODE_UNKNOWN_ERROR);
         }
-    };
+    }
+
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -604,23 +603,20 @@ async fn handle_connect_wifi(
     let ssid = &params[0];
     let pass = &params[1];
 
-    let mut payload = Vec::with_capacity(3);
-    payload.push(reply_id.as_bytes());
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
 
-    // Pre-declare variables to own the returned values
-    let topic_id: String;
-    let error_code: [u8; 1];
     match cb(ssid, pass).await {
         Ok(tid) => {
-            topic_id = tid;
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
-            payload.push(topic_id.as_bytes());
+            encoder.push_code(constant::BLE_SUCCESS_CODE);
+            encoder.push_str(&tid);
         }
         Err(e) => {
-            error_code = [e];
-            payload.push(&error_code);
+            encoder.push_code(e);
         }
-    };
+    }
+
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -629,23 +625,20 @@ async fn handle_keep_wifi(
     reply_id: String,
     cb: Arc<KeepWifiCallback>,
 ) -> Result<(), ReqError> {
-    let mut payload = Vec::with_capacity(3);
-    payload.push(reply_id.as_bytes());
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
 
-    // Pre-declare variables to own the returned values
-    let topic_id: String;
-    let error_code: [u8; 1];
     match cb().await {
         Ok(tid) => {
-            topic_id = tid;
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
-            payload.push(topic_id.as_bytes());
+            encoder.push_code(constant::BLE_SUCCESS_CODE);
+            encoder.push_str(&tid);
         }
         Err(e) => {
-            error_code = [e];
-            payload.push(&error_code);
+            encoder.push_code(e);
         }
-    };
+    }
+
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -654,16 +647,21 @@ async fn handle_get_info(
     reply_id: String,
     cb: Arc<GetInfoCallback>,
 ) -> Result<(), ReqError> {
-    let payload = if let Some(cb) = cb.as_ref() {
+    let infos = if let Some(cb) = cb.as_ref() {
         cb()
     } else {
         vec![]
     };
-    let mut reply = Vec::with_capacity(payload.len() + 1);
-    reply.push(reply_id.as_bytes());
-    reply.push(&[constant::BLE_SUCCESS_CODE]);
-    reply.extend(payload.iter().map(|s| s.as_bytes()));
-    notify_central(notifier, reply).await
+
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
+    encoder.push_code(constant::BLE_SUCCESS_CODE);
+    for info in &infos {
+        encoder.push_str(info);
+    }
+
+    let payload = encoder.finish();
+    notify_central(notifier, payload).await
 }
 
 async fn handle_set_time(
@@ -700,9 +698,10 @@ async fn handle_factory_reset(
     } else {
         [constant::BLE_SUCCESS_CODE]
     };
-    let mut payload = Vec::with_capacity(3);
-    payload.push(reply_id.as_bytes());
-    payload.push(&status_code);
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
+    encoder.push_bytes(&status_code);
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -722,13 +721,12 @@ async fn handle_submit_logs(
         );
 
         println!("BLE: Creating error response for invalid parameters");
-        let mut payload = Vec::with_capacity(2);
-        payload.push(reply_id.as_bytes());
-        let error_code = [constant::BLE_ERR_CODE_INVALID_PARAMS];
-        payload.push(&error_code);
+        let mut encoder = encoding::PayloadEncoder::new();
+        encoder.push_str(&reply_id);
+        encoder.push_code(constant::BLE_ERR_CODE_INVALID_PARAMS);
 
         println!("BLE: Notifying central with invalid params error");
-        return notify_central(notifier, payload).await;
+        return notify_central(notifier, encoder.finish()).await;
     }
 
     let user_id = &params[0];
@@ -737,8 +735,8 @@ async fn handle_submit_logs(
 
     println!("BLE: Extracted parameters - User ID: {user_id}, Title: {title}");
 
-    let mut payload = Vec::with_capacity(2);
-    payload.push(reply_id.as_bytes());
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
 
     // Collect log files
     println!("BLE: Starting log file collection");
@@ -746,9 +744,8 @@ async fn handle_submit_logs(
         Ok(files) => files,
         Err(e) => {
             eprintln!("BLE: Failed to collect log files: {e}");
-            let error_code = [constant::BLE_ERR_CODE_FILE_ERROR];
-            payload.push(&error_code);
-            return notify_central(notifier, payload).await;
+            encoder.push_code(constant::BLE_ERR_CODE_FILE_ERROR);
+            return notify_central(notifier, encoder.finish()).await;
         }
     };
 
@@ -765,29 +762,29 @@ async fn handle_submit_logs(
 
     let result = log_uploader::submit_logs_to_api(user_id, api_key, body).await;
 
-    let error_code: [u8; 1];
     match result {
         Ok(_response) => {
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
+            encoder.push_code(constant::BLE_SUCCESS_CODE);
         }
         Err(e) => {
             eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}",);
-            error_code = [e];
-            payload.push(&error_code);
+            encoder.push_code(e);
         }
-    };
+    }
 
-    notify_central(notifier, payload).await
+    notify_central(notifier, encoder.finish()).await
 }
 
 async fn notify_central(
     notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
-    payload: Vec<&[u8]>,
+    payload: Vec<u8>,
 ) -> Result<(), ReqError> {
-    println!("BLE: Notifying central with payload: {payload:?}");
+    println!(
+        "BLE: Notifying central with encoded payload ({} bytes)",
+        payload.len()
+    );
     let mut guard = notifier.lock().await;
     if let Some(notifier) = guard.as_mut() {
-        let payload = encoding::encode_payload(&payload);
         notifier.notify(payload).await.map_err(|e| {
             eprintln!("BLE: Failed to notify central: {e}");
             ReqError::Failed

@@ -76,10 +76,37 @@ pub fn encode_varint(mut value: u64) -> Vec<u8> {
 }
 
 pub fn encode_payload(vals: &[&[u8]]) -> Vec<u8> {
-    let mut buf = Vec::new();
+    let mut encoder = PayloadEncoder::new();
     for val in vals {
-        buf.extend_from_slice(&encode_varint(val.len() as u64));
-        buf.extend_from_slice(val);
+        encoder.push_bytes(val);
     }
-    buf
+    encoder.finish()
+}
+
+pub struct PayloadEncoder {
+    buf: Vec<u8>,
+}
+
+impl PayloadEncoder {
+    pub fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    pub fn push_bytes(&mut self, bytes: &[u8]) {
+        self.buf
+            .extend_from_slice(&encode_varint(bytes.len() as u64));
+        self.buf.extend_from_slice(bytes);
+    }
+
+    pub fn push_str(&mut self, s: &str) {
+        self.push_bytes(s.as_bytes());
+    }
+
+    pub fn push_code(&mut self, code: u8) {
+        self.push_bytes(&[code]);
+    }
+
+    pub fn finish(self) -> Vec<u8> {
+        self.buf
+    }
 }
