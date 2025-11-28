@@ -22,6 +22,32 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 
+enum BleCommand {
+    ScanWifi,
+    ConnectWifi,
+    KeepWifi,
+    GetInfo,
+    SetTime,
+    FactoryReset,
+    SendLogs,
+    Unknown(String),
+}
+
+impl BleCommand {
+    fn from_str(cmd: &str) -> Self {
+        match cmd {
+            constant::CMD_SCAN_WIFI => BleCommand::ScanWifi,
+            constant::CMD_CONNECT_WIFI => BleCommand::ConnectWifi,
+            constant::CMD_KEEP_WIFI => BleCommand::KeepWifi,
+            constant::CMD_GET_INFO => BleCommand::GetInfo,
+            constant::CMD_SET_TIME => BleCommand::SetTime,
+            constant::CMD_FACTORY_RESET => BleCommand::FactoryReset,
+            constant::CMD_SEND_LOGS => BleCommand::SendLogs,
+            other => BleCommand::Unknown(other.to_string()),
+        }
+    }
+}
+
 pub type BTConnectedCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
 pub type BTDisconnectedCallback =
@@ -376,14 +402,14 @@ impl Ble {
                         }
                         // Enough values, parse command
                         println!("BLE: Payload: {vals:?}");
-                        let cmd = vals[0].clone();
+                        let cmd = BleCommand::from_str(&vals[0]);
                         let reply_id = vals[1].clone();
                         let params = vals[2..].to_vec();
-                        match cmd.as_str() {
-                            constant::CMD_SCAN_WIFI => {
+                        match cmd {
+                            BleCommand::ScanWifi => {
                                 handle_scan_wifi(notifier, reply_id, ssids_cacher).await
                             }
-                            constant::CMD_CONNECT_WIFI => {
+                            BleCommand::ConnectWifi => {
                                 handle_connect_wifi(
                                     notifier,
                                     reply_id,
@@ -392,24 +418,24 @@ impl Ble {
                                 )
                                 .await
                             }
-                            constant::CMD_KEEP_WIFI => {
+                            BleCommand::KeepWifi => {
                                 handle_keep_wifi(notifier, reply_id, keep_wifi_callback).await
                             }
-                            constant::CMD_GET_INFO => {
+                            BleCommand::GetInfo => {
                                 handle_get_info(notifier, reply_id, get_info_callback).await
                             }
-                            constant::CMD_SET_TIME => {
+                            BleCommand::SetTime => {
                                 handle_set_time(notifier, reply_id, params).await
                             }
-                            constant::CMD_FACTORY_RESET => {
+                            BleCommand::FactoryReset => {
                                 handle_factory_reset(notifier, reply_id, factory_reset_callback)
                                     .await
                             }
-                            constant::CMD_SEND_LOGS => {
+                            BleCommand::SendLogs => {
                                 handle_submit_logs(notifier, reply_id, params).await
                             }
-                            _ => {
-                                eprintln!("BLE: Unknown command: {cmd}");
+                            BleCommand::Unknown(raw) => {
+                                eprintln!("BLE: Unknown command: {raw}");
                                 Ok::<(), ReqError>(())
                             }
                         }
