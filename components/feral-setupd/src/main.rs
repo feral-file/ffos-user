@@ -192,11 +192,7 @@ async fn run() -> Result<()> {
         };
 
         ble_service
-            .start(
-                Arc::downgrade(&ble_service),
-                ble_callbacks,
-                ssids_cacher.clone(),
-            )
+            .start(ble_callbacks, ssids_cacher.clone())
             .await
             .context("starting Bluetooth advertising")?;
         println!("MAIN: Bluetooth advertising started successfully");

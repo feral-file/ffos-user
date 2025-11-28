@@ -98,11 +98,11 @@ impl Ble {
     }
 
     pub async fn start(
-        &self,
-        me: Weak<Self>,
+        self: &Arc<Self>,
         callbacks: BleCallbacks,
         ssids_cacher: Arc<SSIDsCacher>,
     ) -> Result<()> {
+        let me = Arc::downgrade(self);
         let mut inner = self.inner.lock().await;
         if inner.advertised {
             return Ok(());
