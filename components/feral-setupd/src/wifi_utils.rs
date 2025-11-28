@@ -94,61 +94,6 @@ impl SSIDsCacher {
         });
     }
 
-    /// Trigger a refresh and wait for it to complete
-    pub async fn trigger_refresh_and_wait(&self) {
-        // Subscribe to notifications BEFORE checking state
-        // This ensures we won't miss any notification (lost wakeup problem)
-        let notified = self.notify.notified();
-
-        // Check if already refreshing
-        {
-            let st = self.state.lock().await;
-            if st.refreshing {
-                // Someone else is refreshing, wait for them to finish
-                drop(st);
-                notified.await;
-                return;
-            }
-        }
-
-        // Start refresh
-        {
-            let mut st = self.state.lock().await;
-            if st.refreshing {
-                // Double-check after acquiring lock
-                drop(st);
-                notified.await;
-                return;
-            }
-            st.refreshing = true;
-        }
-
-        // Do the actual refresh
-        println!("SSIDsCacher: refreshing...");
-        let res = list_ssids(true).await;
-        println!("SSIDsCacher: refreshed: \n{res:?}");
-
-        {
-            let mut st = self.state.lock().await;
-            match res {
-                Ok(ssids) => {
-                    st.cached_ssids = ssids;
-                    st.expired_at =
-                        Some(Instant::now() + Duration::from_millis(constant::SSID_CACHE_TTL));
-                    st.last_error = None;
-                }
-                Err(e) => {
-                    st.reset();
-                    st.last_error = Some(e);
-                }
-            }
-            st.refreshing = false;
-        }
-
-        // wake everyone waiting in `get()`
-        self.notify.notify_waiters();
-    }
-
     /// Get SSIDs, waiting only if a refresh is currently in progress or required.
     /// If the last scan failed, or return empty list of SSIDs, the first "get" will clear the cache
     /// Thus, the next "get" will trigger a new refresh
