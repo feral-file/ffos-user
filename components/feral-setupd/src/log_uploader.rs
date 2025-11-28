@@ -41,10 +41,6 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
             };
 
             let contents = if file_size > MAX_FILE_SIZE_BYTES {
-                println!(
-                    "BLE: Log file {file_name} exceeds 1MB ({file_size} bytes), reading last 1MB"
-                );
-
                 // Seek to the position 1MB from the end
                 let seek_pos = file_size - MAX_FILE_SIZE_BYTES;
                 if let Err(e) = file.seek(std::io::SeekFrom::Start(seek_pos as u64)).await {
@@ -69,11 +65,6 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
                         let mut final_contents = truncation_notice.into_bytes();
                         final_contents.extend(buffer);
 
-                        println!(
-                            "BLE: Truncated log file: {file_name} (final size: {} bytes)",
-                            final_contents.len()
-                        );
-
                         final_contents
                     }
                     Err(e) => {
@@ -85,13 +76,7 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
                 // File is small enough, read the whole thing
                 let mut contents = Vec::new();
                 match file.read_to_end(&mut contents).await {
-                    Ok(_) => {
-                        println!(
-                            "BLE: Collected log file: {file_name} ({} bytes)",
-                            contents.len()
-                        );
-                        contents
-                    }
+                    Ok(_) => contents,
                     Err(e) => {
                         eprintln!("BLE: Failed to read file {file_name}: {e}");
                         continue;
@@ -103,7 +88,7 @@ pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Erro
         }
     }
 
-    println!("BLE: Collected {} log files", log_files.len());
+    println!("BLE log-submit: collected {} log files", log_files.len());
     Ok(log_files)
 }
 
@@ -118,12 +103,10 @@ pub async fn submit_logs_to_api(
 
     // Log request body size
     if let Ok(serialized_body) = serde_json::to_string(&body) {
-        println!("API: Request body size: {} bytes", serialized_body.len());
+        println!("API: Request body size (bytes): {}", serialized_body.len());
     }
 
     let client = reqwest::Client::new();
-
-    println!("API: Building POST request");
 
     let request_builder = client
         .post(constant::LOG_UPLOAD_API)
@@ -147,16 +130,15 @@ pub async fn submit_logs_to_api(
 
             if status.is_success() {
                 println!("API: SUCCESS - Logs submitted successfully");
-                println!("API: Response headers: {:?}", resp.headers());
                 Ok(())
             } else {
-                println!("API: ERROR - HTTP request failed with status: {status}");
-
                 // Try to get response body for debugging
                 match resp.text().await {
                     Ok(response_text) => {
-                        eprintln!("API: Error response body: {response_text}");
-                        println!("API: Failed to submit logs: HTTP {status}, {response_text}");
+                        eprintln!(
+                            "API: Failed to submit logs: HTTP {status}, body_len={}",
+                            response_text.len()
+                        );
                     }
                     Err(body_err) => {
                         eprintln!("API: Failed to read error response body: {body_err}");
@@ -164,7 +146,6 @@ pub async fn submit_logs_to_api(
                     }
                 }
 
-                println!("API: Returning network error code");
                 Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
             }
         }
@@ -182,7 +163,6 @@ pub async fn submit_logs_to_api(
                 eprintln!("API: Error type: Other network error");
             }
 
-            println!("API: Returning network error code");
             Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
         }
     }

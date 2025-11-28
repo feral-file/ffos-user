@@ -379,7 +379,6 @@ impl Ble {
                 write: true,
                 write_without_response: false,
                 method: CharacteristicWriteMethod::Fun(Box::new(move |data, _req| {
-                    println!("BLE: Received bluetooth data {data:?}");
                     let notifier = notifier_for_write.clone();
                     let connect_wifi_callback = connect_wifi_callback.clone();
                     let factory_reset_callback = factory_reset_callback.clone();
@@ -400,10 +399,17 @@ impl Ble {
                             return Ok::<(), ReqError>(());
                         }
                         // Enough values, parse command
-                        println!("BLE: Payload: {vals:?}");
                         let cmd = BleCommand::from_str(&vals[0]);
                         let reply_id = vals[1].clone();
                         let params = vals[2..].to_vec();
+
+                        println!(
+                            "BLE cmd: name={} reply_id={} param_count={}",
+                            vals[0],
+                            reply_id,
+                            params.len()
+                        );
+
                         match cmd {
                             BleCommand::ScanWifi => {
                                 handle_scan_wifi(notifier, reply_id, ssids_cacher).await
@@ -556,7 +562,8 @@ async fn handle_scan_wifi(
     match ssids_cacher.get().await {
         Ok(v) => {
             println!(
-                "BLE: Found SSIDs \n{v:?} in {:?} ms",
+                "BLE cmd=scan_wifi: ssids={} duration_ms={}",
+                v.len(),
                 start_time.elapsed().as_millis()
             );
             encoder.push_code(constant::BLE_SUCCESS_CODE);
@@ -699,22 +706,19 @@ async fn handle_submit_logs(
     reply_id: String,
     params: Vec<String>,
 ) -> Result<(), ReqError> {
-    println!("BLE: Starting log submission process");
-    println!("BLE: Reply ID: {reply_id}");
+    println!("BLE log-submit: start reply_id={reply_id}");
 
     // Expect userId, apiKey, and title
     if params.len() < 3 {
         eprintln!(
-            "BLE: ERROR - Received submit logs payload with only {} values, expected at least 3",
+            "BLE log-submit: invalid params len={}, expected at least 3",
             params.len()
         );
 
-        println!("BLE: Creating error response for invalid parameters");
         let mut encoder = encoding::PayloadEncoder::new();
         encoder.push_str(&reply_id);
         encoder.push_code(constant::BLE_ERR_CODE_INVALID_PARAMS);
 
-        println!("BLE: Notifying central with invalid params error");
         return notify_central(notifier, encoder.finish()).await;
     }
 
@@ -722,17 +726,17 @@ async fn handle_submit_logs(
     let api_key = &params[1];
     let title = &params[2];
 
-    println!("BLE: Extracted parameters - User ID: {user_id}, Title: {title}");
+    println!("BLE log-submit: user={user_id} title={title}");
 
     let mut encoder = encoding::PayloadEncoder::new();
     encoder.push_str(&reply_id);
 
     // Collect log files
-    println!("BLE: Starting log file collection");
+    println!("BLE log-submit: collecting log files");
     let log_files = match log_uploader::collect_log_files().await {
         Ok(files) => files,
         Err(e) => {
-            eprintln!("BLE: Failed to collect log files: {e}");
+            eprintln!("BLE log-submit: failed to collect log files: {e}");
             encoder.push_code(constant::BLE_ERR_CODE_FILE_ERROR);
             return notify_central(notifier, encoder.finish()).await;
         }
@@ -747,7 +751,7 @@ async fn handle_submit_logs(
     );
 
     // Submit logs via HTTP
-    println!("BLE: Submitting for user: {user_id}");
+    println!("BLE log-submit: submitting logs for user={user_id}");
 
     let result = log_uploader::submit_logs_to_api(user_id, api_key, body).await;
 
