@@ -240,43 +240,9 @@ impl Ble {
         // 1. Force disconnect all devices before restarting advertising
         // This is especially important for iOS devices which may leave connections in a "hanging" state
         println!("BLE: Forcefully disconnecting all devices before restart...");
-        {
-            let adapter = inner.adapter.as_ref().unwrap();
-            match adapter.device_addresses().await {
-                Ok(addresses) => {
-                    for addr in addresses {
-                        match adapter.device(addr) {
-                            Ok(dev) => match dev.is_connected().await {
-                                Ok(true) => {
-                                    println!("BLE: Disconnecting device {addr:?}");
-                                    if let Err(e) = dev.disconnect().await {
-                                        eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
-                                    }
-                                }
-                                Ok(false) => {
-                                    println!("BLE: Device {addr:?} already disconnected");
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "BLE: Failed to check connection status for {addr:?}: {e}"
-                                    );
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("BLE: Failed to get device {addr:?}: {e}");
-                            }
-                        }
-                    }
-                    // Give BlueZ time to process disconnections
-                    println!("BLE: Waiting for BlueZ to process disconnections...");
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    eprintln!("BLE: Failed to get device addresses: {e}");
-                    // Continue anyway, try to restart advertising
-                }
-            }
-        } // Drop adapter reference here
+        if let Some(adapter) = inner.adapter.as_ref() {
+            Self::force_disconnect_all_devices(adapter).await;
+        }
 
         // 2. Drop the old advertisement handle
         if let Some(old_handle) = inner.adv_handle.take() {
@@ -301,6 +267,39 @@ impl Ble {
             }
         }
         Ok(())
+    }
+
+    async fn force_disconnect_all_devices(adapter: &Adapter) {
+        let Ok(addresses) = adapter.device_addresses().await else {
+            eprintln!("BLE: Failed to get device addresses");
+            // Continue anyway, try to restart advertising
+            return;
+        };
+
+        for addr in addresses {
+            let Ok(dev) = adapter.device(addr) else {
+                eprintln!("BLE: Failed to get device {addr:?}");
+                continue;
+            };
+
+            match dev.is_connected().await {
+                Ok(true) => {
+                    println!("BLE: Disconnecting device {addr:?}");
+                    if let Err(e) = dev.disconnect().await {
+                        eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
+                    }
+                }
+                Ok(false) => {
+                    println!("BLE: Device {addr:?} already disconnected");
+                }
+                Err(e) => {
+                    eprintln!("BLE: Failed to check connection status for {addr:?}: {e}");
+                }
+            }
+        }
+        // Give BlueZ time to process disconnections
+        println!("BLE: Waiting for BlueZ to process disconnections...");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
     pub async fn get_device_id(&self) -> String {
@@ -542,14 +541,7 @@ impl Ble {
         let svc = Service {
             uuid: constant::SERVICE_UUID,
             primary: true,
-            characteristics: vec![
-                self.create_cmd_char(
-                    me,
-                    callbacks,
-                    ssids_cacher,
-                )
-                .await,
-            ],
+            characteristics: vec![self.create_cmd_char(me, callbacks, ssids_cacher).await],
             ..Default::default()
         };
 
