@@ -154,6 +154,9 @@ async fn run() -> Result<()> {
     // Wait for controld D-Bus connection before proceeding
     wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await?;
 
+    // Setup D-Bus listeners
+    let stop_dbus_listener = setup_dbus_listeners(&app_state, &chrome);
+
     // If the device used to be able to connect to the internet
     // It's likely that it will have internet again really soon
     // We aggressively poll for internet for a few seconds to
@@ -177,8 +180,6 @@ async fn run() -> Result<()> {
     } else {
         startup_with_internet(&app_state, &chrome, used_to_connect.as_ref()).await?;
     }
-
-    let stop_dbus_listener = setup_dbus_listeners(&app_state, &chrome);
 
     // Wait for Ctrl+C or shutdown event
     wait_for_shutdown().await; // Ignore any errors
@@ -600,6 +601,7 @@ mod callbacks {
         chromium: Arc<Cdp>,
     ) -> dbus_utils::ListenCallback {
         Box::new(move |msg| {
+            println!("MAIN: QR switch callback received");
             let chromium = chromium.clone();
             let app_state = app_state.clone();
             let mut qrcode_requested = false;
@@ -608,6 +610,7 @@ mod callbacks {
                 Err(e) => println!("MAIN: Error reading message: {e: }"),
                 _ => {}
             }
+            println!("MAIN: QR switch -> qrcode_requested={}", qrcode_requested);
             task::spawn(async move {
                 if qrcode_requested {
                     let _ = show_qrcode(&app_state, &chromium).await;
