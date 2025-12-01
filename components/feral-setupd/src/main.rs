@@ -1,5 +1,4 @@
 mod ble;
-mod cache;
 mod cdp;
 mod cfg;
 mod connectivity;
@@ -7,16 +6,17 @@ mod constant;
 mod dbus_utils;
 mod encoding;
 mod log_uploader;
+mod persistent_state;
 mod system;
 mod updater;
 mod wifi_utils;
 
 use crate::dbus_utils::PageStateProvider;
+use crate::persistent_state::PersistentState;
 use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
 use anyhow::Context;
 use anyhow::Result;
 use ble::{Ble, BleCallbacks};
-use cache::Cache;
 use cdp::Cdp;
 use connectivity::Connectivity;
 use std::sync::Arc;
@@ -92,7 +92,7 @@ struct AppState {
     device_id: String,
     branch: String,
     current_version: String,
-    app_cache: Cache,
+    state_store: PersistentState,
     internet: Connectivity,
     page: Mutex<Page>,
 
@@ -158,7 +158,7 @@ async fn run() -> Result<()> {
     // It's likely that it will have internet again really soon
     // We aggressively poll for internet for a few seconds to
     // go directly to the webapp instead of the QRCode
-    let used_to_connect = app_state.app_cache.get(cache::CONNECTED);
+    let used_to_connect = app_state.state_store.get(persistent_state::CONNECTED);
     if used_to_connect.is_some() {
         app_state
             .internet
@@ -201,7 +201,7 @@ async fn init_app_state(ble_service: &Arc<Ble>) -> Result<Arc<AppState>> {
         device_id: ble_service.get_device_id().await,
         branch: cfg::branch().await?.to_string(),
         current_version: cfg::current_version().await?.to_string(),
-        app_cache: Cache::new(constant::CACHE_FILEPATH)?,
+        state_store: PersistentState::new(constant::CACHE_FILEPATH)?,
         internet: Connectivity::spawn().await,
         page: Mutex::new(Page::None(unix_s())),
         auto_proceed: AtomicBool::new(false),
@@ -293,8 +293,10 @@ async fn startup_without_internet(
     };
     app_state.internet.wait_until_online(urgency, None).await;
     if used_to_connect.is_none() {
-        app_state.app_cache.set(cache::CONNECTED, "true");
-        app_state.app_cache.save(constant::CACHE_FILEPATH)?;
+        app_state
+            .state_store
+            .set(persistent_state::CONNECTED, "true");
+        app_state.state_store.save()?;
     }
     // We now have internet, but we need to check if
     // the internet comes from bluetooth (auto_proceed is set to false)
@@ -326,8 +328,10 @@ async fn startup_with_internet(
     used_to_connect: Option<&String>,
 ) -> Result<()> {
     if used_to_connect.is_none() {
-        app_state.app_cache.set(cache::CONNECTED, "true");
-        app_state.app_cache.save(constant::CACHE_FILEPATH)?;
+        app_state
+            .state_store
+            .set(persistent_state::CONNECTED, "true");
+        app_state.state_store.save()?;
     }
     on_startup_with_internet(app_state.clone(), chrome.clone()).await
 }
@@ -436,30 +440,27 @@ async fn internet_setup_successfully_cb(
         }
     };
 
-    app_state.app_cache.set(cache::TOPIC_ID, &topic_id);
-    match app_state.app_cache.save(constant::CACHE_FILEPATH) {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("MAIN: Error saving cache: {e:#?}");
-        }
+    let state_store = &app_state.state_store;
+    state_store.set(persistent_state::TOPIC_ID, &topic_id);
+    if state_store.get(persistent_state::PAIRED).is_none() {
+        state_store.set(persistent_state::PAIRED, "false");
+    }
+    if let Err(e) = state_store.save() {
+        eprintln!("MAIN: Error saving cache: {e:#?}");
     }
 
     let app_state = app_state.clone();
     let chromium = chromium.clone();
     task::spawn(async move {
-        // This is a workaround to avoid Err Network Changed from Chrome
-        // This potentially also avoids the white screen issue
         let _ = show_message(&chromium, &app_state, constant::SETUP_SUCCESSFULLY_MSG).await;
-        time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
-        let _ = show_webapp(&app_state, &chromium).await;
     });
     Ok(topic_id)
 }
 
 mod callbacks {
     use super::{
-        AppState, Cdp, WifiError, ble, cache, constant, dbus_utils, internet_setup_successfully_cb,
-        show_factory_reset, show_message, show_qrcode, show_webapp, wifi_utils,
+        AppState, Cdp, WifiError, ble, constant, dbus_utils, internet_setup_successfully_cb,
+        persistent_state, show_factory_reset, show_message, show_qrcode, show_webapp, wifi_utils,
     };
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -587,8 +588,8 @@ mod callbacks {
     pub fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
         Some(Box::new(move || {
             app_state
-                .app_cache
-                .get(cache::TOPIC_ID)
+                .state_store
+                .get(persistent_state::TOPIC_ID)
                 .map(|topic_id| vec![topic_id.to_string()])
                 .unwrap_or_default()
         }))
@@ -611,6 +612,23 @@ mod callbacks {
                 if qrcode_requested {
                     let _ = show_qrcode(&app_state, &chromium).await;
                 } else {
+                    // When the web app is requested, treat this as confirmation
+                    // that the mobile app has successfully paired and received
+                    // the topic ID.
+                    let state_store = &app_state.state_store;
+                    let has_topic = state_store.get(persistent_state::TOPIC_ID).is_some();
+                    let already_paired = state_store
+                        .get(persistent_state::PAIRED)
+                        .map(|v| v == "true")
+                        .unwrap_or(false);
+                    if has_topic && !already_paired {
+                        println!("MAIN: QR switch -> marking device as paired");
+                        app_state.state_store.set(persistent_state::PAIRED, "true");
+                        if let Err(e) = app_state.state_store.save() {
+                            eprintln!("MAIN: Error saving paired state: {e:#?}");
+                        }
+                    }
+
                     let _ = show_webapp(&app_state, &chromium).await;
                 }
             });
@@ -635,7 +653,10 @@ mod callbacks {
 // url?step=qr&device_info=<device_id>|<topic_id>|<internet>|<branch>|<version>
 async fn build_qrcode_url(app_state: &Arc<AppState>) -> String {
     let device_id = app_state.device_id.clone();
-    let topic_id = app_state.app_cache.get(cache::TOPIC_ID).unwrap_or_default();
+    let topic_id = app_state
+        .state_store
+        .get(persistent_state::TOPIC_ID)
+        .unwrap_or_default();
     let has_internet = if app_state.internet.is_online(false).await {
         "true"
     } else {
@@ -786,9 +807,21 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
         Ok(false) => {} // No update required, proceed with the normal flow
     };
 
-    // No update, show art/qrcode depending on whether we have a cache
-    let has_cache = app_state.app_cache.get(cache::TOPIC_ID).is_some();
-    if has_cache {
+    // No update, show art/qrcode depending on topic ID and pairing state
+    let state_store = &app_state.state_store;
+    let has_topic = state_store.get(persistent_state::TOPIC_ID).is_some();
+    // For backward compatibility, treat missing PAIRED as "already paired".
+    let is_paired = state_store
+        .get(persistent_state::PAIRED)
+        .map(|v| v == "true")
+        .unwrap_or(true);
+
+    println!(
+        "MAIN: startup_with_internet: has_topic={} is_paired={}",
+        has_topic, is_paired
+    );
+
+    if has_topic && is_paired {
         show_webapp(&app_state, &chrome).await
     } else {
         show_qrcode(&app_state, &chrome).await

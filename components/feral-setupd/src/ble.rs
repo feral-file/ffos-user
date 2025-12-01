@@ -485,13 +485,8 @@ impl Ble {
                             handle_scan_wifi(notifier, reply_id, ssids_cacher).await
                         }
                         BleCommand::ConnectWifi => {
-                            handle_connect_wifi(
-                                notifier,
-                                reply_id,
-                                params,
-                                connect_wifi_callback,
-                            )
-                            .await
+                            handle_connect_wifi(notifier, reply_id, params, connect_wifi_callback)
+                                .await
                         }
                         BleCommand::KeepWifi => {
                             handle_keep_wifi(notifier, reply_id, keep_wifi_callback).await
@@ -499,12 +494,9 @@ impl Ble {
                         BleCommand::GetInfo => {
                             handle_get_info(notifier, reply_id, get_info_callback).await
                         }
-                        BleCommand::SetTime => {
-                            handle_set_time(notifier, reply_id, params).await
-                        }
+                        BleCommand::SetTime => handle_set_time(notifier, reply_id, params).await,
                         BleCommand::FactoryReset => {
-                            handle_factory_reset(notifier, reply_id, factory_reset_callback)
-                                .await
+                            handle_factory_reset(notifier, reply_id, factory_reset_callback).await
                         }
                         BleCommand::SendLogs => {
                             handle_submit_logs(notifier, reply_id, params).await

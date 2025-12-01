@@ -85,7 +85,9 @@ impl Connectivity {
                 return;
             }
             // Poll again if time is not up
-            if let Some(timeout) = timeout && start.elapsed() > timeout {
+            if let Some(timeout) = timeout
+                && start.elapsed() > timeout
+            {
                 return;
             }
             time::sleep(interval).await;
