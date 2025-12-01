@@ -22,6 +22,28 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum BleStatus {
+    Success = constant::BLE_SUCCESS_CODE,
+    WrongWifiPassword = constant::BLE_ERR_CODE_WRONG_WIFI_PWD,
+    NoInternet = constant::BLE_ERR_CODE_NO_INTERNET,
+    ServerUnreachable = constant::BLE_ERR_CODE_SERVER_UNREACHABLE,
+    WifiRequired = constant::BLE_ERR_CODE_WIFI_REQUIRED,
+    DeviceUpdating = constant::BLE_ERR_CODE_DEVICE_UPDATING,
+    VersionCheckFailed = constant::BLE_ERR_CODE_VERSION_CHECK_FAILED,
+    InvalidParams = constant::BLE_ERR_CODE_INVALID_PARAMS,
+    FileError = constant::BLE_ERR_CODE_FILE_ERROR,
+    NetworkError = constant::BLE_ERR_CODE_NETWORK_ERROR,
+    UnknownError = constant::BLE_ERR_CODE_UNKNOWN_ERROR,
+}
+
+impl BleStatus {
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
 enum BleCommand {
     ScanWifi,
     ConnectWifi,
@@ -53,10 +75,12 @@ pub type BTConnectedCallback =
 pub type BTDisconnectedCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
 pub type ConnectWifiCallback = Box<
-    dyn Fn(&str, &str) -> Pin<Box<dyn Future<Output = Result<String, u8>> + Send>> + Send + Sync,
+    dyn Fn(&str, &str) -> Pin<Box<dyn Future<Output = Result<String, BleStatus>> + Send>>
+        + Send
+        + Sync,
 >;
 pub type KeepWifiCallback =
-    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, u8>> + Send>> + Send + Sync>;
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, BleStatus>> + Send>> + Send + Sync>;
 pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback =
     Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
@@ -566,14 +590,14 @@ async fn handle_scan_wifi(
                 v.len(),
                 start_time.elapsed().as_millis()
             );
-            encoder.push_code(constant::BLE_SUCCESS_CODE);
+            encoder.push_code(BleStatus::Success.code());
             for ssid in &v {
                 encoder.push_str(ssid);
             }
         }
         Err(e) => {
             eprintln!("BLE: Failed to scan wifi: {e}");
-            encoder.push_code(constant::BLE_ERR_CODE_UNKNOWN_ERROR);
+            encoder.push_code(BleStatus::UnknownError.code());
         }
     }
 
@@ -604,11 +628,11 @@ async fn handle_connect_wifi(
 
     match cb(ssid, pass).await {
         Ok(tid) => {
-            encoder.push_code(constant::BLE_SUCCESS_CODE);
+            encoder.push_code(BleStatus::Success.code());
             encoder.push_str(&tid);
         }
         Err(e) => {
-            encoder.push_code(e);
+            encoder.push_code(e.code());
         }
     }
 
@@ -626,11 +650,11 @@ async fn handle_keep_wifi(
 
     match cb().await {
         Ok(tid) => {
-            encoder.push_code(constant::BLE_SUCCESS_CODE);
+            encoder.push_code(BleStatus::Success.code());
             encoder.push_str(&tid);
         }
         Err(e) => {
-            encoder.push_code(e);
+            encoder.push_code(e.code());
         }
     }
 
@@ -651,7 +675,7 @@ async fn handle_get_info(
 
     let mut encoder = encoding::PayloadEncoder::new();
     encoder.push_str(&reply_id);
-    encoder.push_code(constant::BLE_SUCCESS_CODE);
+    encoder.push_code(BleStatus::Success.code());
     for info in &infos {
         encoder.push_str(info);
     }
@@ -690,9 +714,9 @@ async fn handle_factory_reset(
     }
     let status_code = if let Err(e) = system::factory_reset().await {
         eprintln!("BLE: Failed to factory reset: {e:#?}");
-        [constant::BLE_ERR_CODE_UNKNOWN_ERROR]
+        [BleStatus::UnknownError.code()]
     } else {
-        [constant::BLE_SUCCESS_CODE]
+        [BleStatus::Success.code()]
     };
     let mut encoder = encoding::PayloadEncoder::new();
     encoder.push_str(&reply_id);
@@ -717,7 +741,7 @@ async fn handle_submit_logs(
 
         let mut encoder = encoding::PayloadEncoder::new();
         encoder.push_str(&reply_id);
-        encoder.push_code(constant::BLE_ERR_CODE_INVALID_PARAMS);
+        encoder.push_code(BleStatus::InvalidParams.code());
 
         return notify_central(notifier, encoder.finish()).await;
     }
@@ -737,7 +761,7 @@ async fn handle_submit_logs(
         Ok(files) => files,
         Err(e) => {
             eprintln!("BLE log-submit: failed to collect log files: {e}");
-            encoder.push_code(constant::BLE_ERR_CODE_FILE_ERROR);
+            encoder.push_code(BleStatus::FileError.code());
             return notify_central(notifier, encoder.finish()).await;
         }
     };
@@ -757,11 +781,11 @@ async fn handle_submit_logs(
 
     match result {
         Ok(_response) => {
-            encoder.push_code(constant::BLE_SUCCESS_CODE);
+            encoder.push_code(BleStatus::Success.code());
         }
         Err(e) => {
             eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}",);
-            encoder.push_code(e);
+            encoder.push_code(BleStatus::NetworkError.code());
         }
     }
 

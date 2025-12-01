@@ -353,7 +353,7 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
 async fn internet_setup_successfully_cb(
     app_state: &Arc<AppState>,
     chromium: &Arc<Cdp>,
-) -> Result<String, u8> {
+) -> Result<String, ble::BleStatus> {
     // First check if device is too old to auto-upgrade
     match updater::is_too_old_to_upgrade().await {
         Ok(true) => {
@@ -396,7 +396,7 @@ async fn internet_setup_successfully_cb(
                     }
                 });
             }
-            return Err(constant::BLE_ERR_CODE_VERSION_CHECK_FAILED);
+            return Err(ble::BleStatus::VersionCheckFailed);
         }
         Ok(false) => {} // Device can be upgraded, continue with normal flow
         Err(e) => {
@@ -412,7 +412,7 @@ async fn internet_setup_successfully_cb(
             // This is to avoid blocking Error code to mobile app
             // The update process will take over chromium and show the update progress
             task::spawn(update(app_state.clone(), chromium.clone()));
-            return Err(constant::BLE_ERR_CODE_DEVICE_UPDATING);
+            return Err(ble::BleStatus::DeviceUpdating);
         }
         Ok(false) => {} // No update required, proceed with the normal flow
         Err(e) => {
@@ -423,7 +423,7 @@ async fn internet_setup_successfully_cb(
                 constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
             )
             .await;
-            return Err(constant::BLE_ERR_CODE_VERSION_CHECK_FAILED);
+            return Err(ble::BleStatus::VersionCheckFailed);
         }
     }
 
@@ -432,7 +432,7 @@ async fn internet_setup_successfully_cb(
         Ok(info) => info,
         Err(e) => {
             eprintln!("BLE: can't get relayer data from controld: {e:#?}");
-            return Err(constant::BLE_ERR_CODE_SERVER_UNREACHABLE);
+            return Err(ble::BleStatus::ServerUnreachable);
         }
     };
 
@@ -544,9 +544,9 @@ mod callbacks {
                     // But the command doesn't provide a reliable way to detect this
                     let err_code = match &e {
                         WifiError::NmcliFailure { stderr, .. } if stderr.contains("password") => {
-                            constant::BLE_ERR_CODE_WRONG_WIFI_PWD
+                            ble::BleStatus::WrongWifiPassword
                         }
-                        _ => constant::BLE_ERR_CODE_UNKNOWN_ERROR,
+                        _ => ble::BleStatus::UnknownError,
                     };
                     return Err(err_code);
                 }
@@ -561,7 +561,7 @@ mod callbacks {
                         )
                         .await;
                     });
-                    return Err(constant::BLE_ERR_CODE_NO_INTERNET);
+                    return Err(ble::BleStatus::NoInternet);
                 }
                 internet_setup_successfully_cb(&app_state, &chromium).await
             })
@@ -577,7 +577,7 @@ mod callbacks {
             let chromium = chromium.clone();
             Box::pin(async move {
                 if !app_state.internet.is_online(true).await {
-                    return Err(constant::BLE_ERR_CODE_WIFI_REQUIRED);
+                    return Err(ble::BleStatus::WifiRequired);
                 }
                 internet_setup_successfully_cb(&app_state, &chromium).await
             })
