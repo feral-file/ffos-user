@@ -262,6 +262,25 @@ async fn start_ble(
     Ok(())
 }
 
+/// Startup path when the device does **not** have internet at boot time.
+///
+/// When this is called:
+/// - `run` has already waited for `controld` to be reachable.
+/// - The initial internet check says the device is currently offline.
+///
+/// What it does:
+/// - Warms the Wi‑Fi SSID cache so the first BLE scan is fast.
+/// - Shows the pairing QR code to let the user fix connectivity.
+/// - Polls for internet with an aggressive or relaxed interval depending on
+///   whether the device has ever connected before.
+/// - Marks the device as "has connected before" in the cache once online.
+/// - If the BLE flow has not opted out via `auto_proceed`, hands off to the
+///   normal "startup with internet" flow.
+///
+/// Notes:
+/// - If the user chooses a new Wi‑Fi via BLE, the BLE flow clears
+///   `auto_proceed`; in that case this function will not auto‑advance and the
+///   BLE setup path remains in control.
 async fn startup_without_internet(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
@@ -301,6 +320,21 @@ async fn startup_without_internet(
     Ok(())
 }
 
+/// Startup path when the device already has internet at boot time.
+///
+/// When this is called:
+/// - `run` has already waited for `controld` to be reachable.
+/// - The initial internet check says the device is currently online.
+///
+/// What it does:
+/// - Ensures the "has ever connected" flag is persisted in the cache.
+/// - In QEMU mode only, fetches the topic ID from `controld` and saves it.
+/// - Delegates to `on_startup_with_internet` to either show the web app or a
+///   reflashing QR code, depending on updater state and cached topic ID.
+///
+/// Notes:
+/// - This path is used both on true first‑boot with working internet and on
+///   subsequent boots where connectivity is available immediately.
 async fn startup_with_internet(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
@@ -451,8 +485,8 @@ async fn internet_setup_successfully_cb(
 
 mod callbacks {
     use super::{
-        internet_setup_successfully_cb, show_factory_reset, show_message, show_qrcode,
-        show_webapp, AppState, Cdp, WifiError, ble, cache, constant, dbus_utils, wifi_utils,
+        AppState, Cdp, WifiError, ble, cache, constant, dbus_utils, internet_setup_successfully_cb,
+        show_factory_reset, show_message, show_qrcode, show_webapp, wifi_utils,
     };
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -526,9 +560,12 @@ mod callbacks {
                     );
                     // Tell user that the wifi connection failed
                     task::spawn(async move {
-                        let _ =
-                            show_message(&chromium, &app_state, constant::WIFI_FAILED_TO_CONNECT_MSG)
-                                .await;
+                        let _ = show_message(
+                            &chromium,
+                            &app_state,
+                            constant::WIFI_FAILED_TO_CONNECT_MSG,
+                        )
+                        .await;
                     });
                     // This is a bit of a hack to detect wrong password
                     // But the command doesn't provide a reliable way to detect this
@@ -698,6 +735,25 @@ async fn show_reflashing_qrcode(
     Ok(())
 }
 
+/// Handles the main startup flow once the device has a working internet connection.
+///
+/// When this is called:
+/// - The app state and CDP connection have already been initialized.
+/// - The caller has determined that the device currently has internet access.
+///
+/// What it does:
+/// - Checks whether the running firmware/software is too old to auto‑upgrade and, if so,
+///   shows a reflashing QR code or a fallback message and stops further processing.
+/// - If the device can be upgraded, checks whether an update is required and either
+///   drives the updater flow or continues with normal startup.
+/// - If no update is in progress, decides whether to show the web app or the pairing
+///   QR code based on the presence of a cached topic ID and whether the device is in
+///   qemu mode.
+///
+/// Notes:
+/// - Any early return from this function (for example, when an update is required or
+///   the device is too old) is intentional and means the usual "show art or QR" flow
+///   should not continue.
 async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
     // First check if device is too old to auto-upgrade
     match updater::is_too_old_to_upgrade().await {
