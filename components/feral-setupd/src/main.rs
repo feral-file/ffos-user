@@ -10,7 +10,6 @@ mod log_uploader;
 mod system;
 mod updater;
 mod wifi_utils;
-use std::env;
 
 use crate::dbus_utils::PageStateProvider;
 use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
@@ -96,7 +95,6 @@ struct AppState {
     app_cache: Cache,
     internet: Connectivity,
     page: Mutex<Page>,
-    qemu: bool,
 
     // This is the flag to indicate whether we should automatically redirect to webapp
     // when internet is available.
@@ -144,23 +142,14 @@ fn main() {
 }
 
 async fn run() -> Result<()> {
-    const PROFILE: &str = env!("BUILD_PROFILE");
-    println!("MAIN: Build profile: {PROFILE}");
-
-    let qemu = PROFILE == "qemu";
-    if qemu {
-        println!("MAIN: Running in qemu mode");
-    }
     // Initialize state
     let ble_service = Arc::new(Ble::new());
-    let app_state = init_app_state(&ble_service, qemu).await?;
+    let app_state = init_app_state(&ble_service).await?;
     let chrome = init_cdp().await?;
 
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());
-    if !qemu {
-        start_ble(&ble_service, &app_state, &chrome, &ssids_cacher).await?;
-    }
+    start_ble(&ble_service, &app_state, &chrome, &ssids_cacher).await?;
 
     // Wait for controld D-Bus connection before proceeding
     wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await?;
@@ -186,7 +175,7 @@ async fn run() -> Result<()> {
         startup_without_internet(&app_state, &chrome, &ssids_cacher, used_to_connect.as_ref())
             .await?;
     } else {
-        startup_with_internet(&app_state, &chrome, used_to_connect.as_ref(), qemu).await?;
+        startup_with_internet(&app_state, &chrome, used_to_connect.as_ref()).await?;
     }
 
     let stop_dbus_listener = setup_dbus_listeners(&app_state, &chrome);
@@ -197,19 +186,17 @@ async fn run() -> Result<()> {
     println!("MAIN: Stopping DBus listener...");
     stop_dbus_listener.store(true, Ordering::Relaxed);
     println!("MAIN: Stopping BLE service...");
-    if !qemu {
-        if let Err(e) = ble_service.stop().await {
-            eprintln!("MAIN: Error stopping BLE service: {e:#?}");
-            return Err(e);
-        } else {
-            println!("MAIN: BLE service stopped");
-        }
+    if let Err(e) = ble_service.stop().await {
+        eprintln!("MAIN: Error stopping BLE service: {e:#?}");
+        return Err(e);
+    } else {
+        println!("MAIN: BLE service stopped");
     }
     println!("MAIN: Shutting down...");
     Ok(())
 }
 
-async fn init_app_state(ble_service: &Arc<Ble>, qemu: bool) -> Result<Arc<AppState>> {
+async fn init_app_state(ble_service: &Arc<Ble>) -> Result<Arc<AppState>> {
     let app_state = Arc::new(AppState {
         device_id: ble_service.get_device_id().await,
         branch: cfg::branch().await?.to_string(),
@@ -218,7 +205,6 @@ async fn init_app_state(ble_service: &Arc<Ble>, qemu: bool) -> Result<Arc<AppSta
         internet: Connectivity::spawn().await,
         page: Mutex::new(Page::None(unix_s())),
         auto_proceed: AtomicBool::new(false),
-        qemu,
     });
     sentry::configure_scope(|scope| {
         scope.set_tag("branch", app_state.branch.clone());
@@ -328,7 +314,6 @@ async fn startup_without_internet(
 ///
 /// What it does:
 /// - Ensures the "has ever connected" flag is persisted in the cache.
-/// - In QEMU mode only, fetches the topic ID from `controld` and saves it.
 /// - Delegates to `on_startup_with_internet` to either show the web app or a
 ///   reflashing QR code, depending on updater state and cached topic ID.
 ///
@@ -339,21 +324,9 @@ async fn startup_with_internet(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
     used_to_connect: Option<&String>,
-    qemu: bool,
 ) -> Result<()> {
     if used_to_connect.is_none() {
         app_state.app_cache.set(cache::CONNECTED, "true");
-        app_state.app_cache.save(constant::CACHE_FILEPATH)?;
-    }
-    if qemu {
-        let topic_id = match dbus_utils::get_relayer_info() {
-            Ok(info) => info,
-            Err(e) => {
-                eprintln!("QEMU: can't get relayer data from controld: {e:#?}");
-                String::new()
-            }
-        };
-        app_state.app_cache.set(cache::TOPIC_ID, &topic_id);
         app_state.app_cache.save(constant::CACHE_FILEPATH)?;
     }
     on_startup_with_internet(app_state.clone(), chrome.clone()).await
@@ -815,7 +788,7 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
 
     // No update, show art/qrcode depending on whether we have a cache
     let has_cache = app_state.app_cache.get(cache::TOPIC_ID).is_some();
-    if !app_state.qemu && has_cache {
+    if has_cache {
         show_webapp(&app_state, &chrome).await
     } else {
         show_qrcode(&app_state, &chrome).await
