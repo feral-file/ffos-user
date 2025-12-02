@@ -822,18 +822,21 @@ async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
 
 async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let mut page = app_state.page.lock().await;
-    // For webapp, we only navigate if the page is not it already
-    if matches!(*page, Page::WebApp(_)) {
-        return Ok(());
-    }
-
-    // This is to avoid Err Network Changed from Chrome
-    time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
 
     let webapp_url = match cfg::webapp_url().await? {
         Some(url) => url,
         None => constant::WEBAPP_URL.to_string(),
     };
+
+    // For webapp, we only navigate if the page is not it already
+    let current_url = chrome.get_current_url().await?;
+    if current_url.starts_with(&webapp_url) {
+        *page = Page::WebApp(unix_s());
+        return Ok(());
+    }
+
+    // This is to avoid Err Network Changed from Chrome
+    time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
     chrome
         .navigate(&webapp_url)
         .await
