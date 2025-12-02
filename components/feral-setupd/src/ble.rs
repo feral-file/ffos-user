@@ -32,6 +32,7 @@ pub enum BleStatus {
     WifiRequired = constant::BLE_ERR_CODE_WIFI_REQUIRED,
     DeviceUpdating = constant::BLE_ERR_CODE_DEVICE_UPDATING,
     VersionCheckFailed = constant::BLE_ERR_CODE_VERSION_CHECK_FAILED,
+    VersionTooOld = constant::BLE_ERR_CODE_VERSION_TOO_OLD,
     InvalidParams = constant::BLE_ERR_CODE_INVALID_PARAMS,
     FileError = constant::BLE_ERR_CODE_FILE_ERROR,
     NetworkError = constant::BLE_ERR_CODE_NETWORK_ERROR,

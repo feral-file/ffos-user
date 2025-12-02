@@ -44,6 +44,7 @@ pub const BLE_ERR_CODE_VERSION_CHECK_FAILED: u8 = 6;
 pub const BLE_ERR_CODE_INVALID_PARAMS: u8 = 7;
 pub const BLE_ERR_CODE_FILE_ERROR: u8 = 8;
 pub const BLE_ERR_CODE_NETWORK_ERROR: u8 = 9;
+pub const BLE_ERR_CODE_VERSION_TOO_OLD: u8 = 10;
 pub const BLE_ERR_CODE_UNKNOWN_ERROR: u8 = 255;
 
 // Chrome configuration
