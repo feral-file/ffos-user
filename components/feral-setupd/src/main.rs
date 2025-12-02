@@ -81,7 +81,6 @@ impl Page {
             | Page::SystemUpgrade(_)
             | Page::FactoryReset(_)
             | Page::ReflashingRequired(_, _) => true,
-            Page::Message(_, msg) => msg == constant::SETUP_SUCCESSFULLY_MSG,
             _ => false,
         }
     }
