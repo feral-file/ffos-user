@@ -6,7 +6,6 @@ SERVICES=(
   "feral-setupd.service"
   "feral-controld.service"
   "feral-sys-monitord.service"
-  "feral-app-monitord.service"
   "chromium-kiosk.service"
 )
 

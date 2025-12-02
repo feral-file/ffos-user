@@ -36,6 +36,7 @@ exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && 
     --noerrdialogs \
     --disable-extensions \
     --autoplay-policy=no-user-gesture-required \
+    --disable-client-side-phishing-detection \
     --allow-file-access-from-files \
     --enable-logging=stderr \
     --v=0 \

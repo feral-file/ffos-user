@@ -2,7 +2,6 @@ use dbus::arg::Append;
 use dbus::blocking::{BlockingSender, Connection};
 use dbus::channel::Sender;
 use dbus::message::Message;
-use dbus_crossroads::Crossroads;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,42 +12,6 @@ use anyhow::{Result, anyhow};
 use crate::constant;
 
 pub type ListenCallback = Box<dyn Fn(Message) + Send + Sync>;
-
-pub trait PageStateProvider: Send + Sync {
-    fn get_page_state(&self) -> (String, String, i64);
-}
-
-pub fn start_dbus_service<T: PageStateProvider + 'static>(state_provider: Arc<T>) {
-    std::thread::spawn(move || {
-        println!("DBUS: start_dbus_service started");
-
-        let conn = Connection::new_session().expect("DBUS: failed to create connection");
-        conn.request_name(constant::DBUS_SETUPD_DESTINATION, false, true, false)
-            .expect("DBUS: failed to request name");
-
-        let mut cr = Crossroads::new();
-
-        let provider = state_provider.clone();
-        let iface = cr.register(constant::DBUS_SETUPD_INTERFACE, move |b| {
-            let p = provider.clone();
-            b.method(
-                constant::DBUS_GET_PAGE_STATE,
-                (),
-                ("id", "page", "page_changed_unix"),
-                move |_, (), ()| {
-                    let (id, page, timestamp) = p.get_page_state();
-                    Ok((id, page, timestamp))
-                },
-            );
-        });
-        cr.insert(constant::DBUS_SETUPD_OBJECT, &[iface], ());
-        println!("DBUS: Service started");
-
-        if let Err(e) = cr.serve(&conn) {
-            eprintln!("DBUS: service crashed: {e:?}");
-        }
-    });
-}
 
 /// Sends a signal and waits for an acknowledgement from the same object/interface
 /// whose member name is the original `member` plus `_ack`.

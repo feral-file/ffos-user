@@ -8,7 +8,6 @@
 | **feral-controld** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-controld.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-controld.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-controld.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-controld.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-controld&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 | **feral-setupd** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-setupd.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-setupd.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-setupd.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-setupd.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-setupd&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 | **feral-sys-monitord** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-sys-monitord.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-sys-monitord.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-sys-monitord.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-sys-monitord.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-sys-monitord&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
-| **feral-app-monitord** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-app-monitord.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-app-monitord.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-app-monitord.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-app-monitord.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-app-monitord&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 | **feral-watchdog** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-watchdog.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-watchdog.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-watchdog.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-watchdog.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-watchdog&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 
 ---
@@ -60,7 +59,6 @@ ffos-user/
 │   │   ├── Cargo.toml
 │   │   └── ...
 │   ├── feral-sys-monitord/       # System monitoring
-│   ├── feral-app-monitord/       # Application monitoring
 │   ├── feral-watchdog/           # System watchdog
 │   ├── launcher-ui/              # Launcher UI components
 │   └── player-wrapper-ui/        # Player wrapper UI
@@ -105,7 +103,6 @@ ffos-user/
 
 #### 3. Monitoring Layer
 - **feral-sys-monitord**: System resource monitoring
-- **feral-app-monitord**: Application health monitoring
 - **feral-watchdog**: System watchdog and recovery
 
 #### 4. UI Layer
