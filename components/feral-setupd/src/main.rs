@@ -364,7 +364,7 @@ async fn internet_setup_successfully_cb(
                     }
                 });
             }
-            return Err(ble::BleStatus::VersionCheckFailed);
+            return Err(ble::BleStatus::VersionTooOld);
         }
         Ok(false) => {} // Device can be upgraded, continue with normal flow
         Err(e) => {
