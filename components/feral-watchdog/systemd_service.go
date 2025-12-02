@@ -20,7 +20,6 @@ var (
 		"feral-setupd.service":       true,
 		"feral-controld.service":     true,
 		"feral-sys-monitord.service": true,
-		"feral-app-monitord.service": true,
 	}
 )
 

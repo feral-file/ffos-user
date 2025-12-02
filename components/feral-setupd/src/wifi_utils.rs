@@ -1,8 +1,8 @@
 use std::collections::HashSet;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task;
 
@@ -94,61 +94,6 @@ impl SSIDsCacher {
         });
     }
 
-    /// Trigger a refresh and wait for it to complete
-    pub async fn trigger_refresh_and_wait(&self) {
-        // Subscribe to notifications BEFORE checking state
-        // This ensures we won't miss any notification (lost wakeup problem)
-        let notified = self.notify.notified();
-
-        // Check if already refreshing
-        {
-            let st = self.state.lock().await;
-            if st.refreshing {
-                // Someone else is refreshing, wait for them to finish
-                drop(st);
-                notified.await;
-                return;
-            }
-        }
-
-        // Start refresh
-        {
-            let mut st = self.state.lock().await;
-            if st.refreshing {
-                // Double-check after acquiring lock
-                drop(st);
-                notified.await;
-                return;
-            }
-            st.refreshing = true;
-        }
-
-        // Do the actual refresh
-        println!("SSIDsCacher: refreshing...");
-        let res = list_ssids(true).await;
-        println!("SSIDsCacher: refreshed: \n{res:?}");
-
-        {
-            let mut st = self.state.lock().await;
-            match res {
-                Ok(ssids) => {
-                    st.cached_ssids = ssids;
-                    st.expired_at =
-                        Some(Instant::now() + Duration::from_millis(constant::SSID_CACHE_TTL));
-                    st.last_error = None;
-                }
-                Err(e) => {
-                    st.reset();
-                    st.last_error = Some(e);
-                }
-            }
-            st.refreshing = false;
-        }
-
-        // wake everyone waiting in `get()`
-        self.notify.notify_waiters();
-    }
-
     /// Get SSIDs, waiting only if a refresh is currently in progress or required.
     /// If the last scan failed, or return empty list of SSIDs, the first "get" will clear the cache
     /// Thus, the next "get" will trigger a new refresh
@@ -194,19 +139,20 @@ impl SSIDsCacher {
     }
 }
 
-pub fn connect(ssid: &str, pass: &str) -> Result<()> {
+pub async fn connect(ssid: &str, pass: &str) -> Result<()> {
     // delete any existing connection, don't care if it fails
     // we need this because of a bug with nmcli
     // https://bbs.archlinux.org/viewtopic.php?id=300321&p=2
 
-    if let Err(err) = delete(ssid) {
+    if let Err(err) = delete(ssid).await {
         eprintln!("Wifi: failed to delete existing connection: {err}");
     }
 
     println!("Wifi: connecting to {ssid}");
     let output = Command::new("nmcli")
         .args(["device", "wifi", "connect", ssid, "password", pass])
-        .output()?;
+        .output()
+        .await?;
 
     if output.status.success() {
         Ok(())
@@ -218,10 +164,11 @@ pub fn connect(ssid: &str, pass: &str) -> Result<()> {
     }
 }
 
-fn delete(ssid: &str) -> Result<()> {
+async fn delete(ssid: &str) -> Result<()> {
     let output = Command::new("nmcli")
         .args(["connection", "delete", ssid])
-        .output()?;
+        .output()
+        .await?;
 
     if output.status.success() {
         Ok(())
@@ -234,16 +181,12 @@ fn delete(ssid: &str) -> Result<()> {
 }
 
 pub async fn list_ssids(force: bool) -> Result<Vec<String>> {
-    let output = task::spawn_blocking(move || {
-        let mut args = vec!["-t", "-f", "SSID", "device", "wifi", "list"];
-        if force {
-            args.push("--rescan");
-            args.push("yes");
-        }
-        Command::new("nmcli").args(&args).output()
-    })
-    .await? // JoinError → Error::Join
-    ?; // IoError → Error::Io
+    let mut args = vec!["-t", "-f", "SSID", "device", "wifi", "list"];
+    if force {
+        args.push("--rescan");
+        args.push("yes");
+    }
+    let output = Command::new("nmcli").args(&args).output().await?;
 
     if !output.status.success() {
         return Err(Error::NmcliFailure {
