@@ -19,10 +19,6 @@ sync-feral-sys-monitord:
 sync-launcher-ui:
 	@$(SYNC_SCRIPT) ./launcher-ui /opt/feral/ui/launcher/ $(REMOTE_HOST)
 
-.PHONY: sync-feral-app-monitord
-sync-feral-app-monitord:
-	@$(SYNC_SCRIPT) ./feral-app-monitord $(REMOTE_DIR)/feral-app-monitord $(REMOTE_HOST)
-
 .PHONY: sync-feral-watchdog
 sync-feral-watchdog:
 	@$(SYNC_SCRIPT) ./feral-watchdog $(REMOTE_DIR)/feral-watchdog $(REMOTE_HOST)

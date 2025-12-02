@@ -11,7 +11,6 @@ mod system;
 mod updater;
 mod wifi_utils;
 
-use crate::dbus_utils::PageStateProvider;
 use crate::persistent_state::PersistentState;
 use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
 use anyhow::Context;
@@ -103,14 +102,6 @@ struct AppState {
     // We need this flag to turn off the first flow if the user has chosen to provide a different wifi
     // true = auto proceed, false = user has chosen to provide a different wifi
     auto_proceed: AtomicBool,
-}
-
-impl PageStateProvider for AppState {
-    fn get_page_state(&self) -> (String, String, i64) {
-        let id = self.device_id.clone();
-        let page = self.page.blocking_lock();
-        (id, page.page_type().to_string(), page.timestamp())
-    }
 }
 
 // Sentry has to start before tokio runtime
@@ -347,9 +338,6 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         stop_dbus_listener.clone(),
         qrcode_switch_cb,
     );
-
-    // Start the D-Bus service
-    dbus_utils::start_dbus_service(app_state.clone());
 
     stop_dbus_listener
 }
@@ -609,7 +597,7 @@ mod callbacks {
                 Err(e) => println!("MAIN: Error reading message: {e: }"),
                 _ => {}
             }
-            println!("MAIN: QR switch -> qrcode_requested={}", qrcode_requested);
+            println!("MAIN: QR switch -> qrcode_requested={qrcode_requested}");
             task::spawn(async move {
                 if qrcode_requested {
                     let _ = show_qrcode(&app_state, &chromium).await;
@@ -818,10 +806,7 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
         .map(|v| v == "true")
         .unwrap_or(true);
 
-    println!(
-        "MAIN: startup_with_internet: has_topic={} is_paired={}",
-        has_topic, is_paired
-    );
+    println!("MAIN: startup_with_internet: has_topic={has_topic} is_paired={is_paired}");
 
     if has_topic && is_paired {
         show_webapp(&app_state, &chrome).await

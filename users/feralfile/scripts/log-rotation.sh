@@ -14,7 +14,6 @@ if [ ! -f "$LOG_CONFIG_FILE" ]; then
 /home/feralfile/.logs/timesyncd.log|/home/feralfile/.logs/backup/timesyncd
 /home/feralfile/.logs/sys-monitord.log|/home/feralfile/.logs/backup/sys-monitord
 /home/feralfile/.logs/watchdog.log|/home/feralfile/.logs/backup/watchdog
-/home/feralfile/.logs/app-monitord.log|/home/feralfile/.logs/backup/app-monitord
 /home/feralfile/.logs/log-rotation.log|/home/feralfile/.logs/backup/log-rotation
 EOL
 fi

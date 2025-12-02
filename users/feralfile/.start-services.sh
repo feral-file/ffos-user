@@ -4,11 +4,6 @@ if systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; the
     systemctl --user stop "feral-sys-monitord.service"
 fi
 
-if systemctl --user is-enabled "feral-app-monitord.service" >/dev/null 2>&1; then
-    systemctl --user disable "feral-app-monitord.service"
-    systemctl --user stop "feral-app-monitord.service"
-fi
-
 if systemctl --user is-enabled "feral-watchdog.service" >/dev/null 2>&1; then
     systemctl --user disable "feral-watchdog.service"
     systemctl --user stop "feral-watchdog.service"
@@ -21,7 +16,6 @@ systemctl --user daemon-reload
 systemctl --user start system-ready.target
 
 systemctl --user start "feral-sys-monitord.service"
-systemctl --user start "feral-app-monitord.service"
 systemctl --user start "feral-vmagent.service"
 systemctl --user start "display-restore.service"
 systemctl --user start "chromium-kiosk.service"
