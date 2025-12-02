@@ -76,13 +76,13 @@ impl Page {
 
     /// Check if the page should be kept when bluetooth disconnects
     fn should_keep_on_bt_disconnect(&self) -> bool {
-        match self {
+        matches!(
+            self,
             Page::WebApp(_)
-            | Page::SystemUpgrade(_)
-            | Page::FactoryReset(_)
-            | Page::ReflashingRequired(_, _) => true,
-            _ => false,
-        }
+                | Page::SystemUpgrade(_)
+                | Page::FactoryReset(_)
+                | Page::ReflashingRequired(_, _)
+        )
     }
 }
 
