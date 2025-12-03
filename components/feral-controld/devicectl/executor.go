@@ -1,10 +1,14 @@
 package devicectl
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
@@ -128,6 +132,10 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
+	case commands.CMD_FACTORY_RESET:
+		result, err = e.factoryReset(ctx)
+	case commands.CMD_UPLOAD_LOGS:
+		result, err = e.uploadLogs(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -630,4 +638,161 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 	}
 
 	return CmdOK, nil
+}
+
+func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
+	e.logger.Info("Executing factory reset command")
+
+	cmd := e.exec.CommandContext(ctx, "systemctl", "start", "set-factory-boot.service")
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("failed to execute factory reset command: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+const (
+	logFileDir       = "/home/feralfile/.logs"
+	logUploadAPI     = "https://support.autonomy.io/v1/issues/"
+	maxFileSizeBytes = 1048576 // 1MB in bytes
+)
+
+func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {
+	e.logger.Info("Executing upload logs command")
+
+	var cmdArgs struct {
+		UserID string `json:"userId"`
+		APIKey string `json:"apiKey"`
+		Title  string `json:"title"`
+	}
+
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if cmdArgs.UserID == "" || cmdArgs.APIKey == "" || cmdArgs.Title == "" {
+		return nil, fmt.Errorf("missing required arguments: userId, apiKey, and title are required")
+	}
+
+	// Collect log files
+	logFiles, err := e.collectLogFiles()
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect log files: %w", err)
+	}
+
+	e.logger.Info("Collected log files", zap.Int("count", len(logFiles)))
+
+	// Create request body
+	body := e.createLogSubmissionBody(cmdArgs.Title, "Device log submission via Internet", []string{"device-logs", "internet-submission"}, logFiles)
+
+	// Submit logs to API
+	if err := e.submitLogsToAPI(ctx, cmdArgs.UserID, cmdArgs.APIKey, body); err != nil {
+		return nil, fmt.Errorf("failed to submit logs: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+type logFile struct {
+	Name string
+	Data []byte
+}
+
+func (e *executor) collectLogFiles() ([]logFile, error) {
+	entries, err := e.os.ReadDir(logFileDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read log directory: %w", err)
+	}
+
+	var logFiles []logFile
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".log") {
+			continue
+		}
+
+		filePath := logFileDir + "/" + name
+		data, err := e.os.ReadFile(filePath)
+		if err != nil {
+			e.logger.Warn("Failed to read log file", zap.String("file", name), zap.Error(err))
+			continue
+		}
+
+		// Handle large files - only keep last 1MB
+		if len(data) > maxFileSizeBytes {
+			// Find first complete line after truncation point
+			startPos := len(data) - maxFileSizeBytes
+			for i := startPos; i < len(data); i++ {
+				if data[i] == '\n' {
+					startPos = i + 1
+					break
+				}
+			}
+
+			truncationNotice := fmt.Sprintf("[TRUNCATED: Original file size %d bytes, showing last %d bytes]\n", len(data), len(data)-startPos)
+			truncatedData := make([]byte, 0, len(truncationNotice)+len(data)-startPos)
+			truncatedData = append(truncatedData, []byte(truncationNotice)...)
+			truncatedData = append(truncatedData, data[startPos:]...)
+			data = truncatedData
+		}
+
+		logFiles = append(logFiles, logFile{Name: name, Data: data})
+	}
+
+	return logFiles, nil
+}
+
+func (e *executor) createLogSubmissionBody(title, message string, tags []string, logFiles []logFile) map[string]interface{} {
+	attachments := make([]map[string]string, 0, len(logFiles))
+	for _, lf := range logFiles {
+		attachments = append(attachments, map[string]string{
+			"title": lf.Name,
+			"data":  base64.StdEncoding.EncodeToString(lf.Data),
+		})
+	}
+
+	return map[string]interface{}{
+		"attachments": attachments,
+		"title":       title,
+		"message":     message,
+		"tags":        tags,
+	}
+}
+
+func (e *executor) submitLogsToAPI(ctx context.Context, userID, apiKey string, body map[string]interface{}) error {
+	bodyBytes, err := e.json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	e.logger.Info("Submitting logs to API", zap.Int("bodySize", len(bodyBytes)))
+
+	req, err := http.NewRequestWithContext(ctx, "POST", logUploadAPI, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("x-device-id", userID)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("API returned status %d", resp.StatusCode)
+	}
+
+	e.logger.Info("Logs submitted successfully")
+	return nil
 }

@@ -120,6 +120,21 @@ func (mr *MockOSMockRecorder) WriteFile(path, data, perm interface{}) *gomock.Ca
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteFile", reflect.TypeOf((*MockOS)(nil).WriteFile), path, data, perm)
 }
 
+// ReadDir mocks base method.
+func (m *MockOS) ReadDir(path string) ([]os.DirEntry, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReadDir", path)
+	ret0, _ := ret[0].([]os.DirEntry)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ReadDir indicates an expected call of ReadDir.
+func (mr *MockOSMockRecorder) ReadDir(path interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReadDir", reflect.TypeOf((*MockOS)(nil).ReadDir), path)
+}
+
 // MockExec is a mock of Exec interface.
 type MockExec struct {
 	ctrl     *gomock.Controller

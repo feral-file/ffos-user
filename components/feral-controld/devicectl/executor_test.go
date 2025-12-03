@@ -2691,6 +2691,173 @@ func TestExecutor_UpdateToLatest_CommandError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to execute update to latest command")
 }
 
+func TestExecutor_FactoryReset_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type:      commands.CMD_FACTORY_RESET,
+		Arguments: map[string]interface{}{},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Mock exec.CommandContext for factory reset
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
+		Return(ts.mockExecCmd)
+
+	// Mock cmd.Run() to succeed
+	ts.mockExecCmd.EXPECT().
+		Run().
+		Return(nil)
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_FactoryReset_CommandError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type:      commands.CMD_FACTORY_RESET,
+		Arguments: map[string]interface{}{},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Mock exec.CommandContext for factory reset to fail
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
+		Return(ts.mockExecCmd)
+
+	// Mock cmd.Run() to fail
+	ts.mockExecCmd.EXPECT().
+		Run().
+		Return(errors.New("factory reset command failed"))
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to execute factory reset command")
+}
+
+func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	tests := []struct {
+		name      string
+		arguments map[string]interface{}
+	}{
+		{
+			name: "missing userId",
+			arguments: map[string]interface{}{
+				"apiKey": "test-api-key",
+				"title":  "test-title",
+			},
+		},
+		{
+			name: "missing apiKey",
+			arguments: map[string]interface{}{
+				"userId": "test-user-id",
+				"title":  "test-title",
+			},
+		},
+		{
+			name: "missing title",
+			arguments: map[string]interface{}{
+				"userId": "test-user-id",
+				"apiKey": "test-api-key",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := commands.Command{
+				Type:      commands.CMD_UPLOAD_LOGS,
+				Arguments: tt.arguments,
+			}
+
+			// Mock JSON marshaling
+			ts.mockJSON.EXPECT().
+				Marshal(cmd.Arguments).
+				Return([]byte(`{}`), nil)
+
+			// Mock JSON unmarshaling to return an empty struct
+			ts.mockJSON.EXPECT().
+				Unmarshal(gomock.Any(), gomock.Any()).
+				Return(nil)
+
+			// Execute command
+			result, err := ts.executor.Execute(ts.ctx, cmd)
+			assert.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "missing required arguments")
+		})
+	}
+}
+
+func TestExecutor_UploadLogs_ReadDirError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_UPLOAD_LOGS,
+		Arguments: map[string]interface{}{
+			"userId": "test-user-id",
+			"apiKey": "test-api-key",
+			"title":  "test-title",
+		},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
+
+	// Mock JSON unmarshaling
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			// Set values in the struct
+			if args, ok := v.(*struct {
+				UserID string `json:"userId"`
+				APIKey string `json:"apiKey"`
+				Title  string `json:"title"`
+			}); ok {
+				args.UserID = "test-user-id"
+				args.APIKey = "test-api-key"
+				args.Title = "test-title"
+			}
+			return nil
+		})
+
+	// Mock ReadDir to fail
+	ts.mockOS.EXPECT().
+		ReadDir("/home/feralfile/.logs").
+		Return(nil, errors.New("directory not found"))
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to collect log files")
+}
+
 func TestExecutor_NewHandler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
