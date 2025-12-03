@@ -3,164 +3,261 @@ package main
 import (
 	"context"
 	"flag"
-	"os"
-	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/feral-file/ffos-user/components/feral-sys-monitord/logger"
-	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
-
-	"github.com/coreos/go-systemd/v22/daemon"
-	"github.com/feral-file/godbus"
 	"github.com/getsentry/sentry-go"
+
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/config"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/connectivity"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/dbus"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/event"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/logger"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/mediator"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/prom_server"
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/watchdog"
+
+	go_os "os"
+
+	go_daemon "github.com/coreos/go-systemd/v22/daemon"
+	"github.com/feral-file/godbus"
+	dbus_v5 "github.com/godbus/dbus/v5"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/wrapper"
 )
 
 const (
-	WATCHDOG_INTERVAL = 15 * time.Second
-	SHUTDOWN_TIMEOUT  = 2 * time.Second
+	SHUTDOWN_TIMEOUT = 2 * time.Second
 )
 
-var debug = false
+var (
+	debug = false
+)
+
+type app struct {
+	// Basic components
+	Ctx    context.Context
+	Logger *zap.Logger
+
+	// Wrappers
+	Clock    wrapper.Clock
+	OS       wrapper.OS
+	Signal   wrapper.Signal
+	JSON     wrapper.JSON
+	Exec     wrapper.Exec
+	Strconv  wrapper.Strconv
+	Filepath wrapper.Filepath
+	Daemon   wrapper.Daemon
+
+	// Components
+	Watchdog            watchdog.Watchdog
+	ConnectivityHandler connectivity.Handler
+	SystemMonitor       metric.Monitor
+	EventWatcher        event.Watcher
+	Mediator            mediator.Mediator
+	PromServer          prom_server.PromServer
+	DBus                dbus.DBus
+}
 
 func main() {
 	// Read from options
 	flag.BoolVar(&debug, "debug", false, "Enable debug mode")
 	flag.Parse()
 
-	// Initialize logger with debug enabled for development
-	log, err := logger.New(debug)
+	// Initialize basic logger first for config loading
+	basicLogger, err := logger.New(debug)
 	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 	defer func() {
-		_ = log.Sync()
+		_ = basicLogger.Sync()
 	}()
 
-	if err := LoadConfig(); err != nil {
-		log.Error("Failed to load config.", zap.Error(err))
-		return
+	// Load configuration
+	config, err := config.Load(basicLogger)
+	if err != nil {
+		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
 	}
-	log.Info("Configuration loaded successfully.")
 
-	// Initialize Sentry if configured
-	if config.SysMonitordConfig.SentryConfig.IsEnabled() {
-		sc, err := sentry.NewClient(sentry.ClientOptions{
-			Dsn:              config.SysMonitordConfig.SentryConfig.DSN,
-			Debug:            config.SysMonitordConfig.SentryConfig.GetDebug(),
-			SampleRate:       config.SysMonitordConfig.SentryConfig.GetSampleRate(),
-			Environment:      config.SysMonitordConfig.SentryConfig.Environment,
-			Release:          config.SysMonitordConfig.SentryConfig.Release,
-			SendDefaultPII:   true,
-			AttachStacktrace: true,
-		})
+	// Create the final logger (with Sentry if configured)
+	finalLogger := basicLogger
+	if config.SentryConfig.IsEnabled() {
+		sentryLogger, err := logger.AddSentry(finalLogger, *config.SentryConfig)
 		if err != nil {
-			log.Error("Failed to init sentry.NewClient.", zap.Error(err))
-			return
-		}
-		defer sc.Flush(2 * time.Second)
-		finalLogger, err := logger.AddSentry(log, sc)
-		if err != nil {
-			log.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
+			finalLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
 		} else {
-			log = finalLogger
-			log.Info("Sentry initialized successfully",
-				zap.String("environment", config.SysMonitordConfig.SentryConfig.Environment),
-				zap.String("release", config.SysMonitordConfig.SentryConfig.Release))
+			finalLogger = sentryLogger
+			finalLogger.Info("Sentry initialized successfully",
+				zap.String("environment", config.SentryConfig.Environment),
+				zap.String("release", config.SentryConfig.Release))
 			defer logger.FlushSentry(2 * time.Second)
 		}
 	} else {
-		log.Info("Sentry not configured, using basic logger")
+		finalLogger.Info("Sentry not configured, using basic logger")
 	}
 
+	// Initialize app
+	app := initializeApp(
+		dbus.NAME,
+		[]dbus_v5.MatchOption{
+			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
+		},
+		finalLogger,
+	)
+
 	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(app.Ctx)
 	defer cancel()
 
 	// Handle signals for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	sigCh := make(chan go_os.Signal, 1)
+	app.Signal.Notify(sigCh, go_os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		log.Info("Received signal, initiating shutdown...",
+		app.Logger.Info("Received signal, initiating shutdown...",
 			zap.String("signal", sig.String()))
 		cancel()
 
-		time.Sleep(SHUTDOWN_TIMEOUT)
-		log.Error("Shutdown timed out, forcing exit...",
+		app.Clock.Sleep(SHUTDOWN_TIMEOUT)
+		app.Logger.Error("Shutdown timed out, forcing exit...",
 			zap.Duration("timeout", SHUTDOWN_TIMEOUT))
-		os.Exit(1)
+
+		if config.SentryConfig.IsEnabled() {
+			sentry.Flush(1 * time.Second)
+		}
+
+		app.OS.Exit(1)
 	}()
 
-	// Start watchdog in a goroutine
-	watchdog := NewWatchdog(WATCHDOG_INTERVAL, log)
-	go watchdog.Start(ctx)
-	defer watchdog.Stop()
-
-	// Initialize Connectivity
-	connectivity := NewConnectivity(ctx, log)
-	connectivity.Start()
-	defer connectivity.Stop()
-
-	// Initialize DBus client
-	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME)
-	err = dbusClient.Start()
+	// Run the app
+	err = app.run(ctx, config)
 	if err != nil {
-		log.Fatal("DBus init failed", zap.Error(err))
+		app.Logger.Fatal("Failed to run app", zap.Error(err))
+	}
+}
+
+// initializeApp initializes the app with real dependencies
+func initializeApp(
+	dbusName string,
+	dbusOpts []dbus_v5.MatchOption,
+	logger *zap.Logger,
+) *app {
+	// Basic components
+	ctx := context.Background()
+
+	// Wrappers
+	clock := wrapper.NewClock()
+	os := wrapper.NewOS()
+	signal := wrapper.NewSignal()
+	json := wrapper.NewJSON()
+	exec := wrapper.NewExec()
+	strconv := wrapper.NewStrconv()
+	filepath := wrapper.NewFilepath()
+	daemon := wrapper.NewDaemon()
+
+	// Components
+	// Watchdog
+	watchdog := watchdog.New(logger)
+
+	// Connectivity
+	connectivityHandler := connectivity.NewHandler(ctx, logger)
+
+	// System Monitor
+	systemMonitor := metric.NewMonitor(ctx, logger, clock, os, json, strconv, filepath, exec)
+
+	// EventWatcher
+	eventWatcher := event.NewWatcher(ctx, logger, clock, exec)
+
+	// DBus
+	dbusClient := godbus.NewDBusClient(ctx, logger, dbusName, dbusOpts...)
+
+	// Mediator
+	mediator := mediator.New(dbusClient, systemMonitor, connectivityHandler, eventWatcher, logger, json)
+
+	// Prometheus server
+	promServer := prom_server.New(logger)
+
+	return &app{
+		Ctx:                 ctx,
+		Logger:              logger,
+		Clock:               clock,
+		OS:                  os,
+		Signal:              signal,
+		JSON:                json,
+		Strconv:             strconv,
+		Filepath:            filepath,
+		Exec:                exec,
+		Daemon:              daemon,
+		Watchdog:            watchdog,
+		DBus:                dbusClient,
+		SystemMonitor:       systemMonitor,
+		EventWatcher:        eventWatcher,
+		Mediator:            mediator,
+		PromServer:          promServer,
+		ConnectivityHandler: connectivityHandler,
+	}
+}
+
+func (app *app) run(ctx context.Context, conf *config.Config) error {
+	// Start watchdog
+	go app.Watchdog.Start(ctx)
+	defer app.Watchdog.Stop()
+
+	// Start DBus
+	if err := app.DBus.Start(); err != nil {
+		return err
 	}
 	defer func() {
-		_ = dbusClient.Stop()
+		if err := app.DBus.Stop(); err != nil {
+			app.Logger.Warn("Failed to stop DBus", zap.Error(err))
+		}
 	}()
-
-	// Initialize Monitor
-	monitor := metric.NewSysResMonitor(ctx, log)
-	monitor.Start()
-	defer monitor.Stop()
-
-	// Initialize SysMonitordDBus
-	sysMonitordDBus := NewSysMonitordDBus(connectivity, monitor, log)
-	err = dbusClient.Export(sysMonitordDBus, DBUS_PATH, DBUS_INTERFACE)
-	if err != nil {
-		log.Fatal("DBus export failed", zap.Error(err))
+	dbusHandler := dbus.NewHandler(app.ConnectivityHandler, app.SystemMonitor, app.Logger)
+	if err := app.DBus.Export(dbusHandler, dbus.PATH, dbus.INTERFACE); err != nil {
+		return err
 	}
 
-	// Initialize SysEventWatcher
-	eventWatcher := NewSysEventWatcher(ctx, log)
-	eventWatcher.Start()
-	defer eventWatcher.Stop()
+	// Start connectivity
+	app.ConnectivityHandler.Start()
+	defer app.ConnectivityHandler.Stop()
 
-	// Initialize Mediator
-	mediator := NewMediator(
-		dbusClient,
-		monitor,
-		connectivity,
-		eventWatcher,
-		log,
-	)
-	mediator.Start()
-	defer mediator.Stop()
+	// Start system monitor
+	app.SystemMonitor.Start()
+	defer app.SystemMonitor.Stop()
 
-	// Initialize Prometheus server
-	promServer := NewPromServer(log)
-	err = promServer.Start()
-	if err != nil {
-		log.Fatal("Prometheus server start failed", zap.Error(err))
+	// Start event watcher
+	app.EventWatcher.Start()
+	defer app.EventWatcher.Stop()
+
+	// Start mediator
+	app.Mediator.Start()
+	defer app.Mediator.Stop()
+
+	// Start Prometheus server
+	if err := app.PromServer.Start(); err != nil {
+		return err
 	}
 	defer func() {
-		if err := promServer.Stop(); err != nil {
-			log.Warn("Failed to stop promServer", zap.Error(err))
+		if err := app.PromServer.Stop(); err != nil {
+			app.Logger.Warn("Failed to stop promServer", zap.Error(err))
 		}
 	}()
 
 	// send ready notification to systemd
-	sent, err := daemon.SdNotify(false, daemon.SdNotifyReady)
+	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
 	if err != nil {
-		log.Error("Failed to notify systemd", zap.Error(err))
+		app.Logger.Error("Failed to notify systemd", zap.Error(err))
 	}
 	if !sent {
-		log.Warn("Failed to notify systemd, notification not supported. It could because NOTIFY_SOCKET is unset")
+		app.Logger.Warn("Failed to notify systemd, notification not supported. It could because NOTIFY_SOCKET is unset")
 	}
 
+	app.Logger.Info("sys-monitord started successfully")
+
 	<-ctx.Done()
+
+	app.Logger.Info("sys-monitord shutdown completed")
+	return nil
 }

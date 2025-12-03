@@ -1,4 +1,4 @@
-package main
+package prom_server
 
 import (
 	"context"
@@ -11,22 +11,29 @@ import (
 	"go.uber.org/zap"
 )
 
-type PromServer struct {
+type PromServer interface {
+	// Start starts the Prometheus server
+	Start() error
+	// Stop stops the Prometheus server
+	Stop() error
+}
+
+type promServer struct {
 	server *http.Server
 	logger *zap.Logger
 }
 
-func NewPromServer(logger *zap.Logger) *PromServer {
+func New(logger *zap.Logger) PromServer {
 	// Unregister default Go collectors to have clean metrics
 	prometheus.DefaultRegisterer.Unregister(collectors.NewGoCollector())
 	prometheus.DefaultRegisterer.Unregister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
-	return &PromServer{
+	return &promServer{
 		logger: logger,
 	}
 }
 
-func (s *PromServer) Start() error {
+func (s *promServer) Start() error {
 	s.server = &http.Server{
 		Addr:              "localhost:9001",
 		Handler:           promhttp.Handler(),
@@ -43,7 +50,7 @@ func (s *PromServer) Start() error {
 	return nil
 }
 
-func (s *PromServer) Stop() error {
+func (s *promServer) Stop() error {
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

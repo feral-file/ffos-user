@@ -4,14 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
+
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +17,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/wrapper"
 )
 
 // SystemType represents the type of system
@@ -72,7 +72,7 @@ type DiskMetrics struct {
 	AvailableCapacity float64 `json:"available_capacity"`
 }
 
-type SysMetrics struct {
+type SystemMetrics struct {
 	CPU       CPUMetrics    `json:"cpu"`
 	GPU       GPUMetrics    `json:"gpu"`
 	Memory    MemoryMetrics `json:"memory"`
@@ -82,7 +82,7 @@ type SysMetrics struct {
 	Timestamp time.Time     `json:"timestamp"`
 }
 
-type SysDBusMetrics struct {
+type SystemDBusMetrics struct {
 	CPU                CPUMetrics    `json:"cpu"`
 	GPU                GPUMetrics    `json:"gpu"`
 	Memory             MemoryMetrics `json:"memory"`
@@ -92,8 +92,8 @@ type SysDBusMetrics struct {
 	TimestampUnixMilli int64         `json:"timestamp"`
 }
 
-func (p *SysMetrics) DBus() *SysDBusMetrics {
-	return &SysDBusMetrics{
+func (p *SystemMetrics) DBus() *SystemDBusMetrics {
+	return &SystemDBusMetrics{
 		CPU:                p.CPU,
 		GPU:                p.GPU,
 		Memory:             p.Memory,
@@ -104,70 +104,103 @@ func (p *SysMetrics) DBus() *SysDBusMetrics {
 	}
 }
 
-type MonitorHandler func(metrics *SysMetrics)
+type HandlerFunc func(metrics *SystemMetrics)
 
-type SysResMonitor struct {
+//go:generate mockgen -source=monitor.go -destination=../mocks/metric.go -package=mocks -mock_names=Monitor=MockMonitor
+type Monitor interface {
+	// AddHandler adds a callback for system metrics updates
+	AddHandler(f HandlerFunc)
+
+	// RemoveHandler removes a callback for system metrics updates
+	RemoveHandler(f HandlerFunc)
+
+	// Start starts the system metrics monitor
+	Start()
+
+	// Stop stops the system metrics monitor
+	Stop()
+
+	// LastMetrics gets the last system metrics
+	LastMetrics() *SystemMetrics
+}
+
+type monitor struct {
 	sync.Mutex
 
 	ctx         context.Context
 	logger      *zap.Logger
-	lastMetrics *SysMetrics
-	handlers    []MonitorHandler
+	lastMetrics *SystemMetrics
+	handlers    []HandlerFunc
 	doneChan    chan struct{}
 	systemType  SystemType
+
+	// Dependencies
+	clock    wrapper.Clock
+	os       wrapper.OS
+	json     wrapper.JSON
+	strconv  wrapper.Strconv
+	filepath wrapper.Filepath
+	exec     wrapper.Exec
 }
 
-func NewSysResMonitor(ctx context.Context, logger *zap.Logger) *SysResMonitor {
-	return &SysResMonitor{
+func NewMonitor(ctx context.Context, logger *zap.Logger, clock wrapper.Clock, os wrapper.OS, json wrapper.JSON, strconv wrapper.Strconv, filepath wrapper.Filepath, exec wrapper.Exec) Monitor {
+	m := &monitor{
 		ctx:         ctx,
 		logger:      logger,
-		handlers:    []MonitorHandler{},
+		handlers:    []HandlerFunc{},
 		doneChan:    make(chan struct{}),
-		lastMetrics: &SysMetrics{},
-		systemType:  detectCPUType(),
+		lastMetrics: &SystemMetrics{},
+		clock:       clock,
+		os:          os,
+		json:        json,
+		strconv:     strconv,
+		filepath:    filepath,
+		exec:        exec,
 	}
+	m.systemType = m.detectCPUType()
+	return m
 }
 
-func (p *SysResMonitor) LastMetrics() *SysMetrics {
-	p.Lock()
-	defer p.Unlock()
+func (m *monitor) LastMetrics() *SystemMetrics {
+	m.Lock()
+	defer m.Unlock()
 
-	return p.lastMetrics
+	return m.lastMetrics
 }
 
-func (p *SysResMonitor) Start() {
-	go p.run()
+func (m *monitor) Start() {
+	go m.run()
 }
 
-func (p *SysResMonitor) run() {
-	p.logger.Info("SysResMonitor started in the background")
+func (m *monitor) run() {
+	m.logger.Info("System monitor started in the background")
 
-	go p.tick(p.ctx, 2*time.Second, p.monitorCPUFrequency, p.monitorGPUFreq, p.monitorMemory, p.monitorDisk)
-	go p.tick(p.ctx, 4*time.Second, p.monitorCPUTemperature)
-	go p.tick(p.ctx, 30*time.Second, p.monitorUptime)
-	go p.tick(p.ctx, 60*time.Second, p.monitorScreen)
+	go m.tick(m.ctx, 2*time.Second, m.monitorCPUFrequency, m.monitorGPUFreq, m.monitorMemory, m.monitorDisk)
+	go m.tick(m.ctx, 4*time.Second, m.monitorCPUTemperature)
+	go m.tick(m.ctx, 30*time.Second, m.monitorUptime)
+	go m.tick(m.ctx, 60*time.Second, m.monitorScreen)
 }
 
-func (p *SysResMonitor) tick(ctx context.Context, interval time.Duration, fns ...func(ctx context.Context) error) {
-	ticker := time.NewTicker(interval)
+func (m *monitor) tick(ctx context.Context, interval time.Duration, fns ...func(ctx context.Context) error) {
+	ticker := m.clock.NewTicker(interval)
 	defer ticker.Stop()
 
 	mf := func(fns ...func(ctx context.Context) error) {
-		t := time.Now()
+		t := m.clock.Now()
 		var updated bool
 		for _, fn := range fns {
 			err := fn(ctx)
 			if err != nil {
-				p.logger.Error("Failed to monitor system resources", zap.Error(err))
+				m.logger.Error("Failed to monitor system resources", zap.Error(err))
 				continue
 			}
 			updated = true
 		}
 		if updated {
-			p.Lock()
-			p.lastMetrics.Timestamp = t
-			p.Unlock()
-			p.notifyHandlers(ctx, p.lastMetrics)
+			m.Lock()
+			m.lastMetrics.Timestamp = t
+			m.Unlock()
+			m.notifyHandlers(ctx, m.lastMetrics)
 		}
 	}
 
@@ -176,18 +209,18 @@ func (p *SysResMonitor) tick(ctx context.Context, interval time.Duration, fns ..
 
 	for {
 		select {
-		case <-p.doneChan:
+		case <-m.doneChan:
 			return
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.C():
 			mf(fns...)
 		}
 	}
 }
 
-func detectCPUType() SystemType {
-	file, err := os.Open("/proc/cpuinfo")
+func (m *monitor) detectCPUType() SystemType {
+	file, err := m.os.Open("/proc/cpuinfo")
 	if err != nil {
 		return SystemTypeIntel
 	}
@@ -211,9 +244,9 @@ func detectCPUType() SystemType {
 	return SystemTypeIntel
 }
 
-func (p *SysResMonitor) monitorCPUFrequency(_ context.Context) error {
+func (m *monitor) monitorCPUFrequency(_ context.Context) error {
 	// Find all CPU frequency files
-	cpuFreqFiles, err := filepath.Glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq")
+	cpuFreqFiles, err := m.filepath.Glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq")
 	if err != nil {
 		return err
 	}
@@ -226,70 +259,70 @@ func (p *SysResMonitor) monitorCPUFrequency(_ context.Context) error {
 	var sum int64
 	for _, file := range cpuFreqFiles {
 		//nolint:gosec
-		data, err := os.ReadFile(file)
+		data, err := m.os.ReadFile(file)
 		if err != nil {
 			return err
 		}
 
-		freq, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		freq, err := m.strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 		if err != nil {
 			return err
 		}
 		sum += freq
 	}
 	current := float64(sum) / float64(len(cpuFreqFiles)) / 1000.0 // Convert to MHz
-	p.Lock()
-	p.lastMetrics.CPU.CurrentFrequency = current
-	p.Unlock()
+	m.Lock()
+	m.lastMetrics.CPU.CurrentFrequency = current
+	m.Unlock()
 
 	// Get max frequency - look for cpuinfo_max_freq
-	maxFreqFiles, _ := filepath.Glob("/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq")
+	maxFreqFiles, _ := m.filepath.Glob("/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq")
 	if len(maxFreqFiles) > 0 {
-		data, err := os.ReadFile(maxFreqFiles[0])
+		data, err := m.os.ReadFile(maxFreqFiles[0])
 		if err != nil {
 			return err
 		}
 
-		maxFreq, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		maxFreq, err := m.strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 		if err != nil {
 			return err
 		}
 		max := float64(maxFreq) / 1000.0 // Convert to MHz
-		p.Lock()
-		p.lastMetrics.CPU.MaxFrequency = max
-		p.Unlock()
+		m.Lock()
+		m.lastMetrics.CPU.MaxFrequency = max
+		m.Unlock()
 	}
 
 	return nil
 }
 
-func (p *SysResMonitor) monitorCPUTemperature(ctx context.Context) error {
-	switch p.systemType {
+func (m *monitor) monitorCPUTemperature(ctx context.Context) error {
+	switch m.systemType {
 	case SystemTypeIntel:
-		if err := p.monitorIntelTemperature(ctx); err != nil {
+		if err := m.monitorIntelTemperature(ctx); err != nil {
 			return err
 		}
 	case SystemTypeAMD:
-		if err := p.monitorAMDCPUTemperature(ctx); err != nil {
+		if err := m.monitorAMDCPUTemperature(ctx); err != nil {
 			return err
 		}
-		if err := p.monitorAMDGPUTemperature(ctx); err != nil {
+		if err := m.monitorAMDGPUTemperature(ctx); err != nil {
 			return err
 		}
 	default:
 		return fmt.Errorf("unsupported system type")
 	}
-	CPUTemperatureCelsius.Set(p.lastMetrics.CPU.CurrentTemperature)
+	CPUTemperatureCelsius.Set(m.lastMetrics.CPU.CurrentTemperature)
 	return nil
 }
 
-func (p *SysResMonitor) monitorIntelTemperature(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "sensors", "-u")
+func (m *monitor) monitorIntelTemperature(ctx context.Context) error {
+	cmd := m.exec.CommandContext(ctx, "sensors", "-u")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.SetStderr(&stderr)
 	output, err := cmd.Output()
 	if err != nil {
-		p.logger.Error("Failed to get CPU temperature", zap.String("stderr", stderr.String()), zap.Error(err))
+		m.logger.Error("Failed to get CPU temperature", zap.String("stderr", stderr.String()), zap.Error(err))
 		return err
 	}
 
@@ -307,45 +340,45 @@ func (p *SysResMonitor) monitorIntelTemperature(ctx context.Context) error {
 		if inPackage && strings.Contains(line, "temp1_input:") {
 			fields := strings.Fields(line)
 			if len(fields) < 2 {
-				p.logger.Error("Failed to parse current CPU temperature", zap.String("line", line))
+				m.logger.Error("Failed to parse current CPU temperature", zap.String("line", line))
 				continue
 			}
-			current, err := strconv.ParseFloat(fields[1], 64)
+			current, err := m.strconv.ParseFloat(fields[1], 64)
 			if err != nil {
 				return err
 			}
-			p.Lock()
-			p.lastMetrics.CPU.CurrentTemperature = current
-			p.lastMetrics.GPU.CurrentTemperature = current
-			p.Unlock()
+			m.Lock()
+			m.lastMetrics.CPU.CurrentTemperature = current
+			m.lastMetrics.GPU.CurrentTemperature = current
+			m.Unlock()
 		}
 		if inPackage && strings.Contains(line, "temp1_max:") {
 			fields := strings.Fields(line)
 			if len(fields) < 2 {
-				p.logger.Error("Failed to parse max CPU temperature", zap.String("line", line))
+				m.logger.Error("Failed to parse max CPU temperature", zap.String("line", line))
 				continue
 			}
-			max, err := strconv.ParseFloat(fields[1], 64)
+			max, err := m.strconv.ParseFloat(fields[1], 64)
 			if err != nil {
 				return err
 			}
-			p.Lock()
-			p.lastMetrics.CPU.MaxTemperature = max
-			p.lastMetrics.GPU.MaxTemperature = max
-			p.Unlock()
+			m.Lock()
+			m.lastMetrics.CPU.MaxTemperature = max
+			m.lastMetrics.GPU.MaxTemperature = max
+			m.Unlock()
 		}
 	}
 
 	return nil
 }
 
-func (p *SysResMonitor) monitorAMDCPUTemperature(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "sensors", "-u")
+func (m *monitor) monitorAMDCPUTemperature(ctx context.Context) error {
+	cmd := m.exec.CommandContext(ctx, "sensors", "-u")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.SetStderr(&stderr)
 	output, err := cmd.Output()
 	if err != nil {
-		p.logger.Error("Failed to get CPU temperature", zap.String("stderr", stderr.String()), zap.Error(err))
+		m.logger.Error("Failed to get CPU temperature", zap.String("stderr", stderr.String()), zap.Error(err))
 		return err
 	}
 
@@ -369,32 +402,32 @@ func (p *SysResMonitor) monitorAMDCPUTemperature(ctx context.Context) error {
 		if inK10Temp && strings.Contains(line, "temp1_input:") {
 			fields := strings.Fields(line)
 			if len(fields) < 2 {
-				p.logger.Error("Failed to parse current CPU temperature", zap.String("line", line))
+				m.logger.Error("Failed to parse current CPU temperature", zap.String("line", line))
 				continue
 			}
-			current, err := strconv.ParseFloat(fields[1], 64)
+			current, err := m.strconv.ParseFloat(fields[1], 64)
 			if err != nil {
 				return err
 			}
-			p.Lock()
-			p.lastMetrics.CPU.CurrentTemperature = current
-			p.Unlock()
+			m.Lock()
+			m.lastMetrics.CPU.CurrentTemperature = current
+			m.Unlock()
 		}
 
 		// AMD typically doesn't expose max temperature via sensors
 		// Set a typical safe maximum for AMD Ryzen™ 7 5825U
-		p.Lock()
-		p.lastMetrics.CPU.MaxTemperature = 95.0 // AMD Ryzen™ 7 5825U Max Temp
-		p.Unlock()
+		m.Lock()
+		m.lastMetrics.CPU.MaxTemperature = 95.0 // AMD Ryzen™ 7 5825U Max Temp
+		m.Unlock()
 	}
 
 	return nil
 }
 
-func (p *SysResMonitor) monitorAMDGPUTemperature(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "sensors", "-u")
+func (m *monitor) monitorAMDGPUTemperature(ctx context.Context) error {
+	cmd := m.exec.CommandContext(ctx, "sensors", "-u")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.SetStderr(&stderr)
 	output, err := cmd.Output()
 	if err != nil {
 		return err
@@ -421,40 +454,40 @@ func (p *SysResMonitor) monitorAMDGPUTemperature(ctx context.Context) error {
 			if len(fields) < 2 {
 				continue
 			}
-			temp, err := strconv.ParseFloat(fields[1], 64)
+			temp, err := m.strconv.ParseFloat(fields[1], 64)
 			if err != nil {
 				continue
 			}
-			p.Lock()
-			p.lastMetrics.GPU.CurrentTemperature = temp
-			p.lastMetrics.GPU.MaxTemperature = 95.0 // AMD Ryzen™ 7 5825U Max Temp
-			p.Unlock()
+			m.Lock()
+			m.lastMetrics.GPU.CurrentTemperature = temp
+			m.lastMetrics.GPU.MaxTemperature = 95.0 // AMD Ryzen™ 7 5825U Max Temp
+			m.Unlock()
 		}
 	}
 
 	return nil
 }
-func (p *SysResMonitor) monitorGPUFreq(ctx context.Context) error {
-	switch p.systemType {
+func (m *monitor) monitorGPUFreq(ctx context.Context) error {
+	switch m.systemType {
 	case SystemTypeIntel:
-		return p.monitorIntelGPUFreq(ctx)
+		return m.monitorIntelGPUFreq(ctx)
 	case SystemTypeAMD:
-		return p.monitorAMDGPUFreq(ctx)
+		return m.monitorAMDGPUFreq(ctx)
 	default:
 		return fmt.Errorf("unsupported system type")
 	}
 }
 
-func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
+func (m *monitor) monitorIntelGPUFreq(ctx context.Context) error {
 	// Get the current frequency
-	cmd := exec.CommandContext(ctx, "timeout", "1s", "sudo", "intel_gpu_top", "-J", "-s", "1000")
+	cmd := m.exec.CommandContext(ctx, "timeout", "1s", "sudo", "intel_gpu_top", "-J", "-s", "1000")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.SetStderr(&stderr)
 	output, err := cmd.Output()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 124 {
 		if err != nil {
-			p.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
+			m.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
 		}
 		return err
 	}
@@ -469,7 +502,7 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 			Actual float64 `json:"actual"`
 		} `json:"frequency"`
 	}
-	err = json.Unmarshal([]byte(outputString), &result)
+	err = m.json.Unmarshal([]byte(outputString), &result)
 	if err != nil {
 		return err
 	}
@@ -478,16 +511,16 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 	}
 
 	current := result[0].Frequency.Actual
-	p.Lock()
-	p.lastMetrics.GPU.CurrentFrequency = current
-	p.Unlock()
+	m.Lock()
+	m.lastMetrics.GPU.CurrentFrequency = current
+	m.Unlock()
 
 	// Discover the card name using `ls /sys/class/drm/`
-	cmd = exec.CommandContext(ctx, "ls", "/sys/class/drm/")
-	cmd.Stderr = &stderr
+	cmd = m.exec.CommandContext(ctx, "ls", "/sys/class/drm/")
+	cmd.SetStderr(&stderr)
 	output, err = cmd.Output()
 	if err != nil {
-		p.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
+		m.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
 		return err
 	}
 	lines := strings.Split(string(output), "\n")
@@ -502,28 +535,28 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 
 	// Get the max frequency
 	//nolint:gosec
-	cmd = exec.CommandContext(ctx, "cat", "/sys/class/drm/"+card+"/gt_max_freq_mhz")
-	cmd.Stderr = &stderr
+	cmd = m.exec.CommandContext(ctx, "cat", "/sys/class/drm/"+card+"/gt_max_freq_mhz")
+	cmd.SetStderr(&stderr)
 	output, err = cmd.Output()
 	if err != nil {
-		p.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
+		m.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
 		return err
 	}
-	max, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
+	max, err := m.strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
 	if err != nil {
 		return err
 	}
-	p.Lock()
-	p.lastMetrics.GPU.MaxFrequency = max
-	p.Unlock()
+	m.Lock()
+	m.lastMetrics.GPU.MaxFrequency = max
+	m.Unlock()
 
 	return nil
 }
 
-func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "sensors", "-u")
+func (m *monitor) monitorAMDGPUFreq(ctx context.Context) error {
+	cmd := m.exec.CommandContext(ctx, "sensors", "-u")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.SetStderr(&stderr)
 	output, err := cmd.Output()
 	if err != nil {
 		return err
@@ -550,26 +583,26 @@ func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 			if len(fields) < 2 {
 				continue
 			}
-			freq, err := strconv.ParseFloat(fields[1], 64)
+			freq, err := m.strconv.ParseFloat(fields[1], 64)
 			if err != nil {
 				continue
 			}
 			// Convert from Hz to MHz
 			current := freq / 1000000.0
-			p.Lock()
-			p.lastMetrics.GPU.CurrentFrequency = current
-			p.Unlock()
+			m.Lock()
+			m.lastMetrics.GPU.CurrentFrequency = current
+			m.Unlock()
 		}
-		p.Lock()
-		p.lastMetrics.GPU.MaxFrequency = 2000.0 // 2000 MHz max for AMD Ryzen™ 7 5825U
-		p.Unlock()
+		m.Lock()
+		m.lastMetrics.GPU.MaxFrequency = 2000.0 // 2000 MHz max for AMD Ryzen™ 7 5825U
+		m.Unlock()
 	}
 
 	return nil
 }
 
-func (p *SysResMonitor) monitorMemory(ctx context.Context) error {
-	file, err := os.Open("/proc/meminfo")
+func (m *monitor) monitorMemory(ctx context.Context) error {
+	file, err := m.os.Open("/proc/meminfo")
 	if err != nil {
 		return err
 	}
@@ -585,12 +618,12 @@ func (p *SysResMonitor) monitorMemory(ctx context.Context) error {
 		if strings.HasPrefix(line, "MemTotal:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				memTotal, _ = strconv.ParseInt(fields[1], 10, 64)
+				memTotal, _ = m.strconv.ParseInt(fields[1], 10, 64)
 			}
 		} else if strings.HasPrefix(line, "MemAvailable:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				memAvailable, _ = strconv.ParseInt(fields[1], 10, 64)
+				memAvailable, _ = m.strconv.ParseInt(fields[1], 10, 64)
 			}
 		}
 	}
@@ -599,17 +632,17 @@ func (p *SysResMonitor) monitorMemory(ctx context.Context) error {
 	total := float64(memTotal) / 1024.0 // Convert to MB
 	used := float64(memUsed) / 1024.0   // Convert to MB
 
-	p.Lock()
-	p.lastMetrics.Memory.UsedCapacity = used
-	p.lastMetrics.Memory.MaxCapacity = total
-	p.Unlock()
+	m.Lock()
+	m.lastMetrics.Memory.UsedCapacity = used
+	m.lastMetrics.Memory.MaxCapacity = total
+	m.Unlock()
 
 	return nil
 }
 
-func (p *SysResMonitor) monitorUptime(_ context.Context) error {
+func (m *monitor) monitorUptime(_ context.Context) error {
 	// Read the uptime file
-	data, err := os.ReadFile("/proc/uptime")
+	data, err := m.os.ReadFile("/proc/uptime")
 	if err != nil {
 		return err
 	}
@@ -621,28 +654,28 @@ func (p *SysResMonitor) monitorUptime(_ context.Context) error {
 	}
 
 	// Convert uptime to float (seconds)
-	uptimeSec, err := strconv.ParseFloat(fields[0], 64)
+	uptimeSec, err := m.strconv.ParseFloat(fields[0], 64)
 	if err != nil {
 		return err
 	}
 
-	p.Lock()
-	p.lastMetrics.Uptime = uptimeSec
-	p.Unlock()
+	m.Lock()
+	m.lastMetrics.Uptime = uptimeSec
+	m.Unlock()
 
 	CPUUptimeSeconds.Set(uptimeSec)
 
 	return nil
 }
 
-func (p *SysResMonitor) monitorScreen(ctx context.Context) error {
+func (m *monitor) monitorScreen(ctx context.Context) error {
 	// Resolution and refresh rate
-	cmd := exec.CommandContext(ctx, "wlr-randr")
+	cmd := m.exec.CommandContext(ctx, "wlr-randr")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.SetStderr(&stderr)
 	output, err := cmd.Output()
 	if err != nil {
-		p.logger.Error("Failed to get screen metrics", zap.String("stderr", stderr.String()), zap.Error(err))
+		m.logger.Error("Failed to get screen metrics", zap.String("stderr", stderr.String()), zap.Error(err))
 		return err
 	}
 
@@ -659,26 +692,26 @@ func (p *SysResMonitor) monitorScreen(ctx context.Context) error {
 			if len(dimensions) != 2 {
 				return fmt.Errorf("unexpected format in wlr-randr output")
 			}
-			width, err := strconv.Atoi(dimensions[0])
+			width, err := m.strconv.Atoi(dimensions[0])
 			if err != nil {
 				return err
 			}
-			height, err := strconv.Atoi(dimensions[1])
+			height, err := m.strconv.Atoi(dimensions[1])
 			if err != nil {
 				return err
 			}
 
 			// refresh rate
-			refreshRate, err := strconv.ParseFloat(fields[2], 64)
+			refreshRate, err := m.strconv.ParseFloat(fields[2], 64)
 			if err != nil {
 				return err
 			}
 
-			p.Lock()
-			p.lastMetrics.Screen.Width = width
-			p.lastMetrics.Screen.Height = height
-			p.lastMetrics.Screen.RefreshRate = refreshRate
-			p.Unlock()
+			m.Lock()
+			m.lastMetrics.Screen.Width = width
+			m.lastMetrics.Screen.Height = height
+			m.lastMetrics.Screen.RefreshRate = refreshRate
+			m.Unlock()
 
 			break
 		}
@@ -687,29 +720,29 @@ func (p *SysResMonitor) monitorScreen(ctx context.Context) error {
 	return nil
 }
 
-func (p *SysResMonitor) monitorDisk(ctx context.Context) error {
+func (m *monitor) monitorDisk(ctx context.Context) error {
 	// Get total/used capacity
-	total, used, available, err := p.getDiskStats(ctx)
+	total, used, available, err := m.getDiskStats(ctx)
 	if err != nil {
 		return err
 	}
 
-	p.Lock()
-	p.lastMetrics.Disk.TotalCapacity = total
-	p.lastMetrics.Disk.UsedCapacity = used
-	p.lastMetrics.Disk.AvailableCapacity = available
-	p.Unlock()
+	m.Lock()
+	m.lastMetrics.Disk.TotalCapacity = total
+	m.lastMetrics.Disk.UsedCapacity = used
+	m.lastMetrics.Disk.AvailableCapacity = available
+	m.Unlock()
 
 	return nil
 }
 
-func (p *SysResMonitor) getDiskStats(ctx context.Context) (total, used, available float64, err error) {
-	cmd := exec.CommandContext(ctx, "df", "-k", "/")
+func (m *monitor) getDiskStats(ctx context.Context) (total, used, available float64, err error) {
+	cmd := m.exec.CommandContext(ctx, "df", "-k", "/")
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.SetStderr(&stderr)
 	output, err := cmd.Output()
 	if err != nil {
-		p.logger.Error("Failed to get disk stats", zap.String("stderr", stderr.String()), zap.Error(err))
+		m.logger.Error("Failed to get disk stats", zap.String("stderr", stderr.String()), zap.Error(err))
 		return 0, 0, 0, err
 	}
 
@@ -723,17 +756,17 @@ func (p *SysResMonitor) getDiskStats(ctx context.Context) (total, used, availabl
 		return 0, 0, 0, fmt.Errorf("unexpected format in df output")
 	}
 
-	total, err = strconv.ParseFloat(fields[1], 64)
+	total, err = m.strconv.ParseFloat(fields[1], 64)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 
-	used, err = strconv.ParseFloat(fields[2], 64)
+	used, err = m.strconv.ParseFloat(fields[2], 64)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 
-	available, err = strconv.ParseFloat(fields[3], 64)
+	available, err = m.strconv.ParseFloat(fields[3], 64)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -741,18 +774,18 @@ func (p *SysResMonitor) getDiskStats(ctx context.Context) (total, used, availabl
 	return total, used, available, nil
 }
 
-func (p *SysResMonitor) notifyHandlers(ctx context.Context, metrics *SysMetrics) {
-	p.Lock()
-	handlers := make([]MonitorHandler, len(p.handlers))
-	copy(handlers, p.handlers)
-	p.Unlock()
+func (m *monitor) notifyHandlers(ctx context.Context, metrics *SystemMetrics) {
+	m.Lock()
+	handlers := make([]HandlerFunc, len(m.handlers))
+	copy(handlers, m.handlers)
+	m.Unlock()
 
 	for _, handler := range handlers {
-		go func(h MonitorHandler) {
+		go func(h HandlerFunc) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-p.doneChan:
+			case <-m.doneChan:
 				return
 			default:
 				h(metrics)
@@ -761,32 +794,32 @@ func (p *SysResMonitor) notifyHandlers(ctx context.Context, metrics *SysMetrics)
 	}
 }
 
-func (p *SysResMonitor) OnMonitor(handler MonitorHandler) {
-	p.Lock()
-	defer p.Unlock()
+func (m *monitor) AddHandler(handler HandlerFunc) {
+	m.Lock()
+	defer m.Unlock()
 
-	p.handlers = append(p.handlers, handler)
+	m.handlers = append(m.handlers, handler)
 }
 
-func (p *SysResMonitor) RemoveMonitorHandler(handler MonitorHandler) {
-	p.Lock()
-	defer p.Unlock()
+func (m *monitor) RemoveHandler(handler HandlerFunc) {
+	m.Lock()
+	defer m.Unlock()
 
-	for i, h := range p.handlers {
+	for i, h := range m.handlers {
 		if fmt.Sprintf("%p", h) == fmt.Sprintf("%p", handler) {
-			p.handlers = append(p.handlers[:i], p.handlers[i+1:]...)
+			m.handlers = append(m.handlers[:i], m.handlers[i+1:]...)
 			return
 		}
 	}
 }
 
-func (p *SysResMonitor) Stop() {
+func (m *monitor) Stop() {
 	select {
-	case <-p.doneChan:
+	case <-m.doneChan:
 		return
 	default:
-		close(p.doneChan)
+		close(m.doneChan)
 	}
 
-	p.logger.Info("SysResMonitor stopped")
+	m.logger.Info("System monitor stopped")
 }
