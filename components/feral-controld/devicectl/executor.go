@@ -128,6 +128,10 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
+	case commands.CMD_FACTORY_RESET:
+		result, err = e.factoryReset(ctx)
+	case commands.CMD_UPLOAD_LOGS:
+		result, err = e.uploadLogs(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -627,6 +631,56 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to execute update to latest command: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
+	e.logger.Info("Executing factory reset command via DBus")
+
+	// Send DBus signal to setupd to handle factory reset (show page + execute reset)
+	err := e.dbus.RetryableSend(ctx,
+		godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_FACTORY_RESET,
+			Body:      []interface{}{},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to send factory reset signal: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {
+	e.logger.Info("Executing upload logs command via DBus")
+
+	var cmdArgs struct {
+		UserID string `json:"userId"`
+		APIKey string `json:"apiKey"`
+		Title  string `json:"title"`
+	}
+
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if cmdArgs.UserID == "" || cmdArgs.APIKey == "" || cmdArgs.Title == "" {
+		return nil, fmt.Errorf("missing required arguments: userId, apiKey, and title are required")
+	}
+
+	// Send DBus signal to setupd to handle log upload
+	err := e.dbus.RetryableSend(ctx,
+		godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
+			Body:      []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)
 	}
 
 	return CmdOK, nil
