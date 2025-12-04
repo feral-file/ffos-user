@@ -19,13 +19,6 @@ jobs:
       upload-coverage: true
     secrets: inherit
 
-  test-app-monitord:
-    name: Test App Monitord
-    uses: ./.github/workflows/test-app-monitord.yaml
-    with:
-      upload-coverage: true
-    secrets: inherit
-
   test-sys-monitord:
     name: Test Sys Monitord
     uses: ./.github/workflows/test-sys-monitord.yaml

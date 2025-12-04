@@ -47,11 +47,13 @@ use crate::constant;
 struct Target {
     r#type: Option<String>,
     web_socket_debugger_url: Option<String>,
+    url: Option<String>,
 }
 
 pub struct Cdp {
     #[allow(dead_code)]
     ws_url: String,
+    cdp_url: String,
     socket: Arc<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
     current_id: AtomicU64,
 }
@@ -64,6 +66,7 @@ impl Cdp {
 
         let cdp = Self {
             ws_url,
+            cdp_url: cdp_url.to_string(),
             socket: Arc::new(Mutex::new(socket)),
             current_id: AtomicU64::new(constant::CDP_ID_START),
         };
@@ -79,6 +82,21 @@ impl Cdp {
         self.send_cmd("Page.navigate", json!({ "url": url }))
             .await?;
         Ok(())
+    }
+
+    /// Get the current URL of the page using the CDP HTTP endpoint.
+    pub async fn get_current_url(&self) -> Result<String> {
+        let targets: Vec<Target> = reqwest::get(&self.cdp_url).await?.json().await?;
+        targets
+            .into_iter()
+            .find_map(|t| {
+                if t.r#type.as_deref() == Some("page") {
+                    Some(t.url.unwrap_or_default())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::Chromium("No current URL found".into()))
     }
 
     /// Send any CDP command and wait for the matching reply.
@@ -116,16 +134,16 @@ impl Cdp {
                     }
                 };
                 // Get the text of the message and parse it as JSON.
-                if let Message::Text(text) = msg {
-                    if let Ok(resp) = serde_json::from_str::<Value>(&text) {
-                        // If the response is for the command we sent, return the result.
-                        if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
-                            println!("CDP: Response for {method}: {resp}");
-                            if let Some(err) = resp.get("error") {
-                                return Err(Error::Command(err.to_string()));
-                            }
-                            return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
+                if let Message::Text(text) = msg
+                    && let Ok(resp) = serde_json::from_str::<Value>(&text)
+                {
+                    // If the response is for the command we sent, return the result.
+                    if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                        println!("CDP: Response for {method}: {resp}");
+                        if let Some(err) = resp.get("error") {
+                            return Err(Error::Command(err.to_string()));
                         }
+                        return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
                     }
                 }
             }

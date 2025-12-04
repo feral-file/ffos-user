@@ -22,18 +22,73 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 
-pub type BTConnectedCallback =
-    Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
-pub type BTDisconnectedCallback =
-    Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
-pub type ConnectWifiCallback = Box<
-    dyn Fn(&str, &str) -> Pin<Box<dyn Future<Output = Result<String, u8>> + Send>> + Send + Sync,
->;
-pub type KeepWifiCallback =
-    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, u8>> + Send>> + Send + Sync>;
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum BleStatus {
+    Success = constant::BLE_SUCCESS_CODE,
+    WrongWifiPassword = constant::BLE_ERR_CODE_WRONG_WIFI_PWD,
+    NoInternet = constant::BLE_ERR_CODE_NO_INTERNET,
+    ServerUnreachable = constant::BLE_ERR_CODE_SERVER_UNREACHABLE,
+    WifiRequired = constant::BLE_ERR_CODE_WIFI_REQUIRED,
+    DeviceUpdating = constant::BLE_ERR_CODE_DEVICE_UPDATING,
+    VersionCheckFailed = constant::BLE_ERR_CODE_VERSION_CHECK_FAILED,
+    VersionTooOld = constant::BLE_ERR_CODE_VERSION_TOO_OLD,
+    InvalidParams = constant::BLE_ERR_CODE_INVALID_PARAMS,
+    FileError = constant::BLE_ERR_CODE_FILE_ERROR,
+    NetworkError = constant::BLE_ERR_CODE_NETWORK_ERROR,
+    UnknownError = constant::BLE_ERR_CODE_UNKNOWN_ERROR,
+}
+
+impl BleStatus {
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+type AsyncUnit = Pin<Box<dyn Future<Output = ()> + Send>>;
+type AsyncBleResult = Pin<Box<dyn Future<Output = Result<String, BleStatus>> + Send>>;
+
+enum BleCommand {
+    ScanWifi,
+    ConnectWifi,
+    KeepWifi,
+    GetInfo,
+    SetTime,
+    FactoryReset,
+    SendLogs,
+    Unknown(String),
+}
+
+impl BleCommand {
+    fn from_str(cmd: &str) -> Self {
+        match cmd {
+            constant::CMD_SCAN_WIFI => BleCommand::ScanWifi,
+            constant::CMD_CONNECT_WIFI => BleCommand::ConnectWifi,
+            constant::CMD_KEEP_WIFI => BleCommand::KeepWifi,
+            constant::CMD_GET_INFO => BleCommand::GetInfo,
+            constant::CMD_SET_TIME => BleCommand::SetTime,
+            constant::CMD_FACTORY_RESET => BleCommand::FactoryReset,
+            constant::CMD_SEND_LOGS => BleCommand::SendLogs,
+            other => BleCommand::Unknown(other.to_string()),
+        }
+    }
+}
+
+pub type BTConnectedCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync>>;
+pub type BTDisconnectedCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync>>;
+pub type ConnectWifiCallback = Box<dyn Fn(&str, &str) -> AsyncBleResult + Send + Sync>;
+pub type KeepWifiCallback = Box<dyn Fn() -> AsyncBleResult + Send + Sync>;
 pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
-pub type FactoryResetCallback =
-    Option<Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>>;
+pub type FactoryResetCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync>>;
+
+pub struct BleCallbacks {
+    pub bt_connected: BTConnectedCallback,
+    pub bt_disconnected: BTDisconnectedCallback,
+    pub factory_reset: FactoryResetCallback,
+    pub connect_wifi: ConnectWifiCallback,
+    pub keep_wifi: KeepWifiCallback,
+    pub get_info: GetInfoCallback,
+}
 
 #[derive(Default)]
 struct Inner {
@@ -63,16 +118,11 @@ impl Ble {
     }
 
     pub async fn start(
-        &self,
-        me: Weak<Self>,
-        bt_connected_cb: BTConnectedCallback,
-        bt_disconnected_cb: BTDisconnectedCallback,
-        factory_reset_cb: FactoryResetCallback,
-        connect_wifi_cb: ConnectWifiCallback,
-        keep_wifi_cb: KeepWifiCallback,
-        get_info_cb: GetInfoCallback,
+        self: &Arc<Self>,
+        callbacks: BleCallbacks,
         ssids_cacher: Arc<SSIDsCacher>,
     ) -> Result<()> {
+        let ble_handle = Arc::downgrade(self);
         let mut inner = self.inner.lock().await;
         if inner.advertised {
             return Ok(());
@@ -89,43 +139,16 @@ impl Ble {
         );
 
         // Group into a GATT service and register it
-        let svc = Service {
-            uuid: constant::SERVICE_UUID,
-            primary: true,
-            characteristics: vec![
-                self.create_cmd_char(
-                    me,
-                    bt_connected_cb,
-                    bt_disconnected_cb,
-                    factory_reset_cb,
-                    connect_wifi_cb,
-                    keep_wifi_cb,
-                    get_info_cb,
-                    ssids_cacher,
-                )
-                .await,
-            ],
-            ..Default::default()
-        };
-        let app = Application {
-            services: vec![svc],
-            ..Default::default()
-        };
-        let app_handle = adapter.serve_gatt_application(app).await?;
+        let app_handle = self
+            .register_gatt_application(&adapter, ble_handle, callbacks, ssids_cacher)
+            .await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         println!("BLE: GATT app registered; ready to receive commands");
 
         // Start advertising our service UUID
-        let adv = Advertisement {
-            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
-            discoverable: Some(true),
-            local_name: Some(inner.device_id.clone()),
-            min_interval: Some(std::time::Duration::from_millis(20)),
-            max_interval: Some(std::time::Duration::from_millis(100)),
-            ..Default::default()
-        };
+        let adv = Self::build_advertisement(&inner.device_id);
         let adv_handle = adapter.advertise(adv).await?;
         println!("BLE: Advertising GATT service {}", constant::SERVICE_UUID);
 
@@ -213,43 +236,9 @@ impl Ble {
         // 1. Force disconnect all devices before restarting advertising
         // This is especially important for iOS devices which may leave connections in a "hanging" state
         println!("BLE: Forcefully disconnecting all devices before restart...");
-        {
-            let adapter = inner.adapter.as_ref().unwrap();
-            match adapter.device_addresses().await {
-                Ok(addresses) => {
-                    for addr in addresses {
-                        match adapter.device(addr) {
-                            Ok(dev) => match dev.is_connected().await {
-                                Ok(true) => {
-                                    println!("BLE: Disconnecting device {addr:?}");
-                                    if let Err(e) = dev.disconnect().await {
-                                        eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
-                                    }
-                                }
-                                Ok(false) => {
-                                    println!("BLE: Device {addr:?} already disconnected");
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "BLE: Failed to check connection status for {addr:?}: {e}"
-                                    );
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("BLE: Failed to get device {addr:?}: {e}");
-                            }
-                        }
-                    }
-                    // Give BlueZ time to process disconnections
-                    println!("BLE: Waiting for BlueZ to process disconnections...");
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    eprintln!("BLE: Failed to get device addresses: {e}");
-                    // Continue anyway, try to restart advertising
-                }
-            }
-        } // Drop adapter reference here
+        if let Some(adapter) = inner.adapter.as_ref() {
+            Self::force_disconnect_all_devices(adapter).await;
+        }
 
         // 2. Drop the old advertisement handle
         if let Some(old_handle) = inner.adv_handle.take() {
@@ -258,14 +247,7 @@ impl Ble {
         }
 
         // 3. Create a new advertisement with the same configuration
-        let adv = Advertisement {
-            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
-            discoverable: Some(true),
-            local_name: Some(inner.device_id.clone()),
-            min_interval: Some(std::time::Duration::from_millis(20)),
-            max_interval: Some(std::time::Duration::from_millis(100)),
-            ..Default::default()
-        };
+        let adv = Self::build_advertisement(&inner.device_id);
 
         // 4. Register the new advertisement
         // Get adapter reference again for advertising
@@ -283,22 +265,61 @@ impl Ble {
         Ok(())
     }
 
+    async fn force_disconnect_all_devices(adapter: &Adapter) {
+        let Ok(addresses) = adapter.device_addresses().await else {
+            eprintln!("BLE: Failed to get device addresses");
+            // Continue anyway, try to restart advertising
+            return;
+        };
+
+        for addr in addresses {
+            let Ok(dev) = adapter.device(addr) else {
+                eprintln!("BLE: Failed to get device {addr:?}");
+                continue;
+            };
+
+            match dev.is_connected().await {
+                Ok(true) => {
+                    println!("BLE: Disconnecting device {addr:?}");
+                    if let Err(e) = dev.disconnect().await {
+                        eprintln!("BLE: Failed to disconnect {addr:?}: {e}");
+                    }
+                }
+                Ok(false) => {
+                    println!("BLE: Device {addr:?} already disconnected");
+                }
+                Err(e) => {
+                    eprintln!("BLE: Failed to check connection status for {addr:?}: {e}");
+                }
+            }
+        }
+        // Give BlueZ time to process disconnections
+        println!("BLE: Waiting for BlueZ to process disconnections...");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
     pub async fn get_device_id(&self) -> String {
         let st = self.inner.lock().await;
         st.device_id.clone()
     }
 
+    // --- Internal helpers ---
+
     async fn create_cmd_char(
         &self,
-        me: Weak<Self>,
-        bt_connected_cb: BTConnectedCallback,
-        bt_disconnected_cb: BTDisconnectedCallback,
-        factory_reset_cb: FactoryResetCallback,
-        connect_wifi_cb: ConnectWifiCallback,
-        keep_wifi_cb: KeepWifiCallback,
-        get_info_cb: GetInfoCallback,
+        ble_handle: Weak<Self>,
+        callbacks: BleCallbacks,
         ssids_cacher: Arc<SSIDsCacher>,
     ) -> Characteristic {
+        let BleCallbacks {
+            bt_connected,
+            bt_disconnected,
+            factory_reset,
+            connect_wifi,
+            keep_wifi,
+            get_info,
+        } = callbacks;
+
         // Shared storage for the notifier handle
         let notifier: Arc<Mutex<Option<CharacteristicNotifier>>> = Arc::new(Mutex::new(None));
         let notifier_for_write = notifier.clone();
@@ -310,143 +331,191 @@ impl Ble {
             Arc::new(Mutex::new(None));
         let cancel_token_for_notify = cancel_token_storage.clone();
 
-        let bt_connected_callback = Arc::new(bt_connected_cb);
-        let bt_disconnected_callback = Arc::new(bt_disconnected_cb);
-        let factory_reset_callback = Arc::new(factory_reset_cb);
-        let connect_wifi_callback = Arc::new(connect_wifi_cb);
-        let keep_wifi_callback = Arc::new(keep_wifi_cb);
-        let get_info_callback = Arc::new(get_info_cb);
+        let bt_connected_callback = Arc::new(bt_connected);
+        let bt_disconnected_callback = Arc::new(bt_disconnected);
+        let factory_reset_callback = Arc::new(factory_reset);
+        let connect_wifi_callback = Arc::new(connect_wifi);
+        let keep_wifi_callback = Arc::new(keep_wifi);
+        let get_info_callback = Arc::new(get_info);
 
         Characteristic {
             uuid: constant::CMD_CHAR_UUID,
             // Enable notifications on this characteristic
-            notify: Some(CharacteristicNotify {
-                notify: true,
-                method: CharacteristicNotifyMethod::Fun(Box::new(move |new_notifier| {
-                    println!("BLE: a device is connected");
-                    let handle = notifier_for_notify.clone();
-                    let monitor_handle = notifier_for_monitor.clone();
-                    let bt_connected_callback = bt_connected_callback.clone();
-                    let bt_disconnected_callback = bt_disconnected_callback.clone();
-                    let cancel_storage = cancel_token_for_notify.clone();
-                    let me_for_monitor = me.clone();
+            notify: Some(Self::make_cmd_notify_handler(
+                ble_handle,
+                notifier_for_notify,
+                notifier_for_monitor,
+                cancel_token_for_notify,
+                bt_connected_callback,
+                bt_disconnected_callback,
+            )),
+            write: Some(Self::make_cmd_write_handler(
+                notifier_for_write,
+                connect_wifi_callback,
+                factory_reset_callback,
+                keep_wifi_callback,
+                get_info_callback,
+                ssids_cacher,
+            )),
+            ..Default::default()
+        }
+    }
 
-                    async move {
-                        // Cancel any existing disconnect monitor from previous connection
-                        {
-                            let mut old_token = cancel_storage.lock().await;
-                            if let Some(token) = old_token.take() {
-                                println!("BLE: Cancelling previous disconnect monitor");
-                                token.cancel();
-                                // Give the old monitor a moment to stop
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            }
-                        }
+    /// Builds the notification handler for the command characteristic.
+    ///
+    /// Responsibilities:
+    /// - Stores the latest notifier handle for future replies.
+    /// - Cancels any existing disconnect monitor when a new device connects.
+    /// - Starts a fresh disconnect monitor tied to the new connection.
+    /// - Invokes the "BT connected" callback once the connection is ready.
+    fn make_cmd_notify_handler(
+        ble_handle: Weak<Self>,
+        notifier_for_notify: Arc<Mutex<Option<CharacteristicNotifier>>>,
+        notifier_for_monitor: Arc<Mutex<Option<CharacteristicNotifier>>>,
+        cancel_token_for_notify: Arc<Mutex<Option<CancellationToken>>>,
+        bt_connected_callback: Arc<BTConnectedCallback>,
+        bt_disconnected_callback: Arc<BTDisconnectedCallback>,
+    ) -> CharacteristicNotify {
+        CharacteristicNotify {
+            notify: true,
+            method: CharacteristicNotifyMethod::Fun(Box::new(move |new_notifier| {
+                println!("BLE: a device is connected");
+                let handle = notifier_for_notify.clone();
+                let monitor_handle = notifier_for_monitor.clone();
+                let bt_connected_callback = bt_connected_callback.clone();
+                let bt_disconnected_callback = bt_disconnected_callback.clone();
+                let cancel_storage = cancel_token_for_notify.clone();
+                let ble_handle_for_monitor = ble_handle.clone();
 
-                        // Replace the old notifier with the new one
-                        {
-                            let mut old_notifier = handle.lock().await;
-                            if old_notifier.is_some() {
-                                println!("BLE: Replacing previous notifier");
-                            }
-                            *old_notifier = Some(new_notifier);
-                        }
-
-                        // Create a new cancellation token for this connection
-                        let cancel_token = CancellationToken::new();
-                        *cancel_storage.lock().await = Some(cancel_token.clone());
-
-                        // Start new disconnect monitor
-                        let disconnect_monitor = Self::start_disconnect_monitor(
-                            me_for_monitor,
-                            monitor_handle.clone(),
-                            bt_disconnected_callback.clone(),
-                            cancel_token,
-                        );
-                        tokio::spawn(disconnect_monitor);
-
-                        if let Some(cb) = bt_connected_callback.as_ref() {
-                            cb().await;
+                async move {
+                    // Cancel any existing disconnect monitor from previous connection
+                    {
+                        let mut old_token = cancel_storage.lock().await;
+                        if let Some(token) = old_token.take() {
+                            println!("BLE: Cancelling previous disconnect monitor");
+                            token.cancel();
+                            // Give the old monitor a moment to stop
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     }
-                    .boxed()
-                })),
-                ..Default::default()
-            }),
-            write: Some(CharacteristicWrite {
-                write: true,
-                write_without_response: false,
-                method: CharacteristicWriteMethod::Fun(Box::new(move |data, _req| {
-                    println!("BLE: Received bluetooth data {data:?}");
-                    let notifier = notifier_for_write.clone();
-                    let connect_wifi_callback = connect_wifi_callback.clone();
-                    let factory_reset_callback = factory_reset_callback.clone();
-                    let keep_wifi_callback = keep_wifi_callback.clone();
-                    let get_info_callback = get_info_callback.clone();
-                    let ssids_cacher = ssids_cacher.clone();
-                    async move {
-                        let payload = encoding::parse_payload(&data);
-                        // No values, or malformed payload
-                        if payload.is_none() {
-                            eprintln!("BLE: Received malformed payload");
-                            return Ok::<(), ReqError>(());
+
+                    // Replace the old notifier with the new one
+                    {
+                        let mut old_notifier = handle.lock().await;
+                        if old_notifier.is_some() {
+                            println!("BLE: Replacing previous notifier");
                         }
-                        let vals = payload.unwrap();
-                        // Not enough values, or malformed payload
-                        if vals.len() < 2 {
-                            eprintln!("BLE: Received payload with only {} values", vals.len());
-                            return Ok::<(), ReqError>(());
+                        *old_notifier = Some(new_notifier);
+                    }
+
+                    // Create a new cancellation token for this connection
+                    let cancel_token = CancellationToken::new();
+                    *cancel_storage.lock().await = Some(cancel_token.clone());
+
+                    // Start new disconnect monitor
+                    let disconnect_monitor = Self::start_disconnect_monitor(
+                        ble_handle_for_monitor,
+                        monitor_handle.clone(),
+                        bt_disconnected_callback.clone(),
+                        cancel_token,
+                    );
+                    tokio::spawn(disconnect_monitor);
+
+                    if let Some(cb) = bt_connected_callback.as_ref() {
+                        cb().await;
+                    }
+                }
+                .boxed()
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Builds the write handler for the command characteristic.
+    ///
+    /// Responsibilities:
+    /// - Parses and validates the incoming BLE payload.
+    /// - Decodes the command name, reply ID, and parameters.
+    /// - Dispatches to the appropriate handler (`scan_wifi`, `connect_wifi`, etc.).
+    /// - Logs malformed or unknown commands but always returns a graceful `Ok(())`.
+    fn make_cmd_write_handler(
+        notifier_for_write: Arc<Mutex<Option<CharacteristicNotifier>>>,
+        connect_wifi_callback: Arc<ConnectWifiCallback>,
+        factory_reset_callback: Arc<FactoryResetCallback>,
+        keep_wifi_callback: Arc<KeepWifiCallback>,
+        get_info_callback: Arc<GetInfoCallback>,
+        ssids_cacher: Arc<SSIDsCacher>,
+    ) -> CharacteristicWrite {
+        CharacteristicWrite {
+            write: true,
+            write_without_response: false,
+            method: CharacteristicWriteMethod::Fun(Box::new(move |data, _req| {
+                let notifier = notifier_for_write.clone();
+                let connect_wifi_callback = connect_wifi_callback.clone();
+                let factory_reset_callback = factory_reset_callback.clone();
+                let keep_wifi_callback = keep_wifi_callback.clone();
+                let get_info_callback = get_info_callback.clone();
+                let ssids_cacher = ssids_cacher.clone();
+                async move {
+                    let payload = encoding::parse_payload(&data);
+                    // No values, or malformed payload
+                    if payload.is_none() {
+                        eprintln!("BLE: Received malformed payload");
+                        return Ok::<(), ReqError>(());
+                    }
+                    let vals = payload.unwrap();
+                    // Not enough values, or malformed payload
+                    if vals.len() < 2 {
+                        eprintln!("BLE: Received payload with only {} values", vals.len());
+                        return Ok::<(), ReqError>(());
+                    }
+                    // Enough values, parse command
+                    let cmd = BleCommand::from_str(&vals[0]);
+                    let reply_id = vals[1].clone();
+                    let params = vals[2..].to_vec();
+
+                    println!(
+                        "BLE cmd: name={} reply_id={} param_count={}",
+                        vals[0],
+                        reply_id,
+                        params.len()
+                    );
+
+                    match cmd {
+                        BleCommand::ScanWifi => {
+                            handle_scan_wifi(notifier, reply_id, ssids_cacher).await
                         }
-                        // Enough values, parse command
-                        println!("BLE: Payload: {vals:?}");
-                        let cmd = vals[0].clone();
-                        let reply_id = vals[1].clone();
-                        let params = vals[2..].to_vec();
-                        match cmd.as_str() {
-                            constant::CMD_SCAN_WIFI => {
-                                handle_scan_wifi(notifier, reply_id, ssids_cacher).await
-                            }
-                            constant::CMD_CONNECT_WIFI => {
-                                handle_connect_wifi(
-                                    notifier,
-                                    reply_id,
-                                    params,
-                                    connect_wifi_callback,
-                                )
+                        BleCommand::ConnectWifi => {
+                            handle_connect_wifi(notifier, reply_id, params, connect_wifi_callback)
                                 .await
-                            }
-                            constant::CMD_KEEP_WIFI => {
-                                handle_keep_wifi(notifier, reply_id, keep_wifi_callback).await
-                            }
-                            constant::CMD_GET_INFO => {
-                                handle_get_info(notifier, reply_id, get_info_callback).await
-                            }
-                            constant::CMD_SET_TIME => {
-                                handle_set_time(notifier, reply_id, params).await
-                            }
-                            constant::CMD_FACTORY_RESET => {
-                                handle_factory_reset(notifier, reply_id, factory_reset_callback)
-                                    .await
-                            }
-                            constant::CMD_SEND_LOGS => {
-                                handle_submit_logs(notifier, reply_id, params).await
-                            }
-                            _ => {
-                                eprintln!("BLE: Unknown command: {cmd}");
-                                Ok::<(), ReqError>(())
-                            }
+                        }
+                        BleCommand::KeepWifi => {
+                            handle_keep_wifi(notifier, reply_id, keep_wifi_callback).await
+                        }
+                        BleCommand::GetInfo => {
+                            handle_get_info(notifier, reply_id, get_info_callback).await
+                        }
+                        BleCommand::SetTime => handle_set_time(notifier, reply_id, params).await,
+                        BleCommand::FactoryReset => {
+                            handle_factory_reset(notifier, reply_id, factory_reset_callback).await
+                        }
+                        BleCommand::SendLogs => {
+                            handle_submit_logs(notifier, reply_id, params).await
+                        }
+                        BleCommand::Unknown(raw) => {
+                            eprintln!("BLE: Unknown command: {raw}");
+                            Ok::<(), ReqError>(())
                         }
                     }
-                    .boxed()
-                })),
-                ..Default::default()
-            }),
+                }
+                .boxed()
+            })),
             ..Default::default()
         }
     }
 
     async fn start_disconnect_monitor(
-        me: Weak<Self>,
+        ble_handle: Weak<Self>,
         notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
         bt_disconnected_cb: Arc<BTDisconnectedCallback>,
         cancel_token: CancellationToken,
@@ -476,7 +545,7 @@ impl Ble {
 
                         // Step 1: Immediately restart advertising (most important change)
                         // This happens before UI callback to minimize downtime
-                        if let Some(ble) = me.upgrade() {
+                        if let Some(ble) = ble_handle.upgrade() {
                             println!("BLE: Triggering automatic advertising restart...");
                             // Spawn in background to avoid blocking the callback
                             let restart_result = ble.restart_advertising().await;
@@ -499,6 +568,40 @@ impl Ble {
 
         println!("BLE: Disconnect monitor stopped");
     }
+
+    async fn register_gatt_application(
+        &self,
+        adapter: &Adapter,
+        me: Weak<Self>,
+        callbacks: BleCallbacks,
+        ssids_cacher: Arc<SSIDsCacher>,
+    ) -> Result<ApplicationHandle> {
+        let svc = Service {
+            uuid: constant::SERVICE_UUID,
+            primary: true,
+            characteristics: vec![self.create_cmd_char(me, callbacks, ssids_cacher).await],
+            ..Default::default()
+        };
+
+        let app = Application {
+            services: vec![svc],
+            ..Default::default()
+        };
+
+        let app_handle = adapter.serve_gatt_application(app).await?;
+        Ok(app_handle)
+    }
+
+    fn build_advertisement(device_id: &str) -> Advertisement {
+        Advertisement {
+            service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
+            discoverable: Some(true),
+            local_name: Some(device_id.to_string()),
+            min_interval: Some(std::time::Duration::from_millis(20)),
+            max_interval: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        }
+    }
 }
 
 async fn handle_scan_wifi(
@@ -506,29 +609,29 @@ async fn handle_scan_wifi(
     reply_id: String,
     ssids_cacher: Arc<SSIDsCacher>,
 ) -> Result<(), ReqError> {
-    // Scan available SSIDs using the helper
-    let mut payload = Vec::with_capacity(2);
-    payload.push(reply_id.as_bytes());
-
     let start_time = Instant::now();
-    let ssids: Vec<String>; // To own the returned value
-    let error_code: [u8; 1]; // To own the returned value
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
+
     match ssids_cacher.get().await {
         Ok(v) => {
             println!(
-                "BLE: Found SSIDs \n{v:?} in {:?} ms",
+                "BLE cmd=scan_wifi: ssids={} duration_ms={}",
+                v.len(),
                 start_time.elapsed().as_millis()
             );
-            ssids = v;
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
-            payload.extend(ssids.iter().map(|s| s.as_bytes()));
+            encoder.push_code(BleStatus::Success.code());
+            for ssid in &v {
+                encoder.push_str(ssid);
+            }
         }
         Err(e) => {
             eprintln!("BLE: Failed to scan wifi: {e}");
-            error_code = [constant::BLE_ERR_CODE_UNKNOWN_ERROR];
-            payload.push(&error_code);
+            encoder.push_code(BleStatus::UnknownError.code());
         }
-    };
+    }
+
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -550,23 +653,20 @@ async fn handle_connect_wifi(
     let ssid = &params[0];
     let pass = &params[1];
 
-    let mut payload = Vec::with_capacity(3);
-    payload.push(reply_id.as_bytes());
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
 
-    // Pre-declare variables to own the returned values
-    let topic_id: String;
-    let error_code: [u8; 1];
     match cb(ssid, pass).await {
         Ok(tid) => {
-            topic_id = tid;
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
-            payload.push(topic_id.as_bytes());
+            encoder.push_code(BleStatus::Success.code());
+            encoder.push_str(&tid);
         }
         Err(e) => {
-            error_code = [e];
-            payload.push(&error_code);
+            encoder.push_code(e.code());
         }
-    };
+    }
+
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -575,23 +675,20 @@ async fn handle_keep_wifi(
     reply_id: String,
     cb: Arc<KeepWifiCallback>,
 ) -> Result<(), ReqError> {
-    let mut payload = Vec::with_capacity(3);
-    payload.push(reply_id.as_bytes());
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
 
-    // Pre-declare variables to own the returned values
-    let topic_id: String;
-    let error_code: [u8; 1];
     match cb().await {
         Ok(tid) => {
-            topic_id = tid;
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
-            payload.push(topic_id.as_bytes());
+            encoder.push_code(BleStatus::Success.code());
+            encoder.push_str(&tid);
         }
         Err(e) => {
-            error_code = [e];
-            payload.push(&error_code);
+            encoder.push_code(e.code());
         }
-    };
+    }
+
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -600,16 +697,21 @@ async fn handle_get_info(
     reply_id: String,
     cb: Arc<GetInfoCallback>,
 ) -> Result<(), ReqError> {
-    let payload = if let Some(cb) = cb.as_ref() {
+    let infos = if let Some(cb) = cb.as_ref() {
         cb()
     } else {
         vec![]
     };
-    let mut reply = Vec::with_capacity(payload.len() + 1);
-    reply.push(reply_id.as_bytes());
-    reply.push(&[constant::BLE_SUCCESS_CODE]);
-    reply.extend(payload.iter().map(|s| s.as_bytes()));
-    notify_central(notifier, reply).await
+
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
+    encoder.push_code(BleStatus::Success.code());
+    for info in &infos {
+        encoder.push_str(info);
+    }
+
+    let payload = encoder.finish();
+    notify_central(notifier, payload).await
 }
 
 async fn handle_set_time(
@@ -642,13 +744,14 @@ async fn handle_factory_reset(
     }
     let status_code = if let Err(e) = system::factory_reset().await {
         eprintln!("BLE: Failed to factory reset: {e:#?}");
-        [constant::BLE_ERR_CODE_UNKNOWN_ERROR]
+        [BleStatus::UnknownError.code()]
     } else {
-        [constant::BLE_SUCCESS_CODE]
+        [BleStatus::Success.code()]
     };
-    let mut payload = Vec::with_capacity(3);
-    payload.push(reply_id.as_bytes());
-    payload.push(&status_code);
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
+    encoder.push_bytes(&status_code);
+    let payload = encoder.finish();
     notify_central(notifier, payload).await
 }
 
@@ -657,44 +760,39 @@ async fn handle_submit_logs(
     reply_id: String,
     params: Vec<String>,
 ) -> Result<(), ReqError> {
-    println!("BLE: Starting log submission process");
-    println!("BLE: Reply ID: {reply_id}");
+    println!("BLE log-submit: start reply_id={reply_id}");
 
     // Expect userId, apiKey, and title
     if params.len() < 3 {
         eprintln!(
-            "BLE: ERROR - Received submit logs payload with only {} values, expected at least 3",
+            "BLE log-submit: invalid params len={}, expected at least 3",
             params.len()
         );
 
-        println!("BLE: Creating error response for invalid parameters");
-        let mut payload = Vec::with_capacity(2);
-        payload.push(reply_id.as_bytes());
-        let error_code = [constant::BLE_ERR_CODE_INVALID_PARAMS];
-        payload.push(&error_code);
+        let mut encoder = encoding::PayloadEncoder::new();
+        encoder.push_str(&reply_id);
+        encoder.push_code(BleStatus::InvalidParams.code());
 
-        println!("BLE: Notifying central with invalid params error");
-        return notify_central(notifier, payload).await;
+        return notify_central(notifier, encoder.finish()).await;
     }
 
     let user_id = &params[0];
     let api_key = &params[1];
     let title = &params[2];
 
-    println!("BLE: Extracted parameters - User ID: {user_id}, Title: {title}");
+    println!("BLE log-submit: user={user_id} title={title}");
 
-    let mut payload = Vec::with_capacity(2);
-    payload.push(reply_id.as_bytes());
+    let mut encoder = encoding::PayloadEncoder::new();
+    encoder.push_str(&reply_id);
 
     // Collect log files
-    println!("BLE: Starting log file collection");
+    println!("BLE log-submit: collecting log files");
     let log_files = match log_uploader::collect_log_files().await {
         Ok(files) => files,
         Err(e) => {
-            eprintln!("BLE: Failed to collect log files: {e}");
-            let error_code = [constant::BLE_ERR_CODE_FILE_ERROR];
-            payload.push(&error_code);
-            return notify_central(notifier, payload).await;
+            eprintln!("BLE log-submit: failed to collect log files: {e}");
+            encoder.push_code(BleStatus::FileError.code());
+            return notify_central(notifier, encoder.finish()).await;
         }
     };
 
@@ -707,33 +805,33 @@ async fn handle_submit_logs(
     );
 
     // Submit logs via HTTP
-    println!("BLE: Submitting for user: {user_id}");
+    println!("BLE log-submit: submitting logs for user={user_id}");
 
     let result = log_uploader::submit_logs_to_api(user_id, api_key, body).await;
 
-    let error_code: [u8; 1];
     match result {
         Ok(_response) => {
-            payload.push(&[constant::BLE_SUCCESS_CODE]);
+            encoder.push_code(BleStatus::Success.code());
         }
         Err(e) => {
             eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}",);
-            error_code = [e];
-            payload.push(&error_code);
+            encoder.push_code(BleStatus::NetworkError.code());
         }
-    };
+    }
 
-    notify_central(notifier, payload).await
+    notify_central(notifier, encoder.finish()).await
 }
 
 async fn notify_central(
     notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
-    payload: Vec<&[u8]>,
+    payload: Vec<u8>,
 ) -> Result<(), ReqError> {
-    println!("BLE: Notifying central with payload: {payload:?}");
+    println!(
+        "BLE: Notifying central with encoded payload ({} bytes)",
+        payload.len()
+    );
     let mut guard = notifier.lock().await;
     if let Some(notifier) = guard.as_mut() {
-        let payload = encoding::encode_payload(&payload);
         notifier.notify(payload).await.map_err(|e| {
             eprintln!("BLE: Failed to notify central: {e}");
             ReqError::Failed

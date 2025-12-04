@@ -44,6 +44,7 @@ pub const BLE_ERR_CODE_VERSION_CHECK_FAILED: u8 = 6;
 pub const BLE_ERR_CODE_INVALID_PARAMS: u8 = 7;
 pub const BLE_ERR_CODE_FILE_ERROR: u8 = 8;
 pub const BLE_ERR_CODE_NETWORK_ERROR: u8 = 9;
+pub const BLE_ERR_CODE_VERSION_TOO_OLD: u8 = 10;
 pub const BLE_ERR_CODE_UNKNOWN_ERROR: u8 = 255;
 
 // Chrome configuration
@@ -66,15 +67,12 @@ pub const FACTORY_RESET_MSG: &str = "Factory resetting…";
 pub const REFLASHING_REQUIRED_MSG: &str = "We're sorry—we've moved too far ahead for this version to catch up. Your FF1 is too far behind to auto-upgrade. Scan the code below for step-by-step reflashing instructions, or contact us for help. support@feralfile.com";
 
 // D-Bus configuration
-pub const DBUS_SETUPD_OBJECT: &str = "/com/feralfile/setupd";
 pub const DBUS_CONTROLD_OBJECT: &str = "/com/feralfile/controld";
 pub const DBUS_SYSMONITORD_OBJECT: &str = "/com/feralfile/sysmonitord";
 
-pub const DBUS_SETUPD_DESTINATION: &str = "com.feralfile.setupd";
 pub const DBUS_SYSMONITORD_DESTINATION: &str = "com.feralfile.sysmonitord";
 pub const DBUS_CONTROLD_DESTINATION: &str = "com.feralfile.controld";
 
-pub const DBUS_SETUPD_INTERFACE: &str = "com.feralfile.setupd.general";
 pub const DBUS_CONTROLD_INTERFACE: &str = "com.feralfile.controld.general";
 pub const DBUS_SYSMONITORD_INTERFACE: &str = "com.feralfile.sysmonitord";
 
@@ -83,8 +81,6 @@ pub const DBUS_SYSMONITORD_INTERFACE: &str = "com.feralfile.sysmonitord";
 pub const DBUS_EVENT_QRCODE_SWITCH: &str = "show_pairing_qr_code";
 pub const DBUS_CONNECTIVITY_METHOD: &str = "GetConnectivityStatus";
 pub const DBUS_RELAYER_TOPIC_ID_METHOD: &str = "GetRelayerTopicID";
-
-pub const DBUS_GET_PAGE_STATE: &str = "GetPageState";
 
 // pub const DBUS_CONTROLD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
 pub const DBUS_MAX_RETRIES: usize = 6;
