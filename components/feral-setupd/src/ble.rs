@@ -33,8 +33,6 @@ pub enum BleStatus {
     VersionCheckFailed = constant::BLE_ERR_CODE_VERSION_CHECK_FAILED,
     VersionTooOld = constant::BLE_ERR_CODE_VERSION_TOO_OLD,
     InvalidParams = constant::BLE_ERR_CODE_INVALID_PARAMS,
-    FileError = constant::BLE_ERR_CODE_FILE_ERROR,
-    NetworkError = constant::BLE_ERR_CODE_NETWORK_ERROR,
     UnknownError = constant::BLE_ERR_CODE_UNKNOWN_ERROR,
 }
 
@@ -79,8 +77,7 @@ pub type ConnectWifiCallback = Box<dyn Fn(&str, &str) -> AsyncBleResult + Send +
 pub type KeepWifiCallback = Box<dyn Fn() -> AsyncBleResult + Send + Sync>;
 pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync>>;
-pub type SubmitLogsCallback =
-    Box<dyn Fn(&str, &str, &str) -> AsyncUnit + Send + Sync>;
+pub type SubmitLogsCallback = Box<dyn Fn(&str, &str, &str) -> AsyncUnit + Send + Sync>;
 
 pub struct BleCallbacks {
     pub bt_connected: BTConnectedCallback,

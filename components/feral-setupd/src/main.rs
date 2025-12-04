@@ -675,13 +675,10 @@ mod callbacks {
         println!("MAIN: Collected {} log files", log_files.len());
 
         // Create request body with source-specific tags
-        let tags = vec![
-            "device-logs".to_string(),
-            format!("{}-submission", source),
-        ];
+        let tags = vec!["device-logs".to_string(), format!("{source}-submission")];
         let body = super::log_uploader::create_log_submission_body(
             title,
-            &format!("Device log submission via {}", source),
+            &format!("Device log submission via {source}"),
             tags,
             log_files,
         );

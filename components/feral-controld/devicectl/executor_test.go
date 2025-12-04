@@ -2706,14 +2706,14 @@ func TestExecutor_FactoryReset_Success(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Mock exec.CommandContext for factory reset
-	ts.mockExec.EXPECT().
-		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
-		Return(ts.mockExecCmd)
-
-	// Mock cmd.Run() to succeed
-	ts.mockExecCmd.EXPECT().
-		Run().
+	// Mock DBus call for factory reset
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_FACTORY_RESET,
+			Body:      []interface{}{},
+		}).
 		Return(nil)
 
 	// Execute command
@@ -2722,7 +2722,7 @@ func TestExecutor_FactoryReset_Success(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestExecutor_FactoryReset_CommandError(t *testing.T) {
+func TestExecutor_FactoryReset_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -2737,27 +2737,69 @@ func TestExecutor_FactoryReset_CommandError(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Mock exec.CommandContext for factory reset to fail
-	ts.mockExec.EXPECT().
-		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
-		Return(ts.mockExecCmd)
-
-	// Mock cmd.Run() to fail
-	ts.mockExecCmd.EXPECT().
-		Run().
-		Return(errors.New("factory reset command failed"))
+	// Mock DBus call to fail
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, gomock.Any()).
+		Return(errors.New("dbus error"))
 
 	// Execute command
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to execute factory reset command")
+	assert.Contains(t, err.Error(), "failed to send factory reset signal")
 }
 
-func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
+func TestExecutor_UploadLogs_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
+	cmd := commands.Command{
+		Type: commands.CMD_UPLOAD_LOGS,
+		Arguments: map[string]interface{}{
+			"userId": "test-user-id",
+			"apiKey": "test-api-key",
+			"title":  "test-title",
+		},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
+
+	// Mock JSON unmarshaling
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			if args, ok := v.(*struct {
+				UserID string `json:"userId"`
+				APIKey string `json:"apiKey"`
+				Title  string `json:"title"`
+			}); ok {
+				args.UserID = "test-user-id"
+				args.APIKey = "test-api-key"
+				args.Title = "test-title"
+			}
+			return nil
+		})
+
+	// Mock DBus call for upload logs
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
+			Body:      []interface{}{"test-user-id", "test-api-key", "test-title"},
+		}).
+		Return(nil)
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
 	tests := []struct {
 		name      string
 		arguments map[string]interface{}
@@ -2787,6 +2829,9 @@ func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
 			cmd := commands.Command{
 				Type:      commands.CMD_UPLOAD_LOGS,
 				Arguments: tt.arguments,
@@ -2811,7 +2856,7 @@ func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
 	}
 }
 
-func TestExecutor_UploadLogs_ReadDirError(t *testing.T) {
+func TestExecutor_UploadLogs_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -2833,7 +2878,6 @@ func TestExecutor_UploadLogs_ReadDirError(t *testing.T) {
 	ts.mockJSON.EXPECT().
 		Unmarshal(gomock.Any(), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
-			// Set values in the struct
 			if args, ok := v.(*struct {
 				UserID string `json:"userId"`
 				APIKey string `json:"apiKey"`
@@ -2846,16 +2890,16 @@ func TestExecutor_UploadLogs_ReadDirError(t *testing.T) {
 			return nil
 		})
 
-	// Mock ReadDir to fail
-	ts.mockOS.EXPECT().
-		ReadDir("/home/feralfile/.logs").
-		Return(nil, errors.New("directory not found"))
+	// Mock DBus call to fail
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, gomock.Any()).
+		Return(errors.New("dbus error"))
 
 	// Execute command
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to collect log files")
+	assert.Contains(t, err.Error(), "failed to send upload logs signal")
 }
 
 func TestExecutor_NewHandler(t *testing.T) {
