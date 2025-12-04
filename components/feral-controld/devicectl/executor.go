@@ -643,6 +643,18 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Executing factory reset command")
 
+	// Send DBus signal to show factory reset page
+	err := e.dbus.RetryableSend(ctx,
+		godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_SHOW_FACTORY_RESET,
+			Body:      []interface{}{},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to send show factory reset page signal: %w", err)
+	}
+
 	cmd := e.exec.CommandContext(ctx, "systemctl", "start", "set-factory-boot.service")
 
 	if err := cmd.Run(); err != nil {

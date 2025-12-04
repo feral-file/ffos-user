@@ -315,6 +315,17 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         qrcode_switch_cb,
     );
 
+    // Listen for factory reset signal
+    let factory_reset_cb =
+        callbacks::create_factory_reset_dbus_cb(app_state.clone(), chrome.clone());
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_FACTORY_RESET,
+        stop_dbus_listener.clone(),
+        factory_reset_cb,
+    );
+
     stop_dbus_listener
 }
 
@@ -612,6 +623,20 @@ mod callbacks {
                 let _ = show_factory_reset(&chromium, &app_state).await;
             })
         }))
+    }
+
+    pub fn create_factory_reset_dbus_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> dbus_utils::ListenCallback {
+        Box::new(move |_msg| {
+            println!("MAIN: Factory reset callback received");
+            let chromium = chromium.clone();
+            let app_state = app_state.clone();
+            task::spawn(async move {
+                let _ = show_factory_reset(&chromium, &app_state).await;
+            });
+        })
     }
 }
 

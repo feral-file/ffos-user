@@ -28,6 +28,7 @@ const (
 	MONITORD_EVENT_CONNECTIVITY_CHANGE      godbus.Member    = "connectivity_change"
 
 	SETUPD_EVENT_SHOW_PAIRING_QR_CODE godbus.Member = "show_pairing_qr_code"
+	SETUPD_EVENT_SHOW_FACTORY_RESET   godbus.Member = "show_factory_reset"
 )
 
 //go:generate mockgen -source=dbus.go -destination=../mocks/dbus.go -package=mocks -mock_names=DBus=MockDBus
