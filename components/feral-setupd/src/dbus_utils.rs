@@ -74,46 +74,19 @@ pub fn send_signal(object_path: &str, interface: &str, member: &str, payload: &s
     ))
 }
 
-/// Waits up to `timeout_ms` milliseconds for a signal, immediately emits
-/// a `<member>_ack` signal back to the same object/interface, then returns
-/// the payload of the received message.
-#[allow(dead_code)]
-pub fn receive_signal(
-    object_path: &str,
-    interface: &str,
-    member: &str,
-    timeout_ms: u64,
-) -> Result<Message> {
-    let conn = Connection::new_session()?;
-    let rule =
-        format!("type='signal',interface='{interface}',member='{member}',path='{object_path}'");
-    println!("DBUS: Rule: {rule}");
-    conn.add_match_no_cb(&rule)?;
-
-    let end_time = Instant::now() + Duration::from_millis(timeout_ms);
-    while Instant::now() < end_time {
-        let time_left = end_time - Instant::now();
-        if let Ok(msg) = receive_internal(&conn, object_path, interface, member, time_left) {
-            return Ok(msg);
-        }
-    }
-
-    Err(anyhow!(
-        "Timed out after {timeout_ms} ms waiting for '{member}'"
-    ))
-}
-
-/// Waits up to `duration` milliseconds for a signal, immediately emits
-/// a `<member>_ack` signal back if received the right signal and returns
-/// the payload of the received message.
-/// If the signal doesn't match the expected object path or member, an error is returned.
-fn receive_internal(
-    conn: &Connection,
-    object_path: &str,
-    interface: &str,
-    member: &str,
+/// Waits up to `duration` milliseconds for a signal and returns the received
+/// message together with an acknowledgement closure.
+///
+/// The returned closure, when invoked, will emit a `<member>_ack` signal back
+/// on the same connection. If the signal doesn't match the expected object path
+/// or member, an error is returned and no ack closure is created.
+fn receive_internal<'a>(
+    conn: &'a Connection,
+    object_path: &'a str,
+    interface: &'a str,
+    member: &'a str,
     duration: Duration,
-) -> Result<Message> {
+) -> Result<(Message, impl FnOnce() + 'a)> {
     let msg_opt = conn.channel().blocking_pop_message(duration)?;
 
     let msg = msg_opt.ok_or_else(|| anyhow!("DBUS: Did not receive any signal"))?;
@@ -136,17 +109,20 @@ fn receive_internal(
         ));
     }
 
-    // Send acknowledgement
-    println!("DBUS: Sending ack signal '{member}_ack' to {object_path}, {interface}");
-    let mut ack_msg = Message::new_signal(object_path, interface, format!("{member}_ack"))
-        .map_err(anyhow::Error::msg)?;
-    ack_msg = ack_msg.append1("");
-    if conn.send(ack_msg).is_err() {
-        // Failed to send ack signal doesn't matter, just log an error
-        eprintln!("DBUS: Failed to send ack signal '{member}_ack'");
-    }
+    // Closure that will send the acknowledgement when called
+    let ack = move || {
+        println!("DBUS: Sending ack signal '{member}_ack' to {object_path}, {interface}");
+        let mut ack_msg = Message::new_signal(object_path, interface, format!("{member}_ack"))
+            .map_err(anyhow::Error::msg)
+            .unwrap();
+        ack_msg = ack_msg.append1("");
+        if conn.send(ack_msg).is_err() {
+            // Failed to send ack signal doesn't matter, just log an error
+            eprintln!("DBUS: Failed to send ack signal '{member}_ack'");
+        }
+    };
 
-    Ok(msg)
+    Ok((msg, ack))
 }
 
 pub fn listen_for_signal(
@@ -168,7 +144,7 @@ pub fn listen_for_signal(
 
         println!("DBUS: Listening for '{member}' signal in a background thread");
         while !stop.load(Ordering::Relaxed) {
-            if let Ok(msg) = receive_internal(
+            if let Ok((msg, ack)) = receive_internal(
                 &conn,
                 &object_path,
                 &interface,
@@ -176,6 +152,7 @@ pub fn listen_for_signal(
                 Duration::from_millis(constant::DBUS_LISTEN_WAKE_UP_INTERVAL),
             ) {
                 cb(msg);
+                ack();
             }
         }
     });

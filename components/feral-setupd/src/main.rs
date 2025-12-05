@@ -596,7 +596,7 @@ mod callbacks {
                 _ => {}
             }
             println!("MAIN: QR switch -> qrcode_requested={qrcode_requested}");
-            task::spawn(async move {
+            tokio::runtime::Handle::current().block_on(async move {
                 if qrcode_requested {
                     let _ = show_qrcode(&app_state, &chromium).await;
                 } else {
