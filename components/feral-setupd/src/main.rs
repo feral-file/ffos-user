@@ -899,11 +899,10 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
         }
     }
     let has_topic_id = state_store.get(persistent_state::TOPIC_ID).is_some();
-    // For backward compatibility, treat missing PAIRED as "already paired".
     let is_paired = state_store
         .get(persistent_state::PAIRED)
         .map(|v| v == "true")
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     println!("MAIN: startup_with_internet: has_topic_id={has_topic_id} is_paired={is_paired}");
 
