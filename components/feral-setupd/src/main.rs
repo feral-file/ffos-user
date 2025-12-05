@@ -880,18 +880,34 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
         Ok(false) => {} // No update required, proceed with the normal flow
     };
 
-    // No update, show art/qrcode depending on topic ID and pairing state
+    // No update, ensure we have a topic ID if possible and then
+    // show art/qrcode depending on topic ID and pairing state.
     let state_store = &app_state.state_store;
-    let has_topic = state_store.get(persistent_state::TOPIC_ID).is_some();
+    if state_store.get(persistent_state::TOPIC_ID).is_none() {
+        match dbus_utils::get_relayer_info() {
+            Ok(topic_id) => {
+                state_store.set(persistent_state::TOPIC_ID, &topic_id);
+                if let Err(e) = state_store.save() {
+                    eprintln!("MAIN: Error saving persistent state after relayer info: {e:#?}");
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "MAIN: startup_with_internet: can't get relayer data from controld: {e:#?}"
+                );
+            }
+        }
+    }
+    let has_topic_id = state_store.get(persistent_state::TOPIC_ID).is_some();
     // For backward compatibility, treat missing PAIRED as "already paired".
     let is_paired = state_store
         .get(persistent_state::PAIRED)
         .map(|v| v == "true")
         .unwrap_or(true);
 
-    println!("MAIN: startup_with_internet: has_topic={has_topic} is_paired={is_paired}");
+    println!("MAIN: startup_with_internet: has_topic_id={has_topic_id} is_paired={is_paired}");
 
-    if has_topic && is_paired {
+    if has_topic_id && is_paired {
         show_webapp(&app_state, &chrome).await
     } else {
         show_qrcode(&app_state, &chrome).await
