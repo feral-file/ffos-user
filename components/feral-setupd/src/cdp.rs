@@ -77,10 +77,19 @@ impl Cdp {
     }
 
     /// Asynchronously navigate the page to the given URL via CDP.
+    ///
+    /// For navigation we still go through `send_cmd` so that the command
+    /// format and ID handling stay consistent, but we intentionally ignore
+    /// any error from CDP because Chromium sometimes renders successfully
+    /// without sending a matching response.
     pub async fn navigate(&self, url: &str) -> Result<()> {
         println!("CDP: Navigating to {url}");
-        self.send_cmd("Page.navigate", json!({ "url": url }))
-            .await?;
+        if let Err(e) = self
+            .send_cmd("Page.navigate", json!({ "url": url }))
+            .await
+        {
+            eprintln!("CDP: Ignoring navigate error: {e}");
+        }
         Ok(())
     }
 
