@@ -202,6 +202,7 @@ async fn start_ble(
         bt_connected: callbacks::create_bt_connected_cb(app_state.clone(), chrome.clone()),
         bt_disconnected: callbacks::create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
         factory_reset: callbacks::create_factory_reset_cb(app_state.clone(), chrome.clone()),
+        submit_logs: callbacks::create_submit_logs_cb(),
         connect_wifi: callbacks::create_connect_wifi_cb(app_state.clone(), chrome.clone()),
         keep_wifi: callbacks::create_keep_wifi_cb(app_state.clone(), chrome.clone()),
         get_info: callbacks::create_get_info_cb(app_state.clone()),
@@ -313,6 +314,27 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         constant::DBUS_EVENT_QRCODE_SWITCH,
         stop_dbus_listener.clone(),
         qrcode_switch_cb,
+    );
+
+    // Listen for factory reset signal
+    let factory_reset_cb =
+        callbacks::create_factory_reset_dbus_cb(app_state.clone(), chrome.clone());
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_FACTORY_RESET,
+        stop_dbus_listener.clone(),
+        factory_reset_cb,
+    );
+
+    // Listen for upload logs signal
+    let upload_logs_cb = callbacks::create_upload_logs_dbus_cb();
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_UPLOAD_LOGS,
+        stop_dbus_listener.clone(),
+        upload_logs_cb,
     );
 
     stop_dbus_listener
@@ -601,6 +623,15 @@ mod callbacks {
         })
     }
 
+    async fn do_factory_reset(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
+        // Show factory reset page
+        let _ = show_factory_reset(chromium, app_state).await;
+        // Execute factory reset
+        if let Err(e) = super::system::factory_reset().await {
+            eprintln!("MAIN: Failed to execute factory reset: {e:#?}");
+        }
+    }
+
     pub fn create_factory_reset_cb(
         app_state: Arc<AppState>,
         chromium: Arc<Cdp>,
@@ -609,9 +640,85 @@ mod callbacks {
             let chromium = chromium.clone();
             let app_state = app_state.clone();
             Box::pin(async move {
-                let _ = show_factory_reset(&chromium, &app_state).await;
+                do_factory_reset(&chromium, &app_state).await;
             })
         }))
+    }
+
+    pub fn create_factory_reset_dbus_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> dbus_utils::ListenCallback {
+        Box::new(move |_msg| {
+            println!("MAIN: Factory reset DBus callback received");
+            let chromium = chromium.clone();
+            let app_state = app_state.clone();
+            task::spawn(async move {
+                do_factory_reset(&chromium, &app_state).await;
+            });
+        })
+    }
+
+    /// Core log upload logic
+    async fn do_upload_logs(user_id: &str, api_key: &str, title: &str, source: &str) {
+        println!("MAIN: Uploading logs with title: {title} (source: {source})");
+
+        // Collect log files
+        let log_files = match super::log_uploader::collect_log_files().await {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("MAIN: Failed to collect log files: {e:#?}");
+                return;
+            }
+        };
+
+        println!("MAIN: Collected {} log files", log_files.len());
+
+        // Create request body with source-specific tags
+        let tags = vec!["device-logs".to_string(), format!("{source}-submission")];
+        let body = super::log_uploader::create_log_submission_body(
+            title,
+            &format!("Device log submission via {source}"),
+            tags,
+            log_files,
+        );
+
+        // Submit logs to API
+        if let Err(e) = super::log_uploader::submit_logs_to_api(user_id, api_key, body).await {
+            eprintln!("MAIN: Failed to submit logs: error code {e}");
+        } else {
+            println!("MAIN: Logs submitted successfully");
+        }
+    }
+
+    pub fn create_submit_logs_cb() -> ble::SubmitLogsCallback {
+        Box::new(move |user_id, api_key, title| {
+            let user_id = user_id.to_string();
+            let api_key = api_key.to_string();
+            let title = title.to_string();
+            Box::pin(async move {
+                do_upload_logs(&user_id, &api_key, &title, "ble").await;
+            })
+        })
+    }
+
+    pub fn create_upload_logs_dbus_cb() -> dbus_utils::ListenCallback {
+        Box::new(move |msg| {
+            println!("MAIN: Upload logs DBus callback received");
+            // Read parameters: user_id, api_key, title
+            let (user_id, api_key, title): (String, String, String) =
+                match msg.read3::<String, String, String>() {
+                    Ok(params) => params,
+                    Err(e) => {
+                        eprintln!("MAIN: Failed to read upload logs parameters: {e:#?}");
+                        return;
+                    }
+                };
+
+            task::spawn(async move {
+                do_upload_logs(&user_id, &api_key, &title, "internet").await;
+            });
+        })
     }
 }
 

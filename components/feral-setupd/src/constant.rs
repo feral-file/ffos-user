@@ -42,7 +42,6 @@ pub const BLE_ERR_CODE_WIFI_REQUIRED: u8 = 4; // Used when user doesn't have wif
 pub const BLE_ERR_CODE_DEVICE_UPDATING: u8 = 5;
 pub const BLE_ERR_CODE_VERSION_CHECK_FAILED: u8 = 6;
 pub const BLE_ERR_CODE_INVALID_PARAMS: u8 = 7;
-pub const BLE_ERR_CODE_FILE_ERROR: u8 = 8;
 pub const BLE_ERR_CODE_NETWORK_ERROR: u8 = 9;
 pub const BLE_ERR_CODE_VERSION_TOO_OLD: u8 = 10;
 pub const BLE_ERR_CODE_UNKNOWN_ERROR: u8 = 255;
@@ -79,6 +78,8 @@ pub const DBUS_SYSMONITORD_INTERFACE: &str = "com.feralfile.sysmonitord";
 // pub const DBUS_EVENT_WIFI_CONNECTED: &str = "wifi_connected";
 // pub const DBUS_EVENT_RELAYER_CONFIGURED: &str = "relayer_configured";
 pub const DBUS_EVENT_QRCODE_SWITCH: &str = "show_pairing_qr_code";
+pub const DBUS_EVENT_FACTORY_RESET: &str = "factory_reset";
+pub const DBUS_EVENT_UPLOAD_LOGS: &str = "upload_logs";
 pub const DBUS_CONNECTIVITY_METHOD: &str = "GetConnectivityStatus";
 pub const DBUS_RELAYER_TOPIC_ID_METHOD: &str = "GetRelayerTopicID";
 

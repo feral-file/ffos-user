@@ -12,6 +12,7 @@ import (
 type OS interface {
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, data []byte, perm go_os.FileMode) error
+	ReadDir(path string) ([]go_os.DirEntry, error)
 	IsNotExist(err error) bool
 	MkdirAll(path string, perm go_os.FileMode) error
 	Rename(oldpath, newpath string) error
@@ -30,6 +31,10 @@ func (o os) ReadFile(path string) ([]byte, error) {
 
 func (o os) WriteFile(path string, data []byte, perm go_os.FileMode) error {
 	return go_os.WriteFile(path, data, perm)
+}
+
+func (o os) ReadDir(path string) ([]go_os.DirEntry, error) {
+	return go_os.ReadDir(path)
 }
 
 func (o os) IsNotExist(err error) bool {
