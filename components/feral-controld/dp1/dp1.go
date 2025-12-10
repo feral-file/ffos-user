@@ -126,7 +126,7 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 
 	// Build playlist items
 	duration := DEFAULT_DURATION
-	if playlist.Defaults != nil {
+	if playlist.Defaults != nil && playlist.Defaults.Duration > 0 {
 		duration = playlist.Defaults.Duration
 	}
 
