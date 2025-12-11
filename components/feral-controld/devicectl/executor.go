@@ -3,6 +3,7 @@ package devicectl
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -22,6 +23,12 @@ var CmdOK = struct {
 }{
 	OK: true,
 }
+
+// AnalyticsToggleOffFile is the sentinel file that disables proactive metrics collection.
+const AnalyticsToggleOffFile = "/home/feralfile/.config/analytics-toggle-off"
+
+// BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
+const BetaFeaturesToggleOnFile = "/home/feralfile/.config/beta-features-toggle-on"
 
 type Device struct {
 	ID       string `json:"device_id"`
@@ -124,6 +131,10 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.shutdown(ctx)
 	case commands.CMD_REBOOT:
 		result, err = e.reboot(ctx)
+	case commands.CMD_ANALYTICS_TOGGLE_OFF:
+		result, err = e.writeAnalyticsToggleOff(ctx)
+	case commands.CMD_BETA_FEATURES_TOGGLE_ON:
+		result, err = e.writeBetaFeaturesToggleOn(ctx)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
@@ -604,6 +615,40 @@ func (e *executor) reboot(ctx context.Context) (interface{}, error) {
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to execute reboot command: %w", err)
 	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) writeAnalyticsToggleOff(_ context.Context) (interface{}, error) {
+	configDir := filepath.Dir(AnalyticsToggleOffFile)
+
+	if err := e.os.MkdirAll(configDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	content := []byte("analytics collection disabled via controld\n")
+	if err := e.os.WriteFile(AnalyticsToggleOffFile, content, 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write analytics toggle file: %w", err)
+	}
+
+	e.logger.Info("Analytics toggle file created", zap.String("path", AnalyticsToggleOffFile))
+
+	return CmdOK, nil
+}
+
+func (e *executor) writeBetaFeaturesToggleOn(_ context.Context) (interface{}, error) {
+	configDir := filepath.Dir(BetaFeaturesToggleOnFile)
+
+	if err := e.os.MkdirAll(configDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	content := []byte("beta features enabled via controld\n")
+	if err := e.os.WriteFile(BetaFeaturesToggleOnFile, content, 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write beta features toggle file: %w", err)
+	}
+
+	e.logger.Info("Beta features toggle file created", zap.String("path", BetaFeaturesToggleOnFile))
 
 	return CmdOK, nil
 }
