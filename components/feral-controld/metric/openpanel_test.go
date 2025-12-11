@@ -262,7 +262,7 @@ func TestOpenPanelTracker_TrackPlaylistView_Success(t *testing.T) {
 
 	// Expect HTTP request creation and execution (async, so might not be called immediately)
 	ts.mockHTTPClient.EXPECT().
-		NewRequest("POST", "https://api.openpanel.dev/track", gomock.Any()).
+		NewRequest("POST", metric.OPENPANEL_API_URL, gomock.Any()).
 		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
 			req, _ := http.NewRequest(method, url, body)
 			return req, nil
@@ -373,7 +373,7 @@ func TestOpenPanelTracker_TrackPlaylistView_EmptyURL(t *testing.T) {
 
 	// Expect HTTP request (async)
 	ts.mockHTTPClient.EXPECT().
-		NewRequest("POST", "https://api.openpanel.dev/track", gomock.Any()).
+		NewRequest("POST", metric.OPENPANEL_API_URL, gomock.Any()).
 		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
 			req, _ := http.NewRequest(method, url, body)
 			return req, nil
