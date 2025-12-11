@@ -31,11 +31,16 @@ type Publisher struct {
 type TokenMetadata struct {
 	Name         string     `json:"name"`
 	Description  string     `json:"description"`
-	ImageURL     string     `json:"image_url"`
-	AnimationURL string     `json:"animation_url"`
+	ImageURL     *string    `json:"image_url"`
+	AnimationURL *string    `json:"animation_url"`
 	Artists      []Artist   `json:"artists"`
 	Publisher    *Publisher `json:"publisher,omitempty"`
 	MimeType     string     `json:"mime_type"`
+}
+
+type EnrichmentSource struct {
+	AnimationURL *string `json:"animation_url"`
+	ImageURL     *string `json:"image_url"`
 }
 
 type Owner struct {
@@ -49,27 +54,45 @@ type PaginatedOwners struct {
 }
 
 type Token struct {
-	ID              string           `json:"id"`
-	TokenCID        string           `json:"token_cid"`
-	Chain           string           `json:"chain"`
-	Standard        string           `json:"standard"`
-	ContractAddress string           `json:"contract_address"`
-	TokenNumber     string           `json:"token_number"`
-	CurrentOwner    string           `json:"current_owner"`
-	Burned          bool             `json:"burned"`
-	Metadata        *TokenMetadata   `json:"metadata,omitempty"`
-	Owners          *PaginatedOwners `json:"owners,omitempty"`
+	ID               string            `json:"id"`
+	TokenCID         string            `json:"token_cid"`
+	Chain            string            `json:"chain"`
+	Standard         string            `json:"standard"`
+	ContractAddress  string            `json:"contract_address"`
+	TokenNumber      string            `json:"token_number"`
+	CurrentOwner     string            `json:"current_owner"`
+	Burned           bool              `json:"burned"`
+	Metadata         *TokenMetadata    `json:"metadata,omitempty"`
+	EnrichmentSource *EnrichmentSource `json:"enrichment_source,omitempty"`
+	Owners           *PaginatedOwners  `json:"owners,omitempty"`
 }
 
 // GetPreviewURL returns the preview URL, preferring animation_url over image_url
 func (t *Token) GetPreviewURL() string {
-	if t.Metadata == nil {
-		return ""
+	var animationURL *string
+	if t.EnrichmentSource != nil && t.EnrichmentSource.AnimationURL != nil {
+		animationURL = t.EnrichmentSource.AnimationURL
+	} else if t.Metadata != nil && t.Metadata.AnimationURL != nil {
+		animationURL = t.Metadata.AnimationURL
 	}
-	if t.Metadata.AnimationURL != "" {
-		return t.Metadata.AnimationURL
+
+	if animationURL != nil && *animationURL != "" {
+		return *animationURL
 	}
-	return t.Metadata.ImageURL
+
+	// Fall back to gallery thumbnail URL
+	var thumbnailURL *string
+	if t.EnrichmentSource != nil && t.EnrichmentSource.ImageURL != nil {
+		thumbnailURL = t.EnrichmentSource.ImageURL
+	} else if t.Metadata != nil && t.Metadata.ImageURL != nil {
+		thumbnailURL = t.Metadata.ImageURL
+	}
+
+	if thumbnailURL != nil && *thumbnailURL != "" {
+		return *thumbnailURL
+	}
+
+	return ""
 }
 
 // GetTitle returns the token title/name
@@ -153,6 +176,10 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 						url
 					}
 					mime_type
+				}
+				enrichment_source {
+					image_url
+					animation_url
 				}
 				owners {
 					items {
