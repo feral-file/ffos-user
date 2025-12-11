@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	OPENPANEL_API_URL = "https://openpanel.feralfile.com/track"
+	OPENPANEL_API_URL = "https://openpanel.feralfile.com/api/track"
 )
 
 // OpenPanelConfig contains the configuration for OpenPanel
