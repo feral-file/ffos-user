@@ -8,8 +8,6 @@ import (
 
 // EventProperties contains the properties to track with each event
 type EventProperties struct {
-	ActorType        string `json:"actor_type"`
-	ActorID          string `json:"actor_id"`           // device_id e.g., "ff1-00023"
 	EnvApp           string `json:"env_app"`            // "ff1"
 	EnvAppVersion    string `json:"env_app_version"`    // "0.8.1"
 	EnvPlatform      string `json:"env_platform"`       // "ff1"
@@ -18,6 +16,7 @@ type EventProperties struct {
 	EnvBuildType     string `json:"env_build_type"`     // "prod"
 	PlaylistScope    string `json:"playlist_scope"`     // "feed"
 	PlaylistKey      string `json:"playlist_key"`       // "ff-pl-1234"
+	PlaylistName     string `json:"playlist_name"`      // "FF1 Playlist"
 	PlaylistURL      string `json:"playlist_url"`       // "https://feed.feralfile.com/api/v1/playlists/ff-pl-1234"
 	PlaylistFeedHost string `json:"playlist_feed_host"` // "feed.feralfile.com"
 }

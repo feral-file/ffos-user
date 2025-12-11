@@ -151,6 +151,22 @@ func TestOpenPanelTracker_Initialize_Success(t *testing.T) {
 		Unmarshal(configData, gomock.Any()).
 		Return(nil)
 
+	// Expect identify call during initialization
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"type":"identify"}`), nil)
+
+	ts.mockHTTPClient.EXPECT().
+		NewRequest("POST", metric.OPENPANEL_API_URL, gomock.Any()).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			req, _ := http.NewRequest(method, url, body)
+			return req, nil
+		})
+
+	ts.mockHTTPClient.EXPECT().
+		Do(gomock.Any()).
+		Return(createMockResponse(200, `{"ok":true}`), nil)
+
 	err := ts.tracker.Initialize()
 	assert.NoError(t, err)
 }
@@ -232,6 +248,22 @@ func TestOpenPanelTracker_TrackPlaylistView_Success(t *testing.T) {
 		Unmarshal(configData, gomock.Any()).
 		Return(nil)
 
+	// Expect identify call during initialization
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"type":"identify"}`), nil)
+
+	ts.mockHTTPClient.EXPECT().
+		NewRequest("POST", metric.OPENPANEL_API_URL, gomock.Any()).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			req, _ := http.NewRequest(method, url, body)
+			return req, nil
+		})
+
+	ts.mockHTTPClient.EXPECT().
+		Do(gomock.Any()).
+		Return(createMockResponse(200, `{"ok":true}`), nil)
+
 	err := ts.tracker.Initialize()
 	assert.NoError(t, err)
 
@@ -253,7 +285,7 @@ func TestOpenPanelTracker_TrackPlaylistView_Success(t *testing.T) {
 
 	playlistURL := "https://feed.feralfile.com/api/v1/playlists/ff-pl-1234"
 
-	// Expect JSON marshaling
+	// Expect JSON marshaling for track event
 	ts.mockJSON.EXPECT().
 		Marshal(gomock.Any()).
 		DoAndReturn(func(v interface{}) ([]byte, error) {
@@ -328,6 +360,22 @@ func TestOpenPanelTracker_TrackPlaylistView_NilPlaylist(t *testing.T) {
 		Unmarshal(configData, gomock.Any()).
 		Return(nil)
 
+	// Expect identify call during initialization
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"type":"identify"}`), nil)
+
+	ts.mockHTTPClient.EXPECT().
+		NewRequest("POST", metric.OPENPANEL_API_URL, gomock.Any()).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			req, _ := http.NewRequest(method, url, body)
+			return req, nil
+		})
+
+	ts.mockHTTPClient.EXPECT().
+		Do(gomock.Any()).
+		Return(createMockResponse(200, `{"ok":true}`), nil)
+
 	err := ts.tracker.Initialize()
 	assert.NoError(t, err)
 
@@ -355,6 +403,22 @@ func TestOpenPanelTracker_TrackPlaylistView_EmptyURL(t *testing.T) {
 		Unmarshal(configData, gomock.Any()).
 		Return(nil)
 
+	// Expect identify call during initialization
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"type":"identify"}`), nil)
+
+	ts.mockHTTPClient.EXPECT().
+		NewRequest("POST", metric.OPENPANEL_API_URL, gomock.Any()).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			req, _ := http.NewRequest(method, url, body)
+			return req, nil
+		})
+
+	ts.mockHTTPClient.EXPECT().
+		Do(gomock.Any()).
+		Return(createMockResponse(200, `{"ok":true}`), nil)
+
 	err := ts.tracker.Initialize()
 	assert.NoError(t, err)
 
@@ -364,7 +428,7 @@ func TestOpenPanelTracker_TrackPlaylistView_EmptyURL(t *testing.T) {
 		},
 	}
 
-	// Expect JSON marshaling
+	// Expect JSON marshaling for track event
 	ts.mockJSON.EXPECT().
 		Marshal(gomock.Any()).
 		DoAndReturn(func(v interface{}) ([]byte, error) {
@@ -410,6 +474,22 @@ func TestOpenPanelTracker_TrackPlaylistView_MarshalError(t *testing.T) {
 		Unmarshal(configData, gomock.Any()).
 		Return(nil)
 
+	// Expect identify call during initialization
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"type":"identify"}`), nil)
+
+	ts.mockHTTPClient.EXPECT().
+		NewRequest("POST", metric.OPENPANEL_API_URL, gomock.Any()).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			req, _ := http.NewRequest(method, url, body)
+			return req, nil
+		})
+
+	ts.mockHTTPClient.EXPECT().
+		Do(gomock.Any()).
+		Return(createMockResponse(200, `{"ok":true}`), nil)
+
 	err := ts.tracker.Initialize()
 	assert.NoError(t, err)
 
@@ -419,7 +499,7 @@ func TestOpenPanelTracker_TrackPlaylistView_MarshalError(t *testing.T) {
 		},
 	}
 
-	// Expect JSON marshaling to fail
+	// Expect JSON marshaling to fail for track event
 	ts.mockJSON.EXPECT().
 		Marshal(gomock.Any()).
 		Return(nil, errors.New("marshal error"))

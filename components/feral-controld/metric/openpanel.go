@@ -30,9 +30,10 @@ func (c *OpenPanelConfig) IsEnabled() bool {
 
 // DeviceInfo contains information about the device
 type DeviceInfo struct {
-	DeviceID string
-	Version  string
-	Platform string
+	DeviceID  string
+	Version   string
+	Platform  string
+	IPAddress string
 }
 
 type openPanelTracker struct {
@@ -92,12 +93,54 @@ func (t *openPanelTracker) Initialize() error {
 		return fmt.Errorf("failed to read ff1-config.json: %w", err)
 	}
 
+	// Get device IP address
+	t.deviceInfo.IPAddress = t.getDeviceIP()
+
 	t.logger.Info("Initialized metric tracker",
 		zap.String("device_id", t.deviceInfo.DeviceID),
 		zap.String("version", t.deviceInfo.Version),
+		zap.String("ip_address", t.deviceInfo.IPAddress),
 		zap.Bool("enabled", t.config.IsEnabled()))
 
+	// Send identify event to OpenPanel
+	if t.config.IsEnabled() {
+		if err := t.identifyUser(); err != nil {
+			t.logger.Warn("Failed to identify user in OpenPanel", zap.Error(err))
+			// Don't return error, continue initialization
+		}
+	}
+
 	return nil
+}
+
+// getDeviceIP returns the device's IP address
+// TODO: Implement this
+func (t *openPanelTracker) getDeviceIP() string {
+	return ""
+}
+
+// identifyUser sends an identify event to OpenPanel
+func (t *openPanelTracker) identifyUser() error {
+	// Build identify payload
+	payload := map[string]interface{}{
+		"type": "identify",
+		"payload": map[string]interface{}{
+			"profileId": t.deviceInfo.DeviceID,
+			"properties": map[string]interface{}{
+				"actor_type": "ff1",
+				"actor_id":   t.deviceInfo.DeviceID,
+			},
+		},
+	}
+
+	// Marshal payload to JSON
+	jsonData, err := t.json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal identify payload: %w", err)
+	}
+
+	// Send the request synchronously during initialization
+	return t.sendRequest(jsonData, "")
 }
 
 // TrackPlaylistView tracks when a playlist is viewed/displayed
@@ -114,7 +157,7 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 
 	// Extract playlist properties
 	playlistKey := playlist.ID
-	playlistScope := "generated"
+	playlistScope := "local"
 	playlistFeedHost := ""
 
 	// Parse URL to extract host if URL is provided
@@ -130,8 +173,6 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 
 	// Build event properties
 	properties := EventProperties{
-		ActorType:        "device",
-		ActorID:          t.deviceInfo.DeviceID,
 		EnvApp:           "ff1",
 		EnvAppVersion:    t.deviceInfo.Version,
 		EnvPlatform:      t.deviceInfo.Platform,
@@ -140,6 +181,7 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 		EnvBuildType:     "prod",
 		PlaylistScope:    playlistScope,
 		PlaylistKey:      playlistKey,
+		PlaylistName:     playlist.Title,
 		PlaylistURL:      playlistURL,
 		PlaylistFeedHost: playlistFeedHost,
 	}
@@ -149,6 +191,7 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 		"type": "track",
 		"payload": map[string]interface{}{
 			"name":       "playlist_view",
+			"profileId":  t.deviceInfo.DeviceID,
 			"properties": properties,
 		},
 	}
@@ -182,6 +225,11 @@ func (t *openPanelTracker) sendRequest(jsonData []byte, playlistID string) error
 	req.Header.Set("openpanel-client-id", t.config.ClientID)
 	req.Header.Set("openpanel-client-secret", t.config.ClientSecret)
 
+	// Set x-client-ip header for geo location tracking
+	if t.deviceInfo.IPAddress != "" {
+		req.Header.Set("x-client-ip", t.deviceInfo.IPAddress)
+	}
+
 	// Send request
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
@@ -198,10 +246,6 @@ func (t *openPanelTracker) sendRequest(jsonData []byte, playlistID string) error
 			zap.String("playlist_id", playlistID))
 		return fmt.Errorf("OpenPanel API returned status %d", resp.StatusCode)
 	}
-
-	t.logger.Info("Successfully tracked playlist view event",
-		zap.String("playlist_id", playlistID),
-		zap.String("device_id", t.deviceInfo.DeviceID))
 
 	return nil
 }
