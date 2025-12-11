@@ -36,6 +36,21 @@ func (m *MockHTTPClient) EXPECT() *MockHTTPClientMockRecorder {
 	return m.recorder
 }
 
+// Do mocks base method.
+func (m *MockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Do", req)
+	ret0, _ := ret[0].(*http.Response)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Do indicates an expected call of Do.
+func (mr *MockHTTPClientMockRecorder) Do(req interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Do", reflect.TypeOf((*MockHTTPClient)(nil).Do), req)
+}
+
 // Get mocks base method.
 func (m *MockHTTPClient) Get(url string) (*http.Response, error) {
 	m.ctrl.T.Helper()
@@ -49,6 +64,21 @@ func (m *MockHTTPClient) Get(url string) (*http.Response, error) {
 func (mr *MockHTTPClientMockRecorder) Get(url interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockHTTPClient)(nil).Get), url)
+}
+
+// NewRequest mocks base method.
+func (m *MockHTTPClient) NewRequest(method, url string, body io.Reader) (*http.Request, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NewRequest", method, url, body)
+	ret0, _ := ret[0].(*http.Request)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// NewRequest indicates an expected call of NewRequest.
+func (mr *MockHTTPClientMockRecorder) NewRequest(method, url, body interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewRequest", reflect.TypeOf((*MockHTTPClient)(nil).NewRequest), method, url, body)
 }
 
 // Post mocks base method.
