@@ -146,7 +146,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Get analytics toggle (disabled when file exists)
 	g.Go(func() error {
-		const analyticsTogglePath = "/home/feralfile/.config/analytics-toggle-off"
+		const analyticsTogglePath = "/home/feralfile/.state/analytics-toggle-off"
 		_, err := d.os.ReadFile(analyticsTogglePath)
 		if err == nil {
 			analyticsDisabled = true
@@ -161,7 +161,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Get beta features toggle (enabled when file exists)
 	g.Go(func() error {
-		const betaTogglePath = "/home/feralfile/.config/beta-features-toggle-on"
+		const betaTogglePath = "/home/feralfile/.state/beta-features-toggle-on"
 		_, err := d.os.ReadFile(betaTogglePath)
 		if err == nil {
 			betaFeaturesEnabled = true

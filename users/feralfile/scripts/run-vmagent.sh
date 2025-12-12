@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CHECK_INTERVAL=30
-ANALYTICS_TOGGLE_FILE="/home/feralfile/.config/analytics-toggle-off"
+ANALYTICS_TOGGLE_FILE="/home/feralfile/.state/analytics-toggle-off"
 
 detect_cpu_model() {
     if [[ ! -r /proc/cpuinfo ]]; then

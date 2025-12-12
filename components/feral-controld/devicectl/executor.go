@@ -26,10 +26,10 @@ var CmdOK = struct {
 }
 
 // AnalyticsToggleOffFile is the sentinel file that disables proactive metrics collection.
-const AnalyticsToggleOffFile = "/home/feralfile/.config/analytics-toggle-off"
+const AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
 
 // BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
-const BetaFeaturesToggleOnFile = "/home/feralfile/.config/beta-features-toggle-on"
+const BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
 
 type Device struct {
 	ID       string `json:"device_id"`
@@ -71,10 +71,6 @@ type executor struct {
 	math wrapper.Math
 }
 
-type toggleCommandArgs struct {
-	Enabled bool `json:"enabled"`
-}
-
 func New(
 	cdp cdp.CDP,
 	dbus dbus.DBus,
@@ -110,7 +106,6 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 
 	var err error
 	var bytes []byte
-	var toggleArgs toggleCommandArgs
 
 	bytes, err = e.json.Marshal(cmd.Arguments)
 	if err != nil {
@@ -138,15 +133,9 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_REBOOT:
 		result, err = e.reboot(ctx)
 	case commands.CMD_ANALYTICS_TOGGLE_OFF:
-		if err := e.json.Unmarshal(bytes, &toggleArgs); err != nil {
-			return nil, fmt.Errorf("invalid arguments: %w", err)
-		}
-		result, err = e.setAnalyticsToggle(ctx, toggleArgs.Enabled)
+		result, err = e.setAnalyticsToggle(ctx, bytes)
 	case commands.CMD_BETA_FEATURES_TOGGLE_ON:
-		if err := e.json.Unmarshal(bytes, &toggleArgs); err != nil {
-			return nil, fmt.Errorf("invalid arguments: %w", err)
-		}
-		result, err = e.setBetaFeaturesToggle(ctx, toggleArgs.Enabled)
+		result, err = e.setBetaFeaturesToggle(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
@@ -631,14 +620,21 @@ func (e *executor) reboot(ctx context.Context) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (e *executor) setAnalyticsToggle(_ context.Context, enabled bool) (interface{}, error) {
+func (e *executor) setAnalyticsToggle(_ context.Context, args []byte) (interface{}, error) {
+	var toggleArgs struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := e.json.Unmarshal(args, &toggleArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
 	configDir := filepath.Dir(AnalyticsToggleOffFile)
 
 	if err := e.os.MkdirAll(configDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	if enabled {
+	if toggleArgs.Enabled {
 		if err := e.removeFileIfExists(AnalyticsToggleOffFile); err != nil {
 			return nil, fmt.Errorf("failed to enable analytics collection: %w", err)
 		}
@@ -656,14 +652,21 @@ func (e *executor) setAnalyticsToggle(_ context.Context, enabled bool) (interfac
 	return CmdOK, nil
 }
 
-func (e *executor) setBetaFeaturesToggle(_ context.Context, enabled bool) (interface{}, error) {
+func (e *executor) setBetaFeaturesToggle(_ context.Context, args []byte) (interface{}, error) {
+	var toggleArgs struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := e.json.Unmarshal(args, &toggleArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
 	configDir := filepath.Dir(BetaFeaturesToggleOnFile)
 
 	if err := e.os.MkdirAll(configDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	if enabled {
+	if toggleArgs.Enabled {
 		content := []byte("beta features enabled via controld\n")
 		if err := e.os.WriteFile(BetaFeaturesToggleOnFile, content, 0o644); err != nil {
 			return nil, fmt.Errorf("failed to write beta features toggle file: %w", err)
