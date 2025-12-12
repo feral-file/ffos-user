@@ -11,6 +11,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -245,8 +246,7 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 
 	// Read current orientation from config file (this is what user perceives)
 	currentIndex := 0 // Default to normal
-	configPath := "/home/feralfile/.state/screen-orientation"
-	configData, err := e.os.ReadFile(configPath)
+	configData, err := e.os.ReadFile(constants.SCREEN_ORIENTATION_FILE)
 	if err == nil && len(configData) > 0 {
 		savedRotation := strings.TrimSpace(string(configData))
 		for i, rot := range rotations {
@@ -281,7 +281,7 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 	}
 
 	// Write rotation value to file
-	if err := e.os.WriteFile(configPath, []byte(newRotation), 0600); err != nil {
+	if err := e.os.WriteFile(constants.SCREEN_ORIENTATION_FILE, []byte(newRotation), 0600); err != nil {
 		e.logger.Warn("Failed to save screen orientation", zap.Error(err))
 	}
 

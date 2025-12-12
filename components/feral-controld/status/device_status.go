@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"golang.org/x/sync/errgroup"
@@ -65,8 +66,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		// Default to landscape
 		screenRotation = "landscape"
 
-		configPath := "/home/feralfile/.state/screen-orientation"
-		configData, err := d.os.ReadFile(configPath)
+		configData, err := d.os.ReadFile(constants.SCREEN_ORIENTATION_FILE)
 		if err != nil {
 			return nil // Don't fail if config file doesn't exist
 		}
@@ -111,8 +111,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Get installed version and latest version
 	g.Go(func() error {
-		configFile := "/home/feralfile/ff1-config.json"
-		configBytes, err := d.os.ReadFile(configFile)
+		configBytes, err := d.os.ReadFile(constants.FF1_CONFIG_FILE)
 		if err != nil {
 			return fmt.Errorf("failed to read config file: %w", err)
 		}

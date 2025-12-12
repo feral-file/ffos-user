@@ -10,6 +10,8 @@ import (
 
 //go:generate mockgen -source=http.go -destination=../mocks/http.go -package=mocks -mock_names=HTTPClient=MockHTTPClient
 type HTTPClient interface {
+	NewRequest(method string, url string, body go_io.Reader) (*go_http.Request, error)
+	Do(req *go_http.Request) (*go_http.Response, error)
 	Get(url string) (*go_http.Response, error)
 	Post(url string, contentType string, body go_io.Reader) (*go_http.Response, error)
 }
@@ -24,6 +26,14 @@ func NewHTTPClient() HTTPClient {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+func (h httpClient) NewRequest(method string, url string, body go_io.Reader) (*go_http.Request, error) {
+	return go_http.NewRequest(method, url, body)
+}
+
+func (h httpClient) Do(req *go_http.Request) (*go_http.Response, error) {
+	return h.client.Do(req)
 }
 
 func (h httpClient) Get(url string) (*go_http.Response, error) {

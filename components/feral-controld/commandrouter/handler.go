@@ -10,6 +10,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/metric"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -20,12 +21,13 @@ type Handler interface {
 }
 
 type handler struct {
-	executor     devicectl.Executor
-	cdp          cdp.CDP
-	dp1          dp1.DP1
-	json         wrapper.JSON
-	statusPoller status.Poller
-	logger       *zap.Logger
+	executor      devicectl.Executor
+	cdp           cdp.CDP
+	dp1           dp1.DP1
+	json          wrapper.JSON
+	statusPoller  status.Poller
+	metricTracker metric.Tracker
+	logger        *zap.Logger
 }
 
 func New(
@@ -33,16 +35,18 @@ func New(
 	cdp cdp.CDP,
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
+	metricTracker metric.Tracker,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
 	return &handler{
-		executor:     executor,
-		cdp:          cdp,
-		dp1:          dp1,
-		statusPoller: statusPoller,
-		json:         json,
-		logger:       logger,
+		executor:      executor,
+		cdp:           cdp,
+		dp1:           dp1,
+		statusPoller:  statusPoller,
+		metricTracker: metricTracker,
+		json:          json,
+		logger:        logger,
 	}
 }
 
@@ -69,8 +73,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return result, nil
 
 	} else {
+		var playlist *dp1.Playlist
+		var playlistURL string
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
-			var playlist *dp1.Playlist
 			var err error
 			switch {
 			case command.Arguments["playlistUrl"] != nil:
@@ -79,6 +84,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
+				playlistURL = url
 				playlist, err = h.dp1.ProcessPlaylistURL(ctx, url, true)
 				if err != nil {
 					return nil, err
@@ -119,6 +125,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		result, err := h.sendCDPRequest(command)
 		if err != nil {
 			return nil, err
+		}
+
+		// Track playlist view metric after sending to CDP
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && playlist != nil && h.metricTracker != nil {
+			if err := h.metricTracker.TrackPlaylistView(ctx, playlist, playlistURL); err != nil {
+				h.logger.Error("Failed to track playlist view metric", zap.Error(err))
+				// Don't fail the command if metric tracking fails
+			}
 		}
 
 		// Force refresh status poller
