@@ -95,14 +95,6 @@ build_args() {
   fi
 }
 
-ensure_disabled_scrape_config() {
-  cat > "${DISABLED_SCRAPE_FILE}" <<'YAML'
-global:
-  scrape_interval: 15s
-scrape_configs: []
-YAML
-}
-
 start_vmagent() {
   local mode="$1"
   local scrape_config="${SCRAPE_FILE}"
@@ -146,7 +138,6 @@ desired_mode() {
 }
 
 trap stop_vmagent EXIT
-ensure_disabled_scrape_config
 
 initial_mode=$(desired_mode)
 start_vmagent "${initial_mode}"
