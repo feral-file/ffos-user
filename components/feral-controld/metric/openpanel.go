@@ -156,7 +156,6 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 	}
 
 	// Extract playlist properties
-	playlistKey := playlist.ID
 	playlistScope := "local"
 	playlistFeedHost := ""
 
@@ -180,7 +179,8 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 		EnvOSVersion:       t.deviceInfo.Version,
 		EnvBuildType:       "prod",
 		PlaylistScope:      playlistScope,
-		PlaylistKey:        playlistKey,
+		PlaylistID:         playlist.ID,
+		PlaylistKey:        fmt.Sprintf("%s|%s", playlist.Title, playlist.ID),
 		PlaylistDP1Version: playlist.DPVersion,
 		PlaylistName:       playlist.Title,
 		PlaylistURL:        playlistURL,

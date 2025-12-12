@@ -15,9 +15,10 @@ type EventProperties struct {
 	EnvOSVersion       string `json:"env_os_version"`       // "1.0.0"
 	EnvBuildType       string `json:"env_build_type"`       // "prod"
 	PlaylistScope      string `json:"playlist_scope"`       // "feed"
-	PlaylistKey        string `json:"playlist_key"`         // "ff-pl-1234"
-	PlaylistDP1Version string `json:"playlist_dp1_version"` // "1.0.0"
+	PlaylistID         string `json:"playlist_id"`          // "ff-pl-1234"
+	PlaylistKey        string `json:"playlist_key"`         // "FF1 Playlist|ff-pl-1234"
 	PlaylistName       string `json:"playlist_name"`        // "FF1 Playlist"
+	PlaylistDP1Version string `json:"playlist_dp1_version"` // "1.0.0"
 	PlaylistURL        string `json:"playlist_url"`         // "https://feed.feralfile.com/api/v1/playlists/ff-pl-1234"
 	PlaylistFeedHost   string `json:"playlist_feed_host"`   // "feed.feralfile.com"
 }
