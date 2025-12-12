@@ -8,17 +8,18 @@ import (
 
 // EventProperties contains the properties to track with each event
 type EventProperties struct {
-	EnvApp           string `json:"env_app"`            // "ff1"
-	EnvAppVersion    string `json:"env_app_version"`    // "0.8.1"
-	EnvPlatform      string `json:"env_platform"`       // "ff1"
-	EnvOS            string `json:"env_os"`             // "ffos"
-	EnvOSVersion     string `json:"env_os_version"`     // "1.0.0"
-	EnvBuildType     string `json:"env_build_type"`     // "prod"
-	PlaylistScope    string `json:"playlist_scope"`     // "feed"
-	PlaylistKey      string `json:"playlist_key"`       // "ff-pl-1234"
-	PlaylistName     string `json:"playlist_name"`      // "FF1 Playlist"
-	PlaylistURL      string `json:"playlist_url"`       // "https://feed.feralfile.com/api/v1/playlists/ff-pl-1234"
-	PlaylistFeedHost string `json:"playlist_feed_host"` // "feed.feralfile.com"
+	EnvApp             string `json:"env_app"`              // "ff1"
+	EnvAppVersion      string `json:"env_app_version"`      // "0.8.1"
+	EnvPlatform        string `json:"env_platform"`         // "ff1"
+	EnvOS              string `json:"env_os"`               // "ffos"
+	EnvOSVersion       string `json:"env_os_version"`       // "1.0.0"
+	EnvBuildType       string `json:"env_build_type"`       // "prod"
+	PlaylistScope      string `json:"playlist_scope"`       // "feed"
+	PlaylistKey        string `json:"playlist_key"`         // "ff-pl-1234"
+	PlaylistDP1Version string `json:"playlist_dp1_version"` // "1.0.0"
+	PlaylistName       string `json:"playlist_name"`        // "FF1 Playlist"
+	PlaylistURL        string `json:"playlist_url"`         // "https://feed.feralfile.com/api/v1/playlists/ff-pl-1234"
+	PlaylistFeedHost   string `json:"playlist_feed_host"`   // "feed.feralfile.com"
 }
 
 //go:generate mockgen -source=metric.go -destination=../mocks/metric.go -package=mocks -mock_names=Tracker=MockMetricTracker

@@ -140,7 +140,7 @@ func (t *openPanelTracker) identifyUser() error {
 	}
 
 	// Send the request synchronously during initialization
-	return t.sendRequest(jsonData, "")
+	return t.sendRequest(jsonData)
 }
 
 // TrackPlaylistView tracks when a playlist is viewed/displayed
@@ -173,17 +173,18 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 
 	// Build event properties
 	properties := EventProperties{
-		EnvApp:           "ff1",
-		EnvAppVersion:    t.deviceInfo.Version,
-		EnvPlatform:      t.deviceInfo.Platform,
-		EnvOS:            "ffos",
-		EnvOSVersion:     t.deviceInfo.Version,
-		EnvBuildType:     "prod",
-		PlaylistScope:    playlistScope,
-		PlaylistKey:      playlistKey,
-		PlaylistName:     playlist.Title,
-		PlaylistURL:      playlistURL,
-		PlaylistFeedHost: playlistFeedHost,
+		EnvApp:             "ff1",
+		EnvAppVersion:      t.deviceInfo.Version,
+		EnvPlatform:        t.deviceInfo.Platform,
+		EnvOS:              "ffos",
+		EnvOSVersion:       t.deviceInfo.Version,
+		EnvBuildType:       "prod",
+		PlaylistScope:      playlistScope,
+		PlaylistKey:        playlistKey,
+		PlaylistDP1Version: playlist.DPVersion,
+		PlaylistName:       playlist.Title,
+		PlaylistURL:        playlistURL,
+		PlaylistFeedHost:   playlistFeedHost,
 	}
 
 	// Build the request payload
@@ -205,7 +206,7 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 
 	// Send request in a goroutine to avoid blocking
 	go func() {
-		if err := t.sendRequest(jsonData, playlistKey); err != nil {
+		if err := t.sendRequest(jsonData); err != nil {
 			t.logger.Error("Failed to send OpenPanel event", zap.Error(err))
 		}
 	}()
@@ -214,7 +215,7 @@ func (t *openPanelTracker) TrackPlaylistView(ctx context.Context, playlist *dp1.
 }
 
 // sendRequest sends the OpenPanel event request
-func (t *openPanelTracker) sendRequest(jsonData []byte, playlistID string) error {
+func (t *openPanelTracker) sendRequest(jsonData []byte) error {
 	req, err := t.httpClient.NewRequest("POST", OPENPANEL_API_URL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -241,9 +242,6 @@ func (t *openPanelTracker) sendRequest(jsonData []byte, playlistID string) error
 
 	// Check response status
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		t.logger.Error("OpenPanel API returned error status",
-			zap.Int("status_code", resp.StatusCode),
-			zap.String("playlist_id", playlistID))
 		return fmt.Errorf("OpenPanel API returned status %d", resp.StatusCode)
 	}
 
