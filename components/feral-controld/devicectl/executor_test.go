@@ -2352,6 +2352,10 @@ func TestExecutor_AnalyticsToggle_Enable_Success(t *testing.T) {
 		MkdirAll(configDir, os.FileMode(0755)).
 		Return(nil)
 
+	ts.mockOS.EXPECT().
+		IsNotExist(gomock.Any()).
+		Return(true)
+
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
@@ -2413,6 +2417,10 @@ func TestExecutor_BetaFeaturesToggle_Disable_Success(t *testing.T) {
 	ts.mockOS.EXPECT().
 		MkdirAll(configDir, os.FileMode(0755)).
 		Return(nil)
+
+	ts.mockOS.EXPECT().
+		IsNotExist(gomock.Any()).
+		Return(true)
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
