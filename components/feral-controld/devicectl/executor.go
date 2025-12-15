@@ -132,9 +132,9 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.shutdown(ctx)
 	case commands.CMD_REBOOT:
 		result, err = e.reboot(ctx)
-	case commands.CMD_ANALYTICS_TOGGLE_OFF:
+	case commands.CMD_ANALYTICS_TOGGLE:
 		result, err = e.setAnalyticsToggle(ctx, bytes)
-	case commands.CMD_BETA_FEATURES_TOGGLE_ON:
+	case commands.CMD_BETA_FEATURES_TOGGLE:
 		result, err = e.setBetaFeaturesToggle(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)

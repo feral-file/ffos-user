@@ -2300,7 +2300,7 @@ func TestExecutor_AnalyticsToggle_Disable_Success(t *testing.T) {
 	defer ts.teardown()
 
 	cmd := commands.Command{
-		Type:      commands.CMD_ANALYTICS_TOGGLE_OFF,
+		Type:      commands.CMD_ANALYTICS_TOGGLE,
 		Arguments: map[string]interface{}{"enabled": false},
 	}
 
@@ -2333,7 +2333,7 @@ func TestExecutor_AnalyticsToggle_Enable_Success(t *testing.T) {
 	defer ts.teardown()
 
 	cmd := commands.Command{
-		Type:      commands.CMD_ANALYTICS_TOGGLE_OFF,
+		Type:      commands.CMD_ANALYTICS_TOGGLE,
 		Arguments: map[string]interface{}{"enabled": true},
 	}
 
@@ -2362,7 +2362,7 @@ func TestExecutor_BetaFeaturesToggle_Enable_Success(t *testing.T) {
 	defer ts.teardown()
 
 	cmd := commands.Command{
-		Type:      commands.CMD_BETA_FEATURES_TOGGLE_ON,
+		Type:      commands.CMD_BETA_FEATURES_TOGGLE,
 		Arguments: map[string]interface{}{"enabled": true},
 	}
 
@@ -2398,7 +2398,7 @@ func TestExecutor_BetaFeaturesToggle_Disable_Success(t *testing.T) {
 	defer ts.teardown()
 
 	cmd := commands.Command{
-		Type:      commands.CMD_BETA_FEATURES_TOGGLE_ON,
+		Type:      commands.CMD_BETA_FEATURES_TOGGLE,
 		Arguments: map[string]interface{}{"enabled": false},
 	}
 
