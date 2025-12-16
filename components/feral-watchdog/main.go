@@ -55,6 +55,7 @@ type app struct {
 	SystemdMonitor  monitor.SystemdMonitor
 	ChromiumMonitor monitor.ChromiumMonitor
 	VmAgentClient   vmagent.Client
+	DBusClient      *godbus.DBusClient
 }
 
 func main() {
@@ -141,8 +142,17 @@ func (app *app) run(ctx context.Context) error {
 	go app.Watchdog.Start(ctx)
 	defer app.Watchdog.Stop()
 
+	// Start DBus
+	err := app.DBusClient.Start()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = app.DBusClient.Stop()
+	}()
+
 	// Initialize CDP
-	err := app.CDP.Init(ctx)
+	err = app.CDP.Init(ctx)
 	if err != nil {
 		return err
 	}
@@ -248,5 +258,6 @@ func initializeApp(
 		VmAgentClient:   vmagentClient,
 		EventWatcher:    eventWatcher,
 		Watchdog:        watchdog,
+		DBusClient:      dbusClient,
 	}
 }
