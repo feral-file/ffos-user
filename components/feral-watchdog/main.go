@@ -3,184 +3,250 @@ package main
 import (
 	"context"
 	"flag"
-	"os"
-	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/feral-file/godbus"
+	go_os "os"
+
 	"github.com/getsentry/sentry-go"
-	"github.com/godbus/dbus/v5"
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
+	go_daemon "github.com/coreos/go-systemd/v22/daemon"
+	"github.com/feral-file/godbus"
+	dbus_v5 "github.com/godbus/dbus/v5"
+
+	"github.com/feral-file/ffos-user/components/feral-watchdog/cdp"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/command"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/config"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/event"
 	"github.com/feral-file/ffos-user/components/feral-watchdog/logger"
-	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/monitor"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/vmagent"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/watchdog"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/wrapper"
 )
 
 const (
-	// Timeouts
-	GOROUTINE_TIMEOUT = 1500 * time.Millisecond // 1.5 seconds
-
-	DBUS_NAME = "com.feralfile.watchdog"
+	SHUTDOWN_TIMEOUT = 2 * time.Second
+	DBUS_NAME        = "com.feralfile.watchdog"
 )
 
 var debug = false
+
+type app struct {
+	// Basic components
+	Ctx    context.Context
+	Logger *zap.Logger
+
+	// Wrappers
+	Clock  wrapper.Clock
+	OS     wrapper.OS
+	Signal wrapper.Signal
+	JSON   wrapper.JSON
+	Exec   wrapper.Exec
+	Daemon wrapper.Daemon
+
+	// Components
+	Watchdog        watchdog.Watchdog
+	EventWatcher    event.Watcher
+	CDP             cdp.CDP
+	Executor        command.Executor
+	SystemdMonitor  monitor.SystemdMonitor
+	ChromiumMonitor monitor.ChromiumMonitor
+	VmAgentClient   vmagent.Client
+}
 
 func main() {
 	// Read from options
 	flag.BoolVar(&debug, "debug", false, "Enable debug mode")
 	flag.Parse()
 
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// Initialize logger with debug enabled for development
-	log, err := logger.New(debug)
+	// Initialize basic logger first for config loading
+	basicLogger, err := logger.New(debug)
 	if err != nil {
 		panic("Failed to initialize logger: " + err.Error())
 	}
 	defer func() {
-		_ = log.Sync()
+		_ = basicLogger.Sync()
 	}()
 
-	if err := LoadConfig(log); err != nil {
-		log.Error("Failed to load config.", zap.Error(err))
-		return
+	// Load configuration
+	config, err := config.Load(basicLogger)
+	if err != nil {
+		basicLogger.Fatal("Failed to load configuration", zap.Error(err))
 	}
-	log.Info("Configuration loaded successfully.")
 
-	// Initialize Sentry if configured
+	// Create the final logger (with Sentry if configured)
+	finalLogger := basicLogger
 	if config.SentryConfig.IsEnabled() {
-		sc, err := sentry.NewClient(sentry.ClientOptions{
-			Dsn:              config.SentryConfig.DSN,
-			Debug:            config.SentryConfig.GetDebug(),
-			SampleRate:       config.SentryConfig.GetSampleRate(),
-			Environment:      config.SentryConfig.Environment,
-			Release:          config.SentryConfig.Release,
-			SendDefaultPII:   true,
-			AttachStacktrace: true,
-		})
+		sentryLogger, err := logger.AddSentry(finalLogger, *config.SentryConfig)
 		if err != nil {
-			log.Error("Failed to init sentry.NewClient.", zap.Error(err))
-			return
-		}
-		defer sc.Flush(2 * time.Second)
-		finalLogger, err := logger.AddSentry(log, sc)
-		if err != nil {
-			log.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
+			finalLogger.Error("Failed to create Sentry-integrated logger, falling back to basic logger", zap.Error(err))
 		} else {
-			log = finalLogger
-			log.Info("Sentry initialized successfully",
+			finalLogger = sentryLogger
+			finalLogger.Info("Sentry initialized successfully",
 				zap.String("environment", config.SentryConfig.Environment),
 				zap.String("release", config.SentryConfig.Release))
 			defer logger.FlushSentry(2 * time.Second)
 		}
 	} else {
-		log.Info("Sentry not configured, using basic logger")
+		finalLogger.Info("Sentry not configured, using basic logger")
 	}
+
+	// Initialize app
+	app := initializeApp(
+		finalLogger,
+		config.CDPConfig.Endpoint,
+		config.VmagentConfig.URL,
+		DBUS_NAME,
+		[]dbus_v5.MatchOption{
+			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
+		},
+	)
+
+	// Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(app.Ctx)
+	defer cancel()
 
 	// Handle signals for graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sigCh := make(chan go_os.Signal, 1)
+	app.Signal.Notify(sigCh, go_os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		log.Info("Received signal, initiating shutdown...",
+		app.Logger.Info("Received signal, initiating shutdown...",
 			zap.String("signal", sig.String()))
 		cancel()
+
+		app.Clock.Sleep(SHUTDOWN_TIMEOUT)
+		app.Logger.Error("Shutdown timed out, forcing exit...",
+			zap.Duration("timeout", SHUTDOWN_TIMEOUT))
+
+		if config.SentryConfig.IsEnabled() {
+			sentry.Flush(1 * time.Second)
+		}
+
+		app.OS.Exit(1)
 	}()
 
-	// Initialize DBus client
-	mo := dbus.WithMatchPathNamespace(dbus.ObjectPath("/com/feralfile/sysmonitord"))
-	dbusClient := godbus.NewDBusClient(ctx, log, DBUS_NAME, mo)
-	err = dbusClient.Start()
+	// Run the app
+	err = app.run(ctx)
 	if err != nil {
-		log.Fatal("DBus init failed", zap.Error(err))
+		app.Logger.Fatal("Failed to run app", zap.Error(err))
 	}
-	defer func() {
-		_ = dbusClient.Stop()
-	}()
+}
 
-	// Initialize vmagent client
-	var vmagentURL string
-	if config.VmagentConfig != nil && config.VmagentConfig.URL != "" {
-		vmagentURL = config.VmagentConfig.URL
-	}
-	vmagentClient := NewVmagentClient(vmagentURL, log)
+func (app *app) run(ctx context.Context) error {
+	// Start watchdog
+	go app.Watchdog.Start(ctx)
+	defer app.Watchdog.Stop()
 
-	// Initialize system command executor
-	commandHandler := NewCommandHandler(log, vmagentClient)
-
-	// Initialize CDP client
-	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, log)
-	err = cdpClient.Init(ctx)
+	// Initialize CDP
+	err := app.CDP.Init(ctx)
 	if err != nil {
-		log.Fatal("CDP init failed", zap.Error(err))
+		return err
 	}
-	defer cdpClient.Close()
+	defer app.CDP.Close()
 
-	// Initialize resource monitors
-	ramHandler := NewMemoryHandler(log, commandHandler)
-	diskHandler := NewDiskHandler(log, commandHandler)
-	gpuHandler := NewGPUHandler(log, commandHandler)
-	cpuHandler := NewCPUHandler(log, cdpClient)
-	defer gpuHandler.GracefulShutdown(ctx)
+	// Initialize SystemdMonitor
+	app.SystemdMonitor.Start(ctx)
+	defer app.SystemdMonitor.Stop()
 
-	// Initialize mediator
-	mediator := NewMediator(dbusClient, diskHandler, ramHandler, gpuHandler, cpuHandler, log)
-	mediator.Start()
-	defer mediator.Stop()
+	// Initialize ChromiumMonitor
+	app.ChromiumMonitor.Start(ctx)
+	defer app.ChromiumMonitor.Stop()
 
-	// Create a WaitGroup to track all the monitoring goroutines
-	var wg sync.WaitGroup
+	// Initialize EventWatcher
+	app.EventWatcher.Start()
+	defer app.EventWatcher.Stop()
 
-	// Start systemd watchdog
-	systemdWatchdog := NewSystemdWatchdog(log)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		systemdWatchdog.Start(ctx)
-	}()
-
-	// Start Chromium monitor
-	chromiumMonitor := NewChromiumMonitor(config.CDPConfig.Endpoint, log, commandHandler)
-	defer chromiumMonitor.Stop()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		chromiumMonitor.Start(ctx)
-	}()
-
-	// Start Systemd monitor
-	systemdMonitor := NewSystemdMonitor(cdpClient, log, commandHandler)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		systemdMonitor.Start(ctx)
-	}()
-
-	// Notify systemd that we're ready
-	if err := systemdWatchdog.NotifyReady(); err != nil {
-		log.Warn("Failed to notify systemd, but continuing", zap.Error(err))
+	// send ready notification to systemd
+	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
+	if err != nil {
+		app.Logger.Error("Failed to notify systemd", zap.Error(err))
+	}
+	if !sent {
+		app.Logger.Warn("Failed to notify systemd, notification not supported. It could because NOTIFY_SOCKET is unset")
 	}
 
-	// Block until context is done (cancel is called)
+	app.Logger.Info("watchdog started successfully")
+
 	<-ctx.Done()
-	log.Info("Shutdown signal received, cleaning up...")
 
-	// Wait for all goroutines to finish (with timeout)
-	waitCh := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(waitCh)
-	}()
+	app.Logger.Info("watchdog shutdown completed")
+	return nil
+}
 
-	select {
-	case <-waitCh:
-		log.Info("All goroutines have terminated cleanly")
-	case <-time.After(GOROUTINE_TIMEOUT):
-		log.Warn("Some goroutines did not terminate in time")
+// initializeApp initializes the app with real dependencies
+func initializeApp(
+	logger *zap.Logger,
+	cdpEndpoint string,
+	vmagentURL string,
+	dbusName string,
+	dbusOpts []dbus_v5.MatchOption,
+) *app {
+	// Basic components
+	ctx := context.Background()
+
+	// Wrappers
+	clock := wrapper.NewClock()
+	os := wrapper.NewOS()
+	signal := wrapper.NewSignal()
+	httpClient := wrapper.NewHTTPClient(15 * time.Second)
+	io := wrapper.NewIO()
+	json := wrapper.NewJSON()
+	exec := wrapper.NewExec()
+	daemon := wrapper.NewDaemon()
+	d := &websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
 	}
+	webSocketDialer := wrapper.NewWebSocketDialer(d)
 
-	log.Info("feral-watchdog daemon shutdown complete")
+	// Components
+	// CDP
+	cdp := cdp.New(&cdp.Config{Endpoint: cdpEndpoint}, logger, webSocketDialer, io, json, httpClient)
+
+	// VmagentClient
+	vmagentClient := vmagent.NewClient(vmagentURL, logger, httpClient, io)
+
+	// Watchdog
+	watchdog := watchdog.New(logger)
+
+	// DBus
+	dbusClient := godbus.NewDBusClient(ctx, logger, dbusName, dbusOpts...)
+
+	// Executor
+	commandExecutor := command.NewCommandExecutor(logger, vmagentClient, exec)
+
+	// SystemdMonitor
+	systemdMonitor := monitor.NewSystemdMonitor(cdp, commandExecutor, logger)
+
+	// ChromiumMonitor
+	chromiumMonitor := monitor.NewChromiumMonitor(cdpEndpoint, logger, commandExecutor, httpClient, clock, io)
+
+	// EventWatcher
+	diskHandler := event.NewDiskHandler(logger, commandExecutor, clock)
+	memoryHandler := event.NewMemoryHandler(logger, commandExecutor, clock)
+	gpuHandler := event.NewGPUHandler(logger, commandExecutor, clock)
+	cpuHandler := event.NewCPUHandler(logger, cdp, clock)
+	eventWatcher := event.New(dbusClient, diskHandler, memoryHandler, gpuHandler, cpuHandler, json, logger)
+
+	// DBus
+	return &app{
+		Ctx:             ctx,
+		Logger:          logger,
+		Clock:           clock,
+		OS:              os,
+		Signal:          signal,
+		JSON:            json,
+		Exec:            exec,
+		Daemon:          daemon,
+		CDP:             cdp,
+		Executor:        commandExecutor,
+		SystemdMonitor:  systemdMonitor,
+		ChromiumMonitor: chromiumMonitor,
+		VmAgentClient:   vmagentClient,
+		EventWatcher:    eventWatcher,
+		Watchdog:        watchdog,
+	}
 }

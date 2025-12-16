@@ -54,12 +54,15 @@ func (sc *SentryConfig) IsEnabled() bool {
 //go:generate mockgen -source=logger.go -destination=../mocks/logger.go -package=mocks -mock_names=LoggerManager=MockLoggerManager
 type LoggerManager interface {
 	New(debug bool) (*zap.Logger, error)
-	AddSentry(logger *zap.Logger, sentryClient *sentry.Client) (*zap.Logger, error)
+	SetGlobalTopicID(topicID string)
+	AddSentry(logger *zap.Logger, config SentryConfig) (*zap.Logger, error)
 	FlushSentry(timeout time.Duration)
 }
 
 type defaultLoggerManager struct {
-	loggerLock sync.Mutex
+	loggerLock   sync.Mutex
+	sentryClient *sentry.Client
+	sentryHub    *sentry.Hub
 }
 
 func NewLoggerManager() LoggerManager {
@@ -91,18 +94,33 @@ func (m *defaultLoggerManager) New(debug bool) (*zap.Logger, error) {
 }
 
 // AddSentry integrates Sentry into the provided logger
-func (m *defaultLoggerManager) AddSentry(logger *zap.Logger, sentryClient *sentry.Client) (*zap.Logger, error) {
+func (m *defaultLoggerManager) AddSentry(logger *zap.Logger, config SentryConfig) (*zap.Logger, error) {
 	m.loggerLock.Lock()
 	defer m.loggerLock.Unlock()
 
+	sc, err := sentry.NewClient(sentry.ClientOptions{
+		Dsn:              config.DSN,
+		Debug:            config.GetDebug(),
+		SampleRate:       config.GetSampleRate(),
+		Environment:      config.Environment,
+		Release:          config.Release,
+		SendDefaultPII:   true,
+		AttachStacktrace: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	m.sentryClient = sc
+	m.sentryHub = sentry.NewHub(m.sentryClient, sentry.NewScope())
+
 	cfg := zapsentry.Configuration{
-		Level:             zapcore.ErrorLevel, //when to send message to sentry
-		EnableBreadcrumbs: true,               // enable sending breadcrumbs to Sentry
-		BreadcrumbLevel:   zapcore.InfoLevel,  // at what level should we sent breadcrumbs to sentry, this level can't be higher than `Level`
+		Level:             zapcore.ErrorLevel, // when to send message to sentry
+		EnableBreadcrumbs: false,
 		Tags:              map[string]string{},
+		Hub:               m.sentryHub,
 	}
 
-	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(sentryClient))
+	core, err := zapsentry.NewCore(cfg, zapsentry.NewSentryClientFromClient(m.sentryClient))
 	if err != nil {
 		return nil, err
 	}
@@ -114,8 +132,27 @@ func (m *defaultLoggerManager) AddSentry(logger *zap.Logger, sentryClient *sentr
 func (m *defaultLoggerManager) FlushSentry(timeout time.Duration) {
 	m.loggerLock.Lock()
 	defer m.loggerLock.Unlock()
+	if m.sentryClient == nil {
+		return
+	}
+	m.sentryClient.Flush(timeout)
+}
 
-	sentry.Flush(timeout)
+// SetGlobalTopicID sets the topic ID in the global Sentry scope
+// This ensures all Sentry events include the topic ID for better filtering and debugging
+func (m *defaultLoggerManager) SetGlobalTopicID(topicID string) {
+	m.loggerLock.Lock()
+	defer m.loggerLock.Unlock()
+
+	if topicID == "" || m.sentryHub == nil {
+		return
+	}
+	m.sentryHub.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetTag("topic_id", topicID)
+		scope.SetContext("relayer", map[string]interface{}{
+			"topic_id": topicID,
+		})
+	})
 }
 
 // Global instance for backward compatibility
@@ -126,9 +163,15 @@ func New(debug bool) (*zap.Logger, error) {
 	return globalLoggerManager.New(debug)
 }
 
+// SetGlobalTopicID sets the topic ID in the global Sentry scope
+// This ensures all Sentry events include the topic ID for better filtering and debugging
+func SetGlobalTopicID(topicID string) {
+	globalLoggerManager.SetGlobalTopicID(topicID)
+}
+
 // AddSentry integrates Sentry into the provided logger
-func AddSentry(logger *zap.Logger, sentryClient *sentry.Client) (*zap.Logger, error) {
-	return globalLoggerManager.AddSentry(logger, sentryClient)
+func AddSentry(logger *zap.Logger, config SentryConfig) (*zap.Logger, error) {
+	return globalLoggerManager.AddSentry(logger, config)
 }
 
 // FlushSentry flushes any pending Sentry events

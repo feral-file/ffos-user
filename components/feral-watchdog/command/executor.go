@@ -1,18 +1,21 @@
-package main
+package command
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"sync"
 
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-watchdog/vmagent"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/wrapper"
 )
 
 const (
 	SYSTEMD_SERVICE_HANG_THRESHOLD_SECOND int64 = 90
 
+	// Systemd service status
 	SYSTEMD_SERVICE_STATUS_ACTIVE   SystemdServiceStatus = "active"
 	SYSTEMD_SERVICE_STATUS_FAILED   SystemdServiceStatus = "failed"
 	SYSTEMD_SERVICE_STATUS_INACTIVE SystemdServiceStatus = "inactive"
@@ -24,28 +27,47 @@ func (s SystemdServiceStatus) AsPointer() *SystemdServiceStatus {
 	return &s
 }
 
-// CommandHandler implements system health checking and remediation actions
-type CommandHandler struct {
-	logger            *zap.Logger
-	vmagentClient     *VmagentClient
-	mu                sync.Mutex
+//go:generate mockgen -source=executor.go -destination=../mocks/executor.go -package=mocks -mock_names=Executor=MockCommandExecutor
+type Executor interface {
+	// RestartKiosk attempts to restart the chromium-kiosk service
+	RestartKiosk(ctx context.Context) error
+
+	// RebootSystem initiates a system reboot
+	RebootSystem(ctx context.Context, reason vmagent.CrashReason) error
+
+	// CleanupPacmanCache cleans up the pacman cache
+	CleanupPacmanCache(ctx context.Context) error
+
+	// CheckSystemdUserServiceStatus checks the status of a systemd user service
+	CheckSystemdUserServiceStatus(ctx context.Context, serviceName string) (*SystemdServiceStatus, error)
+}
+
+type executor struct {
+	mu sync.Mutex
+
+	// Dependencies
+	exec          wrapper.Exec
+	vmagentClient vmagent.Client
+	logger        *zap.Logger
+
+	// State
 	isRestartingKiosk bool
 	isCleaningDisk    bool
 }
 
-func NewCommandHandler(logger *zap.Logger, vmagentClient *VmagentClient) *CommandHandler {
-	return &CommandHandler{
+func NewCommandExecutor(logger *zap.Logger, vmagentClient vmagent.Client, exec wrapper.Exec) Executor {
+	return &executor{
 		logger:        logger,
 		vmagentClient: vmagentClient,
+		exec:          exec,
 	}
 }
 
-// restartKiosk attempts to restart the chromium-kiosk service
-func (c *CommandHandler) restartKiosk(ctx context.Context) {
+func (c *executor) RestartKiosk(ctx context.Context) error {
 	c.mu.Lock()
 	if c.isRestartingKiosk {
 		c.mu.Unlock()
-		return
+		return nil
 	}
 
 	c.isRestartingKiosk = true
@@ -57,41 +79,46 @@ func (c *CommandHandler) restartKiosk(ctx context.Context) {
 		c.mu.Unlock()
 	}()
 
-	cmd := exec.CommandContext(ctx, "systemctl", "--user", "restart", "chromium-kiosk.service")
+	cmd := c.exec.CommandContext(ctx, "systemctl", "--user", "restart", "chromium-kiosk.service")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		c.logger.Error("Failed to restart chromium-kiosk service",
+		c.logger.Warn("Failed to restart chromium-kiosk service",
 			zap.Error(err),
 			zap.ByteString("output", output))
-	} else {
-		c.logger.Info("Successfully restarted chromium-kiosk service")
+		return err
 	}
+
+	return nil
 }
 
-// rebootSystem initiates a system reboot
-func (c *CommandHandler) rebootSystem(ctx context.Context, reason CrashReason) {
+func (c *executor) RebootSystem(ctx context.Context, reason vmagent.CrashReason) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// Send crash_reboot metric to vmagent before rebooting
 	if c.vmagentClient != nil {
-		c.vmagentClient.SendCrashRebootMetric(ctx, reason)
+		if err := c.vmagentClient.SendCrashRebootMetric(ctx, reason); err != nil {
+			c.logger.Warn("Failed to send crash_reboot metric", zap.Error(err))
+		}
 	} else {
 		c.logger.Warn("Vmagent client is nil, skipping crash_reboot metric")
 	}
 
-	cmd := exec.CommandContext(ctx, "sudo", "systemctl", "reboot")
+	cmd := c.exec.CommandContext(ctx, "sudo", "systemctl", "reboot")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		c.logger.Error("Failed to reboot system",
+		c.logger.Warn("Failed to reboot system",
 			zap.Error(err),
 			zap.ByteString("output", output))
+		return err
 	}
+
+	return nil
 }
 
-func (c *CommandHandler) cleanupPacmanCache(ctx context.Context) {
+func (c *executor) CleanupPacmanCache(ctx context.Context) error {
 	c.mu.Lock()
 	if c.isCleaningDisk {
 		c.mu.Unlock()
-		return
+		return nil
 	}
 
 	c.isCleaningDisk = true
@@ -104,33 +131,30 @@ func (c *CommandHandler) cleanupPacmanCache(ctx context.Context) {
 	}()
 
 	// Clean pacman cache
-	cmd := exec.CommandContext(ctx, "sudo", "pacman", "-Scc", "--noconfirm")
+	cmd := c.exec.CommandContext(ctx, "sudo", "pacman", "-Scc", "--noconfirm")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		c.logger.Error("Failed to clean pacman cache",
+		c.logger.Warn("Failed to clean pacman cache",
 			zap.Error(err),
 			zap.ByteString("output", output))
+		return err
 	}
+
+	return nil
 }
 
-func (c *CommandHandler) checkSystemdUserServiceStatus(ctx context.Context, serviceName string) (*SystemdServiceStatus, error) {
+func (c *executor) CheckSystemdUserServiceStatus(ctx context.Context, svc string) (*SystemdServiceStatus, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !systemdServices[serviceName] {
-		c.logger.Error("unauthorized service name",
-			zap.String("service", serviceName))
-		return nil, fmt.Errorf("unauthorized service: %s", serviceName)
-	}
-
-	cmd := exec.CommandContext(ctx, "systemctl",
-		"--user", "show", serviceName,
+	cmd := c.exec.CommandContext(ctx, "systemctl",
+		"--user", "show", svc,
 		"--property=ActiveState,ExecMainExitTimestampMonotonic",
 		"--no-page")
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		c.logger.Error("Failed to check service status",
-			zap.String("service", serviceName),
+			zap.String("service", svc),
 			zap.Error(err),
 			zap.ByteString("output", output))
 		return nil, err
@@ -157,7 +181,7 @@ func (c *CommandHandler) checkSystemdUserServiceStatus(ctx context.Context, serv
 			return nil, errors.New("ExecMainExitTimestampMonotonic not found in service status")
 		}
 
-		nowCmd := exec.CommandContext(ctx, "cat", "/proc/uptime")
+		nowCmd := c.exec.CommandContext(ctx, "cat", "/proc/uptime")
 		nowOut, nowErr := nowCmd.CombinedOutput()
 		if nowErr != nil {
 			c.logger.Error("Failed to get system uptime",
@@ -182,7 +206,7 @@ func (c *CommandHandler) checkSystemdUserServiceStatus(ctx context.Context, serv
 		uptimeMicros := int64(uptimeSec * 1e6)
 		if (uptimeMicros-exitTsMicros)/1e6 < SYSTEMD_SERVICE_HANG_THRESHOLD_SECOND {
 			c.logger.Warn("Service is in failed state but within hang threshold, might be restarting",
-				zap.String("service", serviceName),
+				zap.String("service", svc),
 				zap.Int64("failed_seconds", (uptimeMicros-exitTsMicros)/1e6))
 			return SYSTEMD_SERVICE_STATUS_ACTIVE.AsPointer(), nil
 		}

@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/wrapper"
+	"github.com/feral-file/ffos-user/components/feral-watchdog/wrapper"
 )
 
 var (
@@ -43,75 +44,83 @@ type Config struct {
 	Endpoint string `json:"endpoint"`
 }
 
-//go:generate mockgen -source=cdp.go -destination=../mocks/mock_cdp.go -package=mocks -mock_names=ClientInterface=MockCDPClient
-type ClientInterface interface {
+//go:generate mockgen -source=cdp.go -destination=../mocks/cdp.go -package=mocks -mock_names=CDP=MockCDP
+type CDP interface {
+	// Init initializes the CDP connection
 	Init(ctx context.Context) error
-	Send(method string, params map[string]interface{}) (interface{}, error)
+
+	// Initialized returns true if the CDP connection is initialized
+	Initialized() bool
+
+	// ShowCriticalTemperature shows the critical temperature page
+	ShowCriticalTemperature(ctx context.Context) error
+
+	// ShowServiceFailedToStart shows the service failed to start page
+	ShowServiceFailedToStart(ctx context.Context) error
+
+	// Close closes the CDP connection
 	Close()
 }
 
-type Client struct {
+type cdp struct {
 	mu sync.Mutex
 
-	// Wrappers to be injected
-	dialer wrapper.WebSocketDialerInterface
-	io     wrapper.IOInterface
-	json   wrapper.JSONInterface
-	http   wrapper.HTTPInterface
+	// Dependencies
+	dialer     wrapper.WebSocketDialer
+	io         wrapper.IO
+	json       wrapper.JSON
+	httpClient wrapper.HTTPClient
+	logger     *zap.Logger
 
-	// Internal state
-	conn           wrapper.WebSocketConnInterface
+	// State
+	conn           wrapper.WebSocketConn
 	reqID          int
 	endpoint       string
 	isReconnecting bool
 	doneChan       chan struct{}
-
-	// Logger
-	logger *zap.Logger
 }
 
-// NewClient creates a new CDP client with custom injected wrappers
-func NewClient(
+// New creates a new CDP client with custom injected wrappers
+func New(
 	config *Config,
 	logger *zap.Logger,
-	dialer wrapper.WebSocketDialerInterface,
-	io wrapper.IOInterface,
-	json wrapper.JSONInterface,
-	http wrapper.HTTPInterface,
-) *Client {
-	return &Client{
-		dialer:         dialer,
+	wsDialer wrapper.WebSocketDialer,
+	io wrapper.IO,
+	json wrapper.JSON,
+	httpClient wrapper.HTTPClient,
+) CDP {
+	return &cdp{
+		dialer:         wsDialer,
 		io:             io,
 		json:           json,
-		http:           http,
+		httpClient:     httpClient,
 		endpoint:       config.Endpoint,
 		reqID:          0,
 		logger:         logger,
 		isReconnecting: false,
+		doneChan:       make(chan struct{}),
 	}
 }
 
 // NewDefault creates a new CDP client with the default wrappers
-func NewDefault(config *Config, logger *zap.Logger) *Client {
-	return NewClient(
+func NewDefault(config *Config, logger *zap.Logger) CDP {
+	return New(
 		config,
 		logger,
 		wrapper.NewWebSocketDialer(websocket.DefaultDialer),
 		wrapper.NewIO(),
 		wrapper.NewJSON(),
-		wrapper.NewHTTP(),
+		wrapper.NewHTTPClient(time.Second*15),
 	)
 }
 
-// Initialized returns true if the CDP connection is initialized
-func (c *Client) Initialized() bool {
+func (c *cdp) Initialized() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.conn != nil
 }
 
-// Init fetches WS endpoint and dials Chromium
-func (c *Client) Init(ctx context.Context) error {
+func (c *cdp) Init(ctx context.Context) error {
 	c.logger.Info("Initializing CDP", zap.String("endpoint", c.endpoint))
 
 	// Ensure the relayer is not connected
@@ -121,15 +130,14 @@ func (c *Client) Init(ctx context.Context) error {
 		return ErrAlreadyInitialized
 	}
 
-	err := c.initLocked(ctx)
+	err := c.init(ctx)
 	c.mu.Unlock()
 	return err
 }
 
-// initLocked performs the actual initialization logic (assumes lock is held)
-func (c *Client) initLocked(ctx context.Context) error {
+func (c *cdp) init(ctx context.Context) error {
 	// Fetch JSON with websocket debugger URL
-	resp, err := c.http.Get(c.endpoint + "/json")
+	resp, err := c.httpClient.Get(c.endpoint + "/json")
 	if err != nil {
 		return fmt.Errorf("failed to fetch debug targets: %w", err)
 	}
@@ -201,8 +209,8 @@ func (c *Client) initLocked(ctx context.Context) error {
 	return nil
 }
 
-// Send sends a raw CDP JSON-RPC message and waits for response
-func (c *Client) Send(method string, params map[string]interface{}) (interface{}, error) {
+// send sends a raw CDP JSON-RPC message and waits for response
+func (c *cdp) send(method string, params map[string]interface{}) (interface{}, error) {
 	c.logger.Info("Sending CDP request", zap.String("method", method), zap.Any("params", params))
 
 	c.mu.Lock()
@@ -288,7 +296,8 @@ func (c *Client) Send(method string, params map[string]interface{}) (interface{}
 	}
 }
 
-func (c *Client) IsReconnectionError(err error) bool {
+// isReconnectionError checks if the error is a reconnection error
+func (c *cdp) isReconnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -326,7 +335,8 @@ func (c *Client) IsReconnectionError(err error) bool {
 	return false
 }
 
-func (c *Client) Reconnect(ctx context.Context) error {
+// reconnect attempts to reconnect to the CDP connection
+func (c *cdp) reconnect(ctx context.Context) error {
 	if c.isReconnecting {
 		return nil
 	}
@@ -359,20 +369,19 @@ func (c *Client) Reconnect(ctx context.Context) error {
 	}
 
 	// Re-initialize the connection
-	return c.initLocked(ctx)
+	return c.init(ctx)
 }
 
-// SendCriticalCPUTemperatureNotification sends a critical CPU temperature notification
-func (c *Client) SendCriticalCPUTemperatureNotification(ctx context.Context) error {
+func (c *cdp) ShowCriticalTemperature(ctx context.Context) error {
 	// Send the CDP command
 	params := map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleWatchdogEvent(%q)", CDP_CRITICAL_CPU_TEMPERATURE_EVENT),
 	}
 
-	_, err := c.Send(METHOD_EVALUATE, params)
+	_, err := c.send(METHOD_EVALUATE, params)
 	if err != nil {
-		if c.IsReconnectionError(err) {
-			return c.Reconnect(ctx)
+		if c.isReconnectionError(err) {
+			return c.reconnect(ctx)
 		}
 
 		return err
@@ -382,20 +391,31 @@ func (c *Client) SendCriticalCPUTemperatureNotification(ctx context.Context) err
 	return nil
 }
 
-// Navigate navigates to the specified URL
-func (c *Client) Navigate(ctx context.Context, url string) error {
+func (c *cdp) ShowServiceFailedToStart(ctx context.Context) error {
+	message := SERVICE_FAILED_TO_START_MESSAGE
+	messageURL := MSG_URL_PREFIX + message
+	err := c.navigate(ctx, messageURL)
+	if err != nil {
+		return fmt.Errorf("failed to navigate to %s: %w", messageURL, err)
+	}
+	c.logger.Info("Navigated to", zap.String("url", messageURL))
+	return nil
+}
+
+// navigate navigates to the specified URL
+func (c *cdp) navigate(ctx context.Context, url string) error {
 	c.logger.Info("CDP: Navigating to", zap.String("url", url))
 	params := map[string]interface{}{
 		"url": url,
 	}
-	_, err := c.Send(METHOD_NAVIGATE, params)
+	_, err := c.send(METHOD_NAVIGATE, params)
 	if err != nil {
-		if c.IsReconnectionError(err) {
-			if reconnErr := c.Reconnect(ctx); reconnErr != nil {
+		if c.isReconnectionError(err) {
+			if reconnErr := c.reconnect(ctx); reconnErr != nil {
 				return fmt.Errorf("failed to reconnect: %w", reconnErr)
 			}
 			// Retry navigation after reconnect
-			_, err = c.Send(METHOD_NAVIGATE, params)
+			_, err = c.send(METHOD_NAVIGATE, params)
 			if err != nil {
 				return fmt.Errorf("failed to navigate to %s: %w", url, err)
 			}
@@ -406,20 +426,7 @@ func (c *Client) Navigate(ctx context.Context, url string) error {
 	return nil
 }
 
-// ShowServiceFailedToStartPage navigates to the service failed to start page
-func (c *Client) ShowServiceFailedToStartPage(ctx context.Context) error {
-	message := SERVICE_FAILED_TO_START_MESSAGE
-	messageURL := MSG_URL_PREFIX + message
-	err := c.Navigate(ctx, messageURL)
-	if err != nil {
-		return fmt.Errorf("failed to navigate to %s: %w", messageURL, err)
-	}
-	c.logger.Info("Navigated to", zap.String("url", messageURL))
-	return nil
-}
-
-// Close closes the CDP connection
-func (c *Client) Close() {
+func (c *cdp) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
