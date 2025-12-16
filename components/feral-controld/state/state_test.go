@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 )
 
 type testSetup struct {
@@ -55,8 +57,7 @@ func TestStateManager_Load_Success_ExistingFile(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	stateFile := "/home/feralfile/.state/controld.state"
-	stateDir := filepath.Dir(stateFile)
+	stateDir := filepath.Dir(constants.STATE_FILE)
 	stateData := `{
 		"connectedDevice": {
 			"device_id": "test-device-123",
@@ -75,7 +76,7 @@ func TestStateManager_Load_Success_ExistingFile(t *testing.T) {
 		Times(1)
 
 	ts.mockOS.EXPECT().
-		ReadFile(stateFile).
+		ReadFile(constants.STATE_FILE).
 		Return([]byte(stateData), nil).
 		Times(1)
 
@@ -117,7 +118,7 @@ func TestStateManager_Load_Success_FileNotExists(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	notFoundErr := &os.PathError{Op: "open", Path: "/home/feralfile/.state/controld.state", Err: os.ErrNotExist}
+	notFoundErr := &os.PathError{Op: "open", Path: constants.STATE_FILE, Err: os.ErrNotExist}
 
 	ts.mockOS.EXPECT().
 		MkdirAll(gomock.Any(), gomock.Any()).
@@ -569,8 +570,7 @@ func TestStateManager_ConcurrentLoad(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	stateFile := "/home/feralfile/.state/controld.state"
-	stateDir := filepath.Dir(stateFile)
+	stateDir := filepath.Dir(constants.STATE_FILE)
 	stateData := `{
 		"connectedDevice": {
 			"device_id": "concurrent-device-123",
@@ -592,7 +592,7 @@ func TestStateManager_ConcurrentLoad(t *testing.T) {
 
 	// Expect ReadFile to return state data (called once per goroutine)
 	ts.mockOS.EXPECT().
-		ReadFile(stateFile).
+		ReadFile(constants.STATE_FILE).
 		Return([]byte(stateData), nil).
 		Times(numGoroutines)
 
@@ -752,8 +752,7 @@ func TestStateManager_ConcurrentLoadAndSaveInterference(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	stateFile := "/home/feralfile/.state/controld.state"
-	stateDir := filepath.Dir(stateFile)
+	stateDir := filepath.Dir(constants.STATE_FILE)
 
 	// Initial state data (what's in the file before save)
 	initialStateData := `{
@@ -810,7 +809,7 @@ func TestStateManager_ConcurrentLoadAndSaveInterference(t *testing.T) {
 
 	// Setup expectations for file reads with timing simulation
 	ts.mockOS.EXPECT().
-		ReadFile(stateFile).
+		ReadFile(constants.STATE_FILE).
 		DoAndReturn(func(path string) ([]byte, error) {
 			// Return data based on whether save has completed
 			if saveHasCompleted {
@@ -966,7 +965,7 @@ func TestState_Load_Success(t *testing.T) {
 	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
 	state.InjectStateManagerForTesting(sm)
 
-	notFoundErr := &os.PathError{Op: "open", Path: "/home/feralfile/.state/controld.state", Err: os.ErrNotExist}
+	notFoundErr := &os.PathError{Op: "open", Path: constants.STATE_FILE, Err: os.ErrNotExist}
 
 	ts.mockOS.EXPECT().
 		MkdirAll(gomock.Any(), gomock.Any()).
