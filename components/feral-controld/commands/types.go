@@ -23,8 +23,12 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_SCREEN_ROTATION:      true,
 	CMD_SHUTDOWN:             true,
 	CMD_REBOOT:               true,
+	CMD_ANALYTICS_TOGGLE:     true,
+	CMD_BETA_FEATURES_TOGGLE: true,
 	CMD_DEVICE_STATUS:        true,
 	CMD_UPDATE_TO_LATEST:     true,
+	CMD_FACTORY_RESET:        true,
+	CMD_UPLOAD_LOGS:          true,
 }
 
 type Command struct {
@@ -47,9 +51,13 @@ const (
 	CMD_SCREEN_ROTATION      Type = "rotate"
 	CMD_SHUTDOWN             Type = "shutdown"
 	CMD_REBOOT               Type = "reboot"
+	CMD_ANALYTICS_TOGGLE     Type = "analyticsToggle"
+	CMD_BETA_FEATURES_TOGGLE Type = "betaFeaturesToggle"
 	CMD_DEVICE_STATUS        Type = "getDeviceStatus"
 	CMD_UPDATE_TO_LATEST     Type = "updateToLatestVersion"
 	CMD_DISPLAY_PLAYLIST     Type = "displayPlaylist"
+	CMD_FACTORY_RESET        Type = "factoryReset"
+	CMD_UPLOAD_LOGS          Type = "uploadLogs"
 )
 
 func (c Type) DeviceCtlCommand() bool {

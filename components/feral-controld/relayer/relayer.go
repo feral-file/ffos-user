@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -229,7 +230,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 	} else {
 		r.logger.Warn("Topic ID is empty, connecting without topic ID",
 			zap.String("connectURL", connectURL),
-			zap.String("stateFile", "/home/feralfile/.state/controld.state"))
+			zap.String("stateFile", constants.STATE_FILE))
 	}
 
 	conn, resp, err := r.dialer.DialContext(ctx, connectURL, nil)

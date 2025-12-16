@@ -1,6 +1,5 @@
 use crate::constant;
 use crate::encoding;
-use crate::log_uploader;
 use crate::system;
 use crate::wifi_utils::SSIDsCacher;
 use bluer::{
@@ -32,9 +31,8 @@ pub enum BleStatus {
     WifiRequired = constant::BLE_ERR_CODE_WIFI_REQUIRED,
     DeviceUpdating = constant::BLE_ERR_CODE_DEVICE_UPDATING,
     VersionCheckFailed = constant::BLE_ERR_CODE_VERSION_CHECK_FAILED,
+    VersionTooOld = constant::BLE_ERR_CODE_VERSION_TOO_OLD,
     InvalidParams = constant::BLE_ERR_CODE_INVALID_PARAMS,
-    FileError = constant::BLE_ERR_CODE_FILE_ERROR,
-    NetworkError = constant::BLE_ERR_CODE_NETWORK_ERROR,
     UnknownError = constant::BLE_ERR_CODE_UNKNOWN_ERROR,
 }
 
@@ -79,11 +77,13 @@ pub type ConnectWifiCallback = Box<dyn Fn(&str, &str) -> AsyncBleResult + Send +
 pub type KeepWifiCallback = Box<dyn Fn() -> AsyncBleResult + Send + Sync>;
 pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync>>;
+pub type SubmitLogsCallback = Box<dyn Fn(&str, &str, &str) -> AsyncUnit + Send + Sync>;
 
 pub struct BleCallbacks {
     pub bt_connected: BTConnectedCallback,
     pub bt_disconnected: BTDisconnectedCallback,
     pub factory_reset: FactoryResetCallback,
+    pub submit_logs: SubmitLogsCallback,
     pub connect_wifi: ConnectWifiCallback,
     pub keep_wifi: KeepWifiCallback,
     pub get_info: GetInfoCallback,
@@ -314,6 +314,7 @@ impl Ble {
             bt_connected,
             bt_disconnected,
             factory_reset,
+            submit_logs,
             connect_wifi,
             keep_wifi,
             get_info,
@@ -333,6 +334,7 @@ impl Ble {
         let bt_connected_callback = Arc::new(bt_connected);
         let bt_disconnected_callback = Arc::new(bt_disconnected);
         let factory_reset_callback = Arc::new(factory_reset);
+        let submit_logs_callback = Arc::new(submit_logs);
         let connect_wifi_callback = Arc::new(connect_wifi);
         let keep_wifi_callback = Arc::new(keep_wifi);
         let get_info_callback = Arc::new(get_info);
@@ -352,6 +354,7 @@ impl Ble {
                 notifier_for_write,
                 connect_wifi_callback,
                 factory_reset_callback,
+                submit_logs_callback,
                 keep_wifi_callback,
                 get_info_callback,
                 ssids_cacher,
@@ -441,6 +444,7 @@ impl Ble {
         notifier_for_write: Arc<Mutex<Option<CharacteristicNotifier>>>,
         connect_wifi_callback: Arc<ConnectWifiCallback>,
         factory_reset_callback: Arc<FactoryResetCallback>,
+        submit_logs_callback: Arc<SubmitLogsCallback>,
         keep_wifi_callback: Arc<KeepWifiCallback>,
         get_info_callback: Arc<GetInfoCallback>,
         ssids_cacher: Arc<SSIDsCacher>,
@@ -452,6 +456,7 @@ impl Ble {
                 let notifier = notifier_for_write.clone();
                 let connect_wifi_callback = connect_wifi_callback.clone();
                 let factory_reset_callback = factory_reset_callback.clone();
+                let submit_logs_callback = submit_logs_callback.clone();
                 let keep_wifi_callback = keep_wifi_callback.clone();
                 let get_info_callback = get_info_callback.clone();
                 let ssids_cacher = ssids_cacher.clone();
@@ -499,7 +504,8 @@ impl Ble {
                             handle_factory_reset(notifier, reply_id, factory_reset_callback).await
                         }
                         BleCommand::SendLogs => {
-                            handle_submit_logs(notifier, reply_id, params).await
+                            handle_submit_logs(notifier, reply_id, params, submit_logs_callback)
+                                .await
                         }
                         BleCommand::Unknown(raw) => {
                             eprintln!("BLE: Unknown command: {raw}");
@@ -738,15 +744,13 @@ async fn handle_factory_reset(
     cb: Arc<FactoryResetCallback>,
 ) -> Result<(), ReqError> {
     println!("BLE: Factory resetting");
+    // Callback handles both showing the page and executing the reset
     if let Some(cb) = cb.as_ref() {
         cb().await;
     }
-    let status_code = if let Err(e) = system::factory_reset().await {
-        eprintln!("BLE: Failed to factory reset: {e:#?}");
-        [BleStatus::UnknownError.code()]
-    } else {
-        [BleStatus::Success.code()]
-    };
+    // Always return success since the callback handles the reset
+    // The device will reboot anyway if successful
+    let status_code = [BleStatus::Success.code()];
     let mut encoder = encoding::PayloadEncoder::new();
     encoder.push_str(&reply_id);
     encoder.push_bytes(&status_code);
@@ -758,6 +762,7 @@ async fn handle_submit_logs(
     notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
     reply_id: String,
     params: Vec<String>,
+    cb: Arc<SubmitLogsCallback>,
 ) -> Result<(), ReqError> {
     println!("BLE log-submit: start reply_id={reply_id}");
 
@@ -775,48 +780,22 @@ async fn handle_submit_logs(
         return notify_central(notifier, encoder.finish()).await;
     }
 
-    let user_id = &params[0];
-    let api_key = &params[1];
-    let title = &params[2];
+    let user_id = params[0].clone();
+    let api_key = params[1].clone();
+    let title = params[2].clone();
 
     println!("BLE log-submit: user={user_id} title={title}");
 
+    // Trigger the callback without waiting for completion
+    let cb_future = cb(&user_id, &api_key, &title);
+    tokio::spawn(async move {
+        cb_future.await;
+    });
+
+    // Return success immediately
     let mut encoder = encoding::PayloadEncoder::new();
     encoder.push_str(&reply_id);
-
-    // Collect log files
-    println!("BLE log-submit: collecting log files");
-    let log_files = match log_uploader::collect_log_files().await {
-        Ok(files) => files,
-        Err(e) => {
-            eprintln!("BLE log-submit: failed to collect log files: {e}");
-            encoder.push_code(BleStatus::FileError.code());
-            return notify_central(notifier, encoder.finish()).await;
-        }
-    };
-
-    // Create request body
-    let body = log_uploader::create_log_submission_body(
-        title,
-        "Device log submission via BLE",
-        vec!["device-logs".to_string(), "ble-submission".to_string()],
-        log_files,
-    );
-
-    // Submit logs via HTTP
-    println!("BLE log-submit: submitting logs for user={user_id}");
-
-    let result = log_uploader::submit_logs_to_api(user_id, api_key, body).await;
-
-    match result {
-        Ok(_response) => {
-            encoder.push_code(BleStatus::Success.code());
-        }
-        Err(e) => {
-            eprintln!("BLE: ERROR - HTTP submission failed with error code: {e}",);
-            encoder.push_code(BleStatus::NetworkError.code());
-        }
-    }
+    encoder.push_code(BleStatus::Success.code());
 
     notify_central(notifier, encoder.finish()).await
 }

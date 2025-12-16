@@ -47,11 +47,13 @@ use crate::constant;
 struct Target {
     r#type: Option<String>,
     web_socket_debugger_url: Option<String>,
+    url: Option<String>,
 }
 
 pub struct Cdp {
     #[allow(dead_code)]
     ws_url: String,
+    cdp_url: String,
     socket: Arc<Mutex<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
     current_id: AtomicU64,
 }
@@ -64,6 +66,7 @@ impl Cdp {
 
         let cdp = Self {
             ws_url,
+            cdp_url: cdp_url.to_string(),
             socket: Arc::new(Mutex::new(socket)),
             current_id: AtomicU64::new(constant::CDP_ID_START),
         };
@@ -74,11 +77,35 @@ impl Cdp {
     }
 
     /// Asynchronously navigate the page to the given URL via CDP.
+    ///
+    /// For navigation we still go through `send_cmd` so that the command
+    /// format and ID handling stay consistent, but we intentionally ignore
+    /// any error from CDP because Chromium sometimes renders successfully
+    /// without sending a matching response.
     pub async fn navigate(&self, url: &str) -> Result<()> {
         println!("CDP: Navigating to {url}");
-        self.send_cmd("Page.navigate", json!({ "url": url }))
-            .await?;
+        if let Err(e) = self
+            .send_cmd("Page.navigate", json!({ "url": url }))
+            .await
+        {
+            eprintln!("CDP: Ignoring navigate error: {e}");
+        }
         Ok(())
+    }
+
+    /// Get the current URL of the page using the CDP HTTP endpoint.
+    pub async fn get_current_url(&self) -> Result<String> {
+        let targets: Vec<Target> = reqwest::get(&self.cdp_url).await?.json().await?;
+        targets
+            .into_iter()
+            .find_map(|t| {
+                if t.r#type.as_deref() == Some("page") {
+                    Some(t.url.unwrap_or_default())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::Chromium("No current URL found".into()))
     }
 
     /// Send any CDP command and wait for the matching reply.

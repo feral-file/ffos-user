@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/feral-file/godbus"
@@ -14,6 +16,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -1829,14 +1832,13 @@ func TestExecutor_ScreenRotation_Success(t *testing.T) {
 				Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 			// Mock OS ReadFile for config
-			configPath := "/home/feralfile/.state/screen-orientation"
 			if tc.configFileReadError != nil {
 				ts.mockOS.EXPECT().
-					ReadFile(configPath).
+					ReadFile(constants.SCREEN_ORIENTATION_FILE).
 					Return(nil, tc.configFileReadError)
 			} else {
 				ts.mockOS.EXPECT().
-					ReadFile(configPath).
+					ReadFile(constants.SCREEN_ORIENTATION_FILE).
 					Return([]byte(tc.configFileContent), nil)
 			}
 
@@ -1852,7 +1854,7 @@ func TestExecutor_ScreenRotation_Success(t *testing.T) {
 
 			// Mock OS WriteFile for saving new rotation
 			ts.mockOS.EXPECT().
-				WriteFile(configPath, []byte(tc.expectedNewRotation), os.FileMode(0600)).
+				WriteFile(constants.SCREEN_ORIENTATION_FILE, []byte(tc.expectedNewRotation), os.FileMode(0600)).
 				Return(nil)
 
 			// Mock status poller force refresh
@@ -2134,9 +2136,8 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 					Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 				// Mock OS ReadFile for config (normal rotation)
-				configPath := "/home/feralfile/.state/screen-orientation"
 				ts.mockOS.EXPECT().
-					ReadFile(configPath).
+					ReadFile(constants.SCREEN_ORIENTATION_FILE).
 					Return([]byte("normal"), nil)
 
 				// Mock exec.CommandContext for wlr-randr rotation command (clockwise from normal = 270)
@@ -2179,9 +2180,8 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 					Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 				// Mock OS ReadFile for config
-				configPath := "/home/feralfile/.state/screen-orientation"
 				ts.mockOS.EXPECT().
-					ReadFile(configPath).
+					ReadFile(constants.SCREEN_ORIENTATION_FILE).
 					Return([]byte("normal"), nil)
 
 				// Mock exec.CommandContext for wlr-randr rotation command
@@ -2196,7 +2196,7 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 
 				// Mock OS WriteFile to fail (but command should still succeed)
 				ts.mockOS.EXPECT().
-					WriteFile(configPath, []byte("270"), os.FileMode(0600)).
+					WriteFile(constants.SCREEN_ORIENTATION_FILE, []byte("270"), os.FileMode(0600)).
 					Return(errors.New("permission denied"))
 
 				// Mock status poller force refresh (reached despite write failure)
@@ -2233,9 +2233,8 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 					Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil)
 
 				// Mock OS ReadFile for config with invalid content
-				configPath := "/home/feralfile/.state/screen-orientation"
 				ts.mockOS.EXPECT().
-					ReadFile(configPath).
+					ReadFile(constants.SCREEN_ORIENTATION_FILE).
 					Return([]byte("invalid_rotation_value"), nil)
 
 				// Mock exec.CommandContext for wlr-randr rotation command (defaults to normal, clockwise = 270)
@@ -2250,7 +2249,7 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 
 				// Mock OS WriteFile success
 				ts.mockOS.EXPECT().
-					WriteFile(configPath, []byte("270"), os.FileMode(0600)).
+					WriteFile(constants.SCREEN_ORIENTATION_FILE, []byte("270"), os.FileMode(0600)).
 					Return(nil)
 
 				// Mock status poller force refresh
@@ -2291,6 +2290,138 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecutor_AnalyticsToggle_Disable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_ANALYTICS_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": false},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":false}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).
+		Return(nil)
+
+	configDir := filepath.Dir(devicectl.AnalyticsToggleOffFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		WriteFile(devicectl.AnalyticsToggleOffFile, gomock.Any(), os.FileMode(0644)).
+		DoAndReturn(func(path string, data []byte, perm os.FileMode) error {
+			assert.Contains(t, string(data), "disabled")
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_AnalyticsToggle_Enable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_ANALYTICS_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": true},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":true}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			reflect.ValueOf(v).Elem().FieldByName("Enabled").SetBool(true)
+			return nil
+		})
+
+	configDir := filepath.Dir(devicectl.AnalyticsToggleOffFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		IsNotExist(gomock.Any()).
+		Return(true)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_BetaFeaturesToggle_Enable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_BETA_FEATURES_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": true},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":true}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			reflect.ValueOf(v).Elem().FieldByName("Enabled").SetBool(true)
+			return nil
+		})
+
+	configDir := filepath.Dir(devicectl.BetaFeaturesToggleOnFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		WriteFile(devicectl.BetaFeaturesToggleOnFile, gomock.Any(), os.FileMode(0644)).
+		DoAndReturn(func(path string, data []byte, perm os.FileMode) error {
+			assert.Contains(t, string(data), "enabled")
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_BetaFeaturesToggle_Disable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_BETA_FEATURES_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": false},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":false}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).
+		Return(nil)
+
+	configDir := filepath.Dir(devicectl.BetaFeaturesToggleOnFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		IsNotExist(gomock.Any()).
+		Return(true)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
 func TestExecutor_Shutdown_Success(t *testing.T) {
@@ -2689,6 +2820,217 @@ func TestExecutor_UpdateToLatest_CommandError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "failed to execute update to latest command")
+}
+
+func TestExecutor_FactoryReset_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type:      commands.CMD_FACTORY_RESET,
+		Arguments: map[string]interface{}{},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Mock DBus call for factory reset
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_FACTORY_RESET,
+			Body:      []interface{}{},
+		}).
+		Return(nil)
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_FactoryReset_DBusError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type:      commands.CMD_FACTORY_RESET,
+		Arguments: map[string]interface{}{},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Mock DBus call to fail
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, gomock.Any()).
+		Return(errors.New("dbus error"))
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to send factory reset signal")
+}
+
+func TestExecutor_UploadLogs_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_UPLOAD_LOGS,
+		Arguments: map[string]interface{}{
+			"userId": "test-user-id",
+			"apiKey": "test-api-key",
+			"title":  "test-title",
+		},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
+
+	// Mock JSON unmarshaling
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			if args, ok := v.(*struct {
+				UserID string `json:"userId"`
+				APIKey string `json:"apiKey"`
+				Title  string `json:"title"`
+			}); ok {
+				args.UserID = "test-user-id"
+				args.APIKey = "test-api-key"
+				args.Title = "test-title"
+			}
+			return nil
+		})
+
+	// Mock DBus call for upload logs
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
+			Body:      []interface{}{"test-user-id", "test-api-key", "test-title"},
+		}).
+		Return(nil)
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments map[string]interface{}
+	}{
+		{
+			name: "missing userId",
+			arguments: map[string]interface{}{
+				"apiKey": "test-api-key",
+				"title":  "test-title",
+			},
+		},
+		{
+			name: "missing apiKey",
+			arguments: map[string]interface{}{
+				"userId": "test-user-id",
+				"title":  "test-title",
+			},
+		},
+		{
+			name: "missing title",
+			arguments: map[string]interface{}{
+				"userId": "test-user-id",
+				"apiKey": "test-api-key",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			cmd := commands.Command{
+				Type:      commands.CMD_UPLOAD_LOGS,
+				Arguments: tt.arguments,
+			}
+
+			// Mock JSON marshaling
+			ts.mockJSON.EXPECT().
+				Marshal(cmd.Arguments).
+				Return([]byte(`{}`), nil)
+
+			// Mock JSON unmarshaling to return an empty struct
+			ts.mockJSON.EXPECT().
+				Unmarshal(gomock.Any(), gomock.Any()).
+				Return(nil)
+
+			// Execute command
+			result, err := ts.executor.Execute(ts.ctx, cmd)
+			assert.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "missing required arguments")
+		})
+	}
+}
+
+func TestExecutor_UploadLogs_DBusError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_UPLOAD_LOGS,
+		Arguments: map[string]interface{}{
+			"userId": "test-user-id",
+			"apiKey": "test-api-key",
+			"title":  "test-title",
+		},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
+
+	// Mock JSON unmarshaling
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			if args, ok := v.(*struct {
+				UserID string `json:"userId"`
+				APIKey string `json:"apiKey"`
+				Title  string `json:"title"`
+			}); ok {
+				args.UserID = "test-user-id"
+				args.APIKey = "test-api-key"
+				args.Title = "test-title"
+			}
+			return nil
+		})
+
+	// Mock DBus call to fail
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, gomock.Any()).
+		Return(errors.New("dbus error"))
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to send upload logs signal")
 }
 
 func TestExecutor_NewHandler(t *testing.T) {

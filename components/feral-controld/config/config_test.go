@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 
@@ -55,7 +56,6 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	configFile := "/home/feralfile/.config/controld.json"
 	configData := `{
 		"cdp": {
 			"endpoint": "http://localhost:9222"
@@ -72,7 +72,7 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 
 	// Setup expectations
 	ts.mockOS.EXPECT().
-		ReadFile(configFile).
+		ReadFile(constants.CONFIG_FILE).
 		Return([]byte(configData), nil).
 		Times(1)
 
@@ -117,7 +117,6 @@ func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	configFile := "/home/feralfile/.config/controld.json"
 	configData := `{
 		"cdp": {
 			"endpoint": "http://localhost:9222"
@@ -126,7 +125,7 @@ func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
 
 	// First load - should read from file
 	ts.mockOS.EXPECT().
-		ReadFile(configFile).
+		ReadFile(constants.CONFIG_FILE).
 		Return([]byte(configData), nil).
 		Times(1)
 
@@ -167,11 +166,10 @@ func TestConfigManager_Load_Errors(t *testing.T) {
 		{
 			name: "config file not found",
 			setupFunc: func(ts *testSetup) {
-				configFile := "/home/feralfile/.config/controld.json"
-				notFoundErr := &os.PathError{Op: "open", Path: configFile, Err: os.ErrNotExist}
+				notFoundErr := &os.PathError{Op: "open", Path: constants.CONFIG_FILE, Err: os.ErrNotExist}
 
 				ts.mockOS.EXPECT().
-					ReadFile(configFile).
+					ReadFile(constants.CONFIG_FILE).
 					Return(nil, notFoundErr).
 					Times(1)
 
@@ -351,7 +349,6 @@ func TestConfigManager_ConcurrentLoad(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	configFile := "/home/feralfile/.config/controld.json"
 	configData := `{
 		"cdp": {
 			"endpoint": "http://concurrent-test:9222"
@@ -365,7 +362,7 @@ func TestConfigManager_ConcurrentLoad(t *testing.T) {
 
 	// Expect ReadFile to succeed only once (first caller wins, others get cached result)
 	ts.mockOS.EXPECT().
-		ReadFile(configFile).
+		ReadFile(constants.CONFIG_FILE).
 		Return([]byte(configData), nil).
 		Times(1)
 
@@ -434,7 +431,6 @@ func TestConfig_Load_Success(t *testing.T) {
 	cm := config.NewConfigManagerWithDeps(ts.mockOS, ts.mockJSON)
 	config.InjectConfigManagerForTesting(cm)
 
-	configFile := "/home/feralfile/.config/controld.json"
 	configData := `{
 		"cdp": {
 			"endpoint": "http://global-test:9222"
@@ -442,7 +438,7 @@ func TestConfig_Load_Success(t *testing.T) {
 	}`
 
 	ts.mockOS.EXPECT().
-		ReadFile(configFile).
+		ReadFile(constants.CONFIG_FILE).
 		Return([]byte(configData), nil).
 		Times(1)
 

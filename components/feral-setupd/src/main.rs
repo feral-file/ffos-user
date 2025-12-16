@@ -49,30 +49,6 @@ enum Page {
 }
 
 impl Page {
-    fn timestamp(&self) -> i64 {
-        match self {
-            Page::None(ts) => *ts,
-            Page::QRCode(ts) => *ts,
-            Page::Message(ts, _) => *ts,
-            Page::SystemUpgrade(ts) => *ts,
-            Page::FactoryReset(ts) => *ts,
-            Page::WebApp(ts) => *ts,
-            Page::ReflashingRequired(ts, _) => *ts,
-        }
-    }
-
-    fn page_type(&self) -> &str {
-        match self {
-            Page::None(_) => "None",
-            Page::QRCode(_) => "QRCode",
-            Page::Message(_, _) => "Message",
-            Page::SystemUpgrade(_) => "SystemUpgrade",
-            Page::FactoryReset(_) => "FactoryReset",
-            Page::WebApp(_) => "WebApp",
-            Page::ReflashingRequired(_, _) => "ReflashingRequired",
-        }
-    }
-
     /// Check if the page should be kept when bluetooth disconnects
     fn should_keep_on_bt_disconnect(&self) -> bool {
         matches!(
@@ -226,6 +202,7 @@ async fn start_ble(
         bt_connected: callbacks::create_bt_connected_cb(app_state.clone(), chrome.clone()),
         bt_disconnected: callbacks::create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
         factory_reset: callbacks::create_factory_reset_cb(app_state.clone(), chrome.clone()),
+        submit_logs: callbacks::create_submit_logs_cb(),
         connect_wifi: callbacks::create_connect_wifi_cb(app_state.clone(), chrome.clone()),
         keep_wifi: callbacks::create_keep_wifi_cb(app_state.clone(), chrome.clone()),
         get_info: callbacks::create_get_info_cb(app_state.clone()),
@@ -339,6 +316,27 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         qrcode_switch_cb,
     );
 
+    // Listen for factory reset signal
+    let factory_reset_cb =
+        callbacks::create_factory_reset_dbus_cb(app_state.clone(), chrome.clone());
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_FACTORY_RESET,
+        stop_dbus_listener.clone(),
+        factory_reset_cb,
+    );
+
+    // Listen for upload logs signal
+    let upload_logs_cb = callbacks::create_upload_logs_dbus_cb();
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_UPLOAD_LOGS,
+        stop_dbus_listener.clone(),
+        upload_logs_cb,
+    );
+
     stop_dbus_listener
 }
 
@@ -388,7 +386,7 @@ async fn internet_setup_successfully_cb(
                     }
                 });
             }
-            return Err(ble::BleStatus::VersionCheckFailed);
+            return Err(ble::BleStatus::VersionTooOld);
         }
         Ok(false) => {} // Device can be upgraded, continue with normal flow
         Err(e) => {
@@ -598,7 +596,7 @@ mod callbacks {
                 _ => {}
             }
             println!("MAIN: QR switch -> qrcode_requested={qrcode_requested}");
-            task::spawn(async move {
+            tokio::runtime::Handle::current().block_on(async move {
                 if qrcode_requested {
                     let _ = show_qrcode(&app_state, &chromium).await;
                 } else {
@@ -625,6 +623,15 @@ mod callbacks {
         })
     }
 
+    async fn do_factory_reset(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
+        // Show factory reset page
+        let _ = show_factory_reset(chromium, app_state).await;
+        // Execute factory reset
+        if let Err(e) = super::system::factory_reset().await {
+            eprintln!("MAIN: Failed to execute factory reset: {e:#?}");
+        }
+    }
+
     pub fn create_factory_reset_cb(
         app_state: Arc<AppState>,
         chromium: Arc<Cdp>,
@@ -633,9 +640,85 @@ mod callbacks {
             let chromium = chromium.clone();
             let app_state = app_state.clone();
             Box::pin(async move {
-                let _ = show_factory_reset(&chromium, &app_state).await;
+                do_factory_reset(&chromium, &app_state).await;
             })
         }))
+    }
+
+    pub fn create_factory_reset_dbus_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> dbus_utils::ListenCallback {
+        Box::new(move |_msg| {
+            println!("MAIN: Factory reset DBus callback received");
+            let chromium = chromium.clone();
+            let app_state = app_state.clone();
+            task::spawn(async move {
+                do_factory_reset(&chromium, &app_state).await;
+            });
+        })
+    }
+
+    /// Core log upload logic
+    async fn do_upload_logs(user_id: &str, api_key: &str, title: &str, source: &str) {
+        println!("MAIN: Uploading logs with title: {title} (source: {source})");
+
+        // Collect log files
+        let log_files = match super::log_uploader::collect_log_files().await {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("MAIN: Failed to collect log files: {e:#?}");
+                return;
+            }
+        };
+
+        println!("MAIN: Collected {} log files", log_files.len());
+
+        // Create request body with source-specific tags
+        let tags = vec!["device-logs".to_string(), format!("{source}-submission")];
+        let body = super::log_uploader::create_log_submission_body(
+            title,
+            &format!("Device log submission via {source}"),
+            tags,
+            log_files,
+        );
+
+        // Submit logs to API
+        if let Err(e) = super::log_uploader::submit_logs_to_api(user_id, api_key, body).await {
+            eprintln!("MAIN: Failed to submit logs: error code {e}");
+        } else {
+            println!("MAIN: Logs submitted successfully");
+        }
+    }
+
+    pub fn create_submit_logs_cb() -> ble::SubmitLogsCallback {
+        Box::new(move |user_id, api_key, title| {
+            let user_id = user_id.to_string();
+            let api_key = api_key.to_string();
+            let title = title.to_string();
+            Box::pin(async move {
+                do_upload_logs(&user_id, &api_key, &title, "ble").await;
+            })
+        })
+    }
+
+    pub fn create_upload_logs_dbus_cb() -> dbus_utils::ListenCallback {
+        Box::new(move |msg| {
+            println!("MAIN: Upload logs DBus callback received");
+            // Read parameters: user_id, api_key, title
+            let (user_id, api_key, title): (String, String, String) =
+                match msg.read3::<String, String, String>() {
+                    Ok(params) => params,
+                    Err(e) => {
+                        eprintln!("MAIN: Failed to read upload logs parameters: {e:#?}");
+                        return;
+                    }
+                };
+
+            task::spawn(async move {
+                do_upload_logs(&user_id, &api_key, &title, "internet").await;
+            });
+        })
     }
 }
 
@@ -797,18 +880,33 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
         Ok(false) => {} // No update required, proceed with the normal flow
     };
 
-    // No update, show art/qrcode depending on topic ID and pairing state
+    // No update, ensure we have a topic ID if possible and then
+    // show art/qrcode depending on topic ID and pairing state.
     let state_store = &app_state.state_store;
-    let has_topic = state_store.get(persistent_state::TOPIC_ID).is_some();
-    // For backward compatibility, treat missing PAIRED as "already paired".
+    if state_store.get(persistent_state::TOPIC_ID).is_none() {
+        match dbus_utils::get_relayer_info() {
+            Ok(topic_id) => {
+                state_store.set(persistent_state::TOPIC_ID, &topic_id);
+                if let Err(e) = state_store.save() {
+                    eprintln!("MAIN: Error saving persistent state after relayer info: {e:#?}");
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "MAIN: startup_with_internet: can't get relayer data from controld: {e:#?}"
+                );
+            }
+        }
+    }
+    let has_topic_id = state_store.get(persistent_state::TOPIC_ID).is_some();
     let is_paired = state_store
         .get(persistent_state::PAIRED)
         .map(|v| v == "true")
-        .unwrap_or(true);
+        .unwrap_or(false);
 
-    println!("MAIN: startup_with_internet: has_topic={has_topic} is_paired={is_paired}");
+    println!("MAIN: startup_with_internet: has_topic_id={has_topic_id} is_paired={is_paired}");
 
-    if has_topic && is_paired {
+    if has_topic_id && is_paired {
         show_webapp(&app_state, &chrome).await
     } else {
         show_qrcode(&app_state, &chrome).await
@@ -846,18 +944,21 @@ async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
 
 async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let mut page = app_state.page.lock().await;
-    // For webapp, we only navigate if the page is not it already
-    if matches!(*page, Page::WebApp(_)) {
-        return Ok(());
-    }
-
-    // This is to avoid Err Network Changed from Chrome
-    time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
 
     let webapp_url = match cfg::webapp_url().await? {
         Some(url) => url,
         None => constant::WEBAPP_URL.to_string(),
     };
+
+    // For webapp, we only navigate if the page is not it already
+    let current_url = chrome.get_current_url().await?;
+    if current_url.starts_with(&webapp_url) {
+        *page = Page::WebApp(unix_s());
+        return Ok(());
+    }
+
+    // This is to avoid Err Network Changed from Chrome
+    time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
     chrome
         .navigate(&webapp_url)
         .await

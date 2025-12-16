@@ -128,7 +128,7 @@ func createMockTokens() []ffindexer.Token {
 			Metadata: &ffindexer.TokenMetadata{
 				Name:        "Test Token 1",
 				Description: "Test description 1",
-				ImageURL:    "http://example.com/preview1.jpg",
+				ImageURL:    stringPtr("http://example.com/preview1.jpg"),
 			},
 			Owners: &ffindexer.PaginatedOwners{
 				Items: []ffindexer.Owner{
@@ -152,7 +152,7 @@ func createMockTokens() []ffindexer.Token {
 			Metadata: &ffindexer.TokenMetadata{
 				Name:        "Test Token 2",
 				Description: "Test description 2",
-				ImageURL:    "http://example.com/preview2.jpg",
+				ImageURL:    stringPtr("http://example.com/preview2.jpg"),
 			},
 			Owners: &ffindexer.PaginatedOwners{
 				Items: []ffindexer.Owner{
@@ -204,7 +204,7 @@ func createSimpleToken(tokenID, chain string, ownerAddr string, quantity int) ff
 		Metadata: &ffindexer.TokenMetadata{
 			Name:        tokenID,
 			Description: "Test token",
-			ImageURL:    "http://example.com/image.jpg",
+			ImageURL:    stringPtr("http://example.com/image.jpg"),
 		},
 	}
 
@@ -756,7 +756,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 				Metadata: &ffindexer.TokenMetadata{
 					Name:        "Test",
 					Description: "Test token",
-					ImageURL:    "http://example.com/preview.jpg",
+					ImageURL:    stringPtr("http://example.com/preview.jpg"),
 				},
 				Owners: &ffindexer.PaginatedOwners{
 					Items: []ffindexer.Owner{

@@ -3,6 +3,8 @@ package devicectl
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -11,6 +13,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -22,6 +25,12 @@ var CmdOK = struct {
 }{
 	OK: true,
 }
+
+// AnalyticsToggleOffFile is the sentinel file that disables proactive metrics collection.
+const AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
+
+// BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
+const BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
 
 type Device struct {
 	ID       string `json:"device_id"`
@@ -124,10 +133,18 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.shutdown(ctx)
 	case commands.CMD_REBOOT:
 		result, err = e.reboot(ctx)
+	case commands.CMD_ANALYTICS_TOGGLE:
+		result, err = e.setAnalyticsToggle(ctx, bytes)
+	case commands.CMD_BETA_FEATURES_TOGGLE:
+		result, err = e.setBetaFeaturesToggle(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
+	case commands.CMD_FACTORY_RESET:
+		result, err = e.factoryReset(ctx)
+	case commands.CMD_UPLOAD_LOGS:
+		result, err = e.uploadLogs(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -241,8 +258,7 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 
 	// Read current orientation from config file (this is what user perceives)
 	currentIndex := 0 // Default to normal
-	configPath := "/home/feralfile/.state/screen-orientation"
-	configData, err := e.os.ReadFile(configPath)
+	configData, err := e.os.ReadFile(constants.SCREEN_ORIENTATION_FILE)
 	if err == nil && len(configData) > 0 {
 		savedRotation := strings.TrimSpace(string(configData))
 		for i, rot := range rotations {
@@ -277,7 +293,7 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 	}
 
 	// Write rotation value to file
-	if err := e.os.WriteFile(configPath, []byte(newRotation), 0600); err != nil {
+	if err := e.os.WriteFile(constants.SCREEN_ORIENTATION_FILE, []byte(newRotation), 0600); err != nil {
 		e.logger.Warn("Failed to save screen orientation", zap.Error(err))
 	}
 
@@ -604,6 +620,77 @@ func (e *executor) reboot(ctx context.Context) (interface{}, error) {
 	return CmdOK, nil
 }
 
+func (e *executor) setAnalyticsToggle(_ context.Context, args []byte) (interface{}, error) {
+	var toggleArgs struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := e.json.Unmarshal(args, &toggleArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	configDir := filepath.Dir(AnalyticsToggleOffFile)
+
+	if err := e.os.MkdirAll(configDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	if toggleArgs.Enabled {
+		if err := e.removeFileIfExists(AnalyticsToggleOffFile); err != nil {
+			return nil, fmt.Errorf("failed to enable analytics collection: %w", err)
+		}
+		e.logger.Info("Analytics collection enabled (toggle file removed)", zap.String("path", AnalyticsToggleOffFile))
+		return CmdOK, nil
+	}
+
+	content := []byte("analytics collection disabled via controld\n")
+	if err := e.os.WriteFile(AnalyticsToggleOffFile, content, 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write analytics toggle file: %w", err)
+	}
+
+	e.logger.Info("Analytics collection disabled (toggle file created)", zap.String("path", AnalyticsToggleOffFile))
+
+	return CmdOK, nil
+}
+
+func (e *executor) setBetaFeaturesToggle(_ context.Context, args []byte) (interface{}, error) {
+	var toggleArgs struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := e.json.Unmarshal(args, &toggleArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	configDir := filepath.Dir(BetaFeaturesToggleOnFile)
+
+	if err := e.os.MkdirAll(configDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	if toggleArgs.Enabled {
+		content := []byte("beta features enabled via controld\n")
+		if err := e.os.WriteFile(BetaFeaturesToggleOnFile, content, 0o644); err != nil {
+			return nil, fmt.Errorf("failed to write beta features toggle file: %w", err)
+		}
+		e.logger.Info("Beta features enabled (toggle file created)", zap.String("path", BetaFeaturesToggleOnFile))
+		return CmdOK, nil
+	}
+
+	if err := e.removeFileIfExists(BetaFeaturesToggleOnFile); err != nil {
+		return nil, fmt.Errorf("failed to disable beta features: %w", err)
+	}
+
+	e.logger.Info("Beta features disabled (toggle file removed)", zap.String("path", BetaFeaturesToggleOnFile))
+
+	return CmdOK, nil
+}
+
+func (e *executor) removeFileIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !e.os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (e *executor) getSysMetrics() (interface{}, error) {
 	e.Lock()
 	defer e.Unlock()
@@ -627,6 +714,56 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to execute update to latest command: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
+	e.logger.Info("Executing factory reset command via DBus")
+
+	// Send DBus signal to setupd to handle factory reset (show page + execute reset)
+	err := e.dbus.RetryableSend(ctx,
+		godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_FACTORY_RESET,
+			Body:      []interface{}{},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to send factory reset signal: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {
+	e.logger.Info("Executing upload logs command via DBus")
+
+	var cmdArgs struct {
+		UserID string `json:"userId"`
+		APIKey string `json:"apiKey"`
+		Title  string `json:"title"`
+	}
+
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if cmdArgs.UserID == "" || cmdArgs.APIKey == "" || cmdArgs.Title == "" {
+		return nil, fmt.Errorf("missing required arguments: userId, apiKey, and title are required")
+	}
+
+	// Send DBus signal to setupd to handle log upload
+	err := e.dbus.RetryableSend(ctx,
+		godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
+			Body:      []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)
 	}
 
 	return CmdOK, nil
