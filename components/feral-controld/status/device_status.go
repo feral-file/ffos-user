@@ -44,10 +44,12 @@ func NewDeviceStatus(
 
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
-	ScreenRotation   string `json:"screenRotation,omitempty"`
-	ConnectedWifi    string `json:"connectedWifi,omitempty"`
-	InstalledVersion string `json:"installedVersion,omitempty"`
-	LatestVersion    string `json:"latestVersion,omitempty"`
+	ScreenRotation      string `json:"screenRotation,omitempty"`
+	ConnectedWifi       string `json:"connectedWifi,omitempty"`
+	InstalledVersion    string `json:"installedVersion,omitempty"`
+	LatestVersion       string `json:"latestVersion,omitempty"`
+	AnalyticsDisabled   bool   `json:"analyticsDisabled,omitempty"`
+	BetaFeaturesEnabled bool   `json:"betaFeaturesEnabled,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -60,6 +62,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Variables to collect results safely
 	var screenRotation, connectedWifi, installedVersion, latestVersion string
+	var analyticsDisabled, betaFeaturesEnabled bool
 
 	// Get screen rotation
 	g.Go(func() error {
@@ -140,6 +143,36 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
+	// Get analytics toggle (disabled when file exists)
+	g.Go(func() error {
+		const analyticsTogglePath = "/home/feralfile/.state/analytics-toggle-off"
+		_, err := d.os.ReadFile(analyticsTogglePath)
+		if err == nil {
+			analyticsDisabled = true
+			return nil
+		}
+		if d.os.IsNotExist(err) {
+			analyticsDisabled = false
+			return nil
+		}
+		return nil
+	})
+
+	// Get beta features toggle (enabled when file exists)
+	g.Go(func() error {
+		const betaTogglePath = "/home/feralfile/.state/beta-features-toggle-on"
+		_, err := d.os.ReadFile(betaTogglePath)
+		if err == nil {
+			betaFeaturesEnabled = true
+			return nil
+		}
+		if d.os.IsNotExist(err) {
+			betaFeaturesEnabled = false
+			return nil
+		}
+		return nil
+	})
+
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil {
 		return nil, err
@@ -150,6 +183,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.ConnectedWifi = connectedWifi
 	response.InstalledVersion = installedVersion
 	response.LatestVersion = latestVersion
+	response.AnalyticsDisabled = analyticsDisabled
+	response.BetaFeaturesEnabled = betaFeaturesEnabled
 
 	return response, nil
 }

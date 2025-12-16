@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/feral-file/godbus"
@@ -2288,6 +2290,138 @@ func TestExecutor_ScreenRotation_Errors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecutor_AnalyticsToggle_Disable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_ANALYTICS_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": false},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":false}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).
+		Return(nil)
+
+	configDir := filepath.Dir(devicectl.AnalyticsToggleOffFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		WriteFile(devicectl.AnalyticsToggleOffFile, gomock.Any(), os.FileMode(0644)).
+		DoAndReturn(func(path string, data []byte, perm os.FileMode) error {
+			assert.Contains(t, string(data), "disabled")
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_AnalyticsToggle_Enable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_ANALYTICS_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": true},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":true}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			reflect.ValueOf(v).Elem().FieldByName("Enabled").SetBool(true)
+			return nil
+		})
+
+	configDir := filepath.Dir(devicectl.AnalyticsToggleOffFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		IsNotExist(gomock.Any()).
+		Return(true)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_BetaFeaturesToggle_Enable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_BETA_FEATURES_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": true},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":true}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			reflect.ValueOf(v).Elem().FieldByName("Enabled").SetBool(true)
+			return nil
+		})
+
+	configDir := filepath.Dir(devicectl.BetaFeaturesToggleOnFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		WriteFile(devicectl.BetaFeaturesToggleOnFile, gomock.Any(), os.FileMode(0644)).
+		DoAndReturn(func(path string, data []byte, perm os.FileMode) error {
+			assert.Contains(t, string(data), "enabled")
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_BetaFeaturesToggle_Disable_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_BETA_FEATURES_TOGGLE,
+		Arguments: map[string]interface{}{"enabled": false},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":false}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).
+		Return(nil)
+
+	configDir := filepath.Dir(devicectl.BetaFeaturesToggleOnFile)
+	ts.mockOS.EXPECT().
+		MkdirAll(configDir, os.FileMode(0755)).
+		Return(nil)
+
+	ts.mockOS.EXPECT().
+		IsNotExist(gomock.Any()).
+		Return(true)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
 func TestExecutor_Shutdown_Success(t *testing.T) {
