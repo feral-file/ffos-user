@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	CPU_CRITICAL_TEMPERATURE       = 90.0             // 90°C critical temperature
+	CPU_CRITICAL_TEMPERATURE       = 93.0             // 93°C critical temperature
 	CPU_MONITOR_DURATION_THRESHOLD = 10 * time.Second // Check if temp is above threshold for 10 seconds
 )
 
