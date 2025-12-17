@@ -196,7 +196,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 		return
 	}
 
-	s.logger.Debug("Player status", zap.Any("playerStatus", playerStatus))
+	s.logger.Debug("Player status fetched")
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
 }
 
@@ -211,6 +211,9 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 		s.logger.Error("Failed to send notification via relayer", zap.Error(err))
 	}
 
+	if notificationType == relayer.NOTIFICATION_TYPE_PLAYER_STATUS {
+		s.logger.Debug("Sending notification via relayer for player status")
+	}
 	// Send the noti via websocket
 	noti := map[string]interface{}{
 		"type":              "notification",
