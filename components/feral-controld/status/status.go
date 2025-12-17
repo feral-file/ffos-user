@@ -196,6 +196,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 		return
 	}
 
+	s.logger.Debug("Player status", zap.Any("playerStatus", playerStatus))
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
 }
 
