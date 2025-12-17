@@ -10,6 +10,8 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
@@ -118,10 +120,10 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Info("Received cast request", zap.Any("payload", payload))
+	payloadJSON, _ := payload.JSON()
+	h.logger.Info("Received cast request", zap.ByteString("payload", helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)))
 
 	if payload.Type == "" {
-		h.logger.Error("Command type is required", zap.Any("payload", payload))
 		http.Error(w, "Command type is required", http.StatusBadRequest)
 		return
 	}
@@ -133,7 +135,6 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result == nil {
-		h.logger.Warn("Processed cast request returned no result", zap.Any("payload", payload))
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

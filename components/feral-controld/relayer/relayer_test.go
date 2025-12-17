@@ -40,6 +40,7 @@ type testSetup struct {
 	mockRandomizer *mocks.MockRandomizer
 	mockClock      *mocks.MockClock
 	mockOS         *mocks.MockOS
+	mockJSON       *mocks.MockJSON
 	client         relayer.Relayer
 }
 
@@ -54,8 +55,9 @@ func setup(t *testing.T) *testSetup {
 	mockRandomizer := mocks.NewMockRandomizer(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
 
-	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, logger)
+	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:           ctrl,
@@ -65,6 +67,7 @@ func setup(t *testing.T) *testSetup {
 		mockRandomizer: mockRandomizer,
 		mockClock:      mockClock,
 		mockOS:         mockOS,
+		mockJSON:       mockJSON,
 		client:         client,
 	}
 }
@@ -775,9 +778,15 @@ func TestClient_SendMessage_Success(t *testing.T) {
 		Return(nil).
 		AnyTimes()
 
+	// Expect JSON marshal for sending message
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte("{}"), nil).
+		AnyTimes()
+
 	// Expect conn to write message once
 	ts.mockConn.EXPECT().
-		WriteJSON(gomock.Any()).
+		WriteMessage(gomock.Any(), gomock.Any()).
 		Return(nil).
 		Times(1)
 

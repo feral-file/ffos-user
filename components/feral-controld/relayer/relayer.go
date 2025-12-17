@@ -15,6 +15,8 @@ import (
 	"time"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -113,6 +115,7 @@ type relayer struct {
 	randomizer wrapper.Randomizer
 	clock      wrapper.Clock
 	os         wrapper.OS
+	json       wrapper.JSON
 
 	// Internal state
 	endpoint     string
@@ -134,6 +137,7 @@ func New(
 	randomizer wrapper.Randomizer,
 	clock wrapper.Clock,
 	os wrapper.OS,
+	json wrapper.JSON,
 	logger *zap.Logger,
 ) Relayer {
 	return &relayer{
@@ -144,6 +148,7 @@ func New(
 		clock:      clock,
 		done:       make(chan struct{}),
 		os:         os,
+		json:       json,
 		logger:     logger,
 		handlers:   []Handler{},
 	}
@@ -349,12 +354,13 @@ func (r *relayer) background(ctx context.Context) {
 					return
 				}
 
-				r.logger.Info("Received message", zap.ByteString("message", msg))
+				logMsg := helper.TruncateBytes(msg, logger.MAX_FIELD_LENGTH)
+				r.logger.Info("Received message", zap.ByteString("message", logMsg))
 
 				// Unmarshal payload
 				var payload Payload
 				if err := json.Unmarshal(msg, &payload); err != nil {
-					r.logger.Error("Invalid JSON received", zap.ByteString("message", msg))
+					r.logger.Error("Invalid JSON received", zap.ByteString("message", logMsg))
 					continue
 				}
 
@@ -392,9 +398,15 @@ func (r *relayer) Send(ctx context.Context, data interface{}) error {
 		return ErrNotConnected
 	}
 
-	r.logger.Info("Sending message to Relayer", zap.Any("data", data))
+	// Marshal data to JSON
+	jsonData, err := r.json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal data: %w", err)
+	}
 
-	return r.conn.WriteJSON(data)
+	r.logger.Info("Sending message to Relayer", zap.ByteString("message", helper.TruncateBytes(jsonData, logger.MAX_FIELD_LENGTH)))
+
+	return r.conn.WriteMessage(websocket.TextMessage, jsonData)
 }
 
 // ping sends a ping to keep the connection alive
