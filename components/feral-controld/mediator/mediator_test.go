@@ -30,6 +30,7 @@ type testSetup struct {
 	mockCommandHandler *mocks.MockCommandHandler
 	mockStatusPoller   *mocks.MockStatusPoller
 	mockRefresher      *mocks.MockRefresher
+	mockJSON           *mocks.MockJSON
 	mediator           mediator.Mediator
 	logger             *zap.Logger
 }
@@ -46,6 +47,7 @@ func setup(t *testing.T) *testSetup {
 	mockCommandHandler := mocks.NewMockCommandHandler(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockRefresher := mocks.NewMockRefresher(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
 
 	med := mediator.New(
 		mockRelayer,
@@ -55,6 +57,7 @@ func setup(t *testing.T) *testSetup {
 		mockExecutor,
 		mockRefresher,
 		mockStatusPoller,
+		mockJSON,
 		logger,
 	)
 
@@ -68,6 +71,7 @@ func setup(t *testing.T) *testSetup {
 		mockCommandHandler: mockCommandHandler,
 		mockStatusPoller:   mockStatusPoller,
 		mockRefresher:      mockRefresher,
+		mockJSON:           mockJSON,
 		mediator:           med,
 		logger:             logger,
 	}
@@ -397,6 +401,12 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 					},
 				}
 
+				// Expect JSON marshal for logging
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte("{}"), nil).
+					AnyTimes()
+
 				// Mock state manager to return empty state
 				mockStateManager := mocks.NewMockStateManager(ts.ctrl)
 				mockStateManager.EXPECT().
@@ -426,6 +436,12 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 		{
 			name: "system message missing topic ID",
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
+				// Expect JSON marshal for logging
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte("{}"), nil).
+					AnyTimes()
+
 				payload := relayer.Payload{
 					MessageID: relayer.MESSAGE_ID_SYSTEM,
 					Message: relayer.Message{
@@ -441,6 +457,12 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
 				topicID := "test-topic-id"
 				saveError := errors.New("save failed")
+
+				// Expect JSON marshal for logging
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte("{}"), nil).
+					AnyTimes()
 
 				// Mock state manager
 				mockStateManager := mocks.NewMockStateManager(ts.ctrl)
@@ -536,6 +558,12 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 					},
 				}
 
+				// Expect JSON marshal for logging
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte("{}"), nil).
+					AnyTimes()
+
 				// Expect the command handler to process
 				ts.mockCommandHandler.EXPECT().
 					Process(gomock.Any(), commands.Command{
@@ -573,6 +601,12 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 					},
 				}
 
+				// Expect JSON marshal for logging
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte("{}"), nil).
+					AnyTimes()
+
 				// Expect the command handler to process and return error
 				ts.mockCommandHandler.EXPECT().
 					Process(gomock.Any(), commands.Command{
@@ -597,6 +631,12 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 						Request: args,
 					},
 				}
+
+				// Expect JSON marshal for logging
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte("{}"), nil).
+					AnyTimes()
 
 				// Expect the command handler to process and return nil result
 				ts.mockCommandHandler.EXPECT().

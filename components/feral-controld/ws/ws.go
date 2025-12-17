@@ -181,7 +181,7 @@ func (ws *ws) SendAll(message any) error {
 		}
 	}
 
-	ws.logger.Info("Broadcast message sent", zap.Int("successful", successCount), zap.Int("failed", len(connections)-successCount), zap.Any("message", message))
+	ws.logger.Info("Broadcast message sent", zap.Int("successful", successCount), zap.Int("failed", len(connections)-successCount))
 
 	return lastErr
 }

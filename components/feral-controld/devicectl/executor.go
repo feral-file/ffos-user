@@ -12,6 +12,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -94,7 +96,8 @@ func (e *executor) SaveLastSysMetrics(metrics []byte) {
 }
 
 func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface{}, error) {
-	e.logger.Info("Executing command", zap.Any("command", cmd))
+	cmdJSON, _ := cmd.JSON()
+	e.logger.Info("Executing command", zap.ByteString("command", helper.TruncateBytes(cmdJSON, logger.MAX_FIELD_LENGTH)))
 
 	var err error
 	var bytes []byte

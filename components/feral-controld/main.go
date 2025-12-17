@@ -308,7 +308,7 @@ func initializeApp(
 	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, logger)
 
 	// Relayer
-	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, logger)
+	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
 
 	// DBus
 	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
@@ -349,7 +349,7 @@ func initializeApp(
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
 
 	// Mediator
-	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, poller, logger)
+	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, poller, json, logger)
 
 	// Hub
 	hub := hub.New(context, wsHandler, cmdHandler, nil, json, logger)
