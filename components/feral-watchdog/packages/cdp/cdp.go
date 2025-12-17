@@ -203,7 +203,7 @@ func (c *Client) initLocked(ctx context.Context) error {
 
 // Send sends a raw CDP JSON-RPC message and waits for response
 func (c *Client) Send(method string, params map[string]interface{}) (interface{}, error) {
-	c.logger.Info("Sending CDP request", zap.String("method", method), zap.Any("params", params))
+	c.logger.Debug("Sending CDP request")
 
 	c.mu.Lock()
 	if c.conn == nil {
