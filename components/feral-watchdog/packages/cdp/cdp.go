@@ -240,9 +240,7 @@ func (c *Client) Send(method string, params map[string]interface{}) (interface{}
 	}
 	c.mu.Unlock()
 
-	c.logger.Debug("Received CDP response",
-		zap.String("method", method),
-		zap.String("response", string(response)))
+	c.logger.Debug("Received CDP response")
 
 	var resp struct {
 		ID     int `json:"id"`
