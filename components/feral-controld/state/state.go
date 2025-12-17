@@ -5,13 +5,10 @@ import (
 	"path/filepath"
 	"sync"
 
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"go.uber.org/zap"
-)
-
-const (
-	STATE_FILE = "/home/feralfile/.state/controld.state"
 )
 
 type RelayerState struct {
@@ -63,20 +60,20 @@ func NewStateManagerWithDeps(osWrapper wrapper.OS, jsonWrapper wrapper.JSON) Sta
 }
 
 func (m *defaultStateManager) Load(logger *zap.Logger) (*State, error) {
-	logger.Info("Loading state", zap.String("file", STATE_FILE))
+	logger.Info("Loading state", zap.String("file", constants.STATE_FILE))
 
 	// Lock during the entire load operation to prevent concurrent access
 	m.stateLock.Lock()
 	defer m.stateLock.Unlock()
 
 	// Ensure directory exists
-	stateDir := filepath.Dir(STATE_FILE)
+	stateDir := filepath.Dir(constants.STATE_FILE)
 	if err := m.os.MkdirAll(stateDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
 
 	// Try to read the file
-	data, err := m.os.ReadFile(STATE_FILE)
+	data, err := m.os.ReadFile(constants.STATE_FILE)
 	if m.os.IsNotExist(err) {
 		// File doesn't exist, return empty state
 		logger.Info("State file does not exist, returning empty state object")
@@ -109,7 +106,7 @@ func (m *defaultStateManager) Save(s *State) error {
 	defer m.stateLock.Unlock()
 
 	// Ensure directory exists
-	stateDir := filepath.Dir(STATE_FILE)
+	stateDir := filepath.Dir(constants.STATE_FILE)
 	if err := m.os.MkdirAll(stateDir, 0750); err != nil {
 		return fmt.Errorf("failed to create state directory: %w", err)
 	}
@@ -120,12 +117,12 @@ func (m *defaultStateManager) Save(s *State) error {
 	}
 
 	// Write to a temporary file first, then rename for atomic updates
-	tempFile := STATE_FILE + ".tmp"
+	tempFile := constants.STATE_FILE + ".tmp"
 	if err := m.os.WriteFile(tempFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 
-	if err := m.os.Rename(tempFile, STATE_FILE); err != nil {
+	if err := m.os.Rename(tempFile, constants.STATE_FILE); err != nil {
 		return fmt.Errorf("failed to finalize state file: %w", err)
 	}
 

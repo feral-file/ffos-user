@@ -6,12 +6,11 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/logger"
-	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
-)
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 
-const (
-	CONFIG_FILE = "/home/feralfile/.config/controld.json"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/metric"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 type CDPConfig struct {
@@ -25,10 +24,11 @@ type RelayerConfig struct {
 
 // Configuration for all components
 type Config struct {
-	CDPConfig     *CDPConfig           `json:"cdp"`
-	RelayerConfig *RelayerConfig       `json:"relayer"`
-	SentryConfig  *logger.SentryConfig `json:"sentry"`
-	EnableHub     bool                 `json:"enableHub"`
+	CDPConfig       *CDPConfig              `json:"cdp"`
+	RelayerConfig   *RelayerConfig          `json:"relayer"`
+	SentryConfig    *logger.SentryConfig    `json:"sentry"`
+	OpenPanelConfig *metric.OpenPanelConfig `json:"openpanel"`
+	EnableHub       bool                    `json:"enableHub"`
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager
@@ -60,7 +60,7 @@ func NewConfigManagerWithDeps(osWrapper wrapper.OS, jsonWrapper wrapper.JSON) Co
 }
 
 func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
-	logger.Info("Loading config", zap.String("file", CONFIG_FILE))
+	logger.Info("Loading config", zap.String("file", constants.CONFIG_FILE))
 
 	// Lock during the entire load process to prevent concurrent access
 	m.configLock.Lock()
@@ -72,7 +72,7 @@ func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
 	}
 
 	// Try to read the file
-	data, err := m.os.ReadFile(CONFIG_FILE)
+	data, err := m.os.ReadFile(constants.CONFIG_FILE)
 	if m.os.IsNotExist(err) {
 		return nil, fmt.Errorf("config file not found: %w", err)
 	} else if err != nil {
@@ -94,9 +94,10 @@ func (m *defaultConfigManager) Get() *Config {
 
 	if m.config == nil {
 		m.config = &Config{
-			CDPConfig:     &CDPConfig{},
-			RelayerConfig: &RelayerConfig{},
-			SentryConfig:  &logger.SentryConfig{},
+			CDPConfig:       &CDPConfig{},
+			RelayerConfig:   &RelayerConfig{},
+			SentryConfig:    &logger.SentryConfig{},
+			OpenPanelConfig: &metric.OpenPanelConfig{},
 		}
 	}
 	return m.config
