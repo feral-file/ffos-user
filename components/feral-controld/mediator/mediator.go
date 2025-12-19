@@ -13,10 +13,13 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 //go:generate mockgen -source=mediator.go -destination=../mocks/mediator.go -package=mocks -mock_names=Mediator=MockMediator
@@ -35,6 +38,7 @@ type mediator struct {
 	statusPoller status.Poller
 	logger       *zap.Logger
 	refresher    playlist_refresher.Refresher
+	json         wrapper.JSON
 }
 
 func New(
@@ -45,6 +49,7 @@ func New(
 	executor devicectl.Executor,
 	refresher playlist_refresher.Refresher,
 	statusPoller status.Poller,
+	json wrapper.JSON,
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
@@ -54,6 +59,7 @@ func New(
 		cmdHandler:   cmdHandler,
 		executor:     executor,
 		statusPoller: statusPoller,
+		json:         json,
 		logger:       l,
 		refresher:    refresher,
 	}
@@ -136,14 +142,16 @@ func (m *mediator) handleDBusSignal(
 }
 
 func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Payload) error {
-	m.logger.Info("handle received relayer message", zap.Any("payload", payload))
+	payloadJSON, _ := m.json.Marshal(payload)
+	logPayload := helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)
+	m.logger.Info("handle received relayer message", zap.ByteString("payload", logPayload))
 
 	switch payload.MessageID {
 	case relayer.MESSAGE_ID_SYSTEM:
 		topicID := payload.Message.TopicID
 		if topicID == nil {
 			err := fmt.Errorf("payload doesn't contain topicID")
-			m.logger.Error("Payload doesn't contain topicID", zap.Any("payload", payload))
+			m.logger.Error("Payload doesn't contain topicID", zap.ByteString("payload", logPayload))
 			return err
 		}
 
@@ -171,7 +179,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			return err
 		}
 		if result == nil {
-			m.logger.Warn("Processed command returned no result", zap.Any("payload", payload))
+			m.logger.Warn("Processed command returned no result", zap.ByteString("payload", logPayload))
 			return nil
 		}
 

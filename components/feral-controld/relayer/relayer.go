@@ -15,6 +15,8 @@ import (
 	"time"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -86,12 +88,6 @@ const (
 	NOTIFICATION_TYPE_DEVICE_STATUS NotificationType = "device_status"
 )
 
-// notificationPersistConfig maps notification types to their persist record counts
-var notificationPersistConfig = map[NotificationType]int{
-	NOTIFICATION_TYPE_PLAYER_STATUS: 1,
-	NOTIFICATION_TYPE_DEVICE_STATUS: 1,
-}
-
 //go:generate mockgen -source=relayer.go -destination=../mocks/relayer.go -package=mocks -mock_names=Relayer=MockRelayer
 type Relayer interface {
 	IsConnected() bool
@@ -101,7 +97,6 @@ type Relayer interface {
 	OnRelayerMessage(handler Handler)
 	RemoveRelayerMessage(handler Handler)
 	Close()
-	SendNotification(ctx context.Context, notificationType NotificationType, message interface{}) error
 }
 
 // relayer handles connection to relay server
@@ -113,6 +108,7 @@ type relayer struct {
 	randomizer wrapper.Randomizer
 	clock      wrapper.Clock
 	os         wrapper.OS
+	json       wrapper.JSON
 
 	// Internal state
 	endpoint     string
@@ -134,6 +130,7 @@ func New(
 	randomizer wrapper.Randomizer,
 	clock wrapper.Clock,
 	os wrapper.OS,
+	json wrapper.JSON,
 	logger *zap.Logger,
 ) Relayer {
 	return &relayer{
@@ -144,6 +141,7 @@ func New(
 		clock:      clock,
 		done:       make(chan struct{}),
 		os:         os,
+		json:       json,
 		logger:     logger,
 		handlers:   []Handler{},
 	}
@@ -349,12 +347,13 @@ func (r *relayer) background(ctx context.Context) {
 					return
 				}
 
-				r.logger.Info("Received message", zap.ByteString("message", msg))
+				logMsg := helper.TruncateBytes(msg, logger.MAX_FIELD_LENGTH)
+				r.logger.Info("Received message", zap.ByteString("message", logMsg))
 
 				// Unmarshal payload
 				var payload Payload
 				if err := json.Unmarshal(msg, &payload); err != nil {
-					r.logger.Error("Invalid JSON received", zap.ByteString("message", msg))
+					r.logger.Error("Invalid JSON received", zap.ByteString("message", logMsg))
 					continue
 				}
 
@@ -392,9 +391,15 @@ func (r *relayer) Send(ctx context.Context, data interface{}) error {
 		return ErrNotConnected
 	}
 
-	r.logger.Info("Sending message to Relayer", zap.Any("data", data))
+	// Marshal data to JSON
+	jsonData, err := r.json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal data: %w", err)
+	}
 
-	return r.conn.WriteJSON(data)
+	r.logger.Info("Sending message to Relayer", zap.ByteString("message", helper.TruncateBytes(jsonData, logger.MAX_FIELD_LENGTH)))
+
+	return r.conn.WriteMessage(websocket.TextMessage, jsonData)
 }
 
 // ping sends a ping to keep the connection alive
@@ -466,39 +471,6 @@ func (r *relayer) closeConn() {
 
 	r.conn = nil
 	r.logger.Info("Relayer connection closed")
-}
-
-func (r *relayer) SendNotification(ctx context.Context, notificationType NotificationType, message interface{}) error {
-	r.logger.Debug("Attempting to send notification",
-		zap.String("type", string(notificationType)),
-		zap.Bool("relayer_connected", r.IsConnected()))
-
-	if !r.IsConnected() {
-		r.logger.Warn("Relayer not connected, skipping notification",
-			zap.String("type", string(notificationType)))
-		return nil
-	}
-
-	notification := map[string]interface{}{
-		"type":              "notification",
-		"notification_type": string(notificationType),
-		"message":           message,
-	}
-
-	// Get persist record count from the configuration map
-	if persistRecordCount, exists := notificationPersistConfig[notificationType]; exists {
-		notification["persist_record_count"] = persistRecordCount
-		r.logger.Debug("Sending notification",
-			zap.String("type", string(notificationType)),
-			zap.Int("persist_count", persistRecordCount),
-			zap.Any("message", message))
-	} else {
-		r.logger.Debug("Sending notification without persist config",
-			zap.String("type", string(notificationType)),
-			zap.Any("message", message))
-	}
-
-	return r.conn.WriteJSON(notification)
 }
 
 func (r *relayer) categorizeWebsocketError(err error, resp *http.Response) error {
