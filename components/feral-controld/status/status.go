@@ -206,9 +206,10 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	}
 
 	data := map[string]interface{}{
-		"type":              "notification",
-		"notification_type": string(notificationType),
-		"message":           message,
+		"type":                 "notification",
+		"notification_type":    string(notificationType),
+		"message":              message,
+		"persist_record_count": 1,
 	}
 
 	// Send the notification via relayer
