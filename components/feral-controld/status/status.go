@@ -199,24 +199,25 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
 }
 
-func (s *poller) sendNotification(ctx context.Context, notificationType relayer.NotificationType, data interface{}) {
-	if !s.shouldSendNotification(notificationType, data) {
+func (s *poller) sendNotification(ctx context.Context, notificationType relayer.NotificationType, message interface{}) {
+	if !s.shouldSendNotification(notificationType, message) {
 		s.logger.Debug("Player status unchanged, skipping notification")
 		return
 	}
 
+	data := map[string]interface{}{
+		"type":              "notification",
+		"notification_type": string(notificationType),
+		"message":           message,
+	}
+
 	// Send the notification via relayer
-	if err := s.relayer.SendNotification(ctx, notificationType, data); err != nil {
+	if err := s.relayer.Send(ctx, data); err != nil {
 		s.logger.Error("Failed to send notification via relayer", zap.Error(err))
 	}
 
-	// Send the noti via websocket
-	noti := map[string]interface{}{
-		"type":              "notification",
-		"notification_type": string(notificationType),
-		"message":           data,
-	}
-	if err := s.ws.SendAll(noti); err != nil {
+	// Send the data via websocket
+	if err := s.ws.SendAll(data); err != nil {
 		s.logger.Error("Failed to send notification via websocket", zap.Error(err))
 	}
 }

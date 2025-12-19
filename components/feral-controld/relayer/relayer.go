@@ -88,12 +88,6 @@ const (
 	NOTIFICATION_TYPE_DEVICE_STATUS NotificationType = "device_status"
 )
 
-// notificationPersistConfig maps notification types to their persist record counts
-var notificationPersistConfig = map[NotificationType]int{
-	NOTIFICATION_TYPE_PLAYER_STATUS: 1,
-	NOTIFICATION_TYPE_DEVICE_STATUS: 1,
-}
-
 //go:generate mockgen -source=relayer.go -destination=../mocks/relayer.go -package=mocks -mock_names=Relayer=MockRelayer
 type Relayer interface {
 	IsConnected() bool
@@ -103,7 +97,6 @@ type Relayer interface {
 	OnRelayerMessage(handler Handler)
 	RemoveRelayerMessage(handler Handler)
 	Close()
-	SendNotification(ctx context.Context, notificationType NotificationType, message interface{}) error
 }
 
 // relayer handles connection to relay server
@@ -478,39 +471,6 @@ func (r *relayer) closeConn() {
 
 	r.conn = nil
 	r.logger.Info("Relayer connection closed")
-}
-
-func (r *relayer) SendNotification(ctx context.Context, notificationType NotificationType, message interface{}) error {
-	r.logger.Debug("Attempting to send notification",
-		zap.String("type", string(notificationType)),
-		zap.Bool("relayer_connected", r.IsConnected()))
-
-	if !r.IsConnected() {
-		r.logger.Warn("Relayer not connected, skipping notification",
-			zap.String("type", string(notificationType)))
-		return nil
-	}
-
-	notification := map[string]interface{}{
-		"type":              "notification",
-		"notification_type": string(notificationType),
-		"message":           message,
-	}
-
-	// Get persist record count from the configuration map
-	if persistRecordCount, exists := notificationPersistConfig[notificationType]; exists {
-		notification["persist_record_count"] = persistRecordCount
-		r.logger.Debug("Sending notification",
-			zap.String("type", string(notificationType)),
-			zap.Int("persist_count", persistRecordCount),
-			zap.Any("message", message))
-	} else {
-		r.logger.Debug("Sending notification without persist config",
-			zap.String("type", string(notificationType)),
-			zap.Any("message", message))
-	}
-
-	return r.conn.WriteJSON(notification)
 }
 
 func (r *relayer) categorizeWebsocketError(err error, resp *http.Response) error {
