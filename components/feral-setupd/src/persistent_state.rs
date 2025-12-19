@@ -71,6 +71,8 @@ impl PersistentState {
         for (key, value) in self.data.lock().iter() {
             writer.write_all(format!("{key}={value}\n").as_bytes())?;
         }
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
         Ok(())
     }
 }

@@ -12,6 +12,8 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+const MAX_FIELD_LENGTH = 256
+
 // SentryConfig contains Sentry-specific configuration
 type SentryConfig struct {
 	DSN         string `json:"dsn"`

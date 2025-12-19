@@ -9,6 +9,8 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/helper"
+	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -179,7 +181,9 @@ func (c *cdp) Init(ctx context.Context) error {
 
 // Send sends a raw CDP JSON-RPC message with logging
 func (c *cdp) Send(method string, params map[string]interface{}) (interface{}, error) {
-	c.logger.Info("Sending CDP request", zap.String("method", method), zap.Any("params", params))
+	logParams, _ := helper.TruncateMap(params, logger.MAX_FIELD_LENGTH)
+	c.logger.Info("Sending CDP request", zap.String("method", method), zap.ByteString("params", logParams))
+
 	return c.send(method, params)
 }
 
