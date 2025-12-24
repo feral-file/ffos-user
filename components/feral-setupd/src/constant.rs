@@ -28,6 +28,7 @@ pub const CMD_CHAR_UUID: Uuid = Uuid::from_u128(0x6e400002b5a3f393e0a9e50e24dcca
 pub const CMD_CONNECT_WIFI: &str = "connect_wifi";
 pub const CMD_SCAN_WIFI: &str = "scan_wifi";
 pub const CMD_GET_INFO: &str = "get_info";
+pub const CMD_GET_DEVICE_INFO: &str = "get_device_info";
 pub const CMD_SET_TIME: &str = "set_time";
 pub const CMD_KEEP_WIFI: &str = "keep_wifi";
 pub const CMD_FACTORY_RESET: &str = "factory_reset";
