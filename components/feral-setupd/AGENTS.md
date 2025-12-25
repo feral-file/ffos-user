@@ -93,6 +93,9 @@ Notes:
 BLE `get_info` returns exactly this single `device_info` string as a 1‑item
 vector so it fits the existing BLE encoder.
 
+There is intentionally no separate BLE `get_device_info` command; `get_info`
+is the canonical source for `device_info`.
+
 ## Development & CI Parity (Docker + Toolchain)
 
 ## Keep This File Updated

@@ -50,7 +50,6 @@ enum BleCommand {
     ConnectWifi,
     KeepWifi,
     GetInfo,
-    GetDeviceInfo,
     SetTime,
     FactoryReset,
     SendLogs,
@@ -64,7 +63,6 @@ impl BleCommand {
             constant::CMD_CONNECT_WIFI => BleCommand::ConnectWifi,
             constant::CMD_KEEP_WIFI => BleCommand::KeepWifi,
             constant::CMD_GET_INFO => BleCommand::GetInfo,
-            constant::CMD_GET_DEVICE_INFO => BleCommand::GetDeviceInfo,
             constant::CMD_SET_TIME => BleCommand::SetTime,
             constant::CMD_FACTORY_RESET => BleCommand::FactoryReset,
             constant::CMD_SEND_LOGS => BleCommand::SendLogs,
@@ -78,7 +76,6 @@ pub type BTDisconnectedCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync
 pub type ConnectWifiCallback = Box<dyn Fn(&str, &str) -> AsyncBleResult + Send + Sync>;
 pub type KeepWifiCallback = Box<dyn Fn() -> AsyncBleResult + Send + Sync>;
 pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
-pub type GetDeviceInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync>>;
 pub type SubmitLogsCallback = Box<dyn Fn(&str, &str, &str) -> AsyncUnit + Send + Sync>;
 
@@ -90,7 +87,6 @@ pub struct BleCallbacks {
     pub connect_wifi: ConnectWifiCallback,
     pub keep_wifi: KeepWifiCallback,
     pub get_info: GetInfoCallback,
-    pub get_device_info: GetDeviceInfoCallback,
 }
 
 #[derive(Default)]
@@ -322,7 +318,6 @@ impl Ble {
             connect_wifi,
             keep_wifi,
             get_info,
-            get_device_info,
         } = callbacks;
 
         // Shared storage for the notifier handle
@@ -343,7 +338,6 @@ impl Ble {
         let connect_wifi_callback = Arc::new(connect_wifi);
         let keep_wifi_callback = Arc::new(keep_wifi);
         let get_info_callback = Arc::new(get_info);
-        let get_device_info_callback = Arc::new(get_device_info);
 
         Characteristic {
             uuid: constant::CMD_CHAR_UUID,
@@ -363,7 +357,6 @@ impl Ble {
                 submit_logs_callback,
                 keep_wifi_callback,
                 get_info_callback,
-                get_device_info_callback,
                 ssids_cacher,
             )),
             ..Default::default()
@@ -454,7 +447,6 @@ impl Ble {
         submit_logs_callback: Arc<SubmitLogsCallback>,
         keep_wifi_callback: Arc<KeepWifiCallback>,
         get_info_callback: Arc<GetInfoCallback>,
-        get_device_info_callback: Arc<GetDeviceInfoCallback>,
         ssids_cacher: Arc<SSIDsCacher>,
     ) -> CharacteristicWrite {
         CharacteristicWrite {
@@ -467,7 +459,6 @@ impl Ble {
                 let submit_logs_callback = submit_logs_callback.clone();
                 let keep_wifi_callback = keep_wifi_callback.clone();
                 let get_info_callback = get_info_callback.clone();
-                let get_device_info_callback = get_device_info_callback.clone();
                 let ssids_cacher = ssids_cacher.clone();
                 async move {
                     let payload = encoding::parse_payload(&data);
@@ -507,10 +498,6 @@ impl Ble {
                         }
                         BleCommand::GetInfo => {
                             handle_get_info(notifier, reply_id, get_info_callback).await
-                        }
-                        BleCommand::GetDeviceInfo => {
-                            handle_get_device_info(notifier, reply_id, get_device_info_callback)
-                                .await
                         }
                         BleCommand::SetTime => handle_set_time(notifier, reply_id, params).await,
                         BleCommand::FactoryReset => {
@@ -714,31 +701,6 @@ async fn handle_get_info(
     notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
     reply_id: String,
     cb: Arc<GetInfoCallback>,
-) -> Result<(), ReqError> {
-    let infos = if let Some(cb) = cb.as_ref() {
-        cb()
-    } else {
-        vec![]
-    };
-
-    let mut encoder = encoding::PayloadEncoder::new();
-    encoder.push_str(&reply_id);
-    encoder.push_code(BleStatus::Success.code());
-    for info in &infos {
-        encoder.push_str(info);
-    }
-
-    let payload = encoder.finish();
-    notify_central(notifier, payload).await
-}
-
-/// Handles the `get_device_info` command for BLE-first setup.
-///
-/// Returns full device context: [device_id, topic_id, has_internet, branch, version]
-async fn handle_get_device_info(
-    notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
-    reply_id: String,
-    cb: Arc<GetDeviceInfoCallback>,
 ) -> Result<(), ReqError> {
     let infos = if let Some(cb) = cb.as_ref() {
         cb()

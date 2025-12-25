@@ -206,7 +206,6 @@ async fn start_ble(
         connect_wifi: callbacks::create_connect_wifi_cb(app_state.clone(), chrome.clone()),
         keep_wifi: callbacks::create_keep_wifi_cb(app_state.clone(), chrome.clone()),
         get_info: callbacks::create_get_info_cb(app_state.clone()),
-        get_device_info: callbacks::create_get_device_info_cb(app_state.clone()),
     };
 
     ble_service
@@ -574,35 +573,6 @@ mod callbacks {
 
     pub fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
         Some(Box::new(move || vec![super::build_device_info(&app_state)]))
-    }
-
-    /// Creates a callback that returns full device context for BLE-first setup.
-    ///
-    /// Returns: [device_id, topic_id, has_internet, branch, version]
-    /// - device_id: Device hostname (e.g., "FF1-ABCD")
-    /// - topic_id: Relayer topic ID (empty string if not configured)
-    /// - has_internet: "true" or "false" (cached value)
-    /// - branch: Release branch (e.g., "main", "release/1.0")
-    /// - version: Semantic version (e.g., "1.2.3")
-    pub fn create_get_device_info_cb(app_state: Arc<AppState>) -> ble::GetDeviceInfoCallback {
-        Some(Box::new(move || {
-            let topic_id = app_state
-                .state_store
-                .get(persistent_state::TOPIC_ID)
-                .unwrap_or_default();
-            let has_internet = if app_state.internet.is_online_cached() {
-                "true"
-            } else {
-                "false"
-            };
-            vec![
-                app_state.device_id.clone(),
-                topic_id,
-                has_internet.to_string(),
-                app_state.branch.clone(),
-                app_state.current_version.clone(),
-            ]
-        }))
     }
 
     pub fn create_qrcode_switch_cb(
