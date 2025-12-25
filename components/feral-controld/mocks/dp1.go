@@ -37,18 +37,18 @@ func (m *MockDP1) EXPECT() *MockDP1MockRecorder {
 }
 
 // ProcessDynamicPlaylist mocks base method.
-func (m *MockDP1) ProcessDynamicPlaylist(ctx context.Context, playlist dp1.Playlist, minimal bool) (*dp1.Playlist, error) {
+func (m *MockDP1) ProcessDynamicPlaylist(ctx context.Context, playlist dp1.Playlist, minimal bool, replaceItems bool) (*dp1.Playlist, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ProcessDynamicPlaylist", ctx, playlist, minimal)
+	ret := m.ctrl.Call(m, "ProcessDynamicPlaylist", ctx, playlist, minimal, replaceItems)
 	ret0, _ := ret[0].(*dp1.Playlist)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ProcessDynamicPlaylist indicates an expected call of ProcessDynamicPlaylist.
-func (mr *MockDP1MockRecorder) ProcessDynamicPlaylist(ctx, playlist, minimal interface{}) *gomock.Call {
+func (mr *MockDP1MockRecorder) ProcessDynamicPlaylist(ctx, playlist, minimal, replaceItems interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessDynamicPlaylist", reflect.TypeOf((*MockDP1)(nil).ProcessDynamicPlaylist), ctx, playlist, minimal)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessDynamicPlaylist", reflect.TypeOf((*MockDP1)(nil).ProcessDynamicPlaylist), ctx, playlist, minimal, replaceItems)
 }
 
 // ProcessPlaylistURL mocks base method.

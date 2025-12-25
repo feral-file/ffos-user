@@ -462,7 +462,7 @@ func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
 		Return(mockTokens, nil)
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, true)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, true, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Len(t, result.Items, 3) // 1 original + 2 from tokens
@@ -489,7 +489,7 @@ func TestDP1_ProcessDynamicPlaylist_MultipleQueriesError(t *testing.T) {
 	}
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "playlist should have exactly 1 dynamic queries, but has 2")
@@ -504,7 +504,7 @@ func TestDP1_ProcessDynamicPlaylist_NoQueriesError(t *testing.T) {
 	}
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "playlist should have exactly 1 dynamic queries, but has 0")
@@ -529,7 +529,7 @@ func TestDP1_ProcessDynamicPlaylist_FFIndexerError(t *testing.T) {
 		Return(nil, errors.New("indexer error"))
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "indexer error")
@@ -558,7 +558,7 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlag(t *testing.T) {
 		})
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, true)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, true, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Len(t, result.Items, 2) // 2 from tokens
@@ -608,7 +608,7 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 	)
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	// Tokens are appended, so we get 100 from first batch + 2 from second batch
@@ -638,7 +638,7 @@ func TestDP1_ProcessDynamicPlaylist_WithDefaults(t *testing.T) {
 		Return(mockTokens, nil)
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Len(t, result.Items, 2)
@@ -669,7 +669,7 @@ func TestDP1_ProcessDynamicPlaylist_WithoutDefaults(t *testing.T) {
 		Return(mockTokens, nil)
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Len(t, result.Items, 2)
@@ -784,7 +784,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 				Return([]ffindexer.Token{token}, nil)
 
 			// Test
-			result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+			result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 			assert.NoError(t, err)
 			assert.NotNil(t, result)
 			assert.Len(t, result.Items, 1)
@@ -830,7 +830,7 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlagWithZeroBalanceFiltering(t *testi
 		})
 
 	// Test with minimal=true
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, true)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, true, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 
@@ -875,7 +875,7 @@ func TestDP1_ProcessDynamicPlaylist_FiltersZeroBalanceTokens(t *testing.T) {
 		Return(mockTokens, nil)
 
 	// Test
-	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 

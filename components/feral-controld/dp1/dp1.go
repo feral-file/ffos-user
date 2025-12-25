@@ -45,8 +45,10 @@ type DP1 interface {
 	// and construct a playlist with the items.
 	// Otherwise, it will return the error.
 	// If minimal is true, it will only process some first items
-	// and return the playlist quickly
-	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error)
+	// and return the playlist quickly.
+	// If replaceItems is true, it will replace existing items with new dynamic query results (for refresh cycles).
+	// If replaceItems is false, it will append new items to existing items (preserves static items from initial load).
+	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, replaceItems bool) (*Playlist, error)
 }
 
 type dp1 struct {
@@ -77,14 +79,14 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 	}
 
 	if len(playlist.DynamicQueries) > 0 {
-		return d.ProcessDynamicPlaylist(ctx, playlist, minimal)
+		return d.ProcessDynamicPlaylist(ctx, playlist, minimal, false) // Preserve static items on initial load
 	}
 
 	return &playlist, nil
 }
 
-func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
-	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID))
+func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, replaceItems bool) (*Playlist, error) {
+	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID), zap.Bool("minimal", minimal), zap.Bool("replaceItems", replaceItems))
 	if len(playlist.DynamicQueries) != 1 {
 		return nil, fmt.Errorf("playlist should have exactly 1 dynamic queries, but has %d", len(playlist.DynamicQueries))
 	}
@@ -130,10 +132,15 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 		duration = playlist.Defaults.Duration
 	}
 
-	// Merge original items with new items
-	originalItems := playlist.Items
+	// Build new items from tokens
 	newItems := buildPlaylistItems(duration, ffTokens)
-	playlist.Items = append(originalItems, newItems...)
+
+	if replaceItems {
+		playlist.Items = newItems
+	} else {
+		originalItems := playlist.Items
+		playlist.Items = append(originalItems, newItems...)
+	}
 
 	return &playlist, nil
 }

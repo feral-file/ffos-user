@@ -162,7 +162,8 @@ func (r *refresher) processPlayingPlaylist() error {
 			return nil
 		}
 
-		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
+		// Use replaceItems=true to replace accumulated items with fresh dynamic query results
+		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false, true)
 		if err != nil {
 			return err
 		}
