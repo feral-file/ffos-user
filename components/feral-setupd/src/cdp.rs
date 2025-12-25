@@ -84,10 +84,7 @@ impl Cdp {
     /// without sending a matching response.
     pub async fn navigate(&self, url: &str) -> Result<()> {
         println!("CDP: Navigating to {url}");
-        if let Err(e) = self
-            .send_cmd("Page.navigate", json!({ "url": url }))
-            .await
-        {
+        if let Err(e) = self.send_cmd("Page.navigate", json!({ "url": url })).await {
             eprintln!("CDP: Ignoring navigate error: {e}");
         }
         Ok(())

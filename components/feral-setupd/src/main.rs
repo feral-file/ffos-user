@@ -573,9 +573,7 @@ mod callbacks {
     }
 
     pub fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
-        Some(Box::new(move || {
-            vec![super::build_device_info(&app_state)]
-        }))
+        Some(Box::new(move || vec![super::build_device_info(&app_state)]))
     }
 
     /// Creates a callback that returns full device context for BLE-first setup.
