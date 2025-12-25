@@ -574,11 +574,7 @@ mod callbacks {
 
     pub fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
         Some(Box::new(move || {
-            app_state
-                .state_store
-                .get(persistent_state::TOPIC_ID)
-                .map(|topic_id| vec![topic_id.to_string()])
-                .unwrap_or_default()
+            vec![super::build_device_info(&app_state)]
         }))
     }
 
@@ -752,15 +748,14 @@ mod callbacks {
     }
 }
 
-// The url format is like this
-// url?step=qr&device_info=<device_id>|<topic_id>|<internet>|<branch>|<version>
-async fn build_qrcode_url(app_state: &Arc<AppState>) -> String {
+// device_info is <device_id>|<topic_id>|<internet>|<branch>|<version>
+fn build_device_info(app_state: &Arc<AppState>) -> String {
     let device_id = app_state.device_id.clone();
     let topic_id = app_state
         .state_store
         .get(persistent_state::TOPIC_ID)
         .unwrap_or_default();
-    let has_internet = if app_state.internet.is_online(false).await {
+    let has_internet = if app_state.internet.is_online_cached() {
         "true"
     } else {
         "false"
@@ -768,8 +763,19 @@ async fn build_qrcode_url(app_state: &Arc<AppState>) -> String {
     let branch = app_state.branch.clone().replace('/', "%2F");
     let version = app_state.current_version.clone();
 
+    format!("{device_id}|{topic_id}|{has_internet}|{branch}|{version}")
+}
+
+// The url format is like this
+// url?step=qr&device_info=<device_info>&version=<version>&device_id=<device_id>
+// Note: we need extra device_id and version for the page to display at the bottom
+fn build_qrcode_url(app_state: &Arc<AppState>) -> String {
+    let device_info = build_device_info(app_state);
+    let device_id = app_state.device_id.clone();
+    let version = app_state.current_version.clone();
+
     format!(
-        "{}&device_info={device_id}|{topic_id}|{has_internet}|{branch}|{version}&version={version}&device_id={device_id}",
+        "{}&device_info={device_info}&version={version}&device_id={device_id}",
         constant::QRCODE_URL_PREFIX
     )
 }
@@ -788,7 +794,7 @@ async fn wait_for_shutdown() {
 }
 
 async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
-    let qrcode_url = build_qrcode_url(app_state).await;
+    let qrcode_url = build_qrcode_url(app_state);
     // QRCode url is dynamically built
     // So we always navigate to make sure the url is correct
     let mut page = app_state.page.lock().await;

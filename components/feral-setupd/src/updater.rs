@@ -161,25 +161,24 @@ async fn run_update_and_send(tx: mpsc::Sender<Result<String, anyhow::Error>>) ->
                         // Check for [PROGRESS] lines
                         if line.contains("[PROGRESS]") {
                             let mut payload = String::new();
-                            let progress_caps = progress_regex.captures(&line);
-                            let mut progress_value = "0";
-                            if progress_caps.is_some() {
-                                progress_value = &progress_caps.as_ref().unwrap()[1];
-                                payload.push_str(&format!("{progress_value}%"));
+                            let mut progress_value = None;
+                            if let Some(progress_caps) = progress_regex.captures(&line) {
+                                let value = progress_caps[1].to_string();
+                                payload.push_str(&format!("{value}%"));
+                                progress_value = Some(value);
                             }
 
-                            let message_caps = message_regex.captures(&line);
-                            if message_caps.is_some() {
-                                if progress_caps.is_some() {
-                                    payload.push_str(&format!(" - {}", &message_caps.as_ref().unwrap()[1]));
+                            if let Some(message_caps) = message_regex.captures(&line) {
+                                if progress_value.is_some() {
+                                    payload.push_str(&format!(" - {}", &message_caps[1]));
                                 } else {
-                                    payload.push_str(&message_caps.as_ref().unwrap()[1]);
+                                    payload.push_str(&message_caps[1]);
                                 }
                             }
 
                             // Send progress as Ok
                             let _ = tx.send(Ok(payload)).await;
-                            if progress_value == "100" {
+                            if progress_value.as_deref() == Some("100") {
                                 break; // End the process
                             }
                         }
