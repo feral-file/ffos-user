@@ -7,6 +7,9 @@ ENV CARGO_HOME=/usr/local/cargo
 ENV PATH=/usr/local/cargo/bin:$PATH
 ENV PKGCTL_DISABLE_SYSTEMD_SANDBOXING=1
 
+# Keep the Docker toolchain aligned with CI.
+ARG RUST_TOOLCHAIN=1.88.0
+
 # ---- bootstrap pacman keyring (sometimes needed on fresh Arch-ARM roots) ----
 RUN pacman-key --init && pacman-key --populate archlinux
 
@@ -14,9 +17,9 @@ RUN pacman-key --init && pacman-key --populate archlinux
 RUN pacman -Sy --noconfirm --needed \
         base-devel git clang pkgconf cmake gdb lldb \
         go rustup && \
-    rustup install stable && \
-    rustup default  stable && \
-    rustup component add clippy rustfmt && \
+    rustup toolchain install "${RUST_TOOLCHAIN}" && \
+    rustup default "${RUST_TOOLCHAIN}" && \
+    rustup component add --toolchain "${RUST_TOOLCHAIN}" clippy rustfmt && \
     yes | pacman -Scc           # shrink layer
 
 WORKDIR /workspace

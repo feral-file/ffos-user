@@ -50,6 +50,14 @@ impl Connectivity {
     // Public API
     // ---------------------------------------------------------------------
 
+    /// Returns the cached internet status synchronously.
+    ///
+    /// This is useful for contexts where async is not available (e.g., BLE callbacks).
+    /// The value is updated by the background refresher every 60 seconds.
+    pub fn is_online_cached(&self) -> bool {
+        *self.inner.rx.borrow()
+    }
+
     /// Returns the cached value unless `force_refresh == true`.
     ///
     /// * When `force_refresh` is **false** (typical case) it is *zero-cost*.
