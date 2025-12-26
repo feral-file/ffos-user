@@ -15,7 +15,7 @@ import (
 
 const (
 	DEFAULT_DURATION             = 300
-	MINIMAL_PLAYLIST_ITEMS_LIMIT = 25
+	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
 	// Namespace UUID for generating deterministic UUIDs from token identifiers
 	//nolint:gosec
@@ -134,21 +134,36 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	newItems := buildPlaylistItems(duration, ffTokens)
 
 	originalItems := playlist.Items
-	originalItemIDs := make(map[string]bool)
-	for _, item := range originalItems {
-		originalItemIDs[item.ID] = true
+
+	// Create a map of newItems by ID for quick lookup and replacement
+	newItemsMap := make(map[string]dp1playlist.PlaylistItem)
+	for _, item := range newItems {
+		newItemsMap[item.ID] = item
 	}
 
-	// Filter newItems to only include items that don't exist in originalItems
-	filteredNewItems := make([]dp1playlist.PlaylistItem, 0, len(newItems))
-	for _, newItem := range newItems {
-		if !originalItemIDs[newItem.ID] {
-			filteredNewItems = append(filteredNewItems, newItem)
+	// Track which newItems have been used (either as replacements or will be added)
+	usedNewItemIDs := make(map[string]bool)
+
+	// Replace items that exist in newItems (newItems take precedence), otherwise keep original
+	mergedItems := make([]dp1playlist.PlaylistItem, 0, len(originalItems)+len(newItems))
+	for _, originalItem := range originalItems {
+		if newItem, existsInNew := newItemsMap[originalItem.ID]; existsInNew {
+			mergedItems = append(mergedItems, newItem)
+			usedNewItemIDs[originalItem.ID] = true
+		} else {
+			mergedItems = append(mergedItems, originalItem)
 		}
 	}
 
-	// Merge original items with new items
-	playlist.Items = append(originalItems, filteredNewItems...)
+	// Append newItems that don't exist in originalItems
+	for _, newItem := range newItems {
+		if !usedNewItemIDs[newItem.ID] {
+			mergedItems = append(mergedItems, newItem)
+			usedNewItemIDs[newItem.ID] = true // Mark as used to skip any subsequent duplicates
+		}
+	}
+
+	playlist.Items = mergedItems
 
 	return &playlist, nil
 }
@@ -219,7 +234,7 @@ func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.Playlist
 func generateTokenUUID(contractAddress, blockchain, tokenNumber string) string {
 	namespace := uuid.MustParse(TOKEN_NAMESPACE_UUID)
 	// Combine the three fields with a delimiter to create a unique identifier
-	identifier := fmt.Sprintf("%s:%s:%s", blockchain, contractAddress, tokenNumber)
+	identifier := fmt.Sprintf("%s:%s:%s", contractAddress, blockchain, tokenNumber)
 	return uuid.NewSHA1(namespace, []byte(identifier)).String()
 }
 
