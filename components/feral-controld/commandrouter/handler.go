@@ -106,7 +106,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 
 				if len(playlist.DynamicQueries) > 0 {
-					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, true, false)
+					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err

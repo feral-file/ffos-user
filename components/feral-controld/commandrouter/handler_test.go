@@ -330,7 +330,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, true, false).
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, true).
 		Return(processedPlaylist, nil).
 		Times(1)
 

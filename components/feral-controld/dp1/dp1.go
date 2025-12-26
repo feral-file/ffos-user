@@ -45,10 +45,8 @@ type DP1 interface {
 	// and construct a playlist with the items.
 	// Otherwise, it will return the error.
 	// If minimal is true, it will only process some first items
-	// and return the playlist quickly.
-	// If replaceItems is true, it will replace existing items with new dynamic query results (for refresh cycles).
-	// If replaceItems is false, it will append new items to existing items (preserves static items from initial load).
-	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, replaceItems bool) (*Playlist, error)
+	// and return the playlist quickly
+	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error)
 }
 
 type dp1 struct {
@@ -79,14 +77,14 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 	}
 
 	if len(playlist.DynamicQueries) > 0 {
-		return d.ProcessDynamicPlaylist(ctx, playlist, minimal, false) // Preserve static items on initial load
+		return d.ProcessDynamicPlaylist(ctx, playlist, minimal)
 	}
 
 	return &playlist, nil
 }
 
-func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, replaceItems bool) (*Playlist, error) {
-	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID), zap.Bool("minimal", minimal), zap.Bool("replaceItems", replaceItems))
+func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
+	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID))
 	if len(playlist.DynamicQueries) != 1 {
 		return nil, fmt.Errorf("playlist should have exactly 1 dynamic queries, but has %d", len(playlist.DynamicQueries))
 	}
@@ -135,12 +133,22 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	// Build new items from tokens
 	newItems := buildPlaylistItems(duration, ffTokens)
 
-	if replaceItems {
-		playlist.Items = newItems
-	} else {
-		originalItems := playlist.Items
-		playlist.Items = append(originalItems, newItems...)
+	originalItems := playlist.Items
+	originalItemIDs := make(map[string]bool)
+	for _, item := range originalItems {
+		originalItemIDs[item.ID] = true
 	}
+
+	// Filter newItems to only include items that don't exist in originalItems
+	filteredNewItems := make([]dp1playlist.PlaylistItem, 0, len(newItems))
+	for _, newItem := range newItems {
+		if !originalItemIDs[newItem.ID] {
+			filteredNewItems = append(filteredNewItems, newItem)
+		}
+	}
+
+	// Merge original items with new items
+	playlist.Items = append(originalItems, filteredNewItems...)
 
 	return &playlist, nil
 }
@@ -211,7 +219,7 @@ func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.Playlist
 func generateTokenUUID(contractAddress, blockchain, tokenNumber string) string {
 	namespace := uuid.MustParse(TOKEN_NAMESPACE_UUID)
 	// Combine the three fields with a delimiter to create a unique identifier
-	identifier := fmt.Sprintf("%s:%s:%s", contractAddress, blockchain, tokenNumber)
+	identifier := fmt.Sprintf("%s:%s:%s", blockchain, contractAddress, tokenNumber)
 	return uuid.NewSHA1(namespace, []byte(identifier)).String()
 }
 

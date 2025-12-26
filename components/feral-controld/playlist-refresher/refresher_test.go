@@ -362,7 +362,7 @@ func TestRefresher_ProcessPlayingPlaylist_DynamicPlaylist(t *testing.T) {
 
 	// Expect DP1 to process dynamic playlist
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false, true).
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
 		Return(mockPlaylist, nil).
 		AnyTimes()
 
@@ -560,7 +560,7 @@ func TestRefresher_ProcessPlayingPlaylist_DP1ProcessDynamicPlaylistError(t *test
 
 	// Expect DP1 to fail processing dynamic playlist
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false, true).
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
 		Return(nil, errors.New("dp1 dynamic processing error")).
 		AnyTimes()
 
