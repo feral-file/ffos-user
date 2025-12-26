@@ -133,37 +133,9 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	// Build new items from tokens
 	newItems := buildPlaylistItems(duration, ffTokens)
 
-	originalItems := playlist.Items
-
-	// Create a map of newItems by ID for quick lookup and replacement
-	newItemsMap := make(map[string]dp1playlist.PlaylistItem)
-	for _, item := range newItems {
-		newItemsMap[item.ID] = item
-	}
-
-	// Track which newItems have been used (either as replacements or will be added)
-	usedNewItemIDs := make(map[string]bool)
-
-	// Replace items that exist in newItems (newItems take precedence), otherwise keep original
-	mergedItems := make([]dp1playlist.PlaylistItem, 0, len(originalItems)+len(newItems))
-	for _, originalItem := range originalItems {
-		if newItem, existsInNew := newItemsMap[originalItem.ID]; existsInNew {
-			mergedItems = append(mergedItems, newItem)
-			usedNewItemIDs[originalItem.ID] = true
-		} else {
-			mergedItems = append(mergedItems, originalItem)
-		}
-	}
-
-	// Append newItems that don't exist in originalItems
-	for _, newItem := range newItems {
-		if !usedNewItemIDs[newItem.ID] {
-			mergedItems = append(mergedItems, newItem)
-			usedNewItemIDs[newItem.ID] = true // Mark as used to skip any subsequent duplicates
-		}
-	}
-
-	playlist.Items = mergedItems
+	// Always replace the new items to keep the playlist up to date.
+	// FIXME: This line will ignore the case that playlist has both curated and dynamic items.
+	playlist.Items = newItems
 
 	return &playlist, nil
 }
