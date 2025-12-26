@@ -196,7 +196,16 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 		return
 	}
 
-	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, playerStatus)
+	// Handle nil playerStatus (CDP returned nil result when player is not playing in case showing QR code)
+	if playerStatus == nil {
+		s.logger.Debug("Player status is nil, skipping notification")
+		return
+	}
+
+	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
+	s.logger.Debug("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
+
+	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, lightweightPlayerStatus)
 }
 
 func (s *poller) sendNotification(ctx context.Context, notificationType relayer.NotificationType, message interface{}) {
@@ -278,6 +287,24 @@ func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 	}
 
 	return playerStatus, nil
+}
+
+// lightweightPlayerStatus creates a lightweight player status by removing the large fields (Playlist) from the player status
+// For all items, remove the source field from the item
+func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStatus {
+	items := make([]dp1playlist.PlaylistItem, 0)
+	if playerStatus.Items != nil {
+		items = make([]dp1playlist.PlaylistItem, 0, len(*playerStatus.Items))
+		for _, item := range *playerStatus.Items {
+			itemCopy := item
+			itemCopy.Source = ""
+			items = append(items, itemCopy)
+		}
+	}
+
+	playerStatus.Items = &items
+	playerStatus.Playlist = &dp1.Playlist{}
+	return playerStatus
 }
 
 func (s *poller) pollDeviceStatus(ctx context.Context) {
