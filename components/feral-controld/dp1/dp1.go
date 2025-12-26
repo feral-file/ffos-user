@@ -15,7 +15,7 @@ import (
 
 const (
 	DEFAULT_DURATION             = 300
-	MINIMAL_PLAYLIST_ITEMS_LIMIT = 25
+	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
 	MAX_PLAYLIST_ITEMS_LIMIT     = 100
 	// Namespace UUID for generating deterministic UUIDs from token identifiers
 	//nolint:gosec
@@ -130,10 +130,12 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 		duration = playlist.Defaults.Duration
 	}
 
-	// Merge original items with new items
-	originalItems := playlist.Items
+	// Build new items from tokens
 	newItems := buildPlaylistItems(duration, ffTokens)
-	playlist.Items = append(originalItems, newItems...)
+
+	// Always replace the new items to keep the playlist up to date.
+	// FIXME: This line will ignore the case that playlist has both curated and dynamic items.
+	playlist.Items = newItems
 
 	return &playlist, nil
 }
