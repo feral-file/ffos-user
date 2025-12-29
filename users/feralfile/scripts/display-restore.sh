@@ -83,6 +83,8 @@ echo "$(date '+%F %T') [INFO] Starting display restore script"
 
 udevadm monitor --kernel --subsystem-match=drm | while read -r line; do
     if [[ "$line" == *"change"* ]]; then
+        # Wait a bit for kernel to update status files
+        sleep 0.3
         # Check if any display is connected
         status=$(cat /sys/class/drm/card*-*/status 2>/dev/null | grep -m1 "^connected$")
         [ -n "$status" ] && status="connected"
