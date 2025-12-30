@@ -10,7 +10,7 @@ Type=notify
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
 Environment="WAYLAND_DISPLAY=wayland-0"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
-ExecStart=/usr/bin/feral-controld --debug
+ExecStart=/usr/bin/feral-controld
 Restart=always
 RestartSec=5
 WatchdogSec=30s
