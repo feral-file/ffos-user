@@ -84,7 +84,7 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 }
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
-	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID))
+	d.logger.Info("Processing dynamic playlist", zap.Any("playlist", playlist))
 	if len(playlist.DynamicQueries) != 1 {
 		return nil, fmt.Errorf("playlist should have exactly 1 dynamic queries, but has %d", len(playlist.DynamicQueries))
 	}

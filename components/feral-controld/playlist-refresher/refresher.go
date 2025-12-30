@@ -135,6 +135,7 @@ func (r *refresher) Stop() {
 func (r *refresher) processPlayingPlaylist() error {
 	// Get player status
 	playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
+	r.logger.Info("Player status", zap.Any("playerStatus", playerStatus))
 	if err != nil {
 		return err
 	}
