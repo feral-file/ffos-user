@@ -22,9 +22,8 @@ var (
 
 const (
 	CDP_CRITICAL_CPU_TEMPERATURE_EVENT = "CriticalCPUTemperature"
-
-	MSG_URL_PREFIX                  = "file:///opt/feral/ui/launcher/index.html?step=message&message="
-	SERVICE_FAILED_TO_START_MESSAGE = "FF1 encountered an unexpected issue and has stopped working. Please reboot the device. If the problem persists, contact support@feralfile.com for assistance."
+	CDP_SERVICE_FAILED_EVENT           = "ServiceFailed"
+	DISPLAY_FERALFILE_URL              = "https://display.feralfile.com"
 
 	// CDP Methods
 	METHOD_EVALUATE = "Runtime.evaluate"
@@ -362,23 +361,50 @@ func (c *Client) Reconnect(ctx context.Context) error {
 	return c.initLocked(ctx)
 }
 
-// SendCriticalCPUTemperatureNotification sends a critical CPU temperature notification
-func (c *Client) SendCriticalCPUTemperatureNotification(ctx context.Context) error {
-	// Send the CDP command
+// sendWatchdogEvent sends a watchdog event to the website via CDP
+func (c *Client) sendWatchdogEvent(ctx context.Context, eventType string) error {
+	expression := fmt.Sprintf("window.handleWatchdogEvent(%q)", eventType)
+
 	params := map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleWatchdogEvent(%q)", CDP_CRITICAL_CPU_TEMPERATURE_EVENT),
+		"expression": expression,
 	}
 
 	_, err := c.Send(METHOD_EVALUATE, params)
 	if err != nil {
 		if c.IsReconnectionError(err) {
-			return c.Reconnect(ctx)
+			if reconnErr := c.Reconnect(ctx); reconnErr != nil {
+				return fmt.Errorf("failed to reconnect: %w", reconnErr)
+			}
+			// Retry after reconnect
+			_, err = c.Send(METHOD_EVALUATE, params)
+			if err != nil {
+				return fmt.Errorf("failed to send watchdog event: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to send watchdog event: %w", err)
 		}
-
-		return err
 	}
 
+	return nil
+}
+
+// SendCriticalCPUTemperatureNotification sends a critical CPU temperature notification
+func (c *Client) SendCriticalCPUTemperatureNotification(ctx context.Context) error {
+	err := c.sendWatchdogEvent(ctx, CDP_CRITICAL_CPU_TEMPERATURE_EVENT)
+	if err != nil {
+		return err
+	}
 	c.logger.Info("Critical CPU temperature notification sent successfully")
+	return nil
+}
+
+// SendServiceFailedEvent sends service failed event to website via CDP
+func (c *Client) SendServiceFailedEvent(ctx context.Context) error {
+	err := c.sendWatchdogEvent(ctx, CDP_SERVICE_FAILED_EVENT)
+	if err != nil {
+		return err
+	}
+	c.logger.Info("Service failed event sent successfully via CDP")
 	return nil
 }
 
@@ -403,18 +429,6 @@ func (c *Client) Navigate(ctx context.Context, url string) error {
 			return fmt.Errorf("failed to navigate to %s: %w", url, err)
 		}
 	}
-	return nil
-}
-
-// ShowServiceFailedToStartPage navigates to the service failed to start page
-func (c *Client) ShowServiceFailedToStartPage(ctx context.Context) error {
-	message := SERVICE_FAILED_TO_START_MESSAGE
-	messageURL := MSG_URL_PREFIX + message
-	err := c.Navigate(ctx, messageURL)
-	if err != nil {
-		return fmt.Errorf("failed to navigate to %s: %w", messageURL, err)
-	}
-	c.logger.Info("Navigated to", zap.String("url", messageURL))
 	return nil
 }
 
