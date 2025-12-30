@@ -25,17 +25,19 @@ var (
 
 // SystemdMonitor monitors systemd services
 type SystemdMonitor struct {
-	cdpClient      *cdp.Client
-	logger         *zap.Logger
-	commandHandler *CommandHandler
+	cdpClient         *cdp.Client
+	logger            *zap.Logger
+	commandHandler    *CommandHandler
+	lastServiceStates map[string]*SystemdServiceStatus // Track last state to detect recovery
 }
 
 // NewSystemdMonitor creates a new Chromium monitor instance
 func NewSystemdMonitor(cdpClient *cdp.Client, logger *zap.Logger, commandHandler *CommandHandler) *SystemdMonitor {
 	return &SystemdMonitor{
-		cdpClient:      cdpClient,
-		logger:         logger,
-		commandHandler: commandHandler,
+		cdpClient:         cdpClient,
+		logger:            logger,
+		commandHandler:    commandHandler,
+		lastServiceStates: make(map[string]*SystemdServiceStatus),
 	}
 }
 
@@ -75,17 +77,36 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 			return errors.New("service state is nil")
 		}
 
+		// Check if service just recovered (failed -> active)
+		lastState := m.lastServiceStates[service]
+		hasRecovered := lastState != nil && *lastState == SYSTEMD_SERVICE_STATUS_FAILED && *state == SYSTEMD_SERVICE_STATUS_ACTIVE
+
 		switch *state {
 		case SYSTEMD_SERVICE_STATUS_ACTIVE:
-			m.logger.Debug("Systemd: Service is active",
-				zap.String("service", service))
+			if hasRecovered {
+				m.logger.Info("Systemd: Service recovered, resume playlist",
+					zap.String("service", service))
+				if m.cdpClient != nil {
+					if err := m.cdpClient.Navigate(ctx, cdp.DISPLAY_FERALFILE_URL); err != nil {
+						m.logger.Error("Systemd: Failed to resume playlist after service recovery",
+							zap.String("service", service),
+							zap.Error(err))
+					} else {
+						m.logger.Info("Systemd: Playlist resumed after service recovery",
+							zap.String("service", service))
+					}
+				}
+			} else {
+				m.logger.Debug("Systemd: Service is active",
+					zap.String("service", service))
+			}
 		case SYSTEMD_SERVICE_STATUS_FAILED:
 			m.logger.Error("Systemd: Service is failed",
 				zap.String("service", service),
 				zap.String("dependency", service))
 			// Send service failed to start notification to website via CDP
 			if m.cdpClient != nil {
-				if err := m.cdpClient.ShowServiceFailedToStartPage(ctx); err != nil {
+				if err := m.cdpClient.SendServiceFailedEvent(ctx); err != nil {
 					m.logger.Error("Systemd: Failed to send service failed to start notification via CDP",
 						zap.String("service", service),
 						zap.Error(err))
@@ -103,6 +124,9 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 				zap.String("service", service),
 				zap.Any("state", state))
 		}
+
+		// Update last state
+		m.lastServiceStates[service] = state
 	}
 
 	return nil
