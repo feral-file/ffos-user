@@ -28,15 +28,17 @@ type SystemdMonitor struct {
 	cdpClient         *cdp.Client
 	logger            *zap.Logger
 	commandHandler    *CommandHandler
+	vmagentClient     *VmagentClient
 	lastServiceStates map[string]*SystemdServiceStatus // Track last state to detect recovery
 }
 
 // NewSystemdMonitor creates a new Chromium monitor instance
-func NewSystemdMonitor(cdpClient *cdp.Client, logger *zap.Logger, commandHandler *CommandHandler) *SystemdMonitor {
+func NewSystemdMonitor(cdpClient *cdp.Client, logger *zap.Logger, commandHandler *CommandHandler, vmagentClient *VmagentClient) *SystemdMonitor {
 	return &SystemdMonitor{
 		cdpClient:         cdpClient,
 		logger:            logger,
 		commandHandler:    commandHandler,
+		vmagentClient:     vmagentClient,
 		lastServiceStates: make(map[string]*SystemdServiceStatus),
 	}
 }
@@ -114,6 +116,13 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 					m.logger.Info("Systemd: Sent service failed to start notification via CDP",
 						zap.String("service", service))
 				}
+			}
+
+			// Send service failed metric to vmagent
+			if m.vmagentClient != nil {
+				m.vmagentClient.SendServiceFailedMetric(ctx, service)
+			} else {
+				m.logger.Warn("Vmagent client is nil, skipping service failed metric")
 			}
 		case SYSTEMD_SERVICE_STATUS_INACTIVE:
 			m.logger.Error("Systemd: Service is inactive",
