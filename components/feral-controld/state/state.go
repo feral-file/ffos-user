@@ -25,9 +25,19 @@ func (r *RelayerState) IsReady() bool {
 	return r.TopicID != ""
 }
 
+// SleepModeState stores the sleep mode status and the last player state before sleep
+type SleepModeState struct {
+	Enabled         bool                   `json:"enabled"`
+	LastPlaylistURL *string                `json:"lastPlaylistURL,omitempty"`
+	LastPlaylist    map[string]interface{} `json:"lastPlaylist,omitempty"`
+	LastIndex       *int                   `json:"lastIndex,omitempty"`
+	LastIsPaused    *bool                  `json:"lastIsPaused,omitempty"`
+}
+
 type State struct {
-	ConnectedDevice *Device       `json:"connectedDevice"`
-	Relayer         *RelayerState `json:"relayer"`
+	ConnectedDevice *Device         `json:"connectedDevice"`
+	Relayer         *RelayerState   `json:"relayer"`
+	SleepMode       *SleepModeState `json:"sleepMode,omitempty"`
 }
 
 //go:generate mockgen -source=state.go -destination=../mocks/state.go -package=mocks -mock_names=StateManager=MockStateManager
@@ -80,6 +90,7 @@ func (m *defaultStateManager) Load(logger *zap.Logger) (*State, error) {
 		return &State{
 			Relayer:         &RelayerState{},
 			ConnectedDevice: &Device{},
+			SleepMode:       &SleepModeState{},
 		}, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to read state file: %w", err)
@@ -89,6 +100,7 @@ func (m *defaultStateManager) Load(logger *zap.Logger) (*State, error) {
 		return &State{
 			Relayer:         &RelayerState{},
 			ConnectedDevice: &Device{},
+			SleepMode:       &SleepModeState{},
 		}, nil
 	}
 
@@ -139,6 +151,7 @@ func (m *defaultStateManager) GetState() *State {
 		m.state = &State{
 			Relayer:         &RelayerState{},
 			ConnectedDevice: &Device{},
+			SleepMode:       &SleepModeState{},
 		}
 	}
 	return m.state

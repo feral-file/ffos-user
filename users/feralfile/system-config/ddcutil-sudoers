@@ -1,0 +1,12 @@
+# Sudoers configuration for passwordless ddcutil access
+# This file should be installed to: /etc/sudoers.d/ddcutil
+#
+# Installation:
+#   sudo visudo -c -f /path/to/this/file  # Validate syntax first
+#   sudo cp /path/to/this/file /etc/sudoers.d/ddcutil
+#   sudo chmod 0440 /etc/sudoers.d/ddcutil
+#
+# This allows the feralfile user to run ddcutil without a password prompt
+
+# Allow feralfile user to run ddcutil without password
+feralfile ALL=(ALL) NOPASSWD: /usr/bin/ddcutil

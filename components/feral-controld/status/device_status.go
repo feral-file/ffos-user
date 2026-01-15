@@ -8,6 +8,7 @@ import (
 	"time"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"golang.org/x/sync/errgroup"
@@ -50,12 +51,17 @@ type DeviceStatusResponse struct {
 	LatestVersion       string `json:"latestVersion,omitempty"`
 	AnalyticsDisabled   bool   `json:"analyticsDisabled,omitempty"`
 	BetaFeaturesEnabled bool   `json:"betaFeaturesEnabled,omitempty"`
+	Sleep               bool   `json:"sleep"`
 }
 
 // GetStatus retrieves comprehensive device status information
 // This function can be used by both command handlers and status polling
 func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, error) {
 	response := &DeviceStatusResponse{}
+
+	// Check sleep mode state
+	sleepModeState := state.GetState().SleepMode
+	isSleeping := sleepModeState != nil && sleepModeState.Enabled
 
 	// Use errgroup for parallel execution
 	g, ctx := errgroup.WithContext(ctx)
@@ -186,6 +192,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.LatestVersion = latestVersion
 	response.AnalyticsDisabled = analyticsDisabled
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
+	response.Sleep = isSleeping
 
 	return response, nil
 }

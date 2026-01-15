@@ -1,0 +1,14 @@
+# Udev rules for ddcutil I2C access without sudo
+# This file should be installed to: /etc/udev/rules.d/45-ddcutil-i2c.rules
+#
+# After installation, reload udev rules:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# Then reboot or replug the monitor
+
+# Grant i2c group access to all I2C devices
+KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0660"
+
+# Alternative: Grant specific user access (replace USER with actual username)
+# KERNEL=="i2c-[0-9]*", OWNER="feralfile", MODE="0660"

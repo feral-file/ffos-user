@@ -34,6 +34,15 @@ const AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
 // BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
 const BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
 
+// Navigation URLs
+const (
+	// LauncherLogoURL is the local launcher UI logo page
+	LauncherLogoURL = "file:///opt/feral/ui/launcher/index.html?step=logo"
+
+	// ControlAppURL is the web-based control application
+	ControlAppURL = "https://display.feralfile.com"
+)
+
 type Device struct {
 	ID       string `json:"device_id"`
 	Name     string `json:"device_name"`
@@ -148,6 +157,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.factoryReset(ctx)
 	case commands.CMD_UPLOAD_LOGS:
 		result, err = e.uploadLogs(ctx, bytes)
+	case commands.CMD_SLEEP_MODE:
+		result, err = e.handleSleepMode(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -770,4 +781,206 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	}
 
 	return CmdOK, nil
+}
+
+// navigateToURL navigates the browser to the specified URL using CDP Page.navigate
+func (e *executor) navigateToURL(url string) error {
+	e.logger.Info("Navigating to URL", zap.String("url", url))
+	_, err := e.cdp.Send("Page.navigate", map[string]interface{}{
+		"url": url,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to navigate to %s: %w", url, err)
+	}
+	return nil
+}
+
+// sendCommandToPage sends a command to the launcher page via window.handleCDPRequest
+func (e *executor) sendCommandToPage(command commands.Command) error {
+	commandJSON, err := e.json.Marshal(command)
+	if err != nil {
+		return fmt.Errorf("failed to marshal command: %w", err)
+	}
+
+	expr := fmt.Sprintf("window.handleCDPRequest(%s)", string(commandJSON))
+	_, err = e.cdp.Send("Runtime.evaluate", map[string]interface{}{
+		"expression": expr,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to send command to page: %w", err)
+	}
+	return nil
+}
+
+func (e *executor) handleSleepMode(ctx context.Context, args []byte) (interface{}, error) {
+	var cmdArgs struct {
+		Enabled bool   `json:"enabled"`
+		Force   *bool  `json:"force,omitempty"`
+		Reason  string `json:"reason,omitempty"`
+	}
+
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	e.logger.Info("Sleep mode request",
+		zap.Bool("enabled", cmdArgs.Enabled),
+		zap.String("reason", cmdArgs.Reason))
+
+	s := state.GetState()
+	if s.SleepMode == nil {
+		s.SleepMode = &state.SleepModeState{}
+	}
+
+	if cmdArgs.Enabled {
+		// Enter sleep mode
+		return e.enterSleepMode(ctx, s)
+	}
+
+	// Exit sleep mode
+	return e.exitSleepMode(ctx, s)
+}
+
+func (e *executor) enterSleepMode(ctx context.Context, s *state.State) (interface{}, error) {
+	e.logger.Info("Entering sleep mode")
+
+	// Capture current player status before switching to logo
+	playerStatus, err := e.statusPoller.FetchPlayerStatus(ctx)
+	if err != nil {
+		e.logger.Warn("Failed to fetch player status before sleep", zap.Error(err))
+		// Continue anyway - we'll just show logo on wake
+	} else if playerStatus != nil && playerStatus.Command == string(commands.CMD_DISPLAY_PLAYLIST) {
+		// Store the playlist state for restoration
+		s.SleepMode.LastPlaylistURL = playerStatus.PlaylistURL
+		s.SleepMode.LastIndex = playerStatus.Index
+		s.SleepMode.LastIsPaused = playerStatus.IsPaused
+
+		// If no URL but we have a playlist object, store it
+		if playerStatus.PlaylistURL == nil && playerStatus.Playlist != nil {
+			playlistBytes, err := e.json.Marshal(playerStatus.Playlist)
+			if err == nil {
+				var playlistMap map[string]interface{}
+				if err := e.json.Unmarshal(playlistBytes, &playlistMap); err == nil {
+					s.SleepMode.LastPlaylist = playlistMap
+				}
+			}
+		}
+
+		e.logger.Info("Captured player state before sleep",
+			zap.Bool("hasPlaylistURL", playerStatus.PlaylistURL != nil),
+			zap.Bool("hasPlaylist", s.SleepMode.LastPlaylist != nil))
+	}
+
+	// Navigate Chromium to logo page
+	if err := e.navigateToURL(LauncherLogoURL); err != nil {
+		e.logger.Error("Failed to navigate to logo page", zap.Error(err))
+		return nil, err
+	}
+
+	e.logger.Info("Navigated to logo page")
+
+	// Turn off screen using script
+	//nolint:gosec
+	cmd := e.exec.CommandContext(ctx, "/home/feralfile/scripts/screen-power.sh", "sleep")
+	if err := cmd.Run(); err != nil {
+		e.logger.Error("Failed to turn off screen", zap.Error(err))
+		return nil, fmt.Errorf("failed to turn off screen: %w", err)
+	}
+
+	e.logger.Info("Screen turned off")
+
+	// Update state
+	s.SleepMode.Enabled = true
+	if err := s.Save(); err != nil {
+		e.logger.Error("Failed to save sleep mode state", zap.Error(err))
+		return nil, fmt.Errorf("failed to save state: %w", err)
+	}
+
+	return map[string]interface{}{
+		"ok":      true,
+		"enabled": true,
+	}, nil
+}
+
+func (e *executor) exitSleepMode(ctx context.Context, s *state.State) (interface{}, error) {
+	e.logger.Info("Exiting sleep mode")
+
+	// Navigate back to the control app (webapp)
+	if err := e.navigateToURL(ControlAppURL); err != nil {
+		e.logger.Error("Failed to navigate to control app", zap.Error(err))
+		// Continue anyway - we can still try to restore the playlist
+	} else {
+		e.logger.Info("Navigated to control app")
+	}
+
+	// Turn on screen using script
+	//nolint:gosec
+	cmd := e.exec.CommandContext(ctx, "/home/feralfile/scripts/screen-power.sh", "wake")
+	if err := cmd.Run(); err != nil {
+		e.logger.Error("Failed to wake screen", zap.Error(err))
+
+		// Navigate Chromium to logo page
+		if err := e.navigateToURL(LauncherLogoURL); err != nil {
+			e.logger.Error("Failed to navigate to logo page", zap.Error(err))
+			return nil, err
+		}
+
+		return nil, fmt.Errorf("failed to wake screen: %w", err)
+	}
+
+	e.logger.Info("Screen woke successfully")
+
+	// Restore playlist if we have one
+	if s.SleepMode.LastPlaylistURL != nil || s.SleepMode.LastPlaylist != nil {
+		e.logger.Info("Restoring previous playlist")
+
+		command := commands.Command{
+			Type:      commands.CMD_DISPLAY_PLAYLIST,
+			Arguments: make(map[string]interface{}),
+		}
+
+		if s.SleepMode.LastPlaylistURL != nil {
+			command.Arguments["playlistUrl"] = *s.SleepMode.LastPlaylistURL
+		} else if s.SleepMode.LastPlaylist != nil {
+			command.Arguments["dp1_call"] = s.SleepMode.LastPlaylist
+		}
+
+		// Add index and isPaused if available
+		if s.SleepMode.LastIndex != nil {
+			command.Arguments["index"] = *s.SleepMode.LastIndex
+		}
+		if s.SleepMode.LastIsPaused != nil {
+			command.Arguments["isPaused"] = *s.SleepMode.LastIsPaused
+		}
+
+		// Send command to page via CDP
+		if err := e.sendCommandToPage(command); err != nil {
+			e.logger.Error("Failed to restore playlist", zap.Error(err))
+			// Don't fail the whole command - screen is on which is the main goal
+		} else {
+			e.logger.Info("Playlist restored successfully")
+		}
+	} else {
+		e.logger.Info("No previous playlist to restore, keeping logo page")
+	}
+
+	// Update state - clear sleep mode and saved playlist
+	s.SleepMode.Enabled = false
+	s.SleepMode.LastPlaylistURL = nil
+	s.SleepMode.LastPlaylist = nil
+	s.SleepMode.LastIndex = nil
+	s.SleepMode.LastIsPaused = nil
+
+	if err := s.Save(); err != nil {
+		e.logger.Error("Failed to save sleep mode state", zap.Error(err))
+		// Don't fail - the important actions are done
+	}
+
+	// Force refresh status poller
+	e.statusPoller.ForceRefresh()
+
+	return map[string]interface{}{
+		"ok":      true,
+		"enabled": false,
+	}, nil
 }

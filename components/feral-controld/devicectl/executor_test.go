@@ -3050,3 +3050,371 @@ func TestExecutor_NewHandler(t *testing.T) {
 	handler := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, mockJSON, mockOS, mockExec, mockMath, logger)
 	assert.NotNil(t, handler)
 }
+
+func TestExecutor_HandleSleepMode_EnterSleep(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type: commands.CMD_SLEEP_MODE,
+		Arguments: map[string]interface{}{
+			"enabled": true,
+		},
+	}
+
+	// Setup state
+	testState := &state.State{
+		Relayer:         &state.RelayerState{TopicID: "test-topic"},
+		ConnectedDevice: &state.Device{},
+		SleepMode:       &state.SleepModeState{},
+	}
+
+	// Mock player status
+	playlistURL := "https://example.com/playlist.json"
+	index := 5
+	isPaused := false
+	mockPlayerStatus := &status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &playlistURL,
+		Index:       &index,
+		IsPaused:    &isPaused,
+	}
+
+	// Mock expectations
+	// First, Execute calls Marshal on the arguments
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true}`), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			// Parse the arguments
+			argMap := v.(*struct {
+				Enabled bool   `json:"enabled"`
+				Force   *bool  `json:"force,omitempty"`
+				Reason  string `json:"reason,omitempty"`
+			})
+			argMap.Enabled = true
+			return nil
+		})
+
+	ts.mockStateManager.EXPECT().GetState().Return(testState).AnyTimes()
+
+	ts.mockStatus.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(mockPlayerStatus, nil)
+
+	// Expect CDP call to navigate to logo page
+	ts.mockCDP.EXPECT().
+		Send("Page.navigate", map[string]interface{}{
+			"url": devicectl.LauncherLogoURL,
+		}).
+		Return(nil, nil)
+
+	// Expect screen sleep script
+	mockCmd := ts.mockExecCmd
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "/home/feralfile/scripts/screen-power.sh", "sleep").
+		Return(mockCmd)
+	mockCmd.EXPECT().Run().Return(nil)
+
+	// Expect state save
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			// Verify state was updated correctly
+			assert.True(t, s.SleepMode.Enabled)
+			assert.Equal(t, &playlistURL, s.SleepMode.LastPlaylistURL)
+			assert.Equal(t, &index, s.SleepMode.LastIndex)
+			assert.Equal(t, &isPaused, s.SleepMode.LastIsPaused)
+			return nil
+		})
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+
+	// Verify result
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	resultMap, ok := result.(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, true, resultMap["ok"])
+	assert.Equal(t, true, resultMap["enabled"])
+}
+
+func TestExecutor_HandleSleepMode_ExitSleep(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type: commands.CMD_SLEEP_MODE,
+		Arguments: map[string]interface{}{
+			"enabled": false,
+		},
+	}
+
+	// Setup state with saved playlist
+	playlistURL := "https://example.com/playlist.json"
+	index := 5
+	isPaused := false
+	testState := &state.State{
+		Relayer:         &state.RelayerState{TopicID: "test-topic"},
+		ConnectedDevice: &state.Device{},
+		SleepMode: &state.SleepModeState{
+			Enabled:         true,
+			LastPlaylistURL: &playlistURL,
+			LastIndex:       &index,
+			LastIsPaused:    &isPaused,
+		},
+	}
+
+	// Mock expectations
+	// First, Execute calls Marshal on the arguments, then playlist restoration calls Marshal again
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"enabled":false}`), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			argMap := v.(*struct {
+				Enabled bool   `json:"enabled"`
+				Force   *bool  `json:"force,omitempty"`
+				Reason  string `json:"reason,omitempty"`
+			})
+			argMap.Enabled = false
+			return nil
+		})
+
+	ts.mockStateManager.EXPECT().GetState().Return(testState).AnyTimes()
+
+	// Expect screen wake script
+	mockWakeCmd := ts.mockExecCmd
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "/home/feralfile/scripts/screen-power.sh", "wake").
+		Return(mockWakeCmd)
+	mockWakeCmd.EXPECT().Run().Return(nil)
+
+	// Expect CDP call to navigate back to control app
+	ts.mockCDP.EXPECT().
+		Send("Page.navigate", map[string]interface{}{
+			"url": devicectl.ControlAppURL,
+		}).
+		Return(nil, nil)
+
+	// Expect playlist restoration via CDP (second Marshal call for the playlist command)
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		DoAndReturn(func(v interface{}) ([]byte, error) {
+			// This is the second Marshal call - for the playlist restoration command
+			cmd := v.(commands.Command)
+			assert.Equal(t, commands.CMD_DISPLAY_PLAYLIST, cmd.Type)
+			assert.Equal(t, playlistURL, cmd.Arguments["playlistUrl"])
+			assert.Equal(t, index, cmd.Arguments["index"])
+			assert.Equal(t, isPaused, cmd.Arguments["isPaused"])
+			return []byte(`{"command":"displayPlaylist","request":{"playlistUrl":"https://example.com/playlist.json","index":5,"isPaused":false}}`), nil
+		})
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, "window.handleCDPRequest")
+			assert.Contains(t, expr, "displayPlaylist")
+			return nil, nil
+		})
+
+	// Expect state save
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			// Verify state was cleared
+			assert.False(t, s.SleepMode.Enabled)
+			assert.Nil(t, s.SleepMode.LastPlaylistURL)
+			assert.Nil(t, s.SleepMode.LastPlaylist)
+			assert.Nil(t, s.SleepMode.LastIndex)
+			assert.Nil(t, s.SleepMode.LastIsPaused)
+			return nil
+		})
+
+	// Expect status poller refresh
+	ts.mockStatus.EXPECT().ForceRefresh()
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+
+	// Verify result
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	resultMap, ok := result.(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, true, resultMap["ok"])
+	assert.Equal(t, false, resultMap["enabled"])
+}
+
+func TestExecutor_HandleSleepMode_EnterSleep_NoPlaylist(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type: commands.CMD_SLEEP_MODE,
+		Arguments: map[string]interface{}{
+			"enabled": true,
+		},
+	}
+
+	// Setup state
+	testState := &state.State{
+		Relayer:         &state.RelayerState{TopicID: "test-topic"},
+		ConnectedDevice: &state.Device{},
+		SleepMode:       &state.SleepModeState{},
+	}
+
+	// Mock player status with no playlist
+	mockPlayerStatus := &status.PlayerStatus{
+		Command: "checkStatus",
+	}
+
+	// Mock expectations
+	// First, Execute calls Marshal on the arguments
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true}`), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			argMap := v.(*struct {
+				Enabled bool   `json:"enabled"`
+				Force   *bool  `json:"force,omitempty"`
+				Reason  string `json:"reason,omitempty"`
+			})
+			argMap.Enabled = true
+			return nil
+		})
+
+	ts.mockStateManager.EXPECT().GetState().Return(testState).AnyTimes()
+
+	ts.mockStatus.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(mockPlayerStatus, nil)
+
+	// Expect CDP call to navigate to logo page
+	ts.mockCDP.EXPECT().
+		Send("Page.navigate", map[string]interface{}{
+			"url": devicectl.LauncherLogoURL,
+		}).
+		Return(nil, nil)
+
+	// Expect screen sleep script
+	mockCmd := ts.mockExecCmd
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "/home/feralfile/scripts/screen-power.sh", "sleep").
+		Return(mockCmd)
+	mockCmd.EXPECT().Run().Return(nil)
+
+	// Expect state save
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			// Verify state - no playlist saved
+			assert.True(t, s.SleepMode.Enabled)
+			assert.Nil(t, s.SleepMode.LastPlaylistURL)
+			return nil
+		})
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+
+	// Verify result
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	resultMap, ok := result.(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, true, resultMap["ok"])
+	assert.Equal(t, true, resultMap["enabled"])
+}
+
+func TestExecutor_HandleSleepMode_ExitSleep_NoSavedPlaylist(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type: commands.CMD_SLEEP_MODE,
+		Arguments: map[string]interface{}{
+			"enabled": false,
+		},
+	}
+
+	// Setup state with no saved playlist
+	testState := &state.State{
+		Relayer:         &state.RelayerState{TopicID: "test-topic"},
+		ConnectedDevice: &state.Device{},
+		SleepMode: &state.SleepModeState{
+			Enabled: true,
+		},
+	}
+
+	// Mock expectations
+	// First, Execute calls Marshal on the arguments
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":false}`), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			argMap := v.(*struct {
+				Enabled bool   `json:"enabled"`
+				Force   *bool  `json:"force,omitempty"`
+				Reason  string `json:"reason,omitempty"`
+			})
+			argMap.Enabled = false
+			return nil
+		})
+
+	ts.mockStateManager.EXPECT().GetState().Return(testState).AnyTimes()
+
+	// Expect screen wake script
+	mockWakeCmd := ts.mockExecCmd
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "/home/feralfile/scripts/screen-power.sh", "wake").
+		Return(mockWakeCmd)
+	mockWakeCmd.EXPECT().Run().Return(nil)
+
+	// Expect CDP call to navigate back to control app
+	ts.mockCDP.EXPECT().
+		Send("Page.navigate", map[string]interface{}{
+			"url": devicectl.ControlAppURL,
+		}).
+		Return(nil, nil)
+
+	// No playlist restoration CDP call expected since there's no playlist to restore
+
+	// Expect state save
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			assert.False(t, s.SleepMode.Enabled)
+			return nil
+		})
+
+	// Expect status poller refresh
+	ts.mockStatus.EXPECT().ForceRefresh()
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+
+	// Verify result
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	resultMap, ok := result.(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, true, resultMap["ok"])
+	assert.Equal(t, false, resultMap["enabled"])
+}

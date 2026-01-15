@@ -29,6 +29,7 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_UPDATE_TO_LATEST:     true,
 	CMD_FACTORY_RESET:        true,
 	CMD_UPLOAD_LOGS:          true,
+	CMD_SLEEP_MODE:           true,
 }
 
 type Command struct {
@@ -58,6 +59,7 @@ const (
 	CMD_DISPLAY_PLAYLIST     Type = "displayPlaylist"
 	CMD_FACTORY_RESET        Type = "factoryReset"
 	CMD_UPLOAD_LOGS          Type = "uploadLogs"
+	CMD_SLEEP_MODE           Type = "sleepMode"
 )
 
 func (c Type) DeviceCtlCommand() bool {
