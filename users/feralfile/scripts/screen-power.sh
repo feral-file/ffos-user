@@ -13,7 +13,13 @@ ACTION="${1:-}"
 case "$ACTION" in
     sleep)
         echo "$(date '+%F %T') [INFO] Turning off screen with ddcutil..."
-        sudo ddcutil --noverify setvcp D6 02
+        # Samsung Frame TVs often have issues with DDC/CI. 
+        # We try to set the power state, but also use wlr-randr as a fallback.
+        # --noscantable helps avoid "EDID has changed" errors by not scanning all buses.
+        sudo ddcutil --noverify --noscantable setvcp D6 02 || echo "$(date '+%F %T') [WARN] ddcutil sleep failed"
+        
+        echo "$(date '+%F %T') [INFO] Turning off display signal with wlr-randr..."
+        wlr-randr --output HDMI-A-1 --off
         echo "$(date '+%F %T') [INFO] Screen sleep complete"
         ;;
     
@@ -23,15 +29,16 @@ case "$ACTION" in
         
         # Wait for display to initialize DDC/CI interface
         # The I2C bus and monitor need time to be ready for communication
+        # Samsung TVs often need more time to wake up the DDC interface
         echo "$(date '+%F %T') [INFO] Waiting for display to initialize..."
-        sleep 1.5
+        sleep 3
         
         echo "$(date '+%F %T') [INFO] Turning on screen with ddcutil..."
-        # Retry once if first attempt fails (common on first wake)
-        if ! sudo ddcutil --noverify setvcp D6 01 2>/dev/null; then
-            echo "$(date '+%F %T') [WARN] First ddcutil attempt failed, retrying after delay..."
+        # Retry with increased delay and --noscantable
+        if ! sudo ddcutil --noverify --noscantable setvcp D6 01 2>/dev/null; then
+            echo "$(date '+%F %T') [WARN] First ddcutil attempt failed, retrying after additional delay..."
             sleep 2
-            sudo ddcutil --noverify setvcp D6 01
+            sudo ddcutil --noverify --noscantable --retry 3 setvcp D6 01 || true
         fi
         echo "$(date '+%F %T') [INFO] Screen wake complete"
         ;;
