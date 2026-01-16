@@ -186,6 +186,20 @@ func (p *SysResMonitor) tick(ctx context.Context, interval time.Duration, fns ..
 	}
 }
 
+func (p *SysResMonitor) isSleepMode() bool {
+	stateFile := "/home/feralfile/.state/controld.state"
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return false
+	}
+
+	// Quick check for sleep mode without full JSON parsing to avoid dependency on feral-controld's types
+	content := string(data)
+	// Remove all whitespace for easier matching
+	compact := strings.Join(strings.Fields(content), "")
+	return strings.Contains(compact, "\"sleepMode\":{\"enabled\":true")
+}
+
 func detectCPUType() SystemType {
 	file, err := os.Open("/proc/cpuinfo")
 	if err != nil {
@@ -636,6 +650,11 @@ func (p *SysResMonitor) monitorUptime(_ context.Context) error {
 }
 
 func (p *SysResMonitor) monitorScreen(ctx context.Context) error {
+	if p.isSleepMode() {
+		p.logger.Debug("Skipping screen monitor in sleep mode")
+		return nil
+	}
+
 	// Resolution and refresh rate
 	cmd := exec.CommandContext(ctx, "wlr-randr")
 	var stderr bytes.Buffer
