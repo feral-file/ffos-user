@@ -1,12 +1,26 @@
 #!/bin/bash
 
 STATE_FILE="/home/feralfile/.state/screen-orientation"
+CONTROLD_STATE_FILE="/home/feralfile/.state/controld.state"
 
 get_rotation() {
     if [ -f "$STATE_FILE" ]; then
         cat "$STATE_FILE"
     else
         echo "normal"
+    fi
+}
+
+is_sleep_mode() {
+    if [ ! -f "$CONTROLD_STATE_FILE" ]; then
+        return 1  # Not in sleep mode if state file doesn't exist
+    fi
+    
+    # Check if sleep mode is enabled in the state file
+    if grep -q '"sleepMode":{[^}]*"enabled":true' "$CONTROLD_STATE_FILE" 2>/dev/null; then
+        return 0  # In sleep mode
+    else
+        return 1  # Not in sleep mode
     fi
 }
 
@@ -85,6 +99,13 @@ udevadm monitor --kernel --subsystem-match=drm | while read -r line; do
     if [[ "$line" == *"change"* ]]; then
         # Wait a bit for kernel to update status files
         sleep 0.3
+        
+        # Skip processing if device is in sleep mode
+        if is_sleep_mode; then
+            echo "$(date '+%F %T') [DEBUG] Skipping display event processing - device is in sleep mode"
+            continue
+        fi
+        
         # Check if any display is connected
         status=$(cat /sys/class/drm/card*-*/status 2>/dev/null | grep -m1 "^connected$")
         [ -n "$status" ] && status="connected"
