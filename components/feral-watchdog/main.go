@@ -152,7 +152,7 @@ func main() {
 	}()
 
 	// Start Systemd monitor
-	systemdMonitor := NewSystemdMonitor(cdpClient, log, commandHandler)
+	systemdMonitor := NewSystemdMonitor(cdpClient, log, commandHandler, vmagentClient)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

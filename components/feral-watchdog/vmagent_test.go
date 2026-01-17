@@ -137,6 +137,43 @@ func TestVmagentClient_SendCrashRebootMetric(t *testing.T) {
 	}
 }
 
+func TestVmagentClient_SendServiceFailedMetric(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	tests := []struct {
+		name    string
+		service string
+	}{
+		{
+			name:    "feral-controld",
+			service: "feral-controld",
+		},
+		{
+			name:    "feral-sys-monitord",
+			service: "feral-sys-monitord",
+		},
+		{
+			name:    "feral-setupd",
+			service: "feral-setupd",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a test server
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			client := NewVmagentClient(server.URL, logger)
+			ctx := context.Background()
+
+			// This should not panic or hang
+			client.SendServiceFailedMetric(ctx, tt.service)
+		})
+	}
+}
+
 func TestVmagentClient_DefaultURL(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 
