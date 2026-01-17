@@ -132,12 +132,13 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		installedVersion = config.Version
 
 		// Get latest version from API if credentials are available
+		// Note: Network errors are non-fatal - latestVersion will remain empty if fetch fails
 		if config.Branch != "" && config.Endpoint != "" {
 			version, err := d.fetchLatestVersion(ctx, config.Endpoint, config.Branch)
-			if err != nil {
-				return fmt.Errorf("failed to fetch latest version: %w", err)
+			if err == nil {
+				latestVersion = version
 			}
-			latestVersion = version
+			// Don't return error - allow other status info to be returned even without network
 		}
 
 		return nil

@@ -252,8 +252,12 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 	}
 
 	if outputName == "" {
+		e.logger.Error("Screen rotation: Could not find active output")
 		return nil, fmt.Errorf("could not find active output")
 	}
+
+	e.logger.Info("Screen rotation: Found active output",
+		zap.String("output_name", outputName))
 
 	// Determine rotation
 	// Assume normal is 0, then 90, 180, 270 degrees
@@ -289,15 +293,25 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 	// This makes wlr-randr and config file stay in sync
 	//nolint:gosec
 	rotateCmd := e.exec.CommandContext(ctx, "wlr-randr", "--output", outputName, "--transform", newRotation)
+	e.logger.Info("Screen rotation: Applying rotation command",
+		zap.String("output", outputName),
+		zap.String("transform", newRotation))
 	err = rotateCmd.Run()
 	if err != nil {
 		e.logger.Error("Failed to rotate screen", zap.Error(err))
 		return nil, fmt.Errorf("failed to rotate screen: %w", err)
 	}
 
+	e.logger.Info("Screen rotation: Successfully applied rotation",
+		zap.String("output", outputName),
+		zap.String("transform", newRotation))
+
 	// Write rotation value to file
 	if err := e.os.WriteFile(constants.SCREEN_ORIENTATION_FILE, []byte(newRotation), 0600); err != nil {
 		e.logger.Warn("Failed to save screen orientation", zap.Error(err))
+	} else {
+		e.logger.Info("Screen rotation: Saved rotation to config file",
+			zap.String("rotation", newRotation))
 	}
 
 	e.logger.Info("Screen rotated and saved",
@@ -318,6 +332,12 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 	case "270":
 		orientationReplyMsg = "portraitReverse"
 	}
+
+	e.logger.Info("Screen rotation: Completed successfully",
+		zap.String("output", outputName),
+		zap.String("rotation", newRotation),
+		zap.String("orientation_reply", orientationReplyMsg))
+
 	return map[string]string{"orientation": orientationReplyMsg}, nil
 }
 
