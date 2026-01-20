@@ -16,9 +16,6 @@ use tokio::{
     time,
 };
 
-// ---------- Cache ----------
-static REMOTE_VERSIONS: OnceLock<UpstreamVersion> = OnceLock::new();
-
 // ---------- Public API ----------
 
 /// Return `Ok(true)` when the running build is **below** the distributor's
@@ -231,10 +228,6 @@ struct UpstreamVersion {
 }
 
 async fn fetch_remote_version() -> Result<UpstreamVersion> {
-    if let Some(versions) = REMOTE_VERSIONS.get() {
-        return Ok(versions.clone());
-    }
-
     let url = format!(
         "{}{}{}",
         cfg::endpoint().await?,
@@ -270,6 +263,5 @@ async fn fetch_remote_version() -> Result<UpstreamVersion> {
         flashing_guide: info.flashing_guide,
         latest_version: Version::parse(&info.latest_version).context("parsing upstream semver")?,
     };
-    REMOTE_VERSIONS.set(versions.clone()).unwrap();
     Ok(versions)
 }
