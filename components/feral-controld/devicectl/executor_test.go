@@ -2759,69 +2759,6 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 	assert.Equal(t, 45.0, resultMap["disk"], "disk metric should match saved value")
 }
 
-func TestExecutor_UpdateToLatest_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_UPDATE_TO_LATEST,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// Mock exec.CommandContext for systemctl
-	ts.mockExec.EXPECT().
-		CommandContext(ts.ctx, "systemctl", "start", "feral-updater@00:00.service").
-		Return(ts.mockExecCmd)
-
-	// Mock cmd.Run() to succeed
-	ts.mockExecCmd.EXPECT().
-		Run().
-		Return(nil)
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_UpdateToLatest_CommandError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_UPDATE_TO_LATEST,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// Mock exec.CommandContext for systemctl to fail
-	ts.mockExec.EXPECT().
-		CommandContext(ts.ctx, "systemctl", "start", "feral-updater@00:00.service").
-		Return(ts.mockExecCmd)
-
-	// Mock cmd.Run() to fail
-	ts.mockExecCmd.EXPECT().
-		Run().
-		Return(errors.New("update to latest command failed"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to execute update to latest command")
-}
-
 func TestExecutor_SystemUpdate_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

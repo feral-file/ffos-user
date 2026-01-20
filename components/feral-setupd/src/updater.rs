@@ -5,7 +5,7 @@ use rand::Rng;
 use regex::Regex;
 use semver::Version;
 use serde::Deserialize;
-use std::{process::Stdio, sync::OnceLock, time::Duration};
+use std::{process::Stdio, time::Duration};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom},
