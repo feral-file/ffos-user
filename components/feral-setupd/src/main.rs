@@ -686,8 +686,8 @@ mod callbacks {
             }
         }
 
-        // Check if update is required
-        match super::updater::is_update_required().await {
+        // Check if update is available
+        match super::updater::is_update_available().await {
             Ok(true) => {
                 if let Err(e) = super::update(app_state.clone(), chromium.clone()).await {
                     eprintln!("MAIN: System update failed: {e:#?}");

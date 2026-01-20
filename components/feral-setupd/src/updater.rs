@@ -29,6 +29,13 @@ pub async fn is_update_required() -> Result<bool> {
     Ok(current < remote_versions.min_runtime_version)
 }
 
+/// Return `Ok(true)` when a newer version is available from the distributor.
+pub async fn is_update_available() -> Result<bool> {
+    let current = cfg::current_version().await?;
+    let remote_versions = fetch_remote_version().await?;
+    Ok(current < remote_versions.latest_version)
+}
+
 /// Return the latest version from the remote server.
 pub async fn latest_version() -> Result<String> {
     let remote_versions = fetch_remote_version().await?;
