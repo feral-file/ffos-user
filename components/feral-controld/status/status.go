@@ -32,6 +32,7 @@ type PlayerStatus struct {
 	IsPaused       *bool                       `json:"isPaused,omitempty"`
 	Items          *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
 	Ok             bool                        `json:"ok,omitempty"`
+	SleepMode      bool                        `json:"sleepMode,omitempty"`
 	Error          *string                     `json:"error,omitempty"`
 	DeviceSettings *struct {
 		Scaling     *string `json:"scaling,omitempty"`
