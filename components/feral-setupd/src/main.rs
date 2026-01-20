@@ -337,6 +337,17 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         upload_logs_cb,
     );
 
+    // Listen for system update signal
+    let system_update_cb =
+        callbacks::create_system_update_dbus_cb(app_state.clone(), chrome.clone());
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_SYSTEM_UPDATE,
+        stop_dbus_listener.clone(),
+        system_update_cb,
+    );
+
     stop_dbus_listener
 }
 
@@ -626,6 +637,77 @@ mod callbacks {
         }
     }
 
+    async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
+        // Check internet connectivity first
+        if !app_state.internet.is_online(true).await {
+            eprintln!("MAIN: System update requested but no internet connection");
+            let _ = show_message(
+                chromium,
+                app_state,
+                constant::INTERNET_FAILED_TO_CONNECT_MSG,
+            )
+            .await;
+            return;
+        }
+
+        // Check if device is too old to auto-upgrade
+        match super::updater::is_too_old_to_upgrade().await {
+            Ok(true) => {
+                // Device is too old, show reflashing QR code
+                if let Ok(Some(flashing_guide)) = super::updater::flashing_guide_url().await {
+                    let current_version = app_state.current_version.clone();
+                    let latest_version = super::updater::latest_version()
+                        .await
+                        .unwrap_or_else(|_| "Unknown".to_string());
+                    let min_upgradeable = super::updater::min_upgradeable_version()
+                        .await
+                        .unwrap_or(None)
+                        .unwrap_or_else(|| "Unknown".to_string());
+
+                    let _ = super::show_reflashing_qrcode(
+                        app_state,
+                        chromium,
+                        &flashing_guide,
+                        &current_version,
+                        &latest_version,
+                        &min_upgradeable,
+                    )
+                    .await;
+                } else {
+                    let _ =
+                        show_message(chromium, app_state, constant::REFLASHING_REQUIRED_MSG).await;
+                }
+                return;
+            }
+            Ok(false) => {} // Device can be upgraded, continue
+            Err(e) => {
+                eprintln!("MAIN: Error checking if device is too old: {e:#?}");
+                // Continue with update check if this fails
+            }
+        }
+
+        // Check if update is required
+        match super::updater::is_update_required().await {
+            Ok(true) => {
+                if let Err(e) = super::update(app_state.clone(), chromium.clone()).await {
+                    eprintln!("MAIN: System update failed: {e:#?}");
+                }
+            }
+            Ok(false) => {
+                println!("MAIN: System update requested but no update required");
+            }
+            Err(e) => {
+                eprintln!("MAIN: Error checking for update: {e:#?}");
+                let _ = show_message(
+                    chromium,
+                    app_state,
+                    constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
+                )
+                .await;
+            }
+        }
+    }
+
     pub fn create_factory_reset_cb(
         app_state: Arc<AppState>,
         chromium: Arc<Cdp>,
@@ -649,6 +731,20 @@ mod callbacks {
             let app_state = app_state.clone();
             task::spawn(async move {
                 do_factory_reset(&chromium, &app_state).await;
+            });
+        })
+    }
+
+    pub fn create_system_update_dbus_cb(
+        app_state: Arc<AppState>,
+        chromium: Arc<Cdp>,
+    ) -> dbus_utils::ListenCallback {
+        Box::new(move |_msg| {
+            println!("MAIN: System update DBus callback received");
+            let chromium = chromium.clone();
+            let app_state = app_state.clone();
+            task::spawn(async move {
+                do_system_update(&chromium, &app_state).await;
             });
         })
     }

@@ -2822,6 +2822,64 @@ func TestExecutor_UpdateToLatest_CommandError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to execute update to latest command")
 }
 
+func TestExecutor_SystemUpdate_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type:      commands.CMD_UPDATE_TO_LATEST,
+		Arguments: map[string]interface{}{},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Mock DBus call for factory reset
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
+			Body:      []interface{}{},
+		}).
+		Return(nil)
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_SystemUpdate_DBusError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Setup test data
+	cmd := commands.Command{
+		Type:      commands.CMD_UPDATE_TO_LATEST,
+		Arguments: map[string]interface{}{},
+	}
+
+	// Mock JSON marshaling
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Mock DBus call to fail
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, gomock.Any()).
+		Return(errors.New("dbus error"))
+
+	// Execute command
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to send system update signal")
+}
+
 func TestExecutor_FactoryReset_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

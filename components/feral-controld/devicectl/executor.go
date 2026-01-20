@@ -730,13 +730,18 @@ func (e *executor) getSysMetrics() (interface{}, error) {
 }
 
 func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
-	e.logger.Info("Executing update to latest version command")
+	e.logger.Info("Executing system update command via DBus")
 
-	// execute command systemctl start feral-updater@00:00.service
-	cmd := e.exec.CommandContext(ctx, "systemctl", "start", "feral-updater@00:00.service")
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to execute update to latest command: %w", err)
+	// Send DBus signal to setupd to handle system update (show page + execute update)
+	err := e.dbus.RetryableSend(ctx,
+		godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
+			Body:      []interface{}{},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to send system update signal: %w", err)
 	}
 
 	return CmdOK, nil
