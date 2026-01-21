@@ -1073,8 +1073,12 @@ async fn check_and_update_system(
             eprintln!("MAIN: Error checking for update: {e:#?}");
             match execution {
                 UpdateExecution::Blocking => {
-                    show_message(chrome, app_state, constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG)
-                        .await?;
+                    show_message(
+                        chrome,
+                        app_state,
+                        constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
+                    )
+                    .await?;
                 }
                 UpdateExecution::NonBlocking => {
                     task::spawn({
