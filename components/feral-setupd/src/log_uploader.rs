@@ -1,195 +1,370 @@
 use crate::constant;
-use anyhow::Result;
-use base64::{Engine as _, engine::general_purpose};
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use tokio::fs;
+use zip::ZipWriter;
+use zip::write::SimpleFileOptions;
 
-const MAX_FILE_SIZE_BYTES: usize = 1_048_576; // 1MB in bytes
+/// Size of chunks when reading files for streaming compression (64KB).
+const READ_CHUNK_SIZE: usize = 64 * 1024;
 
-// Helper function to collect log files
-pub async fn collect_log_files() -> Result<Vec<(String, Vec<u8>)>, std::io::Error> {
-    use tokio::fs;
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+/// Creates a zip archive containing all files from the logs directory recursively.
+/// Uses streaming I/O to avoid loading large files entirely into memory.
+/// Writes to a temporary file and returns the path on success.
+pub async fn create_logs_zip() -> Result<PathBuf, std::io::Error> {
+    let logs_dir = Path::new(constant::LOG_FILEDIR);
 
-    let logs_dir = constant::LOG_FILEDIR;
-    let mut log_files = Vec::new();
+    // Create a temporary file for the zip archive
+    let temp_path = PathBuf::from("/tmp/logs_upload.zip");
 
-    let mut dir = fs::read_dir(logs_dir).await?;
-    while let Some(entry) = dir.next_entry().await? {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("log") {
-            let file_name = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown.log")
-                .to_string();
+    // Collect all file paths first (async), then do sync zip writing
+    let files_to_zip = collect_files_to_zip(logs_dir).await?;
 
-            let mut file = match fs::File::open(&path).await {
-                Ok(f) => f,
+    if files_to_zip.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No log files found",
+        ));
+    }
+
+    // Spawn blocking task for the sync zip writing with streaming file reads
+    let logs_dir_owned = logs_dir.to_path_buf();
+    let temp_path_clone = temp_path.clone();
+    let file_count = tokio::task::spawn_blocking(move || {
+        write_zip_streaming(&temp_path_clone, &logs_dir_owned, &files_to_zip)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+
+    // Get the file size for logging
+    let metadata = fs::metadata(&temp_path).await?;
+    println!(
+        "LOG_UPLOADER: Created zip with {file_count} files, size: {} bytes",
+        metadata.len()
+    );
+
+    Ok(temp_path)
+}
+
+/// Recursively collects all file paths under the given directory.
+async fn collect_files_to_zip(logs_dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut files = Vec::new();
+    let mut dirs_to_visit = vec![logs_dir.to_path_buf()];
+
+    while let Some(current_dir) = dirs_to_visit.pop() {
+        let mut dir = match fs::read_dir(&current_dir).await {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!(
+                    "LOG_UPLOADER: Failed to read directory {}: {e}",
+                    current_dir.display()
+                );
+                continue;
+            }
+        };
+
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+            let metadata = match fs::metadata(&path).await {
+                Ok(m) => m,
                 Err(e) => {
-                    eprintln!("BLE: Failed to open log file {file_name}: {e}");
+                    eprintln!(
+                        "LOG_UPLOADER: Failed to get metadata for {}: {e}",
+                        path.display()
+                    );
                     continue;
                 }
             };
 
-            // Get file size
-            let file_size = match file.metadata().await {
-                Ok(metadata) => metadata.len() as usize,
-                Err(e) => {
-                    eprintln!("BLE: Failed to get metadata for {file_name}: {e}");
-                    continue;
-                }
-            };
-
-            let contents = if file_size > MAX_FILE_SIZE_BYTES {
-                // Seek to the position 1MB from the end
-                let seek_pos = file_size - MAX_FILE_SIZE_BYTES;
-                if let Err(e) = file.seek(std::io::SeekFrom::Start(seek_pos as u64)).await {
-                    eprintln!("BLE: Failed to seek in file {file_name}: {e}");
-                    continue;
-                }
-
-                // Read the last 1MB
-                let mut buffer = Vec::with_capacity(MAX_FILE_SIZE_BYTES);
-                match file.read_to_end(&mut buffer).await {
-                    Ok(_) => {
-                        // Try to find the first complete line
-                        if let Some(first_newline) = buffer.iter().position(|&b| b == b'\n') {
-                            buffer = buffer[first_newline + 1..].to_vec();
-                        }
-
-                        // Add truncation notice
-                        let truncation_notice = format!(
-                            "[TRUNCATED: Original file size {file_size} bytes, showing last {} bytes]\n",
-                            buffer.len()
-                        );
-                        let mut final_contents = truncation_notice.into_bytes();
-                        final_contents.extend(buffer);
-
-                        final_contents
-                    }
-                    Err(e) => {
-                        eprintln!("BLE: Failed to read from file {file_name}: {e}");
-                        continue;
-                    }
-                }
-            } else {
-                // File is small enough, read the whole thing
-                let mut contents = Vec::new();
-                match file.read_to_end(&mut contents).await {
-                    Ok(_) => contents,
-                    Err(e) => {
-                        eprintln!("BLE: Failed to read file {file_name}: {e}");
-                        continue;
-                    }
-                }
-            };
-
-            log_files.push((file_name, contents));
+            if metadata.is_dir() {
+                dirs_to_visit.push(path);
+            } else if metadata.is_file() {
+                files.push(path);
+            }
         }
     }
 
-    println!("BLE log-submit: collected {} log files", log_files.len());
-    Ok(log_files)
+    Ok(files)
 }
 
-pub async fn submit_logs_to_api(
-    user_id: &str,
-    api_key: &str,
-    body: serde_json::Value,
-) -> Result<(), u8> {
-    use reqwest;
+/// Writes files to a zip archive using streaming reads to avoid memory bloat.
+/// Runs in a blocking context since the zip crate is synchronous.
+fn write_zip_streaming(
+    zip_path: &Path,
+    logs_dir: &Path,
+    files: &[PathBuf],
+) -> Result<usize, std::io::Error> {
+    use std::fs::File;
+    use std::io::{BufReader, Read};
 
-    println!("API: Starting log submission to remote API");
+    let file = File::create(zip_path)?;
+    let buffered = BufWriter::new(file);
+    let mut zip = ZipWriter::new(buffered);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    // Log request body size
-    if let Ok(serialized_body) = serde_json::to_string(&body) {
-        println!("API: Request body size (bytes): {}", serialized_body.len());
+    let mut file_count = 0;
+    let mut chunk_buffer = vec![0u8; READ_CHUNK_SIZE];
+
+    for path in files {
+        // Calculate relative path from logs_dir for the zip entry name
+        let relative_path = match path.strip_prefix(logs_dir) {
+            Ok(rel) => rel.to_string_lossy().to_string(),
+            Err(_) => {
+                eprintln!(
+                    "LOG_UPLOADER: Failed to get relative path for {}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+
+        // Open file for streaming read
+        let source_file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("LOG_UPLOADER: Failed to open file {relative_path}: {e}");
+                continue;
+            }
+        };
+        let mut reader = BufReader::new(source_file);
+
+        // Start the zip entry
+        if let Err(e) = zip.start_file(&relative_path, options) {
+            eprintln!("LOG_UPLOADER: Failed to start zip entry for {relative_path}: {e}");
+            continue;
+        }
+
+        // Stream the file contents in chunks
+        loop {
+            let bytes_read = match reader.read(&mut chunk_buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("LOG_UPLOADER: Error reading {relative_path}: {e}");
+                    break;
+                }
+            };
+
+            if let Err(e) = zip.write_all(&chunk_buffer[..bytes_read]) {
+                eprintln!("LOG_UPLOADER: Failed to write chunk for {relative_path}: {e}");
+                break;
+            }
+        }
+
+        file_count += 1;
     }
+
+    zip.finish().map_err(std::io::Error::other)?;
+    Ok(file_count)
+}
+
+/// Request body for the v2 log-submissions API.
+#[derive(Serialize)]
+struct LogSubmissionRequest {
+    device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+/// Pre-signed upload result from S3.
+#[derive(Deserialize, Debug)]
+struct PresignResult {
+    url: String,
+}
+
+/// Response from the v2 log-submissions API.
+#[derive(Deserialize, Debug)]
+struct LogSubmissionResponse {
+    #[allow(dead_code)]
+    object_key: String,
+    upload: PresignResult,
+    #[allow(dead_code)]
+    expires_in_seconds: i64,
+}
+
+/// Requests a pre-signed S3 upload URL from the v2 API.
+async fn get_presigned_url(
+    device_id: &str,
+    api_key: &str,
+    source: &str,
+    branch: &str,
+    version: &str,
+) -> Result<String, u8> {
+    println!("LOG_UPLOADER: Requesting pre-signed URL from v2 API");
+
+    let request_body = LogSubmissionRequest {
+        device_id: device_id.to_string(),
+        title: None,
+        source: Some(source.to_string()),
+        tags: vec!["device-logs".to_string()],
+        branch: Some(branch.to_string()),
+        version: Some(version.to_string()),
+    };
 
     let client = reqwest::Client::new();
 
-    let request_builder = client
+    let response = client
         .post(constant::LOG_UPLOAD_API)
         .header("x-api-key", api_key)
-        .header("x-device-id", user_id)
         .header("Content-Type", "application/json")
-        .json(&body);
-
-    println!("API: Sending HTTP request...");
-    let start_time = std::time::Instant::now();
-
-    let response = request_builder.send().await;
-    let elapsed = start_time.elapsed();
-
-    println!("API: HTTP request completed in {elapsed:?}");
+        .json(&request_body)
+        .send()
+        .await;
 
     match response {
         Ok(resp) => {
             let status = resp.status();
-            println!("API: Received HTTP response with status: {status}");
-
             if status.is_success() {
-                println!("API: SUCCESS - Logs submitted successfully");
-                Ok(())
-            } else {
-                // Try to get response body for debugging
-                match resp.text().await {
-                    Ok(response_text) => {
-                        eprintln!(
-                            "API: Failed to submit logs: HTTP {status}, body_len={}",
-                            response_text.len()
+                match resp.json::<LogSubmissionResponse>().await {
+                    Ok(data) => {
+                        println!(
+                            "LOG_UPLOADER: Got pre-signed URL, object_key: {}",
+                            data.object_key
                         );
+                        Ok(data.upload.url)
                     }
-                    Err(body_err) => {
-                        eprintln!("API: Failed to read error response body: {body_err}");
-                        eprintln!("API: Failed to submit logs: HTTP {status}");
+                    Err(e) => {
+                        eprintln!("LOG_UPLOADER: Failed to parse v2 API response: {e}");
+                        Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
                     }
                 }
-
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("LOG_UPLOADER: v2 API returned error: HTTP {status}, body: {body}");
                 Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
             }
         }
         Err(e) => {
-            eprintln!("API: ERROR - Network error occurred: {e}");
-
-            // More detailed error information
-            if e.is_timeout() {
-                eprintln!("API: Error type: Request timeout");
-            } else if e.is_connect() {
-                eprintln!("API: Error type: Connection error");
-            } else if e.is_request() {
-                eprintln!("API: Error type: Request building error");
-            } else {
-                eprintln!("API: Error type: Other network error");
-            }
-
+            eprintln!("LOG_UPLOADER: Network error requesting pre-signed URL: {e}");
             Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
         }
     }
 }
 
-pub fn create_log_submission_body(
-    title: &str,
-    message: &str,
-    tags: Vec<String>,
-    log_files: Vec<(String, Vec<u8>)>,
-) -> serde_json::Value {
-    let attachments: Vec<serde_json::Value> = log_files
-        .into_iter()
-        .map(|(file_name, data)| {
-            json!({
-                "title": file_name,
-                "data": general_purpose::STANDARD.encode(data)
-            })
-        })
-        .collect();
+/// Uploads the zip file to S3 using streaming to avoid loading into memory.
+async fn upload_zip_to_s3(upload_url: &str, zip_path: &Path) -> Result<(), u8> {
+    use tokio_util::io::ReaderStream;
 
-    let result = json!({
-        "attachments": attachments,
-        "title": title,
-        "message": message,
-        "tags": tags
-    });
+    // Get file size for Content-Length header
+    let metadata = match fs::metadata(zip_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("LOG_UPLOADER: Failed to get zip file metadata: {e}");
+            return Err(constant::BLE_ERR_CODE_UNKNOWN_ERROR);
+        }
+    };
+    let file_size = metadata.len();
+
+    println!("LOG_UPLOADER: Uploading {file_size} bytes to S3 (streaming)");
+
+    // Open file for async streaming read
+    let file = match fs::File::open(zip_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("LOG_UPLOADER: Failed to open zip file for upload: {e}");
+            return Err(constant::BLE_ERR_CODE_UNKNOWN_ERROR);
+        }
+    };
+
+    // Create a streaming body from the file
+    let stream = ReaderStream::new(file);
+    let body = reqwest::Body::wrap_stream(stream);
+
+    let client = reqwest::Client::new();
+    let start_time = std::time::Instant::now();
+
+    let response = client
+        .put(upload_url)
+        .header("Content-Type", "application/zip")
+        .header("Content-Length", file_size)
+        .body(body)
+        .send()
+        .await;
+
+    let elapsed = start_time.elapsed();
+    println!("LOG_UPLOADER: S3 upload completed in {elapsed:?}");
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                println!("LOG_UPLOADER: S3 upload successful");
+                Ok(())
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("LOG_UPLOADER: S3 upload failed: HTTP {status}, body: {body}");
+                Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
+            }
+        }
+        Err(e) => {
+            eprintln!("LOG_UPLOADER: Network error during S3 upload: {e}");
+            if e.is_timeout() {
+                eprintln!("LOG_UPLOADER: Error type: Request timeout");
+            } else if e.is_connect() {
+                eprintln!("LOG_UPLOADER: Error type: Connection error");
+            }
+            Err(constant::BLE_ERR_CODE_NETWORK_ERROR)
+        }
+    }
+}
+
+/// Main entry point: zips the logs folder and uploads to S3 via the v2 API.
+///
+/// Flow:
+/// 1. Zip the entire /home/feralfile/.logs folder (streaming to temp file)
+/// 2. Request a pre-signed S3 upload URL from the v2 API
+/// 3. Stream upload the zip to S3
+/// 4. Clean up the temp file
+pub async fn submit_logs(
+    device_id: &str,
+    api_key: &str,
+    source: &str,
+    branch: &str,
+    version: &str,
+) -> Result<(), u8> {
+    println!("LOG_UPLOADER: Starting log submission (v2 API, streaming)");
+
+    // Step 1: Create zip of logs folder (streaming to temp file)
+    let zip_path = match create_logs_zip().await {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("LOG_UPLOADER: Failed to create logs zip: {e}");
+            return Err(constant::BLE_ERR_CODE_UNKNOWN_ERROR);
+        }
+    };
+
+    // Ensure temp file cleanup on all exit paths
+    let result = async {
+        // Step 2: Get pre-signed URL from v2 API
+        let upload_url = get_presigned_url(device_id, api_key, source, branch, version).await?;
+
+        // Step 3: Stream upload zip to S3
+        upload_zip_to_s3(&upload_url, &zip_path).await?;
+
+        Ok(())
+    }
+    .await;
+
+    // Step 4: Clean up temp file
+    if let Err(e) = fs::remove_file(&zip_path).await {
+        eprintln!(
+            "LOG_UPLOADER: Failed to clean up temp zip file {}: {e}",
+            zip_path.display()
+        );
+    }
+
+    if result.is_ok() {
+        println!("LOG_UPLOADER: Log submission completed successfully");
+    }
 
     result
 }

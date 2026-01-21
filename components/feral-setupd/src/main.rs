@@ -222,7 +222,7 @@ async fn start_ble(
         bt_connected: callbacks::create_bt_connected_cb(app_state.clone(), chrome.clone()),
         bt_disconnected: callbacks::create_bt_disconnected_cb(app_state.clone(), chrome.clone()),
         factory_reset: callbacks::create_factory_reset_cb(app_state.clone(), chrome.clone()),
-        submit_logs: callbacks::create_submit_logs_cb(),
+        submit_logs: callbacks::create_submit_logs_cb(app_state.clone()),
         connect_wifi: callbacks::create_connect_wifi_cb(app_state.clone(), chrome.clone()),
         keep_wifi: callbacks::create_keep_wifi_cb(app_state.clone(), chrome.clone()),
         get_info: callbacks::create_get_info_cb(app_state.clone()),
@@ -348,7 +348,7 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
     );
 
     // Listen for upload logs signal
-    let upload_logs_cb = callbacks::create_upload_logs_dbus_cb();
+    let upload_logs_cb = callbacks::create_upload_logs_dbus_cb(app_state.clone());
     dbus_utils::listen_for_signal(
         constant::DBUS_CONTROLD_OBJECT,
         constant::DBUS_CONTROLD_INTERFACE,
@@ -679,54 +679,42 @@ mod callbacks {
         })
     }
 
-    /// Core log upload logic
-    async fn do_upload_logs(user_id: &str, api_key: &str, title: &str, source: &str) {
-        println!("MAIN: Uploading logs with title: {title} (source: {source})");
+    /// Core log upload logic - zips logs folder and uploads via v2 API
+    async fn do_upload_logs(
+        device_id: &str,
+        api_key: &str,
+        source: &str,
+        branch: &str,
+        version: &str,
+    ) {
+        println!("MAIN: Uploading logs (source: {source})");
 
-        // Collect log files
-        let log_files = match super::log_uploader::collect_log_files().await {
-            Ok(files) => files,
-            Err(e) => {
-                eprintln!("MAIN: Failed to collect log files: {e:#?}");
-                return;
-            }
-        };
-
-        println!("MAIN: Collected {} log files", log_files.len());
-
-        // Create request body with source-specific tags
-        let tags = vec!["device-logs".to_string(), format!("{source}-submission")];
-        let body = super::log_uploader::create_log_submission_body(
-            title,
-            &format!("Device log submission via {source}"),
-            tags,
-            log_files,
-        );
-
-        // Submit logs to API
-        if let Err(e) = super::log_uploader::submit_logs_to_api(user_id, api_key, body).await {
+        if let Err(e) =
+            super::log_uploader::submit_logs(device_id, api_key, source, branch, version).await
+        {
             eprintln!("MAIN: Failed to submit logs: error code {e}");
         } else {
             println!("MAIN: Logs submitted successfully");
         }
     }
 
-    pub fn create_submit_logs_cb() -> ble::SubmitLogsCallback {
-        Box::new(move |user_id, api_key, title| {
+    pub fn create_submit_logs_cb(app_state: Arc<AppState>) -> ble::SubmitLogsCallback {
+        Box::new(move |user_id, api_key, _title| {
             let user_id = user_id.to_string();
             let api_key = api_key.to_string();
-            let title = title.to_string();
+            let branch = app_state.branch.clone();
+            let version = app_state.current_version.clone();
             Box::pin(async move {
-                do_upload_logs(&user_id, &api_key, &title, "ble").await;
+                do_upload_logs(&user_id, &api_key, "ble", &branch, &version).await;
             })
         })
     }
 
-    pub fn create_upload_logs_dbus_cb() -> dbus_utils::ListenCallback {
+    pub fn create_upload_logs_dbus_cb(app_state: Arc<AppState>) -> dbus_utils::ListenCallback {
         Box::new(move |msg| {
             println!("MAIN: Upload logs DBus callback received");
-            // Read parameters: user_id, api_key, title
-            let (user_id, api_key, title): (String, String, String) =
+            // Read parameters: user_id, api_key, title (title unused in v2 API)
+            let (user_id, api_key, _title): (String, String, String) =
                 match msg.read3::<String, String, String>() {
                     Ok(params) => params,
                     Err(e) => {
@@ -735,8 +723,10 @@ mod callbacks {
                     }
                 };
 
+            let branch = app_state.branch.clone();
+            let version = app_state.current_version.clone();
             task::spawn(async move {
-                do_upload_logs(&user_id, &api_key, &title, "internet").await;
+                do_upload_logs(&user_id, &api_key, "dbus", &branch, &version).await;
             });
         })
     }
