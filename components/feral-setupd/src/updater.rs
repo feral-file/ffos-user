@@ -235,9 +235,9 @@ struct UpstreamVersion {
     latest_version: Version,
 }
 
-async fn fetch_remote_version(force_refresh: bool) -> Result<UpstreamVersion> {
-    // Check if we have a cached version (unless force_refresh is true)
-    if !force_refresh {
+async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
+    // Check if we have a cached version
+    if !refresh {
         let cache = REMOTE_VERSIONS.read().unwrap();
         if let Some(versions) = cache.as_ref() {
             return Ok(versions.clone());
