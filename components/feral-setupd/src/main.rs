@@ -699,13 +699,13 @@ mod callbacks {
     }
 
     pub fn create_submit_logs_cb(app_state: Arc<AppState>) -> ble::SubmitLogsCallback {
-        Box::new(move |user_id, api_key, _title| {
-            let user_id = user_id.to_string();
+        Box::new(move |_user_id, api_key, _title| {
             let api_key = api_key.to_string();
+            let device_id = app_state.device_id.clone();
             let branch = app_state.branch.clone();
             let version = app_state.current_version.clone();
             Box::pin(async move {
-                do_upload_logs(&user_id, &api_key, "ble", &branch, &version).await;
+                do_upload_logs(&device_id, &api_key, "ble", &branch, &version).await;
             })
         })
     }
