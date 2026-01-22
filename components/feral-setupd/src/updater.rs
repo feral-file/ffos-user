@@ -5,7 +5,7 @@ use rand::Rng;
 use regex::Regex;
 use semver::Version;
 use serde::Deserialize;
-use std::{process::Stdio, time::Duration};
+use std::{process::Stdio, sync::RwLock, time::Duration};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom},
@@ -17,9 +17,22 @@ use tokio::{
 };
 
 // ---------- Cache ----------
-static REMOTE_VERSIONS: OnceLock<UpstreamVersion> = OnceLock::new();
+static REMOTE_VERSIONS: RwLock<Option<UpstreamVersion>> = RwLock::new(None);
 
 // ---------- Public API ----------
+
+/// Clear the cached remote version data and fetch fresh data from the distributor.
+/// Call this before version checks when you need to ensure up-to-date information.
+pub async fn refresh() -> Result<()> {
+    // Clear the cache
+    {
+        let mut cache = REMOTE_VERSIONS.write().unwrap();
+        *cache = None;
+    }
+    // Fetch fresh data
+    fetch_remote_version().await?;
+    Ok(())
+}
 
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum supported version and an update is therefore required.
@@ -231,8 +244,12 @@ struct UpstreamVersion {
 }
 
 async fn fetch_remote_version() -> Result<UpstreamVersion> {
-    if let Some(versions) = REMOTE_VERSIONS.get() {
-        return Ok(versions.clone());
+    // Check if we have a cached version
+    {
+        let cache = REMOTE_VERSIONS.read().unwrap();
+        if let Some(versions) = cache.as_ref() {
+            return Ok(versions.clone());
+        }
     }
 
     let url = format!(
@@ -270,6 +287,12 @@ async fn fetch_remote_version() -> Result<UpstreamVersion> {
         flashing_guide: info.flashing_guide,
         latest_version: Version::parse(&info.latest_version).context("parsing upstream semver")?,
     };
-    REMOTE_VERSIONS.set(versions.clone()).unwrap();
+
+    // Store in cache
+    {
+        let mut cache = REMOTE_VERSIONS.write().unwrap();
+        *cache = Some(versions.clone());
+    }
+
     Ok(versions)
 }

@@ -243,7 +243,7 @@ async fn start_ble(
 /// - The initial internet check says the device is currently offline.
 ///
 /// What it does:
-/// - Warms the Wi‑Fi SSID cache so the first BLE scan is fast.
+/// - Warms the Wi-Fi SSID cache so the first BLE scan is fast.
 /// - Shows the pairing QR code to let the user fix connectivity.
 /// - Polls for internet with an aggressive or relaxed interval depending on
 ///   whether the device has ever connected before.
@@ -252,8 +252,8 @@ async fn start_ble(
 ///   normal "startup with internet" flow.
 ///
 /// Notes:
-/// - If the user chooses a new Wi‑Fi via BLE, the BLE flow clears
-///   `auto_proceed`; in that case this function will not auto‑advance and the
+/// - If the user chooses a new Wi-Fi via BLE, the BLE flow clears
+///   `auto_proceed`; in that case this function will not auto-advance and the
 ///   BLE setup path remains in control.
 async fn startup_without_internet(
     app_state: &Arc<AppState>,
@@ -308,7 +308,7 @@ async fn startup_without_internet(
 ///   reflashing QR code, depending on updater state and cached topic ID.
 ///
 /// Notes:
-/// - This path is used both on true first‑boot with working internet and on
+/// - This path is used both on true first-boot with working internet and on
 ///   subsequent boots where connectivity is available immediately.
 async fn startup_with_internet(
     app_state: &Arc<AppState>,
@@ -811,7 +811,7 @@ async fn show_reflashing_qrcode(
 ) -> Result<()> {
     // Build message with version information
     let message = format!(
-        "We're sorry—we've moved too far ahead for this version to catch up. Your FF1 is too far behind to auto-upgrade. Current version: {current_version} Latest version: {latest_version} Minimum upgradeable version: {min_upgradeable_version}. Scan the code above for step-by-step reflashing instructions, or contact us for help. support@feralfile.com"
+        "We've moved too far ahead for this version to catch up. Your FF1 is too far behind to auto-upgrade. Current version: {current_version} Latest version: {latest_version} Minimum upgradeable version: {min_upgradeable_version}. Scan the code above for step-by-step reflashing instructions, or contact us for help. support@feralfile.com"
     );
 
     // Build URL with QR code step and flashing guide as the QR content
@@ -839,7 +839,7 @@ async fn show_reflashing_qrcode(
 /// - The caller has determined that the device currently has internet access.
 ///
 /// What it does:
-/// - Checks whether the running firmware/software is too old to auto‑upgrade and, if so,
+/// - Checks whether the running firmware/software is too old to auto-upgrade and, if so,
 ///   shows a reflashing QR code or a fallback message and stops further processing.
 /// - If the device can be upgraded, checks whether an update is required and either
 ///   drives the updater flow or continues with normal startup.
@@ -970,6 +970,12 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
+    // Refresh remote version cache to ensure we have the latest data
+    if let Err(e) = updater::refresh().await {
+        eprintln!("MAIN: Error refreshing remote versions: {e:#?}");
+        // Continue anyway - cached data may still be usable or fetch will be retried
+    }
+
     // First check if device is too old to auto-upgrade
     match updater::is_too_old_to_upgrade().await {
         Ok(true) => {
