@@ -714,7 +714,7 @@ mod callbacks {
         Box::new(move |msg| {
             println!("MAIN: Upload logs DBus callback received");
             // Read parameters: user_id, api_key, title (title unused in v2 API)
-            let (user_id, api_key, _title): (String, String, String) =
+            let (_user_id, api_key, _title): (String, String, String) =
                 match msg.read3::<String, String, String>() {
                     Ok(params) => params,
                     Err(e) => {
@@ -723,10 +723,11 @@ mod callbacks {
                     }
                 };
 
+            let device_id = app_state.device_id.clone();
             let branch = app_state.branch.clone();
             let version = app_state.current_version.clone();
             task::spawn(async move {
-                do_upload_logs(&user_id, &api_key, "dbus", &branch, &version).await;
+                do_upload_logs(&device_id, &api_key, "dbus", &branch, &version).await;
             });
         })
     }
