@@ -25,4 +25,18 @@ docker-run:
 	@docker run --rm -it \
 		-v "$(CURDIR)":/workspace \
 		arch-dev
+
+.PHONY: docker-check
+docker-check:
+	@docker run --rm \
+		-v "$(CURDIR)":/workspace \
+		arch-dev sh -c '\
+			set -e && \
+			echo "==> cargo fmt -- --check" && \
+			cargo fmt -- --check && \
+			echo "==> cargo clippy --all-targets --all-features -- -D warnings" && \
+			cargo clippy --all-targets --all-features -- -D warnings && \
+			echo "==> cargo check --all-targets --all-features --verbose" && \
+			cargo check --all-targets --all-features --verbose && \
+			echo "==> All checks passed!"'
 # ───────────────────────────────────────────────────────────────────────────────	
