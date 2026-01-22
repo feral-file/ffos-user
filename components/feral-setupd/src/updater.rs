@@ -5,7 +5,7 @@ use rand::Rng;
 use regex::Regex;
 use semver::Version;
 use serde::Deserialize;
-use std::{process::Stdio, sync::OnceLock, time::Duration};
+use std::{process::Stdio, sync::RwLock, time::Duration};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom},
@@ -17,21 +17,33 @@ use tokio::{
 };
 
 // ---------- Cache ----------
-static REMOTE_VERSIONS: OnceLock<UpstreamVersion> = OnceLock::new();
+static REMOTE_VERSIONS: RwLock<Option<UpstreamVersion>> = RwLock::new(None);
 
 // ---------- Public API ----------
+
+/// Force refresh the cached remote version information.
+pub async fn refresh_remote_version() {
+    let _ = fetch_remote_version(true).await;
+}
 
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum supported version and an update is therefore required.
 pub async fn is_update_required() -> Result<bool> {
     let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version().await?;
+    let remote_versions = fetch_remote_version(false).await?;
     Ok(current < remote_versions.min_runtime_version)
+}
+
+/// Return `Ok(true)` when a newer version is available from the distributor.
+pub async fn is_update_available() -> Result<bool> {
+    let current = cfg::current_version().await?;
+    let remote_versions = fetch_remote_version(false).await?;
+    Ok(current < remote_versions.latest_version)
 }
 
 /// Return the latest version from the remote server.
 pub async fn latest_version() -> Result<String> {
-    let remote_versions = fetch_remote_version().await?;
+    let remote_versions = fetch_remote_version(false).await?;
     Ok(remote_versions.latest_version.to_string())
 }
 
@@ -39,7 +51,7 @@ pub async fn latest_version() -> Result<String> {
 /// minimum upgradeable version, meaning the device needs to be reflashed.
 pub async fn is_too_old_to_upgrade() -> Result<bool> {
     let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version().await?;
+    let remote_versions = fetch_remote_version(false).await?;
 
     if let Some(min_upgradeable) = &remote_versions.min_upgradeable_version {
         Ok(current < *min_upgradeable)
@@ -50,13 +62,13 @@ pub async fn is_too_old_to_upgrade() -> Result<bool> {
 
 /// Return the flashing guide URL from the remote server, if available.
 pub async fn flashing_guide_url() -> Result<Option<String>> {
-    let remote_versions = fetch_remote_version().await?;
+    let remote_versions = fetch_remote_version(false).await?;
     Ok(remote_versions.flashing_guide.clone())
 }
 
 /// Return the minimum upgradeable version from the remote server, if available.
 pub async fn min_upgradeable_version() -> Result<Option<String>> {
-    let remote_versions = fetch_remote_version().await?;
+    let remote_versions = fetch_remote_version(false).await?;
     Ok(remote_versions
         .min_upgradeable_version
         .as_ref()
@@ -223,9 +235,13 @@ struct UpstreamVersion {
     latest_version: Version,
 }
 
-async fn fetch_remote_version() -> Result<UpstreamVersion> {
-    if let Some(versions) = REMOTE_VERSIONS.get() {
-        return Ok(versions.clone());
+async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
+    // Check if we have a cached version
+    if !refresh {
+        let cache = REMOTE_VERSIONS.read().unwrap();
+        if let Some(versions) = cache.as_ref() {
+            return Ok(versions.clone());
+        }
     }
 
     let url = format!(
@@ -263,6 +279,12 @@ async fn fetch_remote_version() -> Result<UpstreamVersion> {
         flashing_guide: info.flashing_guide,
         latest_version: Version::parse(&info.latest_version).context("parsing upstream semver")?,
     };
-    REMOTE_VERSIONS.set(versions.clone()).unwrap();
+
+    // Store in cache
+    {
+        let mut cache = REMOTE_VERSIONS.write().unwrap();
+        *cache = Some(versions.clone());
+    }
+
     Ok(versions)
 }

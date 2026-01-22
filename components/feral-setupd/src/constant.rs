@@ -80,6 +80,7 @@ pub const DBUS_SYSMONITORD_INTERFACE: &str = "com.feralfile.sysmonitord";
 pub const DBUS_EVENT_QRCODE_SWITCH: &str = "show_pairing_qr_code";
 pub const DBUS_EVENT_FACTORY_RESET: &str = "factory_reset";
 pub const DBUS_EVENT_UPLOAD_LOGS: &str = "upload_logs";
+pub const DBUS_EVENT_SYSTEM_UPDATE: &str = "system_update";
 pub const DBUS_CONNECTIVITY_METHOD: &str = "GetConnectivityStatus";
 pub const DBUS_RELAYER_TOPIC_ID_METHOD: &str = "GetRelayerTopicID";
 
