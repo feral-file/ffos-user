@@ -67,6 +67,34 @@ state using a background refresher. Use:
 - `is_online_cached()` for synchronous contexts (e.g. BLE callbacks).
 - `is_online(force_refresh = true)` when you need a fresh D‑Bus check.
 
+### D‑Bus signals (`src/main.rs`, `src/dbus_utils.rs`, `src/constant.rs`)
+
+`feral-setupd` listens for signals from `controld` on the session bus to handle
+various maintenance and UI control events. All signals are defined as constants
+in `src/constant.rs` and registered during startup via `listen_for_signal()`.
+
+**Signals listened to:**
+- `show_pairing_qr_code` (`DBUS_EVENT_QRCODE_SWITCH`): Switches the UI to show
+  the pairing QR code page.
+- `factory_reset` (`DBUS_EVENT_FACTORY_RESET`): Triggers a factory reset,
+  showing the factory reset page and executing the reset operation.
+- `upload_logs` (`DBUS_EVENT_UPLOAD_LOGS`): Triggers log collection and upload
+  to the backend.
+- `system_update` (`DBUS_EVENT_SYSTEM_UPDATE`): Triggers a user-initiated system
+  update check and installation.
+
+**System update flow** (`do_system_update`):
+- When the `system_update` signal is received, the handler first checks internet
+  connectivity (with force refresh).
+- If no internet connection is available, shows an error message to the user and
+  returns early.
+- If internet is available, triggers `check_and_update_system()` with:
+  - `UpdateMode::Available` (checks for any newer version, not just required
+    updates)
+  - `UpdateExecution::Blocking` (waits for the update to complete, since the
+    D‑Bus callback runs in a spawned task)
+- Errors during the update process are logged but don't crash the daemon.
+
 ### Persistent state (`src/persistent_state.rs`)
 
 Small key/value file store used for setup flags (e.g. `topic_id`, `connected`,
