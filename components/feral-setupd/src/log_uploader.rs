@@ -11,12 +11,20 @@ const READ_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Creates a zip archive containing all files from the logs directory recursively.
 /// Uses streaming I/O to avoid loading large files entirely into memory.
-/// Writes to a temporary file and returns the path on success.
+/// Writes to a temporary file with a unique timestamp-based name to prevent
+/// race conditions when multiple uploads run concurrently.
 pub async fn create_logs_zip() -> Result<PathBuf, std::io::Error> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     let logs_dir = Path::new(constant::LOG_FILEDIR);
 
-    // Create a temporary file for the zip archive
-    let temp_path = PathBuf::from("/tmp/logs_upload.zip");
+    // Generate a unique temp file name using timestamp to avoid race conditions
+    // when multiple uploads run concurrently (e.g., BLE + D-Bus triggered).
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_path = PathBuf::from(format!("/tmp/logs_upload_{timestamp}.zip"));
 
     // Collect all file paths first (async), then do sync zip writing
     let files_to_zip = collect_files_to_zip(logs_dir).await?;
