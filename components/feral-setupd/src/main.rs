@@ -970,12 +970,8 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
-    // Refresh remote version cache to ensure we have the latest data
-    if let Err(e) = updater::refresh().await {
-        eprintln!("MAIN: Error refreshing remote versions: {e:#?}");
-        // Continue anyway - cached data may still be usable or fetch will be retried
-    }
-
+    // Always fetch the remote version first to ensure we have the latest info
+    updater::refresh_remote_version().await;
     // First check if device is too old to auto-upgrade
     match updater::is_too_old_to_upgrade().await {
         Ok(true) => {
