@@ -26,8 +26,8 @@ docker-run:
 		-v "$(CURDIR)":/workspace \
 		arch-dev
 
-.PHONY: docker-check
-docker-check:
+.PHONY: lint
+lint:
 	@docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		arch-dev sh -c '\
