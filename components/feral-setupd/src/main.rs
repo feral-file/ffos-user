@@ -435,7 +435,7 @@ mod callbacks {
     };
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tokio::task;
 
     pub fn create_bt_connected_cb(
@@ -523,7 +523,17 @@ mod callbacks {
                     return Err(err_code);
                 }
 
-                // Return early if there is no internet
+                // Wait for internet connectivity (up to 6 seconds)
+                // WiFi may be connected but internet routing can take a moment
+                app_state
+                    .internet
+                    .wait_until_online(
+                        Duration::from_millis(constant::WIFI_INTERNET_CHECK_INTERVAL),
+                        Some(Duration::from_millis(constant::WIFI_INTERNET_WAIT_TIMEOUT)),
+                    )
+                    .await;
+
+                // Return early if there is still no internet after waiting
                 if !app_state.internet.is_online(true).await {
                     task::spawn(async move {
                         let _ = show_message(
