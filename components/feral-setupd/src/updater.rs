@@ -26,6 +26,19 @@ pub async fn refresh_remote_version() {
     let _ = fetch_remote_version(true).await;
 }
 
+/// Spawn a background task that periodically refreshes the cached remote version.
+/// The refresh happens every hour (configured via `UPDATER_REMOTE_VERSION_REFRESH_INTERVAL`).
+pub fn spawn_remote_version_refresher() {
+    tokio::spawn(async {
+        let interval = Duration::from_millis(constant::UPDATER_REMOTE_VERSION_REFRESH_INTERVAL);
+        loop {
+            time::sleep(interval).await;
+            println!("UPDATER: Periodic remote version refresh triggered");
+            refresh_remote_version().await;
+        }
+    });
+}
+
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum supported version and an update is therefore required.
 pub async fn is_update_required() -> Result<bool> {
@@ -257,9 +270,7 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
     let mut last_error: Option<anyhow::Error> = None;
 
     for attempt in 1..=max_retries {
-        println!(
-            "UPDATER: Fetching version info from {url} (attempt {attempt}/{max_retries})"
-        );
+        println!("UPDATER: Fetching version info from {url} (attempt {attempt}/{max_retries})");
 
         match fetch_remote_version_once(&url).await {
             Ok(versions) => {
@@ -271,9 +282,7 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
                 return Ok(versions);
             }
             Err(e) => {
-                eprintln!(
-                    "UPDATER: Version check attempt {attempt}/{max_retries} failed: {e:#}"
-                );
+                eprintln!("UPDATER: Version check attempt {attempt}/{max_retries} failed: {e:#}");
                 last_error = Some(e);
 
                 // Don't sleep after the last attempt
@@ -284,7 +293,8 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Version check failed after {max_retries} attempts")))
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("Version check failed after {max_retries} attempts")))
 }
 
 /// Single attempt to fetch remote version (no retry logic).
