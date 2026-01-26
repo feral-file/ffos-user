@@ -17,56 +17,63 @@ use tokio::{
 
 // ---------- Public API ----------
 
-/// Return `Ok(true)` when the running build is **below** the distributor's
-/// minimum supported version and an update is therefore required.
-pub async fn is_update_required() -> Result<bool> {
+/// Aggregated version check result containing all computed version information.
+/// This struct is returned by `check_version()` and provides all necessary
+/// information for update decisions in a single D-Bus call.
+#[derive(Debug, Clone)]
+pub struct VersionCheckResult {
+    /// True when the running build is below the minimum supported version
+    /// and an update is therefore required.
+    pub is_update_required: bool,
+    /// True when a newer version is available from the distributor.
+    pub is_update_available: bool,
+    /// True when the running build is below the minimum upgradeable version,
+    /// meaning the device needs to be reflashed.
+    pub is_too_old_to_upgrade: bool,
+    /// The latest version available from the remote server.
+    pub latest_version: String,
+    /// The flashing guide URL, if the device is too old to auto-upgrade.
+    pub flashing_guide_url: Option<String>,
+    /// The minimum upgradeable version, if available.
+    pub min_upgradeable_version: Option<String>,
+}
+
+/// Check version information in a single D-Bus call and return all computed results.
+///
+/// This function fetches version info from sys-monitord via D-Bus and computes
+/// all version-related flags in one go, avoiding multiple D-Bus calls.
+///
+/// # Arguments
+/// * `force_refresh` - If true, sys-monitord will fetch fresh data from the API.
+///   If false, it may return cached data.
+pub async fn check_version(force_refresh: bool) -> Result<VersionCheckResult> {
     let current = cfg::current_version().await?;
-    let version_info = fetch_version_info(false).await?;
+    let version_info = fetch_version_info(force_refresh).await?;
+
+    // Parse versions for comparison
+    let latest =
+        Version::parse(&version_info.latest_version).context("parsing latest_version semver")?;
     let min_runtime = Version::parse(&version_info.min_runtime_version)
         .context("parsing min_runtime_version semver")?;
-    Ok(current < min_runtime)
-}
 
-/// Return `Ok(true)` when a newer version is available from the distributor.
-pub async fn is_update_available() -> Result<bool> {
-    let current = cfg::current_version().await?;
-    let version_info = fetch_version_info(false).await?;
-    let latest = Version::parse(&version_info.latest_version)
-        .context("parsing latest_version semver")?;
-    Ok(current < latest)
-}
+    // Check if device is too old to auto-upgrade
+    let is_too_old_to_upgrade =
+        if let Some(ref min_upgradeable_str) = version_info.min_upgradeable_version {
+            let min_upgradeable = Version::parse(min_upgradeable_str)
+                .context("parsing min_upgradeable_version semver")?;
+            current < min_upgradeable
+        } else {
+            false
+        };
 
-/// Return the latest version from the remote server.
-pub async fn latest_version() -> Result<String> {
-    let version_info = fetch_version_info(false).await?;
-    Ok(version_info.latest_version)
-}
-
-/// Return `Ok(true)` when the running build is **below** the distributor's
-/// minimum upgradeable version, meaning the device needs to be reflashed.
-pub async fn is_too_old_to_upgrade() -> Result<bool> {
-    let current = cfg::current_version().await?;
-    let version_info = fetch_version_info(false).await?;
-
-    if let Some(min_upgradeable_str) = &version_info.min_upgradeable_version {
-        let min_upgradeable = Version::parse(min_upgradeable_str)
-            .context("parsing min_upgradeable_version semver")?;
-        Ok(current < min_upgradeable)
-    } else {
-        Ok(false)
-    }
-}
-
-/// Return the flashing guide URL from the remote server, if available.
-pub async fn flashing_guide_url() -> Result<Option<String>> {
-    let version_info = fetch_version_info(false).await?;
-    Ok(version_info.flashing_guide)
-}
-
-/// Return the minimum upgradeable version from the remote server, if available.
-pub async fn min_upgradeable_version() -> Result<Option<String>> {
-    let version_info = fetch_version_info(false).await?;
-    Ok(version_info.min_upgradeable_version)
+    Ok(VersionCheckResult {
+        is_update_required: current < min_runtime,
+        is_update_available: current < latest,
+        is_too_old_to_upgrade,
+        latest_version: version_info.latest_version,
+        flashing_guide_url: version_info.flashing_guide,
+        min_upgradeable_version: version_info.min_upgradeable_version,
+    })
 }
 
 /// Spawn the updater in a background task and return a channel receiver that
@@ -92,11 +99,9 @@ pub fn spawn_updater() -> Result<mpsc::Receiver<Result<String, anyhow::Error>>> 
 /// This is a blocking call that runs in a blocking task.
 async fn fetch_version_info(force_refresh: bool) -> Result<dbus_utils::VersionInfo> {
     // D-Bus calls are blocking, so run them in a blocking task
-    let result = tokio::task::spawn_blocking(move || {
-        dbus_utils::get_latest_version(force_refresh)
-    })
-    .await
-    .context("spawn_blocking failed")?;
+    let result = tokio::task::spawn_blocking(move || dbus_utils::get_latest_version(force_refresh))
+        .await
+        .context("spawn_blocking failed")?;
 
     result.context("failed to get version info from sys-monitord")
 }

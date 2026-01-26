@@ -907,9 +907,12 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
     }
 }
 
-async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
-    let latest_version = updater::latest_version().await.unwrap_or_default();
-    let base_msg = format!("{} {}", &constant::UPDATING_MSG_PREFIX, latest_version);
+async fn do_update(
+    app_state: Arc<AppState>,
+    chrome: Arc<Cdp>,
+    latest_version: String,
+) -> Result<()> {
+    let base_msg = format!("{} {}", &constant::UPDATING_MSG_PREFIX, &latest_version);
     let default_subtext = constant::UPDATING_MSG_SUBTEXT;
     let _ = show_system_upgrade(
         &chrome,
@@ -971,109 +974,12 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
-    // Always fetch the remote version first to ensure we have the latest info
-    updater::refresh_remote_version().await;
-    // First check if device is too old to auto-upgrade
-    match updater::is_too_old_to_upgrade().await {
-        Ok(true) => {
-            // Device is too old, show reflashing QR code
-            if let Ok(Some(flashing_guide)) = updater::flashing_guide_url().await {
-                let current_version = app_state.current_version.clone();
-                let latest_version = updater::latest_version()
-                    .await
-                    .unwrap_or_else(|_| "Unknown".to_string());
-                let min_upgradeable = updater::min_upgradeable_version()
-                    .await
-                    .unwrap_or(None)
-                    .unwrap_or_else(|| "Unknown".to_string());
-
-                match execution {
-                    UpdateExecution::Blocking => {
-                        show_reflashing_qrcode(
-                            app_state,
-                            chrome,
-                            &flashing_guide,
-                            &current_version,
-                            &latest_version,
-                            &min_upgradeable,
-                        )
-                        .await?;
-                    }
-                    UpdateExecution::NonBlocking => {
-                        task::spawn({
-                            let app_state = app_state.clone();
-                            let chrome = chrome.clone();
-                            async move {
-                                let _ = show_reflashing_qrcode(
-                                    &app_state,
-                                    &chrome,
-                                    &flashing_guide,
-                                    &current_version,
-                                    &latest_version,
-                                    &min_upgradeable,
-                                )
-                                .await;
-                            }
-                        });
-                    }
-                }
-            } else {
-                // Fallback to showing message without QR code if no flashing guide URL
-                match execution {
-                    UpdateExecution::Blocking => {
-                        show_message(chrome, app_state, constant::REFLASHING_REQUIRED_MSG).await?;
-                    }
-                    UpdateExecution::NonBlocking => {
-                        task::spawn({
-                            let app_state = app_state.clone();
-                            let chrome = chrome.clone();
-                            async move {
-                                let _ = show_message(
-                                    &chrome,
-                                    &app_state,
-                                    constant::REFLASHING_REQUIRED_MSG,
-                                )
-                                .await;
-                            }
-                        });
-                    }
-                }
-            }
-            return Ok(UpdateCheckResult::TooOldToUpgrade);
-        }
-        Ok(false) => {} // Device can be upgraded, continue
+    // Fetch version info once with force refresh to ensure we have the latest data.
+    // This single D-Bus call replaces multiple separate calls for version checking.
+    let version_check = match updater::check_version(true).await {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("MAIN: Error checking if device is too old: {e:#?}");
-            // Continue with update check if this fails
-        }
-    }
-
-    // Check if update is needed based on mode
-    let needs_update = match mode {
-        UpdateMode::Required => updater::is_update_required().await,
-        UpdateMode::Available => updater::is_update_available().await,
-    };
-
-    match needs_update {
-        Ok(true) => {
-            match execution {
-                UpdateExecution::Blocking => {
-                    update(app_state.clone(), chrome.clone()).await?;
-                }
-                UpdateExecution::NonBlocking => {
-                    task::spawn(update(app_state.clone(), chrome.clone()));
-                }
-            }
-            Ok(UpdateCheckResult::UpdateStarted)
-        }
-        Ok(false) => {
-            if mode == UpdateMode::Available {
-                println!("MAIN: System update requested but no update available");
-            }
-            Ok(UpdateCheckResult::NoUpdateNeeded)
-        }
-        Err(e) => {
-            eprintln!("MAIN: Error checking for update: {e:#?}");
+            eprintln!("MAIN: Error checking version info: {e:#?}");
             match execution {
                 UpdateExecution::Blocking => {
                     show_message(
@@ -1098,8 +1004,99 @@ async fn check_and_update_system(
                     });
                 }
             }
-            Ok(UpdateCheckResult::VersionCheckFailed)
+            return Ok(UpdateCheckResult::VersionCheckFailed);
         }
+    };
+
+    // First check if device is too old to auto-upgrade
+    if version_check.is_too_old_to_upgrade {
+        // Device is too old, show reflashing QR code
+        if let Some(ref flashing_guide) = version_check.flashing_guide_url {
+            let current_version = app_state.current_version.clone();
+            let latest_version = version_check.latest_version.clone();
+            let min_upgradeable = version_check
+                .min_upgradeable_version
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string());
+            let flashing_guide = flashing_guide.clone();
+
+            match execution {
+                UpdateExecution::Blocking => {
+                    show_reflashing_qrcode(
+                        app_state,
+                        chrome,
+                        &flashing_guide,
+                        &current_version,
+                        &latest_version,
+                        &min_upgradeable,
+                    )
+                    .await?;
+                }
+                UpdateExecution::NonBlocking => {
+                    task::spawn({
+                        let app_state = app_state.clone();
+                        let chrome = chrome.clone();
+                        async move {
+                            let _ = show_reflashing_qrcode(
+                                &app_state,
+                                &chrome,
+                                &flashing_guide,
+                                &current_version,
+                                &latest_version,
+                                &min_upgradeable,
+                            )
+                            .await;
+                        }
+                    });
+                }
+            }
+        } else {
+            // Fallback to showing message without QR code if no flashing guide URL
+            match execution {
+                UpdateExecution::Blocking => {
+                    show_message(chrome, app_state, constant::REFLASHING_REQUIRED_MSG).await?;
+                }
+                UpdateExecution::NonBlocking => {
+                    task::spawn({
+                        let app_state = app_state.clone();
+                        let chrome = chrome.clone();
+                        async move {
+                            let _ = show_message(
+                                &chrome,
+                                &app_state,
+                                constant::REFLASHING_REQUIRED_MSG,
+                            )
+                            .await;
+                        }
+                    });
+                }
+            }
+        }
+        return Ok(UpdateCheckResult::TooOldToUpgrade);
+    }
+
+    // Check if update is needed based on mode using the already-fetched version info
+    let needs_update = match mode {
+        UpdateMode::Required => version_check.is_update_required,
+        UpdateMode::Available => version_check.is_update_available,
+    };
+
+    if needs_update {
+        let latest_version = version_check.latest_version.clone();
+        match execution {
+            UpdateExecution::Blocking => {
+                do_update(app_state.clone(), chrome.clone(), latest_version).await?;
+            }
+            UpdateExecution::NonBlocking => {
+                task::spawn(do_update(app_state.clone(), chrome.clone(), latest_version));
+            }
+        }
+        Ok(UpdateCheckResult::UpdateStarted)
+    } else {
+        if mode == UpdateMode::Available {
+            println!("MAIN: System update requested but no update available");
+        }
+        Ok(UpdateCheckResult::NoUpdateNeeded)
     }
 }
 
