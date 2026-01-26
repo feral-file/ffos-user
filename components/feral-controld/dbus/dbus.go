@@ -24,6 +24,7 @@ const (
 	MONITORD_PATH                           godbus.Path      = "/com/feralfile/sysmonitord"
 	MONITORD_NAME                           string           = "com.feralfile.sysmonitord"
 	MONITORD_METHOD_GET_CONNECTIVITY_STATUS godbus.Member    = "GetConnectivityStatus"
+	MONITORD_METHOD_GET_LATEST_VERSION      godbus.Member    = "GetLatestVersion"
 	MONITORD_EVENT_SYSMETRICS               godbus.Member    = "sysmetrics"
 	MONITORD_EVENT_CONNECTIVITY_CHANGE      godbus.Member    = "connectivity_change"
 

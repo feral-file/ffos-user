@@ -140,9 +140,6 @@ async fn run() -> Result<()> {
     // Wait for controld D-Bus connection before proceeding
     wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await?;
 
-    // Spawn background task to refresh remote version info every hour
-    updater::spawn_remote_version_refresher();
-
     // Setup D-Bus listeners
     let stop_dbus_listener = setup_dbus_listeners(&app_state, &chrome);
 

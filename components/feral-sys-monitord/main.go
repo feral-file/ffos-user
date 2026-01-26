@@ -118,8 +118,13 @@ func main() {
 	monitor.Start()
 	defer monitor.Stop()
 
+	// Initialize VersionChecker
+	versionChecker := NewVersionChecker(ctx, log)
+	versionChecker.Start()
+	defer versionChecker.Stop()
+
 	// Initialize SysMonitordDBus
-	sysMonitordDBus := NewSysMonitordDBus(connectivity, monitor, log)
+	sysMonitordDBus := NewSysMonitordDBus(connectivity, monitor, versionChecker, log)
 	err = dbusClient.Export(sysMonitordDBus, DBUS_PATH, DBUS_INTERFACE)
 	if err != nil {
 		log.Fatal("DBus export failed", zap.Error(err))

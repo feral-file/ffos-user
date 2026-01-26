@@ -318,7 +318,7 @@ func initializeApp(
 	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
 
 	// DeviceStatus
-	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io)
+	deviceStatus := status.NewDeviceStatus(json, os, exec, dbusClient)
 
 	// Websocket handler
 	wsUpgrader := wrapper.NewWebsocketUpgrader(&websocket.Upgrader{

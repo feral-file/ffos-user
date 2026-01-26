@@ -3,11 +3,10 @@ package status
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
-	"time"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	controldbus "github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"golang.org/x/sync/errgroup"
@@ -19,26 +18,23 @@ type DeviceStatus interface {
 }
 
 type deviceStatus struct {
-	json       wrapper.JSON
-	os         wrapper.OS
-	exec       wrapper.Exec
-	httpClient wrapper.HTTPClient
-	io         wrapper.IO
+	json wrapper.JSON
+	os   wrapper.OS
+	exec wrapper.Exec
+	dbus controldbus.DBus
 }
 
 func NewDeviceStatus(
 	json wrapper.JSON,
 	os wrapper.OS,
 	exec wrapper.Exec,
-	httpClient wrapper.HTTPClient,
-	io wrapper.IO,
+	dbus controldbus.DBus,
 ) DeviceStatus {
 	return &deviceStatus{
-		json:       json,
-		os:         os,
-		exec:       exec,
-		httpClient: httpClient,
-		io:         io,
+		json: json,
+		os:   os,
+		exec: exec,
+		dbus: dbus,
 	}
 }
 
@@ -112,7 +108,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
-	// Get installed version and latest version
+	// Get installed version
 	g.Go(func() error {
 		configBytes, err := d.os.ReadFile(constants.FF1_CONFIG_FILE)
 		if err != nil {
@@ -120,9 +116,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		}
 
 		var config struct {
-			Version  string `json:"version"`
-			Branch   string `json:"branch"`
-			Endpoint string `json:"endpoint"`
+			Version string `json:"version"`
 		}
 
 		if err := d.json.Unmarshal(configBytes, &config); err != nil {
@@ -130,17 +124,36 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		}
 
 		installedVersion = config.Version
+		return nil
+	})
 
-		// Get latest version from API if credentials are available
-		// Note: Network errors are non-fatal - latestVersion will remain empty if fetch fails
-		if config.Branch != "" && config.Endpoint != "" {
-			version, err := d.fetchLatestVersion(ctx, config.Endpoint, config.Branch)
-			if err == nil {
-				latestVersion = version
-			}
-			// Don't return error - allow other status info to be returned even without network
+	// Get latest version from sys-monitord D-Bus
+	g.Go(func() error {
+		// Call sys-monitord D-Bus method GetLatestVersion with refresh=false (use cache)
+		result, err := d.dbus.Call(
+			ctx,
+			controldbus.MONITORD_NAME,
+			controldbus.MONITORD_PATH,
+			controldbus.MONITORD_INTERFACE,
+			controldbus.MONITORD_METHOD_GET_LATEST_VERSION,
+			false, // don't force refresh, use cached value
+		)
+		if err != nil {
+			// Don't fail - allow other status info to be returned even without latest version
+			return nil
 		}
 
+		// D-Bus returns VersionDBusResponse struct fields as separate values:
+		// [0] = LatestVersion (string)
+		// [1] = MinRuntimeVersion (string)
+		// [2] = MinUpgradeableVersion (string)
+		// [3] = FlashingGuide (string)
+		// We only need LatestVersion for device status
+		if len(result) >= 4 {
+			if version, ok := result[0].(string); ok {
+				latestVersion = version
+			}
+		}
 		return nil
 	})
 
@@ -188,46 +201,4 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
 
 	return response, nil
-}
-
-// fetchLatestVersion retrieves the latest version from the distribution API
-func (d deviceStatus) fetchLatestVersion(ctx context.Context, endpoint, branch string) (string, error) {
-	apiURL := fmt.Sprintf("%s/api/latest/%s", endpoint, branch)
-
-	// Create HTTP client with 30-second timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API returned status %d", resp.StatusCode)
-	}
-
-	body, err := d.io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	var apiResponse struct {
-		LatestVersion string `json:"latest_version"`
-	}
-
-	if err := d.json.Unmarshal(body, &apiResponse); err != nil {
-		return "", err
-	}
-
-	return apiResponse.LatestVersion, nil
 }

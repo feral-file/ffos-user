@@ -1,11 +1,10 @@
 //! Firmware / software updater support for setupd.
-use crate::{cfg, constant};
+use crate::{cfg, constant, dbus_utils};
 use anyhow::{Context, Result};
 use rand::Rng;
 use regex::Regex;
 use semver::Version;
-use serde::Deserialize;
-use std::{process::Stdio, sync::RwLock, time::Duration};
+use std::{process::Stdio, time::Duration};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom},
@@ -16,58 +15,43 @@ use tokio::{
     time,
 };
 
-// ---------- Cache ----------
-static REMOTE_VERSIONS: RwLock<Option<UpstreamVersion>> = RwLock::new(None);
-
 // ---------- Public API ----------
-
-/// Force refresh the cached remote version information.
-pub async fn refresh_remote_version() {
-    let _ = fetch_remote_version(true).await;
-}
-
-/// Spawn a background task that periodically refreshes the cached remote version.
-/// The refresh happens every hour (configured via `UPDATER_REMOTE_VERSION_REFRESH_INTERVAL`).
-pub fn spawn_remote_version_refresher() {
-    tokio::spawn(async {
-        let interval = Duration::from_millis(constant::UPDATER_REMOTE_VERSION_REFRESH_INTERVAL);
-        loop {
-            time::sleep(interval).await;
-            println!("UPDATER: Periodic remote version refresh triggered");
-            refresh_remote_version().await;
-        }
-    });
-}
 
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum supported version and an update is therefore required.
 pub async fn is_update_required() -> Result<bool> {
     let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version(false).await?;
-    Ok(current < remote_versions.min_runtime_version)
+    let version_info = fetch_version_info(false).await?;
+    let min_runtime = Version::parse(&version_info.min_runtime_version)
+        .context("parsing min_runtime_version semver")?;
+    Ok(current < min_runtime)
 }
 
 /// Return `Ok(true)` when a newer version is available from the distributor.
 pub async fn is_update_available() -> Result<bool> {
     let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version(false).await?;
-    Ok(current < remote_versions.latest_version)
+    let version_info = fetch_version_info(false).await?;
+    let latest = Version::parse(&version_info.latest_version)
+        .context("parsing latest_version semver")?;
+    Ok(current < latest)
 }
 
 /// Return the latest version from the remote server.
 pub async fn latest_version() -> Result<String> {
-    let remote_versions = fetch_remote_version(false).await?;
-    Ok(remote_versions.latest_version.to_string())
+    let version_info = fetch_version_info(false).await?;
+    Ok(version_info.latest_version)
 }
 
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum upgradeable version, meaning the device needs to be reflashed.
 pub async fn is_too_old_to_upgrade() -> Result<bool> {
     let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version(false).await?;
+    let version_info = fetch_version_info(false).await?;
 
-    if let Some(min_upgradeable) = &remote_versions.min_upgradeable_version {
-        Ok(current < *min_upgradeable)
+    if let Some(min_upgradeable_str) = &version_info.min_upgradeable_version {
+        let min_upgradeable = Version::parse(min_upgradeable_str)
+            .context("parsing min_upgradeable_version semver")?;
+        Ok(current < min_upgradeable)
     } else {
         Ok(false)
     }
@@ -75,17 +59,14 @@ pub async fn is_too_old_to_upgrade() -> Result<bool> {
 
 /// Return the flashing guide URL from the remote server, if available.
 pub async fn flashing_guide_url() -> Result<Option<String>> {
-    let remote_versions = fetch_remote_version(false).await?;
-    Ok(remote_versions.flashing_guide.clone())
+    let version_info = fetch_version_info(false).await?;
+    Ok(version_info.flashing_guide)
 }
 
 /// Return the minimum upgradeable version from the remote server, if available.
 pub async fn min_upgradeable_version() -> Result<Option<String>> {
-    let remote_versions = fetch_remote_version(false).await?;
-    Ok(remote_versions
-        .min_upgradeable_version
-        .as_ref()
-        .map(|v| v.to_string()))
+    let version_info = fetch_version_info(false).await?;
+    Ok(version_info.min_upgradeable_version)
 }
 
 /// Spawn the updater in a background task and return a channel receiver that
@@ -103,6 +84,21 @@ pub fn spawn_updater() -> Result<mpsc::Receiver<Result<String, anyhow::Error>>> 
     });
 
     Ok(rx)
+}
+
+// ---------- Internal helpers ----------
+
+/// Fetch version info from sys-monitord via D-Bus.
+/// This is a blocking call that runs in a blocking task.
+async fn fetch_version_info(force_refresh: bool) -> Result<dbus_utils::VersionInfo> {
+    // D-Bus calls are blocking, so run them in a blocking task
+    let result = tokio::task::spawn_blocking(move || {
+        dbus_utils::get_latest_version(force_refresh)
+    })
+    .await
+    .context("spawn_blocking failed")?;
+
+    result.context("failed to get version info from sys-monitord")
 }
 
 /// Internal async worker: starts the systemd unit, tails the log file,
@@ -228,106 +224,4 @@ async fn run_update_and_send(tx: mpsc::Sender<Result<String, anyhow::Error>>) ->
         }
     }
     Ok(())
-}
-
-// ---------- Internal helpers ----------
-
-#[derive(Deserialize)]
-struct UpstreamInfo {
-    min_runtime_version: String,
-    min_upgradeable_version: Option<String>,
-    flashing_guide: Option<String>,
-    latest_version: String,
-}
-
-#[derive(Debug, Clone)]
-struct UpstreamVersion {
-    min_runtime_version: Version,
-    min_upgradeable_version: Option<Version>,
-    flashing_guide: Option<String>,
-    latest_version: Version,
-}
-
-async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
-    // Check if we have a cached version
-    if !refresh {
-        let cache = REMOTE_VERSIONS.read().unwrap();
-        if let Some(versions) = cache.as_ref() {
-            return Ok(versions.clone());
-        }
-    }
-
-    let url = format!(
-        "{}{}{}",
-        cfg::endpoint().await?,
-        constant::UPDATER_UPSTREAM_CONFIG_URL_SUFFIX,
-        cfg::branch().await?
-    );
-
-    // Retry logic: attempt up to UPDATER_VERSION_CHECK_RETRIES times
-    let max_retries = constant::UPDATER_VERSION_CHECK_RETRIES;
-    let retry_delay = Duration::from_millis(constant::UPDATER_VERSION_CHECK_RETRY_DELAY);
-    let mut last_error: Option<anyhow::Error> = None;
-
-    for attempt in 1..=max_retries {
-        println!("UPDATER: Fetching version info from {url} (attempt {attempt}/{max_retries})");
-
-        match fetch_remote_version_once(&url).await {
-            Ok(versions) => {
-                // Store in cache
-                {
-                    let mut cache = REMOTE_VERSIONS.write().unwrap();
-                    *cache = Some(versions.clone());
-                }
-                return Ok(versions);
-            }
-            Err(e) => {
-                eprintln!("UPDATER: Version check attempt {attempt}/{max_retries} failed: {e:#}");
-                last_error = Some(e);
-
-                // Don't sleep after the last attempt
-                if attempt < max_retries {
-                    time::sleep(retry_delay).await;
-                }
-            }
-        }
-    }
-
-    Err(last_error
-        .unwrap_or_else(|| anyhow::anyhow!("Version check failed after {max_retries} attempts")))
-}
-
-/// Single attempt to fetch remote version (no retry logic).
-async fn fetch_remote_version_once(url: &str) -> Result<UpstreamVersion> {
-    let resp = reqwest::Client::new()
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("fetching {url}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "Failed to read response body".to_string());
-        return Err(anyhow::anyhow!(
-            "HTTP {status} from distributor at {url}: {body}"
-        ));
-    }
-
-    let info: UpstreamInfo = resp.json().await.context("decoding distributor JSON")?;
-    let versions = UpstreamVersion {
-        min_runtime_version: Version::parse(&info.min_runtime_version)
-            .context("parsing upstream semver")?,
-        min_upgradeable_version: info
-            .min_upgradeable_version
-            .as_ref()
-            .map(|v| Version::parse(v).context("parsing min_upgradeable_version semver"))
-            .transpose()?,
-        flashing_guide: info.flashing_guide,
-        latest_version: Version::parse(&info.latest_version).context("parsing upstream semver")?,
-    };
-
-    Ok(versions)
 }

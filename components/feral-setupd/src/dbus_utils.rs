@@ -257,3 +257,62 @@ pub fn check_dbus_connection(destination: &str, object_path: &str) -> Result<()>
     println!("DBUS: Connection check successful via Peer.Ping");
     Ok(())
 }
+
+/// Version info returned from sys-monitord D-Bus
+#[derive(Debug, Clone)]
+pub struct VersionInfo {
+    pub latest_version: String,
+    pub min_runtime_version: String,
+    pub min_upgradeable_version: Option<String>,
+    pub flashing_guide: Option<String>,
+}
+
+/// Gets the latest version info from sys-monitord D-Bus.
+/// If `force_refresh` is true, sys-monitord will fetch fresh data from the API.
+/// Otherwise, it returns cached data.
+pub fn get_latest_version(force_refresh: bool) -> Result<VersionInfo> {
+    let start_time = Instant::now();
+
+    match call_method(
+        constant::DBUS_SYSMONITORD_DESTINATION,
+        constant::DBUS_SYSMONITORD_OBJECT,
+        constant::DBUS_SYSMONITORD_INTERFACE,
+        constant::DBUS_GET_LATEST_VERSION_METHOD,
+        Some(force_refresh),
+        constant::DBUS_VERSION_CHECK_TIMEOUT,
+    ) {
+        Ok(response) => {
+            // D-Bus struct returns fields as a tuple: (latest, min_runtime, min_upgradeable, flashing_guide)
+            let (latest_version, min_runtime_version, min_upgradeable_version, flashing_guide): (
+                String,
+                String,
+                String,
+                String,
+            ) = response.read4()?;
+
+            println!(
+                "DBUS: Version info received in {:?} ms",
+                start_time.elapsed().as_millis()
+            );
+
+            Ok(VersionInfo {
+                latest_version,
+                min_runtime_version,
+                min_upgradeable_version: if min_upgradeable_version.is_empty() {
+                    None
+                } else {
+                    Some(min_upgradeable_version)
+                },
+                flashing_guide: if flashing_guide.is_empty() {
+                    None
+                } else {
+                    Some(flashing_guide)
+                },
+            })
+        }
+        Err(e) => {
+            eprintln!("DBUS: Error getting version info: {e}");
+            Err(e)
+        }
+    }
+}

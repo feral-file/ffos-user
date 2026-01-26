@@ -18,17 +18,27 @@ const (
 	DBUS_EVENT_SYSEVENT            godbus.Member = "sysevent"
 )
 
-type SysMonitordDBus struct {
-	connectivity  *Connectivity
-	sysResMonitor *metric.SysResMonitor
-	logger        *zap.Logger
+// VersionDBusResponse is the D-Bus response structure for GetLatestVersion
+type VersionDBusResponse struct {
+	LatestVersion         string
+	MinRuntimeVersion     string
+	MinUpgradeableVersion string
+	FlashingGuide         string
 }
 
-func NewSysMonitordDBus(connectivity *Connectivity, sysResMonitor *metric.SysResMonitor, logger *zap.Logger) *SysMonitordDBus {
+type SysMonitordDBus struct {
+	connectivity   *Connectivity
+	sysResMonitor  *metric.SysResMonitor
+	versionChecker *VersionChecker
+	logger         *zap.Logger
+}
+
+func NewSysMonitordDBus(connectivity *Connectivity, sysResMonitor *metric.SysResMonitor, versionChecker *VersionChecker, logger *zap.Logger) *SysMonitordDBus {
 	return &SysMonitordDBus{
-		connectivity:  connectivity,
-		sysResMonitor: sysResMonitor,
-		logger:        logger,
+		connectivity:   connectivity,
+		sysResMonitor:  sysResMonitor,
+		versionChecker: versionChecker,
+		logger:         logger,
 	}
 }
 
@@ -49,4 +59,21 @@ func (s *SysMonitordDBus) GetConnectivityStatus(refresh bool) (bool, *dbus.Error
 func (s *SysMonitordDBus) GetSysMetrics() (*metric.SysDBusMetrics, *dbus.Error) {
 	s.logger.Info("DBus RPC called: GetSysMetrics")
 	return s.sysResMonitor.LastMetrics().DBus(), nil
+}
+
+func (s *SysMonitordDBus) GetLatestVersion(refresh bool) (*VersionDBusResponse, *dbus.Error) {
+	s.logger.Info("DBus RPC called: GetLatestVersion", zap.Bool("refresh", refresh))
+
+	info, err := s.versionChecker.FetchVersion(refresh)
+	if err != nil {
+		s.logger.Error("Failed to fetch version info", zap.Error(err))
+		return nil, dbus.NewError(err.Error(), []interface{}{})
+	}
+
+	return &VersionDBusResponse{
+		LatestVersion:         info.LatestVersion,
+		MinRuntimeVersion:     info.MinRuntimeVersion,
+		MinUpgradeableVersion: info.MinUpgradeableVersion,
+		FlashingGuide:         info.FlashingGuide,
+	}, nil
 }

@@ -19,11 +19,7 @@ pub const WIFI_INTERNET_CHECK_INTERVAL: u64 = 1000; // 1 second between checks
 
 // Updater configuration
 pub const UPDATER_LOCAL_CONFIG_PATH: &str = "/home/feralfile/ff1-config.json";
-pub const UPDATER_UPSTREAM_CONFIG_URL_SUFFIX: &str = "/api/latest/";
 pub const UPDATER_PROCESS_LOG_FILE: &str = "/var/log/updaterd.log";
-pub const UPDATER_VERSION_CHECK_RETRIES: u32 = 3;
-pub const UPDATER_VERSION_CHECK_RETRY_DELAY: u64 = 2 * 1000; // 2 seconds between retries
-pub const UPDATER_REMOTE_VERSION_REFRESH_INTERVAL: u64 = 60 * 60 * 1000; // 1 hour
 pub const UPDATER_FAILED_TO_CHECK_VERSION_MSG: &str = "Unable to reach update server after multiple attempts. Please verify your internet connection is stable and try again. If this issue persists, contact support@feralfile.com";
 
 // Bluetooth configuration
@@ -87,10 +83,12 @@ pub const DBUS_EVENT_UPLOAD_LOGS: &str = "upload_logs";
 pub const DBUS_EVENT_SYSTEM_UPDATE: &str = "system_update";
 pub const DBUS_CONNECTIVITY_METHOD: &str = "GetConnectivityStatus";
 pub const DBUS_RELAYER_TOPIC_ID_METHOD: &str = "GetRelayerTopicID";
+pub const DBUS_GET_LATEST_VERSION_METHOD: &str = "GetLatestVersion";
 
 // pub const DBUS_CONTROLD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
 pub const DBUS_MAX_RETRIES: usize = 6;
 pub const DBUS_ACK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
 pub const DBUS_INTERNET_CHECK_TIMEOUT: u64 = 1000; // 1 second
 pub const DBUS_RELAYER_CHECK_TIMEOUT: u64 = 31 * 1000; // 31 seconds
+pub const DBUS_VERSION_CHECK_TIMEOUT: u64 = 35 * 1000; // 35 seconds (allows for retries in sys-monitord)
 pub const DBUS_LISTEN_WAKE_UP_INTERVAL: u64 = 1000; // 1 second
