@@ -143,15 +143,15 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 			return nil
 		}
 
-		// D-Bus returns VersionDBusResponse struct fields as separate values:
-		// [0] = LatestVersion (string)
-		// [1] = MinRuntimeVersion (string)
-		// [2] = MinUpgradeableVersion (string)
-		// [3] = FlashingGuide (string)
-		// We only need LatestVersion for device status
-		if len(result) >= 4 {
-			if version, ok := result[0].(string); ok {
-				latestVersion = version
+		// D-Bus returns VersionDBusResponse as a struct, which godbus returns
+		// as a single element containing the struct fields as []interface{}
+		// We only need LatestVersion (first field) for device status
+		if len(result) >= 1 {
+			// result[0] is the struct, which is represented as []interface{} with 4 string fields
+			if structFields, ok := result[0].([]interface{}); ok && len(structFields) >= 1 {
+				if version, ok := structFields[0].(string); ok {
+					latestVersion = version
+				}
 			}
 		}
 		return nil

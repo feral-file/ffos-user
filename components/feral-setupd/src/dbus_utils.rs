@@ -282,13 +282,11 @@ pub fn get_latest_version(force_refresh: bool) -> Result<VersionInfo> {
         constant::DBUS_VERSION_CHECK_TIMEOUT,
     ) {
         Ok(response) => {
-            // D-Bus struct returns fields as a tuple: (latest, min_runtime, min_upgradeable, flashing_guide)
-            let (latest_version, min_runtime_version, min_upgradeable_version, flashing_guide): (
-                String,
-                String,
-                String,
-                String,
-            ) = response.read4()?;
+            // D-Bus struct returns a single struct containing 4 strings (signature: (ssss))
+            // We read1() to get the struct, then destructure the inner tuple
+            let ((latest_version, min_runtime_version, min_upgradeable_version, flashing_guide),): (
+                (String, String, String, String),
+            ) = response.read1()?;
 
             println!(
                 "DBUS: Version info received in {:?} ms",
