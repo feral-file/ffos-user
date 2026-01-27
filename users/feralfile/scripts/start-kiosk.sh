@@ -14,7 +14,7 @@ if [ "$VENDOR" = "GenuineIntel" ]; then
     FEATURES="UseOzonePlatform,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
 else
     # Default to AMD
-    FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
+    FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,DiskCacheBackendExperiment:backend/blockfile"
 fi
 
 # Features to disable for kiosk mode
@@ -47,7 +47,6 @@ exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && 
     --allow-file-access-from-files \
     --enable-logging=stderr \
     --v=0 \
-    --disk-cache-size=1073741824 \
     --hide-scrollbars \
     --disable-search-engine-choice-screen \
     --ash-no-nudges \
