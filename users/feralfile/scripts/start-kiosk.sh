@@ -47,7 +47,7 @@ exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && 
     --allow-file-access-from-files \
     --enable-logging=stderr \
     --v=0 \
-    --disk-cache-size=1073741824 \
+    --disk-cache-size=85899345920 \
     --hide-scrollbars \
     --disable-search-engine-choice-screen \
     --ash-no-nudges \
