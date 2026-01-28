@@ -1,8 +1,12 @@
 package config
 
 import (
+	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -12,6 +16,9 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/metric"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// macRegex validates MAC address format (XX:XX:XX:XX:XX:XX where X is hex digit)
+var macRegex = regexp.MustCompile(`^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$`)
 
 type CDPConfig struct {
 	Endpoint string `json:"endpoint"`
@@ -29,6 +36,10 @@ type Config struct {
 	SentryConfig    *logger.SentryConfig    `json:"sentry"`
 	OpenPanelConfig *metric.OpenPanelConfig `json:"openpanel"`
 	EnableHub       bool                    `json:"enableHub"`
+
+	// MACInfo contains MAC addresses for all network interfaces
+	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
+	MACInfo map[string]string `json:"-"`
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager
@@ -42,20 +53,23 @@ type defaultConfigManager struct {
 	config     *Config
 	os         wrapper.OS
 	json       wrapper.JSON
+	exec       wrapper.Exec
 }
 
 func NewConfigManager() ConfigManager {
 	return &defaultConfigManager{
 		os:   wrapper.NewOS(),
 		json: wrapper.NewJSON(),
+		exec: wrapper.NewExec(),
 	}
 }
 
 // NewConfigManagerWithDeps creates a ConfigManager with custom dependencies (for testing)
-func NewConfigManagerWithDeps(osWrapper wrapper.OS, jsonWrapper wrapper.JSON) ConfigManager {
+func NewConfigManagerWithDeps(osWrapper wrapper.OS, jsonWrapper wrapper.JSON, execWrapper wrapper.Exec) ConfigManager {
 	return &defaultConfigManager{
 		os:   osWrapper,
 		json: jsonWrapper,
+		exec: execWrapper,
 	}
 }
 
@@ -84,8 +98,92 @@ func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Fetch MAC info at startup
+	c.MACInfo = m.getMACInfo(logger)
+
+	logger.Info("MAC info loaded", zap.Any("macInfo", c.MACInfo))
+
 	m.config = &c
 	return m.config, nil
+}
+
+// getMACInfo fetches MAC addresses for all network interfaces and returns as a map
+func (m *defaultConfigManager) getMACInfo(logger *zap.Logger) map[string]string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Get list of network devices
+	devices := m.getNetworkDevices(ctx, logger)
+	if len(devices) == 0 {
+		return make(map[string]string)
+	}
+
+	// Get MAC addresses for each device
+	macMap := make(map[string]string)
+	for _, device := range devices {
+		mac := m.getDeviceMAC(ctx, logger, device)
+		if isValidMAC(mac) {
+			macMap[device] = mac
+		} else {
+			logger.Debug("Invalid or missing MAC address, skipping device",
+				zap.String("device", device),
+				zap.String("mac", mac))
+		}
+	}
+
+	return macMap
+}
+
+// getNetworkDevices returns a list of ethernet and wifi device names
+func (m *defaultConfigManager) getNetworkDevices(ctx context.Context, logger *zap.Logger) []string {
+	cmd := m.exec.CommandContext(ctx, "nmcli", "-t", "-f", "DEVICE,TYPE", "device")
+	output, err := cmd.Output()
+	if err != nil {
+		logger.Warn("Failed to get network devices", zap.Error(err))
+		return nil
+	}
+
+	var devices []string
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		device, devType := parts[0], parts[1]
+		if devType == "ethernet" || devType == "wifi" {
+			devices = append(devices, device)
+		}
+	}
+
+	return devices
+}
+
+// getDeviceMAC returns the MAC address for a given device
+// It first tries ethtool for permanent address, then falls back to sysfs
+func (m *defaultConfigManager) getDeviceMAC(ctx context.Context, logger *zap.Logger, device string) string {
+	// Try ethtool first for permanent address
+	cmd := m.exec.CommandContext(ctx, "ethtool", "-P", device)
+	output, err := cmd.Output()
+	if err == nil {
+		// Parse "Permanent address: aa:bb:cc:dd:ee:ff"
+		line := strings.TrimSpace(string(output))
+		if strings.HasPrefix(line, "Permanent address:") {
+			mac := strings.TrimSpace(strings.TrimPrefix(line, "Permanent address:"))
+			if mac != "" && mac != "00:00:00:00:00:00" {
+				return mac
+			}
+		}
+	}
+	return "" // Fallback to empty if ethtool fails or no valid MAC found
+}
+
+// isValidMAC checks if the given string is a valid MAC address
+func isValidMAC(mac string) bool {
+	if mac == "" {
+		return false
+	}
+	return macRegex.MatchString(mac)
 }
 
 func (m *defaultConfigManager) Get() *Config {

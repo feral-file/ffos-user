@@ -2759,7 +2759,7 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 	assert.Equal(t, 45.0, resultMap["disk"], "disk metric should match saved value")
 }
 
-func TestExecutor_UpdateToLatest_Success(t *testing.T) {
+func TestExecutor_SystemUpdate_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -2774,14 +2774,14 @@ func TestExecutor_UpdateToLatest_Success(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Mock exec.CommandContext for systemctl
-	ts.mockExec.EXPECT().
-		CommandContext(ts.ctx, "systemctl", "start", "feral-updater@00:00.service").
-		Return(ts.mockExecCmd)
-
-	// Mock cmd.Run() to succeed
-	ts.mockExecCmd.EXPECT().
-		Run().
+	// Mock DBus call for factory reset
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
+			Body:      []interface{}{},
+		}).
 		Return(nil)
 
 	// Execute command
@@ -2790,7 +2790,7 @@ func TestExecutor_UpdateToLatest_Success(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
-func TestExecutor_UpdateToLatest_CommandError(t *testing.T) {
+func TestExecutor_SystemUpdate_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -2805,21 +2805,16 @@ func TestExecutor_UpdateToLatest_CommandError(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Mock exec.CommandContext for systemctl to fail
-	ts.mockExec.EXPECT().
-		CommandContext(ts.ctx, "systemctl", "start", "feral-updater@00:00.service").
-		Return(ts.mockExecCmd)
-
-	// Mock cmd.Run() to fail
-	ts.mockExecCmd.EXPECT().
-		Run().
-		Return(errors.New("update to latest command failed"))
+	// Mock DBus call to fail
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, gomock.Any()).
+		Return(errors.New("dbus error"))
 
 	// Execute command
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.Error(t, err)
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to execute update to latest command")
+	assert.Contains(t, err.Error(), "failed to send system update signal")
 }
 
 func TestExecutor_FactoryReset_Success(t *testing.T) {
