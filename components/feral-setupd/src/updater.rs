@@ -26,6 +26,19 @@ pub async fn refresh_remote_version() {
     let _ = fetch_remote_version(true).await;
 }
 
+/// Spawn a background task that periodically refreshes the cached remote version.
+/// The refresh happens every hour (configured via `UPDATER_REMOTE_VERSION_REFRESH_INTERVAL`).
+pub fn spawn_remote_version_refresher() {
+    tokio::spawn(async {
+        let interval = Duration::from_millis(constant::UPDATER_REMOTE_VERSION_REFRESH_INTERVAL);
+        loop {
+            time::sleep(interval).await;
+            println!("UPDATER: Periodic remote version refresh triggered");
+            refresh_remote_version().await;
+        }
+    });
+}
+
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum supported version and an update is therefore required.
 pub async fn is_update_required() -> Result<bool> {
@@ -250,8 +263,44 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
         constant::UPDATER_UPSTREAM_CONFIG_URL_SUFFIX,
         cfg::branch().await?
     );
+
+    // Retry logic: attempt up to UPDATER_VERSION_CHECK_RETRIES times
+    let max_retries = constant::UPDATER_VERSION_CHECK_RETRIES;
+    let retry_delay = Duration::from_millis(constant::UPDATER_VERSION_CHECK_RETRY_DELAY);
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 1..=max_retries {
+        println!("UPDATER: Fetching version info from {url} (attempt {attempt}/{max_retries})");
+
+        match fetch_remote_version_once(&url).await {
+            Ok(versions) => {
+                // Store in cache
+                {
+                    let mut cache = REMOTE_VERSIONS.write().unwrap();
+                    *cache = Some(versions.clone());
+                }
+                return Ok(versions);
+            }
+            Err(e) => {
+                eprintln!("UPDATER: Version check attempt {attempt}/{max_retries} failed: {e:#}");
+                last_error = Some(e);
+
+                // Don't sleep after the last attempt
+                if attempt < max_retries {
+                    time::sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("Version check failed after {max_retries} attempts")))
+}
+
+/// Single attempt to fetch remote version (no retry logic).
+async fn fetch_remote_version_once(url: &str) -> Result<UpstreamVersion> {
     let resp = reqwest::Client::new()
-        .get(&url)
+        .get(url)
         .send()
         .await
         .with_context(|| format!("fetching {url}"))?;
@@ -279,12 +328,6 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
         flashing_guide: info.flashing_guide,
         latest_version: Version::parse(&info.latest_version).context("parsing upstream semver")?,
     };
-
-    // Store in cache
-    {
-        let mut cache = REMOTE_VERSIONS.write().unwrap();
-        *cache = Some(versions.clone());
-    }
 
     Ok(versions)
 }

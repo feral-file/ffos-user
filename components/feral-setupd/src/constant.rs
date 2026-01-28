@@ -14,13 +14,17 @@ pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
 pub const AGGRESSIVE_INTERNET_CHECK_INTERVAL: u64 = 2 * 1000; // 2 seconds
 pub const RELAXED_INTERNET_CHECK_INTERVAL: u64 = 10 * 1000; // 10 seconds
 pub const WAIT_FOR_CONTROLD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
+pub const WIFI_INTERNET_WAIT_TIMEOUT: u64 = 6 * 1000; // 6 seconds to wait for internet after WiFi connects
+pub const WIFI_INTERNET_CHECK_INTERVAL: u64 = 1000; // 1 second between checks
 
 // Updater configuration
 pub const UPDATER_LOCAL_CONFIG_PATH: &str = "/home/feralfile/ff1-config.json";
 pub const UPDATER_UPSTREAM_CONFIG_URL_SUFFIX: &str = "/api/latest/";
 pub const UPDATER_PROCESS_LOG_FILE: &str = "/var/log/updaterd.log";
-pub const UPDATER_FAILED_TO_CHECK_VERSION_MSG: &str =
-    "Failed to check for updates, please try again later.";
+pub const UPDATER_VERSION_CHECK_RETRIES: u32 = 3;
+pub const UPDATER_VERSION_CHECK_RETRY_DELAY: u64 = 2 * 1000; // 2 seconds between retries
+pub const UPDATER_REMOTE_VERSION_REFRESH_INTERVAL: u64 = 60 * 60 * 1000; // 1 hour
+pub const UPDATER_FAILED_TO_CHECK_VERSION_MSG: &str = "FF1 needs to check for critical updates before playing art. If your network is stable and this persists, contact support@feralfile.com - your device may need hands-on help.";
 
 // Bluetooth configuration
 pub const SERVICE_UUID: Uuid = Uuid::from_u128(0xf7826da64fa24e988024bc5b71e0893e_u128);
