@@ -22,6 +22,7 @@ type testSetup struct {
 	ctx      context.Context
 	mockOS   *mocks.MockOS
 	mockJSON *mocks.MockJSON
+	mockExec *mocks.MockExec
 	cm       config.ConfigManager
 	logger   *zap.Logger
 }
@@ -33,13 +34,15 @@ func setup(t *testing.T) *testSetup {
 
 	mockOS := mocks.NewMockOS(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	cm := config.NewConfigManagerWithDeps(mockOS, mockJSON)
+	mockExec := mocks.NewMockExec(ctrl)
+	cm := config.NewConfigManagerWithDeps(mockOS, mockJSON, mockExec)
 
 	return &testSetup{
 		ctrl:     ctrl,
 		ctx:      ctx,
 		mockOS:   mockOS,
 		mockJSON: mockJSON,
+		mockExec: mockExec,
 		cm:       cm,
 		logger:   logger,
 	}
@@ -48,6 +51,13 @@ func setup(t *testing.T) *testSetup {
 func (ts *testSetup) teardown() {
 	config.ResetForTesting()
 	ts.ctrl.Finish()
+}
+
+// setupMACExpectations sets up mock expectations for MAC address fetching
+func (ts *testSetup) setupMACExpectations() {
+	mockCmd := mocks.NewMockExecCmd(ts.ctrl)
+	mockCmd.EXPECT().Output().Return([]byte("aa:bb:cc:dd:ee:ff\n"), nil).Times(2)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "sh", "-c", gomock.Any()).Return(mockCmd).Times(2)
 }
 
 // Test ConfigManager interface
@@ -100,6 +110,9 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 		}).
 		Times(1)
 
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
+
 	// Execute
 	result, err := ts.cm.Load(ts.logger)
 
@@ -146,6 +159,9 @@ func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
 			return nil
 		}).
 		Times(1)
+
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
 
 	// First load
 	result1, err1 := ts.cm.Load(ts.logger)
@@ -294,6 +310,9 @@ func TestConfigManager_Get_AfterLoad(t *testing.T) {
 		}).
 		Times(1)
 
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
+
 	// Load config
 	loadedConfig, err := ts.cm.Load(ts.logger)
 	assert.NoError(t, err)
@@ -386,6 +405,9 @@ func TestConfigManager_ConcurrentLoad(t *testing.T) {
 		}).
 		Times(1)
 
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
+
 	// Execute concurrent loads
 	results := make(chan *config.Config, numGoroutines)
 	errors := make(chan error, numGoroutines)
@@ -428,7 +450,7 @@ func TestConfig_Load_Success(t *testing.T) {
 	defer ts.teardown()
 
 	// Use ConfigManager with mocked dependencies for testing global Load function
-	cm := config.NewConfigManagerWithDeps(ts.mockOS, ts.mockJSON)
+	cm := config.NewConfigManagerWithDeps(ts.mockOS, ts.mockJSON, ts.mockExec)
 	config.InjectConfigManagerForTesting(cm)
 
 	configData := `{
@@ -459,6 +481,9 @@ func TestConfig_Load_Success(t *testing.T) {
 			return nil
 		}).
 		Times(1)
+
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
 
 	result, err := config.Load(ts.logger)
 

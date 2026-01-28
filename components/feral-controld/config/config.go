@@ -1,8 +1,11 @@
 package config
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -29,6 +32,10 @@ type Config struct {
 	SentryConfig    *logger.SentryConfig    `json:"sentry"`
 	OpenPanelConfig *metric.OpenPanelConfig `json:"openpanel"`
 	EnableHub       bool                    `json:"enableHub"`
+
+	// MAC addresses (fetched at startup, not from config file)
+	EthernetMAC string `json:"-"`
+	WifiMAC     string `json:"-"`
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager
@@ -42,20 +49,23 @@ type defaultConfigManager struct {
 	config     *Config
 	os         wrapper.OS
 	json       wrapper.JSON
+	exec       wrapper.Exec
 }
 
 func NewConfigManager() ConfigManager {
 	return &defaultConfigManager{
 		os:   wrapper.NewOS(),
 		json: wrapper.NewJSON(),
+		exec: wrapper.NewExec(),
 	}
 }
 
 // NewConfigManagerWithDeps creates a ConfigManager with custom dependencies (for testing)
-func NewConfigManagerWithDeps(osWrapper wrapper.OS, jsonWrapper wrapper.JSON) ConfigManager {
+func NewConfigManagerWithDeps(osWrapper wrapper.OS, jsonWrapper wrapper.JSON, execWrapper wrapper.Exec) ConfigManager {
 	return &defaultConfigManager{
 		os:   osWrapper,
 		json: jsonWrapper,
+		exec: execWrapper,
 	}
 }
 
@@ -84,8 +94,38 @@ func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Fetch MAC addresses at startup
+	c.EthernetMAC = m.getMACAddress("enp1s0", logger)
+	c.WifiMAC = m.getMACAddress("wlp2s0", logger)
+
+	logger.Info("MAC addresses loaded",
+		zap.String("ethernetMAC", c.EthernetMAC),
+		zap.String("wifiMAC", c.WifiMAC))
+
 	m.config = &c
 	return m.config, nil
+}
+
+// getMACAddress fetches the MAC address for a given network interface
+func (m *defaultConfigManager) getMACAddress(interfaceName string, logger *zap.Logger) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Run: ip link show dev <interface> | grep -o -E 'link/ether ([0-9a-fA-F:]{17})' | awk '{print $2}'
+	// We use sh -c to run the piped command
+	cmd := m.exec.CommandContext(ctx, "sh", "-c",
+		fmt.Sprintf("ip link show dev %s | grep -o -E 'link/ether ([0-9a-fA-F:]{17})' | awk '{print $2}'", interfaceName))
+
+	output, err := cmd.Output()
+	if err != nil {
+		logger.Warn("Failed to get MAC address",
+			zap.String("interface", interfaceName),
+			zap.Error(err))
+		return ""
+	}
+
+	mac := strings.TrimSpace(string(output))
+	return mac
 }
 
 func (m *defaultConfigManager) Get() *Config {

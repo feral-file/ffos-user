@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -50,6 +51,8 @@ type DeviceStatusResponse struct {
 	LatestVersion       string `json:"latestVersion,omitempty"`
 	AnalyticsDisabled   bool   `json:"analyticsDisabled,omitempty"`
 	BetaFeaturesEnabled bool   `json:"betaFeaturesEnabled,omitempty"`
+	EthernetMAC         string `json:"ethernetMac,omitempty"`
+	WifiMAC             string `json:"wifiMac,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -186,6 +189,11 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.LatestVersion = latestVersion
 	response.AnalyticsDisabled = analyticsDisabled
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
+
+	// Get MAC addresses from config
+	cfg := config.Get()
+	response.EthernetMAC = cfg.EthernetMAC
+	response.WifiMAC = cfg.WifiMAC
 
 	return response, nil
 }
