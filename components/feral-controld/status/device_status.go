@@ -51,8 +51,7 @@ type DeviceStatusResponse struct {
 	LatestVersion       string `json:"latestVersion,omitempty"`
 	AnalyticsDisabled   bool   `json:"analyticsDisabled,omitempty"`
 	BetaFeaturesEnabled bool   `json:"betaFeaturesEnabled,omitempty"`
-	EthernetMAC         string `json:"ethernetMac,omitempty"`
-	WifiMAC             string `json:"wifiMac,omitempty"`
+	MACInfo             string `json:"macInfo,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -190,10 +189,9 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.AnalyticsDisabled = analyticsDisabled
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
 
-	// Get MAC addresses from config
+	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()
-	response.EthernetMAC = cfg.EthernetMAC
-	response.WifiMAC = cfg.WifiMAC
+	response.MACInfo = cfg.MACInfo
 
 	return response, nil
 }

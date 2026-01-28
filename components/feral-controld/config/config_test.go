@@ -53,11 +53,11 @@ func (ts *testSetup) teardown() {
 	ts.ctrl.Finish()
 }
 
-// setupMACExpectations sets up mock expectations for MAC address fetching
+// setupMACExpectations sets up mock expectations for MAC info fetching
 func (ts *testSetup) setupMACExpectations() {
 	mockCmd := mocks.NewMockExecCmd(ts.ctrl)
-	mockCmd.EXPECT().Output().Return([]byte("aa:bb:cc:dd:ee:ff\n"), nil).Times(2)
-	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "sh", "-c", gomock.Any()).Return(mockCmd).Times(2)
+	mockCmd.EXPECT().Output().Return([]byte(`{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}`), nil).Times(1)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "sh", "-c", gomock.Any()).Return(mockCmd).Times(1)
 }
 
 // Test ConfigManager interface

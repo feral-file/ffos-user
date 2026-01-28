@@ -33,9 +33,9 @@ type Config struct {
 	OpenPanelConfig *metric.OpenPanelConfig `json:"openpanel"`
 	EnableHub       bool                    `json:"enableHub"`
 
-	// MAC addresses (fetched at startup, not from config file)
-	EthernetMAC string `json:"-"`
-	WifiMAC     string `json:"-"`
+	// MACInfo is a JSON string containing MAC addresses for all network interfaces
+	// e.g., {"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
+	MACInfo string `json:"-"`
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager
@@ -94,38 +94,33 @@ func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Fetch MAC addresses at startup
-	c.EthernetMAC = m.getMACAddress("enp1s0", logger)
-	c.WifiMAC = m.getMACAddress("wlp2s0", logger)
+	// Fetch MAC info at startup
+	c.MACInfo = m.getMACInfo(logger)
 
-	logger.Info("MAC addresses loaded",
-		zap.String("ethernetMAC", c.EthernetMAC),
-		zap.String("wifiMAC", c.WifiMAC))
+	logger.Info("MAC info loaded", zap.String("macInfo", c.MACInfo))
 
 	m.config = &c
 	return m.config, nil
 }
 
-// getMACAddress fetches the MAC address for a given network interface
-func (m *defaultConfigManager) getMACAddress(interfaceName string, logger *zap.Logger) string {
+// getMACInfo fetches MAC addresses for all network interfaces and returns as JSON string
+func (m *defaultConfigManager) getMACInfo(logger *zap.Logger) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Run: ip link show dev <interface> | grep -o -E 'link/ether ([0-9a-fA-F:]{17})' | awk '{print $2}'
-	// We use sh -c to run the piped command
+	// Run the command to get MAC addresses for all network interfaces as JSON
+	//nolint:lll
 	cmd := m.exec.CommandContext(ctx, "sh", "-c",
-		fmt.Sprintf("ip link show dev %s | grep -o -E 'link/ether ([0-9a-fA-F:]{17})' | awk '{print $2}'", interfaceName))
+		`echo "{"$(nmcli -t -f DEVICE,TYPE device | grep -E ':(ethernet|wifi|gsm|cdma)' | cut -d: -f1 | while read d; do mac=$(ethtool -P $d 2>/dev/null | awk '/Permanent address:/ {print $NF}'); [ -z "$mac" ] && mac=$(cat /sys/class/net/$d/address 2>/dev/null); echo "\"$d\":\"$mac\""; done | paste -sd, -)"}"`)
 
 	output, err := cmd.Output()
 	if err != nil {
-		logger.Warn("Failed to get MAC address",
-			zap.String("interface", interfaceName),
-			zap.Error(err))
-		return ""
+		logger.Warn("Failed to get MAC info", zap.Error(err))
+		return "{}"
 	}
 
-	mac := strings.TrimSpace(string(output))
-	return mac
+	macInfo := strings.TrimSpace(string(output))
+	return macInfo
 }
 
 func (m *defaultConfigManager) Get() *Config {
