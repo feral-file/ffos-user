@@ -22,6 +22,7 @@ type testSetup struct {
 	ctx      context.Context
 	mockOS   *mocks.MockOS
 	mockJSON *mocks.MockJSON
+	mockExec *mocks.MockExec
 	cm       config.ConfigManager
 	logger   *zap.Logger
 }
@@ -33,13 +34,15 @@ func setup(t *testing.T) *testSetup {
 
 	mockOS := mocks.NewMockOS(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	cm := config.NewConfigManagerWithDeps(mockOS, mockJSON)
+	mockExec := mocks.NewMockExec(ctrl)
+	cm := config.NewConfigManagerWithDeps(mockOS, mockJSON, mockExec)
 
 	return &testSetup{
 		ctrl:     ctrl,
 		ctx:      ctx,
 		mockOS:   mockOS,
 		mockJSON: mockJSON,
+		mockExec: mockExec,
 		cm:       cm,
 		logger:   logger,
 	}
@@ -48,6 +51,24 @@ func setup(t *testing.T) *testSetup {
 func (ts *testSetup) teardown() {
 	config.ResetForTesting()
 	ts.ctrl.Finish()
+}
+
+// setupMACExpectations sets up mock expectations for MAC info fetching.
+// This mocks the actual nmcli and ethtool commands that getMACInfo calls.
+func (ts *testSetup) setupMACExpectations() {
+	// Mock nmcli command to get network devices
+	nmcliCmd := mocks.NewMockExecCmd(ts.ctrl)
+	nmcliCmd.EXPECT().Output().Return([]byte("enp1s0:ethernet\nwlp2s0:wifi"), nil).Times(1)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "nmcli", "-t", "-f", "DEVICE,TYPE", "device").Return(nmcliCmd).Times(1)
+
+	// Mock ethtool commands to get MAC addresses for each device
+	ethtoolCmd1 := mocks.NewMockExecCmd(ts.ctrl)
+	ethtoolCmd1.EXPECT().Output().Return([]byte("Permanent address: aa:bb:cc:dd:ee:ff"), nil).Times(1)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "ethtool", "-P", "enp1s0").Return(ethtoolCmd1).Times(1)
+
+	ethtoolCmd2 := mocks.NewMockExecCmd(ts.ctrl)
+	ethtoolCmd2.EXPECT().Output().Return([]byte("Permanent address: 11:22:33:44:55:66"), nil).Times(1)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "ethtool", "-P", "wlp2s0").Return(ethtoolCmd2).Times(1)
 }
 
 // Test ConfigManager interface
@@ -100,6 +121,9 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 		}).
 		Times(1)
 
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
+
 	// Execute
 	result, err := ts.cm.Load(ts.logger)
 
@@ -111,6 +135,11 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	assert.Equal(t, "test-api-key", result.RelayerConfig.APIKey)
 	assert.Equal(t, "https://test@sentry.io/123", result.SentryConfig.DSN)
 	assert.Equal(t, "test", result.SentryConfig.Environment)
+
+	// Verify MAC info is populated as a map
+	assert.NotNil(t, result.MACInfo)
+	assert.Equal(t, "aa:bb:cc:dd:ee:ff", result.MACInfo["enp1s0"])
+	assert.Equal(t, "11:22:33:44:55:66", result.MACInfo["wlp2s0"])
 }
 
 func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
@@ -146,6 +175,9 @@ func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
 			return nil
 		}).
 		Times(1)
+
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
 
 	// First load
 	result1, err1 := ts.cm.Load(ts.logger)
@@ -294,6 +326,9 @@ func TestConfigManager_Get_AfterLoad(t *testing.T) {
 		}).
 		Times(1)
 
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
+
 	// Load config
 	loadedConfig, err := ts.cm.Load(ts.logger)
 	assert.NoError(t, err)
@@ -386,6 +421,9 @@ func TestConfigManager_ConcurrentLoad(t *testing.T) {
 		}).
 		Times(1)
 
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
+
 	// Execute concurrent loads
 	results := make(chan *config.Config, numGoroutines)
 	errors := make(chan error, numGoroutines)
@@ -428,7 +466,7 @@ func TestConfig_Load_Success(t *testing.T) {
 	defer ts.teardown()
 
 	// Use ConfigManager with mocked dependencies for testing global Load function
-	cm := config.NewConfigManagerWithDeps(ts.mockOS, ts.mockJSON)
+	cm := config.NewConfigManagerWithDeps(ts.mockOS, ts.mockJSON, ts.mockExec)
 	config.InjectConfigManagerForTesting(cm)
 
 	configData := `{
@@ -460,11 +498,19 @@ func TestConfig_Load_Success(t *testing.T) {
 		}).
 		Times(1)
 
+	// Setup MAC address expectations
+	ts.setupMACExpectations()
+
 	result, err := config.Load(ts.logger)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Equal(t, "http://global-test:9222", result.CDPConfig.Endpoint)
+
+	// Verify MAC info is populated as a map
+	assert.NotNil(t, result.MACInfo)
+	assert.Equal(t, "aa:bb:cc:dd:ee:ff", result.MACInfo["enp1s0"])
+	assert.Equal(t, "11:22:33:44:55:66", result.MACInfo["wlp2s0"])
 }
 
 func TestConfig_Get_Success(t *testing.T) {
