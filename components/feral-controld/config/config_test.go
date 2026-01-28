@@ -53,11 +53,22 @@ func (ts *testSetup) teardown() {
 	ts.ctrl.Finish()
 }
 
-// setupMACExpectations sets up mock expectations for MAC info fetching
+// setupMACExpectations sets up mock expectations for MAC info fetching.
+// This mocks the actual nmcli and ethtool commands that getMACInfo calls.
 func (ts *testSetup) setupMACExpectations() {
-	mockCmd := mocks.NewMockExecCmd(ts.ctrl)
-	mockCmd.EXPECT().Output().Return([]byte(`{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}`), nil).Times(1)
-	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "sh", "-c", gomock.Any()).Return(mockCmd).Times(1)
+	// Mock nmcli command to get network devices
+	nmcliCmd := mocks.NewMockExecCmd(ts.ctrl)
+	nmcliCmd.EXPECT().Output().Return([]byte("enp1s0:ethernet\nwlp2s0:wifi"), nil).Times(1)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "nmcli", "-t", "-f", "DEVICE,TYPE", "device").Return(nmcliCmd).Times(1)
+
+	// Mock ethtool commands to get MAC addresses for each device
+	ethtoolCmd1 := mocks.NewMockExecCmd(ts.ctrl)
+	ethtoolCmd1.EXPECT().Output().Return([]byte("Permanent address: aa:bb:cc:dd:ee:ff"), nil).Times(1)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "ethtool", "-P", "enp1s0").Return(ethtoolCmd1).Times(1)
+
+	ethtoolCmd2 := mocks.NewMockExecCmd(ts.ctrl)
+	ethtoolCmd2.EXPECT().Output().Return([]byte("Permanent address: 11:22:33:44:55:66"), nil).Times(1)
+	ts.mockExec.EXPECT().CommandContext(gomock.Any(), "ethtool", "-P", "wlp2s0").Return(ethtoolCmd2).Times(1)
 }
 
 // Test ConfigManager interface
