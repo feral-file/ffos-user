@@ -15,7 +15,7 @@ mac_address   = "1.1.8"
 md5 = "0.7.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-reqwest = { version = "0.12.15", default-features = false, features = ["blocking", "json", "native-tls"] }
+reqwest = { version = "0.12.15", default-features = false, features = ["blocking", "json", "native-tls", "stream"] }
 url = "2.5.4"
 tungstenite = { version = "0.26.2", default-features = false, features = ["native-tls"] }
 tokio-tungstenite = { version = "0.26.2", default-features = false, features = ["connect", "native-tls"] }
@@ -29,11 +29,9 @@ rand = "0.9.1"
 sentry = "0.42.0"
 base64 = "0.22.1"
 urlencoding = "2.1"
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 
 [profile.qemu]
 inherits = "release"
-
-[lints.clippy]
-too-many-arguments = { level = "allow", threshold = 8 }

@@ -29,6 +29,7 @@ const (
 
 	SETUPD_EVENT_SHOW_PAIRING_QR_CODE godbus.Member = "show_pairing_qr_code"
 	SETUPD_EVENT_FACTORY_RESET        godbus.Member = "factory_reset"
+	SETUPD_EVENT_SYSTEM_UPDATE        godbus.Member = "system_update"
 	SETUPD_EVENT_UPLOAD_LOGS          godbus.Member = "upload_logs"
 )
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
@@ -44,12 +45,13 @@ func NewDeviceStatus(
 
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
-	ScreenRotation      string `json:"screenRotation,omitempty"`
-	ConnectedWifi       string `json:"connectedWifi,omitempty"`
-	InstalledVersion    string `json:"installedVersion,omitempty"`
-	LatestVersion       string `json:"latestVersion,omitempty"`
-	AnalyticsDisabled   bool   `json:"analyticsDisabled,omitempty"`
-	BetaFeaturesEnabled bool   `json:"betaFeaturesEnabled,omitempty"`
+	ScreenRotation      string            `json:"screenRotation,omitempty"`
+	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
+	InstalledVersion    string            `json:"installedVersion,omitempty"`
+	LatestVersion       string            `json:"latestVersion,omitempty"`
+	AnalyticsDisabled   bool              `json:"analyticsDisabled,omitempty"`
+	BetaFeaturesEnabled bool              `json:"betaFeaturesEnabled,omitempty"`
+	MACInfo             map[string]string `json:"macInfo,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -186,6 +188,10 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.LatestVersion = latestVersion
 	response.AnalyticsDisabled = analyticsDisabled
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
+
+	// Get MAC info from config (fetched once at startup)
+	cfg := config.Get()
+	response.MACInfo = cfg.MACInfo
 
 	return response, nil
 }
