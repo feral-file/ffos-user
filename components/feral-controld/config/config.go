@@ -2,7 +2,9 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,9 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/metric"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// macRegex validates MAC address format (XX:XX:XX:XX:XX:XX where X is hex digit)
+var macRegex = regexp.MustCompile(`^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$`)
 
 type CDPConfig struct {
 	Endpoint string `json:"endpoint"`
@@ -108,19 +113,85 @@ func (m *defaultConfigManager) getMACInfo(logger *zap.Logger) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Run the command to get MAC addresses for all network interfaces as JSON
-	//nolint:lll
-	cmd := m.exec.CommandContext(ctx, "sh", "-c",
-		`echo "{"$(nmcli -t -f DEVICE,TYPE device | grep -E ':(ethernet|wifi|gsm|cdma)' | cut -d: -f1 | while read d; do mac=$(ethtool -P $d 2>/dev/null | awk '/Permanent address:/ {print $NF}'); [ -z "$mac" ] && mac=$(cat /sys/class/net/$d/address 2>/dev/null); echo "\"$d\":\"$mac\""; done | paste -sd, -)"}"`)
-
-	output, err := cmd.Output()
-	if err != nil {
-		logger.Warn("Failed to get MAC info", zap.Error(err))
+	// Get list of network devices
+	devices := m.getNetworkDevices(ctx, logger)
+	if len(devices) == 0 {
 		return "{}"
 	}
 
-	macInfo := strings.TrimSpace(string(output))
-	return macInfo
+	// Get MAC addresses for each device
+	macMap := make(map[string]string)
+	for _, device := range devices {
+		mac := m.getDeviceMAC(ctx, logger, device)
+		if isValidMAC(mac) {
+			macMap[device] = mac
+		} else {
+			logger.Debug("Invalid or missing MAC address, skipping device",
+				zap.String("device", device),
+				zap.String("mac", mac))
+		}
+	}
+
+	// Convert to JSON
+	jsonBytes, err := json.Marshal(macMap)
+	if err != nil {
+		logger.Warn("Failed to marshal MAC info", zap.Error(err))
+		return "{}"
+	}
+
+	return string(jsonBytes)
+}
+
+// getNetworkDevices returns a list of ethernet and wifi device names
+func (m *defaultConfigManager) getNetworkDevices(ctx context.Context, logger *zap.Logger) []string {
+	cmd := m.exec.CommandContext(ctx, "nmcli", "-t", "-f", "DEVICE,TYPE", "device")
+	output, err := cmd.Output()
+	if err != nil {
+		logger.Warn("Failed to get network devices", zap.Error(err))
+		return nil
+	}
+
+	var devices []string
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		device, devType := parts[0], parts[1]
+		if devType == "ethernet" || devType == "wifi" {
+			devices = append(devices, device)
+		}
+	}
+
+	return devices
+}
+
+// getDeviceMAC returns the MAC address for a given device
+// It first tries ethtool for permanent address, then falls back to sysfs
+func (m *defaultConfigManager) getDeviceMAC(ctx context.Context, logger *zap.Logger, device string) string {
+	// Try ethtool first for permanent address
+	cmd := m.exec.CommandContext(ctx, "ethtool", "-P", device)
+	output, err := cmd.Output()
+	if err == nil {
+		// Parse "Permanent address: aa:bb:cc:dd:ee:ff"
+		line := strings.TrimSpace(string(output))
+		if strings.HasPrefix(line, "Permanent address:") {
+			mac := strings.TrimSpace(strings.TrimPrefix(line, "Permanent address:"))
+			if mac != "" && mac != "00:00:00:00:00:00" {
+				return mac
+			}
+		}
+	}
+	return "" // Fallback to empty if ethtool fails or no valid MAC found
+}
+
+// isValidMAC checks if the given string is a valid MAC address
+func isValidMAC(mac string) bool {
+	if mac == "" {
+		return false
+	}
+	return macRegex.MatchString(mac)
 }
 
 func (m *defaultConfigManager) Get() *Config {
