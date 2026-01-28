@@ -135,6 +135,11 @@ func TestConfigManager_Load_Success_ExistingFile(t *testing.T) {
 	assert.Equal(t, "test-api-key", result.RelayerConfig.APIKey)
 	assert.Equal(t, "https://test@sentry.io/123", result.SentryConfig.DSN)
 	assert.Equal(t, "test", result.SentryConfig.Environment)
+
+	// Verify MAC info is populated as a map
+	assert.NotNil(t, result.MACInfo)
+	assert.Equal(t, "aa:bb:cc:dd:ee:ff", result.MACInfo["enp1s0"])
+	assert.Equal(t, "11:22:33:44:55:66", result.MACInfo["wlp2s0"])
 }
 
 func TestConfigManager_Load_Success_AlreadyLoaded(t *testing.T) {
@@ -501,6 +506,11 @@ func TestConfig_Load_Success(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 	assert.Equal(t, "http://global-test:9222", result.CDPConfig.Endpoint)
+
+	// Verify MAC info is populated as a map
+	assert.NotNil(t, result.MACInfo)
+	assert.Equal(t, "aa:bb:cc:dd:ee:ff", result.MACInfo["enp1s0"])
+	assert.Equal(t, "11:22:33:44:55:66", result.MACInfo["wlp2s0"])
 }
 
 func TestConfig_Get_Success(t *testing.T) {

@@ -2,7 +2,6 @@ package config
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -38,9 +37,9 @@ type Config struct {
 	OpenPanelConfig *metric.OpenPanelConfig `json:"openpanel"`
 	EnableHub       bool                    `json:"enableHub"`
 
-	// MACInfo is a JSON string containing MAC addresses for all network interfaces
-	// e.g., {"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
-	MACInfo string `json:"-"`
+	// MACInfo contains MAC addresses for all network interfaces
+	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
+	MACInfo map[string]string `json:"-"`
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager
@@ -102,21 +101,21 @@ func (m *defaultConfigManager) Load(logger *zap.Logger) (*Config, error) {
 	// Fetch MAC info at startup
 	c.MACInfo = m.getMACInfo(logger)
 
-	logger.Info("MAC info loaded", zap.String("macInfo", c.MACInfo))
+	logger.Info("MAC info loaded", zap.Any("macInfo", c.MACInfo))
 
 	m.config = &c
 	return m.config, nil
 }
 
-// getMACInfo fetches MAC addresses for all network interfaces and returns as JSON string
-func (m *defaultConfigManager) getMACInfo(logger *zap.Logger) string {
+// getMACInfo fetches MAC addresses for all network interfaces and returns as a map
+func (m *defaultConfigManager) getMACInfo(logger *zap.Logger) map[string]string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Get list of network devices
 	devices := m.getNetworkDevices(ctx, logger)
 	if len(devices) == 0 {
-		return "{}"
+		return make(map[string]string)
 	}
 
 	// Get MAC addresses for each device
@@ -132,14 +131,7 @@ func (m *defaultConfigManager) getMACInfo(logger *zap.Logger) string {
 		}
 	}
 
-	// Convert to JSON
-	jsonBytes, err := json.Marshal(macMap)
-	if err != nil {
-		logger.Warn("Failed to marshal MAC info", zap.Error(err))
-		return "{}"
-	}
-
-	return string(jsonBytes)
+	return macMap
 }
 
 // getNetworkDevices returns a list of ethernet and wifi device names

@@ -45,13 +45,13 @@ func NewDeviceStatus(
 
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
-	ScreenRotation      string `json:"screenRotation,omitempty"`
-	ConnectedWifi       string `json:"connectedWifi,omitempty"`
-	InstalledVersion    string `json:"installedVersion,omitempty"`
-	LatestVersion       string `json:"latestVersion,omitempty"`
-	AnalyticsDisabled   bool   `json:"analyticsDisabled,omitempty"`
-	BetaFeaturesEnabled bool   `json:"betaFeaturesEnabled,omitempty"`
-	MACInfo             string `json:"macInfo,omitempty"`
+	ScreenRotation      string            `json:"screenRotation,omitempty"`
+	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
+	InstalledVersion    string            `json:"installedVersion,omitempty"`
+	LatestVersion       string            `json:"latestVersion,omitempty"`
+	AnalyticsDisabled   bool              `json:"analyticsDisabled,omitempty"`
+	BetaFeaturesEnabled bool              `json:"betaFeaturesEnabled,omitempty"`
+	MACInfo             map[string]string `json:"macInfo,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
