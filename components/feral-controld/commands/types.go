@@ -29,6 +29,8 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_UPDATE_TO_LATEST:     true,
 	CMD_FACTORY_RESET:        true,
 	CMD_UPLOAD_LOGS:          true,
+	CMD_SET_TIMEZONE:         true,
+	CMD_SYNC_TIME:            true,
 }
 
 type Command struct {
@@ -58,6 +60,8 @@ const (
 	CMD_DISPLAY_PLAYLIST     Type = "displayPlaylist"
 	CMD_FACTORY_RESET        Type = "factoryReset"
 	CMD_UPLOAD_LOGS          Type = "uploadLogs"
+	CMD_SET_TIMEZONE         Type = "setTimezone"
+	CMD_SYNC_TIME            Type = "syncTime"
 )
 
 func (c Type) DeviceCtlCommand() bool {

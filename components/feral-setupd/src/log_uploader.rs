@@ -27,6 +27,17 @@ pub async fn create_logs_zip() -> Result<PathBuf, std::io::Error> {
     let temp_path = PathBuf::from(format!("/tmp/logs_upload_{timestamp}.zip"));
 
     // Collect all file paths first (async), then do sync zip writing
+
+    // copy updaterd log files /var/log/updaterd.log /var/log/auto-updaterd.log to log dir
+    let updaterd_log = Path::new("/var/log/updaterd.log");
+    let auto_updaterd_log = Path::new("/var/log/auto-updaterd.log");
+    if updaterd_log.exists() {
+        fs::copy(updaterd_log, logs_dir.join("updaterd.log")).await?;
+    }
+    if auto_updaterd_log.exists() {
+        fs::copy(auto_updaterd_log, logs_dir.join("auto-updaterd.log")).await?;
+    }
+
     let files_to_zip = collect_files_to_zip(logs_dir).await?;
 
     if files_to_zip.is_empty() {
@@ -51,6 +62,10 @@ pub async fn create_logs_zip() -> Result<PathBuf, std::io::Error> {
         "LOG_UPLOADER: Created zip with {file_count} files, size: {} bytes",
         metadata.len()
     );
+
+    // remove copy of updaterd logs from log dir
+    let _ = fs::remove_file(logs_dir.join("updaterd.log")).await;
+    let _ = fs::remove_file(logs_dir.join("auto-updaterd.log")).await;
 
     Ok(temp_path)
 }

@@ -65,3 +65,29 @@ pub async fn set_time(timezone: &str, time: &str) -> Result<(), anyhow::Error> {
         Ok(())
     }
 }
+
+pub fn sync_ntp_time() {
+    // log here 
+    println!("System: Syncing NTP time");
+    task::spawn_blocking(move || {
+        match Command::new(constant::TIMEZONE_CMD)
+            .args([constant::NTP_SYNC_INSTRUCTION])
+            .output()
+        {
+            Ok(output) => {
+                if !output.status.success() {
+                    let err_msg = String::from_utf8_lossy(&output.stderr);
+                    eprintln!(
+                        "Failed to sync via NTP: exit code {}, error: {}",
+                        output.status, err_msg
+                    );
+                } else {
+                    println!("NTP time sync completed successfully");
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to execute NTP sync command: {e:#?}");
+            }
+        }
+    });
+}
