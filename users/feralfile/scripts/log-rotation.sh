@@ -64,7 +64,8 @@ cleanup_old_logs() {
 
 main() {
   echo "Log rotation start: $(date)"
-
+  [ -f /var/log/updaterd.log ] && sudo chown feralfile /var/log/updaterd.log
+  [ -f /var/log/auto-updaterd.log ] && sudo chown feralfile /var/log/auto-updaterd.log
   while IFS='|' read -r LOG_PATH ROTATION_DIR || [ -n "$LOG_PATH" ]; do
     LOG_PATH=$(echo "$LOG_PATH" | xargs)
     ROTATION_DIR=$(echo "${ROTATION_DIR:-}" | xargs)
