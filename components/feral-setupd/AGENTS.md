@@ -96,6 +96,21 @@ vector so it fits the existing BLE encoder.
 There is intentionally no separate BLE `get_device_info` command; `get_info`
 is the canonical source for `device_info`.
 
+## BLE `scan_wifi` response format
+
+BLE `scan_wifi` replies as a list of strings, encoded with `PayloadEncoder`.
+
+- The first values are always:
+  - `reply_id`
+  - `status_code`
+- On success, the remaining values are Wi‑Fi entries, each formatted as:
+  - `<ssid>|<security>`
+
+Where:
+- `ssid` is the SSID as reported by `nmcli`.
+- `security` comes from `nmcli`’s `SECURITY` field and is trimmed.
+- Open networks are reported with `security` set to `OPEN`.
+
 ## Development & CI Parity (Docker + Toolchain)
 
 ## Keep This File Updated

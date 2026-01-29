@@ -149,10 +149,16 @@ pub async fn connect(ssid: &str, pass: &str) -> Result<()> {
     }
 
     println!("Wifi: connecting to {ssid}");
-    let output = Command::new("nmcli")
-        .args(["device", "wifi", "connect", ssid, "password", pass])
-        .output()
-        .await?;
+
+    let mut cmd = Command::new("nmcli");
+    let mut args = vec!["device", "wifi", "connect", ssid];
+    // Allow empty password for open networks: in that case we omit the "password" argument.
+    if !pass.is_empty() {
+        args.push("password");
+        args.push(pass);
+    }
+
+    let output = cmd.args(&args).output().await?;
 
     if output.status.success() {
         Ok(())
@@ -181,7 +187,10 @@ async fn delete(ssid: &str) -> Result<()> {
 }
 
 pub async fn list_ssids(force: bool) -> Result<Vec<String>> {
-    let mut args = vec!["-t", "-f", "SSID", "device", "wifi", "list"];
+    // NOTE: We return each entry as "<ssid>|<security>" where:
+    // - security is "OPEN" if nmcli reports empty/unknown security for that SSID
+    // - otherwise security is the raw nmcli SECURITY field (trimmed)
+    let mut args = vec!["-t", "-f", "SSID,SECURITY", "device", "wifi", "list"];
     if force {
         args.push("--rescan");
         args.push("yes");
@@ -204,15 +213,100 @@ pub async fn list_ssids(force: bool) -> Result<Vec<String>> {
 
     // Limit to maximum 9 SSIDs
     for line in stdout.lines() {
-        if !line.is_empty() && !seen.contains(line) {
-            seen.insert(line.to_string());
-            ssids.push(line.to_string());
+        if line.is_empty() {
+            continue;
+        }
 
-            // Stop once we have 9 SSIDs
-            if ssids.len() >= constant::MAX_SSIDS {
-                break;
-            }
+        // nmcli `-t` output is colon-separated (:) and escapes ':' as '\:' and '\' as '\\'.
+        // IMPORTANT: we must split on the first *unescaped* ':'; an escaped '\:' can appear
+        // inside SSID and must not be treated as a field delimiter.
+        //
+        // Example lines (raw nmcli output):
+        // - "CafeWifi:WPA2"
+        // - "GuestWifi:" (open network)
+        // - "Lab\\:Net:WPA2" (SSID "Lab:Net")
+        let (ssid_raw, security_raw) = split_nmcli_terse_two_fields(line);
+
+        let ssid = nmcli_unescape(ssid_raw).trim().to_string();
+        if ssid.is_empty() {
+            continue;
+        }
+
+        if seen.contains(&ssid) {
+            continue;
+        }
+        seen.insert(ssid.clone());
+
+        let mut security = nmcli_unescape(security_raw).trim().to_string();
+        if security.is_empty() || security == "--" {
+            security = "OPEN".to_string();
+        }
+
+        ssids.push(format!("{ssid}|{security}"));
+
+        // Stop once we have 9 SSIDs
+        if ssids.len() >= constant::MAX_SSIDS {
+            break;
         }
     }
     Ok(ssids)
+}
+
+fn split_nmcli_terse_two_fields(line: &str) -> (&str, &str) {
+    // Find the first ':' that is NOT escaped.
+    // A ':' is escaped if it has an odd number of consecutive '\' immediately before it.
+    let bytes = line.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] != b':' {
+            continue;
+        }
+        // Count consecutive backslashes immediately preceding i.
+        let mut bs = 0usize;
+        let mut j = i;
+        while j > 0 && bytes[j - 1] == b'\\' {
+            bs += 1;
+            j -= 1;
+        }
+        if bs % 2 == 0 {
+            // Unescaped delimiter.
+            let left = &line[..i];
+            let right = &line[i + 1..];
+            return (left, right);
+        }
+    }
+    // If there's no delimiter, treat the whole line as SSID with empty security.
+    (line, "")
+}
+
+fn nmcli_unescape(s: &str) -> String {
+    // nmcli `-t` escaping rules we care about:
+    // - '\:' represents literal ':'
+    // - '\\' represents literal '\'
+    //
+    // Keep it conservative: only unescape those sequences.
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek().copied() {
+                Some(':') => {
+                    chars.next();
+                    out.push(':');
+                    continue;
+                }
+                Some('\\') => {
+                    chars.next();
+                    out.push('\\');
+                    continue;
+                }
+                _ => {
+                    // Unknown escape sequence, keep the backslash
+                    out.push('\\');
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
 }
