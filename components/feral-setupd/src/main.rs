@@ -283,7 +283,7 @@ async fn startup_without_internet(
         Duration::from_millis(constant::RELAXED_INTERNET_CHECK_INTERVAL)
     };
     app_state.internet.wait_until_online(urgency, None).await;
-    
+
     if used_to_connect.is_none() {
         app_state
             .state_store
@@ -381,7 +381,7 @@ async fn internet_setup_successfully_cb(
 ) -> Result<String, ble::BleStatus> {
     // Sync NTP time now that we have internet
     system::sync_ntp_time();
-    
+
     // Check and update system using Required mode (only mandatory updates)
     // Use NonBlocking execution since BLE flow needs to return quickly
     match check_and_update_system(

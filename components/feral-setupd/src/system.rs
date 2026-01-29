@@ -67,7 +67,7 @@ pub async fn set_time(timezone: &str, time: &str) -> Result<(), anyhow::Error> {
 }
 
 pub fn sync_ntp_time() {
-    // log here 
+    // log here
     println!("System: Syncing NTP time");
     task::spawn_blocking(move || {
         match Command::new(constant::TIMEZONE_CMD)
