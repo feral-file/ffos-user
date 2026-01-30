@@ -379,9 +379,6 @@ async fn internet_setup_successfully_cb(
     app_state: &Arc<AppState>,
     chromium: &Arc<Cdp>,
 ) -> Result<String, ble::BleStatus> {
-    // Sync NTP time now that we have internet
-    system::sync_ntp_time();
-
     // Check and update system using Required mode (only mandatory updates)
     // Use NonBlocking execution since BLE flow needs to return quickly
     match check_and_update_system(
@@ -860,8 +857,6 @@ async fn show_reflashing_qrcode(
 ///   the device is too old) is intentional and means the usual "show art or QR" flow
 ///   should not continue.
 async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
-    // Sync NTP time now that we have internet
-    system::sync_ntp_time();
     // Check and update system using Required mode (only mandatory updates on startup)
     // Use Blocking execution since we can wait for completion during startup
     match check_and_update_system(

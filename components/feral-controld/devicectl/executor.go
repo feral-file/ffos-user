@@ -33,8 +33,6 @@ const (
 	AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
 	// BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
 	BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
-	// feral-timesyncd.sh
-	TIMEZONE_SH = "/home/feralfile/scripts/feral-timesyncd.sh"
 )
 
 type Device struct {
@@ -151,10 +149,6 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.factoryReset(ctx)
 	case commands.CMD_UPLOAD_LOGS:
 		result, err = e.uploadLogs(ctx, bytes)
-	case commands.CMD_SET_TIMEZONE:
-		result, err = e.setTimeZone(ctx, bytes)
-	case commands.CMD_SYNC_TIME:
-		result, err = e.syncTime(ctx)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -800,55 +794,6 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)
 	}
-
-	return CmdOK, nil
-}
-
-func (e *executor) setTimeZone(ctx context.Context, args []byte) (interface{}, error) {
-	e.logger.Info("Executing set-time command")
-
-	var cmdArgs struct {
-		Timezone string `json:"timezone"`
-	}
-
-	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-
-	if cmdArgs.Timezone == "" {
-		return nil, fmt.Errorf("missing required arguments: timezone is required")
-	}
-
-	cmd := e.exec.CommandContext(ctx, TIMEZONE_SH, "set-timezone", cmdArgs.Timezone)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		e.logger.Error("Failed to set timezone",
-			zap.Error(err),
-			zap.String("output", string(output)))
-		return nil, fmt.Errorf("failed to set timezone: %w", err)
-	}
-
-	e.logger.Info("Timezone set successfully",
-		zap.String("timezone", cmdArgs.Timezone),
-		zap.String("output", string(output)))
-
-	return CmdOK, nil
-}
-
-func (e *executor) syncTime(ctx context.Context) (interface{}, error) {
-	e.logger.Info("Executing sync time command")
-
-	cmd := e.exec.CommandContext(ctx, TIMEZONE_SH, "sync")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		e.logger.Error("Failed to sync time",
-			zap.Error(err),
-			zap.String("output", string(output)))
-		return nil, fmt.Errorf("failed to sync time: %w", err)
-	}
-
-	e.logger.Info("Time synced successfully",
-		zap.String("output", string(output)))
 
 	return CmdOK, nil
 }

@@ -722,19 +722,9 @@ async fn handle_get_info(
 async fn handle_set_time(
     _notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
     _reply_id: String,
-    params: Vec<String>,
+    _params: Vec<String>,
 ) -> Result<(), ReqError> {
-    println!("BLE: Setting time");
-    if params.len() < 2 {
-        eprintln!(
-            "BLE: Received timezone payload with only {} values",
-            params.len()
-        );
-        return Ok(());
-    }
-    if let Err(e) = system::set_time(&params[0], &params[1]).await {
-        eprintln!("BLE: Failed to set time: {e:#?}");
-    }
+    println!("Do nothing");
     Ok(())
 }
 
