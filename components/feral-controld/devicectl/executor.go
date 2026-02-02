@@ -154,6 +154,10 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.uploadLogs(ctx, bytes)
 	case commands.CMD_SET_TIMEZONE:
 		result, err = e.setTimeZone(ctx, bytes)
+	case commands.CMD_SET_VOLUME:
+		result, err = e.setVolume(ctx, bytes)
+	case commands.CMD_TOGGLE_MUTE:
+		result, err = e.toggleMute(ctx)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -879,6 +883,64 @@ func (e *executor) setTimeZone(ctx context.Context, args []byte) (interface{}, e
 	} else {
 		e.logger.Info("Sync completed after timezone change")
 	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, error) {
+	e.logger.Info("Executing set-volume command")
+
+	var cmdArgs struct {
+		Percent int `json:"percent"`
+	}
+
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	// Validate input range
+	if cmdArgs.Percent < 0 || cmdArgs.Percent > 100 {
+		return nil, fmt.Errorf("percent must be between 0 and 100, got: %d", cmdArgs.Percent)
+	}
+
+	// User input 0% maps to 25%, user input 100% maps to 100%
+	// Formula: pactl_percent = 25 + (user_percent * 0.75)
+	pactlPercent := 0
+	if cmdArgs.Percent > 0 {
+		pactlPercent = 25 + (cmdArgs.Percent * 75 / 100)
+	}
+
+	e.logger.Info("Setting volume", zap.Int("user_percent", cmdArgs.Percent), zap.Int("pactl_percent", pactlPercent))
+
+	// Execute pamixer command
+	cmd := e.exec.CommandContext(ctx, "pamixer", "--set-volume", fmt.Sprintf("%d", pactlPercent))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		e.logger.Error("Failed to set volume",
+			zap.Error(err),
+			zap.String("output", string(output)))
+		return nil, fmt.Errorf("failed to set volume: %w", err)
+	}
+
+	e.logger.Info("Volume set successfully", zap.Int("percent", pactlPercent))
+
+	return CmdOK, nil
+}
+
+func (e *executor) toggleMute(ctx context.Context) (interface{}, error) {
+	e.logger.Info("Executing toggle-mute command")
+
+	// Execute pamixer command to toggle mute
+	cmd := e.exec.CommandContext(ctx, "pamixer", "--toggle-mute")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		e.logger.Error("Failed to toggle mute",
+			zap.Error(err),
+			zap.String("output", string(output)))
+		return nil, fmt.Errorf("failed to toggle mute: %w", err)
+	}
+
+	e.logger.Info("Mute toggled successfully")
 
 	return CmdOK, nil
 }
