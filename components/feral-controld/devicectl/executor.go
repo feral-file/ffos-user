@@ -33,6 +33,9 @@ const (
 	AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
 	// BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
 	BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
+	// TimezoneManualOverrideFile is the sentinel file that indicates timezone has been manually set,
+	// preventing automatic timezone synchronization from other sources.
+	TimezoneManualOverrideFile = "/etc/timezone-manual-override"
 )
 
 type Device struct {
@@ -856,7 +859,19 @@ func (e *executor) setTimeZone(ctx context.Context, args []byte) (interface{}, e
 		zap.String("timezone", cmdArgs.Timezone),
 		zap.String("output", string(output)))
 
-	// Step 3: Run sync to ensure changes are persisted
+	// Step 3: Create flag file to indicate manual timezone override
+	touchCmd := e.exec.CommandContext(ctx, "sudo", "touch", TimezoneManualOverrideFile)
+	if err := touchCmd.Run(); err != nil {
+		e.logger.Warn("Failed to create timezone manual override flag",
+			zap.Error(err),
+			zap.String("path", TimezoneManualOverrideFile))
+		// Don't fail the command if flag creation fails, just log a warning
+	} else {
+		e.logger.Info("Timezone manual override flag created",
+			zap.String("path", TimezoneManualOverrideFile))
+	}
+
+	// Step 4: Run sync to ensure changes are persisted
 	syncCmd := e.exec.CommandContext(ctx, "sync")
 	if err := syncCmd.Run(); err != nil {
 		e.logger.Warn("Failed to run sync after setting timezone", zap.Error(err))
