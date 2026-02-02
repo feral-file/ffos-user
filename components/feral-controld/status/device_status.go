@@ -52,6 +52,8 @@ type DeviceStatusResponse struct {
 	AnalyticsDisabled   bool              `json:"analyticsDisabled,omitempty"`
 	BetaFeaturesEnabled bool              `json:"betaFeaturesEnabled,omitempty"`
 	MACInfo             map[string]string `json:"macInfo,omitempty"`
+	Timezone            string            `json:"timezone,omitempty"`
+	CurrentTime         string            `json:"currentTime,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -64,6 +66,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 
 	// Variables to collect results safely
 	var screenRotation, connectedWifi, installedVersion, latestVersion string
+	var timezone, currentTime string
 	var analyticsDisabled, betaFeaturesEnabled bool
 
 	// Get screen rotation
@@ -176,6 +179,27 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
+	// Get timezone and current time using timedatectl
+	g.Go(func() error {
+		// Get timezone
+		tzCmd := d.exec.CommandContext(ctx, "timedatectl", "show", "--property=Timezone", "--value")
+		tzOutput, err := tzCmd.Output()
+		if err == nil {
+			timezone = strings.TrimSpace(string(tzOutput))
+		}
+		// Don't fail if timezone fetch fails
+
+		// Get current time (local time)
+		dateCmd := d.exec.CommandContext(ctx, "date", "+%Y-%m-%d %H:%M:%S")
+		dateOutput, err := dateCmd.Output()
+		if err == nil {
+			currentTime = strings.TrimSpace(string(dateOutput))
+		}
+		// Don't fail if time fetch fails
+
+		return nil
+	})
+
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil {
 		return nil, err
@@ -188,6 +212,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.LatestVersion = latestVersion
 	response.AnalyticsDisabled = analyticsDisabled
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
+	response.Timezone = timezone
+	response.CurrentTime = currentTime
 
 	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()
