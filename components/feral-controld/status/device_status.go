@@ -212,10 +212,11 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		if err == nil {
 			muteStr := strings.TrimSpace(string(muteOutput))
 			// Parse "true" or "false"
-			if muteStr == "true" {
+			switch muteStr {
+			case "true":
 				muted := true
 				isMuted = &muted
-			} else if muteStr == "false" {
+			case "false":
 				muted := false
 				isMuted = &muted
 			}
