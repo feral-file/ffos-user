@@ -646,17 +646,14 @@ async fn handle_connect_wifi(
     params: Vec<String>,
     cb: Arc<ConnectWifiCallback>,
 ) -> Result<(), ReqError> {
-    // Expect at least SSID and password
-    if params.len() < 2 {
-        eprintln!(
-            "BLE: Received wifi payload with only {} values",
-            params.len()
-        );
+    // Expect at least SSID (password is optional for open networks)
+    if params.is_empty() {
+        eprintln!("BLE: Received wifi payload with no values");
         return Ok(());
     }
 
     let ssid = &params[0];
-    let pass = &params[1];
+    let pass = params.get(1).map(|s| s.as_str()).unwrap_or("");
 
     let mut encoder = encoding::PayloadEncoder::new();
     encoder.push_str(&reply_id);
