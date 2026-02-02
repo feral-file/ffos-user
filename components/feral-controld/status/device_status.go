@@ -54,6 +54,8 @@ type DeviceStatusResponse struct {
 	MACInfo             map[string]string `json:"macInfo,omitempty"`
 	Timezone            string            `json:"timezone,omitempty"`
 	CurrentTime         string            `json:"currentTime,omitempty"`
+	Volume              *int              `json:"volume,omitempty"`
+	IsMuted             *bool             `json:"isMuted,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -68,6 +70,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	var screenRotation, connectedWifi, installedVersion, latestVersion string
 	var timezone, currentTime string
 	var analyticsDisabled, betaFeaturesEnabled bool
+	var volume *int
+	var isMuted *bool
 
 	// Get screen rotation
 	g.Go(func() error {
@@ -200,6 +204,49 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
+	// Get volume and mute status
+	g.Go(func() error {
+		// Get mute status
+		muteCmd := d.exec.CommandContext(ctx, "pamixer", "--get-mute")
+		muteOutput, err := muteCmd.Output()
+		if err == nil {
+			muteStr := strings.TrimSpace(string(muteOutput))
+			// Parse "true" or "false"
+			if muteStr == "true" {
+				muted := true
+				isMuted = &muted
+			} else if muteStr == "false" {
+				muted := false
+				isMuted = &muted
+			}
+		}
+		// Don't fail if mute status fetch fails
+
+		// Get volume status
+		volumeCmd := d.exec.CommandContext(ctx, "pamixer", "--get-volume")
+		volumeOutput, err := volumeCmd.Output()
+		if err == nil {
+			volumeStr := strings.TrimSpace(string(volumeOutput))
+			// Parse the pactl volume value
+			var pactlVolume int
+			if _, err := fmt.Sscanf(volumeStr, "%d", &pactlVolume); err == nil {
+				// Convert back to user volume using inverse formula
+				// pactl_percent = 25 + (user_percent * 0.75)
+				// user_percent = (pactl_percent - 25) / 0.75
+				var userVolume int
+				if pactlVolume <= 25 {
+					userVolume = 0
+				} else {
+					userVolume = (pactlVolume - 25) * 100 / 75
+				}
+				volume = &userVolume
+			}
+		}
+		// Don't fail if volume fetch fails
+
+		return nil
+	})
+
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil {
 		return nil, err
@@ -214,6 +261,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
 	response.Timezone = timezone
 	response.CurrentTime = currentTime
+	response.Volume = volume
+	response.IsMuted = isMuted
 
 	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()
