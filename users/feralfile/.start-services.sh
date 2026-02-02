@@ -1,4 +1,4 @@
-VOLUME_FILE="/home/feralfile/.config/initial-volume-set"
+VOLUME_FILE="/home/feralfile/.state/initial-volume-set"
 if [ ! -f "$VOLUME_FILE" ]; then
     pamixer --set-volume 63
     touch "$VOLUME_FILE"
