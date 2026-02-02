@@ -1,3 +1,10 @@
+VOLUME_FILE="/home/feralfile/.config/initial-volume-set"
+if [ ! -f "$VOLUME_FILE" ]; then
+    pamixer --set-volume 63
+    touch "$VOLUME_FILE"
+    echo "Initial volume set to 50% for first boot."
+fi
+
 # Backward compatibility: Disable and stop old services if they are enabled
 if systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; then
     systemctl --user disable "feral-sys-monitord.service"
