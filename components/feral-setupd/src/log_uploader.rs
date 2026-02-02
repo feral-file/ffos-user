@@ -76,11 +76,15 @@ pub async fn create_logs_zip() -> Result<(PathBuf, PathBuf), std::io::Error> {
     Ok((temp_zip_path, temp_dir))
 }
 
-/// Recursively copies a directory and all its contents to a destination directory.
+/// Recursively copies the contents of a directory to a destination directory.
+/// Uses `src/.` pattern to copy only the contents, not the directory itself.
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+    // Append "/." to source path to copy contents only, not the directory itself
+    let src_contents = format!("{}{}.", src.display(), std::path::MAIN_SEPARATOR);
+    
     let status = tokio::process::Command::new("cp")
         .arg("-r")
-        .arg(src)
+        .arg(&src_contents)
         .arg(dst)
         .status()
         .await?;
