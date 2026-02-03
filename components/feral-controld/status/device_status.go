@@ -3,8 +3,10 @@ package status
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
@@ -19,12 +21,20 @@ type DeviceStatus interface {
 	GetStatus(ctx context.Context) (*DeviceStatusResponse, error)
 }
 
+// versionCache stores the cached latest version information
+type versionCache struct {
+	version   string
+	timestamp time.Time
+	mu        sync.RWMutex
+}
+
 type deviceStatus struct {
 	json       wrapper.JSON
 	os         wrapper.OS
 	exec       wrapper.Exec
 	httpClient wrapper.HTTPClient
 	io         wrapper.IO
+	cache      *versionCache
 }
 
 func NewDeviceStatus(
@@ -40,6 +50,7 @@ func NewDeviceStatus(
 		exec:       exec,
 		httpClient: httpClient,
 		io:         io,
+		cache:      &versionCache{},
 	}
 }
 
@@ -143,11 +154,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		// Get latest version from API if credentials are available
 		// Note: Network errors are non-fatal - latestVersion will remain empty if fetch fails
 		if config.Branch != "" && config.Endpoint != "" {
-			version, err := d.fetchLatestVersion(ctx, config.Endpoint, config.Branch)
-			if err == nil {
-				latestVersion = version
-			}
-			// Don't return error - allow other status info to be returned even without network
+			// don't care about the error - allow other status info to be returned even without network
+			latestVersion, _ = d.getLatestVersion(ctx, config.Endpoint, config.Branch)
 		}
 
 		return nil
@@ -270,6 +278,40 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.MACInfo = cfg.MACInfo
 
 	return response, nil
+}
+
+// getLatestVersion returns the cached version if it's still valid (less than 1 hour old),
+// otherwise fetches a new version from the API and updates the cache
+func (d *deviceStatus) getLatestVersion(ctx context.Context, endpoint, branch string) (string, error) {
+	const cacheDuration = time.Hour
+
+	// 1. Quick Check (Read Lock)
+	d.cache.mu.RLock()
+	isFresh := d.cache.version != "" && time.Since(d.cache.timestamp) < cacheDuration
+	cachedVersion := d.cache.version
+	d.cache.mu.RUnlock()
+
+	if isFresh {
+		return cachedVersion, nil
+	}
+
+	// 2. Network Fetch (No Lock)
+	version, err := d.fetchLatestVersion(ctx, endpoint, branch)
+	if err != nil {
+		log.Printf("Failed to fetch latest version: %v", err)
+		if cachedVersion != "" {
+			return cachedVersion, nil // Return stale cache without error
+		}
+		return "", err // No cache available, return error
+	}
+
+	// 3. Update (Write Lock)
+	d.cache.mu.Lock()
+	d.cache.version = version
+	d.cache.timestamp = time.Now()
+	d.cache.mu.Unlock()
+
+	return version, nil
 }
 
 // fetchLatestVersion retrieves the latest version from the distribution API
