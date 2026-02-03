@@ -1,3 +1,10 @@
+VOLUME_FILE="/home/feralfile/.state/initial-volume-set"
+if [ ! -f "$VOLUME_FILE" ]; then
+    pamixer --set-volume 63
+    touch "$VOLUME_FILE"
+    echo "Initial volume set to 50% for first boot."
+fi
+
 # Backward compatibility: Disable and stop old services if they are enabled
 if systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; then
     systemctl --user disable "feral-sys-monitord.service"
@@ -20,11 +27,6 @@ systemctl --user start "feral-vmagent.service"
 systemctl --user start "display-restore.service"
 systemctl --user start "chromium-kiosk.service"
 systemctl --user start "ota-update-success-check.service"
-
-# Enable hourly timers for time sync and log rotation
-if ! systemctl --user is-enabled "feral-timesyncd.timer" >/dev/null 2>&1; then
-    systemctl --user enable --now "feral-timesyncd.timer"
-fi
 
 if ! systemctl --user is-enabled "feral-log-rotation.timer" >/dev/null 2>&1; then
     systemctl --user enable --now "feral-log-rotation.timer"

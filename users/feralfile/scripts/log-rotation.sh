@@ -11,10 +11,11 @@ if [ ! -f "$LOG_CONFIG_FILE" ]; then
 /home/feralfile/.logs/chromium.log|/home/feralfile/.logs/backup/chromium
 /home/feralfile/.logs/controld.log|/home/feralfile/.logs/backup/controld
 /home/feralfile/.logs/setupd.log|/home/feralfile/.logs/backup/setupd
-/home/feralfile/.logs/timesyncd.log|/home/feralfile/.logs/backup/timesyncd
 /home/feralfile/.logs/sys-monitord.log|/home/feralfile/.logs/backup/sys-monitord
 /home/feralfile/.logs/watchdog.log|/home/feralfile/.logs/backup/watchdog
 /home/feralfile/.logs/log-rotation.log|/home/feralfile/.logs/backup/log-rotation
+/var/log/updaterd.log|/home/feralfile/.logs/backup/updaterd
+/var/log/auto-updaterd.log|/home/feralfile/.logs/backup/auto-updaterd
 EOL
 fi
 
@@ -63,7 +64,8 @@ cleanup_old_logs() {
 
 main() {
   echo "Log rotation start: $(date)"
-
+  [ -f /var/log/updaterd.log ] && sudo chown feralfile /var/log/updaterd.log
+  [ -f /var/log/auto-updaterd.log ] && sudo chown feralfile /var/log/auto-updaterd.log
   while IFS='|' read -r LOG_PATH ROTATION_DIR || [ -n "$LOG_PATH" ]; do
     LOG_PATH=$(echo "$LOG_PATH" | xargs)
     ROTATION_DIR=$(echo "${ROTATION_DIR:-}" | xargs)

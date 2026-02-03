@@ -28,11 +28,15 @@ var CmdOK = struct {
 	OK: true,
 }
 
-// AnalyticsToggleOffFile is the sentinel file that disables proactive metrics collection.
-const AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
-
-// BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
-const BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
+const (
+	// AnalyticsToggleOffFile is the sentinel file that disables proactive metrics collection.
+	AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
+	// BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
+	BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
+	// TimezoneManualOverrideFile is the sentinel file that indicates timezone has been manually set,
+	// preventing automatic timezone synchronization from other sources.
+	TimezoneManualOverrideFile = "/etc/timezone-manual-override"
+)
 
 type Device struct {
 	ID       string `json:"device_id"`
@@ -148,6 +152,12 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.factoryReset(ctx)
 	case commands.CMD_UPLOAD_LOGS:
 		result, err = e.uploadLogs(ctx, bytes)
+	case commands.CMD_SET_TIMEZONE:
+		result, err = e.setTimeZone(ctx, bytes)
+	case commands.CMD_SET_VOLUME:
+		result, err = e.setVolume(ctx, bytes)
+	case commands.CMD_TOGGLE_MUTE:
+		result, err = e.toggleMute(ctx)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -793,6 +803,144 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)
 	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) setTimeZone(ctx context.Context, args []byte) (interface{}, error) {
+	e.logger.Info("Executing set-time command")
+
+	var cmdArgs struct {
+		Timezone string `json:"timezone"`
+	}
+
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if cmdArgs.Timezone == "" {
+		return nil, fmt.Errorf("missing required arguments: timezone is required")
+	}
+
+	// Step 1: Validate timezone by listing all valid timezones
+	e.logger.Info("Validating timezone", zap.String("timezone", cmdArgs.Timezone))
+	listCmd := e.exec.CommandContext(ctx, "timedatectl", "list-timezones")
+	listOutput, err := listCmd.Output()
+	if err != nil {
+		e.logger.Error("Failed to list timezones", zap.Error(err))
+		return nil, fmt.Errorf("failed to list timezones: %w", err)
+	}
+
+	// Check if the provided timezone is in the list of valid timezones
+	validTimezones := strings.Split(string(listOutput), "\n")
+	isValid := false
+	for _, tz := range validTimezones {
+		if strings.TrimSpace(tz) == cmdArgs.Timezone {
+			isValid = true
+			break
+		}
+	}
+
+	if !isValid {
+		e.logger.Error("Invalid timezone provided",
+			zap.String("timezone", cmdArgs.Timezone))
+		return nil, fmt.Errorf("invalid timezone: %s. Use 'timedatectl list-timezones' to see valid timezones", cmdArgs.Timezone)
+	}
+
+	e.logger.Info("Timezone validation passed", zap.String("timezone", cmdArgs.Timezone))
+
+	// Step 2: Set the timezone
+	setCmd := e.exec.CommandContext(ctx, "timedatectl", "set-timezone", cmdArgs.Timezone)
+	output, err := setCmd.CombinedOutput()
+	if err != nil {
+		e.logger.Error("Failed to set timezone",
+			zap.Error(err),
+			zap.String("output", string(output)))
+		return nil, fmt.Errorf("failed to set timezone: %w", err)
+	}
+
+	e.logger.Info("Timezone set successfully",
+		zap.String("timezone", cmdArgs.Timezone),
+		zap.String("output", string(output)))
+
+	// Step 3: Create flag file to indicate manual timezone override
+	touchCmd := e.exec.CommandContext(ctx, "sudo", "touch", TimezoneManualOverrideFile)
+	if err := touchCmd.Run(); err != nil {
+		e.logger.Warn("Failed to create timezone manual override flag",
+			zap.Error(err),
+			zap.String("path", TimezoneManualOverrideFile))
+		// Don't fail the command if flag creation fails, just log a warning
+	} else {
+		e.logger.Info("Timezone manual override flag created",
+			zap.String("path", TimezoneManualOverrideFile))
+	}
+
+	// Step 4: Run sync to ensure changes are persisted
+	syncCmd := e.exec.CommandContext(ctx, "sync")
+	if err := syncCmd.Run(); err != nil {
+		e.logger.Warn("Failed to run sync after setting timezone", zap.Error(err))
+		// Don't fail the command if sync fails, just log a warning
+	} else {
+		e.logger.Info("Sync completed after timezone change")
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, error) {
+	e.logger.Info("Executing set-volume command")
+
+	var cmdArgs struct {
+		Percent int `json:"percent"`
+	}
+
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	// Validate input range
+	if cmdArgs.Percent < 0 || cmdArgs.Percent > 100 {
+		return nil, fmt.Errorf("percent must be between 0 and 100, got: %d", cmdArgs.Percent)
+	}
+
+	// User input 0% maps to 25%, user input 100% maps to 100%
+	// Formula: pactl_percent = 25 + (user_percent * 0.75)
+	pactlPercent := 0
+	if cmdArgs.Percent > 0 {
+		pactlPercent = 25 + (cmdArgs.Percent * 75 / 100)
+	}
+
+	e.logger.Info("Setting volume", zap.Int("user_percent", cmdArgs.Percent), zap.Int("pactl_percent", pactlPercent))
+
+	// Execute pamixer command
+	cmd := e.exec.CommandContext(ctx, "pamixer", "--set-volume", fmt.Sprintf("%d", pactlPercent))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		e.logger.Error("Failed to set volume",
+			zap.Error(err),
+			zap.String("output", string(output)))
+		return nil, fmt.Errorf("failed to set volume: %w", err)
+	}
+
+	e.logger.Info("Volume set successfully", zap.Int("percent", pactlPercent))
+
+	return CmdOK, nil
+}
+
+func (e *executor) toggleMute(ctx context.Context) (interface{}, error) {
+	e.logger.Info("Executing toggle-mute command")
+
+	// Execute pamixer command to toggle mute
+	cmd := e.exec.CommandContext(ctx, "pamixer", "--toggle-mute")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		e.logger.Error("Failed to toggle mute",
+			zap.Error(err),
+			zap.String("output", string(output)))
+		return nil, fmt.Errorf("failed to toggle mute: %w", err)
+	}
+
+	e.logger.Info("Mute toggled successfully")
 
 	return CmdOK, nil
 }

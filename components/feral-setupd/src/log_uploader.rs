@@ -13,23 +13,44 @@ const READ_CHUNK_SIZE: usize = 64 * 1024;
 /// Uses streaming I/O to avoid loading large files entirely into memory.
 /// Writes to a temporary file with a unique timestamp-based name to prevent
 /// race conditions when multiple uploads run concurrently.
-pub async fn create_logs_zip() -> Result<PathBuf, std::io::Error> {
+/// Returns a tuple of (zip_path, temp_dir_path) for cleanup in submit_logs.
+pub async fn create_logs_zip() -> Result<(PathBuf, PathBuf), std::io::Error> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let logs_dir = Path::new(constant::LOG_FILEDIR);
 
-    // Generate a unique temp file name using timestamp to avoid race conditions
+    // Generate a unique timestamp to avoid race conditions
     // when multiple uploads run concurrently (e.g., BLE + D-Bus triggered).
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let temp_path = PathBuf::from(format!("/tmp/logs_upload_{timestamp}.zip"));
 
-    // Collect all file paths first (async), then do sync zip writing
-    let files_to_zip = collect_files_to_zip(logs_dir).await?;
+    let temp_dir = PathBuf::from(format!("/tmp/logs_upload_{timestamp}"));
+    let temp_zip_path = PathBuf::from(format!("/tmp/logs_upload_{timestamp}.zip"));
+
+    // Create temp directory
+    fs::create_dir(&temp_dir).await?;
+
+    // Copy the entire log directory to temp directory
+    copy_dir_recursive(logs_dir, &temp_dir).await?;
+
+    // Copy updaterd log files /var/log/updaterd.log /var/log/auto-updaterd.log to temp dir
+    let updaterd_log = Path::new("/var/log/updaterd.log");
+    let auto_updaterd_log = Path::new("/var/log/auto-updaterd.log");
+    if updaterd_log.exists() {
+        fs::copy(updaterd_log, temp_dir.join("updaterd.log")).await?;
+    }
+    if auto_updaterd_log.exists() {
+        fs::copy(auto_updaterd_log, temp_dir.join("auto-updaterd.log")).await?;
+    }
+
+    // Collect all file paths from temp directory
+    let files_to_zip = collect_files_to_zip(&temp_dir).await?;
 
     if files_to_zip.is_empty() {
+        // Clean up temp dir before returning error
+        let _ = fs::remove_dir_all(&temp_dir).await;
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "No log files found",
@@ -37,22 +58,44 @@ pub async fn create_logs_zip() -> Result<PathBuf, std::io::Error> {
     }
 
     // Spawn blocking task for the sync zip writing with streaming file reads
-    let logs_dir_owned = logs_dir.to_path_buf();
-    let temp_path_clone = temp_path.clone();
+    let temp_dir_owned = temp_dir.clone();
+    let temp_zip_path_clone = temp_zip_path.clone();
     let file_count = tokio::task::spawn_blocking(move || {
-        write_zip_streaming(&temp_path_clone, &logs_dir_owned, &files_to_zip)
+        write_zip_streaming(&temp_zip_path_clone, &temp_dir_owned, &files_to_zip)
     })
     .await
     .map_err(std::io::Error::other)??;
 
     // Get the file size for logging
-    let metadata = fs::metadata(&temp_path).await?;
+    let metadata = fs::metadata(&temp_zip_path).await?;
     println!(
         "LOG_UPLOADER: Created zip with {file_count} files, size: {} bytes",
         metadata.len()
     );
 
-    Ok(temp_path)
+    Ok((temp_zip_path, temp_dir))
+}
+
+/// Recursively copies the contents of a directory to a destination directory.
+/// Uses `src/.` pattern to copy only the contents, not the directory itself.
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+    // Append "/." to source path to copy contents only, not the directory itself
+    let src_contents = format!("{}{}.", src.display(), std::path::MAIN_SEPARATOR);
+
+    let status = tokio::process::Command::new("cp")
+        .arg("-r")
+        .arg(&src_contents)
+        .arg(dst)
+        .status()
+        .await?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "cp command failed with status: {status}"
+        )))
+    }
 }
 
 /// Recursively collects all file paths under the given directory.
@@ -328,10 +371,10 @@ async fn upload_zip_to_s3(upload_url: &str, zip_path: &Path) -> Result<(), u8> {
 /// Main entry point: zips the logs folder and uploads to S3 via the v2 API.
 ///
 /// Flow:
-/// 1. Zip the entire /home/feralfile/.logs folder (streaming to temp file)
+/// 1. Copy logs to temp directory and zip (streaming to temp file)
 /// 2. Request a pre-signed S3 upload URL from the v2 API
 /// 3. Stream upload the zip to S3
-/// 4. Clean up the temp file
+/// 4. Clean up the temp file and temp directory
 pub async fn submit_logs(
     device_id: &str,
     api_key: &str,
@@ -342,15 +385,15 @@ pub async fn submit_logs(
     println!("LOG_UPLOADER: Starting log submission (v2 API, streaming)");
 
     // Step 1: Create zip of logs folder (streaming to temp file)
-    let zip_path = match create_logs_zip().await {
-        Ok(path) => path,
+    let (zip_path, temp_dir) = match create_logs_zip().await {
+        Ok(paths) => paths,
         Err(e) => {
             eprintln!("LOG_UPLOADER: Failed to create logs zip: {e}");
             return Err(constant::BLE_ERR_CODE_UNKNOWN_ERROR);
         }
     };
 
-    // Ensure temp file cleanup on all exit paths
+    // Ensure temp file and directory cleanup on all exit paths
     let result = async {
         // Step 2: Get pre-signed URL from v2 API
         let upload_url = get_presigned_url(device_id, api_key, source, branch, version).await?;
@@ -362,11 +405,19 @@ pub async fn submit_logs(
     }
     .await;
 
-    // Step 4: Clean up temp file
+    // Step 4: Clean up temp zip file
     if let Err(e) = fs::remove_file(&zip_path).await {
         eprintln!(
             "LOG_UPLOADER: Failed to clean up temp zip file {}: {e}",
             zip_path.display()
+        );
+    }
+
+    // Step 5: Clean up temp directory
+    if let Err(e) = fs::remove_dir_all(&temp_dir).await {
+        eprintln!(
+            "LOG_UPLOADER: Failed to clean up temp directory {}: {e}",
+            temp_dir.display()
         );
     }
 
