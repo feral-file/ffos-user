@@ -1,9 +1,14 @@
-VOLUME_FILE="/home/feralfile/.state/initial-volume-set"
+VOLUME_FILE="/home/feralfile/.state/saved-volume"
 if [ ! -f "$VOLUME_FILE" ]; then
-    pamixer --set-volume 63
-    touch "$VOLUME_FILE"
-    echo "Initial volume set to 50% for first boot."
+    # First boot: set default volume to 63%
+    echo "63" > "$VOLUME_FILE"
+    PACTL_PERCENT=63
+else
+    # Read saved volume
+    PACTL_PERCENT=$(cat "$VOLUME_FILE")
 fi
+
+pamixer --set-volume "$PACTL_PERCENT"
 
 # Backward compatibility: Disable and stop old services if they are enabled
 if systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; then

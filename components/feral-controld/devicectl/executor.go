@@ -33,6 +33,8 @@ const (
 	AnalyticsToggleOffFile = "/home/feralfile/.state/analytics-toggle-off"
 	// BetaFeaturesToggleOnFile is the sentinel file that enables beta features (default is off).
 	BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
+	// SavedVolumeFile stores the user's volume setting to persist across reboots.
+	SavedVolumeFile = "/home/feralfile/.state/saved-volume"
 )
 
 type Device struct {
@@ -838,6 +840,13 @@ func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, err
 	}
 
 	e.logger.Info("Volume set successfully", zap.Int("percent", pactlPercent))
+
+	// Save the user percentage to persist across OTA
+	if err := os.WriteFile(SavedVolumeFile, []byte(fmt.Sprintf("%d", pactlPercent)), 0644); err != nil {
+		e.logger.Warn("Failed to save volume to file",
+			zap.Error(err),
+			zap.String("file", SavedVolumeFile))
+	}
 
 	return CmdOK, nil
 }
