@@ -842,6 +842,7 @@ func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, err
 	e.logger.Info("Volume set successfully", zap.Int("percent", pactlPercent))
 
 	// Save the user percentage to persist across OTA
+	// #nosec G306 -- intentionally world-readable for volume information
 	if err := os.WriteFile(SavedVolumeFile, []byte(fmt.Sprintf("%d", pactlPercent)), 0644); err != nil {
 		e.logger.Warn("Failed to save volume to file",
 			zap.Error(err),
