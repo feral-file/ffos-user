@@ -3,8 +3,10 @@ package status
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
@@ -19,12 +21,20 @@ type DeviceStatus interface {
 	GetStatus(ctx context.Context) (*DeviceStatusResponse, error)
 }
 
+// versionCache stores the cached latest version information
+type versionCache struct {
+	version   string
+	timestamp time.Time
+	mu        sync.RWMutex
+}
+
 type deviceStatus struct {
 	json       wrapper.JSON
 	os         wrapper.OS
 	exec       wrapper.Exec
 	httpClient wrapper.HTTPClient
 	io         wrapper.IO
+	cache      *versionCache
 }
 
 func NewDeviceStatus(
@@ -40,6 +50,7 @@ func NewDeviceStatus(
 		exec:       exec,
 		httpClient: httpClient,
 		io:         io,
+		cache:      &versionCache{},
 	}
 }
 
@@ -52,6 +63,8 @@ type DeviceStatusResponse struct {
 	AnalyticsDisabled   bool              `json:"analyticsDisabled,omitempty"`
 	BetaFeaturesEnabled bool              `json:"betaFeaturesEnabled,omitempty"`
 	MACInfo             map[string]string `json:"macInfo,omitempty"`
+	Volume              *int              `json:"volume,omitempty"`
+	IsMuted             *bool             `json:"isMuted,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -65,6 +78,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	// Variables to collect results safely
 	var screenRotation, connectedWifi, installedVersion, latestVersion string
 	var analyticsDisabled, betaFeaturesEnabled bool
+	var volume *int
+	var isMuted *bool
 
 	// Get screen rotation
 	g.Go(func() error {
@@ -136,11 +151,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		// Get latest version from API if credentials are available
 		// Note: Network errors are non-fatal - latestVersion will remain empty if fetch fails
 		if config.Branch != "" && config.Endpoint != "" {
-			version, err := d.fetchLatestVersion(ctx, config.Endpoint, config.Branch)
-			if err == nil {
-				latestVersion = version
-			}
-			// Don't return error - allow other status info to be returned even without network
+			// don't care about the error - allow other status info to be returned even without network
+			latestVersion, _ = d.getLatestVersion(ctx, config.Endpoint, config.Branch)
 		}
 
 		return nil
@@ -176,6 +188,50 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
+	// Get volume and mute status
+	g.Go(func() error {
+		// Get mute status
+		muteCmd := d.exec.CommandContext(ctx, "pamixer", "--get-mute")
+		muteOutput, err := muteCmd.Output()
+		if err == nil {
+			muteStr := strings.TrimSpace(string(muteOutput))
+			// Parse "true" or "false"
+			switch muteStr {
+			case "true":
+				muted := true
+				isMuted = &muted
+			case "false":
+				muted := false
+				isMuted = &muted
+			}
+		}
+		// Don't fail if mute status fetch fails
+
+		// Get volume status
+		volumeCmd := d.exec.CommandContext(ctx, "pamixer", "--get-volume")
+		volumeOutput, err := volumeCmd.Output()
+		if err == nil {
+			volumeStr := strings.TrimSpace(string(volumeOutput))
+			// Parse the pactl volume value
+			var pactlVolume int
+			if _, err := fmt.Sscanf(volumeStr, "%d", &pactlVolume); err == nil {
+				// Convert back to user volume using inverse formula
+				// pactl_percent = 25 + (user_percent * 0.75)
+				// user_percent = (pactl_percent - 25) / 0.75
+				var userVolume int
+				if pactlVolume <= 25 {
+					userVolume = 0
+				} else {
+					userVolume = (pactlVolume - 25) * 100 / 75
+				}
+				volume = &userVolume
+			}
+		}
+		// Don't fail if volume fetch fails
+
+		return nil
+	})
+
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil {
 		return nil, err
@@ -188,12 +244,48 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.LatestVersion = latestVersion
 	response.AnalyticsDisabled = analyticsDisabled
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
+	response.Volume = volume
+	response.IsMuted = isMuted
 
 	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()
 	response.MACInfo = cfg.MACInfo
 
 	return response, nil
+}
+
+// getLatestVersion returns the cached version if it's still valid (less than 1 hour old),
+// otherwise fetches a new version from the API and updates the cache
+func (d *deviceStatus) getLatestVersion(ctx context.Context, endpoint, branch string) (string, error) {
+	const cacheDuration = time.Hour
+
+	// 1. Quick Check (Read Lock)
+	d.cache.mu.RLock()
+	isFresh := d.cache.version != "" && time.Since(d.cache.timestamp) < cacheDuration
+	cachedVersion := d.cache.version
+	d.cache.mu.RUnlock()
+
+	if isFresh {
+		return cachedVersion, nil
+	}
+
+	// 2. Network Fetch (No Lock)
+	version, err := d.fetchLatestVersion(ctx, endpoint, branch)
+	if err != nil {
+		log.Printf("Failed to fetch latest version: %v", err)
+		if cachedVersion != "" {
+			return cachedVersion, nil // Return stale cache without error
+		}
+		return "", err // No cache available, return error
+	}
+
+	// 3. Update (Write Lock)
+	d.cache.mu.Lock()
+	d.cache.version = version
+	d.cache.timestamp = time.Now()
+	d.cache.mu.Unlock()
+
+	return version, nil
 }
 
 // fetchLatestVersion retrieves the latest version from the distribution API

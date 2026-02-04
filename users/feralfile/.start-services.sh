@@ -1,3 +1,15 @@
+VOLUME_FILE="/home/feralfile/.state/saved-volume"
+if [ ! -f "$VOLUME_FILE" ]; then
+    # First boot: set default volume to 63%
+    echo "63" > "$VOLUME_FILE"
+    PACTL_PERCENT=63
+else
+    # Read saved volume
+    PACTL_PERCENT=$(cat "$VOLUME_FILE")
+fi
+
+pamixer --set-volume "$PACTL_PERCENT"
+
 # Backward compatibility: Disable and stop old services if they are enabled
 if systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; then
     systemctl --user disable "feral-sys-monitord.service"
@@ -20,11 +32,6 @@ systemctl --user start "feral-vmagent.service"
 systemctl --user start "display-restore.service"
 systemctl --user start "chromium-kiosk.service"
 systemctl --user start "ota-update-success-check.service"
-
-# Enable hourly timers for time sync and log rotation
-if ! systemctl --user is-enabled "feral-timesyncd.timer" >/dev/null 2>&1; then
-    systemctl --user enable --now "feral-timesyncd.timer"
-fi
 
 if ! systemctl --user is-enabled "feral-log-rotation.timer" >/dev/null 2>&1; then
     systemctl --user enable --now "feral-log-rotation.timer"

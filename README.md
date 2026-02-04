@@ -117,7 +117,6 @@ users/feralfile/
 ├── scripts/                      # System scripts
 │   ├── start-kiosk.sh           # Kiosk mode startup
 │   ├── feral-updater.sh         # System update
-│   ├── feral-timesyncd.sh       # Time synchronization
 │   ├── log-rotation.sh          # Log management
 │   └── ...
 ├── .config/                      # Application configs

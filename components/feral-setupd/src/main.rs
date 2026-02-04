@@ -283,6 +283,7 @@ async fn startup_without_internet(
         Duration::from_millis(constant::RELAXED_INTERNET_CHECK_INTERVAL)
     };
     app_state.internet.wait_until_online(urgency, None).await;
+
     if used_to_connect.is_none() {
         app_state
             .state_store
