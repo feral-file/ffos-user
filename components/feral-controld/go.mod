@@ -13,11 +13,13 @@ require (
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
+	github.com/grandcat/zeroconf v1.0.0
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/zap v1.27.0
 )
 
 require (
+	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
@@ -26,6 +28,7 @@ require (
 	github.com/go-playground/validator/v10 v10.22.1 // indirect
 	github.com/gowebpki/jcs v1.0.1 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
+	github.com/miekg/dns v1.1.27 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/crypto v0.19.0 // indirect
 	golang.org/x/net v0.21.0 // indirect
