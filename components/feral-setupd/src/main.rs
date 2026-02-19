@@ -51,10 +51,13 @@ pub enum UpdateExecution {
 
 #[inline]
 fn unix_s() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs() as i64,
+        Err(error) => {
+            eprintln!("MAIN: System time is before UNIX_EPOCH: {error:?}");
+            0
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,17 +117,25 @@ fn main() {
         },
     ));
 
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async {
-            if let Err(e) = run().await {
-                eprintln!("MAIN: Error running feral-setupd: {e:#?}");
-                let error: &dyn std::error::Error = e.as_ref();
-                sentry::capture_error(error);
-            }
-        });
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("MAIN: Failed to build tokio runtime: {error:?}");
+            sentry::capture_message("failed to build tokio runtime", sentry::Level::Error);
+            return;
+        }
+    };
+
+    runtime.block_on(async {
+        if let Err(e) = run().await {
+            eprintln!("MAIN: Error running feral-setupd: {e:#?}");
+            let error: &dyn std::error::Error = e.as_ref();
+            sentry::capture_error(error);
+        }
+    });
 }
 
 async fn run() -> Result<()> {

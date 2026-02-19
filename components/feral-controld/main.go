@@ -83,7 +83,8 @@ func main() {
 	// Initialize basic logger first for config loading
 	basicLogger, err := logger.New(debug)
 	if err != nil {
-		panic("Failed to initialize logger: " + err.Error())
+		fmt.Fprintf(go_os.Stderr, "Failed to initialize logger: %s\n", err)
+		go_os.Exit(1)
 	}
 	defer func() {
 		_ = basicLogger.Sync()

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -38,7 +39,8 @@ func main() {
 	// Initialize logger with debug enabled for development
 	log, err := logger.New(debug)
 	if err != nil {
-		panic("Failed to initialize logger: " + err.Error())
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %s\n", err)
+		os.Exit(1)
 	}
 	defer func() {
 		_ = log.Sync()

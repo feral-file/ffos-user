@@ -2,12 +2,12 @@ use dbus::arg::Append;
 use dbus::blocking::{BlockingSender, Connection};
 use dbus::channel::Sender;
 use dbus::message::Message;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 use crate::constant;
 
@@ -112,9 +112,15 @@ fn receive_internal<'a>(
     // Closure that will send the acknowledgement when called
     let ack = move || {
         println!("DBUS: Sending ack signal '{member}_ack' to {object_path}, {interface}");
-        let mut ack_msg = Message::new_signal(object_path, interface, format!("{member}_ack"))
-            .map_err(anyhow::Error::msg)
-            .unwrap();
+        let ack_msg = Message::new_signal(object_path, interface, format!("{member}_ack"))
+            .map_err(anyhow::Error::msg);
+        let mut ack_msg = match ack_msg {
+            Ok(ack_msg) => ack_msg,
+            Err(error) => {
+                eprintln!("DBUS: Failed to build ack signal: {error}");
+                return;
+            }
+        };
         ack_msg = ack_msg.append1("");
         if conn.send(ack_msg).is_err() {
             // Failed to send ack signal doesn't matter, just log an error
@@ -136,11 +142,19 @@ pub fn listen_for_signal(
     let interface = interface.to_string();
     let member = member.to_string();
     task::spawn_blocking(move || {
-        let conn = Connection::new_session().expect("DBUS: failed to create connection");
+        let conn = match Connection::new_session() {
+            Ok(conn) => conn,
+            Err(error) => {
+                eprintln!("DBUS: failed to create connection: {error}");
+                return;
+            }
+        };
         let rule =
             format!("type='signal',interface='{interface}',member='{member}',path='{object_path}'");
-        conn.add_match_no_cb(&rule)
-            .expect("DBUS: failed to add match");
+        if let Err(error) = conn.add_match_no_cb(&rule) {
+            eprintln!("DBUS: failed to add match: {error}");
+            return;
+        }
 
         println!("DBUS: Listening for '{member}' signal in a background thread");
         while !stop.load(Ordering::Relaxed) {

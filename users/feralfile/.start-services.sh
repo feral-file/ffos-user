@@ -1,3 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
 VOLUME_FILE="/home/feralfile/.state/saved-volume"
 if [ ! -f "$VOLUME_FILE" ]; then
     # First boot: set default volume to 63%
