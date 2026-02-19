@@ -273,6 +273,7 @@ func resolveMDNSDeviceInfo(os wrapper.OS, s *state.State, logger *zap.Logger) md
 	}
 
 	if (deviceID == "" || deviceName == "") && s != nil && s.ConnectedDevice != nil {
+		logger.Warn("mDNS using connected device state for identity")
 		if deviceID == "" {
 			deviceID = strings.TrimSpace(s.ConnectedDevice.ID)
 		}
