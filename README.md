@@ -203,3 +203,15 @@ ffos-user/develop → ffos build → R2/{develop}/
 ### No GitHub Actions Required
 
 This repository is purely for source code and data. All build logic is handled by the FFOS repository.
+
+### Sync components to a device (dev)
+
+Use the component sync helpers to push local changes to an FF1 over SSH (key-based).
+
+```bash
+# Default host + key
+make -C components sync-feral-controld
+
+# Override host or key
+REMOTE_HOST=ff1-03vdu3x1.local REMOTE_KEY=~/.ssh/id_ed25519 make -C components sync-feral-controld
+```

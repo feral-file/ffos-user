@@ -31,6 +31,7 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_UPLOAD_LOGS:          true,
 	CMD_SET_VOLUME:           true,
 	CMD_TOGGLE_MUTE:          true,
+	CMD_SSH_ACCESS:           true,
 }
 
 type Command struct {
@@ -62,6 +63,7 @@ const (
 	CMD_UPLOAD_LOGS          Type = "uploadLogs"
 	CMD_SET_VOLUME           Type = "setVolume"
 	CMD_TOGGLE_MUTE          Type = "toggleMute"
+	CMD_SSH_ACCESS           Type = "sshAccess"
 )
 
 func (c Type) DeviceCtlCommand() bool {
