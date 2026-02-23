@@ -5,9 +5,10 @@ use dbus::message::Message;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 use tokio::task;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::constant;
 
@@ -131,31 +132,33 @@ fn receive_internal<'a>(
     Ok((msg, ack))
 }
 
-pub fn listen_for_signal(
+pub async fn listen_for_signal(
     object_path: &str,
     interface: &str,
     member: &str,
     stop: Arc<AtomicBool>,
     cb: ListenCallback,
-) {
+) -> Result<()> {
     let object_path = object_path.to_string();
     let interface = interface.to_string();
     let member = member.to_string();
+    let (tx, rx) = oneshot::channel();
     task::spawn_blocking(move || {
         let conn = match Connection::new_session() {
             Ok(conn) => conn,
             Err(error) => {
-                eprintln!("DBUS: failed to create connection: {error}");
+                let _ = tx.send(Err(anyhow!("DBUS: failed to create connection: {error}")));
                 return;
             }
         };
         let rule =
             format!("type='signal',interface='{interface}',member='{member}',path='{object_path}'");
         if let Err(error) = conn.add_match_no_cb(&rule) {
-            eprintln!("DBUS: failed to add match: {error}");
+            let _ = tx.send(Err(anyhow!("DBUS: failed to add match: {error}")));
             return;
         }
 
+        let _ = tx.send(Ok(()));
         println!("DBUS: Listening for '{member}' signal in a background thread");
         while !stop.load(Ordering::Relaxed) {
             if let Ok((msg, ack)) = receive_internal(
@@ -170,6 +173,10 @@ pub fn listen_for_signal(
             }
         }
     });
+
+    rx.await
+        .context("DBUS: listener startup channel closed")??;
+    Ok(())
 }
 
 /// Sends a blocking D‑Bus method call and returns the reply `Message`.
