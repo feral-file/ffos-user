@@ -41,6 +41,10 @@ if ! sudo systemctl is-enabled "feral-updater@03:00.timer" >/dev/null 2>&1; then
     sudo systemctl enable --now "feral-updater@03:00.timer"
 fi
 
+if ! sudo systemctl is-enabled "feral-recovery-update@5:30.timer" >/dev/null 2>&1; then
+    sudo systemctl enable --now "feral-recovery-update@5:30.timer"
+fi
+
 sleep 5
 
 systemctl --user start "feral-watchdog.service"
