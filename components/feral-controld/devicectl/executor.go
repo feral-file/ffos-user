@@ -811,6 +811,9 @@ func (e *executor) writeAuthorizedKey(publicKey string) error {
 }
 
 func (e *executor) scheduleSshDisable(ctx context.Context, ttlSeconds int) error {
+	// Kill active SSH sessions first, then stop the listener.
+	// pkill may exit non-zero if no matching processes exist, so we ignore its exit code with "|| true".
+	disableCmd := "pkill -u feralfile sshd || true; systemctl stop sshd.service"
 	return e.runSudoCommand(
 		ctx,
 		"systemd-run",
@@ -818,9 +821,9 @@ func (e *executor) scheduleSshDisable(ctx context.Context, ttlSeconds int) error
 		constants.SSH_DISABLE_UNIT,
 		"--on-active",
 		fmt.Sprintf("%ds", ttlSeconds),
-		"/usr/bin/systemctl",
-		"stop",
-		"sshd.service",
+		"/bin/bash",
+		"-c",
+		disableCmd,
 	)
 }
 
