@@ -9,14 +9,14 @@ import (
 var (
 	playbackMetricsRegistry = prometheus.NewRegistry()
 
-	ffArtPlaybackDurationSecondsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "ff_art_playback_duration_seconds_total",
+	artPlaybackDurationSecondsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "art_playback_duration_seconds_total",
 		Help: "Total duration in seconds where artwork playback is active.",
 	})
 )
 
 func init() {
-	playbackMetricsRegistry.MustRegister(ffArtPlaybackDurationSecondsTotal)
+	playbackMetricsRegistry.MustRegister(artPlaybackDurationSecondsTotal)
 }
 
 func PlaybackMetricsGatherer() prometheus.Gatherer {
@@ -46,7 +46,7 @@ func (s *poller) updateArtPlaybackMetrics(isPlaying bool, now time.Time) {
 	// Accumulate only while previous sampled state is active artwork playback.
 	if s.lastIsPlaying {
 		deltaSeconds := now.Sub(s.lastPlaybackSampleAt).Seconds()
-		ffArtPlaybackDurationSecondsTotal.Add(deltaSeconds)
+		artPlaybackDurationSecondsTotal.Add(deltaSeconds)
 	}
 
 	s.lastPlaybackSampleAt = now
