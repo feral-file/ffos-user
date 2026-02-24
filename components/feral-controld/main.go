@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	go_os "os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,12 +20,14 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/metric"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
@@ -228,6 +231,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 				app.Logger.Warn("Failed to stop hub", zap.Error(err))
 			}
 		}()
+
+		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
+		advertiser := mdns.New(app.Logger)
+		if err := advertiser.Start(ctx, deviceInfo); err != nil {
+			app.Logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
+		} else {
+			defer advertiser.Stop()
+		}
 	}
 
 	// send ready notification to systemd
@@ -245,6 +256,41 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	app.Logger.Info("controld shutdown completed")
 	return nil
+}
+
+func resolveMDNSDeviceInfo(os wrapper.OS, s *state.State, logger *zap.Logger) mdns.DeviceInfo {
+	deviceID := ""
+	deviceName := ""
+	hostnameBytes, err := os.ReadFile(constants.HOSTNAME_FILE)
+	if err != nil {
+		logger.Warn("Failed to read hostname for mDNS", zap.Error(err))
+	} else {
+		hostname := strings.TrimSpace(string(hostnameBytes))
+		if hostname != "" {
+			deviceID = hostname
+			deviceName = hostname
+		}
+	}
+
+	if (deviceID == "" || deviceName == "") && s != nil && s.ConnectedDevice != nil {
+		logger.Warn("mDNS using connected device state for identity")
+		if deviceID == "" {
+			deviceID = strings.TrimSpace(s.ConnectedDevice.ID)
+		}
+		if deviceName == "" {
+			deviceName = strings.TrimSpace(s.ConnectedDevice.Name)
+		}
+	}
+
+	if deviceName == "" {
+		deviceName = deviceID
+	}
+
+	return mdns.DeviceInfo{
+		ID:   deviceID,
+		Name: deviceName,
+		Port: 1111,
+	}
 }
 
 func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger) (bool, error) {
