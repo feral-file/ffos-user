@@ -4,15 +4,24 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 var (
-	ffArtPlaybackDurationSecondsTotal = promauto.NewCounter(prometheus.CounterOpts{
+	playbackMetricsRegistry = prometheus.NewRegistry()
+
+	ffArtPlaybackDurationSecondsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "ff_art_playback_duration_seconds_total",
 		Help: "Total duration in seconds where artwork playback is active.",
 	})
 )
+
+func init() {
+	playbackMetricsRegistry.MustRegister(ffArtPlaybackDurationSecondsTotal)
+}
+
+func PlaybackMetricsGatherer() prometheus.Gatherer {
+	return playbackMetricsRegistry
+}
 
 func isArtworkPlaying(playerStatus *PlayerStatus) bool {
 	if playerStatus == nil || !playerStatus.Ok {
