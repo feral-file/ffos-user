@@ -2,13 +2,13 @@ use dbus::arg::Append;
 use dbus::blocking::{BlockingSender, Connection};
 use dbus::channel::Sender;
 use dbus::message::Message;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::constant;
 
