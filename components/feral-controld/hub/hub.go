@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
@@ -79,6 +80,7 @@ func (h *hub) routes() {
 
 	mux.HandleFunc("/api/cast", h.handleCast)
 	mux.HandleFunc("/api/notification", h.handleNotification)
+	mux.Handle("/metrics", promhttp.Handler())
 }
 
 // Start starts the HTTP server

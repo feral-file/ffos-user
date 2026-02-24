@@ -62,6 +62,11 @@ type poller struct {
 
 	// Store last status hashes for each notification type to avoid duplicate notifications
 	lastStatusHashes map[relayer.NotificationType]string
+
+	// Track playback state transitions for duration accumulation.
+	lastPlaybackSampleAt      time.Time
+	lastIsPlaying             bool
+	playbackSampleInitialized bool
 }
 
 func NewPoller(
@@ -175,16 +180,12 @@ func (s *poller) ForceRefresh() {
 }
 
 func (s *poller) pollPlayerStatus(ctx context.Context) {
-	// Check if relayer is connected before polling
-	if !s.relayer.IsConnected() {
-		s.logger.Debug("Relayer not connected, skipping player status poll")
-		return
-	}
-
 	s.logger.Debug("Polling player status from Chromium")
+	now := time.Now()
 
 	playerStatus, err := s.FetchPlayerStatus(ctx)
 	if err != nil {
+		s.updateArtPlaybackMetrics(false, now)
 		s.logger.Error("Failed to get player status from CDP", zap.Error(err))
 
 		// Notify relayer about the CDP error in the expected format
@@ -198,9 +199,12 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 
 	// Handle nil playerStatus (CDP returned nil result when player is not playing in case showing QR code)
 	if playerStatus == nil {
+		s.updateArtPlaybackMetrics(false, now)
 		s.logger.Debug("Player status is nil, skipping notification")
 		return
 	}
+
+	s.updateArtPlaybackMetrics(isArtworkPlaying(playerStatus), now)
 
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
 	s.logger.Debug("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
@@ -221,9 +225,14 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 		"persist_record_count": 1,
 	}
 
-	// Send the notification via relayer
-	if err := s.relayer.Send(ctx, data); err != nil {
-		s.logger.Error("Failed to send notification via relayer", zap.Error(err))
+	// Send the notification via relayer only when connected.
+	if s.relayer.IsConnected() {
+		if err := s.relayer.Send(ctx, data); err != nil {
+			s.logger.Error("Failed to send notification via relayer", zap.Error(err))
+		}
+	} else {
+		s.logger.Debug("Relayer not connected, skipping relayer notification send",
+			zap.String("notification_type", string(notificationType)))
 	}
 
 	// Send the data via websocket
