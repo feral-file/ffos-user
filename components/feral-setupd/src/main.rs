@@ -51,10 +51,13 @@ pub enum UpdateExecution {
 
 #[inline]
 fn unix_s() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs() as i64,
+        Err(error) => {
+            eprintln!("MAIN: System time is before UNIX_EPOCH: {error:?}");
+            0
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,17 +117,26 @@ fn main() {
         },
     ));
 
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async {
-            if let Err(e) = run().await {
-                eprintln!("MAIN: Error running feral-setupd: {e:#?}");
-                let error: &dyn std::error::Error = e.as_ref();
-                sentry::capture_error(error);
-            }
-        });
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("MAIN: Failed to build tokio runtime: {error:?}");
+            sentry::capture_message("failed to build tokio runtime", sentry::Level::Error);
+            std::process::exit(1);
+        }
+    };
+
+    runtime.block_on(async {
+        if let Err(e) = run().await {
+            eprintln!("MAIN: Error running feral-setupd: {e:#?}");
+            let error: &dyn std::error::Error = e.as_ref();
+            sentry::capture_error(error);
+            std::process::exit(1);
+        }
+    });
 }
 
 async fn run() -> Result<()> {
@@ -144,7 +156,7 @@ async fn run() -> Result<()> {
     updater::spawn_remote_version_refresher();
 
     // Setup D-Bus listeners
-    let stop_dbus_listener = setup_dbus_listeners(&app_state, &chrome);
+    let stop_dbus_listener = setup_dbus_listeners(&app_state, &chrome).await?;
 
     // If the device used to be able to connect to the internet
     // It's likely that it will have internet again really soon
@@ -328,7 +340,10 @@ async fn startup_with_internet(
     on_startup_with_internet(app_state.clone(), chrome.clone()).await
 }
 
-fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<AtomicBool> {
+async fn setup_dbus_listeners(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+) -> Result<Arc<AtomicBool>> {
     // Listen for QRCode switch signal
     let qrcode_switch_cb = callbacks::create_qrcode_switch_cb(app_state.clone(), chrome.clone());
     let stop_dbus_listener = Arc::new(AtomicBool::new(false));
@@ -338,7 +353,8 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         constant::DBUS_EVENT_QRCODE_SWITCH,
         stop_dbus_listener.clone(),
         qrcode_switch_cb,
-    );
+    )
+    .await?;
 
     // Listen for factory reset signal
     let factory_reset_cb =
@@ -349,7 +365,8 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         constant::DBUS_EVENT_FACTORY_RESET,
         stop_dbus_listener.clone(),
         factory_reset_cb,
-    );
+    )
+    .await?;
 
     // Listen for upload logs signal
     let upload_logs_cb = callbacks::create_upload_logs_dbus_cb(app_state.clone());
@@ -359,7 +376,8 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         constant::DBUS_EVENT_UPLOAD_LOGS,
         stop_dbus_listener.clone(),
         upload_logs_cb,
-    );
+    )
+    .await?;
 
     // Listen for system update signal
     let system_update_cb =
@@ -370,9 +388,10 @@ fn setup_dbus_listeners(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Arc<Ato
         constant::DBUS_EVENT_SYSTEM_UPDATE,
         stop_dbus_listener.clone(),
         system_update_cb,
-    );
+    )
+    .await?;
 
-    stop_dbus_listener
+    Ok(stop_dbus_listener)
 }
 
 async fn internet_setup_successfully_cb(
