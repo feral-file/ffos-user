@@ -9,8 +9,9 @@ set -euo pipefail
 LOCAL_DIR="${1:-.}/"
 REMOTE_USER="feralfile"
 REMOTE_HOST="${3:-192.168.31.91}"
-REMOTE_PASS="portal"
+REMOTE_PASS="${FFOS_REMOTE_PASS:-portal}"
 REMOTE_DIR="${2:-/home/${REMOTE_USER}/src/components/}"
+STRICT_HOST_KEY_CHECKING="${FFOS_STRICT_HOST_KEY_CHECKING:-no}"
 
 # ensure sshpass is installed
 if ! command -v sshpass &>/dev/null; then
@@ -18,8 +19,17 @@ if ! command -v sshpass &>/dev/null; then
   exit 1
 fi
 
+if [[ -z "${FFOS_REMOTE_PASS:-}" ]]; then
+  echo "⚠️  FFOS_REMOTE_PASS not set. Using default password."
+  echo "    Set FFOS_REMOTE_PASS to avoid relying on the default."
+fi
+
+if [[ "${STRICT_HOST_KEY_CHECKING}" == "no" ]]; then
+  echo "⚠️  StrictHostKeyChecking is disabled. Set FFOS_STRICT_HOST_KEY_CHECKING=yes to enable."
+fi
+
 # build ssh wrapper
-SSH_CMD="sshpass -p '${REMOTE_PASS}' ssh -o StrictHostKeyChecking=no"
+SSH_CMD="sshpass -p '${REMOTE_PASS}' ssh -o StrictHostKeyChecking=${STRICT_HOST_KEY_CHECKING}"
 
 # print debug info
 echo "🔍 LOCAL_DIR = ${LOCAL_DIR}"
