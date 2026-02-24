@@ -747,6 +747,18 @@ func (e *executor) setSshAccess(ctx context.Context, args []byte) (interface{}, 
 			expiresAtValue := time.Now().Add(time.Duration(ttlSeconds) * time.Second)
 			expiresAt = &expiresAtValue
 			if err := e.scheduleSshDisable(ctx, ttlSeconds); err != nil {
+				e.logger.Error("Failed to schedule SSH disable timer, rolling back SSH access",
+					zap.Error(err),
+					zap.Int("ttlSeconds", ttlSeconds))
+
+				if stopErr := e.runSudoCommand(ctx, "systemctl", "stop", "sshd.service"); stopErr != nil {
+					e.logger.Error("Rollback failed: could not stop sshd service", zap.Error(stopErr))
+				}
+
+				if removeErr := e.removeFileIfExists(constants.SSH_AUTHORIZED_KEYS_FILE); removeErr != nil {
+					e.logger.Error("Rollback failed: could not remove authorized_keys", zap.Error(removeErr))
+				}
+
 				return nil, fmt.Errorf("failed to schedule SSH disable: %w", err)
 			}
 		}
