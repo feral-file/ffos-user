@@ -1,6 +1,7 @@
 # Default REMOTE_HOST if not provided
 REMOTE_HOST ?= 192.168.31.91
 REMOTE_DIR ?= /home/feralfile/src/components
+REMOTE_KEY ?= ~/.ssh/id_ed25519
 SYNC_SCRIPT := ./scripts/sync-to-device.sh
 
 .PHONY: sync-feral-setupd
