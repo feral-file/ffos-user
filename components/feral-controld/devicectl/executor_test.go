@@ -2537,9 +2537,9 @@ func TestExecutor_SshAccess_Enable_CapsTtlAndSchedulesDisable(t *testing.T) {
 				constants.SSH_DISABLE_UNIT,
 				"--on-active",
 				"86400s",
-				"/usr/bin/systemctl",
-				"stop",
-				"sshd.service",
+				"/bin/bash",
+				"-c",
+				"pkill -u feralfile sshd || true; systemctl stop sshd.service",
 			).
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
