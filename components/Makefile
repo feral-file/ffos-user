@@ -1,5 +1,5 @@
 # Default REMOTE_HOST if not provided
-REMOTE_HOST ?= FF1-WPBJ9VTQ.local
+REMOTE_HOST ?= 192.168.31.91
 REMOTE_DIR ?= /home/feralfile/src/components
 SYNC_SCRIPT := ./scripts/sync-to-device.sh
 
