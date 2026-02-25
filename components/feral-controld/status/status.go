@@ -60,8 +60,10 @@ type poller struct {
 	refreshChan  chan struct{}
 	json         wrapper.JSON
 
-	// Store last status hashes for each notification type to avoid duplicate notifications
-	lastStatusHashes map[relayer.NotificationType]string
+	// Store last status hashes per channel to avoid duplicate notifications.
+	// Relayer and websocket are tracked separately so relayer can catch up after reconnect.
+	lastRelayerStatusHashes map[relayer.NotificationType]string
+	lastWSStatusHashes      map[relayer.NotificationType]string
 
 	// Track playback state transitions for duration accumulation.
 	lastPlaybackSampleAt      time.Time
@@ -78,15 +80,16 @@ func NewPoller(
 	logger *zap.Logger,
 ) Poller {
 	return &poller{
-		cdp:              cdp,
-		relayer:          r,
-		ws:               ws,
-		deviceStatus:     ds,
-		logger:           logger,
-		json:             json,
-		stopChan:         make(chan struct{}),
-		refreshChan:      make(chan struct{}, 10), // Buffered channel to prevent blocking
-		lastStatusHashes: make(map[relayer.NotificationType]string),
+		cdp:                     cdp,
+		relayer:                 r,
+		ws:                      ws,
+		deviceStatus:            ds,
+		logger:                  logger,
+		json:                    json,
+		stopChan:                make(chan struct{}),
+		refreshChan:             make(chan struct{}, 10), // Buffered channel to prevent blocking
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
 	}
 }
 
@@ -102,35 +105,23 @@ func (s *poller) computeStatusHash(data interface{}) (string, error) {
 	return fmt.Sprintf("%x", hash), nil
 }
 
-// shouldSendNotification checks if the status has changed since last notification
-// Returns true if status changed or if this is the first time checking this status type
-func (s *poller) shouldSendNotification(notificationType relayer.NotificationType, data interface{}) bool {
-	if data == nil {
-		return false
-	}
-
-	currentHash, err := s.computeStatusHash(data)
-	if err != nil {
-		// If we can't compute hash, send the notification anyway
-		s.logger.Warn("Failed to compute status hash, sending notification anyway",
-			zap.String("type", string(notificationType)),
-			zap.Error(err))
-		return true
-	}
-
+// shouldSendByHash checks whether a given channel should receive the notification.
+func (s *poller) shouldSendByHash(lastHashes map[relayer.NotificationType]string, notificationType relayer.NotificationType, currentHash string) bool {
 	s.RLock()
-	lastHash, exists := s.lastStatusHashes[notificationType]
+	lastHash, exists := lastHashes[notificationType]
 	s.RUnlock()
 
 	if !exists || lastHash != currentHash {
-		// Only acquire write lock when we need to update
-		s.Lock()
-		s.lastStatusHashes[notificationType] = currentHash
-		s.Unlock()
 		return true
 	}
 
 	return false
+}
+
+func (s *poller) updateStatusHash(lastHashes map[relayer.NotificationType]string, notificationType relayer.NotificationType, currentHash string) {
+	s.Lock()
+	lastHashes[notificationType] = currentHash
+	s.Unlock()
 }
 
 func (s *poller) Start(ctx context.Context) {
@@ -213,9 +204,18 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 }
 
 func (s *poller) sendNotification(ctx context.Context, notificationType relayer.NotificationType, message interface{}) {
-	if !s.shouldSendNotification(notificationType, message) {
-		s.logger.Debug("Player status unchanged, skipping notification")
+	if message == nil {
+		s.logger.Debug("Notification message is nil, skipping notification",
+			zap.String("notification_type", string(notificationType)))
 		return
+	}
+
+	currentHash, err := s.computeStatusHash(message)
+	if err != nil {
+		// If hash cannot be computed, attempt to send anyway.
+		s.logger.Warn("Failed to compute status hash, sending notification without dedupe",
+			zap.String("notification_type", string(notificationType)),
+			zap.Error(err))
 	}
 
 	data := map[string]interface{}{
@@ -227,8 +227,16 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 
 	// Send the notification via relayer only when connected.
 	if s.relayer.IsConnected() {
-		if err := s.relayer.Send(ctx, data); err != nil {
-			s.logger.Error("Failed to send notification via relayer", zap.Error(err))
+		shouldSendRelayer := err != nil || s.shouldSendByHash(s.lastRelayerStatusHashes, notificationType, currentHash)
+		if shouldSendRelayer {
+			if err := s.relayer.Send(ctx, data); err != nil {
+				s.logger.Error("Failed to send notification via relayer", zap.Error(err))
+			} else if err == nil {
+				s.updateStatusHash(s.lastRelayerStatusHashes, notificationType, currentHash)
+			}
+		} else {
+			s.logger.Debug("Relayer status unchanged, skipping relayer notification",
+				zap.String("notification_type", string(notificationType)))
 		}
 	} else {
 		s.logger.Debug("Relayer not connected, skipping relayer notification send",
@@ -236,8 +244,16 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	}
 
 	// Send the data via websocket
-	if err := s.ws.SendAll(data); err != nil {
-		s.logger.Error("Failed to send notification via websocket", zap.Error(err))
+	shouldSendWS := err != nil || s.shouldSendByHash(s.lastWSStatusHashes, notificationType, currentHash)
+	if shouldSendWS {
+		if err := s.ws.SendAll(data); err != nil {
+			s.logger.Error("Failed to send notification via websocket", zap.Error(err))
+		} else if err == nil {
+			s.updateStatusHash(s.lastWSStatusHashes, notificationType, currentHash)
+		}
+	} else {
+		s.logger.Debug("Websocket status unchanged, skipping websocket notification",
+			zap.String("notification_type", string(notificationType)))
 	}
 }
 
