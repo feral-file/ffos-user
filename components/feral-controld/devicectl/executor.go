@@ -738,6 +738,10 @@ func (e *executor) setSshAccess(ctx context.Context, args []byte) (interface{}, 
 			return nil, fmt.Errorf("failed to clear SSH disable timer: %w", err)
 		}
 		if err := e.runSudoCommand(ctx, "systemctl", "start", "sshd.service"); err != nil {
+			e.logger.Error("Failed to start SSH service, rolling back SSH access", zap.Error(err))
+			if removeErr := e.removeFileIfExists(constants.SSH_AUTHORIZED_KEYS_FILE); removeErr != nil {
+				e.logger.Error("Rollback failed: could not remove authorized_keys", zap.Error(removeErr))
+			}
 			return nil, fmt.Errorf("failed to start SSH service: %w", err)
 		}
 
