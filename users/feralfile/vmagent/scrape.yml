@@ -5,11 +5,8 @@ scrape_configs:
     static_configs:
       - targets:
           - "127.0.0.1:9001" # feral-sys-monitord
+          - "127.0.0.1:1111" # feral-controld hub (/metrics)
     metric_relabel_configs:
       - source_labels: ["__name__"]
         regex: "^promhttp_.*"
         action: drop
-  - job_name: "ff1-controld"
-    static_configs:
-      - targets:
-          - "127.0.0.1:1111" # feral-controld hub (/metrics)
