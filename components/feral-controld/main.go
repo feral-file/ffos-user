@@ -235,11 +235,9 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
 		advertiser := mdns.New(app.Logger)
-		if err := advertiser.Start(ctx, deviceInfo); err != nil {
-			app.Logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
-		} else {
-			defer advertiser.Stop()
-		}
+		defer advertiser.Stop()
+
+		app.Mediator.InitializeMDNS(advertiser, deviceInfo, connected)
 	}
 
 	// send ready notification to systemd
