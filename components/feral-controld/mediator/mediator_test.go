@@ -14,6 +14,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -342,6 +343,110 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 			result, err := capturedHandler(ts.ctx, payload)
 
 			// Verify
+			if expectedError != nil {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), expectedError.Error())
+			} else {
+				assert.NoError(t, err)
+				assert.Nil(t, result)
+			}
+		})
+	}
+}
+
+func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
+
+	tests := []struct {
+		name      string
+		setupFunc func(*testSetup, *mocks.MockAdvertiser) (godbus.DBusPayload, error)
+	}{
+		{
+			name: "connectivity gained - restarts mDNS advertiser",
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+						"expression": "window.handleConnectivityChange(true)",
+					}).
+					Return(map[string]interface{}{"result": "ok"}, nil).
+					Times(1)
+
+				ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(2)
+
+				mockAdvertiser.EXPECT().Stop().Times(1)
+				mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+
+				return godbus.DBusPayload{
+					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
+					Body:   []interface{}{true},
+				}, nil
+			},
+		},
+		{
+			name: "connectivity gained - mDNS start fails",
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+						"expression": "window.handleConnectivityChange(true)",
+					}).
+					Return(map[string]interface{}{"result": "ok"}, nil).
+					Times(1)
+
+				ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(2)
+
+				mockAdvertiser.EXPECT().Stop().Times(1)
+				mockAdvertiser.EXPECT().Start(deviceInfo).Return(errors.New("bind failed")).Times(1)
+
+				return godbus.DBusPayload{
+					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
+					Body:   []interface{}{true},
+				}, nil // mDNS start error is logged, not propagated
+			},
+		},
+		{
+			name: "connectivity lost - stops mDNS advertiser",
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+				ts.mockCDP.EXPECT().
+					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+						"expression": "window.handleConnectivityChange(false)",
+					}).
+					Return(map[string]interface{}{"result": "ok"}, nil).
+					Times(1)
+
+				ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
+
+				mockAdvertiser.EXPECT().Stop().Times(1)
+
+				return godbus.DBusPayload{
+					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
+					Body:   []interface{}{false},
+				}, nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+			payload, expectedError := tt.setupFunc(ts, mockAdvertiser)
+
+			var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+			ts.mockDbus.EXPECT().
+				OnBusSignal(gomock.Any()).
+				DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+					capturedHandler = handler
+				}).Times(1)
+
+			ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+
+			ts.mediator.Start()
+			ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, false)
+
+			result, err := capturedHandler(ts.ctx, payload)
+
 			if expectedError != nil {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), expectedError.Error())

@@ -200,6 +200,9 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock OS ReadFile for mDNS device info
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
 
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
 				// Mock Daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
@@ -264,6 +267,9 @@ func TestApp_Run_Success(t *testing.T) {
 
 				// Mock OS ReadFile for mDNS device info
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 
 				// Mock Relayer connect and close
 				ts.mockRelayer.EXPECT().Connect(gomock.Any()).Return(nil)
@@ -508,6 +514,9 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock OS ReadFile for mDNS device info
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
 
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
 				// Mock Daemon notify failure
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(false, errors.New("daemon notify failed"))
 			},
@@ -559,6 +568,9 @@ func TestApp_Run_Errors(t *testing.T) {
 
 				// Mock OS ReadFile for mDNS device info
 				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 
 				// Mock daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)

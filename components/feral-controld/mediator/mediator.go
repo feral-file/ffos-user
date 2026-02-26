@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
@@ -15,6 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -27,6 +29,7 @@ import (
 type Mediator interface {
 	Start()
 	Stop()
+	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, internetConnected bool)
 }
 
 type mediator struct {
@@ -39,6 +42,10 @@ type mediator struct {
 	logger       *zap.Logger
 	refresher    playlist_refresher.Refresher
 	json         wrapper.JSON
+
+	mdnsMu         sync.Mutex
+	mdnsAdvertiser mdns.Advertiser
+	mdnsDeviceInfo mdns.DeviceInfo
 }
 
 func New(
@@ -73,6 +80,20 @@ func (m *mediator) Start() {
 func (m *mediator) Stop() {
 	m.relayer.RemoveRelayerMessage(m.handleRelayerMessage)
 	m.dbus.RemoveBusSignal(m.handleDBusSignal)
+}
+
+func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, internetConnected bool) {
+	m.mdnsMu.Lock()
+	defer m.mdnsMu.Unlock()
+
+	m.mdnsAdvertiser = advertiser
+	m.mdnsDeviceInfo = info
+
+	if internetConnected {
+		if err := m.mdnsAdvertiser.Start(info); err != nil {
+			m.logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
+		}
+	}
 }
 
 func (m *mediator) handleDBusSignal(
@@ -133,6 +154,19 @@ func (m *mediator) handleDBusSignal(
 				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
 			}
 		}
+
+		// Re-register mDNS on connectivity changes: stop on network loss
+		// (sockets become invalid) and re-register on restore (bind fresh interfaces).
+		m.mdnsMu.Lock()
+		if m.mdnsAdvertiser != nil {
+			m.mdnsAdvertiser.Stop()
+			if connected {
+				if err := m.mdnsAdvertiser.Start(m.mdnsDeviceInfo); err != nil {
+					m.logger.Warn("Failed to restart mDNS advertiser", zap.Error(err))
+				}
+			}
+		}
+		m.mdnsMu.Unlock()
 
 	default:
 		m.logger.Warn("Unknown signal", zap.String("member", payload.Member.String()))

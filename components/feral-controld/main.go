@@ -216,14 +216,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.Relayer.Close()
 	}
 
-	// Start StatusPoller - it will handle relayer connection status internally
-	go app.StatusPoller.Start(ctx)
-	defer app.StatusPoller.Stop()
-
-	// Start Playlist Refresher
-	app.PlaylistRefresher.Start()
-	defer app.PlaylistRefresher.Stop()
-
 	// Start Hub if enabled
 	if conf.EnableHub {
 		app.Hub.Start()
@@ -235,12 +227,18 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
 		advertiser := mdns.New(app.Logger)
-		if err := advertiser.Start(ctx, deviceInfo); err != nil {
-			app.Logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
-		} else {
-			defer advertiser.Stop()
-		}
+		defer advertiser.Stop()
+
+		app.Mediator.InitializeMDNS(advertiser, deviceInfo, connected)
 	}
+
+	// Start Playlist Refresher
+	app.PlaylistRefresher.Start()
+	defer app.PlaylistRefresher.Stop()
+
+	// Start StatusPoller - it will handle relayer connection status internally
+	go app.StatusPoller.Start(ctx)
+	defer app.StatusPoller.Stop()
 
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
