@@ -32,6 +32,7 @@ type advertiser struct {
 	logger *zap.Logger
 	mu     sync.Mutex
 	server *zeroconf.Server
+	cancel context.CancelFunc
 }
 
 // New creates a new Advertiser instance.
@@ -74,7 +75,9 @@ func (a *advertiser) Start(ctx context.Context, info DeviceInfo) error {
 		return fmt.Errorf("failed to register mdns service: %w", err)
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
 	a.server = server
+	a.cancel = cancel
 	a.mu.Unlock()
 
 	a.logger.Info("mDNS advertiser started",
@@ -95,12 +98,17 @@ func (a *advertiser) Stop() {
 	a.mu.Lock()
 	server := a.server
 	a.server = nil
+	cancel := a.cancel
+	a.cancel = nil
 	a.mu.Unlock()
 
 	if server == nil {
 		return
 	}
 
+	if cancel != nil {
+		cancel()
+	}
 	server.Shutdown()
 	a.logger.Info("mDNS advertiser stopped")
 }
