@@ -1,7 +1,6 @@
 package mdns
 
 import (
-	"context"
 	"fmt"
 	"sync"
 
@@ -24,7 +23,7 @@ type DeviceInfo struct {
 
 // Advertiser publishes FF1 discovery records over mDNS.
 type Advertiser interface {
-	Start(ctx context.Context, info DeviceInfo) error
+	Start(info DeviceInfo) error
 	Stop()
 }
 
@@ -32,7 +31,6 @@ type advertiser struct {
 	logger *zap.Logger
 	mu     sync.Mutex
 	server *zeroconf.Server
-	cancel context.CancelFunc
 }
 
 // New creates a new Advertiser instance.
@@ -40,8 +38,8 @@ func New(logger *zap.Logger) Advertiser {
 	return &advertiser{logger: logger}
 }
 
-// Start registers an mDNS service and stops on context cancellation.
-func (a *advertiser) Start(ctx context.Context, info DeviceInfo) error {
+// Start registers an mDNS service.
+func (a *advertiser) Start(info DeviceInfo) error {
 	a.mu.Lock()
 	if a.server != nil {
 		a.mu.Unlock()
@@ -75,20 +73,13 @@ func (a *advertiser) Start(ctx context.Context, info DeviceInfo) error {
 		return fmt.Errorf("failed to register mdns service: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
 	a.server = server
-	a.cancel = cancel
 	a.mu.Unlock()
 
 	a.logger.Info("mDNS advertiser started",
 		zap.String("service", serviceType),
 		zap.String("name", name),
 		zap.Int("port", port))
-
-	go func() {
-		<-ctx.Done()
-		a.Stop()
-	}()
 
 	return nil
 }
@@ -98,17 +89,12 @@ func (a *advertiser) Stop() {
 	a.mu.Lock()
 	server := a.server
 	a.server = nil
-	cancel := a.cancel
-	a.cancel = nil
 	a.mu.Unlock()
 
 	if server == nil {
 		return
 	}
 
-	if cancel != nil {
-		cancel()
-	}
 	server.Shutdown()
 	a.logger.Info("mDNS advertiser stopped")
 }

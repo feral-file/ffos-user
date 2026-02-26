@@ -374,7 +374,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 				ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(2)
 
 				mockAdvertiser.EXPECT().Stop().Times(1)
-				mockAdvertiser.EXPECT().Start(gomock.Any(), deviceInfo).Return(nil).Times(1)
+				mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
 
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
@@ -395,7 +395,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 				ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(2)
 
 				mockAdvertiser.EXPECT().Stop().Times(1)
-				mockAdvertiser.EXPECT().Start(gomock.Any(), deviceInfo).Return(errors.New("bind failed")).Times(1)
+				mockAdvertiser.EXPECT().Start(deviceInfo).Return(errors.New("bind failed")).Times(1)
 
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,

@@ -5,7 +5,6 @@
 package mocks
 
 import (
-	context "context"
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
@@ -37,17 +36,17 @@ func (m *MockAdvertiser) EXPECT() *MockAdvertiserMockRecorder {
 }
 
 // Start mocks base method.
-func (m *MockAdvertiser) Start(ctx context.Context, info mdns.DeviceInfo) error {
+func (m *MockAdvertiser) Start(info mdns.DeviceInfo) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Start", ctx, info)
+	ret := m.ctrl.Call(m, "Start", info)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Start indicates an expected call of Start.
-func (mr *MockAdvertiserMockRecorder) Start(ctx, info interface{}) *gomock.Call {
+func (mr *MockAdvertiserMockRecorder) Start(info interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockAdvertiser)(nil).Start), ctx, info)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockAdvertiser)(nil).Start), info)
 }
 
 // Stop mocks base method.

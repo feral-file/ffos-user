@@ -216,14 +216,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.Relayer.Close()
 	}
 
-	// Start StatusPoller - it will handle relayer connection status internally
-	go app.StatusPoller.Start(ctx)
-	defer app.StatusPoller.Stop()
-
-	// Start Playlist Refresher
-	app.PlaylistRefresher.Start()
-	defer app.PlaylistRefresher.Stop()
-
 	// Start Hub if enabled
 	if conf.EnableHub {
 		app.Hub.Start()
@@ -239,6 +231,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 		app.Mediator.InitializeMDNS(advertiser, deviceInfo, connected)
 	}
+
+	// Start Playlist Refresher
+	app.PlaylistRefresher.Start()
+	defer app.PlaylistRefresher.Stop()
+
+	// Start StatusPoller - it will handle relayer connection status internally
+	go app.StatusPoller.Start(ctx)
+	defer app.StatusPoller.Stop()
 
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)

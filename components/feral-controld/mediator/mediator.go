@@ -90,7 +90,7 @@ func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceIn
 	m.mdnsDeviceInfo = info
 
 	if internetConnected {
-		if err := m.mdnsAdvertiser.Start(context.Background(), info); err != nil {
+		if err := m.mdnsAdvertiser.Start(info); err != nil {
 			m.logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
 		}
 	}
@@ -161,7 +161,7 @@ func (m *mediator) handleDBusSignal(
 		if m.mdnsAdvertiser != nil {
 			m.mdnsAdvertiser.Stop()
 			if connected {
-				if err := m.mdnsAdvertiser.Start(context.Background(), m.mdnsDeviceInfo); err != nil {
+				if err := m.mdnsAdvertiser.Start(m.mdnsDeviceInfo); err != nil {
 					m.logger.Warn("Failed to restart mDNS advertiser", zap.Error(err))
 				}
 			}
