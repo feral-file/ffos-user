@@ -25,21 +25,23 @@ var (
 
 // SystemdMonitor monitors systemd services
 type SystemdMonitor struct {
-	cdpClient         *cdp.Client
-	logger            *zap.Logger
-	commandHandler    *CommandHandler
-	vmagentClient     *VmagentClient
-	lastServiceStates map[string]*SystemdServiceStatus // Track last state to detect recovery
+	cdpClient               *cdp.Client
+	logger                  *zap.Logger
+	commandHandler          *CommandHandler
+	vmagentClient           *VmagentClient
+	lastServiceStates       map[string]*SystemdServiceStatus // Track last state to detect recovery
+	failureIncidentReported bool
 }
 
 // NewSystemdMonitor creates a new Chromium monitor instance
 func NewSystemdMonitor(cdpClient *cdp.Client, logger *zap.Logger, commandHandler *CommandHandler, vmagentClient *VmagentClient) *SystemdMonitor {
 	return &SystemdMonitor{
-		cdpClient:         cdpClient,
-		logger:            logger,
-		commandHandler:    commandHandler,
-		vmagentClient:     vmagentClient,
-		lastServiceStates: make(map[string]*SystemdServiceStatus),
+		cdpClient:               cdpClient,
+		logger:                  logger,
+		commandHandler:          commandHandler,
+		vmagentClient:           vmagentClient,
+		lastServiceStates:       make(map[string]*SystemdServiceStatus),
+		failureIncidentReported: false,
 	}
 }
 
@@ -65,6 +67,8 @@ func (m *SystemdMonitor) Start(ctx context.Context) {
 }
 
 func (m *SystemdMonitor) check(ctx context.Context) error {
+	hasFailedService := false
+
 	for service := range systemdServices {
 		state, err := m.commandHandler.checkSystemdUserServiceStatus(ctx, service)
 		if err != nil {
@@ -82,6 +86,7 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 		// Check if service just recovered (failed -> active)
 		lastState := m.lastServiceStates[service]
 		hasRecovered := lastState != nil && *lastState == SYSTEMD_SERVICE_STATUS_FAILED && *state == SYSTEMD_SERVICE_STATUS_ACTIVE
+		hasJustFailed := (lastState == nil || *lastState != SYSTEMD_SERVICE_STATUS_FAILED) && *state == SYSTEMD_SERVICE_STATUS_FAILED
 
 		switch *state {
 		case SYSTEMD_SERVICE_STATUS_ACTIVE:
@@ -103,26 +108,18 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 					zap.String("service", service))
 			}
 		case SYSTEMD_SERVICE_STATUS_FAILED:
+			hasFailedService = true
 			m.logger.Error("Systemd: Service is failed",
 				zap.String("service", service),
 				zap.String("dependency", service))
-			// Send service failed to start notification to website via CDP
-			if m.cdpClient != nil {
-				if err := m.cdpClient.SendServiceFailedEvent(ctx); err != nil {
-					m.logger.Error("Systemd: Failed to send service failed to start notification via CDP",
-						zap.String("service", service),
-						zap.Error(err))
-				} else {
-					m.logger.Info("Systemd: Sent service failed to start notification via CDP",
-						zap.String("service", service))
-				}
-			}
 
 			// Send service failed metric to vmagent
-			if m.vmagentClient != nil {
-				m.vmagentClient.SendServiceFailedMetric(ctx, service)
-			} else {
-				m.logger.Warn("Vmagent client is nil, skipping service failed metric")
+			if hasJustFailed {
+				if m.vmagentClient != nil {
+					m.vmagentClient.SendServiceFailedMetric(ctx, service)
+				} else {
+					m.logger.Warn("Vmagent client is nil, skipping service failed metric")
+				}
 			}
 		case SYSTEMD_SERVICE_STATUS_INACTIVE:
 			m.logger.Error("Systemd: Service is inactive",
@@ -136,6 +133,29 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 
 		// Update last state
 		m.lastServiceStates[service] = state
+	}
+
+	if hasFailedService && !m.failureIncidentReported {
+		if m.cdpClient != nil {
+			if err := m.cdpClient.SendServiceFailedEvent(ctx); err != nil {
+				m.logger.Error("Systemd: Failed to send service failed to start notification via CDP",
+					zap.Error(err))
+			} else {
+				m.logger.Info("Systemd: Sent service failed to start notification via CDP")
+			}
+		}
+
+		if m.vmagentClient != nil {
+			m.vmagentClient.SendServiceFailedIncidentMetric(ctx)
+		} else {
+			m.logger.Warn("Vmagent client is nil, skipping service failed incident metric")
+		}
+
+		m.failureIncidentReported = true
+	}
+
+	if !hasFailedService {
+		m.failureIncidentReported = false
 	}
 
 	return nil
