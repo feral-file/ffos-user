@@ -124,6 +124,7 @@ echo "ActiveState=$state"
 echo "ExecMainExitTimestampMonotonic=0"
 `
 
+	// #nosec G306 -- test helper script must be executable.
 	if err := os.WriteFile(systemctlPath, []byte(systemctlScript), 0o755); err != nil {
 		t.Fatalf("failed to create fake systemctl: %v", err)
 	}
@@ -137,6 +138,7 @@ fi
 
 exec /bin/cat "$@"
 `
+	// #nosec G306 -- test helper script must be executable.
 	if err := os.WriteFile(catPath, []byte(catScript), 0o755); err != nil {
 		t.Fatalf("failed to create fake cat: %v", err)
 	}
