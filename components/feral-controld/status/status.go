@@ -211,7 +211,8 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	}
 
 	currentHash, err := s.computeStatusHash(message)
-	if err != nil {
+	forceSend := err != nil
+	if forceSend {
 		// If hash cannot be computed, attempt to send anyway.
 		s.logger.Warn("Failed to compute status hash, sending notification without dedupe",
 			zap.String("notification_type", string(notificationType)),
@@ -227,11 +228,10 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 
 	// Send the notification via relayer only when connected.
 	if s.relayer.IsConnected() {
-		shouldSendRelayer := err != nil || s.shouldSendByHash(s.lastRelayerStatusHashes, notificationType, currentHash)
-		if shouldSendRelayer {
+		if forceSend || s.shouldSendByHash(s.lastRelayerStatusHashes, notificationType, currentHash) {
 			if err := s.relayer.Send(ctx, data); err != nil {
 				s.logger.Error("Failed to send notification via relayer", zap.Error(err))
-			} else if err == nil {
+			} else {
 				s.updateStatusHash(s.lastRelayerStatusHashes, notificationType, currentHash)
 			}
 		} else {
@@ -244,11 +244,10 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	}
 
 	// Send the data via websocket
-	shouldSendWS := err != nil || s.shouldSendByHash(s.lastWSStatusHashes, notificationType, currentHash)
-	if shouldSendWS {
+	if forceSend || s.shouldSendByHash(s.lastWSStatusHashes, notificationType, currentHash) {
 		if err := s.ws.SendAll(data); err != nil {
 			s.logger.Error("Failed to send notification via websocket", zap.Error(err))
-		} else if err == nil {
+		} else {
 			s.updateStatusHash(s.lastWSStatusHashes, notificationType, currentHash)
 		}
 	} else {
