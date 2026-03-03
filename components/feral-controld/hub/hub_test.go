@@ -70,6 +70,20 @@ func (ts *testSetup) teardown() {
 	ts.ctrl.Finish()
 }
 
+func withFF1ConfigReadError(ts *testSetup, readErr error) {
+	hubImpl := ts.hub.(*hub)
+	hubImpl.readConfig = func() ([]byte, error) {
+		return nil, readErr
+	}
+}
+
+func withFF1Config(ts *testSetup, rawJSON string) {
+	hubImpl := ts.hub.(*hub)
+	hubImpl.readConfig = func() ([]byte, error) {
+		return []byte(rawJSON), nil
+	}
+}
+
 func TestNew(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -565,6 +579,98 @@ func TestHandleCast_ProcessNilResult(t *testing.T) {
 
 	// Verify the response - should return 204 No Content
 	assert.Equal(t, http.StatusNoContent, w.Code)
+}
+
+func TestHandleVersion_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	withFF1Config(ts, `{"version":"1.2.3"}`)
+
+	hubImpl := ts.hub.(*hub)
+	hubImpl.json = wrapper.NewJSON()
+
+	req, err := http.NewRequest("GET", "/api/version", nil)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	hubImpl.handleVersion(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Contains(t, w.Body.String(), `"version":"1.2.3"`)
+}
+
+func TestHandleVersion_InvalidMethod(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	req, err := http.NewRequest("POST", "/api/version", strings.NewReader("{}"))
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	hubImpl := ts.hub.(*hub)
+	hubImpl.handleVersion(w, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+func TestHandleVersion_ConfigReadFailure(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	withFF1ConfigReadError(ts, errors.New("config read failed"))
+
+	hubImpl := ts.hub.(*hub)
+	hubImpl.json = wrapper.NewJSON()
+
+	req, err := http.NewRequest("GET", "/api/version", nil)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	hubImpl.handleVersion(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestHandleInfo_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	withFF1Config(ts, `{"version":"2.0.0"}`)
+
+	hubImpl := ts.hub.(*hub)
+	hubImpl.json = wrapper.NewJSON()
+
+	req, err := http.NewRequest("GET", "/api/info", nil)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	hubImpl.handleInfo(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Contains(t, w.Body.String(), `"ff1Version":"2.0.0"`)
+}
+
+func TestHandleStatus_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	withFF1Config(ts, `{"version":"3.0.0"}`)
+
+	hubImpl := ts.hub.(*hub)
+	hubImpl.json = wrapper.NewJSON()
+
+	req, err := http.NewRequest("GET", "/api/status", nil)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	hubImpl.handleStatus(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Contains(t, w.Body.String(), `"installedVersion":"3.0.0"`)
 }
 
 func TestHandleNotification_Success(t *testing.T) {

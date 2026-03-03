@@ -2,14 +2,17 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -37,6 +40,7 @@ type hub struct {
 	wsHandler  ws.WS
 	cmdHandler commandrouter.Handler
 	json       wrapper.JSON
+	readConfig func() ([]byte, error)
 }
 
 func New(
@@ -65,6 +69,7 @@ func New(
 		json:       json,
 		server:     server,
 		logger:     logger,
+		readConfig: defaultReadFF1Config,
 	}
 	h.routes()
 	return h
@@ -78,7 +83,14 @@ func (h *hub) routes() {
 	}
 
 	mux.HandleFunc("/api/cast", h.handleCast)
+	mux.HandleFunc("/api/version", h.handleVersion)
+	mux.HandleFunc("/api/info", h.handleInfo)
+	mux.HandleFunc("/api/status", h.handleStatus)
 	mux.HandleFunc("/api/notification", h.handleNotification)
+}
+
+func defaultReadFF1Config() ([]byte, error) {
+	return os.ReadFile(constant.FF1_CONFIG_FILE)
 }
 
 // Start starts the HTTP server
@@ -144,6 +156,98 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("Failed to respond with JSON", zap.Error(err))
 		return
 	}
+}
+
+// handleVersion handles GET /api/version endpoint
+func (h *hub) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	payload, err := h.readFF1VersionPayload()
+	if err != nil {
+		h.logger.Error("Failed to read FF1 version", zap.Error(err))
+		http.Error(w, "Failed to read FF1 config", http.StatusInternalServerError)
+		return
+	}
+
+	err = h.respondJSON(w, http.StatusOK, map[string]any{"version": payload})
+	if err != nil {
+		h.logger.Warn("Failed to respond with JSON", zap.Error(err))
+		return
+	}
+}
+
+// handleInfo handles GET /api/info endpoint
+func (h *hub) handleInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	payload, err := h.readFF1VersionPayload()
+	if err != nil {
+		h.logger.Error("Failed to read FF1 version", zap.Error(err))
+		http.Error(w, "Failed to read FF1 config", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]any{
+		"ff1Version": payload,
+		"version":    payload,
+	}
+
+	err = h.respondJSON(w, http.StatusOK, response)
+	if err != nil {
+		h.logger.Warn("Failed to respond with JSON", zap.Error(err))
+		return
+	}
+}
+
+// handleStatus handles GET /api/status endpoint
+func (h *hub) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	payload, err := h.readFF1VersionPayload()
+	if err != nil {
+		h.logger.Error("Failed to read FF1 version", zap.Error(err))
+		http.Error(w, "Failed to read FF1 config", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]any{
+		"device":           map[string]string{"version": payload},
+		"installedVersion": payload,
+		"ff1Version":       payload,
+		"osVersion":        payload,
+	}
+
+	err = h.respondJSON(w, http.StatusOK, response)
+	if err != nil {
+		h.logger.Warn("Failed to respond with JSON", zap.Error(err))
+		return
+	}
+}
+
+func (h *hub) readFF1VersionPayload() (string, error) {
+	configJSON, err := h.readConfig()
+	if err != nil {
+		return "", err
+	}
+
+	var payload struct {
+		Version string `json:"version"`
+	}
+
+	if err := json.Unmarshal(configJSON, &payload); err != nil {
+		return "", err
+	}
+
+	return payload.Version, nil
 }
 
 // handleNotification handles GET /api/notification endpoint and upgrades to WebSocket
