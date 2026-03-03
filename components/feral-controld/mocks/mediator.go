@@ -8,6 +8,8 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 )
 
 // MockMediator is a mock of Mediator interface.
@@ -55,4 +57,16 @@ func (m *MockMediator) Stop() {
 func (mr *MockMediatorMockRecorder) Stop() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stop", reflect.TypeOf((*MockMediator)(nil).Stop))
+}
+
+// InitializeMDNS mocks base method.
+func (m *MockMediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, connected bool) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "InitializeMDNS", advertiser, info, connected)
+}
+
+// InitializeMDNS indicates an expected call of InitializeMDNS.
+func (mr *MockMediatorMockRecorder) InitializeMDNS(advertiser, info, connected interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InitializeMDNS", reflect.TypeOf((*MockMediator)(nil).InitializeMDNS), advertiser, info, connected)
 }

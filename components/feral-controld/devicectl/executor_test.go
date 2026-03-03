@@ -2424,6 +2424,206 @@ func TestExecutor_BetaFeaturesToggle_Disable_Success(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_SshAccess_Enable_RequiresPublicKey(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_SSH_ACCESS,
+		Arguments: map[string]interface{}{
+			"enabled":   true,
+			"publicKey": " ",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true,"publicKey":" "}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":true,"publicKey":" "}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Enabled    bool   `json:"enabled"`
+				PublicKey  string `json:"publicKey"`
+				TTLSeconds *int   `json:"ttlSeconds"`
+			})
+			args.Enabled = true
+			args.PublicKey = " "
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "publicKey is required")
+}
+
+func TestExecutor_SshAccess_Enable_CapsTtlAndSchedulesDisable(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_SSH_ACCESS,
+		Arguments: map[string]interface{}{
+			"enabled":    true,
+			"publicKey":  "ssh-ed25519 AAAA-test",
+			"ttlSeconds": 90000,
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":true,"publicKey":"ssh-ed25519 AAAA-test","ttlSeconds":90000}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(
+			[]byte(`{"enabled":true,"publicKey":"ssh-ed25519 AAAA-test","ttlSeconds":90000}`),
+			gomock.Any(),
+		).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Enabled    bool   `json:"enabled"`
+				PublicKey  string `json:"publicKey"`
+				TTLSeconds *int   `json:"ttlSeconds"`
+			})
+			ttl := 90000
+			args.Enabled = true
+			args.PublicKey = "ssh-ed25519 AAAA-test"
+			args.TTLSeconds = &ttl
+			return nil
+		})
+
+	sshDir := filepath.Dir(constants.SSH_AUTHORIZED_KEYS_FILE)
+	ts.mockOS.EXPECT().
+		MkdirAll(sshDir, os.FileMode(0700)).
+		Return(nil)
+	ts.mockOS.EXPECT().
+		WriteFile(constants.SSH_AUTHORIZED_KEYS_FILE, gomock.Any(), os.FileMode(0600)).
+		DoAndReturn(func(_ string, data []byte, _ os.FileMode) error {
+			assert.Contains(t, string(data), "ssh-ed25519 AAAA-test")
+			return nil
+		})
+
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "start", "sshd.service").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(
+				ts.ctx,
+				"sudo",
+				"systemd-run",
+				"--unit",
+				constants.SSH_DISABLE_UNIT,
+				"--on-active",
+				"86400s",
+				"/bin/bash",
+				"-c",
+				"pkill -u feralfile sshd || true; systemctl stop sshd.service",
+			).
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+
+	response, ok := result.(map[string]interface{})
+	if assert.True(t, ok) {
+		assert.Equal(t, true, response["enabled"])
+		assert.Equal(t, 86400, response["ttlSeconds"])
+	}
+}
+
+func TestExecutor_SshAccess_Disable_StopsService(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_SSH_ACCESS,
+		Arguments: map[string]interface{}{
+			"enabled": false,
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"enabled":false}`), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"enabled":false}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Enabled    bool   `json:"enabled"`
+				PublicKey  string `json:"publicKey"`
+				TTLSeconds *int   `json:"ttlSeconds"`
+			})
+			args.Enabled = false
+			return nil
+		})
+
+	ts.mockOS.EXPECT().
+		IsNotExist(gomock.Any()).
+		Return(true).
+		AnyTimes()
+
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "sudo", "systemctl", "stop", "sshd.service").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+
+	response, ok := result.(map[string]interface{})
+	if assert.True(t, ok) {
+		assert.Equal(t, false, response["enabled"])
+	}
+}
+
 func TestExecutor_Shutdown_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

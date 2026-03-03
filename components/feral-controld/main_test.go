@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/metric"
@@ -196,6 +197,12 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 
+				// Mock OS ReadFile for mDNS device info
+				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
 				// Mock Daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
@@ -257,6 +264,12 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Hub start and stop
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
+
+				// Mock OS ReadFile for mDNS device info
+				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 
 				// Mock Relayer connect and close
 				ts.mockRelayer.EXPECT().Connect(gomock.Any()).Return(nil)
@@ -498,6 +511,12 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
 
+				// Mock OS ReadFile for mDNS device info
+				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
 				// Mock Daemon notify failure
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(false, errors.New("daemon notify failed"))
 			},
@@ -546,6 +565,12 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock Hub start and stop
 				ts.mockHub.EXPECT().Start()
 				ts.mockHub.EXPECT().Stop().Return(nil)
+
+				// Mock OS ReadFile for mDNS device info
+				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
 
 				// Mock daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)

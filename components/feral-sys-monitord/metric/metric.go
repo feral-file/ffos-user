@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
 )
 
@@ -31,15 +30,25 @@ const (
 
 // Prometheus metrics
 var (
-	CPUTemperatureCelsius = promauto.NewGauge(prometheus.GaugeOpts{
+	metricsRegistry = prometheus.NewRegistry()
+
+	CPUTemperatureCelsius = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "cpu_temperature_celsius",
 		Help: "Current CPU temperature in Celsius",
 	})
-	CPUUptimeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+	CPUUptimeSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "cpu_uptime_seconds",
 		Help: "Current CPU uptime in seconds",
 	})
 )
+
+func init() {
+	metricsRegistry.MustRegister(CPUTemperatureCelsius, CPUUptimeSeconds)
+}
+
+func MetricsGatherer() prometheus.Gatherer {
+	return metricsRegistry
+}
 
 type CPUMetrics struct {
 	MaxFrequency       float64 `json:"max_frequency"`
