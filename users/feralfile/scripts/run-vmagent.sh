@@ -82,6 +82,7 @@ build_args() {
     -remoteWrite.url="${REMOTE_URL}"
     -remoteWrite.tmpDataPath="${QUEUE_FILE}"
     -remoteWrite.maxDiskUsagePerURL=256MB
+    -remoteWrite.label="job=ff1-device"
     -remoteWrite.label="instance=${device_id_esc}"
     -remoteWrite.label="version=${VERSION_esc}"
     -remoteWrite.label="branch=${BRANCH_esc}"

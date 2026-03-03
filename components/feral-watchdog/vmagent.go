@@ -140,3 +140,21 @@ func (v *VmagentClient) SendServiceFailedMetric(ctx context.Context, service str
 			zap.String("url", v.url))
 	}
 }
+
+// SendServiceFailedIncidentMetric sends an incident-level service failed metric to vmagent.
+func (v *VmagentClient) SendServiceFailedIncidentMetric(ctx context.Context) {
+	metric := "service_failed_incident 1"
+
+	v.logger.Info("Sending service failed incident metric to vmagent",
+		zap.String("metric", metric),
+		zap.String("url", v.url))
+
+	if err := v.SendMetric(ctx, metric); err != nil {
+		v.logger.Error("Failed to send service failed incident metric to vmagent",
+			zap.Error(err),
+			zap.String("url", v.url))
+	} else {
+		v.logger.Info("Successfully sent service failed incident metric to vmagent",
+			zap.String("url", v.url))
+	}
+}

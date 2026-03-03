@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-sys-monitord/metric"
 )
 
 type PromServer struct {
@@ -17,10 +17,6 @@ type PromServer struct {
 }
 
 func NewPromServer(logger *zap.Logger) *PromServer {
-	// Unregister default Go collectors to have clean metrics
-	prometheus.DefaultRegisterer.Unregister(collectors.NewGoCollector())
-	prometheus.DefaultRegisterer.Unregister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-
 	return &PromServer{
 		logger: logger,
 	}
@@ -29,7 +25,7 @@ func NewPromServer(logger *zap.Logger) *PromServer {
 func (s *PromServer) Start() error {
 	s.server = &http.Server{
 		Addr:              "localhost:9001",
-		Handler:           promhttp.Handler(),
+		Handler:           promhttp.HandlerFor(metric.MetricsGatherer(), promhttp.HandlerOpts{}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

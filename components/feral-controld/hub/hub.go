@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
@@ -79,6 +81,7 @@ func (h *hub) routes() {
 
 	mux.HandleFunc("/api/cast", h.handleCast)
 	mux.HandleFunc("/api/notification", h.handleNotification)
+	mux.Handle("/metrics", promhttp.HandlerFor(status.PlaybackMetricsGatherer(), promhttp.HandlerOpts{}))
 }
 
 // Start starts the HTTP server

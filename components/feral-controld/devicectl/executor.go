@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
@@ -155,6 +156,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setVolume(ctx, bytes)
 	case commands.CMD_TOGGLE_MUTE:
 		result, err = e.toggleMute(ctx)
+	case commands.CMD_SSH_ACCESS:
+		result, err = e.setSshAccess(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -712,6 +715,136 @@ func (e *executor) setBetaFeaturesToggle(_ context.Context, args []byte) (interf
 	e.logger.Info("Beta features disabled (toggle file removed)", zap.String("path", BetaFeaturesToggleOnFile))
 
 	return CmdOK, nil
+}
+
+func (e *executor) setSshAccess(ctx context.Context, args []byte) (interface{}, error) {
+	var cmdArgs struct {
+		Enabled    bool   `json:"enabled"`
+		PublicKey  string `json:"publicKey"`
+		TTLSeconds *int   `json:"ttlSeconds"`
+	}
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if cmdArgs.Enabled {
+		if strings.TrimSpace(cmdArgs.PublicKey) == "" {
+			return nil, fmt.Errorf("publicKey is required to enable SSH")
+		}
+		if err := e.writeAuthorizedKey(cmdArgs.PublicKey); err != nil {
+			return nil, fmt.Errorf("failed to write authorized key: %w", err)
+		}
+		if err := e.clearSshDisableTimer(ctx); err != nil {
+			return nil, fmt.Errorf("failed to clear SSH disable timer: %w", err)
+		}
+		if err := e.runSudoCommand(ctx, "systemctl", "start", "sshd.service"); err != nil {
+			e.logger.Error("Failed to start SSH service, rolling back SSH access", zap.Error(err))
+			if removeErr := e.removeFileIfExists(constants.SSH_AUTHORIZED_KEYS_FILE); removeErr != nil {
+				e.logger.Error("Rollback failed: could not remove authorized_keys", zap.Error(removeErr))
+			}
+			return nil, fmt.Errorf("failed to start SSH service: %w", err)
+		}
+
+		ttlSeconds := normalizeSshTtlSeconds(cmdArgs.TTLSeconds)
+		var expiresAt *time.Time
+		if ttlSeconds > 0 {
+			expiresAtValue := time.Now().Add(time.Duration(ttlSeconds) * time.Second)
+			expiresAt = &expiresAtValue
+			if err := e.scheduleSshDisable(ctx, ttlSeconds); err != nil {
+				e.logger.Error("Failed to schedule SSH disable timer, rolling back SSH access",
+					zap.Error(err),
+					zap.Int("ttlSeconds", ttlSeconds))
+
+				if stopErr := e.runSudoCommand(ctx, "systemctl", "stop", "sshd.service"); stopErr != nil {
+					e.logger.Error("Rollback failed: could not stop sshd service", zap.Error(stopErr))
+				}
+
+				if removeErr := e.removeFileIfExists(constants.SSH_AUTHORIZED_KEYS_FILE); removeErr != nil {
+					e.logger.Error("Rollback failed: could not remove authorized_keys", zap.Error(removeErr))
+				}
+
+				return nil, fmt.Errorf("failed to schedule SSH disable: %w", err)
+			}
+		}
+
+		return map[string]interface{}{
+			"enabled":    true,
+			"ttlSeconds": ttlSeconds,
+			"expiresAt":  expiresAt,
+		}, nil
+	}
+
+	if err := e.clearSshDisableTimer(ctx); err != nil {
+		return nil, fmt.Errorf("failed to clear SSH disable timer: %w", err)
+	}
+	if err := e.runSudoCommand(ctx, "systemctl", "stop", "sshd.service"); err != nil {
+		return nil, fmt.Errorf("failed to stop SSH service: %w", err)
+	}
+	if err := e.removeFileIfExists(constants.SSH_AUTHORIZED_KEYS_FILE); err != nil {
+		return nil, fmt.Errorf("failed to remove authorized keys: %w", err)
+	}
+
+	return map[string]interface{}{
+		"enabled": false,
+	}, nil
+}
+
+func normalizeSshTtlSeconds(ttlSeconds *int) int {
+	if ttlSeconds == nil {
+		return 0
+	}
+	if *ttlSeconds <= 0 {
+		return 0
+	}
+	if *ttlSeconds > 86400 {
+		return 86400
+	}
+	return *ttlSeconds
+}
+
+func (e *executor) writeAuthorizedKey(publicKey string) error {
+	sshDir := filepath.Dir(constants.SSH_AUTHORIZED_KEYS_FILE)
+	if err := e.os.MkdirAll(sshDir, 0700); err != nil {
+		return err
+	}
+	key := strings.TrimSpace(publicKey)
+	if !strings.HasSuffix(key, "\n") {
+		key += "\n"
+	}
+	return e.os.WriteFile(constants.SSH_AUTHORIZED_KEYS_FILE, []byte(key), 0600)
+}
+
+func (e *executor) scheduleSshDisable(ctx context.Context, ttlSeconds int) error {
+	// Kill active SSH sessions first, then stop the listener.
+	// pkill may exit non-zero if no matching processes exist, so we ignore its exit code with "|| true".
+	disableCmd := "pkill -u feralfile sshd || true; systemctl stop sshd.service"
+	return e.runSudoCommand(
+		ctx,
+		"systemd-run",
+		"--unit",
+		constants.SSH_DISABLE_UNIT,
+		"--on-active",
+		fmt.Sprintf("%ds", ttlSeconds),
+		"/bin/bash",
+		"-c",
+		disableCmd,
+	)
+}
+
+func (e *executor) clearSshDisableTimer(ctx context.Context) error {
+	_ = e.runSudoCommand(ctx, "systemctl", "stop", constants.SSH_DISABLE_UNIT+".timer")
+	_ = e.runSudoCommand(ctx, "systemctl", "stop", constants.SSH_DISABLE_UNIT+".service")
+	_ = e.runSudoCommand(ctx, "systemctl", "reset-failed", constants.SSH_DISABLE_UNIT+".service")
+	return nil
+}
+
+func (e *executor) runSudoCommand(ctx context.Context, command string, args ...string) error {
+	cmd := e.exec.CommandContext(ctx, "sudo", append([]string{command}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }
 
 func (e *executor) removeFileIfExists(path string) error {

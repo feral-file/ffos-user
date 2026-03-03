@@ -1,3 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+
 VOLUME_FILE="/home/feralfile/.state/saved-volume"
 if [ ! -f "$VOLUME_FILE" ]; then
     # First boot: set default volume to 63%
@@ -22,7 +25,9 @@ if systemctl --user is-enabled "feral-watchdog.service" >/dev/null 2>&1; then
 fi
 
 mkdir -p /home/feralfile/.config/systemd/user/
-sudo mount /home/feralfile/systemd-services/ /home/feralfile/.config/systemd/user/ -o bind
+if ! mountpoint -q /home/feralfile/.config/systemd/user/; then
+    sudo mount /home/feralfile/systemd-services/ /home/feralfile/.config/systemd/user/ -o bind
+fi
 
 systemctl --user daemon-reload
 systemctl --user start system-ready.target

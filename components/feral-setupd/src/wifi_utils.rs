@@ -123,7 +123,9 @@ impl SSIDsCacher {
                         println!("SSIDsCacher: returning last error");
                         // We take the error here
                         // The next call to `get()` will trigger a new refresh
-                        return Err(st.last_error.take().unwrap());
+                        if let Some(error) = st.last_error.take() {
+                            return Err(error);
+                        }
                     }
 
                     println!("SSIDsCacher: triggering refresh");
