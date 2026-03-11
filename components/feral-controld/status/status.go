@@ -24,6 +24,14 @@ const (
 	POLL_INTERVAL = 5 * time.Second
 )
 
+type LoopMode string
+
+const (
+	LoopModeNone     LoopMode = "none"
+	LoopModePlaylist LoopMode = "playlist"
+	LoopModeOne      LoopMode = "one"
+)
+
 type PlayerStatus struct {
 	Command        string                      `json:"castCommand,omitempty"`
 	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
@@ -37,6 +45,8 @@ type PlayerStatus struct {
 		Scaling     *string `json:"scaling,omitempty"`
 		Orientation *string `json:"orientation,omitempty"`
 	} `json:"deviceSettings,omitempty"`
+	LoopMode *LoopMode `json:"loopMode,omitempty"`
+	Shuffle  *bool     `json:"shuffle,omitempty"`
 }
 
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
