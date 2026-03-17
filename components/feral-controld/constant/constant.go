@@ -10,7 +10,6 @@ const (
 
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"
 	SSH_DISABLE_UNIT         = "ff1-ssh-disable"
-
 )
 
 var (

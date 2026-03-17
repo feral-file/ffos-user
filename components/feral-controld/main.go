@@ -326,7 +326,6 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 	return connected, nil
 }
 
-
 // initializeApp initializes the app with real dependencies
 func initializeApp(
 	logger *zap.Logger,
