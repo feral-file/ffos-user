@@ -10,6 +10,7 @@ import (
 	gomock "github.com/golang/mock/gomock"
 
 	mdns "github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 )
 
 // MockMediator is a mock of Mediator interface.
@@ -69,4 +70,16 @@ func (m *MockMediator) Stop() {
 func (mr *MockMediatorMockRecorder) Stop() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stop", reflect.TypeOf((*MockMediator)(nil).Stop))
+}
+
+// SetPendingOOMRecovery mocks base method.
+func (m *MockMediator) SetPendingOOMRecovery(oomKillCount int, onRecovered mediator.OOMRecoveryCallback) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetPendingOOMRecovery", oomKillCount, onRecovered)
+}
+
+// SetPendingOOMRecovery indicates an expected call of SetPendingOOMRecovery.
+func (mr *MockMediatorMockRecorder) SetPendingOOMRecovery(oomKillCount, onRecovered interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPendingOOMRecovery", reflect.TypeOf((*MockMediator)(nil).SetPendingOOMRecovery), oomKillCount, onRecovered)
 }

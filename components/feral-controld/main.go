@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	go_os "os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -248,6 +249,21 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	app.Logger.Info("controld started successfully")
 
+	// React only to unhandled chromium OOM kill events recorded by the
+	// earlyoom hook. The mediator will piggyback on periodic sysmetrics
+	// dbus signals to retry sending displayDefaultPlaylist until the
+	// webapp is ready, routing through the standard command pipeline.
+	oomKillCount := readCountFile(constants.CHROMIUM_OOM_KILL_COUNT_FILE, app.Logger, "chromium_oom_kill_count")
+	handledOOMKillCount := readCountFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE, app.Logger, "chromium_oom_kill_handled_count")
+	if oomKillCount > handledOOMKillCount {
+		app.Logger.Warn("Unhandled chromium OOM kill detected, arming OOM recovery",
+			zap.Int("chromium_oom_kill_count", oomKillCount),
+			zap.Int("chromium_oom_kill_handled_count", handledOOMKillCount))
+		app.Mediator.SetPendingOOMRecovery(oomKillCount, func(count int) {
+			writeCountFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE, count, app.Logger, "chromium_oom_kill_handled_count")
+		})
+	}
+
 	<-ctx.Done()
 
 	app.Logger.Info("controld shutdown completed")
@@ -318,6 +334,40 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 	}
 
 	return connected, nil
+}
+
+func readCountFile(path string, logger *zap.Logger, field string) int {
+	data, err := go_os.ReadFile(path) // #nosec G304 -- path is from trusted constants only
+	if err != nil {
+		if !go_os.IsNotExist(err) {
+			logger.Warn("Failed to read counter file",
+				zap.String("field", field),
+				zap.String("path", path),
+				zap.Error(err))
+		}
+		return 0
+	}
+
+	count, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		logger.Warn("Failed to parse counter file",
+			zap.String("field", field),
+			zap.String("path", path),
+			zap.Error(err))
+		return 0
+	}
+
+	return count
+}
+
+func writeCountFile(path string, count int, logger *zap.Logger, field string) {
+	if err := go_os.WriteFile(path, []byte(fmt.Sprintf("%d\n", count)), 0600); err != nil {
+		logger.Error("Failed to write counter file",
+			zap.String("field", field),
+			zap.String("path", path),
+			zap.Int("count", count),
+			zap.Error(err))
+	}
 }
 
 // initializeApp initializes the app with real dependencies

@@ -10,4 +10,7 @@ const (
 
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"
 	SSH_DISABLE_UNIT         = "ff1-ssh-disable"
+
+	CHROMIUM_OOM_KILL_COUNT_FILE         = "/var/lib/oom_state/chromium-oom-kill-count"
+	CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE = "/var/lib/oom_state/chromium-oom-kill-handled-count"
 )

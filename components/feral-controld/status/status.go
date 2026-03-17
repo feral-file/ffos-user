@@ -56,6 +56,7 @@ type Poller interface {
 	Stop()
 	ForceRefresh()
 	FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error)
+	SuppressPlayerNotifications(suppress bool)
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -74,6 +75,10 @@ type poller struct {
 	// Relayer and websocket are tracked separately so relayer can catch up after reconnect.
 	lastRelayerStatusHashes map[relayer.NotificationType]string
 	lastWSStatusHashes      map[relayer.NotificationType]string
+
+	// When true, pollPlayerStatus will still fetch but not send notifications.
+	// Used during OOM recovery to prevent persisting stale player state.
+	suppressPlayerNotifications bool
 
 	// Track playback state transitions for duration accumulation.
 	lastPlaybackSampleAt      time.Time
@@ -169,6 +174,13 @@ func (s *poller) Stop() {
 	close(s.stopChan)
 }
 
+func (s *poller) SuppressPlayerNotifications(suppress bool) {
+	s.Lock()
+	s.suppressPlayerNotifications = suppress
+	s.Unlock()
+	s.logger.Info("Player notification suppression changed", zap.Bool("suppress", suppress))
+}
+
 // ForceRefresh triggers an immediate status poll
 func (s *poller) ForceRefresh() {
 	select {
@@ -206,6 +218,14 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	}
 
 	s.updateArtPlaybackMetrics(isArtworkPlaying(playerStatus), now)
+
+	s.RLock()
+	suppressed := s.suppressPlayerNotifications
+	s.RUnlock()
+	if suppressed {
+		s.logger.Debug("Player notifications suppressed (OOM recovery), skipping")
+		return
+	}
 
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
 	s.logger.Debug("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
