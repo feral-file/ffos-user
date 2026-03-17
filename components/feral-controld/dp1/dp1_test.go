@@ -118,7 +118,7 @@ func createMockTokens() []ffindexer.Token {
 	name2 := "Test Token 2"
 	imageURL1 := "http://example.com/preview1.jpg"
 	imageURL2 := "http://example.com/preview2.jpg"
-	
+
 	return []ffindexer.Token{
 		{
 			Chain:           "ethereum",
@@ -154,7 +154,7 @@ func createSimpleToken(tokenID, chain string, ownerAddr string, quantity int) ff
 	}
 
 	imageURL := "http://example.com/image.jpg"
-	
+
 	token := ffindexer.Token{
 		Chain:           chain,
 		Standard:        "ERC721",
@@ -692,7 +692,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 
 			testName := "Test"
 			imageURL := "http://example.com/preview.jpg"
-			
+
 			token := ffindexer.Token{
 				Chain:           tt.input,
 				Standard:        "ERC721",
@@ -873,7 +873,7 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 	name2 := "New Token 2"
 	imageURL1 := "http://example.com/new1.jpg"
 	imageURL2 := "http://example.com/new2.jpg"
-	
+
 	mockTokens := []ffindexer.Token{
 		{
 			Chain:           "ethereum",
@@ -943,7 +943,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 	imageURL1 := "http://example.com/token1.jpg"
 	imageURL2 := "http://example.com/token2.jpg"
 	imageURLDup := "http://example.com/duplicate.jpg"
-	
+
 	mockTokens := []ffindexer.Token{
 		{
 			Chain:           "ethereum",
