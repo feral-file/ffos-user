@@ -20,16 +20,15 @@ import (
 )
 
 type testSetup struct {
-	ctrl              *gomock.Controller
-	ctx               context.Context
-	mockExecutor      *mocks.MockExecutor
-	mockCDP           *mocks.MockCDP
-	mockDP1           *mocks.MockDP1
-	mockJSON          *mocks.MockJSON
-	mockStatusPoller  *mocks.MockStatusPoller
-	mockMetricTracker *mocks.MockMetricTracker
-	handler           commandrouter.Handler
-	logger            *zap.Logger
+	ctrl             *gomock.Controller
+	ctx              context.Context
+	mockExecutor     *mocks.MockExecutor
+	mockCDP          *mocks.MockCDP
+	mockDP1          *mocks.MockDP1
+	mockJSON         *mocks.MockJSON
+	mockStatusPoller *mocks.MockStatusPoller
+	handler          commandrouter.Handler
+	logger           *zap.Logger
 }
 
 func setup(t *testing.T) *testSetup {
@@ -42,20 +41,18 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	mockMetricTracker := mocks.NewMockMetricTracker(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, mockMetricTracker, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, mockJSON, logger)
 
 	return &testSetup{
-		ctrl:              ctrl,
-		ctx:               ctx,
-		mockExecutor:      mockExecutor,
-		mockCDP:           mockCDP,
-		mockDP1:           mockDP1,
-		mockJSON:          mockJSON,
-		mockStatusPoller:  mockStatusPoller,
-		mockMetricTracker: mockMetricTracker,
-		handler:           handler,
-		logger:            logger,
+		ctrl:             ctrl,
+		ctx:              ctx,
+		mockExecutor:     mockExecutor,
+		mockCDP:          mockCDP,
+		mockDP1:          mockDP1,
+		mockJSON:         mockJSON,
+		mockStatusPoller: mockStatusPoller,
+		handler:          handler,
+		logger:           logger,
 	}
 }
 
@@ -177,11 +174,6 @@ func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 		Return(cdpResult, nil).
 		Times(1)
 
-	ts.mockMetricTracker.EXPECT().
-		TrackPlaylistView(ts.ctx, mockPlaylist, playlistURL).
-		Return(nil).
-		Times(1)
-
 	ts.mockStatusPoller.EXPECT().
 		ForceRefresh().
 		Times(1)
@@ -248,11 +240,6 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		Return(cdpResult, nil).
-		Times(1)
-
-	ts.mockMetricTracker.EXPECT().
-		TrackPlaylistView(ts.ctx, mockPlaylist, "").
-		Return(nil).
 		Times(1)
 
 	ts.mockStatusPoller.EXPECT().
@@ -337,11 +324,6 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		Return(cdpResult, nil).
-		Times(1)
-
-	ts.mockMetricTracker.EXPECT().
-		TrackPlaylistView(ts.ctx, processedPlaylist, "").
-		Return(nil).
 		Times(1)
 
 	ts.mockStatusPoller.EXPECT().

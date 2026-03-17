@@ -29,7 +29,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
-	"github.com/feral-file/ffos-user/components/feral-controld/metric"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -75,7 +74,6 @@ type app struct {
 	Watchdog          watchdog.Watchdog
 	PlaylistRefresher playlist_refresher.Refresher
 	Hub               hub.Hub
-	MetricTracker     metric.Tracker
 }
 
 func main() {
@@ -122,7 +120,6 @@ func main() {
 		config.CDPConfig.Endpoint,
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
-		config.OpenPanelConfig,
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
@@ -329,7 +326,6 @@ func initializeApp(
 	cdpEndpoint string,
 	relayerEndpoint string,
 	relayerAPIKey string,
-	openPanelConfig *metric.OpenPanelConfig,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
@@ -391,15 +387,8 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger)
 
-	// Metric tracker
-	metricTracker := metric.NewOpenPanelTracker(openPanelConfig, os, httpClient, json, logger)
-	err := metricTracker.Initialize()
-	if err != nil {
-		logger.Error("Failed to initialize metric tracker", zap.Error(err))
-	}
-
 	// Command handler
-	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, metricTracker, json, logger)
+	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
@@ -433,7 +422,6 @@ func initializeApp(
 		Watchdog:          watchdog,
 		PlaylistRefresher: playlistRefresher,
 		Hub:               hub,
-		MetricTracker:     metricTracker,
 	}
 }
 
@@ -461,7 +449,6 @@ func initializeTestApp(
 	executor devicectl.Executor,
 	dynamicPlaylistRefresher playlist_refresher.Refresher,
 	hub hub.Hub,
-	metricTracker metric.Tracker,
 ) *app {
 	return &app{
 		Ctx:               ctx,
@@ -486,6 +473,5 @@ func initializeTestApp(
 		Watchdog:          watchdog,
 		PlaylistRefresher: dynamicPlaylistRefresher,
 		Hub:               hub,
-		MetricTracker:     metricTracker,
 	}
 }

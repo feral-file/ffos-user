@@ -12,101 +12,49 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-var FF_INDEXER_HOSTS = map[string]bool{
-	"indexer.feralfile.com": true,
-	"indexer.autonomy.io":   true,
-}
+const FF_INDEXER_HOSTS = "indexer-v2.feralfile.com"
 
-// V2 GraphQL types matching ff-indexer-v2 schema
-type Artist struct {
-	DID  string `json:"did"`
-	Name string `json:"name"`
+type Display struct {
+	ImageURL     *string `json:"image_url,omitempty"`
+	AnimationURL *string `json:"animation_url,omitempty"`
+	Name         *string `json:"name,omitempty"`
 }
-
-type Publisher struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-}
-
-type TokenMetadata struct {
-	Name         string     `json:"name"`
-	Description  string     `json:"description"`
-	ImageURL     *string    `json:"image_url"`
-	AnimationURL *string    `json:"animation_url"`
-	Artists      []Artist   `json:"artists"`
-	Publisher    *Publisher `json:"publisher,omitempty"`
-	MimeType     string     `json:"mime_type"`
-}
-
-type EnrichmentSource struct {
-	AnimationURL *string `json:"animation_url"`
-	ImageURL     *string `json:"image_url"`
-}
-
-type Owner struct {
-	OwnerAddress string `json:"owner_address"`
-	Quantity     string `json:"quantity"`
-}
-
-type PaginatedOwners struct {
-	Items []Owner `json:"items"`
-	Total string  `json:"total"`
-}
-
 type Token struct {
-	ID               string            `json:"id"`
-	TokenCID         string            `json:"token_cid"`
-	Chain            string            `json:"chain"`
-	Standard         string            `json:"standard"`
-	ContractAddress  string            `json:"contract_address"`
-	TokenNumber      string            `json:"token_number"`
-	CurrentOwner     string            `json:"current_owner"`
-	Burned           bool              `json:"burned"`
-	Metadata         *TokenMetadata    `json:"metadata,omitempty"`
-	EnrichmentSource *EnrichmentSource `json:"enrichment_source,omitempty"`
-	Owners           *PaginatedOwners  `json:"owners,omitempty"`
+	Chain           string   `json:"chain,omitempty"`
+	Standard        string   `json:"standard,omitempty"`
+	ContractAddress string   `json:"contract_address,omitempty"`
+	TokenNumber     string   `json:"token_number,omitempty"`
+	Display         *Display `json:"display,omitempty"`
 }
 
 // GetPreviewURL returns the preview URL, preferring animation_url over image_url
 func (t *Token) GetPreviewURL() string {
-	var animationURL *string
-	if t.EnrichmentSource != nil && t.EnrichmentSource.AnimationURL != nil {
-		animationURL = t.EnrichmentSource.AnimationURL
-	} else if t.Metadata != nil && t.Metadata.AnimationURL != nil {
-		animationURL = t.Metadata.AnimationURL
+	if t.Display == nil {
+		return ""
 	}
-
-	if animationURL != nil && *animationURL != "" {
-		return *animationURL
+	if t.Display.AnimationURL != nil && *t.Display.AnimationURL != "" {
+		return *t.Display.AnimationURL
 	}
-
-	// Fall back to gallery thumbnail URL
-	var thumbnailURL *string
-	if t.EnrichmentSource != nil && t.EnrichmentSource.ImageURL != nil {
-		thumbnailURL = t.EnrichmentSource.ImageURL
-	} else if t.Metadata != nil && t.Metadata.ImageURL != nil {
-		thumbnailURL = t.Metadata.ImageURL
+	if t.Display.ImageURL != nil && *t.Display.ImageURL != "" {
+		return *t.Display.ImageURL
 	}
-
-	if thumbnailURL != nil && *thumbnailURL != "" {
-		return *thumbnailURL
-	}
-
 	return ""
 }
 
-// GetTitle returns the token title/name
-func (t *Token) GetTitle() string {
-	if t.Metadata == nil {
+// GetName returns the token name
+func (d *Token) GetName() string {
+	if d.Display == nil {
 		return ""
 	}
-	return t.Metadata.Name
+	if d.Display.Name != nil {
+		return *d.Display.Name
+	}
+	return ""
 }
 
 type TokenList struct {
 	Items  []Token `json:"items"`
 	Offset *string `json:"offset"`
-	Total  string  `json:"total"`
 }
 
 type GraphQLResponse struct {
@@ -136,10 +84,9 @@ func New(httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger
 
 func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map[string]string) ([]Token, error) {
 	i.logger.Info("Querying tokens", zap.String("endpoint", endpoint), zap.Any("params", params))
-	// Don't validate endpoint for now
-	// if err := validateEndpoint(endpoint); err != nil {
-	// 	return nil, err
-	// }
+	if err := validateEndpoint(endpoint); err != nil {
+		return nil, err
+	}
 
 	var queryParams []string
 	if len(params) > 0 {
@@ -154,43 +101,17 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 	query := fmt.Sprintf(`{
 		tokens(%s) {
 			items {
-				id
-				token_cid
 				chain
 				standard
 				contract_address
 				token_number
-				current_owner
-				burned
-				metadata {
+				display {
+					image_url
+					animation_url
 					name
-					description
-					image_url
-					animation_url
-					artists {
-						did
-						name
-					}
-					publisher {
-						name
-						url
-					}
-					mime_type
-				}
-				enrichment_source {
-					image_url
-					animation_url
-				}
-				owners {
-					items {
-						owner_address
-						quantity
-					}
-					total
 				}
 			}
 			offset
-			total
 		}
 	}`, qp)
 
@@ -212,14 +133,12 @@ func (i *ffIndexer) QueryTokens(ctx context.Context, endpoint string, params map
 }
 
 // validateEndpoint validates that the endpoint is a valid FF Indexer endpoint
-// Note: it's not currently used but kept for future reference
-// nolint:unused
 func validateEndpoint(endpoint string) error {
 	url, err := url.Parse(endpoint)
 	if err != nil {
 		return err
 	}
-	if !FF_INDEXER_HOSTS[url.Host] {
+	if url.Host != FF_INDEXER_HOSTS {
 		return fmt.Errorf("invalid endpoint: %s", endpoint)
 	}
 	return nil

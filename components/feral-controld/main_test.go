@@ -10,7 +10,6 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
-	"github.com/feral-file/ffos-user/components/feral-controld/metric"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 
@@ -32,17 +31,16 @@ type testSetup struct {
 	mockLoggerManager *mocks.MockLoggerManager
 
 	// Mocked components
-	mockCDP           *mocks.MockCDP
-	mockRelayer       *mocks.MockRelayer
-	mockDBus          *mocks.MockDBus
-	mockMediator      *mocks.MockMediator
-	mockExecutor      *mocks.MockExecutor
-	mockDeviceStatus  *mocks.MockDeviceStatus
-	mockStatusPoller  *mocks.MockStatusPoller
-	mockWatchdog      *mocks.MockWatchdog
-	mockRefresher     *mocks.MockRefresher
-	mockHub           *mocks.MockHub
-	mockMetricTracker *mocks.MockMetricTracker
+	mockCDP          *mocks.MockCDP
+	mockRelayer      *mocks.MockRelayer
+	mockDBus         *mocks.MockDBus
+	mockMediator     *mocks.MockMediator
+	mockExecutor     *mocks.MockExecutor
+	mockDeviceStatus *mocks.MockDeviceStatus
+	mockStatusPoller *mocks.MockStatusPoller
+	mockWatchdog     *mocks.MockWatchdog
+	mockRefresher    *mocks.MockRefresher
+	mockHub          *mocks.MockHub
 
 	// Mocked wrappers
 	mockClock      *mocks.MockClock
@@ -90,7 +88,6 @@ func setup(t *testing.T) *testSetup {
 		mockExec:          mocks.NewMockExec(ctrl),
 		mockMath:          mocks.NewMockMath(ctrl),
 		mockHub:           mocks.NewMockHub(ctrl),
-		mockMetricTracker: mocks.NewMockMetricTracker(ctrl),
 	}
 
 	// Create test config
@@ -133,7 +130,6 @@ func setup(t *testing.T) *testSetup {
 		ts.mockExecutor,
 		ts.mockRefresher,
 		ts.mockHub,
-		ts.mockMetricTracker,
 	)
 	ts.app = app
 
@@ -691,10 +687,6 @@ func TestInitializeApp(t *testing.T) {
 		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
-		&metric.OpenPanelConfig{
-			ClientID:     "test-client-id",
-			ClientSecret: "test-client-secret",
-		},
 		"com.feralfile.test",
 		nil,
 	)
@@ -712,7 +704,6 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.Watchdog)
 	assert.NotNil(t, app.PlaylistRefresher)
 	assert.NotNil(t, app.Hub)
-	assert.NotNil(t, app.MetricTracker)
 
 	// Test all wrappers are initialized
 	assert.NotNil(t, app.Clock)
@@ -757,7 +748,6 @@ func TestInitializeTestApp(t *testing.T) {
 	mockRandom := mocks.NewMockRandomizer(ctrl)
 	mockExec := mocks.NewMockExec(ctrl)
 	mockMath := mocks.NewMockMath(ctrl)
-	mockMetricTracker := mocks.NewMockMetricTracker(ctrl)
 
 	app := initializeTestApp(
 		ctx,
@@ -782,7 +772,6 @@ func TestInitializeTestApp(t *testing.T) {
 		mockExecutor,
 		mockRefresher,
 		mockHub,
-		mockMetricTracker,
 	)
 
 	assert.NotNil(t, app)
@@ -798,7 +787,6 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.Equal(t, mockWatchdog, app.Watchdog)
 	assert.Equal(t, mockRefresher, app.PlaylistRefresher)
 	assert.Equal(t, mockHub, app.Hub)
-	assert.Equal(t, mockMetricTracker, app.MetricTracker)
 
 	// Test all wrappers are initialized
 	assert.Equal(t, mockClock, app.Clock)
