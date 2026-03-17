@@ -20,13 +20,8 @@ import (
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
-	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
-
-// OOMRecoveryCallback is called after the displayDefaultPlaylist command
-// is successfully sent to the webapp following an OOM kill event.
-type OOMRecoveryCallback func(oomKillCount int)
 
 //go:generate mockgen -source=mediator.go -destination=../mocks/mediator.go -package=mocks -mock_names=Mediator=MockMediator
 
@@ -34,32 +29,22 @@ type Mediator interface {
 	Start()
 	Stop()
 	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, internetConnected bool)
-	SetPendingOOMRecovery(oomKillCount int, onRecovered OOMRecoveryCallback)
 }
 
 type mediator struct {
-	relayer      relayer.Relayer
-	dbus         dbus.DBus
-	cdp          cdp.CDP
-	cmdHandler   commandrouter.Handler
-	executor     devicectl.Executor
-	statusPoller status.Poller
-	logger       *zap.Logger
-	refresher    playlist_refresher.Refresher
-	json         wrapper.JSON
+	relayer    relayer.Relayer
+	dbus       dbus.DBus
+	cdp        cdp.CDP
+	cmdHandler commandrouter.Handler
+	executor   devicectl.Executor
+	logger     *zap.Logger
+	refresher  playlist_refresher.Refresher
+	json       wrapper.JSON
 
 	mdnsMu         sync.Mutex
 	mdnsAdvertiser mdns.Advertiser
 	mdnsDeviceInfo mdns.DeviceInfo
-
-	oomMu              sync.Mutex
-	oomKillCount       int
-	oomRecoveryPending bool
-	oomOnRecovered     OOMRecoveryCallback
-	oomRetryCount      int
 }
-
-const MaxOOMRecoveryRetries = 60
 
 func New(
 	relayer relayer.Relayer,
@@ -68,20 +53,18 @@ func New(
 	cmdHandler commandrouter.Handler,
 	executor devicectl.Executor,
 	refresher playlist_refresher.Refresher,
-	statusPoller status.Poller,
 	json wrapper.JSON,
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
-		relayer:      relayer,
-		dbus:         dbus,
-		cdp:          cdp,
-		cmdHandler:   cmdHandler,
-		executor:     executor,
-		statusPoller: statusPoller,
-		json:         json,
-		logger:       l,
-		refresher:    refresher,
+		relayer:    relayer,
+		dbus:       dbus,
+		cdp:        cdp,
+		cmdHandler: cmdHandler,
+		executor:   executor,
+		json:       json,
+		logger:     l,
+		refresher:  refresher,
 	}
 }
 
@@ -106,92 +89,6 @@ func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceIn
 		if err := m.mdnsAdvertiser.Start(info); err != nil {
 			m.logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
 		}
-	}
-}
-
-func (m *mediator) SetPendingOOMRecovery(oomKillCount int, onRecovered OOMRecoveryCallback) {
-	m.oomMu.Lock()
-	defer m.oomMu.Unlock()
-	m.oomRecoveryPending = true
-	m.oomKillCount = oomKillCount
-	m.oomRetryCount = 0
-	m.oomOnRecovered = onRecovered
-
-	// Suppress player status notifications so the stale playlist state
-	// is never persisted on the relayer while recovery is in progress.
-	m.statusPoller.SuppressPlayerNotifications(true)
-
-	m.logger.Warn("OOM recovery armed, player notifications suppressed until recovery completes",
-		zap.Int("chromium_oom_kill_count", oomKillCount))
-}
-
-// tryOOMRecovery waits for the webapp to become responsive (non-nil
-// player status), then sends displayDefaultPlaylist and verifies.
-// Called on each dbus sysmetrics signal; the recovery stays armed
-// (and player notifications stay suppressed) until the player
-// confirms the default playlist or the retry limit is reached.
-func (m *mediator) tryOOMRecovery(ctx context.Context) {
-	m.oomMu.Lock()
-	if !m.oomRecoveryPending {
-		m.oomMu.Unlock()
-		return
-	}
-	count := m.oomKillCount
-	retries := m.oomRetryCount
-	m.oomRetryCount++
-	m.oomMu.Unlock()
-
-	if retries >= MaxOOMRecoveryRetries {
-		m.logger.Warn("OOM recovery: max retries reached, giving up",
-			zap.Int("chromium_oom_kill_count", count),
-			zap.Int("retries", retries))
-		m.finishOOMRecovery(count)
-		return
-	}
-
-	// Wait until the player is actually responsive before sending.
-	playerStatus, err := m.statusPoller.FetchPlayerStatus(ctx)
-	if err != nil || playerStatus == nil {
-		m.logger.Debug("OOM recovery: player not ready yet, will retry on next signal",
-			zap.Int("retry", retries),
-			zap.Error(err))
-		return
-	}
-
-	// Player is responsive but showing something else — override it.
-	cmd := commands.Command{
-		Type:      commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-		Arguments: map[string]any{},
-	}
-
-	if _, err := m.cmdHandler.Process(ctx, cmd); err != nil {
-		m.logger.Warn("OOM recovery: failed to send displayDefaultPlaylist, will retry",
-			zap.Error(err),
-			zap.Int("retry", retries))
-		return
-	}
-
-	m.finishOOMRecovery(count)
-
-	m.logger.Info("OOM recovery: sent displayDefaultPlaylist, will verify on next cycle",
-		zap.Int("chromium_oom_kill_count", count),
-		zap.Int("retry", retries))
-}
-
-func (m *mediator) finishOOMRecovery(count int) {
-	m.oomMu.Lock()
-	m.oomRecoveryPending = false
-	m.oomRetryCount = 0
-	cb := m.oomOnRecovered
-	m.oomMu.Unlock()
-
-	m.statusPoller.SuppressPlayerNotifications(false)
-
-	m.logger.Info("OOM recovery complete, player notifications resumed",
-		zap.Int("chromium_oom_kill_count", count))
-
-	if cb != nil {
-		cb(count)
 	}
 }
 
@@ -221,8 +118,6 @@ func (m *mediator) handleDBusSignal(
 
 		m.logger.Debug("Received sysmetrics", zap.String("metrics", string(body)))
 		m.executor.SaveLastSysMetrics(body)
-
-		m.tryOOMRecovery(ctx)
 
 	case dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE:
 		if len(payload.Body) != 1 {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	go_os "os"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +29,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
+	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -69,6 +69,7 @@ type app struct {
 	Relayer           relayer.Relayer
 	DBus              dbus.DBus
 	Mediator          mediator.Mediator
+	OOMRecoverer      oomrecovery.Recoverer
 	Executor          devicectl.Executor
 	DeviceStatus      status.DeviceStatus
 	StatusPoller      status.Poller
@@ -249,20 +250,9 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 
 	app.Logger.Info("controld started successfully")
 
-	// React only to unhandled chromium OOM kill events recorded by the
-	// earlyoom hook. The mediator will piggyback on periodic sysmetrics
-	// dbus signals to retry sending displayDefaultPlaylist until the
-	// webapp is ready, routing through the standard command pipeline.
-	oomKillCount := readCountFile(constants.CHROMIUM_OOM_KILL_COUNT_FILE, app.Logger, "chromium_oom_kill_count")
-	handledOOMKillCount := readCountFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE, app.Logger, "chromium_oom_kill_handled_count")
-	if oomKillCount > handledOOMKillCount {
-		app.Logger.Warn("Unhandled chromium OOM kill detected, arming OOM recovery",
-			zap.Int("chromium_oom_kill_count", oomKillCount),
-			zap.Int("chromium_oom_kill_handled_count", handledOOMKillCount))
-		app.Mediator.SetPendingOOMRecovery(oomKillCount, func(count int) {
-			writeCountFile(constants.CHROMIUM_OOM_KILL_HANDLED_COUNT_FILE, count, app.Logger, "chromium_oom_kill_handled_count")
-		})
-	}
+	// Check for unhandled chromium OOM kills and recover if needed.
+	// The recoverer handles file I/O, polling, and command dispatch internally.
+	app.OOMRecoverer.Start(ctx)
 
 	<-ctx.Done()
 
@@ -336,39 +326,6 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 	return connected, nil
 }
 
-func readCountFile(path string, logger *zap.Logger, field string) int {
-	data, err := go_os.ReadFile(path) // #nosec G304 -- path is from trusted constants only
-	if err != nil {
-		if !go_os.IsNotExist(err) {
-			logger.Warn("Failed to read counter file",
-				zap.String("field", field),
-				zap.String("path", path),
-				zap.Error(err))
-		}
-		return 0
-	}
-
-	count, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		logger.Warn("Failed to parse counter file",
-			zap.String("field", field),
-			zap.String("path", path),
-			zap.Error(err))
-		return 0
-	}
-
-	return count
-}
-
-func writeCountFile(path string, count int, logger *zap.Logger, field string) {
-	if err := go_os.WriteFile(path, []byte(fmt.Sprintf("%d\n", count)), 0600); err != nil {
-		logger.Error("Failed to write counter file",
-			zap.String("field", field),
-			zap.String("path", path),
-			zap.Int("count", count),
-			zap.Error(err))
-	}
-}
 
 // initializeApp initializes the app with real dependencies
 func initializeApp(
@@ -443,8 +400,11 @@ func initializeApp(
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
 
+	// OOM Recoverer
+	oomRecoverer := oomrecovery.New(poller, cmdHandler, logger)
+
 	// Mediator
-	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, poller, json, logger)
+	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
 
 	// Hub
 	hub := hub.New(context, wsHandler, cmdHandler, nil, json, logger)
@@ -466,6 +426,7 @@ func initializeApp(
 		Relayer:           relayer,
 		DBus:              dbusClient,
 		Mediator:          mediator,
+		OOMRecoverer:      oomRecoverer,
 		Executor:          executor,
 		DeviceStatus:      deviceStatus,
 		StatusPoller:      poller,
@@ -496,6 +457,7 @@ func initializeTestApp(
 	statusPoller status.Poller,
 	watchdog watchdog.Watchdog,
 	mediator mediator.Mediator,
+	oomRecoverer oomrecovery.Recoverer,
 	executor devicectl.Executor,
 	dynamicPlaylistRefresher playlist_refresher.Refresher,
 	hub hub.Hub,
@@ -517,6 +479,7 @@ func initializeTestApp(
 		Relayer:           relayer,
 		DBus:              dbus,
 		Mediator:          mediator,
+		OOMRecoverer:      oomRecoverer,
 		Executor:          executor,
 		DeviceStatus:      deviceStatus,
 		StatusPoller:      statusPoller,

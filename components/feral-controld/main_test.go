@@ -35,6 +35,7 @@ type testSetup struct {
 	mockRelayer      *mocks.MockRelayer
 	mockDBus         *mocks.MockDBus
 	mockMediator     *mocks.MockMediator
+	mockOOMRecoverer *mocks.MockOOMRecoverer
 	mockExecutor     *mocks.MockExecutor
 	mockDeviceStatus *mocks.MockDeviceStatus
 	mockStatusPoller *mocks.MockStatusPoller
@@ -72,6 +73,7 @@ func setup(t *testing.T) *testSetup {
 		mockRelayer:       mocks.NewMockRelayer(ctrl),
 		mockDBus:          mocks.NewMockDBus(ctrl),
 		mockMediator:      mocks.NewMockMediator(ctrl),
+		mockOOMRecoverer:  mocks.NewMockOOMRecoverer(ctrl),
 		mockExecutor:      mocks.NewMockExecutor(ctrl),
 		mockDeviceStatus:  mocks.NewMockDeviceStatus(ctrl),
 		mockStatusPoller:  mocks.NewMockStatusPoller(ctrl),
@@ -127,6 +129,7 @@ func setup(t *testing.T) *testSetup {
 		ts.mockStatusPoller,
 		ts.mockWatchdog,
 		ts.mockMediator,
+		ts.mockOOMRecoverer,
 		ts.mockExecutor,
 		ts.mockRefresher,
 		ts.mockHub,
@@ -202,6 +205,9 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 
+				// Mock OOM recoverer
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+
 				// Mock DBus call
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
@@ -270,6 +276,9 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock Relayer connect and close
 				ts.mockRelayer.EXPECT().Connect(gomock.Any()).Return(nil)
 				ts.mockRelayer.EXPECT().Close()
+
+				// Mock OOM recoverer
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
 		},
 		{
@@ -311,6 +320,9 @@ func TestApp_Run_Success(t *testing.T) {
 
 				// Mock Daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+
+				// Mock OOM recoverer
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 
 				// Mock DBus call
 				ts.mockDBus.EXPECT().
@@ -515,6 +527,9 @@ func TestApp_Run_Errors(t *testing.T) {
 
 				// Mock Daemon notify failure
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(false, errors.New("daemon notify failed"))
+
+				// Mock OOM recoverer
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
 			wantErr: "", // No error expected
 		},
@@ -570,6 +585,9 @@ func TestApp_Run_Errors(t *testing.T) {
 
 				// Mock daemon notify
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+
+				// Mock OOM recoverer
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
 			wantErr: "",
 		},
@@ -698,6 +716,7 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.Relayer)
 	assert.NotNil(t, app.DBus)
 	assert.NotNil(t, app.Mediator)
+	assert.NotNil(t, app.OOMRecoverer)
 	assert.NotNil(t, app.Executor)
 	assert.NotNil(t, app.DeviceStatus)
 	assert.NotNil(t, app.StatusPoller)
@@ -730,6 +749,7 @@ func TestInitializeTestApp(t *testing.T) {
 	mockRelayer := mocks.NewMockRelayer(ctrl)
 	mockDBus := mocks.NewMockDBus(ctrl)
 	mockMediator := mocks.NewMockMediator(ctrl)
+	mockOOMRecoverer := mocks.NewMockOOMRecoverer(ctrl)
 	mockExecutor := mocks.NewMockExecutor(ctrl)
 	mockDeviceStatus := mocks.NewMockDeviceStatus(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -769,6 +789,7 @@ func TestInitializeTestApp(t *testing.T) {
 		mockStatusPoller,
 		mockWatchdog,
 		mockMediator,
+		mockOOMRecoverer,
 		mockExecutor,
 		mockRefresher,
 		mockHub,
@@ -781,6 +802,7 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.Equal(t, mockRelayer, app.Relayer)
 	assert.Equal(t, mockDBus, app.DBus)
 	assert.Equal(t, mockMediator, app.Mediator)
+	assert.Equal(t, mockOOMRecoverer, app.OOMRecoverer)
 	assert.Equal(t, mockExecutor, app.Executor)
 	assert.Equal(t, mockDeviceStatus, app.DeviceStatus)
 	assert.Equal(t, mockStatusPoller, app.StatusPoller)
