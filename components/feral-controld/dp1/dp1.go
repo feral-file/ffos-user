@@ -176,7 +176,7 @@ func buildPlaylistItems(duration int, tokens []ffindexer.Token) []dp1playlist.Pl
 	return items
 }
 func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.PlaylistItem {
-	title := token.GetTitle()
+	title := token.GetName()
 	previewURL := token.GetPreviewURL()
 	chain := normalizeChain(token.Chain)
 

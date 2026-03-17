@@ -20,7 +20,6 @@ import (
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
-	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -33,15 +32,14 @@ type Mediator interface {
 }
 
 type mediator struct {
-	relayer      relayer.Relayer
-	dbus         dbus.DBus
-	cdp          cdp.CDP
-	cmdHandler   commandrouter.Handler
-	executor     devicectl.Executor
-	statusPoller status.Poller
-	logger       *zap.Logger
-	refresher    playlist_refresher.Refresher
-	json         wrapper.JSON
+	relayer    relayer.Relayer
+	dbus       dbus.DBus
+	cdp        cdp.CDP
+	cmdHandler commandrouter.Handler
+	executor   devicectl.Executor
+	logger     *zap.Logger
+	refresher  playlist_refresher.Refresher
+	json       wrapper.JSON
 
 	mdnsMu         sync.Mutex
 	mdnsAdvertiser mdns.Advertiser
@@ -55,20 +53,18 @@ func New(
 	cmdHandler commandrouter.Handler,
 	executor devicectl.Executor,
 	refresher playlist_refresher.Refresher,
-	statusPoller status.Poller,
 	json wrapper.JSON,
 	l *zap.Logger,
 ) Mediator {
 	return &mediator{
-		relayer:      relayer,
-		dbus:         dbus,
-		cdp:          cdp,
-		cmdHandler:   cmdHandler,
-		executor:     executor,
-		statusPoller: statusPoller,
-		json:         json,
-		logger:       l,
-		refresher:    refresher,
+		relayer:    relayer,
+		dbus:       dbus,
+		cdp:        cdp,
+		cmdHandler: cmdHandler,
+		executor:   executor,
+		json:       json,
+		logger:     l,
+		refresher:  refresher,
 	}
 }
 
