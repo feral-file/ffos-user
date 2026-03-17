@@ -100,7 +100,7 @@ func (r *recoverer) run(ctx context.Context, oomKillCount int) {
 	for {
 		select {
 		case <-ctx.Done():
-			r.logger.Warn("OOM recovery cancelled by context",
+			r.logger.Warn("OOM recovery canceled by context",
 				zap.Int("chromium_oom_kill_count", oomKillCount),
 				zap.Int("retries", retries))
 			r.finish(oomKillCount)
