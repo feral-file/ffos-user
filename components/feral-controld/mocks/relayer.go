@@ -127,17 +127,3 @@ func (mr *MockRelayerMockRecorder) Send(ctx, data interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockRelayer)(nil).Send), ctx, data)
 }
-
-// SendNotification mocks base method.
-func (m *MockRelayer) SendNotification(ctx context.Context, notificationType relayer.NotificationType, message interface{}) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SendNotification", ctx, notificationType, message)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// SendNotification indicates an expected call of SendNotification.
-func (mr *MockRelayerMockRecorder) SendNotification(ctx, notificationType, message interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendNotification", reflect.TypeOf((*MockRelayer)(nil).SendNotification), ctx, notificationType, message)
-}
