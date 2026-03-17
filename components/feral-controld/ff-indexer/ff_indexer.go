@@ -12,7 +12,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-const FF_INDEXER_HOSTS = "indexer-v2.feralfile.com"
+const FF_INDEXER_HOST = "indexer-v2.feralfile.com"
 
 type Display struct {
 	ImageURL     *string `json:"image_url,omitempty"`
@@ -138,7 +138,7 @@ func validateEndpoint(endpoint string) error {
 	if err != nil {
 		return err
 	}
-	if url.Host != FF_INDEXER_HOSTS {
+	if url.Host != FF_INDEXER_HOST {
 		return fmt.Errorf("invalid endpoint: %s", endpoint)
 	}
 	return nil
