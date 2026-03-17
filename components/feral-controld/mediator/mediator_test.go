@@ -19,7 +19,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
-	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
 type testSetup struct {
@@ -30,7 +29,6 @@ type testSetup struct {
 	mockCDP            *mocks.MockCDP
 	mockExecutor       *mocks.MockExecutor
 	mockCommandHandler *mocks.MockCommandHandler
-	mockStatusPoller   *mocks.MockStatusPoller
 	mockRefresher      *mocks.MockRefresher
 	mockJSON           *mocks.MockJSON
 	mediator           mediator.Mediator
@@ -47,7 +45,6 @@ func setup(t *testing.T) *testSetup {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockExecutor := mocks.NewMockExecutor(ctrl)
 	mockCommandHandler := mocks.NewMockCommandHandler(ctrl)
-	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockRefresher := mocks.NewMockRefresher(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 
@@ -58,7 +55,6 @@ func setup(t *testing.T) *testSetup {
 		mockCommandHandler,
 		mockExecutor,
 		mockRefresher,
-		mockStatusPoller,
 		mockJSON,
 		logger,
 	)
@@ -71,7 +67,6 @@ func setup(t *testing.T) *testSetup {
 		mockCDP:            mockCDP,
 		mockExecutor:       mockExecutor,
 		mockCommandHandler: mockCommandHandler,
-		mockStatusPoller:   mockStatusPoller,
 		mockRefresher:      mockRefresher,
 		mockJSON:           mockJSON,
 		mediator:           med,
@@ -638,124 +633,6 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestMediator_OOMRecovery_WaitsForPlayerThenVerifies(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	metricsData := []byte(`{"cpu": 50}`)
-
-	// Arm OOM recovery — expects SuppressPlayerNotifications(true)
-	ts.mockStatusPoller.EXPECT().
-		SuppressPlayerNotifications(true).
-		Times(1)
-
-	var recovered bool
-	ts.mediator.SetPendingOOMRecovery(4, func(count int) {
-		recovered = true
-		assert.Equal(t, 4, count)
-	})
-
-	// Register handler
-	var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
-	ts.mockDbus.EXPECT().
-		OnBusSignal(gomock.Any()).
-		DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
-			capturedHandler = handler
-		}).Times(1)
-	ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
-	ts.mediator.Start()
-
-	payload := godbus.DBusPayload{
-		Member: dbus.MONITORD_EVENT_SYSMETRICS,
-		Body:   []interface{}{metricsData},
-	}
-
-	// --- Signal 1: player status nil → skip, don't send command ---
-	ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
-	ts.mockStatusPoller.EXPECT().
-		FetchPlayerStatus(gomock.Any()).
-		Return(nil, nil).
-		Times(1)
-
-	_, err := capturedHandler(ts.ctx, payload)
-	assert.NoError(t, err)
-	assert.False(t, recovered, "should NOT have disarmed yet (player nil)")
-
-	// --- Signal 2: player shows non-default playlist → send displayDefaultPlaylist; code disarms immediately on success ---
-	ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
-	ts.mockStatusPoller.EXPECT().
-		FetchPlayerStatus(gomock.Any()).
-		Return(&status.PlayerStatus{Command: string(commands.CMD_DISPLAY_PLAYLIST)}, nil).
-		Times(1)
-	ts.mockCommandHandler.EXPECT().
-		Process(gomock.Any(), commands.Command{
-			Type:      commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-			Arguments: map[string]any{},
-		}).
-		Return(nil, nil).
-		Times(1)
-	ts.mockStatusPoller.EXPECT().
-		SuppressPlayerNotifications(false).
-		Times(1)
-
-	_, err = capturedHandler(ts.ctx, payload)
-	assert.NoError(t, err)
-	assert.True(t, recovered, "should have disarmed and called callback after sending command")
-}
-
-func TestMediator_OOMRecovery_MaxRetries(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	metricsData := []byte(`{"cpu": 50}`)
-
-	// Arm OOM recovery
-	ts.mockStatusPoller.EXPECT().
-		SuppressPlayerNotifications(true).
-		Times(1)
-
-	var recovered bool
-	ts.mediator.SetPendingOOMRecovery(4, func(count int) {
-		recovered = true
-	})
-
-	var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
-	ts.mockDbus.EXPECT().
-		OnBusSignal(gomock.Any()).
-		DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
-			capturedHandler = handler
-		}).Times(1)
-	ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
-	ts.mediator.Start()
-
-	payload := godbus.DBusPayload{
-		Member: dbus.MONITORD_EVENT_SYSMETRICS,
-		Body:   []interface{}{metricsData},
-	}
-
-	// Exhaust all retries: player always nil → never sends command, just waits
-	ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(mediator.MaxOOMRecoveryRetries + 1)
-	ts.mockStatusPoller.EXPECT().
-		FetchPlayerStatus(gomock.Any()).
-		Return(nil, nil).
-		Times(mediator.MaxOOMRecoveryRetries)
-
-	for i := 0; i < mediator.MaxOOMRecoveryRetries; i++ {
-		_, err := capturedHandler(ts.ctx, payload)
-		assert.NoError(t, err)
-	}
-	assert.False(t, recovered, "should not have recovered via confirmation")
-
-	// Next signal triggers the max-retries give-up path → unsuppress
-	ts.mockStatusPoller.EXPECT().
-		SuppressPlayerNotifications(false).
-		Times(1)
-
-	_, err := capturedHandler(ts.ctx, payload)
-	assert.NoError(t, err)
-	assert.True(t, recovered, "should have given up and called callback")
 }
 
 func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
