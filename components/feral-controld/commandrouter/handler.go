@@ -54,9 +54,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return nil, nil
 	}
 
+	var result interface{}
+	var err error
+
 	if commandType.DeviceCtlCommand() {
 		// Handle device control command
-		result, err := h.executor.Execute(ctx,
+		result, err = h.executor.Execute(ctx,
 			commands.Command{
 				Type:      commandType,
 				Arguments: command.Arguments,
@@ -67,11 +70,21 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 
 		return result, nil
-
 	} else {
 		var playlist *dp1.Playlist
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
-			var err error
+			status.RecordPlaybackAttempt()
+			defer func() {
+				if err != nil {
+					status.RecordPlaybackFailure()
+					return
+				}
+				h.logger.Info("result from CDP", zap.Any("result", result))
+				if !isPlayerResponseOk(result) {
+					h.logger.Warn("Playback verification failed: player did not respond with ok")
+					status.RecordPlaybackFailure()
+				}
+			}()
 			switch {
 			case command.Arguments["playlistUrl"] != nil:
 				url, ok := command.Arguments["playlistUrl"].(string)
@@ -90,12 +103,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlist is not a map")
 				}
 
-				playlistBytes, err := h.json.Marshal(playlistMap)
+				var playlistBytes []byte
+				playlistBytes, err = h.json.Marshal(playlistMap)
 				if err != nil {
 					return nil, fmt.Errorf("failed to marshal playlist: %w", err)
 				}
 
-				if err := h.json.Unmarshal(playlistBytes, &playlist); err != nil {
+				if err = h.json.Unmarshal(playlistBytes, &playlist); err != nil {
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
 
@@ -116,7 +130,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 
 		// Forward to CDP (final, full data)
-		result, err := h.sendCDPRequest(command)
+		result, err = h.sendCDPRequest(command)
 		if err != nil {
 			return nil, err
 		}
@@ -128,6 +142,21 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		return result, nil
 	}
+}
+
+// isPlayerResponseOk checks whether the CDP result from the player
+// contains { "message": { "ok": true } }.
+func isPlayerResponseOk(result interface{}) bool {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	msg, ok := m["message"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	okVal, _ := msg["ok"].(bool)
+	return okVal
 }
 
 // sendCDPRequest marshals payload and sends to CDP
