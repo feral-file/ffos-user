@@ -13,6 +13,13 @@ fi
 
 pamixer --set-volume "$PACTL_PERCENT"
 
+# Reset chromium OOM recovery state on each boot
+if [ -d /var/lib/oom_state ]; then
+    echo "0" > /var/lib/oom_state/chromium-oom-kill-count
+    echo "0" > /var/lib/oom_state/chromium-oom-kill-handled-count
+    echo "0" > /var/lib/oom_state/chromium-oom-kill-last-event
+fi
+
 # Backward compatibility: Disable and stop old services if they are enabled
 if systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; then
     systemctl --user disable "feral-sys-monitord.service"

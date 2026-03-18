@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -103,7 +102,7 @@ func createDynamicPlaylistJSON() string {
 		},
 		"dynamicQueries": [
 			{
-				"endpoint": "https://indexer.feralfile.com/graphql",
+				"endpoint": "https://indexer-v2.feralfile.com/graphql",
 				"params": {
 					"limit": "50",
 					"offset": "0"
@@ -115,53 +114,30 @@ func createDynamicPlaylistJSON() string {
 
 // Helper function to create mock tokens (v2 schema)
 func createMockTokens() []ffindexer.Token {
+	name1 := "Test Token 1"
+	name2 := "Test Token 2"
+	imageURL1 := "http://example.com/preview1.jpg"
+	imageURL2 := "http://example.com/preview2.jpg"
+
 	return []ffindexer.Token{
 		{
-			ID:              "1",
-			TokenCID:        "token1",
 			Chain:           "ethereum",
 			Standard:        "ERC721",
 			ContractAddress: "0x1234567890abcdef",
 			TokenNumber:     "1",
-			CurrentOwner:    "0xowner1",
-			Burned:          false,
-			Metadata: &ffindexer.TokenMetadata{
-				Name:        "Test Token 1",
-				Description: "Test description 1",
-				ImageURL:    stringPtr("http://example.com/preview1.jpg"),
-			},
-			Owners: &ffindexer.PaginatedOwners{
-				Items: []ffindexer.Owner{
-					{
-						OwnerAddress: "0xowner1",
-						Quantity:     "1",
-					},
-				},
-				Total: "1",
+			Display: &ffindexer.Display{
+				Name:     &name1,
+				ImageURL: &imageURL1,
 			},
 		},
 		{
-			ID:              "2",
-			TokenCID:        "token2",
 			Chain:           "tezos",
 			Standard:        "FA2",
 			ContractAddress: "0xabcdef1234567890",
 			TokenNumber:     "2",
-			CurrentOwner:    "0xowner2",
-			Burned:          false,
-			Metadata: &ffindexer.TokenMetadata{
-				Name:        "Test Token 2",
-				Description: "Test description 2",
-				ImageURL:    stringPtr("http://example.com/preview2.jpg"),
-			},
-			Owners: &ffindexer.PaginatedOwners{
-				Items: []ffindexer.Owner{
-					{
-						OwnerAddress: "0xowner2",
-						Quantity:     "1",
-					},
-				},
-				Total: "1",
+			Display: &ffindexer.Display{
+				Name:     &name2,
+				ImageURL: &imageURL2,
 			},
 		},
 	}
@@ -169,55 +145,25 @@ func createMockTokens() []ffindexer.Token {
 
 // Helper to create simple test token
 // tokenID is used as both the test identifier and to derive the token number
-// For example: "token1" -> TokenNumber="1", TokenCID="Qm...token1..."
+// For example: "token1" -> TokenNumber="1"
 func createSimpleToken(tokenID, chain string, ownerAddr string, quantity int) ffindexer.Token {
-	burned := false
-	if quantity == 0 {
-		burned = true
-		ownerAddr = ""
-	}
-
 	// Extract number from tokenID (e.g., "token1" -> "1", "token123" -> "123")
 	tokenNumber := tokenID
 	if len(tokenID) > 5 && tokenID[:5] == "token" {
 		tokenNumber = tokenID[5:]
 	}
 
-	// Use token number as ID string
-	id := "0"
-	if num, err := strconv.ParseUint(tokenNumber, 10, 64); err == nil {
-		id = strconv.FormatUint(num, 10)
-	}
-
-	// Generate a fake IPFS CID for testing
-	fakeCID := fmt.Sprintf("Qm%s%s", tokenID, "abcdefghijklmnopqrstuvwxyz123456")
+	imageURL := "http://example.com/image.jpg"
 
 	token := ffindexer.Token{
-		ID:              id,
-		TokenCID:        fakeCID,
 		Chain:           chain,
 		Standard:        "ERC721",
 		ContractAddress: "0x1234567890abcdef",
 		TokenNumber:     tokenNumber,
-		CurrentOwner:    ownerAddr,
-		Burned:          burned,
-		Metadata: &ffindexer.TokenMetadata{
-			Name:        tokenID,
-			Description: "Test token",
-			ImageURL:    stringPtr("http://example.com/image.jpg"),
+		Display: &ffindexer.Display{
+			Name:     &tokenID,
+			ImageURL: &imageURL,
 		},
-	}
-
-	if quantity > 0 && ownerAddr != "" {
-		token.Owners = &ffindexer.PaginatedOwners{
-			Items: []ffindexer.Owner{
-				{
-					OwnerAddress: ownerAddr,
-					Quantity:     fmt.Sprintf("%d", quantity),
-				},
-			},
-			Total: "1",
-		}
 	}
 
 	return token
@@ -305,7 +251,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 			// Note: Defaults will be nil, so DEFAULT_DURATION will be used
 			playlist.DynamicQueries = []dp1.DynamicQuery{
 				{
-					Endpoint: "https://indexer.feralfile.com/graphql",
+					Endpoint: "https://indexer-v2.feralfile.com/graphql",
 					Params: map[string]string{
 						"limit":  "50",
 						"offset": "0",
@@ -318,7 +264,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 	// Expect FFIndexer query
 	ts.mockFFIndexer.EXPECT().
 		QueryTokens(ts.ctx,
-			"https://indexer.feralfile.com/graphql",
+			"https://indexer-v2.feralfile.com/graphql",
 			map[string]string{
 				"limit":  "100", // minimal is false so it uses MAX_PLAYLIST_ITEMS_LIMIT
 				"offset": "0",
@@ -442,7 +388,7 @@ func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
 		},
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params: map[string]string{
 					"limit":  "50",
 					"offset": "0",
@@ -454,7 +400,7 @@ func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
 	// Expect FFIndexer query
 	ts.mockFFIndexer.EXPECT().
 		QueryTokens(ts.ctx,
-			"https://indexer.feralfile.com/graphql",
+			"https://indexer-v2.feralfile.com/graphql",
 			map[string]string{
 				"limit":  "50", // minimal is true so it uses MINIMAL_PLAYLIST_ITEMS_LIMIT
 				"offset": "0",
@@ -478,11 +424,11 @@ func TestDP1_ProcessDynamicPlaylist_MultipleQueriesError(t *testing.T) {
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -517,7 +463,7 @@ func TestDP1_ProcessDynamicPlaylist_FFIndexerError(t *testing.T) {
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -525,7 +471,7 @@ func TestDP1_ProcessDynamicPlaylist_FFIndexerError(t *testing.T) {
 
 	// Expect FFIndexer query to fail
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		Return(nil, errors.New("indexer error"))
 
 	// Test
@@ -543,7 +489,7 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlag(t *testing.T) {
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -551,7 +497,7 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlag(t *testing.T) {
 
 	// Expect FFIndexer query with minimal size
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
 			assert.Equal(t, "50", params["limit"]) // Should use MINIMAL_PLAYLIST_ITEMS_LIMIT
 			return mockTokens, nil
@@ -583,7 +529,7 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -592,14 +538,14 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 	// Expect multiple FFIndexer queries for pagination
 	gomock.InOrder(
 		ts.mockFFIndexer.EXPECT().
-			QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+			QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 			DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
 				assert.Equal(t, "100", params["limit"]) // MAX_PLAYLIST_ITEMS_LIMIT
 				assert.Equal(t, "0", params["offset"])
 				return firstBatch, nil
 			}),
 		ts.mockFFIndexer.EXPECT().
-			QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+			QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 			DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
 				assert.Equal(t, "100", params["limit"])
 				assert.Equal(t, "100", params["offset"])
@@ -624,7 +570,7 @@ func TestDP1_ProcessDynamicPlaylist_WithDefaults(t *testing.T) {
 		Playlist: dp1playlist.Playlist{},
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -634,7 +580,7 @@ func TestDP1_ProcessDynamicPlaylist_WithDefaults(t *testing.T) {
 
 	// Expect FFIndexer query
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		Return(mockTokens, nil)
 
 	// Test
@@ -657,7 +603,7 @@ func TestDP1_ProcessDynamicPlaylist_WithoutDefaults(t *testing.T) {
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -665,7 +611,7 @@ func TestDP1_ProcessDynamicPlaylist_WithoutDefaults(t *testing.T) {
 
 	// Expect FFIndexer query
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		Return(mockTokens, nil)
 
 	// Test
@@ -744,35 +690,24 @@ func TestDP1_NormalizeChain(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
 
+			testName := "Test"
+			imageURL := "http://example.com/preview.jpg"
+
 			token := ffindexer.Token{
-				ID:              "1",
-				TokenCID:        "test-token",
 				Chain:           tt.input,
 				Standard:        "ERC721",
 				ContractAddress: "0x123",
 				TokenNumber:     "1",
-				CurrentOwner:    "0xowner",
-				Burned:          false,
-				Metadata: &ffindexer.TokenMetadata{
-					Name:        "Test",
-					Description: "Test token",
-					ImageURL:    stringPtr("http://example.com/preview.jpg"),
-				},
-				Owners: &ffindexer.PaginatedOwners{
-					Items: []ffindexer.Owner{
-						{
-							OwnerAddress: "0xowner",
-							Quantity:     "1",
-						},
-					},
-					Total: "1",
+				Display: &ffindexer.Display{
+					Name:     &testName,
+					ImageURL: &imageURL,
 				},
 			}
 
 			playlist := dp1.Playlist{
 				DynamicQueries: []dp1.DynamicQuery{
 					{
-						Endpoint: "https://indexer.feralfile.com/graphql",
+						Endpoint: "https://indexer-v2.feralfile.com/graphql",
 						Params:   map[string]string{"limit": "50"},
 					},
 				},
@@ -780,7 +715,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 
 			// Expect FFIndexer query
 			ts.mockFFIndexer.EXPECT().
-				QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+				QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 				Return([]ffindexer.Token{token}, nil)
 
 			// Test
@@ -802,18 +737,15 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlagWithZeroBalanceFiltering(t *testi
 	defer ts.teardown()
 
 	// Create first batch: 30 tokens (less than MINIMAL_PLAYLIST_ITEMS_LIMIT=50)
-	// Note: Current implementation doesn't filter by balance, so all tokens are included
-	// The loop will break after first batch since len(tokens) < limit
 	firstBatch := make([]ffindexer.Token, 30)
 	for i := 0; i < 30; i++ {
-		quantity := 1
-		firstBatch[i] = createSimpleToken(fmt.Sprintf("token%d", i+1), "ethereum", "0xowner", quantity)
+		firstBatch[i] = createSimpleToken(fmt.Sprintf("token%d", i+1), "ethereum", "0xowner", 1)
 	}
 
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -822,7 +754,7 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlagWithZeroBalanceFiltering(t *testi
 	// Expect single FFIndexer query with minimal limit
 	// Loop breaks after first batch since len(ffTokens) >= MINIMAL_PLAYLIST_ITEMS_LIMIT
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
 			assert.Equal(t, "50", params["limit"]) // Should use MINIMAL_PLAYLIST_ITEMS_LIMIT
 			assert.Equal(t, "0", params["offset"])
@@ -835,11 +767,9 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlagWithZeroBalanceFiltering(t *testi
 	assert.NotNil(t, result)
 
 	// Should return 30 tokens (all from first batch)
-	// Note: Current implementation doesn't filter by balance and breaks after first batch
 	assert.Len(t, result.Items, 30)
 
 	// Verify that we have 30 items with UUID IDs
-	// PlaylistItem.ID uses uuid.New().String(), so we just verify the count and format
 	for i, item := range result.Items {
 		assert.NotEmpty(t, item.ID, "Item %d should have an ID", i)
 		// Verify UUID format (should be 36 characters with hyphens)
@@ -851,19 +781,18 @@ func TestDP1_ProcessDynamicPlaylist_FiltersZeroBalanceTokens(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Create tokens with mixed balances - some zero, some non-zero
-	// Note: Current implementation doesn't filter by balance, so all tokens are included
+	// Create tokens - all tokens are included in the new schema
 	mockTokens := []ffindexer.Token{
-		createSimpleToken("token1", "ethereum", "0xowner", 1), // Non-zero balance
-		createSimpleToken("token2", "ethereum", "0xowner", 0), // Zero balance (burned)
-		createSimpleToken("token3", "tezos", "0xowner", 2),    // Non-zero balance
-		createSimpleToken("token4", "bitmark", "0xowner", 0),  // Zero balance (burned)
+		createSimpleToken("token1", "ethereum", "0xowner", 1),
+		createSimpleToken("token2", "ethereum", "0xowner", 0),
+		createSimpleToken("token3", "tezos", "0xowner", 2),
+		createSimpleToken("token4", "bitmark", "0xowner", 0),
 	}
 
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
@@ -871,7 +800,7 @@ func TestDP1_ProcessDynamicPlaylist_FiltersZeroBalanceTokens(t *testing.T) {
 
 	// Expect FFIndexer query to return tokens with mixed balances
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		Return(mockTokens, nil)
 
 	// Test
@@ -879,7 +808,7 @@ func TestDP1_ProcessDynamicPlaylist_FiltersZeroBalanceTokens(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
 
-	// Note: Current implementation doesn't filter by balance, so all 4 tokens are included
+	// All 4 tokens are included
 	assert.Len(t, result.Items, 4)
 
 	// Verify that all items have UUID IDs
@@ -933,61 +862,44 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 		},
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
 	}
 
 	// Create tokens - these will completely replace the original items
+	name1 := "New Token 1"
+	name2 := "New Token 2"
+	imageURL1 := "http://example.com/new1.jpg"
+	imageURL2 := "http://example.com/new2.jpg"
+
 	mockTokens := []ffindexer.Token{
 		{
-			ID:              "1",
-			TokenCID:        "token1",
 			Chain:           "ethereum",
 			Standard:        "ERC721",
 			ContractAddress: "0x1111111111111111",
 			TokenNumber:     "100",
-			CurrentOwner:    "0xowner1",
-			Burned:          false,
-			Metadata: &ffindexer.TokenMetadata{
-				Name:        "New Token 1",
-				Description: "This replaces all original items",
-				ImageURL:    stringPtr("http://example.com/new1.jpg"),
-			},
-			Owners: &ffindexer.PaginatedOwners{
-				Items: []ffindexer.Owner{
-					{OwnerAddress: "0xowner1", Quantity: "1"},
-				},
-				Total: "1",
+			Display: &ffindexer.Display{
+				Name:     &name1,
+				ImageURL: &imageURL1,
 			},
 		},
 		{
-			ID:              "2",
-			TokenCID:        "token2",
 			Chain:           "tezos",
 			Standard:        "FA2",
 			ContractAddress: "0x2222222222222222",
 			TokenNumber:     "200",
-			CurrentOwner:    "0xowner2",
-			Burned:          false,
-			Metadata: &ffindexer.TokenMetadata{
-				Name:        "New Token 2",
-				Description: "Another new item",
-				ImageURL:    stringPtr("http://example.com/new2.jpg"),
-			},
-			Owners: &ffindexer.PaginatedOwners{
-				Items: []ffindexer.Owner{
-					{OwnerAddress: "0xowner2", Quantity: "1"},
-				},
-				Total: "1",
+			Display: &ffindexer.Display{
+				Name:     &name2,
+				ImageURL: &imageURL2,
 			},
 		},
 	}
 
 	// Expect FFIndexer query
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		Return(mockTokens, nil)
 
 	// Test
@@ -1018,86 +930,58 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 	playlist := dp1.Playlist{
 		DynamicQueries: []dp1.DynamicQuery{
 			{
-				Endpoint: "https://indexer.feralfile.com/graphql",
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
 			},
 		},
 	}
 
 	// Create tokens where some have duplicate IDs (same contractAddress, chain, tokenNumber)
-	// Note: The current implementation doesn't deduplicate, so duplicates will appear
-	// This test verifies that if deduplication is added, it works correctly
+	name1 := "Token 1"
+	name2 := "Token 2"
+	nameDup := "Duplicate Token"
+	imageURL1 := "http://example.com/token1.jpg"
+	imageURL2 := "http://example.com/token2.jpg"
+	imageURLDup := "http://example.com/duplicate.jpg"
+
 	mockTokens := []ffindexer.Token{
 		{
-			ID:              "1",
-			TokenCID:        "token1",
 			Chain:           "ethereum",
 			Standard:        "ERC721",
 			ContractAddress: "0x1111111111111111",
 			TokenNumber:     "100",
-			CurrentOwner:    "0xowner1",
-			Burned:          false,
-			Metadata: &ffindexer.TokenMetadata{
-				Name:        "Token 1",
-				Description: "First token",
-				ImageURL:    stringPtr("http://example.com/token1.jpg"),
-			},
-			Owners: &ffindexer.PaginatedOwners{
-				Items: []ffindexer.Owner{
-					{OwnerAddress: "0xowner1", Quantity: "1"},
-				},
-				Total: "1",
+			Display: &ffindexer.Display{
+				Name:     &name1,
+				ImageURL: &imageURL1,
 			},
 		},
 		{
-			ID:              "2",
-			TokenCID:        "token2",
 			Chain:           "ethereum",
 			Standard:        "ERC721",
 			ContractAddress: "0x2222222222222222",
 			TokenNumber:     "200",
-			CurrentOwner:    "0xowner2",
-			Burned:          false,
-			Metadata: &ffindexer.TokenMetadata{
-				Name:        "Token 2",
-				Description: "Second token",
-				ImageURL:    stringPtr("http://example.com/token2.jpg"),
-			},
-			Owners: &ffindexer.PaginatedOwners{
-				Items: []ffindexer.Owner{
-					{OwnerAddress: "0xowner2", Quantity: "1"},
-				},
-				Total: "1",
+			Display: &ffindexer.Display{
+				Name:     &name2,
+				ImageURL: &imageURL2,
 			},
 		},
 		// Duplicate token (same contractAddress, chain, tokenNumber as token 1)
 		// This will generate the same ID as token 1
 		{
-			ID:              "3",
-			TokenCID:        "token3",
 			Chain:           "ethereum",
 			Standard:        "ERC721",
 			ContractAddress: "0x1111111111111111", // Same as token 1
 			TokenNumber:     "100",                // Same as token 1
-			CurrentOwner:    "0xowner3",
-			Burned:          false,
-			Metadata: &ffindexer.TokenMetadata{
-				Name:        "Duplicate Token",
-				Description: "This has the same ID as token 1",
-				ImageURL:    stringPtr("http://example.com/duplicate.jpg"),
-			},
-			Owners: &ffindexer.PaginatedOwners{
-				Items: []ffindexer.Owner{
-					{OwnerAddress: "0xowner3", Quantity: "1"},
-				},
-				Total: "1",
+			Display: &ffindexer.Display{
+				Name:     &nameDup,
+				ImageURL: &imageURLDup,
 			},
 		},
 	}
 
 	// Expect FFIndexer query
 	ts.mockFFIndexer.EXPECT().
-		QueryTokens(ts.ctx, "https://indexer.feralfile.com/graphql", gomock.Any()).
+		QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 		Return(mockTokens, nil)
 
 	// Test
@@ -1116,9 +1000,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 		idSet[item.ID] = true
 	}
 
-	// Note: Current implementation doesn't deduplicate, so duplicates may exist
-	// This test documents the current behavior
-	// If deduplication is added later, this test should be updated to assert no duplicates
+	// The implementation doesn't deduplicate, so duplicates may exist
 	if duplicateCount > 0 {
 		t.Logf("Warning: Found %d duplicate IDs. Current implementation doesn't deduplicate.", duplicateCount)
 	}

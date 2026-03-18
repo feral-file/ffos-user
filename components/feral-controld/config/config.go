@@ -13,7 +13,6 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
-	"github.com/feral-file/ffos-user/components/feral-controld/metric"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -31,11 +30,10 @@ type RelayerConfig struct {
 
 // Configuration for all components
 type Config struct {
-	CDPConfig       *CDPConfig              `json:"cdp"`
-	RelayerConfig   *RelayerConfig          `json:"relayer"`
-	SentryConfig    *logger.SentryConfig    `json:"sentry"`
-	OpenPanelConfig *metric.OpenPanelConfig `json:"openpanel"`
-	EnableHub       bool                    `json:"enableHub"`
+	CDPConfig     *CDPConfig           `json:"cdp"`
+	RelayerConfig *RelayerConfig       `json:"relayer"`
+	SentryConfig  *logger.SentryConfig `json:"sentry"`
+	EnableHub     bool                 `json:"enableHub"`
 
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
@@ -192,10 +190,9 @@ func (m *defaultConfigManager) Get() *Config {
 
 	if m.config == nil {
 		m.config = &Config{
-			CDPConfig:       &CDPConfig{},
-			RelayerConfig:   &RelayerConfig{},
-			SentryConfig:    &logger.SentryConfig{},
-			OpenPanelConfig: &metric.OpenPanelConfig{},
+			CDPConfig:     &CDPConfig{},
+			RelayerConfig: &RelayerConfig{},
+			SentryConfig:  &logger.SentryConfig{},
 		}
 	}
 	return m.config

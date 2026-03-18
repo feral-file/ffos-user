@@ -29,7 +29,6 @@ type testSetup struct {
 	mockCDP            *mocks.MockCDP
 	mockExecutor       *mocks.MockExecutor
 	mockCommandHandler *mocks.MockCommandHandler
-	mockStatusPoller   *mocks.MockStatusPoller
 	mockRefresher      *mocks.MockRefresher
 	mockJSON           *mocks.MockJSON
 	mediator           mediator.Mediator
@@ -46,7 +45,6 @@ func setup(t *testing.T) *testSetup {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockExecutor := mocks.NewMockExecutor(ctrl)
 	mockCommandHandler := mocks.NewMockCommandHandler(ctrl)
-	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockRefresher := mocks.NewMockRefresher(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 
@@ -57,7 +55,6 @@ func setup(t *testing.T) *testSetup {
 		mockCommandHandler,
 		mockExecutor,
 		mockRefresher,
-		mockStatusPoller,
 		mockJSON,
 		logger,
 	)
@@ -70,7 +67,6 @@ func setup(t *testing.T) *testSetup {
 		mockCDP:            mockCDP,
 		mockExecutor:       mockExecutor,
 		mockCommandHandler: mockCommandHandler,
-		mockStatusPoller:   mockStatusPoller,
 		mockRefresher:      mockRefresher,
 		mockJSON:           mockJSON,
 		mediator:           med,
