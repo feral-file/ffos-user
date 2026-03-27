@@ -2,7 +2,7 @@
 
 Scope: `components/feral-setupd/**`
 
-Repository-wide agent rules also apply from the root [AGENTS.md](/Users/anhnguyen/Documents/projects/ffos-user/AGENTS.md). This file only adds setupd-specific context.
+Repository-wide agent rules also apply from the root `AGENTS.md`. This file only adds setupd-specific context.
 
 ## What This Service Does (High-Level)
 

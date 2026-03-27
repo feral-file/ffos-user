@@ -53,8 +53,8 @@ Use this rule for all Go service work.
 
 ## Testing and quality
 - Format with `gofmt -s`.
-- Run `go test ./...` and `go vet ./...`.
-- Run `golangci-lint run`.
+- Run `go test ./...` and `go vet ./...` only in the touched Go module.
+- Run `golangci-lint run --new-from-rev=HEAD~1 ./...` so linting is scoped to the changed Go diff.
 - Prefer table-driven tests for behavioral branches.
 - Test failure paths and boundary conditions, not only happy paths.
 - Use fakes or test servers for D-Bus, HTTP, filesystem, and time-dependent behavior when possible.

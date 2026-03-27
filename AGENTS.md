@@ -9,8 +9,8 @@ This file defines repository-level constraints for coding agents. Detailed imple
 - Service shape: prefer explicit daemons and narrow responsibilities over shared mutable frameworks.
 
 ## Architecture and API design status
-- Architecture rule source: [docs/architecture-tbd.md](/Users/anhnguyen/Documents/projects/ffos-user/docs/architecture-tbd.md)
-- API design rule source: [docs/api-design-tbd.md](/Users/anhnguyen/Documents/projects/ffos-user/docs/api-design-tbd.md)
+- Architecture rule source: `docs/architecture-tbd.md`
+- API design rule source: `docs/api-design-tbd.md`
 - Those documents are intentionally placeholders. Repo owners should fill them in before major cross-service refactors or public contract expansions.
 
 ## Non-negotiables
@@ -25,7 +25,7 @@ This file defines repository-level constraints for coding agents. Detailed imple
 ## Required workflow for substantial work
 Before implementing a major feature, refactor, daemon behavior change, or CI policy change:
 1. Read this file.
-2. Read [PLANS.md](/Users/anhnguyen/Documents/projects/ffos-user/PLANS.md) when the work is large, vague, or architectural.
+2. Read `PLANS.md` when the work is large, vague, or architectural.
 3. Read the relevant rule files in `.cursor/rules/`.
 4. Read any component-local `AGENTS.md` files for touched services.
 5. Summarize the current flow, constraints, and operational risk before changing behavior.
@@ -39,16 +39,14 @@ Canonical sequence:
 - New code should prefer dependency injection, narrow interfaces, explicit error handling, and tests that cover behavior rather than implementation trivia.
 
 ## Verification gates
+- Verification gates apply only to the files and modules or crates touched by the change.
 - Go changes:
-  - `gofmt -s -w .`
-  - `go test ./...`
-  - `go vet ./...`
-  - `golangci-lint run`
+  - format only the changed Go files: `gofmt -s -w <changed-go-files>`
+  - run `go test ./...` and `go vet ./...` from each touched Go module
+  - lint only the changed Go diff: `golangci-lint run --new-from-rev=HEAD~1 ./...`
 - Rust changes:
-  - `cargo fmt --all`
-  - `cargo check --all-targets --all-features`
-  - `cargo clippy --all-targets --all-features -- -D warnings`
-  - `cargo test --all-targets --all-features`
+  - format only the changed Rust files: `cargo fmt --all -- --check`
+  - run `cargo check --all-targets --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` only in each touched crate
 - CI and workflow changes:
   - validate the affected workflow logic
   - preserve branch/path protections
@@ -62,7 +60,7 @@ After implementation, run a review loop until the reviewer qualifies the change.
 4. Only commit or open a PR after review qualifies the change.
 
 Shared review prompt:
-- [prompts/code-review.md](/Users/anhnguyen/Documents/projects/ffos-user/prompts/code-review.md)
+- `prompts/code-review.md`
 
 ## Agent assets
 - Cursor rules: `.cursor/rules/`

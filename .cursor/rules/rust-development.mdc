@@ -36,7 +36,8 @@ Use this rule for all Rust service work.
 - Do not comment syntax that the type system already makes clear.
 
 ## Testing and quality
-- Run `cargo fmt --all`.
+- Run verification only in the touched crate.
+- Run `cargo fmt --all -- --check`.
 - Run `cargo check --all-targets --all-features`.
 - Run `cargo clippy --all-targets --all-features -- -D warnings`.
 - Run `cargo test --all-targets --all-features`.

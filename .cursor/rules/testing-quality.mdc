@@ -17,16 +17,15 @@ alwaysApply: true
 5. Update docs or comments when future maintainers would otherwise lose context.
 
 ## Go verification
-- `gofmt -s -w .`
-- `go test ./...`
-- `go vet ./...`
-- `golangci-lint run`
+- format only the changed Go files with `gofmt -s -w <changed-go-files>`
+- run `go test ./...` and `go vet ./...` only in each touched Go module
+- lint only the changed Go diff with `golangci-lint run --new-from-rev=HEAD~1 ./...`
 
 ## Rust verification
-- `cargo fmt --all`
-- `cargo check --all-targets --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-targets --all-features`
+- run `cargo fmt --all -- --check` only for the touched crate
+- run `cargo check --all-targets --all-features` only for the touched crate
+- run `cargo clippy --all-targets --all-features -- -D warnings` only for the touched crate
+- run `cargo test --all-targets --all-features` only for the touched crate
 
 ## CI verification
 - Ensure workflows trigger on source and config changes, not only on the happy-path file globs.

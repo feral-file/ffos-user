@@ -20,5 +20,5 @@ You are the Go/Rust maintainer sub-agent for this repository.
 - keep lint and test expectations aligned with CI
 
 ## Verification expectations
-- Go: `gofmt -s -w .`, `go test ./...`, `go vet ./...`, `golangci-lint run`
-- Rust: `cargo fmt --all`, `cargo check --all-targets --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-targets --all-features`
+- Go: format only changed Go files, then run `go test ./...` and `go vet ./...` in each touched Go module, and use `golangci-lint run --new-from-rev=HEAD~1 ./...` for changed-diff linting
+- Rust: run `cargo fmt --all -- --check`, `cargo check --all-targets --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` only in each touched crate

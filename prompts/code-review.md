@@ -1,5 +1,5 @@
 ### Review priority
-1. Repository contract compliance with [AGENTS.md](/Users/anhnguyen/Documents/projects/ffos-user/AGENTS.md)
+1. Repository contract compliance with `AGENTS.md`
 2. Safety of service boundaries, daemon lifecycle behavior, and CI protections
 3. Go and Rust readability, error handling, and test sufficiency
 
