@@ -2,27 +2,31 @@
 
 Scope: `components/feral-setupd/**`
 
-Repository-wide agent rules also apply from the root `AGENTS.md`. This file only adds setupd-specific context.
+Repository-wide principles from the root `AGENTS.md` also apply here.
 
-## What This Service Does (High-Level)
+## Purpose
 
-`feral-setupd` is the device “first-run / recovery” daemon for FF1. It owns the
-setup UX and orchestration:
+`feral-setupd` is the device first-run and recovery daemon.
 
-- Starts and serves a BLE GATT service so the mobile app can provision Wi‑Fi and
-  trigger maintenance actions.
-- Drives the on-device UI via CDP (Chromium DevTools Protocol) by navigating the
-  launcher UI to QR code / message / web app pages.
-- Coordinates with other services over D‑Bus (e.g. waits for `controld`,
-  listens for page switch events).
-- Tracks small persistent flags (topic id, “ever connected”, “paired”) in a tiny
-  text file on disk.
-- Can trigger/monitor the updater and forward progress/error output.
+It is responsible for:
+- serving BLE commands used by the mobile app during provisioning
+- driving setup and recovery UI transitions through CDP
+- coordinating with other services over D-Bus during setup
+- persisting small setup-state flags
+- invoking and monitoring updater flows
 
-This project is Linux-only at runtime (BlueZ, D‑Bus, systemd/log paths), so local
-checks should run in the provided Arch Linux Docker environment.
+This component should stay focused on setup, pairing, recovery, and adjacent UX orchestration. It should not absorb broad device-policy logic that belongs elsewhere.
 
-## Runtime Architecture (How It Works)
+## Language and style
+- Language: Rust
+- Prefer explicit, readable Rust over clever abstractions.
+- Keep async task ownership, lock boundaries, and shutdown behavior obvious.
+- Add comments for protocol payloads, setup-state invariants, callback ordering, updater trade-offs, and amendment hazards.
+- Avoid `unwrap` and `expect` in production paths unless the invariant is truly process-fatal and the reason is documented.
+
+This project is Linux-only at runtime, so local checks should run in the provided Arch Linux Docker environment when possible.
+
+## Architecture
 
 ### Startup flow (`src/main.rs`)
 
@@ -80,7 +84,13 @@ daemon paths.
 Runs/monitors the updater systemd unit, tails the updater log file, extracts
 progress/messages via regex, and streams progress/error lines back to callers.
 
-## Key Data Contracts
+## Architectural direction
+- Keep `src/main.rs` as lifecycle and orchestration glue, not a dumping ground for unrelated logic.
+- Keep BLE parsing, UI navigation, persistence, connectivity, and updater behavior in focused modules.
+- Treat BLE command payloads and `device_info` as interface contracts.
+- If a change affects setup sequencing, callback ordering, or shared state, preserve the rationale in comments.
+
+## Key data contracts
 
 ### `device_info` string
 
@@ -98,9 +108,7 @@ vector so it fits the existing BLE encoder.
 There is intentionally no separate BLE `get_device_info` command; `get_info`
 is the canonical source for `device_info`.
 
-## Development & CI Parity (Docker + Toolchain)
-
-## Keep This File Updated
+## Keep this file updated
 
 If you change behavior, commands, toolchain versions, or data contracts in code,
 also update `AGENTS.md` in the same PR so future work stays consistent (e.g.
@@ -120,19 +128,29 @@ that via the `Dockerfile` argument:
 - Default: `RUST_TOOLCHAIN=1.88.0`
 - Override: `docker build --build-arg RUST_TOOLCHAIN=1.88.0 -t arch-dev .`
 
-### Pre-commit lint gate (required)
+## Verification for touched work
 
-Before committing changes to this component, run these in Linux (Docker) and
-stop if anything fails or produces diffs/warnings that require action:
+- Run these in Linux or the provided Docker environment for the touched crate:
+- `cargo fmt --all -- --check`
+- `cargo check --all-targets --all-features`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all-targets --all-features`
 
-- `cargo fmt -- --check`
-  - If it fails, run `cargo fmt` and re-check.
-- `cargo check`
-- `cargo clippy`
+If a command reports warnings that indicate code changes are needed, fix them before committing unless the team explicitly agrees to keep that warning class.
 
-If a command reports warnings that indicate code changes are needed, fix them
-before committing (don’t “paper over” warnings unless the team explicitly agrees
-to allow that warning class).
+## Definition of done
+A task in this component is done only when:
+1. setup, pairing, and recovery ownership remains clear
+2. touched crate checks pass, or blockers are documented
+3. comments preserve the why behind non-obvious setup sequencing, payload contracts, or updater behavior
+4. BLE, D-Bus, and UI navigation contracts remain intentional
+5. this file stays accurate when flows or toolchain expectations change
+
+## Review flow
+1. Prepare a handoff that states which setup or recovery behavior changed and how the flow is affected.
+2. Call out BLE payload changes, D-Bus callback assumptions, persistence changes, or updater trade-offs.
+3. Run the reviewer loop using `prompts/code-review.md`.
+4. Only commit or ship after the review loop returns `Verdict: accept`.
 
 ## Reusing Docker Containers (don’t respawn each time)
 
