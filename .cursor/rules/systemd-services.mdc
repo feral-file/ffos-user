@@ -1,5 +1,23 @@
 ---
-description:
+description: Rules for systemd-managed Linux service behavior and operational safety
 globs:
-alwaysApply: false
+  - "components/**"
+  - "users/feralfile/systemd-services/**"
+alwaysApply: true
 ---
+
+# systemd Service Rule
+
+## Runtime expectations
+- Services are long-running user-space daemons. Startup, readiness, shutdown, and restart behavior must be explicit.
+- Keep unit responsibilities narrow and observable through logs and health signals.
+- Avoid introducing hidden cross-service coupling through filesystem side effects or implicit ordering.
+
+## Operational safety
+- Handle termination signals and cleanup paths deliberately.
+- Distinguish fatal startup failures from recoverable steady-state failures.
+- Be careful with retry loops, watchdog behavior, and system-triggered restarts; comment on trade-offs when the behavior is non-obvious.
+- When a service interacts with D-Bus, systemd readiness, or external subprocesses, preserve clear ownership and timeout handling.
+
+## Documentation expectations
+- If a change affects startup order, readiness signals, required environment, service names, or state paths, update the relevant docs or service notes in the same change.

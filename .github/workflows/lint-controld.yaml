@@ -5,9 +5,22 @@ on:
     branches: [release, develop]
     paths:
       - 'components/feral-controld/**/*.go'
+      - '.golangci.yml'
+      - 'components/feral-controld/go.mod'
+      - 'components/feral-controld/go.sum'
   pull_request:
     paths:
       - 'components/feral-controld/**/*.go'
+      - '.golangci.yml'
+      - 'components/feral-controld/go.mod'
+      - 'components/feral-controld/go.sum'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-controld-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:

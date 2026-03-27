@@ -1,5 +1,20 @@
 ---
-description:
+description: Manual rule for incident debugging and troubleshooting changes
 globs:
 alwaysApply: false
 ---
+
+# Debugging and Troubleshooting Rule
+
+Use this rule when debugging incidents, flaky tests, service failures, or production-like behavior.
+
+## Required approach
+- Reconstruct the lifecycle first: startup, readiness, steady-state, failure, shutdown.
+- Check whether the bug is caused by timing, state drift, external process assumptions, or interface mismatch.
+- Preserve debugging breadcrumbs in logs, tests, or comments if the failure mode is likely to recur.
+- If a fix depends on an operational assumption that is not obvious in code, document it close to the logic.
+
+## Preferred artifacts
+- targeted regression tests
+- improved structured logs
+- comments on invariants, timing assumptions, or failure boundaries

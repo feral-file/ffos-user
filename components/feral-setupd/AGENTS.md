@@ -2,6 +2,8 @@
 
 Scope: `components/feral-setupd/**`
 
+Repository-wide agent rules also apply from the root [AGENTS.md](/Users/anhnguyen/Documents/projects/ffos-user/AGENTS.md). This file only adds setupd-specific context.
+
 ## What This Service Does (High-Level)
 
 `feral-setupd` is the device “first-run / recovery” daemon for FF1. It owns the
@@ -104,6 +106,11 @@ If you change behavior, commands, toolchain versions, or data contracts in code,
 also update `AGENTS.md` in the same PR so future work stays consistent (e.g.
 changing BLE commands/payloads, `device_info` format, Docker toolchain pinning,
 or required lint/test steps).
+
+When non-obvious logic changes, prefer intent-rich comments that preserve the
+reasoning, invariants, and trade-offs for future amendment sessions. This is
+especially important for BLE payload handling, DBus callbacks, UI navigation
+decisions, updater behavior, and shared-state synchronization.
 
 ### Toolchain
 

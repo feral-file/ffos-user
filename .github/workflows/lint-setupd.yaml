@@ -5,9 +5,24 @@ on:
     branches: [release, develop]
     paths:
       - 'components/feral-setupd/src/**'
+      - 'components/feral-setupd/Cargo.toml'
+      - 'components/feral-setupd/Cargo.lock'
+      - 'components/feral-setupd/rustfmt.toml'
+      - 'components/feral-setupd/clippy.toml'
   pull_request:
     paths:
       - 'components/feral-setupd/src/**'
+      - 'components/feral-setupd/Cargo.toml'
+      - 'components/feral-setupd/Cargo.lock'
+      - 'components/feral-setupd/rustfmt.toml'
+      - 'components/feral-setupd/clippy.toml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-setupd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:

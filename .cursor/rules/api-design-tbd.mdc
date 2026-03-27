@@ -1,0 +1,16 @@
+---
+description: Placeholder API and protocol design rule until repo owner defines a canonical contract
+globs:
+  - "components/**"
+alwaysApply: false
+---
+
+# API Design Rule TBD
+
+The canonical repository API and protocol design contract has not been finalized.
+
+For now:
+- keep interfaces explicit and narrow
+- prefer additive changes over ambiguous field reuse
+- comment on compatibility assumptions near protocol code
+- update `docs/api-design-tbd.md` if you discover stable design rules the repo owner should ratify

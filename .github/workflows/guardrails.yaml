@@ -1,0 +1,89 @@
+name: Guardrails
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".cursor/**"
+      - ".codex/**"
+      - ".opencode/**"
+      - "AGENTS.md"
+      - "PLANS.md"
+      - "prompts/**"
+      - "docs/**"
+      - ".golangci.yml"
+  push:
+    branches:
+      - main
+      - develop
+      - release
+    paths:
+      - ".github/workflows/**"
+      - ".cursor/**"
+      - ".codex/**"
+      - ".opencode/**"
+      - "AGENTS.md"
+      - "PLANS.md"
+      - "prompts/**"
+      - "docs/**"
+      - ".golangci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardrails-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-agentic-files:
+    name: Validate agentic docs and prompts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check required files
+        run: |
+          set -euo pipefail
+          required_files=(
+            "AGENTS.md"
+            "PLANS.md"
+            "prompts/code-review.md"
+            "docs/architecture-tbd.md"
+            "docs/api-design-tbd.md"
+            ".cursor/rules/00-repository-contract.mdc"
+            ".cursor/rules/go-development.mdc"
+            ".cursor/rules/rust-development.mdc"
+            ".cursor/rules/systemd-services.mdc"
+            ".cursor/rules/testing-quality.mdc"
+            ".cursor/rules/commenting-intent.mdc"
+            ".cursor/rules/review-workflow.mdc"
+            ".cursor/agents/planner-researcher.md"
+            ".cursor/agents/reviewer.md"
+            ".cursor/agents/go-rust-maintainer.md"
+            ".codex/agents/planner-researcher.md"
+            ".codex/agents/reviewer.md"
+            ".codex/agents/go-rust-maintainer.md"
+            ".opencode/agents/planner-researcher.md"
+            ".opencode/agents/reviewer.md"
+            ".opencode/agents/go-rust-maintainer.md"
+            ".golangci.yml"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "Missing required file: $file"
+              exit 1
+            fi
+          done
+
+  actionlint:
+    name: Lint GitHub Actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: rhysd/actionlint@v1

@@ -1,0 +1,26 @@
+---
+description: Repository-wide contract for Go and Rust service work in ffos-user
+globs:
+  - "components/**"
+  - ".github/workflows/**"
+  - "AGENTS.md"
+alwaysApply: true
+---
+
+# Repository Contract Rule
+
+## Core constraints
+- Prefer replacing or deleting flawed code paths over preserving brittle compatibility behavior.
+- Keep service boundaries explicit. Cross-service behavior should remain legible from interfaces and logs.
+- Prefer stateless, testable helpers by default.
+- Add intent-rich comments for non-obvious logic, especially around lifecycle, retries, race prevention, state transitions, protocol details, and operational trade-offs.
+- When architecture or API rules are unclear, reference the TBD docs instead of silently inventing permanent repository policy.
+
+## Required references
+- `AGENTS.md`
+- `docs/architecture-tbd.md`
+- `docs/api-design-tbd.md`
+
+## Completion checks
+- Relevant lint, format, and test gates were considered and run where possible.
+- New complexity is justified in comments or docs when future maintainers would otherwise have to rediscover the rationale.
