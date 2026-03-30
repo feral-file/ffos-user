@@ -61,7 +61,7 @@ func TestParseDdcPowerSetting(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_Continuous(t *testing.T) {
 	t.Parallel()
 
-	p, err := parseDdcutilGetVcpBrief("VCP 10 C 50 100\n")
+	_, p, err := parseDdcutilGetVcpBriefLine("VCP 10 C 50 100\n")
 	require.NoError(t, err)
 	assert.Equal(t, ddcBriefContinuous, p.Kind)
 	assert.Equal(t, 50, p.Current)
@@ -71,7 +71,7 @@ func TestParseDdcutilGetVcpBrief_Continuous(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_SNC(t *testing.T) {
 	t.Parallel()
 
-	p, err := parseDdcutilGetVcpBrief("VCP 8D SNC x02\n")
+	_, p, err := parseDdcutilGetVcpBriefLine("VCP 8D SNC x02\n")
 	require.NoError(t, err)
 	assert.Equal(t, ddcBriefSNC, p.Kind)
 	assert.Equal(t, 2, p.SL)
@@ -80,7 +80,7 @@ func TestParseDdcutilGetVcpBrief_SNC(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_CNC(t *testing.T) {
 	t.Parallel()
 
-	p, err := parseDdcutilGetVcpBrief("VCP D6 CND x01 x02 x03 x04\n")
+	_, p, err := parseDdcutilGetVcpBriefLine("VCP D6 CND x01 x02 x03 x04")
 	require.NoError(t, err)
 	assert.Equal(t, ddcBriefCNC, p.Kind)
 	assert.Equal(t, 0x0102, p.Max)
@@ -93,7 +93,7 @@ func TestParseDdcutilGetVcpBrief_CNC(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_FF1MuteCNC(t *testing.T) {
 	t.Parallel()
 
-	p, err := parseDdcutilGetVcpBrief("VCP 8D CNC x00 x01 x00 x01\n")
+	_, p, err := parseDdcutilGetVcpBriefLine("VCP 8D CNC x00 x01 x00 x01\n")
 	require.NoError(t, err)
 	assert.Equal(t, ddcBriefCNC, p.Kind)
 	assert.Equal(t, 1, p.Max)
@@ -109,7 +109,7 @@ func TestParseDdcutilGetVcpBrief_FF1MuteCNC(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_FF1VolumeCNC(t *testing.T) {
 	t.Parallel()
 
-	p, err := parseDdcutilGetVcpBrief("VCP 62 CNC x00 x64 x00 x00\n")
+	_, p, err := parseDdcutilGetVcpBriefLine("VCP 62 CNC x00 x64 x00 x00\n")
 	require.NoError(t, err)
 	assert.Equal(t, ddcBriefCNC, p.Kind)
 	assert.Equal(t, 100, p.Max)
@@ -133,7 +133,7 @@ func TestDdcVolumePercentFromParsed_CNCScaled(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_FF1PowerSNCZero(t *testing.T) {
 	t.Parallel()
 
-	p, err := parseDdcutilGetVcpBrief("VCP D6 SNC x00\n")
+	_, p, err := parseDdcutilGetVcpBriefLine("VCP D6 SNC x00\n")
 	require.NoError(t, err)
 	assert.Equal(t, ddcBriefSNC, p.Kind)
 	assert.Equal(t, 0, p.SL)
@@ -146,7 +146,7 @@ func TestParseDdcutilGetVcpBrief_FF1PowerSNCZero(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_ERR(t *testing.T) {
 	t.Parallel()
 
-	_, err := parseDdcutilGetVcpBrief("VCP 84 ERR\n")
+	_, _, err := parseDdcutilGetVcpBriefLine("VCP 84 ERR\n")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ERR")
 }
@@ -154,8 +154,24 @@ func TestParseDdcutilGetVcpBrief_ERR(t *testing.T) {
 func TestParseDdcutilGetVcpBrief_NoLine(t *testing.T) {
 	t.Parallel()
 
-	_, err := parseDdcutilGetVcpBrief("nothing useful\n")
+	_, _, err := parseDdcutilGetVcpBriefLine("nothing useful\n")
 	require.Error(t, err)
+}
+
+func TestParseDdcutilGetVcpBriefBatch_IgnoresLeadingNoise(t *testing.T) {
+	t.Parallel()
+
+	out := "" +
+		"Discarding cached sleep adjustment data for bus /dev/i2c-4. EDID has changed.\n" +
+		"VCP 60 SNC x11\n"
+
+	parsed, errs := parseDdcutilGetVcpBriefBatch(out)
+	require.Empty(t, errs)
+
+	p, ok := parsed["60"]
+	require.True(t, ok)
+	assert.Equal(t, ddcBriefSNC, p.Kind)
+	assert.Equal(t, 0x11, p.SL)
 }
 
 func TestDdcutilOutputImpliesDisplayNotFound(t *testing.T) {
@@ -166,3 +182,17 @@ func TestDdcutilOutputImpliesDisplayNotFound(t *testing.T) {
 	assert.False(t, ddcutilOutputImpliesDisplayNotFound([]byte("no display"), errors.New("exit 1")))
 	assert.False(t, ddcutilOutputImpliesDisplayNotFound([]byte(""), nil))
 }
+
+func TestParseDdcutilDetectBriefMonitorModel(t *testing.T) {
+	t.Parallel()
+
+	out := "" +
+		"Something else\n" +
+		"Monitor:   ASUS : ROG-Strix\n" +
+		"Other line\n"
+
+	model, err := parseDdcutilDetectBriefMonitorModel(out)
+	require.NoError(t, err)
+	assert.Equal(t, "ASUS:ROG-Strix", model)
+}
+

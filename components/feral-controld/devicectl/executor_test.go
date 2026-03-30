@@ -3379,7 +3379,7 @@ func TestExecutor_DdcPanelControl_DisplayNotFoundRunsDetectAndRetries(t *testing
 			CombinedOutput().
 			Return([]byte("Display not found\n"), errors.New("exit 1")),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "detect").
+				CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "60", "--brief").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
@@ -3433,12 +3433,26 @@ func TestExecutor_DdcPanelControl_Errors(t *testing.T) {
 			name:    "ddcutilFails",
 			payload: `{"action":"brightness","value":5}`,
 			setup: func(ts *testSetup) {
-				ts.mockExec.EXPECT().
-					CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
-					Return(ts.mockExecCmd)
-				ts.mockExecCmd.EXPECT().
-					CombinedOutput().
-					Return([]byte("no display"), errors.New("exit 1"))
+				gomock.InOrder(
+					ts.mockExec.EXPECT().
+						CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+						Return(ts.mockExecCmd),
+					ts.mockExecCmd.EXPECT().
+						CombinedOutput().
+						Return([]byte("no display"), errors.New("exit 1")),
+					ts.mockExec.EXPECT().
+						CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "60", "--brief").
+						Return(ts.mockExecCmd),
+					ts.mockExecCmd.EXPECT().
+						CombinedOutput().
+						Return([]byte("getvcp 60 ok"), nil),
+					ts.mockExec.EXPECT().
+						CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+						Return(ts.mockExecCmd),
+					ts.mockExecCmd.EXPECT().
+						CombinedOutput().
+						Return([]byte("no display"), errors.New("exit 1")),
+				)
 			},
 			wantErr: "ddcutil setvcp",
 		},
@@ -3491,35 +3505,17 @@ func TestExecutor_DdcPanelStatus_Success(t *testing.T) {
 
 	gomock.InOrder(
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10").
+			CommandContext(ts.ctx, "ddcutil", "detect", "--brief").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
-			Return([]byte("VCP 10 C 50 100\n"), nil),
+			Return([]byte("Monitor: ASUS : ROG-Strix\n"), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "12").
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
-			Return([]byte("VCP 12 C 30 100\n"), nil),
-		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "62").
-			Return(ts.mockExecCmd),
-		ts.mockExecCmd.EXPECT().
-			CombinedOutput().
-			Return([]byte("VCP 62 C 15 100\n"), nil),
-		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "8D").
-			Return(ts.mockExecCmd),
-		ts.mockExecCmd.EXPECT().
-			CombinedOutput().
-			Return([]byte("VCP 8D SNC x01\n"), nil),
-		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "D6").
-			Return(ts.mockExecCmd),
-		ts.mockExecCmd.EXPECT().
-			CombinedOutput().
-			Return([]byte("VCP D6 SNC x01\n"), nil),
+			Return([]byte("VCP 10 C 50 100\nVCP 12 C 30 100\nVCP 62 C 15 100\nVCP 8D SNC x01\nVCP D6 SNC x01\n"), nil),
 	)
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
@@ -3536,6 +3532,8 @@ func TestExecutor_DdcPanelStatus_Success(t *testing.T) {
 	assert.Equal(t, "on", *st.Mute)
 	require.NotNil(t, st.Power)
 	assert.Equal(t, "on", *st.Power)
+	require.NotNil(t, st.Monitor)
+	assert.Equal(t, "ASUS:ROG-Strix", *st.Monitor)
 	assert.Nil(t, st.Errors)
 }
 
@@ -3554,35 +3552,17 @@ func TestExecutor_DdcPanelStatus_PartialErrors(t *testing.T) {
 
 	gomock.InOrder(
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10").
+			CommandContext(ts.ctx, "ddcutil", "detect", "--brief").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
-			Return([]byte("VCP 10 C 50 100\n"), nil),
+			Return([]byte("Monitor: ASUS : ROG-Strix\n"), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "12").
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
-			Return(nil, errors.New("boom")),
-		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "62").
-			Return(ts.mockExecCmd),
-		ts.mockExecCmd.EXPECT().
-			CombinedOutput().
-			Return([]byte("VCP 62 C 1 100\n"), nil),
-		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "8D").
-			Return(ts.mockExecCmd),
-		ts.mockExecCmd.EXPECT().
-			CombinedOutput().
-			Return([]byte("VCP 8D SNC x02\n"), nil),
-		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "D6").
-			Return(ts.mockExecCmd),
-		ts.mockExecCmd.EXPECT().
-			CombinedOutput().
-			Return([]byte("VCP D6 SNC x99\n"), nil),
+			Return([]byte("VCP 10 C 50 100\nVCP 12 ERR\nVCP 62 C 1 100\nVCP 8D SNC x02\nVCP D6 SNC x99\n"), nil),
 	)
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
@@ -3595,7 +3575,128 @@ func TestExecutor_DdcPanelStatus_PartialErrors(t *testing.T) {
 	require.NotNil(t, st.Mute)
 	assert.Equal(t, "off", *st.Mute)
 	assert.Nil(t, st.Power)
+	require.NotNil(t, st.Monitor)
+	assert.Equal(t, "ASUS:ROG-Strix", *st.Monitor)
 	require.NotNil(t, st.Errors)
 	assert.Contains(t, st.Errors, "contrast")
 	assert.Contains(t, st.Errors, "power")
+}
+
+func TestExecutor_DdcPanelStatus_RetryDetectOnAnyError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_DDC_PANEL_STATUS,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "detect", "--brief").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("Monitor: ASUS : ROG-Strix\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("boom output"), errors.New("boom")),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "60", "--brief").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("getvcp 60 ok"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 10 C 50 100\nVCP 12 C 30 100\nVCP 62 C 15 100\nVCP 8D SNC x01\nVCP D6 SNC x01\n"), nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	require.NoError(t, err)
+	st, ok := result.(*devicectl.DdcPanelStatus)
+	require.True(t, ok)
+	require.NotNil(t, st.Brightness)
+	assert.Equal(t, 50, *st.Brightness)
+	require.NotNil(t, st.Contrast)
+	assert.Equal(t, 30, *st.Contrast)
+	require.NotNil(t, st.Volume)
+	assert.Equal(t, 15, *st.Volume)
+	require.NotNil(t, st.Mute)
+	assert.Equal(t, "on", *st.Mute)
+	require.NotNil(t, st.Power)
+	assert.Equal(t, "on", *st.Power)
+	require.NotNil(t, st.Monitor)
+	assert.Equal(t, "ASUS:ROG-Strix", *st.Monitor)
+	assert.Nil(t, st.Errors)
+}
+
+func TestExecutor_DdcPanelStatus_RetryWhenNoVcpLines(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_DDC_PANEL_STATUS,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "detect", "--brief").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("Monitor: ASUS : ROG-Strix\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			// Only leading noise, no `VCP ...` line.
+			Return([]byte("Discarding cached sleep adjustment data for bus /dev/i2c-4. EDID has changed.\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "60", "--brief").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 10 C 50 100\nVCP 12 C 30 100\nVCP 62 C 15 100\nVCP 8D SNC x01\nVCP D6 SNC x01\n"), nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	require.NoError(t, err)
+	st, ok := result.(*devicectl.DdcPanelStatus)
+	require.True(t, ok)
+	require.NotNil(t, st.Brightness)
+	assert.Equal(t, 50, *st.Brightness)
+	require.NotNil(t, st.Contrast)
+	assert.Equal(t, 30, *st.Contrast)
+	require.NotNil(t, st.Volume)
+	assert.Equal(t, 15, *st.Volume)
+	require.NotNil(t, st.Mute)
+	assert.Equal(t, "on", *st.Mute)
+	require.NotNil(t, st.Power)
+	assert.Equal(t, "on", *st.Power)
+	require.NotNil(t, st.Monitor)
+	assert.Equal(t, "ASUS:ROG-Strix", *st.Monitor)
+	assert.Nil(t, st.Errors)
 }
