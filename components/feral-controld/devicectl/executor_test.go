@@ -13,6 +13,7 @@ import (
 	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
@@ -3258,55 +3259,55 @@ func TestExecutor_DdcPanelControl_Success(t *testing.T) {
 		{
 			name:        "brightness",
 			payload:     `{"action":"brightness","value":42}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "10", "42"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "10", "42"},
 			description: "VCP 0x10 brightness",
 		},
 		{
 			name:        "contrast",
 			payload:     `{"action":"contrast","value":77}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "12", "77"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "12", "77"},
 			description: "VCP 0x12 contrast",
 		},
 		{
 			name:        "volume",
 			payload:     `{"action":"volume","value":0}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "62", "0"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "62", "0"},
 			description: "VCP 0x62 speaker volume",
 		},
 		{
 			name:        "muteOn",
 			payload:     `{"action":"mute","value":"on"}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "8D", "1"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "8D", "1"},
 			description: "VCP 0x8D mute on",
 		},
 		{
 			name:        "muteOff",
 			payload:     `{"action":"mute","value":"off"}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "8D", "2"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "8D", "2"},
 			description: "VCP 0x8D mute off",
 		},
 		{
 			name:        "powerStandby",
 			payload:     `{"action":"power","value":"standby"}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "D6", "04"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "D6", "04"},
 			description: "DDC power standby",
 		},
 		{
 			name:        "powerOff",
 			payload:     `{"action":"power","value":"off"}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "D6", "05"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "D6", "05"},
 			description: "DDC power off soft",
 		},
 		{
 			name:        "powerOn",
 			payload:     `{"action":"power","value":"on"}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "D6", "01"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "D6", "01"},
 			description: "DDC power on",
 		},
 		{
 			name:        "actionCaseInsensitive",
 			payload:     `{"action":"BRIGHTNESS","value":1}`,
-			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "10", "1"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "10", "1"},
 			description: "action normalized to lower case",
 		},
 	}
@@ -3333,7 +3334,7 @@ func TestExecutor_DdcPanelControl_Success(t *testing.T) {
 
 			wantArgv := tt.wantArgs
 			ts.mockExec.EXPECT().
-				CommandContext(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				CommandContext(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 				DoAndReturn(func(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
 					got := append([]string{name}, arg...)
 					assert.Equal(t, wantArgv, got, tt.description)
@@ -3348,6 +3349,52 @@ func TestExecutor_DdcPanelControl_Success(t *testing.T) {
 			assert.Equal(t, devicectl.CmdOK, result)
 		})
 	}
+}
+
+func TestExecutor_DdcPanelControl_DisplayNotFoundRunsDetectAndRetries(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	payload := `{"action":"brightness","value":5}`
+	cmd := commands.Command{
+		Type:      commands.CMD_DDC_PANEL_CONTROL,
+		Arguments: map[string]interface{}{},
+	}
+	_ = json.Unmarshal([]byte(payload), &cmd.Arguments)
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(payload), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(payload), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			return json.Unmarshal(data, v)
+		})
+
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("Display not found\n"), errors.New("exit 1")),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "detect").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("Invalid display\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte(""), nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
 func TestExecutor_DdcPanelControl_Errors(t *testing.T) {
@@ -3387,7 +3434,7 @@ func TestExecutor_DdcPanelControl_Errors(t *testing.T) {
 			payload: `{"action":"brightness","value":5}`,
 			setup: func(ts *testSetup) {
 				ts.mockExec.EXPECT().
-					CommandContext(ts.ctx, "sudo", "ddcutil", "--noverify", "setvcp", "10", "5").
+					CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
 					Return(ts.mockExecCmd)
 				ts.mockExecCmd.EXPECT().
 					CombinedOutput().
@@ -3427,4 +3474,128 @@ func TestExecutor_DdcPanelControl_Errors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestExecutor_DdcPanelStatus_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_DDC_PANEL_STATUS,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 10 C 50 100\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "12").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 12 C 30 100\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "62").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 62 C 15 100\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "8D").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 8D SNC x01\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP D6 SNC x01\n"), nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	require.NoError(t, err)
+	st, ok := result.(*devicectl.DdcPanelStatus)
+	require.True(t, ok)
+	require.NotNil(t, st.Brightness)
+	assert.Equal(t, 50, *st.Brightness)
+	require.NotNil(t, st.Contrast)
+	assert.Equal(t, 30, *st.Contrast)
+	require.NotNil(t, st.Volume)
+	assert.Equal(t, 15, *st.Volume)
+	require.NotNil(t, st.Mute)
+	assert.Equal(t, "on", *st.Mute)
+	require.NotNil(t, st.Power)
+	assert.Equal(t, "on", *st.Power)
+	assert.Nil(t, st.Errors)
+}
+
+func TestExecutor_DdcPanelStatus_PartialErrors(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_DDC_PANEL_STATUS,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 10 C 50 100\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "12").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return(nil, errors.New("boom")),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "62").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 62 C 1 100\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "8D").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 8D SNC x02\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP D6 SNC x99\n"), nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	require.NoError(t, err)
+	st, ok := result.(*devicectl.DdcPanelStatus)
+	require.True(t, ok)
+	require.NotNil(t, st.Brightness)
+	assert.Nil(t, st.Contrast)
+	require.NotNil(t, st.Volume)
+	require.NotNil(t, st.Mute)
+	assert.Equal(t, "off", *st.Mute)
+	assert.Nil(t, st.Power)
+	require.NotNil(t, st.Errors)
+	assert.Contains(t, st.Errors, "contrast")
+	assert.Contains(t, st.Errors, "power")
 }

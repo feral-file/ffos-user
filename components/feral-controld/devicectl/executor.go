@@ -2,7 +2,6 @@ package devicectl
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,6 +76,8 @@ type executor struct {
 	os   wrapper.OS
 	exec wrapper.Exec
 	math wrapper.Math
+
+	ddc *panelDdc
 }
 
 func New(
@@ -100,6 +101,7 @@ func New(
 		os:           os,
 		exec:         exec,
 		math:         math,
+		ddc:          newPanelDdc(exec, l),
 	}
 }
 
@@ -161,6 +163,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setSshAccess(ctx, bytes)
 	case commands.CMD_DDC_PANEL_CONTROL:
 		result, err = e.ddcPanelControl(ctx, bytes)
+	case commands.CMD_DDC_PANEL_STATUS:
+		result, err = e.ddcPanelStatus(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -1006,51 +1010,25 @@ func (e *executor) toggleMute(ctx context.Context) (interface{}, error) {
 	return CmdOK, nil
 }
 
-// ddcPanelControl applies VCPs on the default display using ddcutil, matching the behavior of the
-// device's monitor_control.sh helper: sudo ddcutil --noverify setvcp <code> <value>.
-type ddcPanelControlArgs struct {
-	Action string          `json:"action"`
-	Value  json.RawMessage `json:"value"`
-}
-
 func (e *executor) ddcPanelControl(ctx context.Context, args []byte) (interface{}, error) {
-	var cmdArgs ddcPanelControlArgs
-	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+	var req DdcPanelControlRequest
+	if err := e.json.Unmarshal(args, &req); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-
-	action, err := ParseDdcPanelAction(cmdArgs.Action)
+	action, err := ParseDdcPanelAction(req.Action)
 	if err != nil {
 		return nil, err
 	}
-
-	if len(cmdArgs.Value) == 0 {
+	if len(req.Value) == 0 {
 		return nil, fmt.Errorf("value is required for ddcPanelControl action %q", action)
 	}
-
-	vcpCode, vcpVal, err := resolveDdcSetVCP(action, cmdArgs.Value)
-	if err != nil {
+	if err := e.ddc.ApplyControl(ctx, action, req.Value); err != nil {
 		return nil, err
 	}
-
-	e.logger.Info("ddcutil setvcp",
-		zap.String("action", string(action)),
-		zap.String("vcp", vcpCode),
-		zap.String("value", vcpVal))
-
-	if err := e.runDdcutilSetVCP(ctx, vcpCode, vcpVal); err != nil {
-		e.logger.Error("ddcutil setvcp failed", zap.Error(err))
-		return nil, err
-	}
-
 	return CmdOK, nil
 }
 
-func (e *executor) runDdcutilSetVCP(ctx context.Context, vcpCode, value string) error {
-	cmd := e.exec.CommandContext(ctx, "sudo", "ddcutil", "--noverify", "setvcp", vcpCode, value)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ddcutil setvcp %s %s: %s: %w", vcpCode, value, strings.TrimSpace(string(out)), err)
-	}
-	return nil
+// ddcPanelStatus reads the standard panel VCPs. Request body is unused (send {}).
+func (e *executor) ddcPanelStatus(ctx context.Context, _ []byte) (interface{}, error) {
+	return e.ddc.CollectStatus(ctx)
 }
