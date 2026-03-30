@@ -253,11 +253,18 @@ func parseDdcutilGetVcpBrief(output string) (ddcBriefParsed, error) {
 		return ddcBriefParsed{Kind: ddcBriefSNC, SL: sl}, nil
 	}
 	if m := reDdcBriefCNC.FindStringSubmatch(line); m != nil {
-		sl, err := parseDdcHexByte(m[4])
-		if err != nil {
-			return ddcBriefParsed{}, fmt.Errorf("parse CNC SL byte: %w", err)
+		// Brief CNC order is mh ml sh sl (16-bit max, then 16-bit current). Mute/power
+		// use the low byte of the current word as SL (the fourth byte).
+		mh, err1 := parseDdcHexByte(m[1])
+		ml, err2 := parseDdcHexByte(m[2])
+		sh, err3 := parseDdcHexByte(m[3])
+		sl, err4 := parseDdcHexByte(m[4])
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+			return ddcBriefParsed{}, fmt.Errorf("parse CNC bytes: %v %v %v %v", err1, err2, err3, err4)
 		}
-		return ddcBriefParsed{Kind: ddcBriefCNC, SL: sl}, nil
+		max := (mh << 8) | ml
+		cur := (sh << 8) | sl
+		return ddcBriefParsed{Kind: ddcBriefCNC, Current: cur, Max: max, SL: sl}, nil
 	}
 
 	return ddcBriefParsed{}, fmt.Errorf("unrecognized brief getvcp line: %s", line)
@@ -297,6 +304,9 @@ func ddcMuteFromSL(sl int) (string, bool) {
 
 func ddcPowerFromSL(sl int) (string, bool) {
 	switch sl {
+	case 0x00:
+		// FF1 reports SNC x00 for normal operation (same effective state as 0x01 "on").
+		return string(DdcPowerOn), true
 	case 0x01:
 		return string(DdcPowerOn), true
 	case 0x04:
@@ -305,6 +315,29 @@ func ddcPowerFromSL(sl int) (string, bool) {
 		return string(DdcPowerOff), true
 	default:
 		return "", false
+	}
+}
+
+// ddcVolumePercentFromParsed maps getvcp --brief output to a 0–100 volume level.
+// Continuous VCPs already report current in device units; CNC encodes 16-bit max/current.
+func ddcVolumePercentFromParsed(p ddcBriefParsed) (int, error) {
+	switch p.Kind {
+	case ddcBriefContinuous:
+		return p.Current, nil
+	case ddcBriefCNC:
+		if p.Max <= 0 {
+			return 0, fmt.Errorf("CNC volume has max<=0")
+		}
+		pct := p.Current * 100 / p.Max
+		if pct > 100 {
+			pct = 100
+		}
+		if pct < 0 {
+			pct = 0
+		}
+		return pct, nil
+	default:
+		return 0, fmt.Errorf("expected continuous or CNC VCP for volume, got kind %v", p.Kind)
 	}
 }
 
@@ -377,7 +410,7 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 			continue
 		}
 		switch q.field {
-		case "brightness", "contrast", "volume":
+		case "brightness", "contrast":
 			if parsed.Kind != ddcBriefContinuous {
 				errs[q.field] = fmt.Sprintf("expected continuous VCP, got kind %v", parsed.Kind)
 				continue
@@ -387,9 +420,14 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 				status.Brightness = ddcIntPtr(parsed.Current)
 			case "contrast":
 				status.Contrast = ddcIntPtr(parsed.Current)
-			case "volume":
-				status.Volume = ddcIntPtr(parsed.Current)
 			}
+		case "volume":
+			vol, err := ddcVolumePercentFromParsed(parsed)
+			if err != nil {
+				errs[q.field] = err.Error()
+				continue
+			}
+			status.Volume = ddcIntPtr(vol)
 		case "mute":
 			if parsed.Kind != ddcBriefSNC && parsed.Kind != ddcBriefCNC {
 				errs[q.field] = fmt.Sprintf("expected SNC or CNC VCP for mute, got kind %v", parsed.Kind)

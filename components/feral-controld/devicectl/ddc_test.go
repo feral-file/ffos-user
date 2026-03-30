@@ -83,7 +83,64 @@ func TestParseDdcutilGetVcpBrief_CNC(t *testing.T) {
 	p, err := parseDdcutilGetVcpBrief("VCP D6 CND x01 x02 x03 x04\n")
 	require.NoError(t, err)
 	assert.Equal(t, ddcBriefCNC, p.Kind)
+	assert.Equal(t, 0x0102, p.Max)
+	assert.Equal(t, 0x0304, p.Current)
 	assert.Equal(t, 4, p.SL)
+}
+
+// Real FF1 output: ddcutil --noverify getvcp --brief 8d  ->  VCP 8D CNC x00 x01 x00 x01
+// Brief CNC order is mh ml sh sl; we use the last byte as SL for mute mapping.
+func TestParseDdcutilGetVcpBrief_FF1MuteCNC(t *testing.T) {
+	t.Parallel()
+
+	p, err := parseDdcutilGetVcpBrief("VCP 8D CNC x00 x01 x00 x01\n")
+	require.NoError(t, err)
+	assert.Equal(t, ddcBriefCNC, p.Kind)
+	assert.Equal(t, 1, p.Max)
+	assert.Equal(t, 1, p.Current)
+	assert.Equal(t, 0x01, p.SL)
+
+	mute, ok := ddcMuteFromSL(p.SL)
+	require.True(t, ok)
+	assert.Equal(t, "on", mute)
+}
+
+// Real FF1: ddcutil --noverify getvcp --brief 62  ->  VCP 62 CNC x00 x64 x00 x00
+func TestParseDdcutilGetVcpBrief_FF1VolumeCNC(t *testing.T) {
+	t.Parallel()
+
+	p, err := parseDdcutilGetVcpBrief("VCP 62 CNC x00 x64 x00 x00\n")
+	require.NoError(t, err)
+	assert.Equal(t, ddcBriefCNC, p.Kind)
+	assert.Equal(t, 100, p.Max)
+	assert.Equal(t, 0, p.Current)
+
+	v, err := ddcVolumePercentFromParsed(p)
+	require.NoError(t, err)
+	assert.Equal(t, 0, v)
+}
+
+func TestDdcVolumePercentFromParsed_CNCScaled(t *testing.T) {
+	t.Parallel()
+
+	p := ddcBriefParsed{Kind: ddcBriefCNC, Current: 50, Max: 100}
+	v, err := ddcVolumePercentFromParsed(p)
+	require.NoError(t, err)
+	assert.Equal(t, 50, v)
+}
+
+// Real FF1: ddcutil --noverify getvcp --brief d6  ->  VCP D6 SNC x00
+func TestParseDdcutilGetVcpBrief_FF1PowerSNCZero(t *testing.T) {
+	t.Parallel()
+
+	p, err := parseDdcutilGetVcpBrief("VCP D6 SNC x00\n")
+	require.NoError(t, err)
+	assert.Equal(t, ddcBriefSNC, p.Kind)
+	assert.Equal(t, 0, p.SL)
+
+	pow, ok := ddcPowerFromSL(p.SL)
+	require.True(t, ok)
+	assert.Equal(t, "on", pow)
 }
 
 func TestParseDdcutilGetVcpBrief_ERR(t *testing.T) {
