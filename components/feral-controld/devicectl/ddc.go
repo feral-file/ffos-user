@@ -3,6 +3,7 @@ package devicectl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -247,7 +248,7 @@ func parseDdcutilGetVcpBriefLine(line string) (string, ddcBriefParsed, error) {
 		cur, err1 := strconv.Atoi(fields[3])
 		max, err2 := strconv.Atoi(fields[4])
 		if err1 != nil || err2 != nil {
-			return "", ddcBriefParsed{}, fmt.Errorf("parse continuous VCP values: %v %v", err1, err2)
+			return "", ddcBriefParsed{}, fmt.Errorf("parse continuous VCP values: %w", errors.Join(err1, err2))
 		}
 		return code, ddcBriefParsed{Kind: ddcBriefContinuous, Current: cur, Max: max}, nil
 	case "SNC":
@@ -269,7 +270,7 @@ func parseDdcutilGetVcpBriefLine(line string) (string, ddcBriefParsed, error) {
 		sh, err3 := parseDdcHexByte(fields[5])
 		sl, err4 := parseDdcHexByte(fields[6])
 		if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
-			return "", ddcBriefParsed{}, fmt.Errorf("parse CNC bytes: %v %v %v %v", err1, err2, err3, err4)
+			return "", ddcBriefParsed{}, fmt.Errorf("parse CNC bytes: %w", errors.Join(err1, err2, err3, err4))
 		}
 		max := (mh << 8) | ml
 		cur := (sh << 8) | sl
@@ -591,7 +592,7 @@ func (p *panelDdc) execDdcutilWithDisplayRecovery(ctx context.Context, argv ...s
 	// - output implies display-not-found, or
 	// - for getvcp --brief: output contains no leading `VCP ...` line (often means
 	//   transient display/bus issues where ddcutil returned success).
-	if err == nil && !ddcutilOutputImpliesDisplayNotFound(out, err) && !(expectsVcpBriefOutput && !hasVcpBriefLine) {
+	if err == nil && !ddcutilOutputImpliesDisplayNotFound(out, err) && (!expectsVcpBriefOutput || hasVcpBriefLine) {
 		return out, err
 	}
 

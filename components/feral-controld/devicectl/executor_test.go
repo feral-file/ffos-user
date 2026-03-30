@@ -3259,55 +3259,55 @@ func TestExecutor_DdcPanelControl_Success(t *testing.T) {
 		{
 			name:        "brightness",
 			payload:     `{"action":"brightness","value":42}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "10", "42"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "10", "42"},
 			description: "VCP 0x10 brightness",
 		},
 		{
 			name:        "contrast",
 			payload:     `{"action":"contrast","value":77}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "12", "77"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "12", "77"},
 			description: "VCP 0x12 contrast",
 		},
 		{
 			name:        "volume",
 			payload:     `{"action":"volume","value":0}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "62", "0"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "62", "0"},
 			description: "VCP 0x62 speaker volume",
 		},
 		{
 			name:        "muteOn",
 			payload:     `{"action":"mute","value":"on"}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "8D", "1"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "8D", "1"},
 			description: "VCP 0x8D mute on",
 		},
 		{
 			name:        "muteOff",
 			payload:     `{"action":"mute","value":"off"}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "8D", "2"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "8D", "2"},
 			description: "VCP 0x8D mute off",
 		},
 		{
 			name:        "powerStandby",
 			payload:     `{"action":"power","value":"standby"}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "D6", "04"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "D6", "04"},
 			description: "DDC power standby",
 		},
 		{
 			name:        "powerOff",
 			payload:     `{"action":"power","value":"off"}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "D6", "05"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "D6", "05"},
 			description: "DDC power off soft",
 		},
 		{
 			name:        "powerOn",
 			payload:     `{"action":"power","value":"on"}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "D6", "01"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "D6", "01"},
 			description: "DDC power on",
 		},
 		{
 			name:        "actionCaseInsensitive",
 			payload:     `{"action":"BRIGHTNESS","value":1}`,
-			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "10", "1"},
+			wantArgs:    []string{"ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "10", "1"},
 			description: "action normalized to lower case",
 		},
 	}
@@ -3334,7 +3334,15 @@ func TestExecutor_DdcPanelControl_Success(t *testing.T) {
 
 			wantArgv := tt.wantArgs
 			ts.mockExec.EXPECT().
-				CommandContext(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				CommandContext(ts.ctx,
+					gomock.Any(), // ddcutil
+					gomock.Any(), // --noverify
+					gomock.Any(), // setvcp
+					gomock.Any(), // --sleep-multiplier
+					gomock.Any(), // 1.5
+					gomock.Any(), // vcpCode
+					gomock.Any(), // value
+				).
 				DoAndReturn(func(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
 					got := append([]string{name}, arg...)
 					assert.Equal(t, wantArgv, got, tt.description)
@@ -3373,19 +3381,19 @@ func TestExecutor_DdcPanelControl_DisplayNotFoundRunsDetectAndRetries(t *testing
 
 	gomock.InOrder(
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "10", "5").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte("Display not found\n"), errors.New("exit 1")),
 		ts.mockExec.EXPECT().
-				CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "60", "--brief").
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "60", "--brief").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
 			Return([]byte("Invalid display\n"), nil),
 		ts.mockExec.EXPECT().
-			CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "10", "5").
 			Return(ts.mockExecCmd),
 		ts.mockExecCmd.EXPECT().
 			CombinedOutput().
@@ -3435,7 +3443,7 @@ func TestExecutor_DdcPanelControl_Errors(t *testing.T) {
 			setup: func(ts *testSetup) {
 				gomock.InOrder(
 					ts.mockExec.EXPECT().
-						CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+						CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "10", "5").
 						Return(ts.mockExecCmd),
 					ts.mockExecCmd.EXPECT().
 						CombinedOutput().
@@ -3447,7 +3455,7 @@ func TestExecutor_DdcPanelControl_Errors(t *testing.T) {
 						CombinedOutput().
 						Return([]byte("getvcp 60 ok"), nil),
 					ts.mockExec.EXPECT().
-						CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "10", "5").
+						CommandContext(ts.ctx, "ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", "10", "5").
 						Return(ts.mockExecCmd),
 					ts.mockExecCmd.EXPECT().
 						CombinedOutput().
