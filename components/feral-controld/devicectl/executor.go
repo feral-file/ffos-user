@@ -2,6 +2,7 @@ package devicectl
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,6 +159,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.toggleMute(ctx)
 	case commands.CMD_SSH_ACCESS:
 		result, err = e.setSshAccess(ctx, bytes)
+	case commands.CMD_DDC_PANEL_CONTROL:
+		result, err = e.ddcPanelControl(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -1001,4 +1004,53 @@ func (e *executor) toggleMute(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Mute toggled successfully")
 
 	return CmdOK, nil
+}
+
+// ddcPanelControl applies VCPs on the default display using ddcutil, matching the behavior of the
+// device's monitor_control.sh helper: sudo ddcutil --noverify setvcp <code> <value>.
+type ddcPanelControlArgs struct {
+	Action string          `json:"action"`
+	Value  json.RawMessage `json:"value"`
+}
+
+func (e *executor) ddcPanelControl(ctx context.Context, args []byte) (interface{}, error) {
+	var cmdArgs ddcPanelControlArgs
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	action, err := ParseDdcPanelAction(cmdArgs.Action)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(cmdArgs.Value) == 0 {
+		return nil, fmt.Errorf("value is required for ddcPanelControl action %q", action)
+	}
+
+	vcpCode, vcpVal, err := resolveDdcSetVCP(action, cmdArgs.Value)
+	if err != nil {
+		return nil, err
+	}
+
+	e.logger.Info("ddcutil setvcp",
+		zap.String("action", string(action)),
+		zap.String("vcp", vcpCode),
+		zap.String("value", vcpVal))
+
+	if err := e.runDdcutilSetVCP(ctx, vcpCode, vcpVal); err != nil {
+		e.logger.Error("ddcutil setvcp failed", zap.Error(err))
+		return nil, err
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) runDdcutilSetVCP(ctx context.Context, vcpCode, value string) error {
+	cmd := e.exec.CommandContext(ctx, "sudo", "ddcutil", "--noverify", "setvcp", vcpCode, value)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ddcutil setvcp %s %s: %s: %w", vcpCode, value, strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }

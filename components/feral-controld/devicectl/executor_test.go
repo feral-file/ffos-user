@@ -2,6 +2,7 @@ package devicectl_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 type testSetup struct {
@@ -3244,4 +3246,185 @@ func TestExecutor_NewHandler(t *testing.T) {
 
 	handler := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, mockJSON, mockOS, mockExec, mockMath, logger)
 	assert.NotNil(t, handler)
+}
+
+func TestExecutor_DdcPanelControl_Success(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     string
+		wantArgs    []string
+		description string
+	}{
+		{
+			name:        "brightness",
+			payload:     `{"action":"brightness","value":42}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "10", "42"},
+			description: "VCP 0x10 brightness",
+		},
+		{
+			name:        "contrast",
+			payload:     `{"action":"contrast","value":77}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "12", "77"},
+			description: "VCP 0x12 contrast",
+		},
+		{
+			name:        "volume",
+			payload:     `{"action":"volume","value":0}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "62", "0"},
+			description: "VCP 0x62 speaker volume",
+		},
+		{
+			name:        "muteOn",
+			payload:     `{"action":"mute","value":"on"}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "8D", "1"},
+			description: "VCP 0x8D mute on",
+		},
+		{
+			name:        "muteOff",
+			payload:     `{"action":"mute","value":"off"}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "8D", "2"},
+			description: "VCP 0x8D mute off",
+		},
+		{
+			name:        "powerStandby",
+			payload:     `{"action":"power","value":"standby"}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "D6", "04"},
+			description: "DDC power standby",
+		},
+		{
+			name:        "powerOff",
+			payload:     `{"action":"power","value":"off"}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "D6", "05"},
+			description: "DDC power off soft",
+		},
+		{
+			name:        "powerOn",
+			payload:     `{"action":"power","value":"on"}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "D6", "01"},
+			description: "DDC power on",
+		},
+		{
+			name:        "actionCaseInsensitive",
+			payload:     `{"action":"BRIGHTNESS","value":1}`,
+			wantArgs:    []string{"sudo", "ddcutil", "--noverify", "setvcp", "10", "1"},
+			description: "action normalized to lower case",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			cmd := commands.Command{
+				Type:      commands.CMD_DDC_PANEL_CONTROL,
+				Arguments: map[string]interface{}{},
+			}
+			_ = json.Unmarshal([]byte(tt.payload), &cmd.Arguments)
+
+			ts.mockJSON.EXPECT().
+				Marshal(cmd.Arguments).
+				Return([]byte(tt.payload), nil)
+			ts.mockJSON.EXPECT().
+				Unmarshal([]byte(tt.payload), gomock.Any()).
+				DoAndReturn(func(data []byte, v interface{}) error {
+					return json.Unmarshal(data, v)
+				})
+
+			wantArgv := tt.wantArgs
+			ts.mockExec.EXPECT().
+				CommandContext(ts.ctx, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
+					got := append([]string{name}, arg...)
+					assert.Equal(t, wantArgv, got, tt.description)
+					return ts.mockExecCmd
+				})
+			ts.mockExecCmd.EXPECT().
+				CombinedOutput().
+				Return([]byte(""), nil)
+
+			result, err := ts.executor.Execute(ts.ctx, cmd)
+			assert.NoError(t, err, tt.description)
+			assert.Equal(t, devicectl.CmdOK, result)
+		})
+	}
+}
+
+func TestExecutor_DdcPanelControl_Errors(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		setup   func(*testSetup)
+		wantErr string
+	}{
+		{
+			name:    "unknownAction",
+			payload: `{"action":"gamma","value":1}`,
+			wantErr: "invalid ddcPanelControl action",
+		},
+		{
+			name:    "muteBadValue",
+			payload: `{"action":"mute","value":"maybe"}`,
+			wantErr: "invalid mute value",
+		},
+		{
+			name:    "powerBadValue",
+			payload: `{"action":"power","value":"fast"}`,
+			wantErr: "invalid power value",
+		},
+		{
+			name:    "percentOutOfRange",
+			payload: `{"action":"brightness","value":101}`,
+			wantErr: "between 0 and 100",
+		},
+		{
+			name:    "missingValue",
+			payload: `{"action":"brightness"}`,
+			wantErr: "value is required",
+		},
+		{
+			name:    "ddcutilFails",
+			payload: `{"action":"brightness","value":5}`,
+			setup: func(ts *testSetup) {
+				ts.mockExec.EXPECT().
+					CommandContext(ts.ctx, "sudo", "ddcutil", "--noverify", "setvcp", "10", "5").
+					Return(ts.mockExecCmd)
+				ts.mockExecCmd.EXPECT().
+					CombinedOutput().
+					Return([]byte("no display"), errors.New("exit 1"))
+			},
+			wantErr: "ddcutil setvcp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			cmd := commands.Command{
+				Type:      commands.CMD_DDC_PANEL_CONTROL,
+				Arguments: map[string]interface{}{},
+			}
+			_ = json.Unmarshal([]byte(tt.payload), &cmd.Arguments)
+
+			ts.mockJSON.EXPECT().
+				Marshal(cmd.Arguments).
+				Return([]byte(tt.payload), nil)
+			ts.mockJSON.EXPECT().
+				Unmarshal([]byte(tt.payload), gomock.Any()).
+				DoAndReturn(func(data []byte, v interface{}) error {
+					return json.Unmarshal(data, v)
+				})
+
+			if tt.setup != nil {
+				tt.setup(ts)
+			}
+
+			result, err := ts.executor.Execute(ts.ctx, cmd)
+			assert.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
