@@ -565,7 +565,7 @@ func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]b
 }
 
 func (p *panelDdc) setVCP(ctx context.Context, vcpCode, value string) error {
-	out, err := p.execDdcutilWithDisplayRecovery(ctx, "ddcutil", "--noverify", "setvcp", vcpCode, value)
+	out, err := p.execDdcutilWithDisplayRecovery(ctx, "ddcutil", "--noverify", "setvcp", "--sleep-multiplier", "1.5", vcpCode, value)
 	if err != nil {
 		return fmt.Errorf("ddcutil setvcp %s %s: %s: %w", vcpCode, value, strings.TrimSpace(string(out)), err)
 	}
