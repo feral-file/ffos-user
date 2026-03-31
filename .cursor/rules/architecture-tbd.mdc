@@ -13,4 +13,4 @@ For now:
 - keep service boundaries explicit
 - avoid cross-cutting abstractions without strong justification
 - record trade-offs in comments when changing architecture-sensitive paths
-- update `docs/architecture-tbd.md` if you discover a stable rule that the repo owner should ratify
+- update `docs/architecture.md` if you discover a stable rule that the repo owner should ratify

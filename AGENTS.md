@@ -21,9 +21,9 @@ This file defines the repository-wide principles for coding agents. The detailed
 - `feral-watchdog` consumes health signals and takes recovery actions.
 - UI code and daemon code should stay clearly separated. Cross-service behavior should be coordinated through explicit contracts, not hidden coupling.
 
-## Architecture and API design status
-- Architecture direction placeholder: `docs/architecture-tbd.md`
-- API and protocol direction placeholder: `docs/api-design-tbd.md`
+## Architecture and API design
+- Architecture direction: `docs/architecture.md`
+- API and protocol direction: `docs/api-design.md`
 - Repo owner should fill these in so future agents know which architectural direction to aim for.
 
 ## Required workflow for substantial work

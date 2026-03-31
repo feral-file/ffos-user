@@ -13,4 +13,4 @@ For now:
 - keep interfaces explicit and narrow
 - prefer additive changes over ambiguous field reuse
 - comment on compatibility assumptions near protocol code
-- update `docs/api-design-tbd.md` if you discover stable design rules the repo owner should ratify
+- update `docs/api-design.md` if you discover stable design rules the repo owner should ratify

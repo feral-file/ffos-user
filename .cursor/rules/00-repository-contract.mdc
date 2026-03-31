@@ -18,8 +18,8 @@ alwaysApply: true
 
 ## Required references
 - `AGENTS.md`
-- `docs/architecture-tbd.md`
-- `docs/api-design-tbd.md`
+- `docs/architecture.md`
+- `docs/api-design.md`
 
 ## Completion checks
 - Relevant lint, format, and test gates were considered and run where possible.
