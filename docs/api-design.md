@@ -106,6 +106,8 @@ All messages are JSON. The message envelope is:
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
+`devicectl` also exposes two device-control commands for panel control over DDC/CI via `ddcutil`: `ddcPanelControl` (set brightness, contrast, speaker volume, mute, or power using a single JSON request body that selects the action) and `ddcPanelStatus` (query the same VCPs and return a structured status object). Both share the standard relayer/hub envelope; detailed field shapes live alongside the executor in `devicectl/ddc.go`.
+
 **Command type constants** are defined in `components/feral-controld/commands/types.go`. New remote commands must be added there with a corresponding entry in `deviceCtlCommands` if they require executor handling.
 
 ### Hub WebSocket protocol (port 1111)
