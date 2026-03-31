@@ -24,5 +24,5 @@ Use this document when the task is large enough, risky enough, or vague enough t
 ## Repository-specific planning rules
 - Prefer deleting or simplifying complex paths before adding new abstractions.
 - Treat system boundaries as first-class: D-Bus contracts, systemd behavior, local files, network boundaries, and device lifecycle constraints.
-- If architecture or API guidance is missing, call that out explicitly and reference the TBD placeholders instead of inventing permanent rules silently.
+- If architecture or API guidance is needed, read `docs/architecture.md` and `docs/api-design.md` first. If those docs don't cover the case, call it out explicitly rather than inventing permanent rules silently.
 - For CI changes, include failure modes such as jobs not triggering, overly broad triggers, flaky coverage tools, or silent lint regressions.

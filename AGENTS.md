@@ -24,7 +24,7 @@ This file defines the repository-wide principles for coding agents. The detailed
 ## Architecture and API design
 - Architecture direction: `docs/architecture.md`
 - API and protocol direction: `docs/api-design.md`
-- Repo owner should fill these in so future agents know which architectural direction to aim for.
+- Both docs are filled. Read them before making cross-service changes or adding new interfaces.
 
 ## Required workflow for substantial work
 1. Read this file.

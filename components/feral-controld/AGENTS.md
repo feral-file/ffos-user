@@ -28,10 +28,27 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 
 ### Shape
 - `main.go` owns startup, shutdown, wiring, and lifecycle.
-- package directories such as `dbus`, `relayer`, `cdp`, `commandrouter`, `status`, `watchdog`, and `mediator` own concrete integration seams.
-- the mediator layer is the orchestration hub between incoming signals, relayer messages, and local side effects
-- `state` persists durable local state; treat it as a contract, not casual scratch storage
-- `wrapper` exists to keep code testable around time, OS, exec, random, IO, and serialization
+- `mediator` is the orchestration hub: handles D-Bus signals from `feral-sys-monitord` and relayer messages, routes them to the right side effects.
+- `commandrouter` is the command dispatch layer. It has a 3-way routing split:
+  1. Commands where `Type.DeviceCtlCommand()` is true → `devicectl` executor (device control actions).
+  2. `CMD_DISPLAY_PLAYLIST` → `dp1` (playlist resolution) then CDP (`window.handleCDPRequest(...)`).
+  3. Everything else → CDP directly via `window.handleCDPRequest(...)`.
+- `devicectl` (executor) implements all device-control commands: connect, showPairingQRCode, keyboard/mouse events, screen rotation, shutdown, reboot, analytics toggle, beta features toggle, device status, update, factory reset, upload logs, volume, SSH access.
+  - `showPairingQRCode`, `factoryReset`, `updateToLatest`, `uploadLogs` also send D-Bus signals to `feral-setupd` on controld's own bus (`/com/feralfile/controld`, interface `com.feralfile.controld.general`) via `RetryableSend`.
+  - Executor manages three sentinel state files: `/home/feralfile/.state/analytics-toggle-off` (presence = analytics disabled), `/home/feralfile/.state/beta-features-toggle-on` (presence = beta features enabled), `/home/feralfile/.state/saved-volume` (persisted volume level).
+- `dbus` owns the D-Bus client and the controld handler. The handler exports `GetRelayerTopicID` RPC. It also defines the member constants for signals sent to setupd.
+- `relayer` manages the WebSocket relayer connection (ping every 15s, pong wait 3s). It classifies errors as permanent, transient, or busy.
+- `cdp` is the Chrome DevTools Protocol client (WebSocket to `127.0.0.1:9222`). Commands are sent via `Runtime.evaluate` calling `window.handleCDPRequest(payload)`.
+- `status` owns the device status collector (`DeviceStatus`) and the status poller. The poller polls CDP for player status and drives notifications to the web app.
+- `hub` exposes a local WebSocket server on `0.0.0.0:1111` (only when `enableHub` is true in config). Uses the same `commandrouter` as the relayer. Also serves Prometheus metrics at this address.
+- `mdns` advertises the device on the local network. mDNS starts/stops in response to connectivity changes from D-Bus.
+- `oom-recovery` (`OOMRecoverer`): on startup, compares `/var/lib/oom_state/chromium-oom-kill-count` against a handled-count file. If unhandled OOM kills exist, it polls (every 2s, up to 60 retries) until the webapp is responsive, then sends `CMD_DISPLAY_DEFAULT_PLAYLIST` to resume playback, then writes the handled-count. Suppresses player notifications during recovery.
+- `playlist-refresher`: polls every 5 minutes. If the current player command is `displayPlaylist`, it re-resolves the playlist via `dp1` (URL-based or dynamic queries) and re-sends it to CDP with `refresh: true`.
+- `dp1` processes DP1 playlist format (URL and dynamic queries). Uses `ff-indexer` for content resolution.
+- `ff-indexer` fetches Feral File content index via HTTP.
+- `watchdog` is a **systemd keepalive notifier** only — it sends `sd_notify WATCHDOG=1` every 15 seconds. It does NOT make recovery decisions (that is `feral-watchdog`'s job).
+- `state` persists durable local state; treat it as a contract, not casual scratch storage.
+- `wrapper` exists to keep code testable around time, OS, exec, random, IO, and serialization.
 
 ### Architectural direction
 - Keep `main.go` as composition, not business logic.

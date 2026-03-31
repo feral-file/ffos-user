@@ -9,7 +9,7 @@ Repository-wide principles from the root `AGENTS.md` also apply here.
 `feral-watchdog` is the recovery-policy daemon for device health failures.
 
 It is responsible for:
-- monitoring Chromium health via CDP
+- monitoring Chromium health via HTTP polling (not WebSocket/CDP)
 - consuming system metrics and events from `feral-sys-monitord`
 - deciding when to restart kiosk services, clean disk pressure, or reboot
 - feeding incident metrics to vmagent when configured
@@ -27,11 +27,16 @@ This daemon owns recovery policy. It should not become the source of raw health 
 ## Architecture
 
 ### Shape
-- `main.go` wires config, DBus, vmagent, CDP, handlers, mediator, and background monitors.
-- resource-specific handlers such as memory, disk, GPU, and CPU encapsulate threshold logic
-- `Mediator` consumes D-Bus signals and fans them into the appropriate handlers
-- systemd and Chromium monitors are long-running goroutines with explicit shutdown semantics
-- vmagent integration is a reporting side effect, not the policy source
+- `main.go` wires config, DBus, vmagent, handlers, mediator, and background monitors.
+- `Mediator` (`mediator.go`) consumes D-Bus signals from `feral-sys-monitord`:
+  - `sysmetrics` → routes to disk, memory, and CPU handlers.
+  - `sysevent` → `gpu_hanging` triggers `scheduleGPUReboot`; `gpu_recover` triggers `handleGPURecovery`.
+- `ChromiumMonitor` (`chromium.go`) is a long-running background goroutine that polls `http://localhost:9222/json` via HTTP (not WebSocket/CDP). Check interval: 5 s; hang threshold: 20 s of no successful response. If Chromium restarts 3 times within 5 minutes, the device reboots instead of restarting kiosk. Recovery action: `systemctl --user restart chromium-kiosk.service`.
+- `SystemdMonitor` (`systemd_service.go`) monitors three systemd services every 30 s: `feral-setupd.service`, `feral-controld.service`, `feral-sys-monitord.service`. Restarts any service that is not active.
+- `SystemdWatchdog` (`systemd_watchdog.go`) sends `sd_notify WATCHDOG=1` every 10 s. This is a **keepalive notifier only** — it does not make any recovery decisions.
+- RAM handler (`ram.go`): critical threshold 95%. Sustained above threshold for 15 s → restart kiosk (`systemctl --user restart chromium-kiosk.service`). Sustained for 60 s → reboot device.
+- Disk handler, GPU handler, CPU handler: resource-specific handlers encapsulate their own threshold and escalation logic.
+- vmagent integration is a reporting side effect, not the policy source.
 
 ### Architectural direction
 - Keep policy logic close to the relevant handler instead of scattering it through goroutines.

@@ -79,10 +79,45 @@ Small key/value file store used for setup flags (e.g. `topic_id`, `connected`,
 `paired`). Keep it human-readable and small; treat I/O errors as actionable in
 daemon paths.
 
+### D-Bus signals received (`src/dbus_utils.rs`, `src/constant.rs`)
+
+`feral-setupd` listens for four signals sent by `feral-controld` on controld's
+own bus. All four arrive on:
+- Bus name: `com.feralfile.controld`
+- Object path: `/com/feralfile/controld`
+- Interface: `com.feralfile.controld.general`
+
+| Signal member | What setupd does |
+|---|---|
+| `show_pairing_qr_code` | Navigates CDP to the QR code page |
+| `factory_reset` | Starts the factory-reset flow |
+| `system_update` | Triggers a software update |
+| `upload_logs` | Uploads device logs |
+
+**ACK mechanism**: `listen_for_signal` in `dbus_utils.rs` calls the registered
+callback when a signal is received, then immediately emits `{member}_ack` back
+on the same object/interface. The sender (`RetryableSend` in controld) retries
+up to `DBUS_MAX_RETRIES` (6) times, waiting up to `DBUS_ACK_TIMEOUT` (5 s) per
+attempt before resending. If no ack arrives after all retries, the send fails
+with an error.
+
 ### Updater (`src/updater.rs`)
 
 Runs/monitors the updater systemd unit, tails the updater log file, extracts
 progress/messages via regex, and streams progress/error lines back to callers.
+
+Two enums control update behaviour:
+
+- `UpdateMode::Required` — check only against the distributor's minimum
+  supported version; update is mandatory if the running build is below it.
+- `UpdateMode::Available` — check against the latest published version; update
+  is optional/user-triggered.
+
+- `UpdateExecution::Blocking` — run update operations in the foreground. Used
+  during startup and D-Bus callback flows where we can wait.
+- `UpdateExecution::NonBlocking` — spawn update operations in background tasks
+  and return immediately. Used in BLE flows where a response must be sent to
+  the mobile app without delay.
 
 ## Architectural direction
 - Keep `src/main.rs` as lifecycle and orchestration glue, not a dumping ground for unrelated logic.
