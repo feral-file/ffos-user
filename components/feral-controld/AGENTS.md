@@ -33,7 +33,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
   1. Commands where `Type.DeviceCtlCommand()` is true → `devicectl` executor (device control actions).
   2. `CMD_DISPLAY_PLAYLIST` → `dp1` (playlist resolution) then CDP (`window.handleCDPRequest(...)`).
   3. Everything else → CDP directly via `window.handleCDPRequest(...)`.
-- `devicectl` (executor) implements all device-control commands: connect, showPairingQRCode, keyboard/mouse events, screen rotation, shutdown, reboot, analytics toggle, beta features toggle, device status, update, factory reset, upload logs, volume, SSH access.
+- `devicectl` (executor) implements all device-control commands: connect, showPairingQRCode, keyboard/mouse events, screen rotation, shutdown, reboot, analytics toggle, beta features toggle, device status, update, factory reset, upload logs, volume, SSH access, and panel control over DDC/CI (`ddcPanelControl` / `ddcPanelStatus` for brightness, contrast, volume, mute, and power via `ddcutil` with a simple retry/recovery path).
   - `showPairingQRCode`, `factoryReset`, `updateToLatest`, `uploadLogs` also send D-Bus signals to `feral-setupd` on controld's own bus (`/com/feralfile/controld`, interface `com.feralfile.controld.general`) via `RetryableSend`.
   - Executor manages three sentinel state files: `/home/feralfile/.state/analytics-toggle-off` (presence = analytics disabled), `/home/feralfile/.state/beta-features-toggle-on` (presence = beta features enabled), `/home/feralfile/.state/saved-volume` (persisted volume level).
 - `dbus` owns the D-Bus client and the controld handler. The handler exports `GetRelayerTopicID` RPC. It also defines the member constants for signals sent to setupd.

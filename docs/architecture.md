@@ -69,6 +69,10 @@ Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0
 
 `feral-controld` exposes a local WebSocket server on `0.0.0.0:1111` when `enableHub` is true in config. This hub accepts the same command format as the relayer and is used for local-network control (e.g. from a companion app on the same network). mDNS advertises hub availability. The hub is not a replacement for the relayer; it is an optional local control path.
 
+### Panel control: DDC/CI via `ddcutil`
+
+`feral-controld`’s `devicectl` executor drives the attached panel over DDC/CI using the `ddcutil` CLI. Remote or hub commands `ddcPanelControl` and `ddcPanelStatus` map to brightness, contrast, speaker volume, mute, and power VCPs on the default display; the helper wraps `ddcutil` with a lightweight retry/recovery run when the tool reports display-not-found or missing VCP output.
+
 ### Mobile provisioning: BLE GATT (Bluetooth Low Energy)
 
 `feral-setupd` exposes a BLE GATT service used by the mobile app during first-run provisioning. BLE is the setup channel only; it is not used for runtime device control or command routing. No other service registers a GATT service.

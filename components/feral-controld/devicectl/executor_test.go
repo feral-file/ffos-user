@@ -3590,6 +3590,73 @@ func TestExecutor_DdcPanelStatus_PartialErrors(t *testing.T) {
 	assert.Contains(t, st.Errors, "power")
 }
 
+func TestExecutor_DdcPanelStatus_OnlyMuteErrWithExitCode(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_DDC_PANEL_STATUS,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Simulate ddcutil emitting usable VCP lines plus ERR for mute, and
+	// returning a non-zero exit status.
+	gomock.InOrder(
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "detect", "--brief").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("Monitor: DEL : DELL S2721QS\n"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 10 C 75 100\nVCP 12 C 75 100\nVCP 62 C 0 100\nVCP 8D ERR\nVCP D6 SNC x01\n"), errors.New("exit status 1")),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "60", "--brief").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("getvcp 60 ok"), nil),
+		ts.mockExec.EXPECT().
+			CommandContext(ts.ctx, "ddcutil", "--noverify", "getvcp", "--brief", "10", "12", "62", "8D", "D6").
+			Return(ts.mockExecCmd),
+		ts.mockExecCmd.EXPECT().
+			CombinedOutput().
+			Return([]byte("VCP 10 C 75 100\nVCP 12 C 75 100\nVCP 62 C 0 100\nVCP 8D ERR\nVCP D6 SNC x01\n"), errors.New("exit status 1")),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	require.NoError(t, err)
+	st, ok := result.(*devicectl.DdcPanelStatus)
+	require.True(t, ok)
+
+	require.NotNil(t, st.Brightness)
+	assert.Equal(t, 75, *st.Brightness)
+	require.NotNil(t, st.Contrast)
+	assert.Equal(t, 75, *st.Contrast)
+	require.NotNil(t, st.Volume)
+	assert.Equal(t, 0, *st.Volume)
+	require.NotNil(t, st.Power)
+	assert.Equal(t, "on", *st.Power)
+	require.NotNil(t, st.Monitor)
+	assert.Equal(t, "DEL:DELL S2721QS", *st.Monitor)
+
+	require.NotNil(t, st.Errors)
+	// Only mute should report an error; others should be clean.
+	assert.Contains(t, st.Errors, "mute")
+	assert.NotContains(t, st.Errors, "brightness")
+	assert.NotContains(t, st.Errors, "contrast")
+	assert.NotContains(t, st.Errors, "volume")
+	assert.NotContains(t, st.Errors, "power")
+}
+
 func TestExecutor_DdcPanelStatus_RetryDetectOnAnyError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

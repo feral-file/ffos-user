@@ -559,7 +559,10 @@ func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]b
 	args = append(args, "--noverify", "getvcp", "--brief")
 	args = append(args, vcpCodes...)
 	out, err := p.execDdcutilWithDisplayRecovery(ctx, append([]string{"ddcutil"}, args...)...)
-	if err != nil {
+	// Some panels return non-zero when one VCP reports ERR but still emit usable
+	// VCP lines for others. In that case we want to keep parsing instead of
+	// failing the whole batch, as long as we see at least one VCP brief line.
+	if err != nil && !ddcutilOutputHasVcpBriefLine(out) {
 		return out, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return out, nil
