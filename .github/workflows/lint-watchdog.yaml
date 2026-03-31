@@ -5,9 +5,22 @@ on:
     branches: [release, develop]
     paths:
       - 'components/feral-watchdog/**/*.go'
+      - '.golangci.yml'
+      - 'components/feral-watchdog/go.mod'
+      - 'components/feral-watchdog/go.sum'
   pull_request:
     paths:
       - 'components/feral-watchdog/**/*.go'
+      - '.golangci.yml'
+      - 'components/feral-watchdog/go.mod'
+      - 'components/feral-watchdog/go.sum'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-watchdog-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:

@@ -1,0 +1,29 @@
+---
+description: Intent-rich commenting guidance for future agentic amendment sessions
+globs:
+  - "components/**"
+alwaysApply: true
+---
+
+# Intent Comment Rule
+
+## Principle
+- Comments are additional maintenance context for future amendment sessions, not a narration of syntax.
+
+## Add comments when code is carrying
+- invariants that must stay in sync across functions or tasks
+- shutdown or startup ordering assumptions
+- protocol or wire-format constraints
+- concurrency assumptions
+- trade-offs between readability, performance, or operational safety
+- reasons a fallback, retry, cache, or guard exists
+- known hazards if a future edit simplifies the code incorrectly
+
+## Preferred comment shape
+- why this exists
+- what must remain true
+- what failure mode is being prevented
+- why the chosen trade-off was accepted
+
+## Anti-pattern
+- comments that merely restate the next line of code

@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - 'components/feral-controld/**/*.go'
+      - '.golangci.yml'
+      - 'components/feral-controld/go.mod'
+      - 'components/feral-controld/go.sum'
   workflow_call:
     inputs:
       upload-coverage:
@@ -11,6 +14,13 @@ on:
         required: false
         default: false
         type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-controld-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
