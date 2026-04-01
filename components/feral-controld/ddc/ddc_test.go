@@ -1,4 +1,4 @@
-package devicectl
+package ddc
 
 import (
 	"errors"
