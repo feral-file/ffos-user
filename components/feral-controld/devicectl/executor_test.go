@@ -20,6 +20,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -62,8 +63,12 @@ func setup(t *testing.T) *testSetup {
 	mockStateManager := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(mockStateManager)
 
+	// Use a real panelDDC backed by mockExec so that DDC executor tests can
+	// keep mocking ddcutil subprocess calls through mockExec.CommandContext.
+	panelDDC := ddc.New(mockExec, logger)
+
 	// Create executor with mocks
-	executor := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, mockJSON, mockOS, mockExec, mockMath, logger)
+	executor := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, panelDDC, mockJSON, mockOS, mockExec, mockMath, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -3244,8 +3249,9 @@ func TestExecutor_NewHandler(t *testing.T) {
 	mockOS := mocks.NewMockOS(ctrl)
 	mockExec := mocks.NewMockExec(ctrl)
 	mockMath := mocks.NewMockMath(ctrl)
+	panelDDC := mocks.NewMockPanelDDC(ctrl)
 
-	handler := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, mockJSON, mockOS, mockExec, mockMath, logger)
+	handler := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, panelDDC, mockJSON, mockOS, mockExec, mockMath, logger)
 	assert.NotNil(t, handler)
 }
 
@@ -3528,7 +3534,7 @@ func TestExecutor_DdcPanelStatus_Success(t *testing.T) {
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	require.NoError(t, err)
-	st, ok := result.(*devicectl.DdcPanelStatus)
+	st, ok := result.(*ddc.DdcPanelStatus)
 	require.True(t, ok)
 	require.NotNil(t, st.Brightness)
 	assert.Equal(t, 50, *st.Brightness)
@@ -3575,7 +3581,7 @@ func TestExecutor_DdcPanelStatus_PartialErrors(t *testing.T) {
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	require.NoError(t, err)
-	st, ok := result.(*devicectl.DdcPanelStatus)
+	st, ok := result.(*ddc.DdcPanelStatus)
 	require.True(t, ok)
 	require.NotNil(t, st.Brightness)
 	assert.Nil(t, st.Contrast)
@@ -3634,7 +3640,7 @@ func TestExecutor_DdcPanelStatus_OnlyMuteErrWithExitCode(t *testing.T) {
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	require.NoError(t, err)
-	st, ok := result.(*devicectl.DdcPanelStatus)
+	st, ok := result.(*ddc.DdcPanelStatus)
 	require.True(t, ok)
 
 	require.NotNil(t, st.Brightness)
@@ -3699,7 +3705,7 @@ func TestExecutor_DdcPanelStatus_RetryDetectOnAnyError(t *testing.T) {
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	require.NoError(t, err)
-	st, ok := result.(*devicectl.DdcPanelStatus)
+	st, ok := result.(*ddc.DdcPanelStatus)
 	require.True(t, ok)
 	require.NotNil(t, st.Brightness)
 	assert.Equal(t, 50, *st.Brightness)
@@ -3759,7 +3765,7 @@ func TestExecutor_DdcPanelStatus_RetryWhenNoVcpLines(t *testing.T) {
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	require.NoError(t, err)
-	st, ok := result.(*devicectl.DdcPanelStatus)
+	st, ok := result.(*ddc.DdcPanelStatus)
 	require.True(t, ok)
 	require.NotNil(t, st.Brightness)
 	assert.Equal(t, 50, *st.Brightness)

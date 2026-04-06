@@ -1,4 +1,4 @@
-package devicectl
+package ddc
 
 import (
 	"context"
@@ -12,6 +12,22 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// -----------------------------------------------------------------------------
+// PanelDDC interface – shared by the status poller and the command executor.
+// -----------------------------------------------------------------------------
+
+//go:generate mockgen -source=ddc.go -destination=../mocks/ddc.go -package=mocks -mock_names=PanelDDC=MockPanelDDC
+type PanelDDC interface {
+	CollectStatus(ctx context.Context) (*DdcPanelStatus, error)
+	ApplyControl(ctx context.Context, action DdcPanelAction, value json.RawMessage) error
+}
+
+// New returns a PanelDDC that drives the default ddcutil display.
+// Requires RW /dev/i2c-* (udev/i2c group).
+func New(exec wrapper.Exec, logger *zap.Logger) PanelDDC {
+	return &panelDdc{exec: exec, logger: logger}
+}
 
 // -----------------------------------------------------------------------------
 // Panel control: wire types and setvcp resolution (ddcPanelControl)
@@ -193,8 +209,8 @@ func parseDdcJSONString(raw json.RawMessage) (string, error) {
 // Panel status: getvcp --brief parsing (ddcPanelStatus)
 // -----------------------------------------------------------------------------
 
-// DdcPanelStatus is returned by ddcPanelStatus. Omitted fields mean that feature could not be read.
-// Errors maps field name to message.
+// DdcPanelStatus is returned by CollectStatus. Omitted fields mean that feature
+// could not be read. Errors maps field name to message.
 type DdcPanelStatus struct {
 	Brightness *int              `json:"brightness,omitempty"`
 	Contrast   *int              `json:"contrast,omitempty"`
@@ -435,14 +451,9 @@ func (p *panelDdc) detectMonitorModel(ctx context.Context) (string, error) {
 // ddcutil runner: detect + retry, setvcp, getvcp, full status
 // -----------------------------------------------------------------------------
 
-// panelDdc runs ddcutil against the default display. Requires RW /dev/i2c-* (udev/i2c group).
 type panelDdc struct {
 	exec   wrapper.Exec
 	logger *zap.Logger
-}
-
-func newPanelDdc(exec wrapper.Exec, logger *zap.Logger) *panelDdc {
-	return &panelDdc{exec: exec, logger: logger}
 }
 
 // ApplyControl runs setvcp for the resolved action/value pair.
@@ -464,7 +475,7 @@ func (p *panelDdc) ApplyControl(ctx context.Context, action DdcPanelAction, valu
 
 // CollectStatus queries brightness, contrast, volume, mute, and power VCPs.
 func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
-	status := &DdcPanelStatus{}
+	panelStatus := &DdcPanelStatus{}
 	errs := map[string]string{}
 
 	monitorModel, err := p.detectMonitorModel(ctx)
@@ -472,7 +483,7 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 		// Model discovery is auxiliary; we don't block panel VCP status.
 		errs["monitor"] = err.Error()
 	} else if monitorModel != "" {
-		status.Monitor = ddcStringPtr(monitorModel)
+		panelStatus.Monitor = ddcStringPtr(monitorModel)
 	}
 
 	codes := make([]string, 0, len(ddcPanelStatusQueries))
@@ -486,8 +497,8 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 		for _, q := range ddcPanelStatusQueries {
 			errs[q.field] = err.Error()
 		}
-		status.Errors = errs
-		return status, nil
+		panelStatus.Errors = errs
+		return panelStatus, nil
 	}
 
 	parsedByCode, parseErrsByCode := parseDdcutilGetVcpBriefBatch(string(out))
@@ -512,9 +523,9 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 			}
 			switch q.field {
 			case "brightness":
-				status.Brightness = ddcIntPtr(parsed.Current)
+				panelStatus.Brightness = ddcIntPtr(parsed.Current)
 			case "contrast":
-				status.Contrast = ddcIntPtr(parsed.Current)
+				panelStatus.Contrast = ddcIntPtr(parsed.Current)
 			}
 		case "volume":
 			vol, err := ddcVolumePercentFromParsed(parsed)
@@ -522,7 +533,7 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 				errs[q.field] = err.Error()
 				continue
 			}
-			status.Volume = ddcIntPtr(vol)
+			panelStatus.Volume = ddcIntPtr(vol)
 		case "mute":
 			if parsed.Kind != ddcBriefSNC && parsed.Kind != ddcBriefCNC {
 				errs[q.field] = fmt.Sprintf("expected SNC or CNC VCP for mute, got kind %v", parsed.Kind)
@@ -533,7 +544,7 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 				errs[q.field] = fmt.Sprintf("unmapped mute SL=0x%02x", parsed.SL)
 				continue
 			}
-			status.Mute = ddcStringPtr(s)
+			panelStatus.Mute = ddcStringPtr(s)
 		case "power":
 			if parsed.Kind != ddcBriefSNC && parsed.Kind != ddcBriefCNC {
 				errs[q.field] = fmt.Sprintf("expected SNC or CNC VCP for power, got kind %v", parsed.Kind)
@@ -544,14 +555,14 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 				errs[q.field] = fmt.Sprintf("unmapped power SL=0x%02x", parsed.SL)
 				continue
 			}
-			status.Power = ddcStringPtr(s)
+			panelStatus.Power = ddcStringPtr(s)
 		}
 	}
 
 	if len(errs) > 0 {
-		status.Errors = errs
+		panelStatus.Errors = errs
 	}
-	return status, nil
+	return panelStatus, nil
 }
 
 func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]byte, error) {

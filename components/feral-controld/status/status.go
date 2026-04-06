@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -66,6 +67,7 @@ type poller struct {
 	relayer      relayer.Relayer
 	ws           ws.WS
 	deviceStatus DeviceStatus
+	panelDDC     ddc.PanelDDC
 	logger       *zap.Logger
 	stopChan     chan struct{}
 	refreshChan  chan struct{}
@@ -91,6 +93,7 @@ func NewPoller(
 	r relayer.Relayer,
 	ws ws.WS,
 	ds DeviceStatus,
+	panelDDC ddc.PanelDDC,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Poller {
@@ -99,6 +102,7 @@ func NewPoller(
 		relayer:                 r,
 		ws:                      ws,
 		deviceStatus:            ds,
+		panelDDC:                panelDDC,
 		logger:                  logger,
 		json:                    json,
 		stopChan:                make(chan struct{}),
@@ -149,6 +153,7 @@ func (s *poller) Start(ctx context.Context) {
 	// Poll immediately on start
 	s.pollPlayerStatus(ctx)
 	s.pollDeviceStatus(ctx)
+	s.pollDDCStatus(ctx)
 
 	for {
 		select {
@@ -161,10 +166,12 @@ func (s *poller) Start(ctx context.Context) {
 		case <-statusTicker.C:
 			s.pollPlayerStatus(ctx)
 			s.pollDeviceStatus(ctx)
+			s.pollDDCStatus(ctx)
 		case <-s.refreshChan:
 			s.logger.Debug("Force refreshing status due to CDP command")
 			s.pollPlayerStatus(ctx)
 			s.pollDeviceStatus(ctx)
+			s.pollDDCStatus(ctx)
 		}
 	}
 }
@@ -378,4 +385,22 @@ func (s *poller) pollDeviceStatus(ctx context.Context) {
 	}
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DEVICE_STATUS, deviceStatus)
+}
+
+func (s *poller) pollDDCStatus(ctx context.Context) {
+	// Check if relayer is connected before polling
+	if !s.relayer.IsConnected() {
+		s.logger.Debug("Relayer not connected, skipping DDC status poll")
+		return
+	}
+
+	s.logger.Debug("Polling DDC panel status")
+
+	ddcStatus, err := s.panelDDC.CollectStatus(ctx)
+	if err != nil {
+		s.logger.Error("Failed to get DDC panel status", zap.Error(err))
+		return
+	}
+
+	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatus)
 }

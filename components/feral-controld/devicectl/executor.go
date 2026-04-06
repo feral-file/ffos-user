@@ -16,6 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -77,7 +78,7 @@ type executor struct {
 	exec wrapper.Exec
 	math wrapper.Math
 
-	ddc *panelDdc
+	panelDDC ddc.PanelDDC
 }
 
 func New(
@@ -85,6 +86,7 @@ func New(
 	dbus dbus.DBus,
 	deviceStatus status.DeviceStatus,
 	statusPoller status.Poller,
+	panelDDC ddc.PanelDDC,
 	json wrapper.JSON,
 	os wrapper.OS,
 	exec wrapper.Exec,
@@ -101,7 +103,7 @@ func New(
 		os:           os,
 		exec:         exec,
 		math:         math,
-		ddc:          newPanelDdc(exec, l),
+		panelDDC:     panelDDC,
 	}
 }
 
@@ -1011,18 +1013,18 @@ func (e *executor) toggleMute(ctx context.Context) (interface{}, error) {
 }
 
 func (e *executor) ddcPanelControl(ctx context.Context, args []byte) (interface{}, error) {
-	var req DdcPanelControlRequest
+	var req ddc.DdcPanelControlRequest
 	if err := e.json.Unmarshal(args, &req); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	action, err := ParseDdcPanelAction(req.Action)
+	action, err := ddc.ParseDdcPanelAction(req.Action)
 	if err != nil {
 		return nil, err
 	}
 	if len(req.Value) == 0 {
 		return nil, fmt.Errorf("value is required for ddcPanelControl action %q", action)
 	}
-	if err := e.ddc.ApplyControl(ctx, action, req.Value); err != nil {
+	if err := e.panelDDC.ApplyControl(ctx, action, req.Value); err != nil {
 		return nil, err
 	}
 	return CmdOK, nil
@@ -1030,5 +1032,5 @@ func (e *executor) ddcPanelControl(ctx context.Context, args []byte) (interface{
 
 // ddcPanelStatus reads the standard panel VCPs. Request body is unused (send {}).
 func (e *executor) ddcPanelStatus(ctx context.Context, _ []byte) (interface{}, error) {
-	return e.ddc.CollectStatus(ctx)
+	return e.panelDDC.CollectStatus(ctx)
 }
