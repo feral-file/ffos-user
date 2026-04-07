@@ -157,7 +157,7 @@ func (r *refresher) processPlayingPlaylist() error {
 			return err
 		}
 	case playerStatus.Playlist != nil:
-		if len(playerStatus.Playlist.DynamicQueries) == 0 {
+		if !playerStatus.Playlist.HasDynamicContent() {
 			r.logger.Debug("Playlist has no dynamic queries, skipping")
 			return nil
 		}

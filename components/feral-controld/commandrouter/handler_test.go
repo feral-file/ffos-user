@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
-	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
@@ -62,8 +62,8 @@ func (ts *testSetup) teardown() {
 }
 
 // Helper functions
-func stringPtr(s string) *string {
-	return &s
+func float64Ptr(f float64) *float64 {
+	return &f
 }
 
 func playerOkResponse() map[string]interface{} {
@@ -183,9 +183,9 @@ func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item"),
+					Title:    "Test Item",
 					Source:   "https://example.com/video.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
@@ -226,9 +226,9 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item"),
+					Title:    "Test Item",
 					Source:   "https://example.com/video.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
@@ -292,7 +292,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Playlist: dp1playlist.Playlist{
 			Items: []dp1playlist.PlaylistItem{},
 		},
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://api.example.com/graphql",
 				Params: map[string]string{
@@ -307,7 +307,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 				{
 					ID:       "item1",
 					Source:   "https://example.com/video.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 				},
 			},
 		},

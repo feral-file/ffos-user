@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
@@ -81,14 +81,14 @@ func createMockPlaylist() *dp1.Playlist {
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item 1"),
+					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
 		},
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
 				Params: map[string]string{
@@ -107,20 +107,19 @@ func createMockPlaylistNoDynamic() *dp1.Playlist {
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item 1"),
+					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
 		},
-		DynamicQueries: []dp1.DynamicQuery{},
+		DynamicQueries: []dp1.LegacyDynamicQuery{},
 	}
 }
 
-// Helper function to create string pointers
-func stringPtr(s string) *string {
-	return &s
+func float64Ptr(f float64) *float64 {
+	return &f
 }
 
 // Helper function to set up common mock expectations for background goroutine

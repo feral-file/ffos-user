@@ -3,9 +3,12 @@ package dp1
 import (
 	"context"
 	"fmt"
+	"maps"
+	"net/http"
+	"strconv"
 	"strings"
 
-	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
@@ -16,20 +19,41 @@ import (
 const (
 	DEFAULT_DURATION             = 300
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
-	MAX_PLAYLIST_ITEMS_LIMIT     = 100
+	MAX_PLAYLIST_ITEMS_LIMIT     = 255
 	// Namespace UUID for generating deterministic UUIDs from token identifiers
 	//nolint:gosec
 	TOKEN_NAMESPACE_UUID = "8c95b1c2-4ef7-4ad9-a89a-84e410c1b4b1"
+
+	// hydrationKeyLimit and hydrationKeyOffset must match placeholder names in dynamicQuery.query
+	// (e.g. {{limit}}, {{offset}}) for spec-compliant playlists.
+	hydrationKeyLimit  = "limit"
+	hydrationKeyOffset = "offset"
 )
 
-type DynamicQuery struct {
+// LegacyDynamicQuery is the pre-DP-1-extension shape: a single indexer endpoint plus flat string params.
+//
+// --- LEGACY DYNAMIC QUERIES (remove when all playlists use dynamicQuery) ---
+// JSON field: "dynamicQueries" (array). Controld maps this to FFIndexer.QueryTokens (Feral GraphQL).
+// Delete this type, DynamicQueries on Playlist, processDynamicPlaylistLegacy, and the legacy branch
+// in ProcessDynamicPlaylist / ProcessPlaylistURL once migration is complete.
+type LegacyDynamicQuery struct {
 	Endpoint string            `json:"endpoint"`
 	Params   map[string]string `json:"params"`
 }
 
+// Playlist is a DP-1 playlist plus optional dynamic resolution config.
 type Playlist struct {
 	dp1playlist.Playlist
-	DynamicQueries []DynamicQuery `json:"dynamicQueries"`
+	// LEGACY: see LegacyDynamicQuery. Omit from JSON when using spec dynamicQuery only.
+	DynamicQueries []LegacyDynamicQuery `json:"dynamicQueries,omitempty"`
+}
+
+// HasDynamicContent returns true when the playlist requests dynamic item resolution (spec or legacy).
+func (p *Playlist) HasDynamicContent() bool {
+	if p == nil {
+		return false
+	}
+	return p.DynamicQuery != nil || len(p.DynamicQueries) > 0
 }
 
 //go:generate mockgen -source=dp1.go -destination=../mocks/dp1.go -package=mocks -mock_names=DP1=MockDP1
@@ -70,13 +94,12 @@ func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrap
 func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing playlist from URL", zap.String("url", url))
 
-	// Fetch playlist from URL
 	playlist, err := d.fetchPlaylist(url)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(playlist.DynamicQueries) > 0 {
+	if playlist.HasDynamicContent() {
 		return d.ProcessDynamicPlaylist(ctx, playlist, minimal)
 	}
 
@@ -85,21 +108,83 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID))
+
+	if playlist.DynamicQuery != nil {
+		if len(playlist.DynamicQueries) > 0 {
+			d.logger.Warn("playlist has both dynamicQuery and legacy dynamicQueries; using dynamicQuery only",
+				zap.String("playlist_id", playlist.ID))
+		}
+		return d.processDynamicPlaylistSpec(ctx, playlist, minimal)
+	}
+
+	// --- LEGACY: dynamicQueries[] + FFIndexer (remove with LegacyDynamicQuery) ---
+	if len(playlist.DynamicQueries) > 0 {
+		return d.processDynamicPlaylistLegacy(ctx, playlist, minimal)
+	}
+
+	return nil, fmt.Errorf("playlist has no dynamic query configuration")
+}
+
+// processDynamicPlaylistSpec resolves items using DP-1 playlists extension dynamicQuery and
+// github.com/display-protocol/dp1-go PlaylistItemsFromDynamicQuery. Pagination uses {{limit}} and
+// {{offset}} placeholders in dynamicQuery.query, matching MINIMAL/MAX batch sizes used by legacy.
+//
+// Replacement behavior matches legacy: playlist.Items is replaced by resolved dynamic items only (no merge with static items).
+func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
+	if playlist.DynamicQuery == nil {
+		return nil, fmt.Errorf("internal: dynamicQuery is nil")
+	}
+
+	client := d.httpClientAsHTTPClient()
+	limit := MAX_PLAYLIST_ITEMS_LIMIT
+	if minimal {
+		limit = MINIMAL_PLAYLIST_ITEMS_LIMIT
+	}
+
+	var accumulated []dp1playlist.PlaylistItem
+	offset := 0
+	for {
+		params := dp1playlist.HydrationParams{
+			hydrationKeyLimit:  strconv.Itoa(limit),
+			hydrationKeyOffset: strconv.Itoa(offset),
+		}
+
+		batch, err := dp1playlist.PlaylistItemsFromDynamicQuery(ctx, playlist.DynamicQuery, params, client)
+		if err != nil {
+			return nil, err
+		}
+		accumulated = append(accumulated, batch...)
+
+		if len(batch) < limit {
+			break
+		}
+		if minimal && len(accumulated) >= MINIMAL_PLAYLIST_ITEMS_LIMIT {
+			break
+		}
+		offset += limit
+	}
+
+	playlist.Items = accumulated
+	return &playlist, nil
+}
+
+// processDynamicPlaylistLegacy uses FFIndexer.QueryTokens against the Feral indexer GraphQL tokens(...) API.
+//
+// --- LEGACY REMOVAL ---
+// Delete this function when "dynamicQueries" is no longer published. Depends on: LegacyDynamicQuery,
+// DynamicQueries field, ffIndexer.QueryTokens loop, buildPlaylistItems from Token.
+func (d *dp1) processDynamicPlaylistLegacy(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
 	if len(playlist.DynamicQueries) != 1 {
 		return nil, fmt.Errorf("playlist should have exactly 1 dynamic queries, but has %d", len(playlist.DynamicQueries))
 	}
 
-	// Process dynamic query by executing the GraphQL query
-	// Create a copy to avoid modifying the original playlist
 	originalQuery := playlist.DynamicQueries[0]
-	dynamicQuery := DynamicQuery{
+	dynamicQuery := LegacyDynamicQuery{
 		Endpoint: originalQuery.Endpoint,
 		Params:   make(map[string]string),
 	}
 	// Copy the original params
-	for k, v := range originalQuery.Params {
-		dynamicQuery.Params[k] = v
-	}
+	maps.Copy(dynamicQuery.Params, originalQuery.Params)
 
 	var ffTokens []ffindexer.Token
 	limit := MAX_PLAYLIST_ITEMS_LIMIT
@@ -124,13 +209,7 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 		offset += limit
 	}
 
-	// Build playlist items
-	duration := DEFAULT_DURATION
-	if playlist.Defaults != nil && playlist.Defaults.Duration > 0 {
-		duration = playlist.Defaults.Duration
-	}
-
-	// Build new items from tokens
+	duration := defaultDurationSeconds(playlist)
 	newItems := buildPlaylistItems(duration, ffTokens)
 
 	// Always replace the new items to keep the playlist up to date.
@@ -138,6 +217,14 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 	playlist.Items = newItems
 
 	return &playlist, nil
+}
+
+func defaultDurationSeconds(playlist Playlist) float64 {
+	duration := float64(DEFAULT_DURATION)
+	if playlist.Defaults != nil && playlist.Defaults.Duration != nil && *playlist.Defaults.Duration > 0 {
+		duration = *playlist.Defaults.Duration
+	}
+	return duration
 }
 
 func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
@@ -168,34 +255,35 @@ func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
 	return playlist, nil
 }
 
-func buildPlaylistItems(duration int, tokens []ffindexer.Token) []dp1playlist.PlaylistItem {
+func buildPlaylistItems(duration float64, tokens []ffindexer.Token) []dp1playlist.PlaylistItem {
 	items := make([]dp1playlist.PlaylistItem, 0, len(tokens))
 	for _, token := range tokens {
 		items = append(items, buildPlaylistItem(duration, token))
 	}
 	return items
 }
-func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.PlaylistItem {
+
+func buildPlaylistItem(duration float64, token ffindexer.Token) dp1playlist.PlaylistItem {
 	title := token.GetName()
 	previewURL := token.GetPreviewURL()
 	chain := normalizeChain(token.Chain)
 
-	// Generate deterministic UUID from contractAddress, blockchain, and tokenNumber
 	itemID := generateTokenUUID(token.ContractAddress, token.Chain, token.TokenNumber)
+	dur := duration
 
 	return dp1playlist.PlaylistItem{
 		ID:       itemID,
-		Title:    &title,
+		Title:    title,
 		Source:   previewURL,
-		Duration: duration,
+		Duration: &dur,
 		License:  "open",
-		Provenance: &dp1playlist.Provenance{
-			Type: "onChain",
-			Contract: &dp1playlist.Contract{
+		Provenance: &dp1playlist.ProvenanceBlock{
+			Type: dp1playlist.ProvenanceOnChain,
+			Contract: &dp1playlist.ProvenanceContract{
 				Chain:    chain,
-				Standard: &token.Standard,
-				Address:  &token.ContractAddress,
-				TokenID:  &token.TokenNumber,
+				Standard: token.Standard,
+				Address:  token.ContractAddress,
+				TokenID:  token.TokenNumber,
 			},
 		},
 	}
@@ -205,7 +293,6 @@ func buildPlaylistItem(duration int, token ffindexer.Token) dp1playlist.Playlist
 // This ensures the same token always gets the same UUID.
 func generateTokenUUID(contractAddress, blockchain, tokenNumber string) string {
 	namespace := uuid.MustParse(TOKEN_NAMESPACE_UUID)
-	// Combine the three fields with a delimiter to create a unique identifier
 	identifier := fmt.Sprintf("%s:%s:%s", contractAddress, blockchain, tokenNumber)
 	return uuid.NewSHA1(namespace, []byte(identifier)).String()
 }
@@ -221,4 +308,17 @@ func normalizeChain(blockchain string) string {
 		return "tezos"
 	}
 	return "other"
+}
+
+// httpClientTransport adapts wrapper.HTTPClient to http.RoundTripper for *http.Client used by dp1-go.
+type httpClientTransport struct {
+	wrapper.HTTPClient
+}
+
+func (t httpClientTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.Do(req)
+}
+
+func (d *dp1) httpClientAsHTTPClient() *http.Client {
+	return &http.Client{Transport: httpClientTransport{d.httpClient}}
 }

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 
 	"go.uber.org/zap"
 
