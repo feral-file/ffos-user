@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
@@ -301,6 +302,96 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 			},
 		},
 	}
+	processedPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{
+					ID:       "item1",
+					Source:   "https://example.com/video.mp4",
+					Duration: float64Ptr(300),
+				},
+			},
+		},
+	}
+	cdpResult := playerOkResponse()
+
+	command := commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{
+			"dp1_call": playlistMap,
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(playlistMap).
+		Return(playlistBytes, nil).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(playlistBytes, gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			playlist := v.(**dp1.Playlist)
+			*playlist = mockPlaylist
+			return nil
+		}).
+		Times(1)
+
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, true).
+		Return(processedPlaylist, nil).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(cdpResult, nil).
+		Times(1)
+
+	ts.mockStatusPoller.EXPECT().
+		ForceRefresh().
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.Equal(t, cdpResult, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery ensures dp1_call with only
+// the DP-1 playlists extension dynamicQuery (no legacy dynamicQueries) still triggers
+// ProcessDynamicPlaylist via HasDynamicContent().
+func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistMap := map[string]interface{}{
+		"items": []interface{}{},
+		"dynamicQuery": map[string]interface{}{
+			"profile":  "graphql-v1",
+			"endpoint": "https://api.example.com/graphql",
+			"query":    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+			"responseMapping": map[string]interface{}{
+				"itemsPath":  "data.items",
+				"itemSchema": "dp1/1.0",
+			},
+		},
+	}
+	playlistBytes := []byte(`{"items":[]}`)
+	mockPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{},
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://api.example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+	assert.True(t, mockPlaylist.HasDynamicContent(), "fixture should be spec-only dynamic (no legacy dynamicQueries)")
+
 	processedPlaylist := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Items: []dp1playlist.PlaylistItem{
