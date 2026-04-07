@@ -113,7 +113,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("failed to unmarshal playlist: %w", err)
 				}
 
-				if len(playlist.DynamicQueries) > 0 {
+				if playlist.HasDynamicContent() {
 					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))

@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+	"github.com/display-protocol/dp1-go/extension/playlists"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
@@ -81,14 +82,14 @@ func createMockPlaylist() *dp1.Playlist {
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item 1"),
+					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
 		},
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer.feralfile.com/graphql",
 				Params: map[string]string{
@@ -107,20 +108,45 @@ func createMockPlaylistNoDynamic() *dp1.Playlist {
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item 1"),
+					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
 		},
-		DynamicQueries: []dp1.DynamicQuery{},
+		DynamicQueries: []dp1.LegacyDynamicQuery{},
 	}
 }
 
-// Helper function to create string pointers
-func stringPtr(s string) *string {
-	return &s
+// createMockPlaylistSpecDynamic is a playlist with only DP-1 dynamicQuery (no legacy dynamicQueries).
+func createMockPlaylistSpecDynamic() *dp1.Playlist {
+	return &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{
+					ID:       "item1",
+					Title:    "Test Item 1",
+					Source:   "http://example.com/video1.mp4",
+					Duration: float64Ptr(300),
+					License:  "open",
+				},
+			},
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://indexer.example/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+}
+
+func float64Ptr(f float64) *float64 {
+	return &f
 }
 
 // Helper function to set up common mock expectations for background goroutine
@@ -379,6 +405,30 @@ func TestRefresher_ProcessPlayingPlaylist_DynamicPlaylist(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Stop the refresher
+	ts.refresher.Stop()
+}
+
+func TestRefresher_ProcessPlayingPlaylist_SpecDynamicQueryOnly(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	setupBackgroundMocks(ts)
+	mockPlaylist := createMockPlaylistSpecDynamic()
+	assert.True(t, mockPlaylist.HasDynamicContent(), "spec-only dynamicQuery should trigger refresh path")
+	// Expect status poller to return player status with spec dynamic playlist (no legacy dynamicQueries)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
+		AnyTimes()
+	ts.mockDP1.EXPECT().
+		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return("success", nil).
+		AnyTimes()
+	ts.refresher.Start()
+	time.Sleep(100 * time.Millisecond)
 	ts.refresher.Stop()
 }
 

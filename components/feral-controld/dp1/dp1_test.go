@@ -2,14 +2,18 @@ package dp1_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
-	dp1playlist "github.com/display-protocol/dp1-validator/playlist"
+	"github.com/display-protocol/dp1-go/extension/playlists"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"github.com/google/uuid"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
@@ -42,7 +46,7 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger)
+	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false)
 
 	return &testSetup{
 		ctrl:          ctrl,
@@ -195,9 +199,9 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 			playlist.Items = []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item 1"),
+					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			}
@@ -211,8 +215,8 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 	assert.NotNil(t, result)
 	assert.Len(t, result.Items, 1)
 	assert.Equal(t, "item1", result.Items[0].ID)
-	assert.Equal(t, "Test Item 1", *result.Items[0].Title)
-	assert.Equal(t, 300, result.Items[0].Duration)
+	assert.Equal(t, "Test Item 1", result.Items[0].Title)
+	assert.Equal(t, 300.0, *result.Items[0].Duration)
 	assert.Equal(t, "open", result.Items[0].License)
 }
 
@@ -242,14 +246,14 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 			playlist.Items = []dp1playlist.PlaylistItem{
 				{
 					ID:       "item1",
-					Title:    stringPtr("Test Item 1"),
+					Title:    "Test Item 1",
 					Source:   "http://example.com/video1.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			}
 			// Note: Defaults will be nil, so DEFAULT_DURATION will be used
-			playlist.DynamicQueries = []dp1.DynamicQuery{
+			playlist.DynamicQueries = []dp1.LegacyDynamicQuery{
 				{
 					Endpoint: "https://indexer-v2.feralfile.com/graphql",
 					Params: map[string]string{
@@ -266,7 +270,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 		QueryTokens(ts.ctx,
 			"https://indexer-v2.feralfile.com/graphql",
 			map[string]string{
-				"limit":  "100", // minimal is false so it uses MAX_PLAYLIST_ITEMS_LIMIT
+				"limit":  strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), // minimal is false so it uses MAX_PLAYLIST_ITEMS_LIMIT
 				"offset": "0",
 			}).
 		Return(mockTokens, nil)
@@ -277,8 +281,8 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 	assert.NotNil(t, result)
 	// Original items are replaced with new items from tokens
 	assert.Len(t, result.Items, 2) // 2 from tokens (original items are replaced)
-	assert.Equal(t, "Test Token 1", *result.Items[0].Title)
-	assert.Equal(t, "Test Token 2", *result.Items[1].Title)
+	assert.Equal(t, "Test Token 1", result.Items[0].Title)
+	assert.Equal(t, "Test Token 2", result.Items[1].Title)
 }
 
 func TestDP1_ProcessPlaylistURL_HTTPError(t *testing.T) {
@@ -379,14 +383,14 @@ func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "original1",
-					Title:    stringPtr("Original Item"),
+					Title:    "Original Item",
 					Source:   "http://example.com/original.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
 		},
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params: map[string]string{
@@ -413,8 +417,135 @@ func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
 	assert.NotNil(t, result)
 	// Original items are replaced with new items from tokens
 	assert.Len(t, result.Items, 2) // 2 from tokens (original items are replaced)
-	assert.Equal(t, "Test Token 1", *result.Items[0].Title)
-	assert.Equal(t, "Test Token 2", *result.Items[1].Title)
+	assert.Equal(t, "Test Token 1", result.Items[0].Title)
+	assert.Equal(t, "Test Token 2", result.Items[1].Title)
+}
+
+func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_SingleFetch(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	body := `{"data":{"items":[
+		{"id":"385f79b6-a45f-4c1c-8080-e93a192adccc","title":"FromIndexer","source":"https://media.example/a"},
+		{"id":"485f79b6-a45f-4c1c-8080-e93a192adccd","title":"FromIndexer2","source":"https://media.example/b"}
+	]}}`
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			assertGraphQLHydration(t, req, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), "0")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	assert.NoError(t, err)
+	assert.Len(t, result.Items, 2)
+	assert.Equal(t, "FromIndexer", result.Items[0].Title)
+	assert.Equal(t, "FromIndexer2", result.Items[1].Title)
+}
+
+func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_PrefersOverLegacy(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	body := `{"data":{"items":[
+		{"id":"385f79b6-a45f-4c1c-8080-e93a192adccc","title":"SpecOnly","source":"https://media.example/a"}
+	]}}`
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			assertGraphQLHydration(t, req, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), "0")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { x(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+		DynamicQueries: []dp1.LegacyDynamicQuery{
+			{
+				Endpoint: "https://indexer-v2.feralfile.com/graphql",
+				Params:   map[string]string{"limit": "50"},
+			},
+		},
+	}
+
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	assert.NoError(t, err)
+	assert.Len(t, result.Items, 1)
+	assert.Equal(t, "SpecOnly", result.Items[0].Title)
+}
+
+func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_PaginationTwoPages(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Non-minimal uses MAX_PLAYLIST_ITEMS_LIMIT per page. First response fills a full page; second is short → two HTTP calls.
+	firstBatch := make([]string, dp1.MAX_PLAYLIST_ITEMS_LIMIT)
+	for i := range firstBatch {
+		id := uuid.New().String()
+		firstBatch[i] = fmt.Sprintf(`{"id":"%s","title":"p1","source":"https://media.example/%d"}`, id, i)
+	}
+	secondBatch := []string{
+		`{"id":"585f79b6-a45f-4c1c-8080-e93a192adccc","title":"Page2","source":"https://media.example/p2"}`,
+	}
+	body1 := `{"data":{"items":[` + strings.Join(firstBatch, ",") + `]}}`
+	body2 := `{"data":{"items":[` + strings.Join(secondBatch, ",") + `]}}`
+
+	gomock.InOrder(
+		ts.mockHTTP.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				assertGraphQLHydration(t, req, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), "0")
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body1))}, nil
+			}),
+		ts.mockHTTP.EXPECT().
+			Do(gomock.Any()).
+			DoAndReturn(func(req *http.Request) (*http.Response, error) {
+				assertGraphQLHydration(t, req, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT))
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body2))}, nil
+			}),
+	)
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+
+	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
+	assert.NoError(t, err)
+	assert.Len(t, result.Items, dp1.MAX_PLAYLIST_ITEMS_LIMIT+1)
+	assert.Equal(t, "Page2", result.Items[dp1.MAX_PLAYLIST_ITEMS_LIMIT].Title)
 }
 
 func TestDP1_ProcessDynamicPlaylist_MultipleQueriesError(t *testing.T) {
@@ -422,7 +553,7 @@ func TestDP1_ProcessDynamicPlaylist_MultipleQueriesError(t *testing.T) {
 	defer ts.teardown()
 
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -446,14 +577,14 @@ func TestDP1_ProcessDynamicPlaylist_NoQueriesError(t *testing.T) {
 	defer ts.teardown()
 
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{},
+		DynamicQueries: []dp1.LegacyDynamicQuery{},
 	}
 
 	// Test
 	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
 	assert.Error(t, err)
 	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "playlist should have exactly 1 dynamic queries, but has 0")
+	assert.Contains(t, err.Error(), "playlist has no dynamic query configuration")
 }
 
 func TestDP1_ProcessDynamicPlaylist_FFIndexerError(t *testing.T) {
@@ -461,7 +592,7 @@ func TestDP1_ProcessDynamicPlaylist_FFIndexerError(t *testing.T) {
 	defer ts.teardown()
 
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -487,7 +618,7 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlag(t *testing.T) {
 
 	mockTokens := createMockTokens()
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -515,8 +646,8 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 	defer ts.teardown()
 
 	// Create tokens for pagination test - first batch has exactly the limit
-	firstBatch := make([]ffindexer.Token, 100) // MAX_PLAYLIST_ITEMS_LIMIT
-	for i := range 100 {
+	firstBatch := make([]ffindexer.Token, dp1.MAX_PLAYLIST_ITEMS_LIMIT)
+	for i := range firstBatch {
 		firstBatch[i] = createSimpleToken(fmt.Sprintf("token%d", i+1), "ethereum", "0xowner", 1)
 	}
 
@@ -527,7 +658,7 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 	}
 
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -540,15 +671,15 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 		ts.mockFFIndexer.EXPECT().
 			QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 			DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
-				assert.Equal(t, "100", params["limit"]) // MAX_PLAYLIST_ITEMS_LIMIT
+				assert.Equal(t, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), params["limit"])
 				assert.Equal(t, "0", params["offset"])
 				return firstBatch, nil
 			}),
 		ts.mockFFIndexer.EXPECT().
 			QueryTokens(ts.ctx, "https://indexer-v2.feralfile.com/graphql", gomock.Any()).
 			DoAndReturn(func(ctx context.Context, endpoint string, params map[string]string) ([]ffindexer.Token, error) {
-				assert.Equal(t, "100", params["limit"])
-				assert.Equal(t, "100", params["offset"])
+				assert.Equal(t, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), params["limit"])
+				assert.Equal(t, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), params["offset"])
 				return secondBatch, nil
 			}),
 	)
@@ -557,8 +688,8 @@ func TestDP1_ProcessDynamicPlaylist_Pagination(t *testing.T) {
 	result, err := ts.client.ProcessDynamicPlaylist(ts.ctx, playlist, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
-	// Tokens are appended, so we get 100 from first batch + 2 from second batch
-	assert.Len(t, result.Items, 102) // 100 from first batch + 2 from second batch
+	// Tokens are appended, so we get MAX_PLAYLIST_ITEMS_LIMIT from first batch + 2 from second batch
+	assert.Len(t, result.Items, dp1.MAX_PLAYLIST_ITEMS_LIMIT+2)
 }
 
 func TestDP1_ProcessDynamicPlaylist_WithDefaults(t *testing.T) {
@@ -568,7 +699,7 @@ func TestDP1_ProcessDynamicPlaylist_WithDefaults(t *testing.T) {
 	mockTokens := createMockTokens()
 	playlist := dp1.Playlist{
 		Playlist: dp1playlist.Playlist{},
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -591,7 +722,7 @@ func TestDP1_ProcessDynamicPlaylist_WithDefaults(t *testing.T) {
 
 	// Check that items use the default duration (since defaults is nil)
 	for _, item := range result.Items {
-		assert.Equal(t, 300, item.Duration) // DEFAULT_DURATION
+		assert.Equal(t, 300.0, *item.Duration) // DEFAULT_DURATION
 	}
 }
 
@@ -601,7 +732,7 @@ func TestDP1_ProcessDynamicPlaylist_WithoutDefaults(t *testing.T) {
 
 	mockTokens := createMockTokens()
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -622,7 +753,7 @@ func TestDP1_ProcessDynamicPlaylist_WithoutDefaults(t *testing.T) {
 
 	// Check that items use the default duration
 	for _, item := range result.Items {
-		assert.Equal(t, 300, item.Duration) // DEFAULT_DURATION
+		assert.Equal(t, 300.0, *item.Duration) // DEFAULT_DURATION
 	}
 }
 
@@ -705,7 +836,7 @@ func TestDP1_NormalizeChain(t *testing.T) {
 			}
 
 			playlist := dp1.Playlist{
-				DynamicQueries: []dp1.DynamicQuery{
+				DynamicQueries: []dp1.LegacyDynamicQuery{
 					{
 						Endpoint: "https://indexer-v2.feralfile.com/graphql",
 						Params:   map[string]string{"limit": "50"},
@@ -743,7 +874,7 @@ func TestDP1_ProcessDynamicPlaylist_MinimalFlagWithZeroBalanceFiltering(t *testi
 	}
 
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -790,7 +921,7 @@ func TestDP1_ProcessDynamicPlaylist_FiltersZeroBalanceTokens(t *testing.T) {
 	}
 
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -821,7 +952,7 @@ func TestDP1_ProcessDynamicPlaylist_FiltersZeroBalanceTokens(t *testing.T) {
 	// Verify the titles of all tokens
 	titles := make([]string, len(result.Items))
 	for i, item := range result.Items {
-		titles[i] = *item.Title
+		titles[i] = item.Title
 	}
 	assert.Contains(t, titles, "token1")
 	assert.Contains(t, titles, "token2")
@@ -839,28 +970,28 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:       "original1",
-					Title:    stringPtr("Original Item 1"),
+					Title:    "Original Item 1",
 					Source:   "http://example.com/original1.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 				{
 					ID:       "original2",
-					Title:    stringPtr("Original Item 2"),
+					Title:    "Original Item 2",
 					Source:   "http://example.com/original2.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 				{
 					ID:       "original3",
-					Title:    stringPtr("Original Item 3"),
+					Title:    "Original Item 3",
 					Source:   "http://example.com/original3.mp4",
-					Duration: 300,
+					Duration: float64Ptr(300),
 					License:  "open",
 				},
 			},
 		},
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -919,8 +1050,8 @@ func TestDP1_ProcessDynamicPlaylist_ReplacesOriginalItems(t *testing.T) {
 	}
 
 	// Verify items are from tokens
-	assert.Equal(t, "New Token 1", *result.Items[0].Title)
-	assert.Equal(t, "New Token 2", *result.Items[1].Title)
+	assert.Equal(t, "New Token 1", result.Items[0].Title)
+	assert.Equal(t, "New Token 2", result.Items[1].Title)
 }
 
 func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
@@ -928,7 +1059,7 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 	defer ts.teardown()
 
 	playlist := dp1.Playlist{
-		DynamicQueries: []dp1.DynamicQuery{
+		DynamicQueries: []dp1.LegacyDynamicQuery{
 			{
 				Endpoint: "https://indexer-v2.feralfile.com/graphql",
 				Params:   map[string]string{"limit": "50"},
@@ -1009,7 +1140,19 @@ func TestDP1_ProcessDynamicPlaylist_NoDuplicateItems(t *testing.T) {
 	assert.GreaterOrEqual(t, len(result.Items), 2, "Should have at least 2 items from tokens")
 }
 
-// Helper function to create string pointers
-func stringPtr(s string) *string {
-	return &s
+func float64Ptr(f float64) *float64 {
+	return &f
+}
+
+// assertGraphQLHydration checks dp1-go hydrated {{limit}} and {{offset}} into the POST JSON body.
+func assertGraphQLHydration(t *testing.T, req *http.Request, wantLimit, wantOffset string) {
+	t.Helper()
+	b, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	var env struct {
+		Query string `json:"query"`
+	}
+	assert.NoError(t, json.Unmarshal(b, &env))
+	assert.Contains(t, env.Query, "limit: "+wantLimit)
+	assert.Contains(t, env.Query, "offset: "+wantOffset)
 }
