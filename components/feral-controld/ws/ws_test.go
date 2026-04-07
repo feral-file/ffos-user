@@ -253,10 +253,15 @@ func TestSendAll_Success(t *testing.T) {
 		Return(mockConn2, nil).
 		Times(1)
 
-	// Mock connection methods for background goroutines
+	// Mock connection methods for background goroutines.
+	// Make ReadMessage block briefly so the connections stay alive
+	// long enough for SendAll to invoke WriteJSON.
 	ts.mockConn.EXPECT().
 		ReadMessage().
-		Return(0, nil, errors.New("connection closed")).
+		DoAndReturn(func() (int, []byte, error) {
+			time.Sleep(100 * time.Millisecond)
+			return 0, nil, errors.New("connection closed")
+		}).
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
@@ -271,7 +276,10 @@ func TestSendAll_Success(t *testing.T) {
 
 	mockConn2.EXPECT().
 		ReadMessage().
-		Return(0, nil, errors.New("connection closed")).
+		DoAndReturn(func() (int, []byte, error) {
+			time.Sleep(100 * time.Millisecond)
+			return 0, nil, errors.New("connection closed")
+		}).
 		AnyTimes()
 
 	mockConn2.EXPECT().
@@ -336,10 +344,15 @@ func TestSendAll_PartialFailure(t *testing.T) {
 		Return(mockConn2, nil).
 		Times(1)
 
-	// Mock connection methods for background goroutines
+	// Mock connection methods for background goroutines.
+	// Make ReadMessage block briefly so the connections stay alive
+	// long enough for SendAll to invoke WriteJSON.
 	ts.mockConn.EXPECT().
 		ReadMessage().
-		Return(0, nil, errors.New("connection closed")).
+		DoAndReturn(func() (int, []byte, error) {
+			time.Sleep(100 * time.Millisecond)
+			return 0, nil, errors.New("connection closed")
+		}).
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
@@ -354,7 +367,10 @@ func TestSendAll_PartialFailure(t *testing.T) {
 
 	mockConn2.EXPECT().
 		ReadMessage().
-		Return(0, nil, errors.New("connection closed")).
+		DoAndReturn(func() (int, []byte, error) {
+			time.Sleep(100 * time.Millisecond)
+			return 0, nil, errors.New("connection closed")
+		}).
 		AnyTimes()
 
 	mockConn2.EXPECT().

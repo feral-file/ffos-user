@@ -1,0 +1,33 @@
+---
+description: Verification gates and test posture for Go, Rust, and CI changes
+globs:
+  - "components/**"
+  - ".github/workflows/**"
+  - ".golangci.yml"
+alwaysApply: true
+---
+
+# Testing and Quality Rule
+
+## Required sequence
+1. Isolate the smallest behavior seam.
+2. Add or update tests around that seam.
+3. Implement the change.
+4. Run the relevant format, lint, and test commands.
+5. Update docs or comments when future maintainers would otherwise lose context.
+
+## Go verification
+- format only the changed Go files with `gofmt -s -w <changed-go-files>`
+- run `go test ./...` and `go vet ./...` only in each touched Go module
+- lint only the changed Go diff with `golangci-lint run --new-from-rev=HEAD~1 ./...`
+
+## Rust verification
+- run `cargo fmt --all -- --check` only for the touched crate
+- run `cargo check --all-targets --all-features` only for the touched crate
+- run `cargo clippy --all-targets --all-features -- -D warnings` only for the touched crate
+- run `cargo test --all-targets --all-features` only for the touched crate
+
+## CI verification
+- Ensure workflows trigger on source and config changes, not only on the happy-path file globs.
+- Prefer reusable checks, explicit permissions, and fail-fast guardrails for lint and test pipelines.
+- If a verification command cannot be run locally, state that clearly and keep the workflow authoritative.

@@ -1,0 +1,18 @@
+---
+description: Required review loop before commit or PR
+globs:
+  - "components/**"
+  - ".github/workflows/**"
+  - "AGENTS.md"
+alwaysApply: true
+---
+
+# Review Workflow Rule
+
+After implementation, run a review loop until the reviewer qualifies the change.
+
+1. Prepare a compact handoff with goal, files changed, key decisions, trade-offs, and checks run.
+2. Invoke the reviewer sub-agent with fresh context.
+3. If review returns `Verdict: revise`, address the findings and rerun checks.
+4. Repeat until the reviewer returns `Verdict: accept`.
+5. Only then proceed to commit, push, or PR creation.

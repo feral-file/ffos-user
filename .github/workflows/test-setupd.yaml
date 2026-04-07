@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - 'components/feral-setupd/src/**'
+      - 'components/feral-setupd/Cargo.toml'
+      - 'components/feral-setupd/Cargo.lock'
+      - 'components/feral-setupd/rustfmt.toml'
+      - 'components/feral-setupd/clippy.toml'
   workflow_call:
     inputs:
       upload-coverage:
@@ -11,6 +15,13 @@ on:
         required: false
         default: false
         type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-setupd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

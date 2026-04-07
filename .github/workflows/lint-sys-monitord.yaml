@@ -5,9 +5,22 @@ on:
     branches: [release, develop]
     paths:
       - 'components/feral-sys-monitord/**/*.go'
+      - '.golangci.yml'
+      - 'components/feral-sys-monitord/go.mod'
+      - 'components/feral-sys-monitord/go.sum'
   pull_request:
     paths:
       - 'components/feral-sys-monitord/**/*.go'
+      - '.golangci.yml'
+      - 'components/feral-sys-monitord/go.mod'
+      - 'components/feral-sys-monitord/go.sum'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-sys-monitord-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
