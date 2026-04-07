@@ -387,8 +387,14 @@ func (s *poller) pollDeviceStatus(ctx context.Context) {
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DEVICE_STATUS, deviceStatus)
 }
 
+// ddcPollTimeout bounds how long a single DDC status collection may run.
+// CollectStatus shells out to ddcutil (detect + getvcp, each with a retry
+// path), so worst-case is ~4 subprocess invocations over I2C. 15 seconds is
+// generous for healthy hardware but short enough to prevent a bad I2C/DDC path
+// from blocking the main poll loop indefinitely.
+const ddcPollTimeout = 15 * time.Second
+
 func (s *poller) pollDDCStatus(ctx context.Context) {
-	// Check if relayer is connected before polling
 	if !s.relayer.IsConnected() {
 		s.logger.Debug("Relayer not connected, skipping DDC status poll")
 		return
@@ -396,7 +402,10 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 
 	s.logger.Debug("Polling DDC panel status")
 
-	ddcStatus, err := s.panelDDC.CollectStatus(ctx)
+	ddcCtx, cancel := context.WithTimeout(ctx, ddcPollTimeout)
+	defer cancel()
+
+	ddcStatus, err := s.panelDDC.CollectStatus(ddcCtx)
 	if err != nil {
 		s.logger.Error("Failed to get DDC panel status", zap.Error(err))
 		return
