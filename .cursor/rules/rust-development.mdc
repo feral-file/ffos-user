@@ -1,5 +1,50 @@
 ---
-description:
+description: Rust coding, testing, and readability rules for ffos-user services
 globs:
-alwaysApply: false
+  - "components/**/*.rs"
+  - "components/**/Cargo.toml"
+  - "components/**/clippy.toml"
+  - "components/**/rustfmt.toml"
+alwaysApply: true
 ---
+
+# Rust Development Standards
+
+Use this rule for all Rust service work.
+
+## Readability and structure
+- Prefer explicit, boring Rust over clever type gymnastics when maintainability is the priority.
+- Keep ownership, borrowing, and mutation easy to follow.
+- Split files or helper types when a module starts mixing protocol parsing, orchestration, I/O, and state transitions.
+- Prefer domain-specific types over loosely structured tuples or ad hoc maps in non-trivial code.
+
+## Error handling
+- Prefer returning `Result` and propagating errors with context.
+- Use `thiserror` or domain error enums when callers need structured handling.
+- Avoid `unwrap` and `expect` in production paths unless an invariant is truly process-fatal and the comment explains why.
+- Treat retries, fallback behavior, and ignored failures as design decisions that deserve comments.
+
+## Async and lifecycle
+- Make task ownership, cancellation, and shutdown behavior explicit.
+- Use shared state sparingly and document invariants around locks or caches.
+- Prefer message passing or well-scoped state holders over broad shared mutability.
+- If blocking work is required inside async flows, isolate it clearly.
+
+## Comments
+- Add comments for protocol details, lifecycle assumptions, cache coherence, system integration caveats, and amendment hazards.
+- Comments may be longer than usual when preserving operational trade-offs or maintenance constraints.
+- Do not comment syntax that the type system already makes clear.
+
+## Testing and quality
+- Run verification only in the touched crate.
+- Run `cargo fmt --all -- --check`.
+- Run `cargo check --all-targets --all-features`.
+- Run `cargo clippy --all-targets --all-features -- -D warnings`.
+- Run `cargo test --all-targets --all-features`.
+- Prefer focused unit tests for parsing, state logic, and error handling.
+- Add integration-style coverage when behavior crosses async boundaries, filesystem boundaries, or service contracts.
+
+## Lint posture
+- Keep Clippy clean in touched code.
+- Prefer explicit helper functions and typed constants when Clippy is surfacing readability issues.
+- Do not silence Clippy without a narrow explanation.

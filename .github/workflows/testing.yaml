@@ -4,6 +4,13 @@ on:
   push:
     branches: [main, develop]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: testing-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-controld:
     name: Test Controld

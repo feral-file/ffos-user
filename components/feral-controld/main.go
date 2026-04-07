@@ -22,6 +22,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
@@ -367,6 +368,9 @@ func initializeApp(
 	// DeviceStatus
 	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io)
 
+	// DDC panel
+	ddcPanel := ddc.New(exec, logger)
+
 	// Websocket handler
 	wsUpgrader := wrapper.NewWebsocketUpgrader(&websocket.Upgrader{
 		ReadBufferSize:  ws.BUFFER_SIZE,
@@ -379,19 +383,19 @@ func initializeApp(
 	wsHandler := ws.NewWSHandler(context, wsUpgrader, clock, logger)
 
 	// StatusPoller
-	poller := status.NewPoller(cdp, relayer, wsHandler, deviceStatus, json, logger)
+	poller := status.NewPoller(cdp, relayer, wsHandler, deviceStatus, ddcPanel, json, logger)
 
 	// Watchdog
 	watchdog := watchdog.New(logger)
 
 	// Executor
-	executor := devicectl.New(cdp, dbusClient, deviceStatus, poller, json, os, exec, math, logger)
+	executor := devicectl.New(cdp, dbusClient, deviceStatus, poller, ddcPanel, json, os, exec, math, logger)
 
 	// FFIndexer
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
 
 	// DP1
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger)
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
 	// Command handler
 	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)

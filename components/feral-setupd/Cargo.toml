@@ -33,5 +33,13 @@ zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
 [profile.qemu]
 inherits = "release"

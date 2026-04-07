@@ -1,0 +1,16 @@
+---
+description: Placeholder architecture rule until repo owner defines a canonical architecture contract
+globs:
+  - "components/**"
+alwaysApply: false
+---
+
+# Architecture Rule TBD
+
+The canonical repository architecture contract has not been finalized.
+
+For now:
+- keep service boundaries explicit
+- avoid cross-cutting abstractions without strong justification
+- record trade-offs in comments when changing architecture-sensitive paths
+- update `docs/architecture.md` if you discover a stable rule that the repo owner should ratify

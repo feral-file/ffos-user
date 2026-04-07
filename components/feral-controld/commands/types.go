@@ -32,6 +32,8 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_SET_VOLUME:           true,
 	CMD_TOGGLE_MUTE:          true,
 	CMD_SSH_ACCESS:           true,
+	CMD_DDC_PANEL_CONTROL:    true,
+	CMD_DDC_PANEL_STATUS:     true,
 }
 
 type Command struct {
@@ -65,6 +67,11 @@ const (
 	CMD_TOGGLE_MUTE              Type = "toggleMute"
 	CMD_SSH_ACCESS               Type = "sshAccess"
 	CMD_DISPLAY_DEFAULT_PLAYLIST Type = "displayDefaultPlaylist"
+	// CMD_DDC_PANEL_CONTROL drives the attached panel over DDC via ddcutil (brightness, contrast,
+	// speaker volume, mute, and power). One JSON command type; request body selects the operation.
+	CMD_DDC_PANEL_CONTROL Type = "ddcPanelControl"
+	// CMD_DDC_PANEL_STATUS reads the same VCPs as ddcPanelControl via ddcutil getvcp --brief.
+	CMD_DDC_PANEL_STATUS Type = "ddcPanelStatus"
 )
 
 func (c Type) DeviceCtlCommand() bool {

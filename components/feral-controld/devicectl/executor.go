@@ -16,6 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
+	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -76,6 +77,8 @@ type executor struct {
 	os   wrapper.OS
 	exec wrapper.Exec
 	math wrapper.Math
+
+	panelDDC ddc.PanelDDC
 }
 
 func New(
@@ -83,6 +86,7 @@ func New(
 	dbus dbus.DBus,
 	deviceStatus status.DeviceStatus,
 	statusPoller status.Poller,
+	panelDDC ddc.PanelDDC,
 	json wrapper.JSON,
 	os wrapper.OS,
 	exec wrapper.Exec,
@@ -99,6 +103,7 @@ func New(
 		os:           os,
 		exec:         exec,
 		math:         math,
+		panelDDC:     panelDDC,
 	}
 }
 
@@ -158,6 +163,10 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.toggleMute(ctx)
 	case commands.CMD_SSH_ACCESS:
 		result, err = e.setSshAccess(ctx, bytes)
+	case commands.CMD_DDC_PANEL_CONTROL:
+		result, err = e.ddcPanelControl(ctx, bytes)
+	case commands.CMD_DDC_PANEL_STATUS:
+		result, err = e.ddcPanelStatus(ctx, bytes)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
@@ -1001,4 +1010,27 @@ func (e *executor) toggleMute(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Mute toggled successfully")
 
 	return CmdOK, nil
+}
+
+func (e *executor) ddcPanelControl(ctx context.Context, args []byte) (interface{}, error) {
+	var req ddc.DdcPanelControlRequest
+	if err := e.json.Unmarshal(args, &req); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	action, err := ddc.ParseDdcPanelAction(req.Action)
+	if err != nil {
+		return nil, err
+	}
+	if len(req.Value) == 0 {
+		return nil, fmt.Errorf("value is required for ddcPanelControl action %q", action)
+	}
+	if err := e.panelDDC.ApplyControl(ctx, action, req.Value); err != nil {
+		return nil, err
+	}
+	return CmdOK, nil
+}
+
+// ddcPanelStatus reads the standard panel VCPs. Request body is unused (send {}).
+func (e *executor) ddcPanelStatus(ctx context.Context, _ []byte) (interface{}, error) {
+	return e.panelDDC.CollectStatus(ctx)
 }

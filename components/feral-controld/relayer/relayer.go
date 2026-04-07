@@ -86,6 +86,7 @@ type NotificationType string
 const (
 	NOTIFICATION_TYPE_PLAYER_STATUS NotificationType = "player_status"
 	NOTIFICATION_TYPE_DEVICE_STATUS NotificationType = "device_status"
+	NOTIFICATION_TYPE_DDC_STATUS    NotificationType = "ddc_status"
 )
 
 //go:generate mockgen -source=relayer.go -destination=../mocks/relayer.go -package=mocks -mock_names=Relayer=MockRelayer
