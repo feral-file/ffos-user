@@ -2,12 +2,15 @@ package status
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 )
 
@@ -129,4 +132,110 @@ func TestSendNotification_RetryRelayerWhenSendFails(t *testing.T) {
 	if fWS.sendAllCalls != 1 {
 		t.Fatalf("expected websocket dedupe to send once, got %d", fWS.sendAllCalls)
 	}
+}
+
+// fakePanelDDC captures the context for deadline inspection.
+type fakePanelDDC struct {
+	collectCtx chan context.Context
+	status     *ddc.DdcPanelStatus
+	err        error
+}
+
+func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
+	if f.collectCtx != nil {
+		f.collectCtx <- ctx
+	}
+	return f.status, f.err
+}
+
+func (f *fakePanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.RawMessage) error {
+	return nil
+}
+
+func TestPollDDCStatus_ContextCarriesTimeout(t *testing.T) {
+	ctxCh := make(chan context.Context, 1)
+	fakeDDC := &fakePanelDDC{
+		collectCtx: ctxCh,
+		status:     &ddc.DdcPanelStatus{},
+	}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	fWS := &fakeWS{}
+
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      fWS,
+		panelDDC:                fakeDDC,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+
+	select {
+	case received := <-ctxCh:
+		deadline, ok := received.Deadline()
+		if !ok {
+			t.Fatal("expected CollectStatus context to carry a deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > ddcPollTimeout {
+			t.Fatalf("deadline should be within (0, %v], got %v remaining", ddcPollTimeout, remaining)
+		}
+	default:
+		t.Fatal("CollectStatus was not called")
+	}
+}
+
+func TestPollDDCStatus_TimeoutCancelsHangingCollect(t *testing.T) {
+	t.Parallel()
+
+	ctxCh := make(chan context.Context, 1)
+
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	fWS := &fakeWS{}
+
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      fWS,
+		panelDDC:                &blockingPanelDDC{ctxCh: ctxCh},
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	// Use a parent context with a very short timeout to make the test fast.
+	// The DDC timeout derives from this parent, so it will be the shorter of the two.
+	parentCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		p.pollDDCStatus(parentCtx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// pollDDCStatus returned — the timeout worked.
+	case <-time.After(2 * time.Second):
+		t.Fatal("pollDDCStatus did not return within 2s; timeout is not bounding the DDC call")
+	}
+}
+
+// blockingPanelDDC blocks CollectStatus until the context is canceled.
+type blockingPanelDDC struct {
+	ctxCh chan context.Context
+}
+
+func (b *blockingPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
+	if b.ctxCh != nil {
+		b.ctxCh <- ctx
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingPanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.RawMessage) error {
+	return nil
 }
