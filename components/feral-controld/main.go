@@ -391,7 +391,7 @@ func initializeApp(
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
 
 	// DP1
-	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger)
+	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
 	// Command handler
 	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)

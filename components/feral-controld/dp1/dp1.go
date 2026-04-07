@@ -79,15 +79,18 @@ type dp1 struct {
 	json       wrapper.JSON
 	io         wrapper.IO
 	logger     *zap.Logger
+	// debug mirrors controld --debug: relaxes dp1-go dynamicQuery endpoint policy (http:// and non-public hosts).
+	debug bool
 }
 
-func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger) DP1 {
+func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrapper.JSON, io wrapper.IO, logger *zap.Logger, debug bool) DP1 {
 	return &dp1{
 		ffIndexer:  ffIndexer,
 		httpClient: httpClient,
 		json:       json,
 		io:         io,
 		logger:     logger,
+		debug:      debug,
 	}
 }
 
@@ -149,7 +152,12 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 			hydrationKeyOffset: strconv.Itoa(offset),
 		}
 
-		batch, err := dp1playlist.PlaylistItemsFromDynamicQuery(ctx, playlist.DynamicQuery, params, client)
+		batch, err := dp1playlist.PlaylistItemsFromDynamicQuery(
+			ctx,
+			playlist.DynamicQuery,
+			params,
+			client,
+			&dp1playlist.DynamicQueryFetchOptions{AllowInsecureHTTP: d.debug})
 		if err != nil {
 			return nil, err
 		}

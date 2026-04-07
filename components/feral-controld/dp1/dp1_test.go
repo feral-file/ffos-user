@@ -46,7 +46,7 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockIO := mocks.NewMockIO(ctrl)
 
-	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger)
+	client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, false)
 
 	return &testSetup{
 		ctrl:          ctrl,
@@ -440,7 +440,7 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_SingleFetch(t *testing.T) {
 		Playlist: dp1playlist.Playlist{
 			DynamicQuery: &playlists.DynamicQuery{
 				Profile:  dp1playlist.ProfileGraphQLV1,
-				Endpoint: "https://indexer.example/graphql",
+				Endpoint: "https://example.com/graphql",
 				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
 				ResponseMapping: playlists.ResponseMapping{
 					ItemsPath:  "data.items",
@@ -475,7 +475,7 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_PrefersOverLegacy(t *testin
 		Playlist: dp1playlist.Playlist{
 			DynamicQuery: &playlists.DynamicQuery{
 				Profile:  dp1playlist.ProfileGraphQLV1,
-				Endpoint: "https://indexer.example/graphql",
+				Endpoint: "https://example.com/graphql",
 				Query:    `query { x(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
 				ResponseMapping: playlists.ResponseMapping{
 					ItemsPath:  "data.items",
@@ -532,7 +532,7 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_PaginationTwoPages(t *testi
 		Playlist: dp1playlist.Playlist{
 			DynamicQuery: &playlists.DynamicQuery{
 				Profile:  dp1playlist.ProfileGraphQLV1,
-				Endpoint: "https://indexer.example/graphql",
+				Endpoint: "https://example.com/graphql",
 				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
 				ResponseMapping: playlists.ResponseMapping{
 					ItemsPath:  "data.items",
