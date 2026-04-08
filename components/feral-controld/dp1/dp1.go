@@ -327,6 +327,12 @@ func (t httpClientTransport) RoundTrip(req *http.Request) (*http.Response, error
 	return t.Do(req)
 }
 
+// httpClientAsHTTPClient creates an http.Client compatible with dp1-go while preserving the timeout
+// configured by wrapper.NewHTTPClient. Without an explicit timeout, slow or stalled dynamicQuery
+// endpoints would hang playlist hydration indefinitely (callers typically use long-lived contexts).
 func (d *dp1) httpClientAsHTTPClient() *http.Client {
-	return &http.Client{Transport: httpClientTransport{d.httpClient}}
+	return &http.Client{
+		Transport: httpClientTransport{d.httpClient},
+		Timeout:   wrapper.HTTPClientTimeout,
+	}
 }
