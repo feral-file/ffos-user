@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+const (
+	// HTTPClientTimeout is the default request timeout for all HTTP clients.
+	// Prevents slow or stalled endpoints from blocking indefinitely.
+	HTTPClientTimeout = 30 * time.Second
+)
+
 //go:generate mockgen -source=http.go -destination=../mocks/http.go -package=mocks -mock_names=HTTPClient=MockHTTPClient
 type HTTPClient interface {
 	NewRequest(method string, url string, body go_io.Reader) (*go_http.Request, error)
@@ -23,7 +29,7 @@ type httpClient struct {
 func NewHTTPClient() HTTPClient {
 	return httpClient{
 		client: &go_http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: HTTPClientTimeout,
 		},
 	}
 }
