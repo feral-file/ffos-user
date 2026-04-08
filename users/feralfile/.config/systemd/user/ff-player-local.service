@@ -1,0 +1,15 @@
+[Unit]
+Description=Local FF Player Static Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/feralfile/scripts/serve-local-player.sh
+WorkingDirectory=/home/feralfile
+StandardOutput=append:/home/feralfile/.logs/ff-player-local.log
+StandardError=append:/home/feralfile/.logs/ff-player-local.log
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

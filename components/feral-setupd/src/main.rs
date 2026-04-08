@@ -17,6 +17,7 @@ use ble::Ble;
 use cache::Cache;
 use cdp::Cdp;
 use connectivity::Connectivity;
+use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -426,22 +427,29 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) {
     // We should not proceed with the normal flow any more
     // The device needs to automatically restart to apply the update
     // So we just return
-    match updater::is_update_required().await {
-        Ok(true) => {
-            let _ = update(app_state.clone(), chrome.clone()).await;
-            return;
+    if has_webapp_override() {
+        println!(
+            "MAIN: Webapp override detected at {}, skipping updater gate",
+            constant::WEBAPP_URL_OVERRIDE_PATH
+        );
+    } else {
+        match updater::is_update_required().await {
+            Ok(true) => {
+                let _ = update(app_state.clone(), chrome.clone()).await;
+                return;
+            }
+            Err(e) => {
+                eprintln!("MAIN: Error checking for update: {e}");
+                let _ = show_message(
+                    &chrome,
+                    &app_state,
+                    constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
+                )
+                .await;
+                return;
+            }
+            Ok(false) => {}
         }
-        Err(e) => {
-            eprintln!("MAIN: Error checking for update: {e}");
-            let _ = show_message(
-                &chrome,
-                &app_state,
-                constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
-            )
-            .await;
-            return;
-        }
-        Ok(false) => {}
     }
 
     // Otherwise, proceed with the normal flow
@@ -489,13 +497,31 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
     // This is to avoid Err Network Changed from Chrome
     time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
 
+    let webapp_url = resolve_webapp_url();
+
     chrome
-        .navigate(constant::WEBAPP_URL)
+        .navigate(&webapp_url)
         .await
-        .with_context(|| format!("navigating to {}", constant::WEBAPP_URL))?;
-    println!("MAIN: Navigated to {}", constant::WEBAPP_URL);
+        .with_context(|| format!("navigating to {}", webapp_url))?;
+    println!("MAIN: Navigated to {}", webapp_url);
     *page = Page::WebApp(unix_s());
     Ok(())
+}
+
+fn resolve_webapp_url() -> String {
+    if let Ok(value) = fs::read_to_string(constant::WEBAPP_URL_OVERRIDE_PATH) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    constant::WEBAPP_URL.to_string()
+}
+
+fn has_webapp_override() -> bool {
+    fs::read_to_string(constant::WEBAPP_URL_OVERRIDE_PATH)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &str) -> Result<()> {

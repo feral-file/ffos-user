@@ -41,6 +41,7 @@ pub const BLE_ERR_CODE_UNKNOWN_ERROR: u8 = 255;
 pub const CDP_URL: &str = "http://127.0.0.1:9222/json";
 pub const CDP_ID_START: u64 = 1_000_000;
 pub const WEBAPP_URL: &str = "https://display.feralfile.com";
+pub const WEBAPP_URL_OVERRIDE_PATH: &str = "/home/feralfile/.config/webapp-url";
 pub const QRCODE_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=qr&device_id=";
 pub const MSG_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=message&message=";
 pub const WELCOME_MSG: &str = "Welcome to the Portal (FF-X1)";
