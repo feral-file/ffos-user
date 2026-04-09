@@ -132,8 +132,14 @@ func (m *mediator) handleDBusSignal(
 		}
 
 		m.logger.Info("Received connectivity change event", zap.Bool("connected", connected), zap.Bool("relayer_connected", m.relayer.IsConnected()))
+		m.logger.Info("Processing connectivity transition",
+			zap.Bool("connected", connected),
+			zap.Bool("relayer_connected", m.relayer.IsConnected()),
+			zap.Bool("mdns_active", m.mdnsAdvertiser != nil),
+		)
 
 		// Send the connectivity change to web app
+		m.logger.Debug("Forwarding connectivity change to web app", zap.Bool("connected", connected))
 		_, err := m.cdp.Send(
 			cdp.METHOD_EVALUATE,
 			map[string]interface{}{
@@ -145,9 +151,12 @@ func (m *mediator) handleDBusSignal(
 
 		// Reconnect the relayer if it's not already connected
 		if connected && !m.relayer.IsConnected() {
+			m.logger.Info("Connectivity restored, reconnecting relayer")
 			err := m.relayer.RetryableConnect(ctx)
 			if err != nil {
 				m.logger.Error("Failed to reconnect to relayer", zap.Error(err))
+			} else {
+				m.logger.Info("Relayer reconnected after connectivity change")
 			}
 		}
 
@@ -174,7 +183,16 @@ func (m *mediator) handleDBusSignal(
 func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Payload) error {
 	payloadJSON, _ := m.json.Marshal(payload)
 	logPayload := helper.TruncateBytes(payloadJSON, logger.MAX_FIELD_LENGTH)
-	m.logger.Info("handle received relayer message", zap.ByteString("payload", logPayload))
+	m.logger.Info("handle received relayer message",
+		zap.ByteString("payload", logPayload),
+		zap.String("messageID", payload.MessageID),
+		zap.String("command", func() string {
+			if payload.Message.Command == nil {
+				return ""
+			}
+			return *payload.Message.Command
+		}()),
+	)
 
 	switch payload.MessageID {
 	case relayer.MESSAGE_ID_SYSTEM:
@@ -219,6 +237,7 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			Message:   result,
 		}
 
+		m.logger.Debug("Sending relayer RPC response", zap.String("messageID", payload.MessageID))
 		return m.relayer.Send(ctx, resp)
 	}
 

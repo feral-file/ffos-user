@@ -160,7 +160,14 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 	var attempts int
 	for {
 		attempts++
-		r.logger.Info("Connecting to Relayer", zap.String("endpoint", r.endpoint), zap.Int("attempts", attempts))
+		topicID := state.GetState().Relayer.TopicID
+		r.logger.Info("Connecting to Relayer",
+			zap.String("endpoint", r.endpoint),
+			zap.Int("attempts", attempts),
+			zap.String("topicID", topicID),
+			zap.Bool("topic_ready", topicID != ""),
+			zap.Bool("currently_connected", r.IsConnected()),
+		)
 
 		err := r.Connect(ctx)
 		if err == nil {
@@ -172,29 +179,42 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 		var busyErr BusyError
 		switch {
 		case errors.Is(err, ErrAlreadyConnected):
+			r.logger.Info("Relayer connect skipped because connection already exists")
 			return nil
 		case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 			return err
 		case errors.As(err, &permanentErr):
+			r.logger.Error("Relayer connection failed permanently", zap.Error(err))
 			return err
 		case errors.As(err, &transientErr):
+			r.logger.Warn("Relayer connection failed transiently, will retry",
+				zap.Error(err),
+				zap.Int("attempts", attempts),
+			)
 			// randomize sleep time between 1 and 5 seconds
 			sleepTime := r.randomizer.Duration(1*time.Second, 5*time.Second)
+			r.logger.Info("Sleeping before relayer retry", zap.Duration("sleep", sleepTime))
 			r.clock.Sleep(sleepTime)
 			continue
 		case errors.As(err, &busyErr):
+			r.logger.Warn("Relayer endpoint is busy, will retry",
+				zap.Error(err),
+				zap.Int("attempts", attempts),
+			)
 			// randomize sleep time between 10 and 60 seconds
 			sleepTime := r.randomizer.Duration(10*time.Second, 60*time.Second)
+			r.logger.Info("Sleeping before relayer retry", zap.Duration("sleep", sleepTime))
 			r.clock.Sleep(sleepTime)
 			continue
 		default:
 			// For unknown error, we retry several times before giving up and return error
-			r.logger.Error("Unknown relayer connection error", zap.Error(err))
+			r.logger.Error("Unknown relayer connection error", zap.Error(err), zap.Int("attempts", attempts))
 			if attempts > 10 {
 				return err
 			}
 			// randomize sleep time between 10 and 60 seconds
 			sleepTime := r.randomizer.Duration(10*time.Second, 60*time.Second)
+			r.logger.Info("Sleeping before relayer retry", zap.Duration("sleep", sleepTime))
 			r.clock.Sleep(sleepTime)
 			continue
 		}
@@ -207,6 +227,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 	r.Lock()
 	if r.conn != nil {
 		r.Unlock()
+		r.logger.Info("Relayer connect skipped because conn is already initialized")
 		return ErrAlreadyConnected
 	}
 
@@ -218,14 +239,14 @@ func (r *relayer) Connect(ctx context.Context) error {
 	}
 
 	topicID := state.GetState().Relayer.TopicID
-	r.logger.Debug("Retrieved topic ID from state",
+	r.logger.Info("Retrieved topic ID from state",
 		zap.String("topicID", topicID),
 		zap.Bool("isEmpty", topicID == ""),
 		zap.Bool("isReady", state.GetState().Relayer.IsReady()))
 
 	if topicID != "" {
 		connectURL += fmt.Sprintf("&topicID=%s", topicID)
-		r.logger.Debug("Added topic ID to connection URL", zap.String("connectURL", connectURL))
+		r.logger.Info("Added topic ID to connection URL", zap.String("connectURL", connectURL))
 	} else {
 		r.logger.Warn("Topic ID is empty, connecting without topic ID",
 			zap.String("connectURL", connectURL),
@@ -235,15 +256,34 @@ func (r *relayer) Connect(ctx context.Context) error {
 	conn, resp, err := r.dialer.DialContext(ctx, connectURL, nil)
 	if err != nil {
 		r.Unlock()
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		r.logger.Warn("Relayer dial failed",
+			zap.Error(err),
+			zap.String("endpoint", r.endpoint),
+			zap.String("topicID", topicID),
+			zap.Int("status_code", statusCode),
+		)
 		return r.categorizeWebsocketError(err, resp)
 	}
 
 	r.conn = conn
 	r.Unlock()
+	cfRay := ""
+	if resp != nil {
+		cfRay = resp.Header.Get("cf-ray")
+	}
+	r.logger.Info("Relayer websocket dial succeeded",
+		zap.String("endpoint", r.endpoint),
+		zap.String("topicID", topicID),
+		zap.String("cf_ray", cfRay),
+	)
 
 	// Set pong handler
 	conn.SetPongHandler(func(_ string) error {
-		r.logger.Debug("Received pong")
+		r.logger.Info("Received pong from relayer")
 		return conn.SetReadDeadline(time.Time{})
 	})
 
@@ -266,6 +306,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 				ticker.Stop()
 				return
 			case <-ticker.C():
+				r.logger.Info("Relayer ping ticker fired")
 				r.ping()
 			}
 		}
@@ -274,7 +315,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 	// Handle background tasks
 	r.background(ctx)
 
-	r.logger.Info("Connected to Relayer", zap.String("reqID", resp.Header.Get("cf-ray")))
+	r.logger.Info("Connected to Relayer", zap.String("reqID", cfRay))
 
 	return nil
 }
@@ -320,17 +361,18 @@ func (r *relayer) background(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				r.logger.Debug("Closing WebSocket connection due to context cancellation")
+				r.logger.Info("Closing WebSocket connection due to context cancellation")
 				r.Close()
 				return
 			case <-r.done:
 				// Exit if closed manually
-				r.logger.Debug("Context handler exiting due to manual close")
+				r.logger.Info("Context handler exiting due to manual close")
 				return
 			default:
 				r.Lock()
 				if r.conn == nil {
 					r.Unlock()
+					r.logger.Info("Relayer background exiting because connection is nil")
 					return
 				}
 
@@ -349,14 +391,22 @@ func (r *relayer) background(ctx context.Context) {
 				}
 
 				logMsg := helper.TruncateBytes(msg, logger.MAX_FIELD_LENGTH)
-				r.logger.Info("Received message", zap.ByteString("message", logMsg))
-
-				// Unmarshal payload
 				var payload Payload
 				if err := json.Unmarshal(msg, &payload); err != nil {
-					r.logger.Error("Invalid JSON received", zap.ByteString("message", logMsg))
+					r.logger.Error("Invalid JSON received",
+						zap.ByteString("message", logMsg),
+						zap.Int("message_length", len(msg)),
+					)
 					continue
 				}
+
+				r.logger.Info("Received message",
+					zap.ByteString("message", logMsg),
+					zap.String("messageID", payload.MessageID),
+					zap.String("command", derefString(payload.Message.Command)),
+					zap.String("topicID", derefString(payload.Message.TopicID)),
+					zap.Int("message_length", len(msg)),
+				)
 
 				// Forward payload to handlers
 				for _, handler := range r.handlers {
@@ -372,7 +422,11 @@ func (r *relayer) background(ctx context.Context) {
 							return
 						default:
 							if err := handler(ctx, payload); err != nil {
-								r.logger.Error("Failed to handle message", zap.Error(err))
+								r.logger.Error("Failed to handle message",
+									zap.Error(err),
+									zap.String("messageID", payload.MessageID),
+									zap.String("command", derefString(payload.Message.Command)),
+								)
 							}
 							return
 						}
@@ -389,16 +443,22 @@ func (r *relayer) Send(ctx context.Context, data interface{}) error {
 	defer r.Unlock()
 
 	if r.conn == nil {
+		r.logger.Warn("Attempted to send message while relayer is disconnected", zap.String("payload_type", fmt.Sprintf("%T", data)))
 		return ErrNotConnected
 	}
 
 	// Marshal data to JSON
 	jsonData, err := r.json.Marshal(data)
 	if err != nil {
+		r.logger.Error("Failed to marshal relayer payload", zap.String("payload_type", fmt.Sprintf("%T", data)), zap.Error(err))
 		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
-	r.logger.Info("Sending message to Relayer", zap.ByteString("message", helper.TruncateBytes(jsonData, logger.MAX_FIELD_LENGTH)))
+	r.logger.Info("Sending message to Relayer",
+		zap.ByteString("message", helper.TruncateBytes(jsonData, logger.MAX_FIELD_LENGTH)),
+		zap.String("payload_type", fmt.Sprintf("%T", data)),
+		zap.Int("message_length", len(jsonData)),
+	)
 
 	return r.conn.WriteMessage(websocket.TextMessage, jsonData)
 }
@@ -408,10 +468,11 @@ func (r *relayer) ping() {
 	r.Lock()
 	defer r.Unlock()
 	if r.conn == nil {
+		r.logger.Info("Skipping relayer ping because connection is nil")
 		return
 	}
 
-	r.logger.Debug("Sending ping")
+	r.logger.Info("Sending relayer ping")
 	if err := r.conn.WriteMessage(websocket.PingMessage, []byte("ping")); err != nil {
 		r.logger.Error("Failed to send ping", zap.Error(err))
 		return
@@ -452,6 +513,7 @@ func (r *relayer) Close() {
 
 func (r *relayer) closeConn() {
 	if r.conn == nil {
+		r.logger.Info("closeConn called with nil connection")
 		return
 	}
 
@@ -534,4 +596,11 @@ func (r *relayer) categorizeWebsocketError(err error, resp *http.Response) error
 
 	// 4. Fallback to unknown error
 	return err
+}
+
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
