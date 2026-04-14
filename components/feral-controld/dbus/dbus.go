@@ -70,7 +70,6 @@ func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
 	currentState := state.GetState()
 	c.logger.Info("DBus RPC called: GetRelayerTopicID",
 		zap.String("current_topic_id", currentState.Relayer.TopicID),
-		zap.Bool("relayer_connected", c.relayer.IsConnected()),
 	)
 
 	topicID := currentState.Relayer.TopicID
@@ -89,7 +88,6 @@ func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
 
 	c.logger.Info("Waiting for relayer topic ID",
 		zap.Duration("timeout", 30*time.Second),
-		zap.Bool("relayer_connected", c.relayer.IsConnected()),
 	)
 
 	// Channel to signal when the topicID is received
@@ -144,7 +142,6 @@ func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
 	if err != nil {
 		c.logger.Error("Failed to reconnect to relayer",
 			zap.Error(err),
-			zap.Bool("relayer_connected", c.relayer.IsConnected()),
 		)
 		retryCancel()
 		return "", dbus.NewError(err.Error(), []interface{}{})

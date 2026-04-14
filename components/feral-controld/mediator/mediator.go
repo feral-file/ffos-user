@@ -131,8 +131,7 @@ func (m *mediator) handleDBusSignal(
 			return nil, fmt.Errorf("invalid body type")
 		}
 
-		m.logger.Info("Received connectivity change event", zap.Bool("connected", connected), zap.Bool("relayer_connected", m.relayer.IsConnected()))
-		m.logger.Info("Processing connectivity transition",
+		m.logger.Info("Received connectivity change event",
 			zap.Bool("connected", connected),
 			zap.Bool("relayer_connected", m.relayer.IsConnected()),
 			zap.Bool("mdns_active", m.mdnsAdvertiser != nil),
