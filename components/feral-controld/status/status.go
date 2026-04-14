@@ -200,9 +200,6 @@ func (s *poller) ForceRefresh() {
 }
 
 func (s *poller) pollPlayerStatus(ctx context.Context) {
-	s.logger.Info("Polling player status from Chromium",
-		zap.Bool("relayer_connected", s.relayer.IsConnected()),
-	)
 	now := time.Now()
 
 	playerStatus, err := s.FetchPlayerStatus(ctx)
@@ -287,10 +284,10 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 				)
 				s.updateStatusHash(s.lastRelayerStatusHashes, notificationType, currentHash)
 			}
-	} else {
-		s.logger.Info("Relayer status unchanged, skipping relayer notification",
-			zap.String("notification_type", string(notificationType)))
-	}
+		} else {
+			s.logger.Info("Relayer status unchanged, skipping relayer notification",
+				zap.String("notification_type", string(notificationType)))
+		}
 	} else {
 		s.logger.Debug("Relayer not connected, skipping relayer notification send",
 			zap.String("notification_type", string(notificationType)))

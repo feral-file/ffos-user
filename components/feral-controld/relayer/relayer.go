@@ -246,7 +246,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 
 	if topicID != "" {
 		connectURL += fmt.Sprintf("&topicID=%s", topicID)
-		r.logger.Info("Added topic ID to connection URL", zap.String("connectURL", connectURL))
+		r.logger.Debug("Added topic ID to connection URL", zap.String("connectURL", connectURL))
 	} else {
 		r.logger.Warn("Topic ID is empty, connecting without topic ID",
 			zap.String("connectURL", connectURL),
