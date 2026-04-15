@@ -477,9 +477,6 @@ func TestExecutor_DeviceStatus_Error(t *testing.T) {
 }
 
 func TestExecutor_KeyboardEvent_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
 	testCases := []struct {
 		name     string
 		keyCode  int
@@ -744,10 +741,10 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 			},
 			wantErr: "failed to send keyboard event",
 		},
-	{
-		name: "Special key keyUp failure is ignored",
-		setupFunc: func(ts *testSetup) {
-			keyCode := 13 // Enter
+		{
+			name: "Special key keyUp failure is ignored",
+			setupFunc: func(ts *testSetup) {
+				keyCode := 13 // Enter
 
 				ts.mockJSON.EXPECT().
 					Marshal(gomock.Any()).
@@ -809,28 +806,24 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
 
-			// Setup test data
 			cmd := commands.Command{
 				Type: commands.CMD_KEYBOARD_EVENT,
 				Arguments: map[string]interface{}{
-					"code": 65, // Default value, overridden in setupFunc if needed
+					"code": 65,
 				},
 			}
 
-			// Setup error condition
 			tt.setupFunc(ts)
 
-			// Execute the method under test
 			result, err := ts.executor.Execute(ts.ctx, cmd)
 
-			// Assert error occurred and contains expected message or success
 			if tt.wantErr != "" {
-				assert.Error(t, err, "expected error, got %v", err)
-				assert.Contains(t, err.Error(), tt.wantErr, "expected error message to contain %q, got %q", tt.wantErr, err.Error())
-				assert.Nil(t, result, "expected nil result on error")
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, result)
 			} else {
-				assert.NoError(t, err, "expected no error, got %v", err)
-				assert.Equal(t, devicectl.CmdOK, result, "expected CmdOK result on success")
+				assert.NoError(t, err)
+				assert.Equal(t, devicectl.CmdOK, result)
 			}
 		})
 	}

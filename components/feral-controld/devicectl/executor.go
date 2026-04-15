@@ -370,6 +370,8 @@ func (e *executor) handleKeyboardEvent(args []byte) (interface{}, error) {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
+	// The remote keyboard payload uses a constrained numeric code set:
+	// standard phone-keyboard characters plus a small special-key subset.
 	keyEvent := e.keyboardEventForCode(cmdArgs.Code)
 	if keyEvent == nil {
 		return nil, fmt.Errorf("unsupported keyboard event code: %d", cmdArgs.Code)
