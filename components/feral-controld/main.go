@@ -208,12 +208,25 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	} else {
 		app.Logger.Info("Connectivity status", zap.Bool("connected", connected))
 	}
+	app.Logger.Info("Initial relayer connection gate evaluated",
+		zap.Bool("internet_connected", connected),
+		zap.Bool("relayer_ready", s.Relayer.IsReady()),
+		zap.String("topic_id", s.Relayer.TopicID),
+	)
 	if connected && s.Relayer.IsReady() {
+		app.Logger.Info("Connecting relayer during startup")
 		err = app.Relayer.Connect(ctx)
 		if err != nil {
+			app.Logger.Error("Failed initial relayer connection", zap.Error(err))
 			return err
 		}
+		app.Logger.Info("Initial relayer connection established")
 		defer app.Relayer.Close()
+	} else {
+		app.Logger.Info("Skipping initial relayer connection",
+			zap.Bool("internet_connected", connected),
+			zap.Bool("relayer_ready", s.Relayer.IsReady()),
+		)
 	}
 
 	// Start Hub if enabled
@@ -310,7 +323,7 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 		dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
 		true,
 	)
-	logger.Debug("Connectivity status", zap.Any("resp", resp), zap.Error(err))
+	logger.Info("Connectivity status response", zap.Any("resp", resp), zap.Error(err))
 	if err != nil {
 		return false, err
 	}

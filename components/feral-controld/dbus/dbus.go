@@ -67,10 +67,14 @@ func NewHandler(
 }
 
 func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
-	c.logger.Info("DBus RPC called: GetRelayerTopicID")
+	currentState := state.GetState()
+	c.logger.Info("DBus RPC called: GetRelayerTopicID",
+		zap.String("current_topic_id", currentState.Relayer.TopicID),
+	)
 
-	topicID := state.GetState().Relayer.TopicID
+	topicID := currentState.Relayer.TopicID
 	if topicID != "" {
+		c.logger.Info("Returning cached relayer topic ID", zap.String("topicID", topicID))
 		return topicID, nil
 	}
 
@@ -81,6 +85,10 @@ func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
 	// Create a context that will be canceled when either the deadline is reached or the global context is canceled
 	retryCtx, retryCancel := context.WithCancel(c.ctx)
 	_ = retryCancel // Explicitly ignore retryCancel for successful case
+
+	c.logger.Info("Waiting for relayer topic ID",
+		zap.Duration("timeout", 30*time.Second),
+	)
 
 	// Channel to signal when the topicID is received
 	doneChan := make(chan struct{})
@@ -104,13 +112,17 @@ func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
 				return err
 			}
 
+			c.logger.Info("Received relayer system payload", zap.String("topicID", *topicID))
+
 			// Save s
 			s := state.GetState()
 			s.Relayer.TopicID = *topicID
 			err = s.Save()
 			if err != nil {
+				c.logger.Error("Failed to persist relayer topic ID", zap.Error(err), zap.String("topicID", *topicID))
 				return err
 			}
+			c.logger.Info("Persisted relayer topic ID", zap.String("topicID", *topicID))
 
 			// Remove handler and close doneChan
 			closeOnce.Do(func() {
@@ -128,10 +140,14 @@ func (c *handler) GetRelayerTopicID() (string, *dbus.Error) {
 	// Connect to the relayer
 	err := c.relayer.RetryableConnect(retryCtx)
 	if err != nil {
-		c.logger.Error("Failed to reconnect to relayer", zap.Error(err))
+		c.logger.Error("Failed to reconnect to relayer",
+			zap.Error(err),
+		)
 		retryCancel()
 		return "", dbus.NewError(err.Error(), []interface{}{})
 	}
+
+	c.logger.Info("Relayer connected while waiting for topic ID")
 
 	// Wait for the topicID to be received or an error to occur
 	for {
