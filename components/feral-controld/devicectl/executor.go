@@ -454,23 +454,96 @@ func (e *executor) keyboardEventForCode(keyCode int) *keyboardEvent {
 		return nil
 	}
 
-	key := string(rune(keyCode))
-	code := keyCodeToCodeName(keyCode)
-	return &keyboardEvent{key: key, code: code, text: key}
+	key, code, text := printableASCIIKeyEvent(keyCode)
+	if code == "" {
+		e.logger.Warn("Unhandled printable keyboard event code", zap.Int("code", keyCode))
+		return nil
+	}
+	return &keyboardEvent{key: key, code: code, text: text}
 }
 
-func keyCodeToCodeName(keyCode int) string {
-	switch {
-	case keyCode >= 65 && keyCode <= 90:
-		return "Key" + string(rune(keyCode))
-	case keyCode >= 97 && keyCode <= 122:
-		return "Key" + strings.ToUpper(string(rune(keyCode)))
-	case keyCode >= 48 && keyCode <= 57:
-		return "Digit" + string(rune(keyCode))
+func printableASCIIKeyEvent(keyCode int) (key string, code string, text string) {
+	switch keyCode {
+	case 32:
+		return " ", "Space", " "
+	case 33:
+		return "!", "Digit1", "!"
+	case 34:
+		return "\"", "Quote", "\""
+	case 35:
+		return "#", "Digit3", "#"
+	case 36:
+		return "$", "Digit4", "$"
+	case 37:
+		return "%", "Digit5", "%"
+	case 38:
+		return "&", "Digit7", "&"
+	case 39:
+		return "'", "Quote", "'"
+	case 40:
+		return "(", "Digit9", "("
+	case 41:
+		return ")", "Digit0", ")"
+	case 42:
+		return "*", "Digit8", "*"
+	case 43:
+		return "+", "Equal", "+"
+	case 44:
+		return ",", "Comma", ","
+	case 45:
+		return "-", "Minus", "-"
+	case 46:
+		return ".", "Period", "."
+	case 47:
+		return "/", "Slash", "/"
+	case 48, 49, 50, 51, 52, 53, 54, 55, 56, 57:
+		return string(rune(keyCode)), "Digit" + string(rune(keyCode)), string(rune(keyCode))
+	case 58:
+		return ":", "Semicolon", ":"
+	case 59:
+		return ";", "Semicolon", ";"
+	case 60:
+		return "<", "Comma", "<"
+	case 61:
+		return "=", "Equal", "="
+	case 62:
+		return ">", "Period", ">"
+	case 63:
+		return "?", "Slash", "?"
+	case 64:
+		return "@", "Digit2", "@"
+	case 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
+		75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
+		85, 86, 87, 88, 89, 90:
+		return string(rune(keyCode)), "Key" + string(rune(keyCode)), string(rune(keyCode))
+	case 91:
+		return "[", "BracketLeft", "["
+	case 92:
+		return "\\", "Backslash", "\\"
+	case 93:
+		return "]", "BracketRight", "]"
+	case 94:
+		return "^", "Digit6", "^"
+	case 95:
+		return "_", "Minus", "_"
+	case 96:
+		return "`", "Backquote", "`"
+	case 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+		107, 108, 109, 110, 111, 112, 113, 114, 115, 116,
+		117, 118, 119, 120, 121, 122:
+		upper := strings.ToUpper(string(rune(keyCode)))
+		return string(rune(keyCode)), "Key" + upper, string(rune(keyCode))
+	case 123:
+		return "{", "BracketLeft", "{"
+	case 124:
+		return "|", "Backslash", "|"
+	case 125:
+		return "}", "BracketRight", "}"
+	case 126:
+		return "~", "Backquote", "~"
 	default:
-		return "Key" + string(rune(keyCode))
+		return "", "", ""
 	}
-
 }
 
 func (e *executor) initializeScreenDimensions() {

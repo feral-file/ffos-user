@@ -489,7 +489,10 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 		{name: "LetterA", keyCode: 65, expected: map[string]interface{}{"key": "A", "code": "KeyA", "text": "A", "unmodifiedText": "A"}, wantText: true},
 		{name: "Letterz", keyCode: 122, expected: map[string]interface{}{"key": "z", "code": "KeyZ", "text": "z", "unmodifiedText": "z"}, wantText: true},
 		{name: "Number0", keyCode: 48, expected: map[string]interface{}{"key": "0", "code": "Digit0", "text": "0", "unmodifiedText": "0"}, wantText: true},
-		{name: "Tilde", keyCode: 126, expected: map[string]interface{}{"key": "~", "code": "Key~", "text": "~", "unmodifiedText": "~"}, wantText: true},
+		{name: "Exclamation", keyCode: 33, expected: map[string]interface{}{"key": "!", "code": "Digit1", "text": "!", "unmodifiedText": "!"}, wantText: true},
+		{name: "AtSign", keyCode: 64, expected: map[string]interface{}{"key": "@", "code": "Digit2", "text": "@", "unmodifiedText": "@"}, wantText: true},
+		{name: "Underscore", keyCode: 95, expected: map[string]interface{}{"key": "_", "code": "Minus", "text": "_", "unmodifiedText": "_"}, wantText: true},
+		{name: "Tilde", keyCode: 126, expected: map[string]interface{}{"key": "~", "code": "Backquote", "text": "~", "unmodifiedText": "~"}, wantText: true},
 		{name: "Space", keyCode: 32, expected: map[string]interface{}{"key": " ", "code": "Space", "text": " ", "unmodifiedText": " "}, wantText: true},
 		{name: "Tab", keyCode: 9, expected: map[string]interface{}{"key": "Tab", "code": "Tab"}, wantText: false},
 		{name: "Enter", keyCode: 13, expected: map[string]interface{}{"key": "Enter", "code": "Enter"}, wantText: false},
@@ -572,6 +575,38 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 			assert.Equal(t, devicectl.CmdOK, result)
 		})
 	}
+}
+
+func TestExecutor_KeyboardEvent_UnsupportedCode(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_KEYBOARD_EVENT,
+		Arguments: map[string]interface{}{
+			"code": 31,
+		},
+	}
+
+	arguments := `{"code":31}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			args := v.(*struct {
+				Code int `json:"code"`
+			})
+			args.Code = 31
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "unsupported keyboard event code")
 }
 
 func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
