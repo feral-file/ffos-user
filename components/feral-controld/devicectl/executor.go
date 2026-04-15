@@ -439,14 +439,6 @@ func (e *executor) keyboardEventForCode(keyCode int) *keyboardEvent {
 		return &keyboardEvent{key: "Escape", code: "Escape"}
 	case 8:
 		return &keyboardEvent{key: "Backspace", code: "Backspace"}
-	case 37:
-		return &keyboardEvent{key: "ArrowLeft", code: "ArrowLeft"}
-	case 38:
-		return &keyboardEvent{key: "ArrowUp", code: "ArrowUp"}
-	case 39:
-		return &keyboardEvent{key: "ArrowRight", code: "ArrowRight"}
-	case 40:
-		return &keyboardEvent{key: "ArrowDown", code: "ArrowDown"}
 	}
 
 	if keyCode < 32 || keyCode > 126 {

@@ -491,6 +491,10 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 		{name: "Number0", keyCode: 48, expected: map[string]interface{}{"key": "0", "code": "Digit0", "text": "0", "unmodifiedText": "0"}, wantText: true},
 		{name: "Exclamation", keyCode: 33, expected: map[string]interface{}{"key": "!", "code": "Digit1", "text": "!", "unmodifiedText": "!"}, wantText: true},
 		{name: "AtSign", keyCode: 64, expected: map[string]interface{}{"key": "@", "code": "Digit2", "text": "@", "unmodifiedText": "@"}, wantText: true},
+		{name: "Percent", keyCode: 37, expected: map[string]interface{}{"key": "%", "code": "Digit5", "text": "%", "unmodifiedText": "%"}, wantText: true},
+		{name: "Ampersand", keyCode: 38, expected: map[string]interface{}{"key": "&", "code": "Digit7", "text": "&", "unmodifiedText": "&"}, wantText: true},
+		{name: "Apostrophe", keyCode: 39, expected: map[string]interface{}{"key": "'", "code": "Quote", "text": "'", "unmodifiedText": "'"}, wantText: true},
+		{name: "LeftParen", keyCode: 40, expected: map[string]interface{}{"key": "(", "code": "Digit9", "text": "(", "unmodifiedText": "("}, wantText: true},
 		{name: "Underscore", keyCode: 95, expected: map[string]interface{}{"key": "_", "code": "Minus", "text": "_", "unmodifiedText": "_"}, wantText: true},
 		{name: "Tilde", keyCode: 126, expected: map[string]interface{}{"key": "~", "code": "Backquote", "text": "~", "unmodifiedText": "~"}, wantText: true},
 		{name: "Space", keyCode: 32, expected: map[string]interface{}{"key": " ", "code": "Space", "text": " ", "unmodifiedText": " "}, wantText: true},
@@ -498,10 +502,6 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 		{name: "Enter", keyCode: 13, expected: map[string]interface{}{"key": "Enter", "code": "Enter"}, wantText: false},
 		{name: "Escape", keyCode: 27, expected: map[string]interface{}{"key": "Escape", "code": "Escape"}, wantText: false},
 		{name: "Backspace", keyCode: 8, expected: map[string]interface{}{"key": "Backspace", "code": "Backspace"}, wantText: false},
-		{name: "ArrowLeft", keyCode: 37, expected: map[string]interface{}{"key": "ArrowLeft", "code": "ArrowLeft"}, wantText: false},
-		{name: "ArrowUp", keyCode: 38, expected: map[string]interface{}{"key": "ArrowUp", "code": "ArrowUp"}, wantText: false},
-		{name: "ArrowRight", keyCode: 39, expected: map[string]interface{}{"key": "ArrowRight", "code": "ArrowRight"}, wantText: false},
-		{name: "ArrowDown", keyCode: 40, expected: map[string]interface{}{"key": "ArrowDown", "code": "ArrowDown"}, wantText: false},
 	}
 
 	for _, tc := range testCases {
@@ -744,10 +744,10 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 			},
 			wantErr: "failed to send keyboard event",
 		},
-		{
-			name: "Special key keyUp failure is ignored",
-			setupFunc: func(ts *testSetup) {
-				keyCode := 13 // Enter
+	{
+		name: "Special key keyUp failure is ignored",
+		setupFunc: func(ts *testSetup) {
+			keyCode := 13 // Enter
 
 				ts.mockJSON.EXPECT().
 					Marshal(gomock.Any()).
@@ -783,6 +783,24 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 					})
 			},
 			wantErr: "",
+		},
+		{
+			name: "Unsupported key code fails",
+			setupFunc: func(ts *testSetup) {
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte(`{"code":31}`), nil)
+				ts.mockJSON.EXPECT().
+					Unmarshal(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						args := v.(*struct {
+							Code int `json:"code"`
+						})
+						args.Code = 31
+						return nil
+					})
+			},
+			wantErr: "unsupported keyboard event code",
 		},
 	}
 
