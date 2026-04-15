@@ -61,9 +61,19 @@ func NewWSHandler(ctx context.Context, upgrader wrapper.WebsocketUpgrader, clock
 }
 
 func (ws *ws) NewConnection(w http.ResponseWriter, r *http.Request) (string, error) {
+	ws.logger.Info("Upgrading websocket connection",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("origin", r.Header.Get("Origin")),
+	)
+
 	conn, err := ws.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		ws.logger.Error("Failed to upgrade connection", zap.Error(err))
+		ws.logger.Error("Failed to upgrade connection",
+			zap.Error(err),
+			zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr),
+		)
 		return "", err
 	}
 
@@ -114,7 +124,8 @@ func (ws *ws) background(connID string, wrapped *syncConn) {
 		// Connection closed or error occurred
 		ws.logger.Info("Read failed, attempting to close connection",
 			zap.String("connID", connID),
-			zap.Error(err))
+			zap.Error(err),
+		)
 		ws.mu.Lock()
 		ws.closeConn(connID)
 		ws.mu.Unlock()
@@ -128,6 +139,7 @@ func (ws *ws) Send(connID string, message any) error {
 	ws.mu.RUnlock()
 
 	if !exists {
+		ws.logger.Warn("Attempted to send to missing websocket connection", zap.String("connID", connID))
 		return fmt.Errorf("connection %s not found", connID)
 	}
 
@@ -137,10 +149,14 @@ func (ws *ws) Send(connID string, message any) error {
 	wrapped.mu.Unlock()
 
 	if err != nil {
+		ws.logger.Error("Failed to send message to client",
+			zap.String("connID", connID),
+			zap.Error(err),
+		)
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
-	ws.logger.Debug("Message sent to client", zap.String("connID", connID), zap.Any("message", message))
+	ws.logger.Info("Message sent to client", zap.String("connID", connID), zap.Any("message", message))
 
 	return nil
 }
@@ -148,7 +164,9 @@ func (ws *ws) Send(connID string, message any) error {
 func (ws *ws) SendAll(message any) error {
 	ws.mu.RLock()
 	if len(ws.connections) == 0 {
-		ws.logger.Warn("No connections to send message to")
+		ws.logger.Warn("No connections to send message to",
+			zap.String("message_type", fmt.Sprintf("%T", message)),
+		)
 		ws.mu.RUnlock()
 		return nil
 	}
@@ -157,6 +175,11 @@ func (ws *ws) SendAll(message any) error {
 	connections := make(map[string]*syncConn, len(ws.connections))
 	maps.Copy(connections, ws.connections)
 	ws.mu.RUnlock()
+
+	ws.logger.Info("Broadcasting websocket message",
+		zap.String("message_type", fmt.Sprintf("%T", message)),
+		zap.Int("connection_count", len(connections)),
+	)
 
 	var lastErr error
 	successCount := 0
@@ -214,8 +237,14 @@ func (ws *ws) closeConn(connID string) {
 
 		// Remove the connection from the tracker
 		delete(ws.connections, connID)
-		ws.logger.Info("Connection closed", zap.String("connID", connID))
+		ws.logger.Info("Connection closed",
+			zap.String("connID", connID),
+			zap.Int("remaining_connections", len(ws.connections)),
+		)
+		return
 	}
+
+	ws.logger.Info("closeConn called for unknown websocket connection", zap.String("connID", connID))
 }
 
 func (ws *ws) Close() {

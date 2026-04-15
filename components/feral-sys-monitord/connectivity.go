@@ -57,7 +57,11 @@ func (c *Connectivity) GetLastConnected() bool {
 }
 
 func (c *Connectivity) Start() {
-	c.logger.Info("Starting Connectivity Watcher")
+	c.logger.Info("Starting Connectivity Watcher",
+		zap.Int("targets", len(PING_TARGET_ADDRESS)),
+		zap.Duration("slow_interval", SLOW_PING_INTERVAL),
+		zap.Duration("fast_interval", FAST_PING_INTERVAL),
+	)
 	c.background()
 }
 
@@ -140,6 +144,8 @@ func (c *Connectivity) background() {
 			lastConnected = c.lastConnected
 			c.Unlock()
 
+			c.logger.Info("Initial connectivity state determined", zap.Bool("connected", connected))
+
 			c.notifyHandlers(c.ctx, connected)
 		}
 
@@ -178,6 +184,10 @@ func (c *Connectivity) background() {
 				c.Unlock()
 
 				if lastConnected != nil && connected != *lastConnected {
+					c.logger.Info("Connectivity state changed",
+						zap.Bool("previous_connected", *lastConnected),
+						zap.Bool("current_connected", connected),
+					)
 					c.notifyHandlers(c.ctx, connected)
 
 					// restart the background goroutine when connectivity changes
@@ -197,7 +207,11 @@ func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
 	defer cancel()
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	resultChan := make(chan bool, len(PING_TARGET_ADDRESS))
+	type targetResult struct {
+		target string
+		ok     bool
+	}
+	resultChan := make(chan targetResult, len(PING_TARGET_ADDRESS))
 
 	for _, target := range PING_TARGET_ADDRESS {
 		t := target
@@ -213,7 +227,7 @@ func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
 				}
 			}
 
-			resultChan <- err == nil
+			resultChan <- targetResult{target: t, ok: err == nil}
 
 			return err
 		})
@@ -226,13 +240,23 @@ func (c *Connectivity) CheckConnectivity(timeout time.Duration) (bool, error) {
 	}
 
 	connected := false
+	successfulTarget := ""
 	for range PING_TARGET_ADDRESS {
 		result := <-resultChan
-		if result {
+		if result.ok {
 			connected = true
+			if successfulTarget == "" {
+				successfulTarget = result.target
+			}
 			break
 		}
 	}
+
+	c.logger.Info("Connectivity check summary",
+		zap.Bool("connected", connected),
+		zap.String("successful_target", successfulTarget),
+		zap.Duration("timeout", timeout),
+	)
 
 	return connected, nil
 }
