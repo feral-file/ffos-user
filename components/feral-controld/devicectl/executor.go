@@ -370,43 +370,107 @@ func (e *executor) handleKeyboardEvent(args []byte) (interface{}, error) {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Always map special keys first
-	keyName := e.mapToYdoKey(cmdArgs.Code)
-	isPrintable := false
-	if keyName == "" && cmdArgs.Code >= 32 && cmdArgs.Code <= 126 {
-		keyName = string(rune(cmdArgs.Code))
-		isPrintable = true
+	keyEvent := e.keyboardEventForCode(cmdArgs.Code)
+	if keyEvent == nil {
+		return nil, fmt.Errorf("unsupported keyboard event code: %d", cmdArgs.Code)
 	}
 
-	e.logger.Info("Keyboard event", zap.Int("code", cmdArgs.Code), zap.String("key", keyName))
+	e.logger.Info("Keyboard event",
+		zap.Int("code", cmdArgs.Code),
+		zap.String("key", keyEvent.key),
+		zap.String("code_name", keyEvent.code))
 
-	// Prepare CDP command to dispatch a key event
-	keyEventParams := map[string]interface{}{
+	keyDownParams := map[string]interface{}{
 		"type":                  "keyDown",
 		"windowsVirtualKeyCode": cmdArgs.Code,
-		"key":                   keyName,
-		"text":                  keyName,
-		"unmodifiedText":        keyName,
 		"nativeVirtualKeyCode":  cmdArgs.Code,
+		"key":                   keyEvent.key,
+		"code":                  keyEvent.code,
+	}
+	if keyEvent.text != "" {
+		keyDownParams["text"] = keyEvent.text
+		keyDownParams["unmodifiedText"] = keyEvent.text
 	}
 
-	// Send key directly via CDP
-	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
+	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyDownParams)
 	if err != nil {
 		e.logger.Error("Failed to send key via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to send keyboard event: %w", err)
 	}
 
-	// Only send keyUp for printable ASCII (not for special keys)
-	if isPrintable {
-		keyEventParams["type"] = "keyUp"
-		_, err := e.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
-		if err != nil {
-			e.logger.Error("Failed to send keyUp via CDP", zap.Error(err))
-		}
+	keyUpParams := map[string]interface{}{
+		"type":                  "keyUp",
+		"windowsVirtualKeyCode": cmdArgs.Code,
+		"nativeVirtualKeyCode":  cmdArgs.Code,
+		"key":                   keyEvent.key,
+		"code":                  keyEvent.code,
+	}
+	if keyEvent.text != "" {
+		keyUpParams["text"] = keyEvent.text
+		keyUpParams["unmodifiedText"] = keyEvent.text
+	}
+
+	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyUpParams)
+	if err != nil {
+		e.logger.Error("Failed to send keyUp via CDP", zap.Error(err))
 	}
 
 	return CmdOK, nil
+}
+
+type keyboardEvent struct {
+	key  string
+	code string
+	text string
+}
+
+// keyboardEventForCode translates the remote command's numeric code into the
+// browser-facing values Chromium expects. This is intentionally a CDP-level
+// approximation of keyboard input, not an OS/kernel keyboard injection path.
+func (e *executor) keyboardEventForCode(keyCode int) *keyboardEvent {
+	switch keyCode {
+	case 32:
+		return &keyboardEvent{key: " ", code: "Space", text: " "}
+	case 9:
+		return &keyboardEvent{key: "Tab", code: "Tab"}
+	case 13:
+		return &keyboardEvent{key: "Enter", code: "Enter"}
+	case 27:
+		return &keyboardEvent{key: "Escape", code: "Escape"}
+	case 8:
+		return &keyboardEvent{key: "Backspace", code: "Backspace"}
+	case 37:
+		return &keyboardEvent{key: "ArrowLeft", code: "ArrowLeft"}
+	case 38:
+		return &keyboardEvent{key: "ArrowUp", code: "ArrowUp"}
+	case 39:
+		return &keyboardEvent{key: "ArrowRight", code: "ArrowRight"}
+	case 40:
+		return &keyboardEvent{key: "ArrowDown", code: "ArrowDown"}
+	}
+
+	if keyCode < 32 || keyCode > 126 {
+		e.logger.Warn("Unhandled keyboard event code", zap.Int("code", keyCode))
+		return nil
+	}
+
+	key := string(rune(keyCode))
+	code := keyCodeToCodeName(keyCode)
+	return &keyboardEvent{key: key, code: code, text: key}
+}
+
+func keyCodeToCodeName(keyCode int) string {
+	switch {
+	case keyCode >= 65 && keyCode <= 90:
+		return "Key" + string(rune(keyCode))
+	case keyCode >= 97 && keyCode <= 122:
+		return "Key" + strings.ToUpper(string(rune(keyCode)))
+	case keyCode >= 48 && keyCode <= 57:
+		return "Digit" + string(rune(keyCode))
+	default:
+		return "Key" + string(rune(keyCode))
+	}
+
 }
 
 func (e *executor) initializeScreenDimensions() {
