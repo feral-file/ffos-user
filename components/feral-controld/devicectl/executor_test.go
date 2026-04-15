@@ -769,7 +769,7 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 						assert.Equal(t, " ", params["text"])
 						assert.Equal(t, " ", params["unmodifiedText"])
 						return nil, errors.New("cdp keyDown failed")
-				})
+					})
 			},
 			wantErr: "failed to send keyboard event",
 		},
