@@ -409,6 +409,137 @@ func (e *executor) handleKeyboardEvent(args []byte) (interface{}, error) {
 	return CmdOK, nil
 }
 
+<<<<<<< HEAD
+=======
+type keyboardEvent struct {
+	key  string
+	code string
+	text string
+}
+
+// keyboardEventForCode translates the remote command's numeric code into the
+// browser-facing values Chromium expects. This is intentionally a CDP-level
+// approximation of keyboard input, not an OS/kernel keyboard injection path.
+func (e *executor) keyboardEventForCode(keyCode int) *keyboardEvent {
+	switch keyCode {
+	case 32:
+		return &keyboardEvent{key: " ", code: "Space", text: " "}
+	case 9:
+		return &keyboardEvent{key: "Tab", code: "Tab"}
+	case 13:
+		return &keyboardEvent{key: "Enter", code: "Enter"}
+	case 27:
+		return &keyboardEvent{key: "Escape", code: "Escape"}
+	case 8:
+		return &keyboardEvent{key: "Backspace", code: "Backspace"}
+	case 37:
+		return &keyboardEvent{key: "ArrowLeft", code: "ArrowLeft"}
+	case 38:
+		return &keyboardEvent{key: "ArrowUp", code: "ArrowUp"}
+	case 39:
+		return &keyboardEvent{key: "ArrowRight", code: "ArrowRight"}
+	case 40:
+		return &keyboardEvent{key: "ArrowDown", code: "ArrowDown"}
+	}
+
+	if keyCode < 32 || keyCode > 126 {
+		e.logger.Warn("Unhandled keyboard event code", zap.Int("code", keyCode))
+		return nil
+	}
+
+	key, code, text := printableASCIIKeyEvent(keyCode)
+	if code == "" {
+		e.logger.Warn("Unhandled printable keyboard event code", zap.Int("code", keyCode))
+		return nil
+	}
+	return &keyboardEvent{key: key, code: code, text: text}
+}
+
+func printableASCIIKeyEvent(keyCode int) (key string, code string, text string) {
+	switch keyCode {
+	case 32:
+		return " ", "Space", " "
+	case 33:
+		return "!", "Digit1", "!"
+	case 34:
+		return "\"", "Quote", "\""
+	case 35:
+		return "#", "Digit3", "#"
+	case 36:
+		return "$", "Digit4", "$"
+	case 37:
+		return "%", "Digit5", "%"
+	case 38:
+		return "&", "Digit7", "&"
+	case 39:
+		return "'", "Quote", "'"
+	case 40:
+		return "(", "Digit9", "("
+	case 41:
+		return ")", "Digit0", ")"
+	case 42:
+		return "*", "Digit8", "*"
+	case 43:
+		return "+", "Equal", "+"
+	case 44:
+		return ",", "Comma", ","
+	case 45:
+		return "-", "Minus", "-"
+	case 46:
+		return ".", "Period", "."
+	case 47:
+		return "/", "Slash", "/"
+	case 48, 49, 50, 51, 52, 53, 54, 55, 56, 57:
+		return string(rune(keyCode)), "Digit" + string(rune(keyCode)), string(rune(keyCode))
+	case 58:
+		return ":", "Semicolon", ":"
+	case 59:
+		return ";", "Semicolon", ";"
+	case 60:
+		return "<", "Comma", "<"
+	case 61:
+		return "=", "Equal", "="
+	case 62:
+		return ">", "Period", ">"
+	case 63:
+		return "?", "Slash", "?"
+	case 64:
+		return "@", "Digit2", "@"
+	case 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
+		75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
+		85, 86, 87, 88, 89, 90:
+		return string(rune(keyCode)), "Key" + string(rune(keyCode)), string(rune(keyCode))
+	case 91:
+		return "[", "BracketLeft", "["
+	case 92:
+		return "\\", "Backslash", "\\"
+	case 93:
+		return "]", "BracketRight", "]"
+	case 94:
+		return "^", "Digit6", "^"
+	case 95:
+		return "_", "Minus", "_"
+	case 96:
+		return "`", "Backquote", "`"
+	case 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+		107, 108, 109, 110, 111, 112, 113, 114, 115, 116,
+		117, 118, 119, 120, 121, 122:
+		upper := strings.ToUpper(string(rune(keyCode)))
+		return string(rune(keyCode)), "Key" + upper, string(rune(keyCode))
+	case 123:
+		return "{", "BracketLeft", "{"
+	case 124:
+		return "|", "Backslash", "|"
+	case 125:
+		return "}", "BracketRight", "}"
+	case 126:
+		return "~", "Backquote", "~"
+	default:
+		return "", "", ""
+	}
+}
+
+>>>>>>> c9ec603 (Handle printable keyboard codes correctly)
 func (e *executor) initializeScreenDimensions() {
 	if e.screenInitialized {
 		return

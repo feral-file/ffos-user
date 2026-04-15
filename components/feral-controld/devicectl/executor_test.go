@@ -481,38 +481,30 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 	defer ts.teardown()
 
 	testCases := []struct {
-		name           string
-		keyCode        int
-		expectedKey    string
-		shouldGetKeyUp bool
-		description    string
+		name    string
+		keyCode int
+		expected map[string]interface{}
+		wantText bool
 	}{
-		// Printable ASCII characters (should get keyUp)
-		{name: "LetterA", keyCode: 65, expectedKey: "A", shouldGetKeyUp: true, description: "Uppercase A"},
-		{name: "LetterZ", keyCode: 90, expectedKey: "Z", shouldGetKeyUp: true, description: "Uppercase Z"},
-		{name: "Lettera", keyCode: 97, expectedKey: "a", shouldGetKeyUp: true, description: "Lowercase a"},
-		{name: "Letterz", keyCode: 122, expectedKey: "z", shouldGetKeyUp: true, description: "Lowercase z"},
-		{name: "Number0", keyCode: 48, expectedKey: "0", shouldGetKeyUp: true, description: "Number 0"},
-		{name: "Number9", keyCode: 57, expectedKey: "9", shouldGetKeyUp: true, description: "Number 9"},
-		{name: "Tilde", keyCode: 126, expectedKey: "~", shouldGetKeyUp: true, description: "Tilde character (max printable ASCII)"},
-
-		// Special keys that should NOT get keyUp (fixed behavior)
-		{name: "Space", keyCode: 32, expectedKey: "space", shouldGetKeyUp: false, description: "Space key (special key, no keyUp)"},
-		{name: "Tab", keyCode: 9, expectedKey: "tab", shouldGetKeyUp: false, description: "Tab key (special key, no keyUp)"},
-		{name: "Enter", keyCode: 13, expectedKey: "return", shouldGetKeyUp: false, description: "Enter key (special key, no keyUp)"},
-		{name: "Escape", keyCode: 27, expectedKey: "escape", shouldGetKeyUp: false, description: "Escape key (special key, no keyUp)"},
-		{name: "Backspace", keyCode: 8, expectedKey: "backspace", shouldGetKeyUp: false, description: "Backspace key (special key, no keyUp)"},
-
-		// Arrow keys now correctly mapped (fixed behavior)
-		{name: "ArrowLeft", keyCode: 37, expectedKey: "left", shouldGetKeyUp: false, description: "Left arrow (special key, no keyUp)"},
-		{name: "ArrowUp", keyCode: 38, expectedKey: "up", shouldGetKeyUp: false, description: "Up arrow (special key, no keyUp)"},
-		{name: "ArrowRight", keyCode: 39, expectedKey: "right", shouldGetKeyUp: false, description: "Right arrow (special key, no keyUp)"},
-		{name: "ArrowDown", keyCode: 40, expectedKey: "down", shouldGetKeyUp: false, description: "Down arrow (special key, no keyUp)"},
-
-		// Edge cases
-		{name: "BelowPrintable", keyCode: 31, expectedKey: "", shouldGetKeyUp: false, description: "Below printable ASCII range"},
-		{name: "AbovePrintable", keyCode: 127, expectedKey: "", shouldGetKeyUp: false, description: "Above printable ASCII range"},
-		{name: "UnknownKey", keyCode: 999, expectedKey: "", shouldGetKeyUp: false, description: "Unknown key code"},
+		{name: "LetterA", keyCode: 65, expected: map[string]interface{}{"key": "A", "code": "KeyA", "text": "A", "unmodifiedText": "A"}, wantText: true},
+		{name: "LetterZ", keyCode: 90, expected: map[string]interface{}{"key": "Z", "code": "KeyZ", "text": "Z", "unmodifiedText": "Z"}, wantText: true},
+		{name: "Lettera", keyCode: 97, expected: map[string]interface{}{"key": "a", "code": "KeyA", "text": "a", "unmodifiedText": "a"}, wantText: true},
+		{name: "Letterz", keyCode: 122, expected: map[string]interface{}{"key": "z", "code": "KeyZ", "text": "z", "unmodifiedText": "z"}, wantText: true},
+		{name: "Number0", keyCode: 48, expected: map[string]interface{}{"key": "0", "code": "Digit0", "text": "0", "unmodifiedText": "0"}, wantText: true},
+		{name: "Number9", keyCode: 57, expected: map[string]interface{}{"key": "9", "code": "Digit9", "text": "9", "unmodifiedText": "9"}, wantText: true},
+		{name: "Exclamation", keyCode: 33, expected: map[string]interface{}{"key": "!", "code": "Digit1", "text": "!", "unmodifiedText": "!"}, wantText: true},
+		{name: "AtSign", keyCode: 64, expected: map[string]interface{}{"key": "@", "code": "Digit2", "text": "@", "unmodifiedText": "@"}, wantText: true},
+		{name: "Underscore", keyCode: 95, expected: map[string]interface{}{"key": "_", "code": "Minus", "text": "_", "unmodifiedText": "_"}, wantText: true},
+		{name: "Tilde", keyCode: 126, expected: map[string]interface{}{"key": "~", "code": "Backquote", "text": "~", "unmodifiedText": "~"}, wantText: true},
+		{name: "Space", keyCode: 32, expected: map[string]interface{}{"key": " ", "code": "Space", "text": " ", "unmodifiedText": " "}, wantText: true},
+		{name: "Tab", keyCode: 9, expected: map[string]interface{}{"key": "Tab", "code": "Tab"}, wantText: false},
+		{name: "Enter", keyCode: 13, expected: map[string]interface{}{"key": "Enter", "code": "Enter"}, wantText: false},
+		{name: "Escape", keyCode: 27, expected: map[string]interface{}{"key": "Escape", "code": "Escape"}, wantText: false},
+		{name: "Backspace", keyCode: 8, expected: map[string]interface{}{"key": "Backspace", "code": "Backspace"}, wantText: false},
+		{name: "ArrowLeft", keyCode: 37, expected: map[string]interface{}{"key": "ArrowLeft", "code": "ArrowLeft"}, wantText: false},
+		{name: "ArrowUp", keyCode: 38, expected: map[string]interface{}{"key": "ArrowUp", "code": "ArrowUp"}, wantText: false},
+		{name: "ArrowRight", keyCode: 39, expected: map[string]interface{}{"key": "ArrowRight", "code": "ArrowRight"}, wantText: false},
+		{name: "ArrowDown", keyCode: 40, expected: map[string]interface{}{"key": "ArrowDown", "code": "ArrowDown"}, wantText: false},
 	}
 
 	for _, tc := range testCases {
@@ -550,25 +542,27 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 					// Verify keyDown parameters
 					assert.Equal(t, "keyDown", params["type"])
 					assert.Equal(t, tc.keyCode, params["windowsVirtualKeyCode"])
-					assert.Equal(t, tc.expectedKey, params["key"])
-					assert.Equal(t, tc.expectedKey, params["text"])
-					assert.Equal(t, tc.expectedKey, params["unmodifiedText"])
+					assert.Equal(t, tc.expected["key"], params["key"])
+					if tc.wantText {
+						assert.Equal(t, tc.expected["text"], params["text"])
+						assert.Equal(t, tc.expected["unmodifiedText"], params["unmodifiedText"])
+					}
 					assert.Equal(t, tc.keyCode, params["nativeVirtualKeyCode"])
+					assert.Equal(t, tc.expected["code"], params["code"])
 					return nil, nil
 				})
 
 			// Mock CDP Send for keyUp (only if shouldGetKeyUp is true)
-			if tc.shouldGetKeyUp {
+			if tc.wantText {
 				ts.mockCDP.EXPECT().
 					Send("Input.dispatchKeyEvent", gomock.Any()).
 					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
 						// Verify keyUp parameters
 						assert.Equal(t, "keyUp", params["type"])
 						assert.Equal(t, tc.keyCode, params["windowsVirtualKeyCode"])
-						assert.Equal(t, tc.expectedKey, params["key"])
-						assert.Equal(t, tc.expectedKey, params["text"])
-						assert.Equal(t, tc.expectedKey, params["unmodifiedText"])
+						assert.Equal(t, tc.expected["key"], params["key"])
 						assert.Equal(t, tc.keyCode, params["nativeVirtualKeyCode"])
+						assert.Equal(t, tc.expected["code"], params["code"])
 						return nil, nil
 					})
 			}
@@ -579,6 +573,38 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 			assert.Equal(t, devicectl.CmdOK, result)
 		})
 	}
+}
+
+func TestExecutor_KeyboardEvent_UnsupportedCode(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_KEYBOARD_EVENT,
+		Arguments: map[string]interface{}{
+			"code": 31,
+		},
+	}
+
+	arguments := `{"code":31}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			args := v.(*struct {
+				Code int `json:"code"`
+			})
+			args.Code = 31
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "unsupported keyboard event code")
 }
 
 func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
