@@ -127,6 +127,7 @@ func (c *cdp) Init(ctx context.Context) error {
 		c.mu.Unlock()
 		return fmt.Errorf("invalid targets format: %w", err)
 	}
+	c.logger.Info("Fetched CDP targets", zap.Int("target_count", len(targets)))
 
 	// Collect all page targets
 	var pageTargets []struct {
@@ -140,22 +141,27 @@ func (c *cdp) Init(ctx context.Context) error {
 			pageTargets = append(pageTargets, t)
 		}
 	}
+	c.logger.Info("Filtered CDP page targets", zap.Int("page_target_count", len(pageTargets)))
 
 	if len(pageTargets) == 0 {
 		c.mu.Unlock()
+		c.logger.Error("No CDP page targets available")
 		return ErrNoPageTargetFound
 	}
 
 	if len(pageTargets) > 1 {
 		c.mu.Unlock()
+		c.logger.Error("Multiple CDP page targets available", zap.Int("page_target_count", len(pageTargets)))
 		return ErrMultiplePageTargetsFound
 	}
 
 	// Connect to the single page target
 	target := pageTargets[0]
+	c.logger.Info("Selected CDP page target", zap.String("websocket_debugger_url", target.WebSocketDebuggerURL))
 	conn, _, err := c.dialer.DialContext(ctx, target.WebSocketDebuggerURL, nil)
 	if err != nil {
 		c.mu.Unlock()
+		c.logger.Error("CDP dial failed", zap.String("websocket_debugger_url", target.WebSocketDebuggerURL), zap.Error(err))
 		return fmt.Errorf("cdp dial error: %w", err)
 	}
 	c.conn = conn
