@@ -750,32 +750,6 @@ func (e *executor) handleMouseTapEvent() (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (e *executor) mapToYdoKey(keyCode int) string {
-	switch keyCode {
-	case 32:
-		return "space"
-	case 9:
-		return "tab"
-	case 13:
-		return "return"
-	case 27:
-		return "escape"
-	case 8:
-		return "backspace"
-	case 37:
-		return "left"
-	case 38:
-		return "up"
-	case 39:
-		return "right"
-	case 40:
-		return "down"
-	default:
-		e.logger.Warn("Unhandled key code", zap.Int("code", keyCode))
-		return ""
-	}
-}
-
 func (e *executor) shutdown(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Executing shutdown command")
 
