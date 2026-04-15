@@ -606,6 +606,38 @@ func TestExecutor_KeyboardEvent_UnsupportedCode(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported keyboard event code")
 }
 
+func TestExecutor_KeyboardEvent_UnsupportedPrintablePunctuation(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_KEYBOARD_EVENT,
+		Arguments: map[string]interface{}{
+			"code": 127,
+		},
+	}
+
+	arguments := `{"code":127}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			args := v.(*struct {
+				Code int `json:"code"`
+			})
+			args.Code = 127
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "unsupported keyboard event code")
+}
+
 func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -737,7 +769,7 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 						assert.Equal(t, " ", params["text"])
 						assert.Equal(t, " ", params["unmodifiedText"])
 						return nil, errors.New("cdp keyDown failed")
-					})
+				})
 			},
 			wantErr: "failed to send keyboard event",
 		},
