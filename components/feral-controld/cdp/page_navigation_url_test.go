@@ -8,9 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 )
 
 func TestPageNavigationURL_Success(t *testing.T) {
