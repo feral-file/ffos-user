@@ -14,8 +14,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )

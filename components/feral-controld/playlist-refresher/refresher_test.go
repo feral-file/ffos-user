@@ -17,8 +17,8 @@ import (
 	refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -346,8 +346,8 @@ func TestRefresher_ProcessPlayingPlaylist_PlaylistURL(t *testing.T) {
 
 	// Expect DP1 to process playlist URL
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLConditional(ts.ctx, playlistURL, false, gomock.Any()).
+		Return(&dp1.PlaylistURLResult{NotModified: false, ETag: `"t1"`, Playlist: mockPlaylist}, nil).
 		AnyTimes()
 
 	// Expect CDP to send the playlist
@@ -369,6 +369,29 @@ func TestRefresher_ProcessPlayingPlaylist_PlaylistURL(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Stop the refresher
+	ts.refresher.Stop()
+}
+
+func TestRefresher_ProcessPlayingPlaylist_PlaylistURL_NotModified_NoCDP(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	setupBackgroundMocks(ts)
+
+	playlistURL := "http://example.com/playlist.json"
+
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURLConditional(ts.ctx, playlistURL, false, gomock.Any()).
+		Return(&dp1.PlaylistURLResult{NotModified: true}, nil).
+		AnyTimes()
+
+	ts.refresher.Start()
+	time.Sleep(100 * time.Millisecond)
 	ts.refresher.Stop()
 }
 
@@ -575,7 +598,7 @@ func TestRefresher_ProcessPlayingPlaylist_DP1ProcessPlaylistURLError(t *testing.
 
 	// Expect DP1 to fail processing playlist URL
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		ProcessPlaylistURLConditional(ts.ctx, playlistURL, false, gomock.Any()).
 		Return(nil, errors.New("dp1 processing error")).
 		AnyTimes()
 
@@ -646,8 +669,8 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendError(t *testing.T) {
 
 	// Expect DP1 to process playlist URL successfully
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLConditional(ts.ctx, playlistURL, false, gomock.Any()).
+		Return(&dp1.PlaylistURLResult{NotModified: false, ETag: `"t1"`, Playlist: mockPlaylist}, nil).
 		AnyTimes()
 
 	// Expect CDP to fail sending
@@ -715,8 +738,8 @@ func TestRefresher_SendCDPRequest_Success(t *testing.T) {
 
 	// Expect DP1 to process playlist URL
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
-		Return(mockPlaylist, nil).
+		ProcessPlaylistURLConditional(ts.ctx, playlistURL, false, gomock.Any()).
+		Return(&dp1.PlaylistURLResult{NotModified: false, ETag: `"t1"`, Playlist: mockPlaylist}, nil).
 		AnyTimes()
 
 	// Expect CDP to send the playlist with proper payload structure
@@ -784,8 +807,8 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 
 	// Expect DP1 to process playlist (needed for processPlayingPlaylist to succeed)
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(createMockPlaylist(), nil).
+		ProcessPlaylistURLConditional(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&dp1.PlaylistURLResult{NotModified: false, ETag: `"t1"`, Playlist: createMockPlaylist()}, nil).
 		AnyTimes()
 
 	// Expect CDP to send request (needed for processPlayingPlaylist to succeed)
@@ -848,8 +871,8 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 
 	// Expect DP1 to process playlist (needed for processPlayingPlaylist to succeed)
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(createMockPlaylist(), nil).
+		ProcessPlaylistURLConditional(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&dp1.PlaylistURLResult{NotModified: false, ETag: `"t1"`, Playlist: createMockPlaylist()}, nil).
 		AnyTimes()
 
 	// Expect CDP to send request (needed for processPlayingPlaylist to succeed)

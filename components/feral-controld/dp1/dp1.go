@@ -56,6 +56,18 @@ func (p *Playlist) HasDynamicContent() bool {
 	return p.DynamicQuery != nil || len(p.DynamicQueries) > 0
 }
 
+// PlaylistURLResult is the outcome of fetching a playlist document by URL, optionally with
+// If-None-Match revalidation (HTTP 304 Not Modified).
+type PlaylistURLResult struct {
+	// NotModified is true when the server responded with 304 and the body was not sent.
+	NotModified bool
+	// ETag is the ETag header from a 200 response (empty if the origin omitted it).
+	ETag string
+	// Playlist is the fully resolved playlist (including dynamic hydration when applicable).
+	// Nil when NotModified is true.
+	Playlist *Playlist
+}
+
 //go:generate mockgen -source=dp1.go -destination=../mocks/dp1.go -package=mocks -mock_names=DP1=MockDP1
 type DP1 interface {
 	// ProcessPlaylistURL processes a playlist from an URL.
@@ -63,6 +75,10 @@ type DP1 interface {
 	// If the playlist has dynamic queries, it will hand off to
 	// ProcessDynamicPlaylist with the minimal flag.
 	ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error)
+
+	// ProcessPlaylistURLConditional fetches a playlist by URL and supports conditional GET via
+	// If-None-Match. On 304 Not Modified, NotModified is true and Playlist is nil.
+	ProcessPlaylistURLConditional(ctx context.Context, url string, minimal bool, ifNoneMatch string) (*PlaylistURLResult, error)
 
 	// ProcessDynamicPlaylist processes a dynamic playlist.
 	// If the playlist has dynamic queries, it will process them
@@ -97,16 +113,44 @@ func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrap
 func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing playlist from URL", zap.String("url", url))
 
-	playlist, err := d.fetchPlaylist(url)
+	res, err := d.ProcessPlaylistURLConditional(ctx, url, minimal, "")
 	if err != nil {
 		return nil, err
 	}
+	if res.NotModified {
+		return nil, fmt.Errorf("unexpected 304 without If-None-Match")
+	}
+	if res.Playlist == nil {
+		return nil, fmt.Errorf("empty playlist after fetch")
+	}
+	return res.Playlist, nil
+}
 
-	if playlist.HasDynamicContent() {
-		return d.ProcessDynamicPlaylist(ctx, playlist, minimal)
+func (d *dp1) ProcessPlaylistURLConditional(ctx context.Context, url string, minimal bool, ifNoneMatch string) (*PlaylistURLResult, error) {
+	d.logger.Info("Processing playlist from URL", zap.String("url", url))
+
+	notModified, etag, playlist, err := d.fetchPlaylistHTTP(ctx, url, ifNoneMatch)
+	if err != nil {
+		return nil, err
+	}
+	if notModified {
+		return &PlaylistURLResult{NotModified: true}, nil
+	}
+	if playlist == nil {
+		return nil, fmt.Errorf("internal: fetch returned no playlist without 304")
 	}
 
-	return &playlist, nil
+	var out *Playlist
+	if playlist.HasDynamicContent() {
+		out, err = d.ProcessDynamicPlaylist(ctx, *playlist, minimal)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		out = playlist
+	}
+
+	return &PlaylistURLResult{NotModified: false, ETag: etag, Playlist: out}, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
@@ -235,32 +279,49 @@ func defaultDurationSeconds(playlist Playlist) float64 {
 	return duration
 }
 
-func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
+// fetchPlaylistHTTP performs a GET (optionally conditional) and returns the parsed playlist on 200,
+// or notModified on 304. Caller must not send If-None-Match on the first fetch (empty string).
+func (d *dp1) fetchPlaylistHTTP(ctx context.Context, url, ifNoneMatch string) (notModified bool, etag string, playlist *Playlist, err error) {
 	d.logger.Info("Fetching playlist from URL", zap.String("url", url))
-	resp, err := d.httpClient.Get(url)
+
+	req, err := d.httpClient.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return Playlist{}, err
+		return false, "", nil, err
+	}
+	req = req.WithContext(ctx)
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
+	}
+
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return false, "", nil, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Playlist{}, fmt.Errorf("fetch playlist failed: %s", resp.Status)
+	if resp.StatusCode == http.StatusNotModified {
+		return true, ifNoneMatch, nil, nil
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, "", nil, fmt.Errorf("fetch playlist failed: %s", resp.Status)
+	}
+
+	etag = resp.Header.Get("ETag")
 
 	bytes, err := d.io.ReadAll(resp.Body)
 	if err != nil {
-		return Playlist{}, err
+		return false, "", nil, err
 	}
 
-	var playlist Playlist
-	err = d.json.Unmarshal(bytes, &playlist)
-	if err != nil {
-		return Playlist{}, err
+	var pl Playlist
+	if err = d.json.Unmarshal(bytes, &pl); err != nil {
+		return false, "", nil, err
 	}
 
-	return playlist, nil
+	return false, etag, &pl, nil
 }
 
 func buildPlaylistItems(duration float64, tokens []ffindexer.Token) []dp1playlist.PlaylistItem {

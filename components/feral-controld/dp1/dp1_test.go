@@ -19,8 +19,8 @@ import (
 	ffindexer "github.com/feral-file/ffos-user/components/feral-controld/ff-indexer"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -65,10 +65,25 @@ func (ts *testSetup) teardown() {
 
 // Helper function to create a mock HTTP response
 func createMockResponse(statusCode int, body string) *http.Response {
+	h := make(http.Header)
 	return &http.Response{
 		StatusCode: statusCode,
+		Header:     h,
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
+}
+
+func wireHTTPGET(ts *testSetup, url string, resp *http.Response) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		panic(err)
+	}
+	ts.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, url, nil).
+		Return(req, nil)
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		Return(resp, nil)
 }
 
 // Helper function to create a mock playlist JSON
@@ -180,10 +195,7 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 	url := "http://example.com/playlist.json"
 	playlistJSON := createPlaylistJSON()
 
-	// Expect HTTP GET request
-	ts.mockHTTP.EXPECT().
-		Get(url).
-		Return(createMockResponse(http.StatusOK, playlistJSON), nil)
+	wireHTTPGET(ts, url, createMockResponse(http.StatusOK, playlistJSON))
 
 	// Expect IO ReadAll
 	ts.mockIO.EXPECT().
@@ -228,10 +240,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 	playlistJSON := createDynamicPlaylistJSON()
 	mockTokens := createMockTokens()
 
-	// Expect HTTP GET request
-	ts.mockHTTP.EXPECT().
-		Get(url).
-		Return(createMockResponse(http.StatusOK, playlistJSON), nil)
+	wireHTTPGET(ts, url, createMockResponse(http.StatusOK, playlistJSON))
 
 	// Expect IO ReadAll
 	ts.mockIO.EXPECT().
@@ -291,9 +300,13 @@ func TestDP1_ProcessPlaylistURL_HTTPError(t *testing.T) {
 
 	url := "http://example.com/playlist.json"
 
-	// Expect HTTP GET request to fail
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	assert.NoError(t, err)
 	ts.mockHTTP.EXPECT().
-		Get(url).
+		NewRequest(http.MethodGet, url, nil).
+		Return(req, nil)
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
 		Return(nil, errors.New("network error"))
 
 	// Test
@@ -309,10 +322,7 @@ func TestDP1_ProcessPlaylistURL_HTTPStatusCodeError(t *testing.T) {
 
 	url := "http://example.com/playlist.json"
 
-	// Expect HTTP GET request to return error status
-	ts.mockHTTP.EXPECT().
-		Get(url).
-		Return(createMockResponse(http.StatusNotFound, "Not Found"), nil)
+	wireHTTPGET(ts, url, createMockResponse(http.StatusNotFound, "Not Found"))
 
 	// Test
 	result, err := ts.client.ProcessPlaylistURL(ts.ctx, url, false)
@@ -327,10 +337,7 @@ func TestDP1_ProcessPlaylistURL_ReadAllError(t *testing.T) {
 
 	url := "http://example.com/playlist.json"
 
-	// Expect HTTP GET request
-	ts.mockHTTP.EXPECT().
-		Get(url).
-		Return(createMockResponse(http.StatusOK, "test"), nil)
+	wireHTTPGET(ts, url, createMockResponse(http.StatusOK, "test"))
 
 	// Expect IO ReadAll to fail
 	ts.mockIO.EXPECT().
@@ -351,10 +358,7 @@ func TestDP1_ProcessPlaylistURL_JSONUnmarshalError(t *testing.T) {
 	url := "http://example.com/playlist.json"
 	playlistJSON := createPlaylistJSON()
 
-	// Expect HTTP GET request
-	ts.mockHTTP.EXPECT().
-		Get(url).
-		Return(createMockResponse(http.StatusOK, playlistJSON), nil)
+	wireHTTPGET(ts, url, createMockResponse(http.StatusOK, playlistJSON))
 
 	// Expect IO ReadAll
 	ts.mockIO.EXPECT().
@@ -371,6 +375,67 @@ func TestDP1_ProcessPlaylistURL_JSONUnmarshalError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "json error")
+}
+
+func TestDP1_ProcessPlaylistURLConditional_NotModified(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/playlist.json"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	assert.NoError(t, err)
+	ts.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, url, nil).
+		Return(req, nil)
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(r *http.Request) (*http.Response, error) {
+			assert.Equal(t, `"v1"`, r.Header.Get("If-None-Match"))
+			return createMockResponse(http.StatusNotModified, ""), nil
+		})
+
+	res, err := ts.client.ProcessPlaylistURLConditional(ts.ctx, url, false, `"v1"`)
+	assert.NoError(t, err)
+	assert.True(t, res.NotModified)
+	assert.Nil(t, res.Playlist)
+}
+
+func TestDP1_ProcessPlaylistURLConditional_ETagOn200(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	url := "http://example.com/playlist.json"
+	playlistJSON := createPlaylistJSON()
+	resp := createMockResponse(http.StatusOK, playlistJSON)
+	resp.Header.Set("ETag", `"etag-1"`)
+
+	wireHTTPGET(ts, url, resp)
+
+	ts.mockIO.EXPECT().
+		ReadAll(gomock.Any()).
+		Return([]byte(playlistJSON), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(playlistJSON), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			playlist := v.(*dp1.Playlist)
+			playlist.Items = []dp1playlist.PlaylistItem{
+				{
+					ID:       "item1",
+					Title:    "Test Item 1",
+					Source:   "http://example.com/video1.mp4",
+					Duration: float64Ptr(300),
+					License:  "open",
+				},
+			}
+			return nil
+		})
+
+	res, err := ts.client.ProcessPlaylistURLConditional(ts.ctx, url, false, "")
+	assert.NoError(t, err)
+	assert.False(t, res.NotModified)
+	assert.Equal(t, `"etag-1"`, res.ETag)
+	assert.NotNil(t, res.Playlist)
 }
 
 func TestDP1_ProcessDynamicPlaylist_Success(t *testing.T) {
