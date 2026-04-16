@@ -12,6 +12,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 type fakeRelayer struct {
@@ -238,4 +239,101 @@ func (b *blockingPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStat
 
 func (b *blockingPanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.RawMessage) error {
 	return nil
+}
+
+type fakeCDP struct {
+	noLogResult    interface{}
+	noLogErr       error
+	pageURL        string
+	pageURLErr     error
+	noLogSendCalls int
+	pageURLCalls   int
+}
+
+func (f *fakeCDP) Init(context.Context) error { return nil }
+
+func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
+
+func (f *fakeCDP) NoLogSend(string, map[string]interface{}) (interface{}, error) {
+	f.noLogSendCalls++
+	return f.noLogResult, f.noLogErr
+}
+
+func (f *fakeCDP) PageNavigationURL(context.Context) (string, error) {
+	f.pageURLCalls++
+	return f.pageURL, f.pageURLErr
+}
+
+func (f *fakeCDP) Close() {}
+
+func (f *fakeCDP) Initialized() bool { return true }
+
+func TestFetchPlayerStatus_IncludesDisplayURL(t *testing.T) {
+	t.Parallel()
+
+	mockCDP := &fakeCDP{
+		noLogResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"castCommand": "displayPlaylist",
+				"ok":          true,
+			},
+		},
+		pageURL: "file:///opt/feral/ui/launcher/index.html?step=qr",
+	}
+	p := &poller{
+		cdp:    mockCDP,
+		json:   wrapper.NewJSON(),
+		logger: zap.NewNop(),
+	}
+
+	ctx := context.Background()
+
+	got, err := p.FetchPlayerStatus(ctx)
+	if err != nil {
+		t.Fatalf("FetchPlayerStatus() error = %v", err)
+	}
+	if got == nil || got.DisplayURL == nil {
+		t.Fatalf("FetchPlayerStatus() should include displayURL, got %+v", got)
+	}
+	if *got.DisplayURL != "file:///opt/feral/ui/launcher/index.html?step=qr" {
+		t.Fatalf("displayURL = %q, want %q", *got.DisplayURL, "file:///opt/feral/ui/launcher/index.html?step=qr")
+	}
+	if mockCDP.noLogSendCalls != 1 || mockCDP.pageURLCalls != 1 {
+		t.Fatalf("expected one NoLogSend and one PageNavigationURL call, got %d and %d", mockCDP.noLogSendCalls, mockCDP.pageURLCalls)
+	}
+}
+
+func TestFetchPlayerStatus_DisplayURLBestEffort(t *testing.T) {
+	t.Parallel()
+
+	mockCDP := &fakeCDP{
+		noLogResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"castCommand": "displayPlaylist",
+				"ok":          true,
+			},
+		},
+		pageURLErr: errors.New("debug targets unavailable"),
+	}
+	p := &poller{
+		cdp:    mockCDP,
+		json:   wrapper.NewJSON(),
+		logger: zap.NewNop(),
+	}
+
+	ctx := context.Background()
+
+	got, err := p.FetchPlayerStatus(ctx)
+	if err != nil {
+		t.Fatalf("FetchPlayerStatus() should keep status success when URL lookup fails, got err %v", err)
+	}
+	if got == nil {
+		t.Fatal("FetchPlayerStatus() returned nil status")
+	}
+	if got.DisplayURL != nil {
+		t.Fatalf("displayURL should be nil when lookup fails, got %q", *got.DisplayURL)
+	}
+	if mockCDP.noLogSendCalls != 1 || mockCDP.pageURLCalls != 1 {
+		t.Fatalf("expected one NoLogSend and one PageNavigationURL call, got %d and %d", mockCDP.noLogSendCalls, mockCDP.pageURLCalls)
+	}
 }

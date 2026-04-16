@@ -35,6 +35,7 @@ const (
 
 type PlayerStatus struct {
 	Command        string                      `json:"castCommand,omitempty"`
+	DisplayURL     *string                     `json:"displayURL,omitempty"`
 	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
 	Playlist       *dp1.Playlist               `json:"playlist,omitempty"`
 	Index          *int                        `json:"index"`
@@ -365,6 +366,14 @@ func (s *poller) FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error) {
 	if err := s.json.Unmarshal(jsonMessage, playerStatus); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal message: %w", err)
 	}
+
+	uiPageURL, err := s.cdp.PageNavigationURL(ctx)
+	if err != nil {
+		// UI URL enrichment is best effort; player status remains valid without it.
+		s.logger.Debug("Skipping UI page URL enrichment for player status", zap.Error(err))
+		return playerStatus, nil
+	}
+	playerStatus.DisplayURL = &uiPageURL
 
 	return playerStatus, nil
 }

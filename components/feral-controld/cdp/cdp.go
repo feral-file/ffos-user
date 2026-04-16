@@ -38,6 +38,7 @@ type CDP interface {
 	Init(ctx context.Context) error
 	Send(method string, params map[string]interface{}) (interface{}, error)
 	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
+	PageNavigationURL(ctx context.Context) (string, error)
 	Close()
 	Initialized() bool
 }
@@ -183,6 +184,54 @@ func (c *cdp) Init(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (c *cdp) PageNavigationURL(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	resp, err := c.httpClient.Get(c.endpoint + "/json")
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch debug targets: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			c.logger.Warn("Failed to close response body", zap.Error(err))
+		}
+	}()
+
+	body, err := c.io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read targets: %w", err)
+	}
+
+	var targets []struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	}
+	if err := c.json.Unmarshal(body, &targets); err != nil {
+		return "", fmt.Errorf("invalid targets format: %w", err)
+	}
+	c.logger.Debug("Fetched CDP targets for navigation URL", zap.Int("target_count", len(targets)))
+
+	pageTargets := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if t.Type == "page" {
+			pageTargets = append(pageTargets, t.URL)
+		}
+	}
+	c.logger.Debug("Filtered CDP page targets for navigation URL", zap.Int("page_target_count", len(pageTargets)))
+
+	if len(pageTargets) == 0 {
+		return "", ErrNoPageTargetFound
+	}
+
+	if len(pageTargets) > 1 {
+		return "", ErrMultiplePageTargetsFound
+	}
+
+	return pageTargets[0], nil
 }
 
 // Send sends a raw CDP JSON-RPC message with logging
