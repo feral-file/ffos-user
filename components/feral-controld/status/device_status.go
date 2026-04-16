@@ -89,7 +89,8 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	var isMuted *bool
 	var displayURL *string
 
-	// Chrome UI document URL (same source as CDP target listing; does not require player JS).
+	// Chrome UI document URL. This is the same target listing the poller uses, but
+	// keeping it here preserves the response shape for direct CMD_DEVICE_STATUS calls.
 	g.Go(func() error {
 		if d.cdp == nil {
 			return nil
