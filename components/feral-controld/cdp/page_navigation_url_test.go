@@ -2,6 +2,7 @@ package cdp_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,4 +140,33 @@ func TestPageNavigationURL_ContextCanceled(t *testing.T) {
 
 	_, err := ts.client.PageNavigationURL(ctx)
 	assert.ErrorContains(t, err, context.Canceled.Error(), fmt.Sprintf("expected context canceled, got %v", err))
+}
+
+func TestPageNavigationURL_HTTPGetError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockHTTP.EXPECT().Get(gomock.Any()).Return(nil, errors.New("connection refused")).Times(1)
+
+	_, err := ts.client.PageNavigationURL(context.Background())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to fetch debug targets")
+}
+
+func TestPageNavigationURL_ReadAllError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	responseBody := `[]`
+	mockResponse := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(responseBody)),
+	}
+
+	ts.mockHTTP.EXPECT().Get(gomock.Any()).Return(mockResponse, nil).Times(1)
+	ts.mockIO.EXPECT().ReadAll(mockResponse.Body).Return(nil, errors.New("read failed")).Times(1)
+
+	_, err := ts.client.PageNavigationURL(context.Background())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read targets")
 }

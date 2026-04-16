@@ -39,7 +39,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - `dbus` owns the D-Bus client and the controld handler. The handler exports `GetRelayerTopicID` RPC. It also defines the member constants for signals sent to setupd.
 - `relayer` manages the WebSocket relayer connection (ping every 15s, pong wait 3s). It classifies errors as permanent, transient, or busy.
 - `cdp` is the Chrome DevTools Protocol client (WebSocket to `127.0.0.1:9222`). Commands are sent via `Runtime.evaluate` calling `window.handleCDPRequest(payload)`.
-- `status` owns the device status collector (`DeviceStatus`) and the status poller. The poller polls CDP for player status and drives notifications to the web app.
+- `status` owns the device status collector (`DeviceStatus`) and the status poller. The poller polls CDP for player status and drives notifications to the web app. `DeviceStatus.GetStatus` includes best-effort `displayURL` (Chromium page URL from DevTools `/json`) on `device_status` notifications; player status carries playback/UI state from `checkStatus` only.
 - `hub` exposes a local WebSocket server on `0.0.0.0:1111` (only when `enableHub` is true in config). Uses the same `commandrouter` as the relayer. Also serves Prometheus metrics at this address.
 - `mdns` advertises the device on the local network. mDNS starts/stops in response to connectivity changes from D-Bus.
 - `oom-recovery` (`OOMRecoverer`): on startup, compares `/var/lib/oom_state/chromium-oom-kill-count` against a handled-count file. If unhandled OOM kills exist, it polls (every 2s, up to 60 retries) until the webapp is responsive, then sends `CMD_DISPLAY_DEFAULT_PLAYLIST` to resume playback, then writes the handled-count. Suppresses player notifications during recovery.

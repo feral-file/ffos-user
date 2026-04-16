@@ -110,6 +110,11 @@ All messages are JSON. The message envelope is:
 
 **Command type constants** are defined in `components/feral-controld/commands/types.go`. New remote commands must be added there with a corresponding entry in `deviceCtlCommands` if they require executor handling.
 
+**Relayer outbound notifications (`feral-controld`):** The device periodically pushes JSON notifications over the relayer WebSocket (and local hub clients) with an envelope that includes `notification_type` and a structured `message`. At minimum:
+
+- `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts.
+- `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, and best-effort `displayURL`). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead.
+
 ### Hub WebSocket protocol (port 1111)
 
 The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands.

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -34,6 +35,7 @@ type deviceStatus struct {
 	exec       wrapper.Exec
 	httpClient wrapper.HTTPClient
 	io         wrapper.IO
+	cdp        cdp.CDP
 	cache      *versionCache
 }
 
@@ -43,6 +45,7 @@ func NewDeviceStatus(
 	exec wrapper.Exec,
 	httpClient wrapper.HTTPClient,
 	io wrapper.IO,
+	cdpClient cdp.CDP,
 ) DeviceStatus {
 	return &deviceStatus{
 		json:       json,
@@ -50,6 +53,7 @@ func NewDeviceStatus(
 		exec:       exec,
 		httpClient: httpClient,
 		io:         io,
+		cdp:        cdpClient,
 		cache:      &versionCache{},
 	}
 }
@@ -65,6 +69,9 @@ type DeviceStatusResponse struct {
 	MACInfo             map[string]string `json:"macInfo,omitempty"`
 	Volume              *int              `json:"volume,omitempty"`
 	IsMuted             *bool             `json:"isMuted,omitempty"`
+	// DisplayURL is the Chrome top-frame URL for the sole "page" debug target (DevTools /json).
+	// Best-effort: omitted when CDP cannot resolve the URL.
+	DisplayURL *string `json:"displayURL,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -80,6 +87,21 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	var analyticsDisabled, betaFeaturesEnabled bool
 	var volume *int
 	var isMuted *bool
+	var displayURL *string
+
+	// Chrome UI document URL (same source as CDP target listing; does not require player JS).
+	g.Go(func() error {
+		if d.cdp == nil {
+			return nil
+		}
+		u, err := d.cdp.PageNavigationURL(ctx)
+		if err != nil {
+			// Non-fatal: device status remains useful without this field.
+			return nil
+		}
+		displayURL = &u
+		return nil
+	})
 
 	// Get screen rotation
 	g.Go(func() error {
@@ -246,6 +268,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.BetaFeaturesEnabled = betaFeaturesEnabled
 	response.Volume = volume
 	response.IsMuted = isMuted
+	response.DisplayURL = displayURL
 
 	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()
