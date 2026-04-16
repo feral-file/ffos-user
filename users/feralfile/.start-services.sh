@@ -42,6 +42,9 @@ systemctl --user start system-ready.target
 systemctl --user start "feral-sys-monitord.service"
 systemctl --user start "feral-vmagent.service"
 systemctl --user start "display-restore.service"
+# Optional: when /opt/feral/ff-player exists, serves player static files before Chromium navigates to webapp_url.
+# Do not abort boot if the unit is misconfigured (e.g. darkhttpd missing on an experimental image).
+systemctl --user start "feral-ff-player-static.service" || true
 systemctl --user start "chromium-kiosk.service"
 systemctl --user start "ota-update-success-check.service"
 

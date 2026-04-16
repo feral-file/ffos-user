@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-watchdog/ff1config"
 	"github.com/feral-file/ffos-user/components/feral-watchdog/packages/cdp"
 
 	"go.uber.org/zap"
@@ -94,7 +95,9 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 				m.logger.Info("Systemd: Service recovered, resume playlist",
 					zap.String("service", service))
 				if m.cdpClient != nil {
-					if err := m.cdpClient.Navigate(ctx, cdp.DISPLAY_FERALFILE_URL); err != nil {
+					// Match feral-setupd: optional webapp_url in ff1-config.json overrides the default player URL.
+					navURL := ff1config.ResolveWebappURL()
+					if err := m.cdpClient.Navigate(ctx, navURL); err != nil {
 						m.logger.Error("Systemd: Failed to resume playlist after service recovery",
 							zap.String("service", service),
 							zap.Error(err))
