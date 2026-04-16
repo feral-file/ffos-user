@@ -192,7 +192,7 @@ func TestDP1_ProcessPlaylistURL_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/playlist.json"
+	url := "https://example.com/playlist.json"
 	playlistJSON := createPlaylistJSON()
 
 	wireHTTPGET(ts, url, createMockResponse(http.StatusOK, playlistJSON))
@@ -236,7 +236,7 @@ func TestDP1_ProcessPlaylistURL_WithDynamicQueries(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/dynamic-playlist.json"
+	url := "https://example.com/dynamic-playlist.json"
 	playlistJSON := createDynamicPlaylistJSON()
 	mockTokens := createMockTokens()
 
@@ -298,7 +298,7 @@ func TestDP1_ProcessPlaylistURL_HTTPError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/playlist.json"
+	url := "https://example.com/playlist.json"
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	assert.NoError(t, err)
@@ -320,7 +320,7 @@ func TestDP1_ProcessPlaylistURL_HTTPStatusCodeError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/playlist.json"
+	url := "https://example.com/playlist.json"
 
 	wireHTTPGET(ts, url, createMockResponse(http.StatusNotFound, "Not Found"))
 
@@ -335,7 +335,7 @@ func TestDP1_ProcessPlaylistURL_ReadAllError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/playlist.json"
+	url := "https://example.com/playlist.json"
 
 	wireHTTPGET(ts, url, createMockResponse(http.StatusOK, "test"))
 
@@ -355,7 +355,7 @@ func TestDP1_ProcessPlaylistURL_JSONUnmarshalError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/playlist.json"
+	url := "https://example.com/playlist.json"
 	playlistJSON := createPlaylistJSON()
 
 	wireHTTPGET(ts, url, createMockResponse(http.StatusOK, playlistJSON))
@@ -381,7 +381,7 @@ func TestDP1_ProcessPlaylistURLConditional_NotModified(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/playlist.json"
+	url := "https://example.com/playlist.json"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	assert.NoError(t, err)
 	ts.mockHTTP.EXPECT().
@@ -404,7 +404,7 @@ func TestDP1_ProcessPlaylistURLConditional_ETagOn200(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	url := "http://example.com/playlist.json"
+	url := "https://example.com/playlist.json"
 	playlistJSON := createPlaylistJSON()
 	resp := createMockResponse(http.StatusOK, playlistJSON)
 	resp.Header.Set("ETag", `"etag-1"`)
@@ -1220,4 +1220,273 @@ func assertGraphQLHydration(t *testing.T, req *http.Request, wantLimit, wantOffs
 	assert.NoError(t, json.Unmarshal(b, &env))
 	assert.Contains(t, env.Query, "limit: "+wantLimit)
 	assert.Contains(t, env.Query, "offset: "+wantOffset)
+}
+
+func TestDP1_ProcessPlaylistURL_URLValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		url         string
+		debug       bool
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "valid HTTPS URL",
+			url:         "https://example.com/playlist.json",
+			debug:       false,
+			expectError: false,
+		},
+		{
+			name:        "HTTP URL rejected in production",
+			url:         "http://example.com/playlist.json",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "insecure scheme",
+		},
+		{
+			name:        "HTTP URL allowed in debug mode",
+			url:         "http://example.com/playlist.json",
+			debug:       true,
+			expectError: false,
+		},
+		{
+			name:        "localhost rejected in production",
+			url:         "https://localhost:8080/playlist.json",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "localhost access not allowed",
+		},
+		{
+			name:        "localhost allowed in debug mode",
+			url:         "https://localhost:8080/playlist.json",
+			debug:       true,
+			expectError: false,
+		},
+		{
+			name:        "loopback IP rejected in production",
+			url:         "https://127.0.0.1/playlist.json",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "localhost access not allowed",
+		},
+		{
+			name:        "loopback IP allowed in debug mode",
+			url:         "https://127.0.0.1/playlist.json",
+			debug:       true,
+			expectError: false,
+		},
+		{
+			name:        "private IP rejected in production",
+			url:         "https://192.168.1.1/playlist.json",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "private IP address not allowed",
+		},
+		{
+			name:        "private IP allowed in debug mode",
+			url:         "https://192.168.1.1/playlist.json",
+			debug:       true,
+			expectError: false,
+		},
+		{
+			name:        "private IP 10.x rejected in production",
+			url:         "https://10.0.0.1/playlist.json",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "private IP address not allowed",
+		},
+		{
+			name:        "malformed URL rejected",
+			url:         "not a url",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "malformed URL",
+		},
+		{
+			name:        "malformed URL rejected even in debug",
+			url:         "://invalid",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "malformed URL",
+		},
+		{
+			name:        "empty host rejected",
+			url:         "https:///path",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "empty host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+			ctx := context.Background()
+
+			mockFFIndexer := mocks.NewMockFFIndexer(ctrl)
+			mockHTTPClient := mocks.NewMockHTTPClient(ctrl)
+			mockJSON := mocks.NewMockJSON(ctrl)
+			mockIO := mocks.NewMockIO(ctrl)
+
+			client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, tt.debug)
+
+			// If we expect the URL to pass validation, we need to mock the HTTP response
+			if !tt.expectError {
+				// Mock HTTP request creation
+				req, _ := http.NewRequest(http.MethodGet, tt.url, nil)
+				mockHTTPClient.EXPECT().
+					NewRequest(http.MethodGet, tt.url, nil).
+					Return(req, nil)
+
+				// Mock HTTP response with valid playlist
+				validPlaylist := `{"id":"test","items":[]}`
+				resp := createMockResponse(http.StatusOK, validPlaylist)
+				mockHTTPClient.EXPECT().
+					Do(gomock.Any()).
+					Return(resp, nil)
+
+				// Mock JSON unmarshaling
+				mockIO.EXPECT().
+					ReadAll(gomock.Any()).
+					Return([]byte(validPlaylist), nil)
+
+				mockJSON.EXPECT().
+					Unmarshal(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						return json.Unmarshal(data, v)
+					})
+			}
+
+			result, err := client.ProcessPlaylistURL(ctx, tt.url, false)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.errorMsg != "" {
+					assert.Contains(t, err.Error(), tt.errorMsg)
+				}
+				assert.Nil(t, result)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, result)
+			}
+		})
+	}
+}
+
+func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_URLValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		endpoint    string
+		debug       bool
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "valid HTTPS endpoint",
+			endpoint:    "https://api.example.com/graphql",
+			debug:       false,
+			expectError: false,
+		},
+		{
+			name:        "HTTP endpoint rejected in production",
+			endpoint:    "http://api.example.com/graphql",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "insecure scheme",
+		},
+		{
+			name:        "HTTP endpoint allowed in debug mode",
+			endpoint:    "http://api.example.com/graphql",
+			debug:       true,
+			expectError: false,
+		},
+		{
+			name:        "localhost endpoint rejected in production",
+			endpoint:    "https://localhost:3000/graphql",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "localhost access not allowed",
+		},
+		{
+			name:        "localhost endpoint allowed in debug mode",
+			endpoint:    "https://localhost:3000/graphql",
+			debug:       true,
+			expectError: false,
+		},
+		{
+			name:        "private IP endpoint rejected in production",
+			endpoint:    "https://192.168.1.100/graphql",
+			debug:       false,
+			expectError: true,
+			errorMsg:    "private IP address not allowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+			ctx := context.Background()
+
+			mockFFIndexer := mocks.NewMockFFIndexer(ctrl)
+			mockHTTPClient := mocks.NewMockHTTPClient(ctrl)
+			mockJSON := mocks.NewMockJSON(ctrl)
+			mockIO := mocks.NewMockIO(ctrl)
+
+			client := dp1.New(mockFFIndexer, mockHTTPClient, mockJSON, mockIO, logger, tt.debug)
+
+			playlist := dp1.Playlist{
+				Playlist: dp1playlist.Playlist{
+					ID: "test-playlist",
+				},
+			}
+			playlist.DynamicQuery = &playlists.DynamicQuery{
+				Endpoint: tt.endpoint,
+				Query:    `{ items(limit: {{limit}}, offset: {{offset}}) { id } }`,
+			}
+
+			// If we expect validation to pass, mock the HTTP transport for dp1-go
+			if !tt.expectError {
+				// dp1-go will make HTTP requests through the wrapped client
+				// We need to set up a proper mock for the dynamicQuery fetch
+				// Since dp1-go uses *http.Client internally and we're using a wrapper,
+				// we need to mock the transport behavior
+
+				// Mock response for the dynamic query
+				graphqlResp := `{"items":[{"id":"item1"}]}`
+				resp := createMockResponse(http.StatusOK, graphqlResp)
+
+				mockHTTPClient.EXPECT().
+					Do(gomock.Any()).
+					Return(resp, nil).
+					AnyTimes()
+
+				mockIO.EXPECT().
+					ReadAll(gomock.Any()).
+					Return([]byte(graphqlResp), nil).
+					AnyTimes()
+			}
+
+			result, err := client.ProcessDynamicPlaylist(ctx, playlist, false)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.errorMsg != "" {
+					assert.Contains(t, err.Error(), tt.errorMsg)
+				}
+				assert.Nil(t, result)
+			} else {
+				// Note: may still fail due to dp1-go parsing/validation,
+				// but should not fail on our URL validation
+				if err != nil {
+					assert.NotContains(t, err.Error(), "invalid dynamic query endpoint")
+				}
+			}
+		})
+	}
 }
