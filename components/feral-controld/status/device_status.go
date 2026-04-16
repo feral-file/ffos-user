@@ -69,9 +69,7 @@ type DeviceStatusResponse struct {
 	MACInfo             map[string]string `json:"macInfo,omitempty"`
 	Volume              *int              `json:"volume,omitempty"`
 	IsMuted             *bool             `json:"isMuted,omitempty"`
-	// DisplayURL is the Chrome top-frame URL for the sole "page" debug target (DevTools /json).
-	// Best-effort: omitted when CDP cannot resolve the URL.
-	DisplayURL *string `json:"displayURL,omitempty"`
+	DisplayURL          *string           `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
 }
 
 // GetStatus retrieves comprehensive device status information
