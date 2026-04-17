@@ -26,7 +26,7 @@ func TestPageNavigationURL_Success(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}
 
-	ts.mockHTTP.EXPECT().Get(gomock.Any()).Return(mockResponse, nil).Times(1)
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).Return(mockResponse, nil).Times(1)
 	ts.mockIO.EXPECT().ReadAll(mockResponse.Body).Return(bodyBytes, nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(bodyBytes, gomock.Any()).
@@ -64,7 +64,7 @@ func TestPageNavigationURL_NoPageTarget(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}
 
-	ts.mockHTTP.EXPECT().Get(gomock.Any()).Return(mockResponse, nil).Times(1)
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).Return(mockResponse, nil).Times(1)
 	ts.mockIO.EXPECT().ReadAll(mockResponse.Body).Return(bodyBytes, nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(bodyBytes, gomock.Any()).
@@ -101,7 +101,7 @@ func TestPageNavigationURL_MultiplePageTargets(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}
 
-	ts.mockHTTP.EXPECT().Get(gomock.Any()).Return(mockResponse, nil).Times(1)
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).Return(mockResponse, nil).Times(1)
 	ts.mockIO.EXPECT().ReadAll(mockResponse.Body).Return(bodyBytes, nil).Times(1)
 	ts.mockJSON.EXPECT().
 		Unmarshal(bodyBytes, gomock.Any()).
@@ -146,7 +146,7 @@ func TestPageNavigationURL_HTTPGetError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	ts.mockHTTP.EXPECT().Get(gomock.Any()).Return(nil, errors.New("connection refused")).Times(1)
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).Return(nil, errors.New("connection refused")).Times(1)
 
 	_, err := ts.client.PageNavigationURL(context.Background())
 	assert.Error(t, err)
@@ -163,7 +163,7 @@ func TestPageNavigationURL_ReadAllError(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}
 
-	ts.mockHTTP.EXPECT().Get(gomock.Any()).Return(mockResponse, nil).Times(1)
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).Return(mockResponse, nil).Times(1)
 	ts.mockIO.EXPECT().ReadAll(mockResponse.Body).Return(nil, errors.New("read failed")).Times(1)
 
 	_, err := ts.client.PageNavigationURL(context.Background())

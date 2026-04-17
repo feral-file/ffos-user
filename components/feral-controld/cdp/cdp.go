@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -94,6 +96,10 @@ func (c *cdp) Initialized() bool {
 func (c *cdp) Init(ctx context.Context) error {
 	c.logger.Info("Initializing CDP", zap.String("endpoint", c.endpoint))
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Ensure the relayer is not connected
 	c.mu.Lock()
 	if c.conn != nil {
@@ -101,8 +107,17 @@ func (c *cdp) Init(ctx context.Context) error {
 		return ErrAlreadyInitialized
 	}
 
-	// Fetch JSON with websocket debugger URL
-	resp, err := c.httpClient.Get(c.endpoint + "/json")
+	// Fetch JSON with websocket debugger URL. Use a request bound to ctx (plus a cap) so
+	// this step respects cancellation; raw http.Get ignores the request context and can
+	// block for the shared client's default timeout.
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, initDebugTargetsFetchTimeout)
+	defer fetchCancel()
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, c.endpoint+"/json", nil)
+	if err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("failed to build debug targets request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("failed to fetch debug targets: %w", err)
@@ -186,12 +201,30 @@ func (c *cdp) Init(ctx context.Context) error {
 	return nil
 }
 
+// initDebugTargetsFetchTimeout caps the /json fetch during CDP Init. Parent ctx
+// cancellation still applies; the cap avoids an uncancelled 30s client stall when
+// ctx has no deadline.
+const initDebugTargetsFetchTimeout = 15 * time.Second
+
+// pageNavigationURLFetchTimeout bounds the best-effort /json probe. Without this,
+// a hung Chromium devtools endpoint could block until the shared HTTP client's
+// 30s timeout, stalling DeviceStatus polling and downstream notifications.
+const pageNavigationURLFetchTimeout = 5 * time.Second
+
 func (c *cdp) PageNavigationURL(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 
-	resp, err := c.httpClient.Get(c.endpoint + "/json")
+	ctx, cancel := context.WithTimeout(ctx, pageNavigationURLFetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/json", nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build debug targets request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch debug targets: %w", err)
 	}

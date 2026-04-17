@@ -78,9 +78,9 @@ func TestClient_Init_Success(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}
 
-	// Expect http.Get to return mock response
+	// Expect http.Do to return mock response
 	ts.mockHTTP.EXPECT().
-		Get(gomock.Any()).
+		Do(gomock.Any()).
 		Return(mockResponse, nil).
 		Times(1)
 
@@ -151,9 +151,9 @@ func TestClient_Init_Error(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(responseBody)),
 				}
 
-				// Expect http.Get to return mock response
+				// Expect http.Do to return mock response
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -204,9 +204,9 @@ func TestClient_Init_Error(t *testing.T) {
 		{
 			name: "HTTP GET error",
 			setupFunc: func(ts *testSetup) {
-				// Expect http.Get to return error
+				// Expect http.Do to return error
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(nil, fmt.Errorf("connection refused")).
 					Times(1)
 			},
@@ -220,9 +220,9 @@ func TestClient_Init_Error(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader("")),
 				}
 
-				// Expect http.Get to return mock response
+				// Expect http.Do to return mock response
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -243,9 +243,9 @@ func TestClient_Init_Error(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(responseBody)),
 				}
 
-				// Expect http.Get to return mock response
+				// Expect http.Do to return mock response
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -272,9 +272,9 @@ func TestClient_Init_Error(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(responseBody)),
 				}
 
-				// Expect http.Get to return mock response
+				// Expect http.Do to return mock response
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -321,9 +321,9 @@ func TestClient_Init_Error(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(responseBody)),
 				}
 
-				// Expect http.Get to return mock response
+				// Expect http.Do to return mock response
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -372,9 +372,9 @@ func TestClient_Init_Error(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(responseBody)),
 				}
 
-				// Expect http.Get to return mock response
+				// Expect http.Do to return mock response
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -447,9 +447,9 @@ func TestClient_Init_Async(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}
 
-	// Expect http.Get to return mock response - only one connection should succeed
+	// Expect http.Do to return mock response - only one connection should succeed
 	ts.mockHTTP.EXPECT().
-		Get(gomock.Any()).
+		Do(gomock.Any()).
 		Return(mockResponse, nil).
 		Times(1)
 
@@ -555,9 +555,9 @@ func TestClient_Init_ContextCanceled(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}
 
-	// Expect http.Get to return mock response
+	// Expect http.Do to return mock response
 	ts.mockHTTP.EXPECT().
-		Get(gomock.Any()).
+		Do(gomock.Any()).
 		Return(mockResponse, nil).
 		Times(1)
 
@@ -642,7 +642,7 @@ func TestClient_Send_Success(t *testing.T) {
 
 	// Setup initialization expectations
 	ts.mockHTTP.EXPECT().
-		Get(gomock.Any()).
+		Do(gomock.Any()).
 		Return(mockResponse, nil).
 		Times(1)
 
@@ -798,7 +798,7 @@ func TestClient_Send_Error(t *testing.T) {
 
 				// Expect HTTP GET to return response body
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).Times(1)
 
 				// Expect io.ReadAll to return response body
@@ -859,7 +859,7 @@ func TestClient_Send_Error(t *testing.T) {
 
 				// Expect HTTP GET to return response body
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -929,7 +929,7 @@ func TestClient_Send_Error(t *testing.T) {
 
 				// Expect HTTP GET to return response body
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -1005,7 +1005,7 @@ func TestClient_Send_Error(t *testing.T) {
 
 				// Expect HTTP GET to return response body
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -1086,7 +1086,7 @@ func TestClient_Send_Error(t *testing.T) {
 
 				// Expect HTTP GET to return response body
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -1188,7 +1188,7 @@ func TestClient_Send_Error(t *testing.T) {
 
 				// Expect HTTP GET to return response body
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -1296,7 +1296,7 @@ func TestClient_Send_Error(t *testing.T) {
 
 				// Expect HTTP GET to return response body
 				ts.mockHTTP.EXPECT().
-					Get(gomock.Any()).
+					Do(gomock.Any()).
 					Return(mockResponse, nil).
 					Times(1)
 
@@ -1433,7 +1433,7 @@ func TestClient_Send_Async(t *testing.T) {
 
 	// Setup initialization expectations
 	ts.mockHTTP.EXPECT().
-		Get(gomock.Any()).
+		Do(gomock.Any()).
 		Return(mockResponse, nil).
 		Times(1)
 
@@ -1678,7 +1678,7 @@ func TestClient_Close_Success(t *testing.T) {
 
 	// Setup initialization expectations
 	ts.mockHTTP.EXPECT().
-		Get(gomock.Any()).
+		Do(gomock.Any()).
 		Return(mockResponse, nil).
 		Times(1)
 
@@ -1755,7 +1755,7 @@ func TestClient_Close_Error(t *testing.T) {
 
 	// Setup initialization expectations
 	ts.mockHTTP.EXPECT().
-		Get(gomock.Any()).
+		Do(gomock.Any()).
 		Return(mockResponse, nil).
 		Times(1)
 
