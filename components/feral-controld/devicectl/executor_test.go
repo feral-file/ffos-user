@@ -64,7 +64,7 @@ func setup(t *testing.T) *testSetup {
 	state.InjectStateManagerForTesting(mockStateManager)
 
 	// Use a real panelDDC backed by mockExec so that DDC executor tests can
-	// keep mocking ddcutil subprocess calls through mockExec.CommandContext
+	// keep mocking ddcutil subprocess calls through mockExec.CommandContext.
 	panelDDC := ddc.New(mockExec, logger)
 
 	// Create executor with mocks
