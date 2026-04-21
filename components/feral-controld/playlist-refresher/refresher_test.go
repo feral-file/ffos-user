@@ -72,6 +72,7 @@ func createMockPlayerStatus(command string, playlistURL *string, playlist *dp1.P
 		Playlist:    playlist,
 		Index:       nil,
 		IsPaused:    nil,
+		Ok:          true,
 	}
 }
 
@@ -486,15 +487,19 @@ func TestRefresher_ProcessPlayingPlaylist_WrongCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	setupBackgroundMocks(ts)
-
 	// Expect status poller to return player status with wrong command
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_SHUTDOWN), nil, nil), nil).
 		AnyTimes()
 
-	// Should not call DP1 or CDP since command is not CMD_DISPLAY_PLAYLIST
+	// No playlist URL or embedded playlist: processPlayingPlaylist errors and retries (refresher
+	// does not branch on castCommand).
+	ts.mockClock.EXPECT().
+		Sleep(gomock.Any()).
+		AnyTimes()
+
+	// Should not call DP1 or CDP
 
 	// Start the refresher
 	ts.refresher.Start()
