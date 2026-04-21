@@ -129,6 +129,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		}
 
+		if commandType == commands.CMD_REFRESH_ARTWORK {
+			_, err = h.cdp.Send("Network.clearBrowserCache", map[string]interface{}{})
+			if err != nil {
+				h.logger.Warn("Failed to clear Chromium browser cache before artwork refresh", zap.Error(err))
+			}
+		}
+
 		// Forward to CDP (final, full data)
 		result, err = h.sendCDPRequest(command)
 		if err != nil {
