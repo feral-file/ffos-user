@@ -379,7 +379,7 @@ func initializeApp(
 	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
 
 	// DeviceStatus
-	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io)
+	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io, cdp)
 
 	// DDC panel
 	ddcPanel := ddc.New(exec, logger)

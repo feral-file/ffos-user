@@ -89,6 +89,21 @@ func (mr *MockCDPMockRecorder) NoLogSend(method, params interface{}) *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NoLogSend", reflect.TypeOf((*MockCDP)(nil).NoLogSend), method, params)
 }
 
+// PageNavigationURL mocks base method.
+func (m *MockCDP) PageNavigationURL(ctx context.Context) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PageNavigationURL", ctx)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// PageNavigationURL indicates an expected call of PageNavigationURL.
+func (mr *MockCDPMockRecorder) PageNavigationURL(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PageNavigationURL", reflect.TypeOf((*MockCDP)(nil).PageNavigationURL), ctx)
+}
+
 // Send mocks base method.
 func (m *MockCDP) Send(method string, params map[string]interface{}) (interface{}, error) {
 	m.ctrl.T.Helper()
