@@ -18,6 +18,7 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -132,6 +133,72 @@ func TestClient_Init_Success(t *testing.T) {
 	assert.True(t, ts.client.Initialized(), "expected client to be initialized")
 
 	// Properly close the client to prevent goroutine leaks
+	ts.client.Close()
+}
+
+// TestClient_Init_BootstrapFetchDeadlineMatchesSharedHTTPClient guards against
+// regressing to a short-only cap (e.g. 15s): slow /json responses must still be
+// able to succeed up to the shared HTTP client budget (F1/F2).
+func TestClient_Init_BootstrapFetchDeadlineMatchesSharedHTTPClient(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	const targetWS = "ws://localhost:9222/devtools/page/123"
+	responseBody := fmt.Sprintf(`[{"type":"page","title":"t","webSocketDebuggerUrl":"%s"}]`, targetWS)
+	responseBodyBytes := []byte(responseBody)
+
+	var gotReq *http.Request
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			gotReq = req
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(responseBody)),
+			}, nil
+		}).
+		Times(1)
+
+	ts.mockIO.EXPECT().
+		ReadAll(gomock.Any()).
+		Return(responseBodyBytes, nil).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(responseBodyBytes, gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			targets := v.(*[]struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			})
+			*targets = []struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			}{
+				{Type: "page", Title: "t", WebSocketDebuggerURL: targetWS},
+			}
+			return nil
+		}).
+		Times(1)
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, targetWS, nil).
+		Return(ts.mockConn, nil, nil).
+		Times(1)
+
+	ts.mockConn.EXPECT().Close().Return(nil).AnyTimes()
+
+	err := ts.client.Init(ts.ctx)
+	assert.NoError(t, err)
+
+	require.NotNil(t, gotReq)
+	deadline, ok := gotReq.Context().Deadline()
+	assert.True(t, ok, "bootstrap /json request should carry a deadline")
+	assert.Greater(t, time.Until(deadline), 20*time.Second,
+		"deadline should allow slow /json up to the shared HTTP client limit (not a ~15s-only cap)")
+
 	ts.client.Close()
 }
 

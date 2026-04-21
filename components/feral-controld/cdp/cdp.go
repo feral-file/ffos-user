@@ -201,10 +201,11 @@ func (c *cdp) Init(ctx context.Context) error {
 	return nil
 }
 
-// initDebugTargetsFetchTimeout caps the /json fetch during CDP Init. Parent ctx
-// cancellation still applies; the cap avoids an uncancelled 30s client stall when
-// ctx has no deadline.
-const initDebugTargetsFetchTimeout = 15 * time.Second
+// initDebugTargetsFetchTimeout matches the shared HTTP client round-trip limit so
+// bootstrap /json discovery stays aligned with prior Get behavior while the request
+// remains context-driven (see Init). A shorter cap caused false Init failures when
+// Chromium answered /json between that cap and the client timeout (cold boot / recovery).
+const initDebugTargetsFetchTimeout = wrapper.HTTPClientTimeout
 
 // pageNavigationURLFetchTimeout bounds the best-effort /json probe. Without this,
 // a hung Chromium devtools endpoint could block until the shared HTTP client's
