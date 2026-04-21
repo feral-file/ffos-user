@@ -1,6 +1,6 @@
 ---
 name: reviewer
-model: premium
+model: inherit
 description: Read-only code reviewer for Go/Rust services, CI workflows, and repository guardrails. Always follows prompts/code-review.md.
 readonly: true
 ---
