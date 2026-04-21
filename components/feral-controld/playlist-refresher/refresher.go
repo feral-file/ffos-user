@@ -157,8 +157,7 @@ func (r *refresher) processPlayingPlaylist() error {
 		return nil
 	}
 
-	if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
-		r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
+	if !playerStatus.Ok {
 		return nil
 	}
 
@@ -179,7 +178,6 @@ func (r *refresher) processPlayingPlaylist() error {
 		return nil
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
-			r.logger.Debug("Playlist has no dynamic queries, skipping")
 			return nil
 		}
 
@@ -220,7 +218,6 @@ func (r *refresher) processPlaylistURLRefresh(playlistURL string) error {
 		return err
 	}
 	if res.NotModified {
-		r.logger.Debug("Playlist URL unchanged (HTTP 304), skipping CDP")
 		return nil
 	}
 	playlist := res.Playlist
