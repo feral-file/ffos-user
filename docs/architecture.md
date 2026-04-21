@@ -63,7 +63,7 @@ feral-setupd    --[GetRelayerTopicID]------> feral-controld
 
 ### UI control: Chrome DevTools Protocol (CDP)
 
-Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-setupd` drives setup UI pages (QR code, messages, webapp URL). `feral-controld` forwards web commands from the relayer to Chromium via CDP. `feral-watchdog` monitors Chromium health and issues recovery commands via CDP. Daemons do not embed policy HTTP servers. The bundled **ff-player** static tree is served by the user service `feral-ff-player-static.service` when the image ships `/opt/feral/ff-player`; by default Chromium navigates to that device-local player URL. Optional `webapp_url` in `ff1-config.json` overrides the default when set (for example a remote `https://display.feralfile.com` URL for dev or canary testing).
+Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-setupd` drives setup UI pages (QR code, messages, webapp URL). `feral-controld` forwards web commands from the relayer to Chromium via CDP. `feral-watchdog` monitors Chromium health and issues recovery commands via CDP. Daemons do not embed policy HTTP servers. The bundled **ff-player** static tree is served by the user service `feral-ff-player-static.service` when the image ships `/opt/feral/ff-player`; by default Chromium navigates to that device-local player URL. Optional `webapp_url` in `ff1-config.json` overrides the default when set (trimmed; empty means use the default); for example a remote `https://display.feralfile.com` URL for dev or canary testing. Remote playback is never chosen implicitly: `feral-setupd` navigates to the resolved player URL as-is. After monitored dependency recovery, `feral-watchdog` resolves the same player URL and retries CDP `Navigate` a few times to cover races with the static server.
 
 ### Local device control: Hub WebSocket (port 1111)
 
@@ -88,7 +88,7 @@ Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0
 The boundary between launcher/UI code and daemon logic:
 
 - **Daemons own all state, policy, and side effects.** Daemons decide what page to show, when to update, and what to do on errors.
-- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` for setup, or from the kiosk player URL chosen by `feral-setupd`: compile-time default is the device-local player (`http://127.0.0.1:8080/` when `feral-ff-player-static` serves `/opt/feral/ff-player`). If `webapp_url` is set in `ff1-config.json`, it replaces that default (use this for an explicit remote player URL in dev or canary). Daemons navigate by calling CDP, not by modifying files on disk at runtime.
+- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` for setup, or from the kiosk player URL chosen by `feral-setupd`: compile-time default is the device-local player (`http://127.0.0.1:8080/` when `feral-ff-player-static` serves `/opt/feral/ff-player`). If `webapp_url` is set in `ff1-config.json`, it replaces that default after trim (use this for an explicit remote player URL in dev or canary). Daemons do not rewrite that URL to a remote host. Daemons navigate by calling CDP, not by modifying files on disk at runtime.
 - **`launcher-ui` is a one-shot process starter.** It constructs a URL from command-line arguments (key=value pairs), launches Chromium with `cage` as the Wayland compositor, and waits. It contains no business logic and no daemon lifecycle. Arguments come from the systemd unit; they do not change at runtime.
 - **UI does not call daemons directly** except through the Hub WebSocket (when local control UI in Chromium sends commands to controld on port 1111). All other control flows originate in daemons and push into Chromium via CDP.
 - **`player-wrapper-ui`** follows the same pattern: thin process wrapper, no policy.
@@ -109,7 +109,7 @@ Each service owns its own state files exclusively. No service should read or wri
 | `feral-controld` | `/home/feralfile/.state/controld.state` | Relayer topic ID, connected device (ID, name, platform) |
 | `feral-controld` | `/home/feralfile/.state/screen-orientation` | Last committed screen orientation value |
 | `feral-setupd` | `/home/feralfile/.state/setupd` | Setup flags: `paired`, `topic_id`, `connected` |
-| updater scripts | `/home/feralfile/ff1-config.json` | Device branch, current version, update channel URLs; optional `webapp_url` overrides the default device-local player URL (read-only at runtime by services) |
+| updater scripts | `/home/feralfile/ff1-config.json` | Device branch, current version, update channel URLs; optional `webapp_url` (trimmed; empty uses default) overrides the device-local player URL (read-only at runtime by services) |
 | system | `/etc/hostname` | Device hostname (read-only at runtime; used by `controld` for mDNS identity) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-count` | Chromium OOM kill count (read by `controld` OOM recoverer) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-handled-count` | Handled OOM kill count (written by `controld` OOM recoverer) |

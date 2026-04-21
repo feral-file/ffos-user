@@ -14,6 +14,10 @@ import (
 const (
 	// Chromium configuration
 	SYSTEMD_CHECK_INTERVAL = 30 * time.Second // Check systemd service status every 30 seconds
+
+	// After dependency recovery, the local static server may lag Chromium by a short window.
+	playerNavigateRetries    = 4
+	playerNavigateRetryDelay = 400 * time.Millisecond
 )
 
 var (
@@ -97,7 +101,7 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 				if m.cdpClient != nil {
 					// Match feral-setupd: optional webapp_url in ff1-config.json overrides the default player URL.
 					navURL := ff1config.ResolveWebappURL()
-					if err := m.cdpClient.Navigate(ctx, navURL); err != nil {
+					if err := navigatePlayerWithRetries(ctx, m.cdpClient, navURL, m.logger); err != nil {
 						m.logger.Error("Systemd: Failed to resume playlist after service recovery",
 							zap.String("service", service),
 							zap.Error(err))
@@ -162,4 +166,29 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func navigatePlayerWithRetries(ctx context.Context, client *cdp.Client, url string, log *zap.Logger) error {
+	var lastErr error
+	for attempt := 1; attempt <= playerNavigateRetries; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(playerNavigateRetryDelay):
+			}
+		}
+		err := client.Navigate(ctx, url)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if log != nil {
+			log.Warn("Systemd: player Navigate failed, retrying",
+				zap.Int("attempt", attempt),
+				zap.Int("max_attempts", playerNavigateRetries),
+				zap.Error(err))
+		}
+	}
+	return lastErr
 }

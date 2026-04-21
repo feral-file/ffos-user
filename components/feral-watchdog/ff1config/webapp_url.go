@@ -21,6 +21,7 @@ type localConfig struct {
 }
 
 // ResolveWebappURL returns webapp_url from ff1-config.json when set (override), otherwise DefaultWebappURL.
+// String values are trimmed; empty after trim falls back to DefaultWebappURL — keep in sync with feral-setupd cfg::normalize_webapp_url.
 // Callers use this for CDP navigation that must match the player URL feral-setupd already chose.
 func ResolveWebappURL() string {
 	return ResolveWebappURLFromPath(ConfigPath)
