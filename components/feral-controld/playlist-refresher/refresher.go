@@ -218,6 +218,8 @@ func (r *refresher) processPlaylistURLRefresh(playlistURL string) error {
 		return err
 	}
 	if res.NotModified {
+		// dp1 skipped fetch body and dynamic hydration; see feral-controld AGENTS.md known issue
+		// (dynamicQuery + ETag / 304).
 		return nil
 	}
 	playlist := res.Playlist

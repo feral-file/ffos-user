@@ -79,7 +79,9 @@ type DP1 interface {
 	ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error)
 
 	// ProcessPlaylistURLConditional fetches a playlist by URL and supports conditional GET via
-	// If-None-Match. On 304 Not Modified, NotModified is true and Playlist is nil.
+	// If-None-Match. On 304 Not Modified, NotModified is true and Playlist is nil — dynamic
+	// hydration (ProcessDynamicPlaylist) is skipped on that path. See feral-controld AGENTS.md
+	// "Known issues" for the dynamicQuery / ETag freshness caveat.
 	ProcessPlaylistURLConditional(ctx context.Context, url string, minimal bool, ifNoneMatch string) (*PlaylistURLResult, error)
 
 	// ProcessDynamicPlaylist processes a dynamic playlist.
@@ -146,6 +148,8 @@ func (d *dp1) ProcessPlaylistURLConditional(ctx context.Context, url string, min
 		return nil, err
 	}
 	if notModified {
+		// No document body: cannot re-run ProcessDynamicPlaylist. If the playlist uses
+		// dynamicQuery, hydrated items may be stale until the origin returns 200 again.
 		return &PlaylistURLResult{NotModified: true}, nil
 	}
 	if playlist == nil {

@@ -65,6 +65,18 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - State writes, relayer reconnection, and CDP updates should stay understandable in logs and comments.
 - If a new path changes command routing or topic/state persistence, document the invariant close to the code.
 
+## Known issues
+
+### URL playlist conditional fetch (`304`) vs `dynamicQuery` hydration
+
+The playlist refresher calls `dp1.ProcessPlaylistURLConditional` with `If-None-Match` (stored ETag from the last **200** response). When the origin answers **304 Not Modified**, the implementation returns early: there is no new playlist document body, so **`ProcessDynamicPlaylist` never runs** on that refresh tick.
+
+For playlists whose items come from **`dynamicQuery`** (or legacy dynamic queries), the **resolved item list can change** even when the **static** playlist JSON and its ETag are unchanged. In that situation the device keeps showing the last hydrated snapshot until a **200** with a new body (or a cleared/changed ETag) occurs.
+
+Relying on the outer playlist ETag to implicitly cover downstream dynamic data would be a **new publisher/origin contract**; it is **not** documented or enforced here. Until conditional-fetch behavior is redesigned (or origins guarantee that contract), treat this as an **accepted freshness gap** for URL-backed dynamic playlists.
+
+See: `dp1.ProcessPlaylistURLConditional`, `playlist-refresher.processPlaylistURLRefresh`.
+
 ## Verification for touched work
 - Format changed Go files with `gofmt -s -w <changed-go-files>`.
 - Run `go test ./...` in `components/feral-controld`.
