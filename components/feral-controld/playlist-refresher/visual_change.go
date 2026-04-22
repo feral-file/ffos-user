@@ -9,15 +9,13 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 )
 
+// noteFingerprint is visibility-only: intermission note text. Note Duration is ignored (timing-only),
+// consistent with ignoring item Duration.
 func noteFingerprint(n *playlists.Note) string {
 	if n == nil {
 		return ""
 	}
-	s := n.Text
-	if n.Duration != nil {
-		s += "\x1e" + strconv.FormatFloat(*n.Duration, 'g', -1, 64)
-	}
-	return s
+	return n.Text
 }
 
 func itemStableID(it dp1playlist.PlaylistItem, idx int) string {
@@ -28,10 +26,14 @@ func itemStableID(it dp1playlist.PlaylistItem, idx int) string {
 }
 
 // visiblePlaylistChanged compares two fully resolved playlists for differences that affect what
-// the viewer sees as the cast surface: playlist-level and per-item intermission notes (playlists
-// extension), and the identity set of items (add/remove/replace by stable id). Non-visual edits
-// (e.g. duration or media URL tweaks without note/title-card changes) return false so the caller
-// can apply a soft refresh instead of restarting playback.
+// the viewer sees as the cast surface: playlist-level and per-item intermission note **text**
+// (playlists extension; note Duration ignored), per-slot item identity (including playback order
+// when items carry stable ids), per-item media URL (Source), and add/remove/replace. Item Duration
+// tweaks alone are ignored (timing-only); other non-address metadata (title, license, etc.) is
+// also ignored so the caller can soft-refresh unless the address or ordered identity changed.
+//
+// Items without id use a per-index fallback key only; reordering two such items without changing
+// notes or Source is still treated as unchanged (same limitation as before).
 func visiblePlaylistChanged(prev, next *dp1.Playlist) bool {
 	if prev == nil || next == nil {
 		return true
@@ -39,24 +41,17 @@ func visiblePlaylistChanged(prev, next *dp1.Playlist) bool {
 	if noteFingerprint(prev.Note) != noteFingerprint(next.Note) {
 		return true
 	}
-	prevByKey := make(map[string]dp1playlist.PlaylistItem)
-	for i, it := range prev.Items {
-		prevByKey[itemStableID(it, i)] = it
-	}
-	nextByKey := make(map[string]dp1playlist.PlaylistItem)
-	for i, it := range next.Items {
-		nextByKey[itemStableID(it, i)] = it
-	}
-	if len(prevByKey) != len(nextByKey) {
+	if len(prev.Items) != len(next.Items) {
 		return true
 	}
-	for k := range prevByKey {
-		if _, ok := nextByKey[k]; !ok {
+	for i := range prev.Items {
+		pIt, nIt := prev.Items[i], next.Items[i]
+		if itemStableID(pIt, i) != itemStableID(nIt, i) {
 			return true
 		}
-	}
-	for k, pIt := range prevByKey {
-		nIt := nextByKey[k]
+		if pIt.Source != nIt.Source {
+			return true
+		}
 		if noteFingerprint(pIt.Note) != noteFingerprint(nIt.Note) {
 			return true
 		}
