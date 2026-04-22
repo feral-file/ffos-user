@@ -8,6 +8,9 @@ pub const LOG_FILEDIR: &str = "/home/feralfile/.logs";
 pub const LOG_UPLOAD_API: &str = "https://support.autonomy.io/v2/ff1/log-submissions";
 pub const SSID_CACHE_TTL: u64 = 10 * 60 * 1000; // 10 minutes
 pub const WIFI_WEBAPP_DELAY: u64 = 3 * 1000; // 3 seconds
+/// How long setupd waits for the bundled ff-player HTTP server (127.0.0.1:8080) before showing an error.
+pub const LOCAL_PLAYER_TCP_WAIT_TIMEOUT_MS: u64 = 30 * 1000; // 30 seconds
+pub const LOCAL_PLAYER_TCP_POLL_INTERVAL_MS: u64 = 250;
 pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
 pub const AGGRESSIVE_INTERNET_CHECK_INTERVAL: u64 = 2 * 1000; // 2 seconds
 pub const RELAXED_INTERNET_CHECK_INTERVAL: u64 = 10 * 1000; // 10 seconds
@@ -58,6 +61,9 @@ pub const WEBAPP_URL: &str = "http://127.0.0.1:8080/";
 pub const QRCODE_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=qr";
 pub const MSG_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=message&message=";
 pub const WELCOME_MSG: &str = "Welcome to the FF1";
+/// Shown when the kiosk targets the device-local player but nothing accepts TCP on 127.0.0.1:8080 (no hosted fallback).
+/// Keep in sync with `components/feral-watchdog/ff1config.LocalPlayerUnavailableMessage`.
+pub const LOCAL_PLAYER_UNAVAILABLE_MSG: &str = "This FF1 could not reach the built-in art player on this device. The player files or HTTP server may be missing. Reboot once; if it still fails, contact support@feralfile.com.";
 pub const WIFI_CONNECTING_MSG_PREFIX: &str = "Connecting to ";
 pub const WIFI_FAILED_TO_CONNECT_MSG: &str =
     "Failed to connect to the wifi network, please try again.";

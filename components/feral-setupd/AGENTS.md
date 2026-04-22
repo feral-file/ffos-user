@@ -65,6 +65,7 @@ dispatch lives in `BleCommand::from_str` + the `match` inside the write handler.
 - QR code page (includes `device_info` query params)
 - Message pages (errors, update prompts, etc.)
 - Web app page after successful setup/pairing
+- When the resolved player URL is the bundled loopback player (`http://127.0.0.1:8080`), `show_webapp` waits for TCP on that port (bounded) before navigating; if the wait times out it shows `LOCAL_PLAYER_UNAVAILABLE_MSG` on the launcher message step (no remote fallback).
 
 ### Connectivity (`src/connectivity.rs`, `src/dbus_utils.rs`)
 

@@ -11,6 +11,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// cdpNavigator is the subset of CDP used for post-recovery playlist navigation (unit-tested).
+type cdpNavigator interface {
+	Navigate(ctx context.Context, url string) error
+}
+
 const (
 	// Chromium configuration
 	SYSTEMD_CHECK_INTERVAL = 30 * time.Second // Check systemd service status every 30 seconds
@@ -99,16 +104,8 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 				m.logger.Info("Systemd: Service recovered, resume playlist",
 					zap.String("service", service))
 				if m.cdpClient != nil {
-					// Match feral-setupd: optional webapp_url in ff1-config.json overrides the default player URL.
 					navURL := ff1config.ResolveWebappURL()
-					if err := navigatePlayerWithRetries(ctx, m.cdpClient, navURL, m.logger); err != nil {
-						m.logger.Error("Systemd: Failed to resume playlist after service recovery",
-							zap.String("service", service),
-							zap.Error(err))
-					} else {
-						m.logger.Info("Systemd: Playlist resumed after service recovery",
-							zap.String("service", service))
-					}
+					resumePlaylistAfterServiceRecovery(ctx, m.cdpClient, m.logger, service, navURL, nil)
 				}
 			} else {
 				m.logger.Debug("Systemd: Service is active",
@@ -168,7 +165,48 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 	return nil
 }
 
-func navigatePlayerWithRetries(ctx context.Context, client *cdp.Client, url string, log *zap.Logger) error {
+// resumePlaylistAfterServiceRecovery mirrors feral-setupd local player policy.
+// waitTCP may be nil (production uses ff1config.WaitLocalBundlePlayerTCP); tests inject fast failures.
+func resumePlaylistAfterServiceRecovery(
+	ctx context.Context,
+	client cdpNavigator,
+	log *zap.Logger,
+	service string,
+	navURL string,
+	waitTCP func(context.Context) error,
+) {
+	waitFn := waitTCP
+	if waitFn == nil {
+		waitFn = ff1config.WaitLocalBundlePlayerTCP
+	}
+	var navErr error
+	if ff1config.IsLocalBundlePlayerURL(navURL) {
+		if err := waitFn(ctx); err != nil {
+			navErr = err
+		} else {
+			navErr = navigatePlayerWithRetries(ctx, client, navURL, log)
+		}
+	} else {
+		navErr = navigatePlayerWithRetries(ctx, client, navURL, log)
+	}
+	if navErr != nil {
+		log.Error("Systemd: Failed to resume playlist after service recovery",
+			zap.String("service", service),
+			zap.Error(navErr))
+		if ff1config.IsLocalBundlePlayerURL(navURL) {
+			msgURL := ff1config.LauncherMessageNavigateURL(ff1config.LocalPlayerUnavailableMessage)
+			if msgNavErr := client.Navigate(ctx, msgURL); msgNavErr != nil {
+				log.Error("Systemd: Failed to navigate local player error message",
+					zap.Error(msgNavErr))
+			}
+		}
+	} else {
+		log.Info("Systemd: Playlist resumed after service recovery",
+			zap.String("service", service))
+	}
+}
+
+func navigatePlayerWithRetries(ctx context.Context, client cdpNavigator, url string, log *zap.Logger) error {
 	var lastErr error
 	for attempt := 1; attempt <= playerNavigateRetries; attempt++ {
 		if attempt > 1 {

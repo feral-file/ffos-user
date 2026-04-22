@@ -9,6 +9,7 @@ mod log_uploader;
 mod persistent_state;
 mod system;
 mod updater;
+mod webapp;
 mod wifi_utils;
 
 use crate::persistent_state::PersistentState;
@@ -1127,12 +1128,25 @@ async fn check_and_update_system(
 }
 
 async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
-    let mut page = app_state.page.lock().await;
-
     let webapp_url = match cfg::webapp_url().await? {
         Some(url) => url,
         None => constant::WEBAPP_URL.to_string(),
     };
+
+    if webapp::is_local_bundle_player_url(&webapp_url) {
+        if let Err(e) = webapp::wait_local_bundle_player_tcp().await {
+            eprintln!("MAIN: local player TCP wait failed: {e:#}");
+            show_message(
+                chrome,
+                app_state,
+                constant::LOCAL_PLAYER_UNAVAILABLE_MSG,
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    let mut page = app_state.page.lock().await;
 
     // For webapp, we only navigate if the page is not it already
     let current_url = chrome.get_current_url().await?;
@@ -1153,7 +1167,11 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
 }
 
 async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &str) -> Result<()> {
-    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, message);
+    let message_url = format!(
+        "{}{}",
+        constant::MSG_URL_PREFIX,
+        urlencoding::encode(message)
+    );
     chrome
         .navigate(&message_url)
         .await
