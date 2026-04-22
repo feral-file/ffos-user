@@ -43,7 +43,11 @@ func TestPollTCPUntilOpen_succeeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close listener: %v", err)
+		}
+	})
 	addr := ln.Addr().String()
 	go func() {
 		c, err := ln.Accept()
