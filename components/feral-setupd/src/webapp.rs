@@ -85,7 +85,9 @@ mod tests {
 
     #[test]
     fn is_local_bundle_player_url_rejects_remote() {
-        assert!(!is_local_bundle_player_url("https://display.feralfile.com/"));
+        assert!(!is_local_bundle_player_url(
+            "https://display.feralfile.com/"
+        ));
     }
 
     #[tokio::test]

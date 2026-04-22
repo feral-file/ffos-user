@@ -1136,12 +1136,7 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
     if webapp::is_local_bundle_player_url(&webapp_url) {
         if let Err(e) = webapp::wait_local_bundle_player_tcp().await {
             eprintln!("MAIN: local player TCP wait failed: {e:#}");
-            show_message(
-                chrome,
-                app_state,
-                constant::LOCAL_PLAYER_UNAVAILABLE_MSG,
-            )
-            .await?;
+            show_message(chrome, app_state, constant::LOCAL_PLAYER_UNAVAILABLE_MSG).await?;
             return Ok(());
         }
     }
