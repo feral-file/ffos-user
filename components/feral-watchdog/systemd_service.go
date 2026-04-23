@@ -20,7 +20,7 @@ var (
 		"feral-ff-player-static.service": true,
 		"feral-setupd.service":           true,
 		"feral-controld.service":         true,
-		"feral-sys-monitord.service":      true,
+		"feral-sys-monitord.service":     true,
 	}
 )
 

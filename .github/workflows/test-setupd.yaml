@@ -61,8 +61,9 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          # Install cargo-tarpaulin for coverage
-          cargo install cargo-tarpaulin
+          # Pin tarpaulin: unversioned `cargo install` resolves to releases whose deps
+          # can require a newer rustc than this job (e.g. cargo-platform 0.3.3 needs 1.91+).
+          cargo install cargo-tarpaulin --version 0.34.1 --locked
           cargo tarpaulin --out Xml --output-dir coverage
 
       - name: Upload coverage to Codecov
