@@ -1,6 +1,7 @@
 [Unit]
 Description=Feral File Kiosk Watchdog Daemon
-After=system-ready.target feral-sys-monitord.service network.target
+After=system-ready.target feral-sys-monitord.service network.target feral-ff-player-static.service
+Wants=feral-ff-player-static.service
 ConditionPathExists=/run/user/1000/bus
 
 [Service]

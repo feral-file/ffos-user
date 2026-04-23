@@ -1,0 +1,18 @@
+[Unit]
+Description=Serve bundled ff-player static files on loopback
+After=system-ready.target
+Before=chromium-kiosk.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=45s
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+ExecStart=/bin/bash /home/feralfile/scripts/serve-ff-player-static.sh
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/home/feralfile/.logs/ff-player-static.log
+StandardError=append:/home/feralfile/.logs/ff-player-static.log
+
+[Install]
+WantedBy=default.target

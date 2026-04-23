@@ -32,8 +32,9 @@ This daemon owns recovery policy. It should not become the source of raw health 
   - `sysmetrics` → routes to disk, memory, and CPU handlers.
   - `sysevent` → `gpu_hanging` triggers `scheduleGPUReboot`; `gpu_recover` triggers `handleGPURecovery`.
 - `ChromiumMonitor` (`chromium.go`) is a long-running background goroutine that polls `http://localhost:9222/json` via HTTP (not WebSocket/CDP). Check interval: 5 s; hang threshold: 20 s of no successful response. If Chromium restarts 3 times within 5 minutes, the device reboots instead of restarting kiosk. Recovery action: `systemctl --user restart chromium-kiosk.service`.
-- `SystemdMonitor` (`systemd_service.go`) monitors three systemd services every 30 s: `feral-setupd.service`, `feral-controld.service`, `feral-sys-monitord.service`. Restarts any service that is not active.
+- `SystemdMonitor` (`systemd_service.go`) monitors four systemd services every 30 s: `feral-ff-player-static.service`, `feral-setupd.service`, `feral-controld.service`, `feral-sys-monitord.service`. Restarts any service that is not active.
 - `SystemdWatchdog` (`systemd_watchdog.go`) sends `sd_notify WATCHDOG=1` every 10 s. This is a **keepalive notifier only** — it does not make any recovery decisions.
+- Recovery and resume navigation always target the bundled local player at `http://127.0.0.1:8080/`. Do not reintroduce remote player URL overrides; the static player unit owns readiness.
 - RAM handler (`ram.go`): critical threshold 95%. Sustained above threshold for 15 s → restart kiosk (`systemctl --user restart chromium-kiosk.service`). Sustained for 60 s → reboot device.
 - Disk handler, GPU handler, CPU handler: resource-specific handlers encapsulate their own threshold and escalation logic.
 - vmagent integration is a reporting side effect, not the policy source.
