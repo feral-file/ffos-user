@@ -13,6 +13,7 @@ if [ ! -f "$LOG_CONFIG_FILE" ]; then
 /home/feralfile/.logs/setupd.log|/home/feralfile/.logs/backup/setupd
 /home/feralfile/.logs/sys-monitord.log|/home/feralfile/.logs/backup/sys-monitord
 /home/feralfile/.logs/watchdog.log|/home/feralfile/.logs/backup/watchdog
+/home/feralfile/.logs/ff-player-static.log|/home/feralfile/.logs/backup/ff-player-static
 /home/feralfile/.logs/log-rotation.log|/home/feralfile/.logs/backup/log-rotation
 /var/log/updaterd.log|/home/feralfile/.logs/backup/updaterd
 /var/log/auto-updaterd.log|/home/feralfile/.logs/backup/auto-updaterd
