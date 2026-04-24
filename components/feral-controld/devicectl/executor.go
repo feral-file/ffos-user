@@ -73,10 +73,11 @@ type executor struct {
 	movingScaleFactor float64
 
 	// Deps
-	json wrapper.JSON
-	os   wrapper.OS
-	exec wrapper.Exec
-	math wrapper.Math
+	json  wrapper.JSON
+	os    wrapper.OS
+	exec  wrapper.Exec
+	math  wrapper.Math
+	clock wrapper.Clock
 
 	panelDDC ddc.PanelDDC
 }
@@ -91,6 +92,7 @@ func New(
 	os wrapper.OS,
 	exec wrapper.Exec,
 	math wrapper.Math,
+	clock wrapper.Clock,
 	l *zap.Logger,
 ) Executor {
 	return &executor{
@@ -103,6 +105,7 @@ func New(
 		os:           os,
 		exec:         exec,
 		math:         math,
+		clock:        clock,
 		panelDDC:     panelDDC,
 	}
 }
@@ -136,7 +139,13 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_MOUSE_DRAG_EVENT:
 		result, err = e.handleMouseMoveEvent(bytes)
 	case commands.CMD_MOUSE_TAP_EVENT:
-		result, err = e.handleMouseTapEvent()
+		result, err = e.handleMouseTapEvent(bytes)
+	case commands.CMD_MOUSE_DOUBLE_TAP_EVENT:
+		result, err = e.handleMouseDoubleTapEvent(bytes)
+	case commands.CMD_MOUSE_LONG_PRESS_EVENT:
+		result, err = e.handleMouseLongPressEvent(bytes)
+	case commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT:
+		result, err = e.handleMouseClickAndDragEvent(bytes)
 	case commands.CMD_PROFILE:
 		result, err = e.getSysMetrics()
 	case commands.CMD_SCREEN_ROTATION:
@@ -540,6 +549,38 @@ func printableASCIIKeyEvent(keyCode int) (key string, code string, text string) 
 	}
 }
 
+type mouseButtonWire string
+
+const (
+	mouseButtonLeft   mouseButtonWire = "left"
+	mouseButtonRight  mouseButtonWire = "right"
+	mouseButtonMiddle mouseButtonWire = "middle"
+)
+
+func (e *executor) parseMouseButton(args []byte) (button string, buttons int, err error) {
+	var cmdArgs struct {
+		Button string `json:"button"`
+	}
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return "", 0, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	wire := mouseButtonWire(cmdArgs.Button)
+	if wire == "" {
+		wire = mouseButtonLeft
+	}
+	switch wire {
+	case mouseButtonLeft:
+		return "left", 1, nil
+	case mouseButtonRight:
+		return "right", 2, nil
+	case mouseButtonMiddle:
+		return "middle", 4, nil
+	default:
+		return "", 0, fmt.Errorf("invalid arguments: unknown mouse button: %s", cmdArgs.Button)
+	}
+}
+
 func (e *executor) initializeScreenDimensions() {
 	if e.screenInitialized {
 		return
@@ -585,7 +626,10 @@ func (e *executor) initializeScreenDimensions() {
 		zap.Float64("cursorY", e.cursorPositionY))
 }
 
-func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
+func (e *executor) handleMouseMoveEventWithButtons(
+	args []byte,
+	pressedButtons int,
+) (interface{}, error) {
 	// Initialize screen dimensions if not done already
 	e.initializeScreenDimensions()
 
@@ -676,34 +720,40 @@ func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
 	}
 
 	// 2. Send the final mouse event to actually move the cursor
-	if len(absolutePositions) > 0 {
-		// Get the last position for the final mouseMoved event
-		moveParams := map[string]interface{}{
-			"type":       "mouseMoved",
-			"x":          e.cursorPositionX,
-			"y":          e.cursorPositionY,
-			"button":     "none",
-			"buttons":    0,
-			"clickCount": 0,
-		}
-
-		_, err = e.cdp.Send("Input.dispatchMouseEvent", moveParams)
-		if err != nil {
-			e.logger.Error("Failed to move mouse via CDP", zap.Error(err))
-			return nil, fmt.Errorf("failed to move mouse: %w", err)
-		}
-
-		e.logger.Info("Mouse moved to final position",
-			zap.Float64("x", e.cursorPositionX),
-			zap.Float64("y", e.cursorPositionY))
+	moveParams := map[string]interface{}{
+		"type":       "mouseMoved",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     "none",
+		"buttons":    pressedButtons,
+		"clickCount": 0,
 	}
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", moveParams)
+	if err != nil {
+		e.logger.Error("Failed to move mouse via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to move mouse: %w", err)
+	}
+
+	e.logger.Info("Mouse moved to final position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
 
 	return CmdOK, nil
 }
 
-func (e *executor) handleMouseTapEvent() (interface{}, error) {
+func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
+	return e.handleMouseMoveEventWithButtons(args, 0)
+}
+
+func (e *executor) handleMouseTapEvent(args []byte) (interface{}, error) {
 	// Initialize screen dimensions if not done already
 	e.initializeScreenDimensions()
+
+	button, pressedButtons, err := e.parseMouseButton(args)
+	if err != nil {
+		return nil, err
+	}
 
 	e.logger.Info("Mouse tap event at current position",
 		zap.Float64("x", e.cursorPositionX),
@@ -714,12 +764,12 @@ func (e *executor) handleMouseTapEvent() (interface{}, error) {
 		"type":       "mousePressed",
 		"x":          e.cursorPositionX,
 		"y":          e.cursorPositionY,
-		"button":     "left",
-		"buttons":    1,
+		"button":     button,
+		"buttons":    pressedButtons,
 		"clickCount": 1,
 	}
 
-	_, err := e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
 	if err != nil {
 		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to press mouse button: %w", err)
@@ -730,11 +780,156 @@ func (e *executor) handleMouseTapEvent() (interface{}, error) {
 		"type":       "mouseReleased",
 		"x":          e.cursorPositionX,
 		"y":          e.cursorPositionY,
-		"button":     "left",
+		"button":     button,
 		"buttons":    0,
 		"clickCount": 1,
 	}
 
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
+	if err != nil {
+		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to release mouse button: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
+	e.initializeScreenDimensions()
+
+	button, pressedButtons, err := e.parseMouseButton(args)
+	if err != nil {
+		return nil, err
+	}
+
+	e.logger.Info("Mouse double tap event at current position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    pressedButtons,
+		"clickCount": 2,
+	}
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	if err != nil {
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to press mouse button: %w", err)
+	}
+
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    0,
+		"clickCount": 2,
+	}
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
+	if err != nil {
+		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to release mouse button: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) handleMouseLongPressEvent(args []byte) (interface{}, error) {
+	e.initializeScreenDimensions()
+
+	button, pressedButtons, err := e.parseMouseButton(args)
+	if err != nil {
+		return nil, err
+	}
+
+	e.logger.Info("Mouse long press event at current position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    pressedButtons,
+		"clickCount": 1,
+	}
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	if err != nil {
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to press mouse button: %w", err)
+	}
+
+	e.clock.Sleep(1 * time.Second)
+
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    0,
+		"clickCount": 1,
+	}
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
+	if err != nil {
+		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to release mouse button: %w", err)
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) handleMouseClickAndDragEvent(args []byte) (interface{}, error) {
+	e.initializeScreenDimensions()
+
+	// Parse cursor offsets to decide whether we should press/move/release.
+	var cursorArgs struct {
+		CursorOffsets []struct {
+			DX float64 `json:"dx"`
+			DY float64 `json:"dy"`
+		} `json:"cursorOffsets"`
+	}
+	if err := e.json.Unmarshal(args, &cursorArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if len(cursorArgs.CursorOffsets) == 0 {
+		return CmdOK, nil
+	}
+
+	e.logger.Info("Mouse click-and-drag event at current position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	_, err := e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	if err != nil {
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to press mouse button: %w", err)
+	}
+
+	_, err = e.handleMouseMoveEventWithButtons(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
 	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
 	if err != nil {
 		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))

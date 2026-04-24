@@ -402,7 +402,19 @@ func initializeApp(
 	watchdog := watchdog.New(logger)
 
 	// Executor
-	executor := devicectl.New(cdp, dbusClient, deviceStatus, poller, ddcPanel, json, os, exec, math, logger)
+	executor := devicectl.New(
+		cdp,
+		dbusClient,
+		deviceStatus,
+		poller,
+		ddcPanel,
+		json,
+		os,
+		exec,
+		math,
+		clock,
+		logger,
+	)
 
 	// FFIndexer
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)
