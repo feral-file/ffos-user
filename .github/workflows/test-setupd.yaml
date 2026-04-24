@@ -8,6 +8,11 @@ on:
       - 'components/feral-setupd/Cargo.lock'
       - 'components/feral-setupd/rustfmt.toml'
       - 'components/feral-setupd/clippy.toml'
+      - 'users/feralfile/scripts/serve-ff-player-static.sh'
+      - 'users/feralfile/scripts/test-serve-ff-player-static.sh'
+      - 'users/feralfile/systemd-services/feral-ff-player-static.service'
+      - 'users/feralfile/systemd-services/chromium-kiosk.service'
+      - 'users/feralfile/systemd-services/feral-setupd.service'
   workflow_call:
     inputs:
       upload-coverage:
@@ -25,7 +30,7 @@ concurrency:
 
 jobs:
   test:
-    name: Test feral-setupd (Rust)
+    name: Test feral-setupd startup contract
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -58,6 +63,9 @@ jobs:
 
       - name: Run cargo check
         run: cargo check --verbose
+
+      - name: Run ff-player static smoke test
+        run: bash ../../users/feralfile/scripts/test-serve-ff-player-static.sh
 
       - name: Run tests with coverage
         run: |
