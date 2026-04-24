@@ -2127,6 +2127,126 @@ func TestExecutor_MouseClickAndDragEvent_Success(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_MouseClickAndDragEvent_ReleaseFailureReturnsError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID": "release-failure",
+			"cursorOffsets": []map[string]interface{}{
+				{"dx": 2.0, "dy": 0.0},
+			},
+		},
+	}
+	argsJSON := `{"messageID":"release-failure","cursorOffsets":[{"dx":2.0,"dy":0.0}]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag probe)")
+			}
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 2, DY: 0}}
+			return nil
+		}).
+		Times(1)
+	down := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", down).Return(nil, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				MessageID     string `json:"messageID"`
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag move)")
+			}
+			args.MessageID = "release-failure"
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 2, DY: 0}}
+			return nil
+		})
+	ts.mockMath.EXPECT().Sqrt(4.0).Return(2.0)
+	ts.mockMath.EXPECT().Min(962.0, 1920.0).Return(962.0)
+	ts.mockMath.EXPECT().Max(0.0, 962.0).Return(962.0)
+	ts.mockMath.EXPECT().Min(540.0, 1080.0).Return(540.0)
+	ts.mockMath.EXPECT().Max(0.0, 540.0).Return(540.0)
+	ts.mockJSON.EXPECT().
+		Marshal(map[string]interface{}{
+			"messageID": "release-failure",
+			"message": map[string]interface{}{
+				"command": "cursorUpdate",
+				"request": map[string]interface{}{
+					"positions": []map[string]float64{{"x": 962.0, "y": 540.0}},
+				},
+			},
+		}).
+		Return([]byte(`{"messageID":"release-failure","message":{"command":"cursorUpdate","request":{"positions":[{"x":962,"y":540}]}}}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", map[string]interface{}{
+			"expression": `window.handleCDPRequest({"messageID":"release-failure","message":{"command":"cursorUpdate","request":{"positions":[{"x":962,"y":540}]}}})`,
+		}).
+		Return(nil, nil)
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":       "mouseMoved",
+			"x":          962.0,
+			"y":          540.0,
+			"button":     "none",
+			"buttons":    1,
+			"clickCount": 0,
+		}).
+		Return(nil, nil)
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":       "mouseReleased",
+			"x":          962.0,
+			"y":          540.0,
+			"button":     "left",
+			"buttons":    0,
+			"clickCount": 1,
+		}).
+		Return(nil, errors.New("release failed"))
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to release mouse button")
+	assert.Nil(t, result)
+}
+
 func TestExecutor_MouseClickAndDragEvent_ReleasesOnMoveError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

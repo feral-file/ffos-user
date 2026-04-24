@@ -336,7 +336,12 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		zap.String("response", string(response)))
 
 	var resp struct {
-		ID     int `json:"id"`
+		ID    int `json:"id"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    any    `json:"data"`
+		} `json:"error"`
 		Result struct {
 			Result struct {
 				Type        string      `json:"type"`
@@ -349,6 +354,14 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	}
 	if err := c.json.Unmarshal(response, &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse CDP response: %w", err)
+	}
+
+	if resp.Error != nil {
+		return nil, &RemoteError{
+			Method:      method,
+			Description: resp.Error.Message,
+			Unsupported: isUnsupportedRemoteError(method, resp.Error.Message),
+		}
 	}
 
 	result := resp.Result.Result

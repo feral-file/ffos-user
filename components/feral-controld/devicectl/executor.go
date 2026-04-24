@@ -886,7 +886,7 @@ func (e *executor) handleMouseLongPressEvent(args []byte) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (e *executor) handleMouseClickAndDragEvent(args []byte) (interface{}, error) {
+func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}, err error) {
 	e.initializeScreenDimensions()
 
 	// Parse cursor offsets to decide whether we should press/move/release.
@@ -915,14 +915,15 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (interface{}, error
 		"buttons":    1,
 		"clickCount": 1,
 	}
-	_, err := e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
 	if err != nil {
 		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to press mouse button: %w", err)
 	}
 	// Each click-and-drag batch is press + move + release. If the move step fails, we still
 	// must release the button; otherwise the page can keep a stuck mouse-down in Chromium
-	// until a later event clears it. Log release failures and preserve the move error.
+	// until a later event clears it. Log release failures and preserve the move error; if the
+	// move succeeds, surface a failed release to avoid silently leaving Chromium pressed.
 	defer func() {
 		up := map[string]interface{}{
 			"type":       "mouseReleased",
@@ -934,6 +935,10 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (interface{}, error
 		}
 		if _, relErr := e.cdp.Send("Input.dispatchMouseEvent", up); relErr != nil {
 			e.logger.Error("click-and-drag: best-effort release after batch failed", zap.Error(relErr))
+			if err == nil {
+				err = fmt.Errorf("failed to release mouse button: %w", relErr)
+				result = nil
+			}
 		}
 	}()
 
