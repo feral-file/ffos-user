@@ -405,8 +405,6 @@ func isUnsupportedRemoteError(method, description string) bool {
 		return true
 	case method == "input.synthesizepinchgesture" && strings.Contains(description, "wasn't found"):
 		return true
-	case method == "input.synthesizepinchgesture" && strings.Contains(description, "not found"):
-		return true
 	default:
 		return false
 	}

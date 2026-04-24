@@ -106,6 +106,19 @@ All messages are JSON. The message envelope is:
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
+**Device-control relayer commands**
+
+The following command names are routed to `devicectl` and use the standard relayer/hub envelope (`command` plus `request`):
+
+| Command | Request fields | Notes |
+|---|---|---|
+| `dragGesture` | `cursorOffsets` | Array of `{dx, dy}` step deltas. |
+| `tapGesture` | `button` | `button` selects left, right, or middle; missing or empty defaults to left. |
+| `doubleTapGesture` | `button` | Same button selection as `tapGesture`. |
+| `longPressGesture` | `button` | Same button selection as `tapGesture`. |
+| `clickAndDragGesture` | `cursorOffsets` | Press, move, then release. The executor treats release failure as an error because Chromium can remain pressed. |
+| `zoomGesture` | `scaleSteps` | Array of positive float scale factors. Pinch synthesis is attempted first and falls back to wheel zoom only when the method is unsupported. |
+
 `devicectl` also exposes two device-control commands for panel control over DDC/CI via `ddcutil`: `ddcPanelControl` (set brightness, contrast, speaker volume, mute, or power using a single JSON request body that selects the action) and `ddcPanelStatus` (query the same VCPs and return a structured status object). Both share the standard relayer/hub envelope; detailed field shapes live alongside the executor in `devicectl/ddc.go`.
 
 **Command type constants** are defined in `components/feral-controld/commands/types.go`. New remote commands must be added there with a corresponding entry in `deviceCtlCommands` if they require executor handling.
