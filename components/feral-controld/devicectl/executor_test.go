@@ -2191,6 +2191,166 @@ func TestExecutor_MouseClickAndDragEvent_ReleasesOnMoveError(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.05, 0.98},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.05,0.98]}`
+	outJSON := `{"message":{"command":"zoomGesture","request":{"scaleSteps":[1.05,0.98]}}}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.05, 0.98}
+			return nil
+		})
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte(outJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", map[string]interface{}{
+			"expression": `window.handleCDPRequest(` + outJSON + `)`,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_WithMessageID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"messageID":  "z1",
+			"scaleSteps": []float64{1.1},
+		},
+	}
+	argsJSON := `{"messageID":"z1","scaleSteps":[1.1]}`
+	outJSON := `{"messageID":"z1","message":{"command":"zoomGesture","request":{"scaleSteps":[1.1]}}}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.MessageID = "z1"
+			in.ScaleSteps = []float64{1.1}
+			return nil
+		})
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte(outJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", map[string]interface{}{
+			"expression": `window.handleCDPRequest(` + outJSON + `)`,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_EmptyScaleSteps(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{"scaleSteps": []float64{}},
+	}
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(`{"scaleSteps":[]}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"scaleSteps":[]}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = nil
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_CDPError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.01},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.01]}`
+	outJSON := `{"message":{"command":"zoomGesture","request":{"scaleSteps":[1.01]}}}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.01}
+			return nil
+		})
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte(outJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", map[string]interface{}{
+			"expression": `window.handleCDPRequest(` + outJSON + `)`,
+		}).
+		Return(nil, errors.New("cdp eval failed"))
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to process zoom gesture")
+	assert.Nil(t, result)
+}
+
 func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -23,6 +23,7 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_MOUSE_DOUBLE_TAP_EVENT:     true,
 	CMD_MOUSE_LONG_PRESS_EVENT:     true,
 	CMD_MOUSE_CLICK_AND_DRAG_EVENT: true,
+	CMD_ZOOM_GESTURE:               true,
 	CMD_SCREEN_ROTATION:            true,
 	CMD_SHUTDOWN:                   true,
 	CMD_REBOOT:                     true,
@@ -58,6 +59,7 @@ const (
 	CMD_MOUSE_DOUBLE_TAP_EVENT     Type = "doubleTapGesture"
 	CMD_MOUSE_LONG_PRESS_EVENT     Type = "longPressGesture"
 	CMD_MOUSE_CLICK_AND_DRAG_EVENT Type = "clickAndDragGesture"
+	CMD_ZOOM_GESTURE               Type = "zoomGesture"
 	CMD_SYS_METRICS                Type = "deviceMetrics"
 	CMD_SCREEN_ROTATION            Type = "rotate"
 	CMD_SHUTDOWN                   Type = "shutdown"

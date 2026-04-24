@@ -146,6 +146,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.handleMouseLongPressEvent(bytes)
 	case commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT:
 		result, err = e.handleMouseClickAndDragEvent(bytes)
+	case commands.CMD_ZOOM_GESTURE:
+		result, err = e.handleZoomGestureEvent(bytes)
 	case commands.CMD_PROFILE:
 		result, err = e.getSysMetrics()
 	case commands.CMD_SCREEN_ROTATION:
@@ -936,6 +938,51 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (interface{}, error
 	_, err = e.handleMouseMoveEventWithButtons(args, 1)
 	if err != nil {
 		return nil, err
+	}
+
+	return CmdOK, nil
+}
+
+// handleZoomGestureEvent forwards pinch-scale steps to the web player, matching
+// the mobile `zoomGesture` relayer command (`request.scaleSteps` — multiplicative
+// ratios per step, >1 zoom in, <1 zoom out).
+func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
+	e.initializeScreenDimensions()
+
+	var in struct {
+		MessageID  string    `json:"messageID"`
+		ScaleSteps []float64 `json:"scaleSteps"`
+	}
+	if err := e.json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if len(in.ScaleSteps) == 0 {
+		return CmdOK, nil
+	}
+
+	root := map[string]interface{}{
+		"message": map[string]interface{}{
+			"command": "zoomGesture",
+			"request": map[string]interface{}{
+				"scaleSteps": in.ScaleSteps,
+			},
+		},
+	}
+	if in.MessageID != "" {
+		root["messageID"] = in.MessageID
+	}
+
+	payload, err := e.json.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal zoom payload: %w", err)
+	}
+
+	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+	})
+	if err != nil {
+		e.logger.Error("Failed to forward zoomGesture to the player", zap.Error(err))
+		return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
 	}
 
 	return CmdOK, nil
