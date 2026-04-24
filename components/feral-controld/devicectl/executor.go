@@ -2,7 +2,9 @@ package devicectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -943,9 +945,9 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (interface{}, error
 	return CmdOK, nil
 }
 
-// handleZoomGestureEvent forwards pinch-scale steps to the web player, matching
-// the mobile `zoomGesture` relayer command (`request.scaleSteps` — multiplicative
-// ratios per step, >1 zoom in, <1 zoom out).
+// handleZoomGestureEvent synthesizes pinch gestures at the CDP boundary. We
+// keep this in controld so the player UI does not need to understand a separate
+// gesture command.
 func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 	e.initializeScreenDimensions()
 
@@ -960,32 +962,92 @@ func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 		return CmdOK, nil
 	}
 
-	root := map[string]interface{}{
-		"message": map[string]interface{}{
-			"command": "zoomGesture",
-			"request": map[string]interface{}{
-				"scaleSteps": in.ScaleSteps,
-			},
-		},
-	}
-	if in.MessageID != "" {
-		root["messageID"] = in.MessageID
+	for _, step := range in.ScaleSteps {
+		if step <= 0 {
+			return nil, fmt.Errorf("invalid arguments: scaleSteps must be positive: %v", step)
+		}
 	}
 
-	payload, err := e.json.Marshal(root)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal zoom payload: %w", err)
-	}
+	for _, step := range in.ScaleSteps {
+		if err := e.sendZoomPinchGesture(step); err != nil {
+			if !isUnsupportedPinchGestureError(err) {
+				e.logger.Error("Failed to synthesize pinch gesture", zap.Error(err))
+				return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
+			}
 
-	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-	})
-	if err != nil {
-		e.logger.Error("Failed to forward zoomGesture to the player", zap.Error(err))
-		return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
+			e.logger.Warn("Pinch gesture unsupported, falling back to wheel zoom", zap.Error(err))
+			if fallbackErr := e.sendZoomWheelGesture(step); fallbackErr != nil {
+				e.logger.Error("Failed to dispatch zoom fallback", zap.Error(fallbackErr))
+				return nil, fmt.Errorf("failed to process zoom gesture: %w", fallbackErr)
+			}
+		}
 	}
 
 	return CmdOK, nil
+}
+
+func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
+	params := map[string]interface{}{
+		"x":                 e.cursorPositionX,
+		"y":                 e.cursorPositionY,
+		"scaleFactor":       scaleFactor,
+		"relativeSpeed":     800,
+		"gestureSourceType": "default",
+	}
+
+	_, err := e.cdp.Send("Input.synthesizePinchGesture", params)
+	if err != nil {
+		return fmt.Errorf("synthesize pinch gesture: %w", err)
+	}
+
+	return nil
+}
+
+func (e *executor) sendZoomWheelGesture(scaleFactor float64) error {
+	deltaY := zoomWheelDeltaY(scaleFactor)
+	if scaleFactor > 1 {
+		deltaY = -deltaY
+	}
+
+	params := map[string]interface{}{
+		"type":      "mouseWheel",
+		"x":         e.cursorPositionX,
+		"y":         e.cursorPositionY,
+		"deltaX":    0,
+		"deltaY":    deltaY,
+		"button":    "none",
+		"buttons":   0,
+		"modifiers": 2,
+	}
+
+	_, err := e.cdp.Send("Input.dispatchMouseEvent", params)
+	if err != nil {
+		return fmt.Errorf("dispatch wheel gesture: %w", err)
+	}
+
+	return nil
+}
+
+func zoomWheelDeltaY(scaleFactor float64) float64 {
+	magnitude := math.Abs(math.Log2(scaleFactor))
+	steps := math.Round(magnitude * 8)
+	if steps < 1 {
+		steps = 1
+	}
+	return 120.0 * steps
+}
+
+func isUnsupportedPinchGestureError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var remoteErr *cdp.RemoteError
+	if !errors.As(err, &remoteErr) {
+		return false
+	}
+
+	return remoteErr.Method == "Input.synthesizePinchGesture" && remoteErr.Unsupported
 }
 
 func (e *executor) shutdown(ctx context.Context) (interface{}, error) {

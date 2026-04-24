@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,19 @@ var (
 	ErrNoPageTargetFound           = errors.New("no page target found in Chromium instance")
 	ErrMultiplePageTargetsFound    = errors.New("multiple page targets found in Chromium instance")
 )
+
+type RemoteError struct {
+	Method      string
+	Description string
+	Unsupported bool
+}
+
+func (e *RemoteError) Error() string {
+	if e.Method == "" {
+		return fmt.Sprintf("CDP error: %s", e.Description)
+	}
+	return fmt.Sprintf("CDP error: %s: %s", e.Method, e.Description)
+}
 
 const (
 	// CDP Methods
@@ -343,7 +357,12 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	if result.Type == TYPE_OBJECT &&
 		result.Subtype != nil &&
 		*result.Subtype == SUBTYPE_ERROR {
-		return nil, fmt.Errorf("CDP error: %v", *result.Description)
+		description := *result.Description
+		return nil, &RemoteError{
+			Method:      method,
+			Description: description,
+			Unsupported: isUnsupportedRemoteError(method, description),
+		}
 	}
 
 	// Check for response type mismatch
@@ -360,6 +379,23 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("CDP response type mismatch: %s", result.Type)
+	}
+}
+
+func isUnsupportedRemoteError(method, description string) bool {
+	method = strings.ToLower(strings.TrimSpace(method))
+	description = strings.ToLower(strings.TrimSpace(description))
+	switch {
+	case method == "input.synthesizepinchgesture" && strings.Contains(description, "method not found"):
+		return true
+	case method == "input.synthesizepinchgesture" && strings.Contains(description, "unknown method"):
+		return true
+	case method == "input.synthesizepinchgesture" && strings.Contains(description, "wasn't found"):
+		return true
+	case method == "input.synthesizepinchgesture" && strings.Contains(description, "not found"):
+		return true
+	default:
+		return false
 	}
 }
 

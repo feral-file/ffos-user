@@ -1241,7 +1241,7 @@ func TestClient_Send_Error(t *testing.T) {
 					}).
 					Times(1)
 			},
-			wantErr: "CDP error: Test error",
+			wantErr: "CDP error: Runtime.evaluate: Test error",
 		},
 		{
 			name: "CDP invalid string response",
