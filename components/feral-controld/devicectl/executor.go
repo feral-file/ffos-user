@@ -916,24 +916,26 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (interface{}, error
 		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to press mouse button: %w", err)
 	}
+	// Each click-and-drag batch is press + move + release. If the move step fails, we still
+	// must release the button; otherwise the page can keep a stuck mouse-down in Chromium
+	// until a later event clears it. Log release failures and preserve the move error.
+	defer func() {
+		up := map[string]interface{}{
+			"type":       "mouseReleased",
+			"x":          e.cursorPositionX,
+			"y":          e.cursorPositionY,
+			"button":     "left",
+			"buttons":    0,
+			"clickCount": 1,
+		}
+		if _, relErr := e.cdp.Send("Input.dispatchMouseEvent", up); relErr != nil {
+			e.logger.Error("click-and-drag: best-effort release after batch failed", zap.Error(relErr))
+		}
+	}()
 
 	_, err = e.handleMouseMoveEventWithButtons(args, 1)
 	if err != nil {
 		return nil, err
-	}
-
-	upParams := map[string]interface{}{
-		"type":       "mouseReleased",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     "left",
-		"buttons":    0,
-		"clickCount": 1,
-	}
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
-	if err != nil {
-		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to release mouse button: %w", err)
 	}
 
 	return CmdOK, nil

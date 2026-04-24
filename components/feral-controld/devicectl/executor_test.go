@@ -1772,6 +1772,39 @@ func TestExecutor_MouseTapEvent_RightButton(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_MouseTapEvent_InvalidButton(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_TAP_EVENT,
+		Arguments: map[string]interface{}{
+			"button": "nope",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"button":"nope"}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"button":"nope"}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			p := v.(*struct {
+				Button string `json:"button"`
+			})
+			p.Button = "nope"
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown mouse button")
+	assert.Nil(t, result)
+}
+
 func TestExecutor_MouseDoubleTapEvent_DefaultLeft(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -1890,6 +1923,64 @@ func TestExecutor_MouseLongPressEvent_SleepsAndReleases(t *testing.T) {
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
 	)
 
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseLongPressEvent_MiddleButton(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{
+			"button": "middle",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"button":"middle"}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"button":"middle"}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = "middle"
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "middle",
+		"buttons":    4,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "middle",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().Sleep(1*time.Second),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
+	)
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
@@ -2033,6 +2124,71 @@ func TestExecutor_MouseClickAndDragEvent_Success(t *testing.T) {
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseClickAndDragEvent_ReleasesOnMoveError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID": "m1",
+			"cursorOffsets": []map[string]interface{}{
+				{"dx": 1.0, "dy": 0.0},
+			},
+		},
+	}
+	argsJSON := `{"messageID":"m1","cursorOffsets":[{"dx":1.0,"dy":0.0}]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag probe)")
+			}
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 1, DY: 0}}
+			return nil
+		}).
+		Times(1)
+	down := map[string]interface{}{
+		"type": "mousePressed", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 1, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", down).Return(nil, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		Return(errors.New("unmarshal move failed")).
+		Times(1)
+	// best-effort release at current cursor (still at center) when move step fails
+	release := map[string]interface{}{
+		"type": "mouseReleased", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 0, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", release).Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unmarshal move failed")
+	assert.Nil(t, result)
 }
 
 func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
