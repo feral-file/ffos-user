@@ -4,7 +4,7 @@ set -euo pipefail
 MAX_DAYS=7
 TODAY=$(date +"%Y-%m-%d")
 LOG_CONFIG_FILE="/home/feralfile/log_paths.conf"
-NEW_LOG_ENTRY="/home/feralfile/.logs/ff-player-static.log|/home/feralfile/.logs/backup/ff-player-static"
+NEW_LOG_ENTRY="/home/feralfile/.logs/feral-player.log|/home/feralfile/.logs/backup/feral-player"
 
 if [ ! -f "$LOG_CONFIG_FILE" ]; then
   cat > "$LOG_CONFIG_FILE" <<'EOL'
@@ -14,7 +14,7 @@ if [ ! -f "$LOG_CONFIG_FILE" ]; then
 /home/feralfile/.logs/setupd.log|/home/feralfile/.logs/backup/setupd
 /home/feralfile/.logs/sys-monitord.log|/home/feralfile/.logs/backup/sys-monitord
 /home/feralfile/.logs/watchdog.log|/home/feralfile/.logs/backup/watchdog
-/home/feralfile/.logs/ff-player-static.log|/home/feralfile/.logs/backup/ff-player-static
+/home/feralfile/.logs/feral-player.log|/home/feralfile/.logs/backup/feral-player
 /home/feralfile/.logs/log-rotation.log|/home/feralfile/.logs/backup/log-rotation
 /var/log/updaterd.log|/home/feralfile/.logs/backup/updaterd
 /var/log/auto-updaterd.log|/home/feralfile/.logs/backup/auto-updaterd

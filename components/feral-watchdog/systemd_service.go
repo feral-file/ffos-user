@@ -17,10 +17,10 @@ const (
 
 var (
 	systemdServices = map[string]bool{
-		"feral-ff-player-static.service": true,
-		"feral-setupd.service":           true,
-		"feral-controld.service":         true,
-		"feral-sys-monitord.service":     true,
+		"feral-player.service":       true,
+		"feral-setupd.service":       true,
+		"feral-controld.service":     true,
+		"feral-sys-monitord.service": true,
 	}
 )
 

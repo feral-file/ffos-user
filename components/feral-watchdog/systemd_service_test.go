@@ -86,7 +86,7 @@ func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-ff-player-static.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 }
 
@@ -125,7 +125,7 @@ done
 
 state="active"
 case "$service" in
-  "feral-ff-player-static.service")
+  "feral-player.service")
     state="${FF_TEST_PLAYER_STATE:-active}"
     ;;
   "feral-setupd.service")

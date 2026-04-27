@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-readonly FF_PLAYER_ROOT="${FF_PLAYER_STATIC_ROOT:-/opt/feral/ff-player}"
+readonly FF_PLAYER_ROOT="${FF_PLAYER_STATIC_ROOT:-/opt/feral/feral-player}"
 readonly FF_PLAYER_PORT="${FF_PLAYER_STATIC_PORT:-8080}"
 readonly FF_PLAYER_URL="http://127.0.0.1:${FF_PLAYER_PORT}/"
 readonly FF_PLAYER_READY_TIMEOUT_SECONDS="${FF_PLAYER_READY_TIMEOUT_SECONDS:-30}"
@@ -9,14 +9,14 @@ readonly FF_PLAYER_READY_POLL_SECONDS="${FF_PLAYER_READY_POLL_SECONDS:-1}"
 
 require_binary() {
 	if ! command -v "$1" >/dev/null 2>&1; then
-		echo "serve-ff-player-static: required binary not found: $1" >&2
+		echo "serve-feral-player: required binary not found: $1" >&2
 		exit 1
 	fi
 }
 
 start_server() {
 	if [[ ! -d "${FF_PLAYER_ROOT}" ]]; then
-		echo "serve-ff-player-static: missing static tree at ${FF_PLAYER_ROOT}" >&2
+		echo "serve-feral-player: missing static tree at ${FF_PLAYER_ROOT}" >&2
 		exit 1
 	fi
 
@@ -39,14 +39,14 @@ wait_for_ready() {
 
 		if ! kill -0 "${server_pid}" >/dev/null 2>&1; then
 			wait "${server_pid}" || true
-			echo "serve-ff-player-static: HTTP server exited before becoming ready" >&2
+			echo "serve-feral-player: HTTP server exited before becoming ready" >&2
 			return 1
 		fi
 
 		sleep "${FF_PLAYER_READY_POLL_SECONDS}"
 	done
 
-	echo "serve-ff-player-static: timed out waiting for ${FF_PLAYER_URL}" >&2
+	echo "serve-feral-player: timed out waiting for ${FF_PLAYER_URL}" >&2
 	return 1
 }
 
@@ -61,5 +61,5 @@ trap cleanup EXIT INT TERM
 
 start_server
 wait_for_ready
-systemd-notify --ready --status="ff-player static ready on ${FF_PLAYER_URL}"
+systemd-notify --ready --status="feral-player static ready on ${FF_PLAYER_URL}"
 wait "${server_pid}"

@@ -1,7 +1,7 @@
 [Unit]
 Description=Chromium Kiosk Mode
-After=system-ready.target feral-ff-player-static.service
-Requires=feral-ff-player-static.service
+After=system-ready.target feral-player.service
+Requires=feral-player.service
 
 [Service]
 Type=simple

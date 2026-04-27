@@ -65,7 +65,7 @@ feral-setupd    --[GetRelayerTopicID]------> feral-controld
 
 Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-setupd` drives setup UI pages (QR code, messages, and the bundled local webapp). `feral-controld` forwards web commands from the relayer to Chromium via CDP. `feral-watchdog` monitors Chromium health and issues recovery commands via CDP. Neither daemon embeds a web server or serves UI assets directly.
 
-`feral-ff-player-static.service` is the readiness gate for the bundled local webapp. Chromium kiosk and any daemon that navigates to the local player must wait for that unit to report `READY=1`.
+`feral-player.service` is the readiness gate for the bundled local webapp. Chromium kiosk and any daemon that navigates to the local player must wait for that unit to report `READY=1`.
 
 ### Local device control: Hub WebSocket (port 1111)
 
