@@ -12,7 +12,6 @@ struct LocalConfigJSON {
     branch: String,
     version: String,
     endpoint: String,
-    webapp_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -20,7 +19,6 @@ struct RunningBuild {
     pub branch: String,
     pub version: Version,
     pub endpoint: String,
-    pub webapp_url: Option<String>,
 }
 
 pub async fn branch() -> Result<String> {
@@ -38,11 +36,6 @@ pub async fn endpoint() -> Result<String> {
     Ok(current.endpoint)
 }
 
-pub async fn webapp_url() -> Result<Option<String>> {
-    let current = current_cfg().await?;
-    Ok(current.webapp_url)
-}
-
 async fn current_cfg() -> Result<RunningBuild> {
     if let Some(build) = CURRENT_BUILD.get() {
         return Ok(build.clone());
@@ -57,7 +50,6 @@ async fn current_cfg() -> Result<RunningBuild> {
         branch: cfg.branch,
         version,
         endpoint: cfg.endpoint,
-        webapp_url: cfg.webapp_url,
     };
     CURRENT_BUILD.set(build.clone()).unwrap();
     Ok(build)

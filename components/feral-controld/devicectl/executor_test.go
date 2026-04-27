@@ -477,47 +477,35 @@ func TestExecutor_DeviceStatus_Error(t *testing.T) {
 }
 
 func TestExecutor_KeyboardEvent_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
 	testCases := []struct {
-		name           string
-		keyCode        int
-		expectedKey    string
-		shouldGetKeyUp bool
-		description    string
+		name     string
+		keyCode  int
+		expected map[string]interface{}
+		wantText bool
 	}{
-		// Printable ASCII characters (should get keyUp)
-		{name: "LetterA", keyCode: 65, expectedKey: "A", shouldGetKeyUp: true, description: "Uppercase A"},
-		{name: "LetterZ", keyCode: 90, expectedKey: "Z", shouldGetKeyUp: true, description: "Uppercase Z"},
-		{name: "Lettera", keyCode: 97, expectedKey: "a", shouldGetKeyUp: true, description: "Lowercase a"},
-		{name: "Letterz", keyCode: 122, expectedKey: "z", shouldGetKeyUp: true, description: "Lowercase z"},
-		{name: "Number0", keyCode: 48, expectedKey: "0", shouldGetKeyUp: true, description: "Number 0"},
-		{name: "Number9", keyCode: 57, expectedKey: "9", shouldGetKeyUp: true, description: "Number 9"},
-		{name: "Tilde", keyCode: 126, expectedKey: "~", shouldGetKeyUp: true, description: "Tilde character (max printable ASCII)"},
-
-		// Special keys that should NOT get keyUp (fixed behavior)
-		{name: "Space", keyCode: 32, expectedKey: "space", shouldGetKeyUp: false, description: "Space key (special key, no keyUp)"},
-		{name: "Tab", keyCode: 9, expectedKey: "tab", shouldGetKeyUp: false, description: "Tab key (special key, no keyUp)"},
-		{name: "Enter", keyCode: 13, expectedKey: "return", shouldGetKeyUp: false, description: "Enter key (special key, no keyUp)"},
-		{name: "Escape", keyCode: 27, expectedKey: "escape", shouldGetKeyUp: false, description: "Escape key (special key, no keyUp)"},
-		{name: "Backspace", keyCode: 8, expectedKey: "backspace", shouldGetKeyUp: false, description: "Backspace key (special key, no keyUp)"},
-
-		// Arrow keys now correctly mapped (fixed behavior)
-		{name: "ArrowLeft", keyCode: 37, expectedKey: "left", shouldGetKeyUp: false, description: "Left arrow (special key, no keyUp)"},
-		{name: "ArrowUp", keyCode: 38, expectedKey: "up", shouldGetKeyUp: false, description: "Up arrow (special key, no keyUp)"},
-		{name: "ArrowRight", keyCode: 39, expectedKey: "right", shouldGetKeyUp: false, description: "Right arrow (special key, no keyUp)"},
-		{name: "ArrowDown", keyCode: 40, expectedKey: "down", shouldGetKeyUp: false, description: "Down arrow (special key, no keyUp)"},
-
-		// Edge cases
-		{name: "BelowPrintable", keyCode: 31, expectedKey: "", shouldGetKeyUp: false, description: "Below printable ASCII range"},
-		{name: "AbovePrintable", keyCode: 127, expectedKey: "", shouldGetKeyUp: false, description: "Above printable ASCII range"},
-		{name: "UnknownKey", keyCode: 999, expectedKey: "", shouldGetKeyUp: false, description: "Unknown key code"},
+		{name: "LetterA", keyCode: 65, expected: map[string]interface{}{"key": "A", "code": "KeyA", "text": "A", "unmodifiedText": "A"}, wantText: true},
+		{name: "Letterz", keyCode: 122, expected: map[string]interface{}{"key": "z", "code": "KeyZ", "text": "z", "unmodifiedText": "z"}, wantText: true},
+		{name: "Number0", keyCode: 48, expected: map[string]interface{}{"key": "0", "code": "Digit0", "text": "0", "unmodifiedText": "0"}, wantText: true},
+		{name: "Exclamation", keyCode: 33, expected: map[string]interface{}{"key": "!", "code": "Digit1", "text": "!", "unmodifiedText": "!"}, wantText: true},
+		{name: "AtSign", keyCode: 64, expected: map[string]interface{}{"key": "@", "code": "Digit2", "text": "@", "unmodifiedText": "@"}, wantText: true},
+		{name: "Percent", keyCode: 37, expected: map[string]interface{}{"key": "%", "code": "Digit5", "text": "%", "unmodifiedText": "%"}, wantText: true},
+		{name: "Ampersand", keyCode: 38, expected: map[string]interface{}{"key": "&", "code": "Digit7", "text": "&", "unmodifiedText": "&"}, wantText: true},
+		{name: "Apostrophe", keyCode: 39, expected: map[string]interface{}{"key": "'", "code": "Quote", "text": "'", "unmodifiedText": "'"}, wantText: true},
+		{name: "LeftParen", keyCode: 40, expected: map[string]interface{}{"key": "(", "code": "Digit9", "text": "(", "unmodifiedText": "("}, wantText: true},
+		{name: "Underscore", keyCode: 95, expected: map[string]interface{}{"key": "_", "code": "Minus", "text": "_", "unmodifiedText": "_"}, wantText: true},
+		{name: "Tilde", keyCode: 126, expected: map[string]interface{}{"key": "~", "code": "Backquote", "text": "~", "unmodifiedText": "~"}, wantText: true},
+		{name: "Space", keyCode: 32, expected: map[string]interface{}{"key": " ", "code": "Space", "text": " ", "unmodifiedText": " "}, wantText: true},
+		{name: "Tab", keyCode: 9, expected: map[string]interface{}{"key": "Tab", "code": "Tab"}, wantText: false},
+		{name: "Enter", keyCode: 13, expected: map[string]interface{}{"key": "Enter", "code": "Enter"}, wantText: false},
+		{name: "Escape", keyCode: 27, expected: map[string]interface{}{"key": "Escape", "code": "Escape"}, wantText: false},
+		{name: "Backspace", keyCode: 8, expected: map[string]interface{}{"key": "Backspace", "code": "Backspace"}, wantText: false},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Setup test data
+			ts := setup(t)
+			defer ts.teardown()
+
 			cmd := commands.Command{
 				Type: commands.CMD_KEYBOARD_EVENT,
 				Arguments: map[string]interface{}{
@@ -527,12 +515,10 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 
 			arguments := fmt.Sprintf(`{"code":%d}`, tc.keyCode)
 
-			// Mock JSON marshaling
 			ts.mockJSON.EXPECT().
 				Marshal(cmd.Arguments).
 				Return([]byte(arguments), nil)
 
-			// Mock JSON unmarshaling
 			ts.mockJSON.EXPECT().
 				Unmarshal([]byte(arguments), gomock.Any()).
 				DoAndReturn(func(data []byte, v interface{}) error {
@@ -543,42 +529,113 @@ func TestExecutor_KeyboardEvent_Success(t *testing.T) {
 					return nil
 				})
 
-			// Mock CDP Send for keyDown
-			ts.mockCDP.EXPECT().
+			first := ts.mockCDP.EXPECT().
 				Send("Input.dispatchKeyEvent", gomock.Any()).
 				DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-					// Verify keyDown parameters
 					assert.Equal(t, "keyDown", params["type"])
 					assert.Equal(t, tc.keyCode, params["windowsVirtualKeyCode"])
-					assert.Equal(t, tc.expectedKey, params["key"])
-					assert.Equal(t, tc.expectedKey, params["text"])
-					assert.Equal(t, tc.expectedKey, params["unmodifiedText"])
 					assert.Equal(t, tc.keyCode, params["nativeVirtualKeyCode"])
+					for k, v := range tc.expected {
+						assert.Equal(t, v, params[k], "unexpected value for %s", k)
+					}
+					if tc.wantText {
+						assert.Equal(t, tc.expected["text"], params["text"])
+						assert.Equal(t, tc.expected["unmodifiedText"], params["unmodifiedText"])
+					} else {
+						assert.NotContains(t, params, "text")
+						assert.NotContains(t, params, "unmodifiedText")
+					}
 					return nil, nil
 				})
 
-			// Mock CDP Send for keyUp (only if shouldGetKeyUp is true)
-			if tc.shouldGetKeyUp {
-				ts.mockCDP.EXPECT().
-					Send("Input.dispatchKeyEvent", gomock.Any()).
-					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-						// Verify keyUp parameters
-						assert.Equal(t, "keyUp", params["type"])
-						assert.Equal(t, tc.keyCode, params["windowsVirtualKeyCode"])
-						assert.Equal(t, tc.expectedKey, params["key"])
-						assert.Equal(t, tc.expectedKey, params["text"])
-						assert.Equal(t, tc.expectedKey, params["unmodifiedText"])
-						assert.Equal(t, tc.keyCode, params["nativeVirtualKeyCode"])
-						return nil, nil
-					})
-			}
+			ts.mockCDP.EXPECT().
+				Send("Input.dispatchKeyEvent", gomock.Any()).
+				DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+					assert.Equal(t, "keyUp", params["type"])
+					assert.Equal(t, tc.keyCode, params["windowsVirtualKeyCode"])
+					assert.Equal(t, tc.keyCode, params["nativeVirtualKeyCode"])
+					for k, v := range tc.expected {
+						assert.Equal(t, v, params[k], "unexpected value for %s", k)
+					}
+					if tc.wantText {
+						assert.Equal(t, tc.expected["text"], params["text"])
+						assert.Equal(t, tc.expected["unmodifiedText"], params["unmodifiedText"])
+					} else {
+						assert.NotContains(t, params, "text")
+						assert.NotContains(t, params, "unmodifiedText")
+					}
+					return nil, nil
+				}).After(first)
 
-			// Execute command
 			result, err := ts.executor.Execute(ts.ctx, cmd)
 			assert.NoError(t, err)
 			assert.Equal(t, devicectl.CmdOK, result)
 		})
 	}
+}
+
+func TestExecutor_KeyboardEvent_UnsupportedCode(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_KEYBOARD_EVENT,
+		Arguments: map[string]interface{}{
+			"code": 31,
+		},
+	}
+
+	arguments := `{"code":31}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			args := v.(*struct {
+				Code int `json:"code"`
+			})
+			args.Code = 31
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "unsupported keyboard event code")
+}
+
+func TestExecutor_KeyboardEvent_UnsupportedPrintablePunctuation(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_KEYBOARD_EVENT,
+		Arguments: map[string]interface{}{
+			"code": 127,
+		},
+	}
+
+	arguments := `{"code":127}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			args := v.(*struct {
+				Code int `json:"code"`
+			})
+			args.Code = 127
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "unsupported keyboard event code")
 }
 
 func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
@@ -617,7 +674,6 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 			setupFunc: func(ts *testSetup) {
 				keyCode := 65 // 'A' - printable ASCII
 
-				// Mock JSON operations success
 				ts.mockJSON.EXPECT().
 					Marshal(gomock.Any()).
 					Return([]byte(`{"code":65}`), nil)
@@ -631,14 +687,13 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 						return nil
 					})
 
-				// Mock CDP Send for keyDown to fail
 				ts.mockCDP.EXPECT().
 					Send("Input.dispatchKeyEvent", gomock.Any()).
 					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-						// Verify keyDown parameters
 						assert.Equal(t, "keyDown", params["type"])
 						assert.Equal(t, keyCode, params["windowsVirtualKeyCode"])
 						assert.Equal(t, "A", params["key"])
+						assert.Equal(t, "KeyA", params["code"])
 						return nil, errors.New("cdp keyDown failed")
 					})
 			},
@@ -649,7 +704,6 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 			setupFunc: func(ts *testSetup) {
 				keyCode := 65 // 'A' - printable ASCII
 
-				// Mock JSON operations success
 				ts.mockJSON.EXPECT().
 					Marshal(gomock.Any()).
 					Return([]byte(`{"code":65}`), nil)
@@ -663,36 +717,35 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 						return nil
 					})
 
-				// Mock CDP Send for keyDown success
 				ts.mockCDP.EXPECT().
 					Send("Input.dispatchKeyEvent", gomock.Any()).
 					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-						// Verify keyDown parameters
 						assert.Equal(t, "keyDown", params["type"])
 						assert.Equal(t, keyCode, params["windowsVirtualKeyCode"])
 						assert.Equal(t, "A", params["key"])
+						assert.Equal(t, "KeyA", params["code"])
+						assert.Equal(t, "A", params["text"])
+						assert.Equal(t, "A", params["unmodifiedText"])
 						return nil, nil
 					})
 
-				// Mock CDP Send for keyUp to fail (but command should still succeed)
 				ts.mockCDP.EXPECT().
 					Send("Input.dispatchKeyEvent", gomock.Any()).
 					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-						// Verify keyUp parameters
 						assert.Equal(t, "keyUp", params["type"])
 						assert.Equal(t, keyCode, params["windowsVirtualKeyCode"])
 						assert.Equal(t, "A", params["key"])
+						assert.Equal(t, "KeyA", params["code"])
 						return nil, errors.New("cdp keyUp failed")
 					})
 			},
-			wantErr: "", // Should succeed despite keyUp failure
+			wantErr: "",
 		},
 		{
 			name: "CDP keyDown failure for special key",
 			setupFunc: func(ts *testSetup) {
 				keyCode := 32 // Space - special key (no keyUp)
 
-				// Mock JSON operations success
 				ts.mockJSON.EXPECT().
 					Marshal(gomock.Any()).
 					Return([]byte(`{"code":32}`), nil)
@@ -706,19 +759,77 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 						return nil
 					})
 
-				// Mock CDP Send for keyDown to fail
 				ts.mockCDP.EXPECT().
 					Send("Input.dispatchKeyEvent", gomock.Any()).
 					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-						// Verify keyDown parameters
 						assert.Equal(t, "keyDown", params["type"])
 						assert.Equal(t, keyCode, params["windowsVirtualKeyCode"])
-						assert.Equal(t, "space", params["key"])
+						assert.Equal(t, " ", params["key"])
+						assert.Equal(t, "Space", params["code"])
+						assert.Equal(t, " ", params["text"])
+						assert.Equal(t, " ", params["unmodifiedText"])
 						return nil, errors.New("cdp keyDown failed")
 					})
-				// No keyUp expected for special keys
 			},
 			wantErr: "failed to send keyboard event",
+		},
+		{
+			name: "Special key keyUp failure is ignored",
+			setupFunc: func(ts *testSetup) {
+				keyCode := 13 // Enter
+
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte(`{"code":13}`), nil)
+				ts.mockJSON.EXPECT().
+					Unmarshal(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						args := v.(*struct {
+							Code int `json:"code"`
+						})
+						args.Code = keyCode
+						return nil
+					})
+
+				ts.mockCDP.EXPECT().
+					Send("Input.dispatchKeyEvent", gomock.Any()).
+					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+						assert.Equal(t, "keyDown", params["type"])
+						assert.Equal(t, "Enter", params["key"])
+						assert.Equal(t, "Enter", params["code"])
+						assert.NotContains(t, params, "text")
+						assert.NotContains(t, params, "unmodifiedText")
+						return nil, nil
+					})
+
+				ts.mockCDP.EXPECT().
+					Send("Input.dispatchKeyEvent", gomock.Any()).
+					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+						assert.Equal(t, "keyUp", params["type"])
+						assert.Equal(t, "Enter", params["key"])
+						assert.Equal(t, "Enter", params["code"])
+						return nil, errors.New("cdp keyUp failed")
+					})
+			},
+			wantErr: "",
+		},
+		{
+			name: "Unsupported key code fails",
+			setupFunc: func(ts *testSetup) {
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte(`{"code":31}`), nil)
+				ts.mockJSON.EXPECT().
+					Unmarshal(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						args := v.(*struct {
+							Code int `json:"code"`
+						})
+						args.Code = 31
+						return nil
+					})
+			},
+			wantErr: "unsupported keyboard event code",
 		},
 	}
 
@@ -727,28 +838,24 @@ func TestExecutor_KeyboardEvent_Errors(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
 
-			// Setup test data
 			cmd := commands.Command{
 				Type: commands.CMD_KEYBOARD_EVENT,
 				Arguments: map[string]interface{}{
-					"code": 65, // Default value, overridden in setupFunc if needed
+					"code": 65,
 				},
 			}
 
-			// Setup error condition
 			tt.setupFunc(ts)
 
-			// Execute the method under test
 			result, err := ts.executor.Execute(ts.ctx, cmd)
 
-			// Assert error occurred and contains expected message or success
 			if tt.wantErr != "" {
-				assert.Error(t, err, "expected error, got %v", err)
-				assert.Contains(t, err.Error(), tt.wantErr, "expected error message to contain %q, got %q", tt.wantErr, err.Error())
-				assert.Nil(t, result, "expected nil result on error")
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, result)
 			} else {
-				assert.NoError(t, err, "expected no error, got %v", err)
-				assert.Equal(t, devicectl.CmdOK, result, "expected CmdOK result on success")
+				assert.NoError(t, err)
+				assert.Equal(t, devicectl.CmdOK, result)
 			}
 		})
 	}

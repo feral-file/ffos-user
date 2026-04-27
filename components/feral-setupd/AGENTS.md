@@ -66,6 +66,8 @@ dispatch lives in `BleCommand::from_str` + the `match` inside the write handler.
 - Message pages (errors, update prompts, etc.)
 - Web app page after successful setup/pairing
 
+The web app target is fixed to the bundled local player at `http://127.0.0.1:8080/`. Do not reintroduce `webapp_url` overrides from `ff1-config.json`; readiness belongs to `feral-player.service`.
+
 ### Connectivity (`src/connectivity.rs`, `src/dbus_utils.rs`)
 
 `Connectivity` is a cloneable handle that maintains a cached “online/offline”

@@ -273,6 +273,35 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 	assert.Equal(t, cdpResult, result)
 }
 
+func TestCommandHandler_Process_RefreshArtwork(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	command := commands.Command{
+		Type:      commands.CMD_REFRESH_ARTWORK,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockCDP.EXPECT().
+		Send("Network.clearBrowserCache", map[string]interface{}{}).
+		Return(nil, nil).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerOkResponse(), nil).
+		Times(1)
+
+	ts.mockStatusPoller.EXPECT().
+		ForceRefresh().
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
 func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

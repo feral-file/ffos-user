@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -38,6 +40,7 @@ type CDP interface {
 	Init(ctx context.Context) error
 	Send(method string, params map[string]interface{}) (interface{}, error)
 	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
+	PageNavigationURL(ctx context.Context) (string, error)
 	Close()
 	Initialized() bool
 }
@@ -93,6 +96,10 @@ func (c *cdp) Initialized() bool {
 func (c *cdp) Init(ctx context.Context) error {
 	c.logger.Info("Initializing CDP", zap.String("endpoint", c.endpoint))
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Ensure the relayer is not connected
 	c.mu.Lock()
 	if c.conn != nil {
@@ -100,8 +107,17 @@ func (c *cdp) Init(ctx context.Context) error {
 		return ErrAlreadyInitialized
 	}
 
-	// Fetch JSON with websocket debugger URL
-	resp, err := c.httpClient.Get(c.endpoint + "/json")
+	// Fetch JSON with websocket debugger URL. Use a request bound to ctx (plus a cap) so
+	// this step respects cancellation; raw http.Get ignores the request context and can
+	// block for the shared client's default timeout.
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, initDebugTargetsFetchTimeout)
+	defer fetchCancel()
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, c.endpoint+"/json", nil)
+	if err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("failed to build debug targets request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("failed to fetch debug targets: %w", err)
@@ -183,6 +199,73 @@ func (c *cdp) Init(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// initDebugTargetsFetchTimeout matches the shared HTTP client round-trip limit so
+// bootstrap /json discovery stays aligned with prior Get behavior while the request
+// remains context-driven (see Init). A shorter cap caused false Init failures when
+// Chromium answered /json between that cap and the client timeout (cold boot / recovery).
+const initDebugTargetsFetchTimeout = wrapper.HTTPClientTimeout
+
+// pageNavigationURLFetchTimeout bounds the best-effort /json probe. Without this,
+// a hung Chromium devtools endpoint could block until the shared HTTP client's
+// 30s timeout, stalling DeviceStatus polling and downstream notifications.
+const pageNavigationURLFetchTimeout = 5 * time.Second
+
+func (c *cdp) PageNavigationURL(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, pageNavigationURLFetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/json", nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build debug targets request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch debug targets: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			c.logger.Warn("Failed to close response body", zap.Error(err))
+		}
+	}()
+
+	body, err := c.io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read targets: %w", err)
+	}
+
+	var targets []struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	}
+	if err := c.json.Unmarshal(body, &targets); err != nil {
+		return "", fmt.Errorf("invalid targets format: %w", err)
+	}
+	c.logger.Debug("Fetched CDP targets for navigation URL", zap.Int("target_count", len(targets)))
+
+	pageTargets := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if t.Type == "page" {
+			pageTargets = append(pageTargets, t.URL)
+		}
+	}
+	c.logger.Debug("Filtered CDP page targets for navigation URL", zap.Int("page_target_count", len(pageTargets)))
+
+	if len(pageTargets) == 0 {
+		return "", ErrNoPageTargetFound
+	}
+
+	if len(pageTargets) > 1 {
+		return "", ErrMultiplePageTargetsFound
+	}
+
+	return pageTargets[0], nil
 }
 
 // Send sends a raw CDP JSON-RPC message with logging

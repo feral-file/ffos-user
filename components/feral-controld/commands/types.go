@@ -67,6 +67,7 @@ const (
 	CMD_TOGGLE_MUTE              Type = "toggleMute"
 	CMD_SSH_ACCESS               Type = "sshAccess"
 	CMD_DISPLAY_DEFAULT_PLAYLIST Type = "displayDefaultPlaylist"
+	CMD_REFRESH_ARTWORK          Type = "refreshArtwork"
 	// CMD_DDC_PANEL_CONTROL drives the attached panel over DDC via ddcutil (brightness, contrast,
 	// speaker volume, mute, and power). One JSON command type; request body selects the operation.
 	CMD_DDC_PANEL_CONTROL Type = "ddcPanelControl"

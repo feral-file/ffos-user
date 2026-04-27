@@ -59,18 +59,31 @@ func (f *fakeRelayer) Close() {}
 type fakeWS struct {
 	sendAllCalls int
 	sendAllErr   error
+	lastPayload  any
 }
 
 func (f *fakeWS) NewConnection(http.ResponseWriter, *http.Request) (string, error) { return "", nil }
 
 func (f *fakeWS) Send(string, any) error { return nil }
 
-func (f *fakeWS) SendAll(any) error {
+func (f *fakeWS) SendAll(payload any) error {
 	f.sendAllCalls++
+	f.lastPayload = payload
 	return f.sendAllErr
 }
 
 func (f *fakeWS) Close() {}
+
+type fakeDeviceStatus struct {
+	status *DeviceStatusResponse
+	err    error
+	calls  int
+}
+
+func (f *fakeDeviceStatus) GetStatus(context.Context) (*DeviceStatusResponse, error) {
+	f.calls++
+	return f.status, f.err
+}
 
 func TestSendNotification_RelayerCatchesUpAfterReconnect(t *testing.T) {
 	fRelayer := &fakeRelayer{
@@ -131,6 +144,44 @@ func TestSendNotification_RetryRelayerWhenSendFails(t *testing.T) {
 	}
 	if fWS.sendAllCalls != 1 {
 		t.Fatalf("expected websocket dedupe to send once, got %d", fWS.sendAllCalls)
+	}
+}
+
+func TestPollDeviceStatus_SendsDeviceStatus(t *testing.T) {
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	fWS := &fakeWS{}
+	fDeviceStatus := &fakeDeviceStatus{
+		status: &DeviceStatusResponse{ScreenRotation: "landscape"},
+	}
+
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      fWS,
+		deviceStatus:            fDeviceStatus,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDeviceStatus(context.Background())
+
+	if fWS.sendAllCalls != 1 {
+		t.Fatalf("expected one device status send, got %d", fWS.sendAllCalls)
+	}
+	if fDeviceStatus.calls != 1 {
+		t.Fatalf("expected one device status read, got %d", fDeviceStatus.calls)
+	}
+
+	payload, ok := fWS.lastPayload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected payload to be a map, got %T", fWS.lastPayload)
+	}
+	message, ok := payload["message"].(*DeviceStatusResponse)
+	if !ok {
+		t.Fatalf("expected message to be *DeviceStatusResponse, got %T", payload["message"])
+	}
+	if message.ScreenRotation != "landscape" {
+		t.Fatalf("expected screenRotation to be preserved, got %+v", message.ScreenRotation)
 	}
 }
 

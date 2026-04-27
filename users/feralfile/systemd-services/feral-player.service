@@ -1,0 +1,18 @@
+[Unit]
+Description=Serve bundled feral-player static files on loopback
+After=system-ready.target
+Before=chromium-kiosk.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=45s
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+ExecStart=/bin/bash /home/feralfile/scripts/serve-feral-player.sh
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/home/feralfile/.logs/feral-player.log
+StandardError=append:/home/feralfile/.logs/feral-player.log
+
+[Install]
+WantedBy=default.target
