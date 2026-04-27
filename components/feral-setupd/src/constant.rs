@@ -51,7 +51,7 @@ pub const BLE_ERR_CODE_UNKNOWN_ERROR: u8 = 255;
 // Chrome configuration
 pub const CDP_URL: &str = "http://127.0.0.1:9222/json";
 pub const CDP_ID_START: u64 = 1_000_000;
-pub const WEBAPP_URL: &str = "https://display.feralfile.com";
+pub const WEBAPP_URL: &str = "http://127.0.0.1:8080/";
 pub const QRCODE_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=qr";
 pub const MSG_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=message&message=";
 pub const WELCOME_MSG: &str = "Welcome to the FF1";

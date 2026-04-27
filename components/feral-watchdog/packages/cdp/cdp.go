@@ -23,7 +23,7 @@ var (
 const (
 	CDP_CRITICAL_CPU_TEMPERATURE_EVENT = "CriticalCPUTemperature"
 	CDP_SERVICE_FAILED_EVENT           = "ServiceFailed"
-	DISPLAY_FERALFILE_URL              = "https://display.feralfile.com"
+	DISPLAY_FERALFILE_URL              = "http://127.0.0.1:8080/"
 
 	// CDP Methods
 	METHOD_EVALUATE = "Runtime.evaluate"
