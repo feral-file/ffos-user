@@ -198,11 +198,43 @@ ffos-user/develop → ffos build → R2/{develop}/
 - Prefix with component name for clarity
 - Example: `feral-controld: add heartbeat functionality`
 
-## Setup Instructions
+## Verification
 
-### No GitHub Actions Required
+This repository has active GitHub Actions for component lint and test coverage. Build orchestration for full FFOS images still lives in the FFOS repository, but component source and user-data contracts are verified here.
 
-This repository is purely for source code and data. All build logic is handled by the FFOS repository.
+Run the repo-wide local verification path from the repository root:
+
+```bash
+make verify
+```
+
+`make verify` is non-mutating for repository files and runs the same component checks that CI calls:
+
+- Go components: `go mod download`, `go vet ./...`, `golangci-lint run ./...`, `gofmt -s -l .`, and `go test -v` for `feral-controld`, `feral-sys-monitord`, and `feral-watchdog`.
+- Rust component: `cargo fmt -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo check`, and `cargo test` for `feral-setupd`.
+- Startup contract smoke test: `scripts/test-serve-feral-player.sh` validates the `serve-feral-player.sh` static bundle failure path and systemd notify readiness contract with temporary fakes.
+
+Local prerequisites are Go 1.23.5 or compatible, `golangci-lint` v2.4.0, Rust 1.88.0 with `rustfmt` and `clippy`, and the system libraries needed by `feral-setupd` (`libdbus-1-dev` and `pkg-config` on Ubuntu).
+
+GitHub Actions are split by component and purpose:
+
+- `lint-controld.yaml`, `lint-sys-monitord.yaml`, and `lint-watchdog.yaml` run the matching Go lint targets.
+- `lint-setupd.yaml` runs the Rust lint target.
+- `test-controld.yaml`, `test-sys-monitord.yaml`, `test-watchdog.yaml`, and `test-setupd.yaml` run the matching test targets.
+- `testing.yaml` reuses the component test workflows on pushes to `main` and `develop` and enables Codecov upload.
+
+CI intentionally has one parity exception: push coverage jobs generate coverage artifacts for Codecov after the shared `make verify-*` test target passes. That coverage step is CI-only and is not part of the non-mutating local verification path.
+
+Focused local targets are available when working on one component:
+
+```bash
+make verify-feral-controld
+make verify-feral-sys-monitord
+make verify-feral-watchdog
+make verify-setupd
+```
+
+Each target prints deterministic command output suitable for local review or agent evaluation; the smoke test also emits `test-serve-feral-player: OK` when the service-state contract passes.
 
 ### Sync components to a device (dev)
 

@@ -6,12 +6,14 @@ on:
     paths:
       - 'components/feral-sys-monitord/**/*.go'
       - '.golangci.yml'
+      - 'Makefile'
       - 'components/feral-sys-monitord/go.mod'
       - 'components/feral-sys-monitord/go.sum'
   pull_request:
     paths:
       - 'components/feral-sys-monitord/**/*.go'
       - '.golangci.yml'
+      - 'Makefile'
       - 'components/feral-sys-monitord/go.mod'
       - 'components/feral-sys-monitord/go.sum'
 
@@ -26,9 +28,6 @@ jobs:
   lint:
     name: Lint feral-sys-monitord (Go)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./components/feral-sys-monitord
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,22 +39,10 @@ jobs:
           cache: true
           cache-dependency-path: components/feral-sys-monitord/go.sum
 
-      - name: Install dependencies
-        run: go mod download
-
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.4.0
-          working-directory: ./components/feral-sys-monitord
-
-      - name: Run go fmt check
+      - name: Install golangci-lint
         run: |
-          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
-            echo "Code is not formatted. Please run 'gofmt -s -w .'"
-            gofmt -s -l .
-            exit 1
-          fi
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.4.0
+
+      - name: Run local verification target
+        run: make verify-feral-sys-monitord-lint

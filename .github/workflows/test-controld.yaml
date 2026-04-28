@@ -5,6 +5,7 @@ on:
     paths:
       - 'components/feral-controld/**/*.go'
       - '.golangci.yml'
+      - 'Makefile'
       - 'components/feral-controld/go.mod'
       - 'components/feral-controld/go.sum'
   workflow_call:
@@ -26,9 +27,6 @@ jobs:
   test:
     name: Test feral-controld (Go)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./components/feral-controld
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,13 +38,12 @@ jobs:
           cache: true
           cache-dependency-path: components/feral-controld/go.sum
 
-      - name: Install dependencies
-        run: go mod download
+      - name: Run local verification target
+        run: make verify-feral-controld-test
 
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: Run tests with coverage
+      - name: Generate coverage
+        if: ${{ inputs.upload-coverage == true }}
+        working-directory: ./components/feral-controld
         run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
 
       - name: Upload coverage to Codecov
