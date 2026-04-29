@@ -18,10 +18,10 @@ func TestSystemdMonitor_ServiceFailedMetric_EmittedOnceWhileStuck(t *testing.T) 
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active")
+	setServiceStates(t, "active", "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "active", "failed", "active")
+	setServiceStates(t, "active", "active", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 	requireNoError(t, monitor.check(ctx))
 
@@ -34,15 +34,15 @@ func TestSystemdMonitor_ServiceFailedIncident_OneForCascade(t *testing.T) {
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active")
+	setServiceStates(t, "active", "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	// First service fails -> incident opens.
-	setServiceStates(t, "active", "failed", "active")
+	setServiceStates(t, "active", "active", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	// Additional service fails while incident is already open.
-	setServiceStates(t, "failed", "failed", "active")
+	setServiceStates(t, "active", "failed", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
@@ -55,23 +55,39 @@ func TestSystemdMonitor_ServiceFailedIncident_ReopensAfterRecovery(t *testing.T)
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active")
+	setServiceStates(t, "active", "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "active", "failed", "active")
+	setServiceStates(t, "active", "active", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	// All services recover -> incident latch resets.
-	setServiceStates(t, "active", "active", "active")
+	setServiceStates(t, "active", "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "failed", "active", "active")
+	setServiceStates(t, "active", "failed", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
 	assertMetricCount(t, metrics, "service_failed_incident 1", 2)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-setupd.service"} 1`, 1)
+}
+
+func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
+	monitor, collector := newTestSystemdMonitor(t)
+	ctx := context.Background()
+
+	setServiceStates(t, "active", "active", "active", "active")
+	requireNoError(t, monitor.check(ctx))
+
+	setServiceStates(t, "failed", "active", "active", "active")
+	requireNoError(t, monitor.check(ctx))
+	requireNoError(t, monitor.check(ctx))
+
+	metrics := collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
+	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 }
 
 func newTestSystemdMonitor(t *testing.T) (*SystemdMonitor, *metricCollectorRoundTripper) {
@@ -109,6 +125,9 @@ done
 
 state="active"
 case "$service" in
+  "feral-player.service")
+    state="${FF_TEST_PLAYER_STATE:-active}"
+    ;;
   "feral-setupd.service")
     state="${FF_TEST_SETUPD_STATE:-active}"
     ;;
@@ -162,8 +181,9 @@ exec /bin/cat "$@"
 	}
 }
 
-func setServiceStates(t *testing.T, setupd, controld, sysMonitord string) {
+func setServiceStates(t *testing.T, player, setupd, controld, sysMonitord string) {
 	t.Helper()
+	t.Setenv("FF_TEST_PLAYER_STATE", player)
 	t.Setenv("FF_TEST_SETUPD_STATE", setupd)
 	t.Setenv("FF_TEST_CONTROLD_STATE", controld)
 	t.Setenv("FF_TEST_SYSMONITORD_STATE", sysMonitord)

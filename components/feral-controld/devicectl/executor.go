@@ -370,43 +370,174 @@ func (e *executor) handleKeyboardEvent(args []byte) (interface{}, error) {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Always map special keys first
-	keyName := e.mapToYdoKey(cmdArgs.Code)
-	isPrintable := false
-	if keyName == "" && cmdArgs.Code >= 32 && cmdArgs.Code <= 126 {
-		keyName = string(rune(cmdArgs.Code))
-		isPrintable = true
+	// The remote keyboard payload uses a constrained numeric code set:
+	// standard phone-keyboard characters plus a small special-key subset.
+	keyEvent := e.keyboardEventForCode(cmdArgs.Code)
+	if keyEvent == nil {
+		return nil, fmt.Errorf("unsupported keyboard event code: %d", cmdArgs.Code)
 	}
 
-	e.logger.Info("Keyboard event", zap.Int("code", cmdArgs.Code), zap.String("key", keyName))
+	e.logger.Info("Keyboard event",
+		zap.Int("code", cmdArgs.Code),
+		zap.String("key", keyEvent.key),
+		zap.String("code_name", keyEvent.code))
 
-	// Prepare CDP command to dispatch a key event
-	keyEventParams := map[string]interface{}{
+	keyDownParams := map[string]interface{}{
 		"type":                  "keyDown",
 		"windowsVirtualKeyCode": cmdArgs.Code,
-		"key":                   keyName,
-		"text":                  keyName,
-		"unmodifiedText":        keyName,
 		"nativeVirtualKeyCode":  cmdArgs.Code,
+		"key":                   keyEvent.key,
+		"code":                  keyEvent.code,
+	}
+	if keyEvent.text != "" {
+		keyDownParams["text"] = keyEvent.text
+		keyDownParams["unmodifiedText"] = keyEvent.text
 	}
 
-	// Send key directly via CDP
-	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
+	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyDownParams)
 	if err != nil {
 		e.logger.Error("Failed to send key via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to send keyboard event: %w", err)
 	}
 
-	// Only send keyUp for printable ASCII (not for special keys)
-	if isPrintable {
-		keyEventParams["type"] = "keyUp"
-		_, err := e.cdp.Send("Input.dispatchKeyEvent", keyEventParams)
-		if err != nil {
-			e.logger.Error("Failed to send keyUp via CDP", zap.Error(err))
-		}
+	keyUpParams := map[string]interface{}{
+		"type":                  "keyUp",
+		"windowsVirtualKeyCode": cmdArgs.Code,
+		"nativeVirtualKeyCode":  cmdArgs.Code,
+		"key":                   keyEvent.key,
+		"code":                  keyEvent.code,
+	}
+	if keyEvent.text != "" {
+		keyUpParams["text"] = keyEvent.text
+		keyUpParams["unmodifiedText"] = keyEvent.text
+	}
+
+	_, err = e.cdp.Send("Input.dispatchKeyEvent", keyUpParams)
+	if err != nil {
+		e.logger.Error("Failed to send keyUp via CDP", zap.Error(err))
 	}
 
 	return CmdOK, nil
+}
+
+type keyboardEvent struct {
+	key  string
+	code string
+	text string
+}
+
+// keyboardEventForCode translates the remote command's numeric code into the
+// browser-facing values Chromium expects. This is intentionally a CDP-level
+// approximation of keyboard input, not an OS/kernel keyboard injection path.
+func (e *executor) keyboardEventForCode(keyCode int) *keyboardEvent {
+	switch keyCode {
+	case 32:
+		return &keyboardEvent{key: " ", code: "Space", text: " "}
+	case 9:
+		return &keyboardEvent{key: "Tab", code: "Tab"}
+	case 13:
+		return &keyboardEvent{key: "Enter", code: "Enter"}
+	case 27:
+		return &keyboardEvent{key: "Escape", code: "Escape"}
+	case 8:
+		return &keyboardEvent{key: "Backspace", code: "Backspace"}
+	}
+
+	if keyCode < 32 || keyCode > 126 {
+		e.logger.Warn("Unhandled keyboard event code", zap.Int("code", keyCode))
+		return nil
+	}
+
+	key, code, text := printableASCIIKeyEvent(keyCode)
+	if code == "" {
+		e.logger.Warn("Unhandled printable keyboard event code", zap.Int("code", keyCode))
+		return nil
+	}
+	return &keyboardEvent{key: key, code: code, text: text}
+}
+
+func printableASCIIKeyEvent(keyCode int) (key string, code string, text string) {
+	switch keyCode {
+	case 32:
+		return " ", "Space", " "
+	case 33:
+		return "!", "Digit1", "!"
+	case 34:
+		return "\"", "Quote", "\""
+	case 35:
+		return "#", "Digit3", "#"
+	case 36:
+		return "$", "Digit4", "$"
+	case 37:
+		return "%", "Digit5", "%"
+	case 38:
+		return "&", "Digit7", "&"
+	case 39:
+		return "'", "Quote", "'"
+	case 40:
+		return "(", "Digit9", "("
+	case 41:
+		return ")", "Digit0", ")"
+	case 42:
+		return "*", "Digit8", "*"
+	case 43:
+		return "+", "Equal", "+"
+	case 44:
+		return ",", "Comma", ","
+	case 45:
+		return "-", "Minus", "-"
+	case 46:
+		return ".", "Period", "."
+	case 47:
+		return "/", "Slash", "/"
+	case 48, 49, 50, 51, 52, 53, 54, 55, 56, 57:
+		return string(rune(keyCode)), "Digit" + string(rune(keyCode)), string(rune(keyCode))
+	case 58:
+		return ":", "Semicolon", ":"
+	case 59:
+		return ";", "Semicolon", ";"
+	case 60:
+		return "<", "Comma", "<"
+	case 61:
+		return "=", "Equal", "="
+	case 62:
+		return ">", "Period", ">"
+	case 63:
+		return "?", "Slash", "?"
+	case 64:
+		return "@", "Digit2", "@"
+	case 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
+		75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
+		85, 86, 87, 88, 89, 90:
+		return string(rune(keyCode)), "Key" + string(rune(keyCode)), string(rune(keyCode))
+	case 91:
+		return "[", "BracketLeft", "["
+	case 92:
+		return "\\", "Backslash", "\\"
+	case 93:
+		return "]", "BracketRight", "]"
+	case 94:
+		return "^", "Digit6", "^"
+	case 95:
+		return "_", "Minus", "_"
+	case 96:
+		return "`", "Backquote", "`"
+	case 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+		107, 108, 109, 110, 111, 112, 113, 114, 115, 116,
+		117, 118, 119, 120, 121, 122:
+		upper := strings.ToUpper(string(rune(keyCode)))
+		return string(rune(keyCode)), "Key" + upper, string(rune(keyCode))
+	case 123:
+		return "{", "BracketLeft", "{"
+	case 124:
+		return "|", "Backslash", "|"
+	case 125:
+		return "}", "BracketRight", "}"
+	case 126:
+		return "~", "Backquote", "~"
+	default:
+		return "", "", ""
+	}
 }
 
 func (e *executor) initializeScreenDimensions() {
@@ -611,32 +742,6 @@ func (e *executor) handleMouseTapEvent() (interface{}, error) {
 	}
 
 	return CmdOK, nil
-}
-
-func (e *executor) mapToYdoKey(keyCode int) string {
-	switch keyCode {
-	case 32:
-		return "space"
-	case 9:
-		return "tab"
-	case 13:
-		return "return"
-	case 27:
-		return "escape"
-	case 8:
-		return "backspace"
-	case 37:
-		return "left"
-	case 38:
-		return "up"
-	case 39:
-		return "right"
-	case 40:
-		return "down"
-	default:
-		e.logger.Warn("Unhandled key code", zap.Int("code", keyCode))
-		return ""
-	}
 }
 
 func (e *executor) shutdown(ctx context.Context) (interface{}, error) {

@@ -1129,14 +1129,12 @@ async fn check_and_update_system(
 async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let mut page = app_state.page.lock().await;
 
-    let webapp_url = match cfg::webapp_url().await? {
-        Some(url) => url,
-        None => constant::WEBAPP_URL.to_string(),
-    };
+    let webapp_url = constant::WEBAPP_URL;
 
-    // For webapp, we only navigate if the page is not it already
+    // The static player is now a readiness-gated local service. We trust systemd
+    // for readiness and only keep the fast-path when Chromium is already on it.
     let current_url = chrome.get_current_url().await?;
-    if current_url.starts_with(&webapp_url) {
+    if current_url.starts_with(webapp_url) {
         *page = Page::WebApp(unix_s());
         return Ok(());
     }
@@ -1144,9 +1142,10 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
     // This is to avoid Err Network Changed from Chrome
     time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
     chrome
-        .navigate(&webapp_url)
+        .navigate(webapp_url)
         .await
         .with_context(|| format!("navigating to {webapp_url}"))?;
+
     println!("MAIN: Navigated to {webapp_url}");
     *page = Page::WebApp(unix_s());
     Ok(())

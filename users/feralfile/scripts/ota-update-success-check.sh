@@ -3,6 +3,7 @@ set -uo pipefail
 
 # List of services to check
 SERVICES=(
+  "feral-player.service"
   "feral-setupd.service"
   "feral-controld.service"
   "feral-sys-monitord.service"
