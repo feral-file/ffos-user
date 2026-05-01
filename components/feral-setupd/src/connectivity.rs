@@ -31,7 +31,7 @@ impl Connectivity {
     // ---------------------------------------------------------------------
     /// Spawns the background refresher and returns a usable handle.
     pub async fn spawn() -> Self {
-        let initial = dbus_utils::internet_availability();
+        let initial = dbus_utils::internet_availability(true);
         let (tx, rx) = watch::channel(initial);
 
         let inner = Arc::new(Inner {
@@ -40,7 +40,7 @@ impl Connectivity {
             force_lock: Mutex::new(()),
         });
 
-        // Kick off the 30-second poller
+        // Kick off the 60-second poller
         tokio::spawn(background_refresher(tx));
 
         Self { inner }
@@ -70,7 +70,7 @@ impl Connectivity {
 
         // Serialize concurrent “force” calls.
         let _guard = self.inner.force_lock.lock().await;
-        let fresh = dbus_utils::internet_availability();
+        let fresh = dbus_utils::internet_availability(true);
         let _ = self.inner.tx.send_if_modified(|old| {
             if *old != fresh {
                 *old = fresh;
@@ -109,10 +109,11 @@ impl Connectivity {
 
 async fn background_refresher(tx: watch::Sender<bool>) {
     let mut ticker = time::interval(Duration::from_secs(60));
+    ticker.tick().await; // Discard the immediate tick; spawn() already forced a fresh value.
 
     loop {
         ticker.tick().await;
-        let ok = dbus_utils::internet_availability();
+        let ok = dbus_utils::internet_availability(false);
         let _ = tx.send_if_modified(|old| {
             if *old != ok {
                 *old = ok;
