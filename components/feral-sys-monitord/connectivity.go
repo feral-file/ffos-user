@@ -17,13 +17,12 @@ const (
 	FAST_PING_INTERVAL = 3 * time.Second
 
 	// Connection timeout
-	BACKGROUND_PING_TIMEOUT = 5 * time.Second
-	RPC_PING_TIMEOUT        = 2 * time.Second
+	PING_TIMEOUT = 5 * time.Second
 )
 
 var PING_TARGET_ADDRESS = []string{
-	"1.1.1.1:443", // Cloudflare
-	"8.8.8.8:443", // Google
+	"8.8.8.8:443",
+	"8.8.4.4:443",
 }
 
 type ConnectivityHandler func(ctx context.Context, connected bool)
@@ -134,7 +133,7 @@ func (c *Connectivity) background() {
 
 		// Always check connectivity for the first time
 		if lastConnected == nil {
-			connected, err := c.CheckConnectivity(BACKGROUND_PING_TIMEOUT)
+			connected, err := c.CheckConnectivity(PING_TIMEOUT)
 			if err != nil {
 				// We accept not being able to check connectivity and only log the warning
 				c.logger.Warn("Connectivity check failed", zap.Error(err))
@@ -170,7 +169,7 @@ func (c *Connectivity) background() {
 				return
 			case <-ticker.C:
 				c.logger.Info("Checking connectivity")
-				connected, err := c.CheckConnectivity(BACKGROUND_PING_TIMEOUT)
+				connected, err := c.CheckConnectivity(PING_TIMEOUT)
 				c.logger.Info("Connectivity check result", zap.Bool("connected", connected))
 				if err != nil {
 					// We accept not being able to check connectivity and only log the warning

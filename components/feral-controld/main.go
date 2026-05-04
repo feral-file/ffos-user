@@ -312,7 +312,7 @@ func resolveMDNSDeviceInfo(os wrapper.OS, s *state.State, logger *zap.Logger) md
 func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger) (bool, error) {
 	logger.Info("Getting connectivity status")
 
-	deadlineCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	deadlineCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
 	defer cancel()
 
 	resp, err := dc.Call(

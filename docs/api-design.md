@@ -208,8 +208,8 @@ Error codes are single bytes defined in `constant.rs`. Use the most specific cod
 
 | Caller | Callee | Method | Timeout |
 |---|---|---|---|
-| `feral-controld` | `feral-sys-monitord` | `GetConnectivityStatus` | 5 seconds |
-| `feral-setupd` | `feral-sys-monitord` | `GetConnectivityStatus` | 1 second (`DBUS_INTERNET_CHECK_TIMEOUT`) |
+| `feral-controld` | `feral-sys-monitord` | `GetConnectivityStatus` | 7 seconds |
+| `feral-setupd` | `feral-sys-monitord` | `GetConnectivityStatus` | 7 second (`DBUS_INTERNET_CHECK_TIMEOUT`) |
 | `feral-setupd` | `feral-controld` | `GetRelayerTopicID` | 31 seconds (`DBUS_RELAYER_CHECK_TIMEOUT`) |
 | `feral-setupd` | — | Wait for controld to appear on bus | 30 seconds (`WAIT_FOR_CONTROLD_TIMEOUT`) |
 
