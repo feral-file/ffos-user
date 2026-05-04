@@ -1812,6 +1812,109 @@ func TestClient_Send_PinchingUnsupportedTopLevelError(t *testing.T) {
 	assert.Equal(t, "Input.synthesizePinchGesture", remoteErr.Method)
 }
 
+func TestClient_Send_PinchingUnsupportedTopLevelErrorFromProtocolEnvelope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	responseBody := "fake response body"
+	mockResponse := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(responseBody)),
+	}
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		Return(mockResponse, nil).
+		Times(1)
+
+	ts.mockIO.EXPECT().
+		ReadAll(gomock.Any()).
+		Return([]byte(responseBody), nil).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			targets := v.(*[]struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			})
+			*targets = []struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			}{
+				{Type: "page", Title: "Test Page", WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/123"},
+			}
+			return nil
+		}).
+		Times(1)
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, nil, nil).
+		Times(1)
+
+	err := ts.client.Init(ts.ctx)
+	assert.NoError(t, err)
+	assert.True(t, ts.client.Initialized())
+
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"id":1,"method":"Input.synthesizePinchGesture","params":{"x":1,"y":2}}`), nil).
+		Times(1)
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.TextMessage, gomock.Any()).
+		Return(nil).
+		Times(1)
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		Return(websocket.TextMessage, []byte(`{"id":1,"error":{"code":-32601,"message":"method not found"}}`), nil).
+		Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"id":1,"error":{"code":-32601,"message":"method not found"}}`), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			resp := v.(*struct {
+				ID    int `json:"id"`
+				Error *struct {
+					Code    int         `json:"code"`
+					Message string      `json:"message"`
+					Data    interface{} `json:"data"`
+				} `json:"error"`
+				Result struct {
+					Result struct {
+						Type        string      `json:"type"`
+						Subtype     *string     `json:"subtype"`
+						ClassName   *string     `json:"className"`
+						Description *string     `json:"description"`
+						Value       interface{} `json:"value"`
+					} `json:"result"`
+				} `json:"result"`
+			})
+			resp.ID = 1
+			resp.Error = &struct {
+				Code    int         `json:"code"`
+				Message string      `json:"message"`
+				Data    interface{} `json:"data"`
+			}{
+				Code:    -32601,
+				Message: "method not found",
+			}
+			return nil
+		}).
+		Times(1)
+
+	result, err := ts.client.Send("Input.synthesizePinchGesture", map[string]interface{}{"x": 1, "y": 2})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+
+	var remoteErr *cdp.RemoteError
+	assert.ErrorAs(t, err, &remoteErr)
+	assert.True(t, remoteErr.Unsupported)
+	assert.Equal(t, "Input.synthesizePinchGesture", remoteErr.Method)
+}
+
 func TestClient_Send_Async(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
