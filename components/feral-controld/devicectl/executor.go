@@ -936,8 +936,9 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}
 	}
 	// Each click-and-drag batch is press + move + release. If the move step fails, we still
 	// must release the button; otherwise the page can keep a stuck mouse-down in Chromium
-	// until a later event clears it. Log release failures and preserve the move error; if the
-	// move succeeds, surface a failed release to avoid silently leaving Chromium pressed.
+	// until a later event clears it. Failed cleanup releases are always surfaced: alone when
+	// the move succeeded, or joined with the move error so a stuck-button cleanup failure is
+	// not dropped when the move path already failed.
 	defer func() {
 		up := map[string]interface{}{
 			"type":       "mouseReleased",
@@ -949,10 +950,13 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}
 		}
 		if _, relErr := e.cdp.Send("Input.dispatchMouseEvent", up); relErr != nil {
 			e.logger.Error("click-and-drag: best-effort release after batch failed", zap.Error(relErr))
+			releaseErr := fmt.Errorf("failed to release mouse button during cleanup: %w", relErr)
 			if err == nil {
-				err = fmt.Errorf("failed to release mouse button: %w", relErr)
-				result = nil
+				err = releaseErr
+			} else {
+				err = errors.Join(err, releaseErr)
 			}
+			result = nil
 		}
 	}()
 

@@ -2464,6 +2464,74 @@ func TestExecutor_MouseClickAndDragEvent_ReleasesOnMoveError(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+func TestExecutor_MouseClickAndDragEvent_MoveErrorAndCleanupReleaseErrorJoined(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID": "m2",
+			"cursorOffsets": []map[string]interface{}{
+				{"dx": 1.0, "dy": 0.0},
+			},
+		},
+	}
+	argsJSON := `{"messageID":"m2","cursorOffsets":[{"dx":1.0,"dy":0.0}]}`
+
+	moveRoot := errors.New("unmarshal move failed")
+	cleanupRoot := errors.New("cdp cleanup release failed")
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag probe)")
+			}
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 1, DY: 0}}
+			return nil
+		}).
+		Times(1)
+	down := map[string]interface{}{
+		"type": "mousePressed", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 1, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", down).Return(nil, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		Return(moveRoot).
+		Times(1)
+	release := map[string]interface{}{
+		"type": "mouseReleased", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 0, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", release).Return(nil, cleanupRoot)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.True(t, errors.Is(err, moveRoot), "expected move error in joined result")
+	assert.True(t, errors.Is(err, cleanupRoot), "expected cleanup release error in joined result")
+}
+
 func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
