@@ -763,39 +763,57 @@ func (e *executor) handleMouseTapEvent(args []byte) (interface{}, error) {
 		zap.Float64("x", e.cursorPositionX),
 		zap.Float64("y", e.cursorPositionY))
 
-	// 1. Press mouse button at current position
+	if err := e.dispatchMouseClick(button, pressedButtons, 1); err != nil {
+		return nil, err
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) dispatchMouseClick(button string, pressedButtons int, clickCount int) (err error) {
 	downParams := map[string]interface{}{
 		"type":       "mousePressed",
 		"x":          e.cursorPositionX,
 		"y":          e.cursorPositionY,
 		"button":     button,
 		"buttons":    pressedButtons,
-		"clickCount": 1,
+		"clickCount": clickCount,
 	}
-
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
-	if err != nil {
-		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to press mouse button: %w", err)
-	}
-
-	// 2. Release mouse button
 	upParams := map[string]interface{}{
 		"type":       "mouseReleased",
 		"x":          e.cursorPositionX,
 		"y":          e.cursorPositionY,
 		"button":     button,
 		"buttons":    0,
-		"clickCount": 1,
+		"clickCount": clickCount,
 	}
+
+	pressed := false
+	defer func() {
+		if !pressed {
+			return
+		}
+		_, releaseErr := e.cdp.Send("Input.dispatchMouseEvent", upParams)
+		if releaseErr != nil {
+			e.logger.Error("Failed to release mouse button via CDP during cleanup", zap.Error(releaseErr))
+		}
+	}()
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	if err != nil {
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		return fmt.Errorf("failed to press mouse button: %w", err)
+	}
+	pressed = true
 
 	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
 	if err != nil {
 		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to release mouse button: %w", err)
+		return fmt.Errorf("failed to release mouse button: %w", err)
 	}
+	pressed = false
 
-	return CmdOK, nil
+	return nil
 }
 
 func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
@@ -810,32 +828,14 @@ func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
 		zap.Float64("x", e.cursorPositionX),
 		zap.Float64("y", e.cursorPositionY))
 
-	downParams := map[string]interface{}{
-		"type":       "mousePressed",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     button,
-		"buttons":    pressedButtons,
-		"clickCount": 2,
-	}
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
-	if err != nil {
-		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to press mouse button: %w", err)
-	}
-
-	upParams := map[string]interface{}{
-		"type":       "mouseReleased",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     button,
-		"buttons":    0,
-		"clickCount": 2,
-	}
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
-	if err != nil {
-		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to release mouse button: %w", err)
+	// Chromium's dblclick handling is sequence-sensitive: a single press/release
+	// pair with clickCount=2 can still collapse to a plain click on targets that
+	// inspect the full click sequence. Emit two clicks so the second one carries
+	// the double-click count expected by dblclick/double-tap handlers.
+	for clickCount := 1; clickCount <= 2; clickCount++ {
+		if err := e.dispatchMouseClick(button, pressedButtons, clickCount); err != nil {
+			return nil, err
+		}
 	}
 
 	return CmdOK, nil
@@ -861,14 +861,6 @@ func (e *executor) handleMouseLongPressEvent(args []byte) (interface{}, error) {
 		"buttons":    pressedButtons,
 		"clickCount": 1,
 	}
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
-	if err != nil {
-		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to press mouse button: %w", err)
-	}
-
-	e.clock.Sleep(1 * time.Second)
-
 	upParams := map[string]interface{}{
 		"type":       "mouseReleased",
 		"x":          e.cursorPositionX,
@@ -877,11 +869,33 @@ func (e *executor) handleMouseLongPressEvent(args []byte) (interface{}, error) {
 		"buttons":    0,
 		"clickCount": 1,
 	}
+
+	pressed := false
+	defer func() {
+		if !pressed {
+			return
+		}
+		_, releaseErr := e.cdp.Send("Input.dispatchMouseEvent", upParams)
+		if releaseErr != nil {
+			e.logger.Error("Failed to release mouse button via CDP during cleanup", zap.Error(releaseErr))
+		}
+	}()
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	if err != nil {
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to press mouse button: %w", err)
+	}
+	pressed = true
+
+	e.clock.Sleep(1 * time.Second)
+
 	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
 	if err != nil {
 		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to release mouse button: %w", err)
 	}
+	pressed = false
 
 	return CmdOK, nil
 }

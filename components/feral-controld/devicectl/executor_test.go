@@ -1842,7 +1842,23 @@ func TestExecutor_MouseDoubleTapEvent_DefaultLeft(t *testing.T) {
 			return nil
 		})
 
-	downParams := map[string]interface{}{
+	firstDown := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	firstUp := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+	secondDown := map[string]interface{}{
 		"type":       "mousePressed",
 		"x":          centerX,
 		"y":          centerY,
@@ -1850,7 +1866,7 @@ func TestExecutor_MouseDoubleTapEvent_DefaultLeft(t *testing.T) {
 		"buttons":    1,
 		"clickCount": 2,
 	}
-	upParams := map[string]interface{}{
+	secondUp := map[string]interface{}{
 		"type":       "mouseReleased",
 		"x":          centerX,
 		"y":          centerY,
@@ -1858,12 +1874,81 @@ func TestExecutor_MouseDoubleTapEvent_DefaultLeft(t *testing.T) {
 		"buttons":    0,
 		"clickCount": 2,
 	}
-	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil)
-	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil)
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstDown).Return(nil, nil)
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstUp).Return(nil, nil)
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", secondDown).Return(nil, nil)
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", secondUp).Return(nil, nil)
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseDoubleTapEvent_ReleaseFailureAttemptsCleanup(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_DOUBLE_TAP_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	// parseMouseButton default left
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	firstDown := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	firstUp := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	releaseErr := errors.New("release failed")
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstDown).Return(nil, nil),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstUp).Return(nil, releaseErr),
+		// cleanup attempt
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstUp).Return(nil, nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to release mouse button")
+	assert.Nil(t, result)
 }
 
 func TestExecutor_MouseLongPressEvent_SleepsAndReleases(t *testing.T) {
@@ -1927,6 +2012,73 @@ func TestExecutor_MouseLongPressEvent_SleepsAndReleases(t *testing.T) {
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseLongPressEvent_ReleaseFailureAttemptsCleanup(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	releaseErr := errors.New("release failed")
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().Sleep(1*time.Second),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, releaseErr),
+		// cleanup attempt
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to release mouse button")
+	assert.Nil(t, result)
 }
 
 func TestExecutor_MouseLongPressEvent_MiddleButton(t *testing.T) {
@@ -3159,24 +3311,36 @@ func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
 						return nil
 					})
 
-				// Mock CDP Send for mouse press success
-				ts.mockCDP.EXPECT().
-					Send("Input.dispatchMouseEvent", gomock.Any()).
-					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-						// Verify mousePressed event
-						assert.Equal(t, "mousePressed", params["type"])
-						assert.Equal(t, 960.0, params["x"]) // Screen center
-						assert.Equal(t, 540.0, params["y"])
-						assert.Equal(t, "left", params["button"])
-						assert.Equal(t, 1, params["buttons"])
-						assert.Equal(t, 1, params["clickCount"])
-						return nil, nil
-					})
-
-				// Mock CDP Send for mouse release to fail
-				ts.mockCDP.EXPECT().
-					Send("Input.dispatchMouseEvent", gomock.Any()).
-					Return(nil, errors.New("cdp mouse release failed"))
+				releaseErr := errors.New("cdp mouse release failed")
+				gomock.InOrder(
+					// Mock CDP Send for mouse press success
+					ts.mockCDP.EXPECT().
+						Send("Input.dispatchMouseEvent", gomock.Any()).
+						DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+							// Verify mousePressed event
+							assert.Equal(t, "mousePressed", params["type"])
+							assert.Equal(t, 960.0, params["x"]) // Screen center
+							assert.Equal(t, 540.0, params["y"])
+							assert.Equal(t, "left", params["button"])
+							assert.Equal(t, 1, params["buttons"])
+							assert.Equal(t, 1, params["clickCount"])
+							return nil, nil
+						}),
+					// Mock CDP Send for mouse release to fail
+					ts.mockCDP.EXPECT().
+						Send("Input.dispatchMouseEvent", gomock.Any()).
+						DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+							assert.Equal(t, "mouseReleased", params["type"])
+							return nil, releaseErr
+						}),
+					// Cleanup: best-effort release retry
+					ts.mockCDP.EXPECT().
+						Send("Input.dispatchMouseEvent", gomock.Any()).
+						DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+							assert.Equal(t, "mouseReleased", params["type"])
+							return nil, nil
+						}),
+				)
 			},
 			wantErr: "failed to release mouse button",
 		},

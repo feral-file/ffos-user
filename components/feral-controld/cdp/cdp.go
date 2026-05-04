@@ -360,7 +360,7 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		return nil, &RemoteError{
 			Method:      method,
 			Description: resp.Error.Message,
-			Unsupported: isUnsupportedRemoteError(method, resp.Error.Message),
+			Unsupported: isUnsupportedRemoteMethodError(method, resp.Error.Code),
 		}
 	}
 
@@ -370,11 +370,17 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	if result.Type == TYPE_OBJECT &&
 		result.Subtype != nil &&
 		*result.Subtype == SUBTYPE_ERROR {
-		description := *result.Description
+		description := "remote error"
+		switch {
+		case result.Description != nil && strings.TrimSpace(*result.Description) != "":
+			description = *result.Description
+		case result.ClassName != nil && strings.TrimSpace(*result.ClassName) != "":
+			description = *result.ClassName
+		}
 		return nil, &RemoteError{
 			Method:      method,
 			Description: description,
-			Unsupported: isUnsupportedRemoteError(method, description),
+			Unsupported: false,
 		}
 	}
 
@@ -395,19 +401,8 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	}
 }
 
-func isUnsupportedRemoteError(method, description string) bool {
-	method = strings.ToLower(strings.TrimSpace(method))
-	description = strings.ToLower(strings.TrimSpace(description))
-	switch {
-	case method == "input.synthesizepinchgesture" && strings.Contains(description, "method not found"):
-		return true
-	case method == "input.synthesizepinchgesture" && strings.Contains(description, "unknown method"):
-		return true
-	case method == "input.synthesizepinchgesture" && strings.Contains(description, "wasn't found"):
-		return true
-	default:
-		return false
-	}
+func isUnsupportedRemoteMethodError(method string, code int) bool {
+	return method == "Input.synthesizePinchGesture" && code == -32601
 }
 
 // Close closes the CDP connection
