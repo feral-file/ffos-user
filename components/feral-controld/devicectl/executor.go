@@ -1009,6 +1009,10 @@ func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
 }
 
 func (e *executor) sendZoomWheelGesture(scaleFactor float64) error {
+	if scaleFactor == 1 {
+		return nil
+	}
+
 	deltaY := zoomWheelDeltaY(scaleFactor)
 	if scaleFactor > 1 {
 		deltaY = -deltaY

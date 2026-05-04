@@ -2624,6 +2624,55 @@ func TestExecutor_ZoomGestureEvent_PinchUnsupportedUsesFallback(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_ZoomGestureEvent_NeutralScaleDoesNotFallback(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.0},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.0}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.0,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "Method not found", Unsupported: true})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
 func TestExecutor_ZoomGestureEvent_FallbackMagnitudeGrowsWithScale(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
