@@ -65,7 +65,7 @@ type app struct {
 	Exec       wrapper.Exec
 	Math       wrapper.Math
 
-	// Components
+	// Components 
 	CDP               cdp.CDP
 	Relayer           relayer.Relayer
 	DBus              dbus.DBus
