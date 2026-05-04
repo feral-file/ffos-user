@@ -63,7 +63,9 @@ feral-setupd    --[GetRelayerTopicID]------> feral-controld
 
 ### UI control: Chrome DevTools Protocol (CDP)
 
-Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-setupd` drives setup UI pages (QR code, messages, webapp URL). `feral-controld` forwards web commands from the relayer to Chromium via CDP. `feral-watchdog` monitors Chromium health and issues recovery commands via CDP. Neither daemon embeds a web server or serves UI assets directly.
+Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-setupd` drives setup UI pages (QR code, messages, and the bundled local webapp). `feral-controld` forwards web commands from the relayer to Chromium via CDP. `feral-watchdog` monitors Chromium health and issues recovery commands via CDP. Neither daemon embeds a web server or serves UI assets directly.
+
+`feral-player.service` is the readiness gate for the bundled local webapp. Chromium kiosk and any daemon that navigates to the local player must wait for that unit to report `READY=1`.
 
 ### Local device control: Hub WebSocket (port 1111)
 
@@ -88,7 +90,7 @@ Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0
 The boundary between launcher/UI code and daemon logic:
 
 - **Daemons own all state, policy, and side effects.** Daemons decide what page to show, when to update, and what to do on errors.
-- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` or from `https://display.feralfile.com`. Daemons navigate by calling CDP, not by modifying files on disk at runtime.
+- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` or from the bundled local player at `http://127.0.0.1:8080/`. Daemons navigate by calling CDP, not by modifying files on disk at runtime.
 - **`launcher-ui` is a one-shot process starter.** It constructs a URL from command-line arguments (key=value pairs), launches Chromium with `cage` as the Wayland compositor, and waits. It contains no business logic and no daemon lifecycle. Arguments come from the systemd unit; they do not change at runtime.
 - **UI does not call daemons directly** except through the Hub WebSocket (when local control UI in Chromium sends commands to controld on port 1111). All other control flows originate in daemons and push into Chromium via CDP.
 - **`player-wrapper-ui`** follows the same pattern: thin process wrapper, no policy.
@@ -119,7 +121,7 @@ Rules:
 - State writes must be atomic. Use write-to-temp-then-rename (`FILE.tmp` → `FILE`).
 - State files are human-readable JSON. Add fields additively; never rename or remove fields without a migration path.
 - State is not a message bus. Services that need to react to changes in another service's state must use D-Bus signals, not file polling.
-- `ff1-config.json` is read-only at runtime for all services. Only updater scripts write it.
+- `ff1-config.json` is read-only at runtime for all services. Only updater scripts write it. It does not control the local player URL.
 - SSH authorized keys (`/home/feralfile/.ssh/authorized_keys`) are managed by `feral-controld` on behalf of the `sshAccess` command.
 
 ---
