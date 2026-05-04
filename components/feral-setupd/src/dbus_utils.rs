@@ -216,13 +216,16 @@ pub fn call_method<T: Send + Sync + Append>(
 
 /// Checks if the internet is available by calling the `connectivity` method
 /// on the `sys-monitord` service.
-pub fn internet_availability() -> bool {
+///
+/// When `force_refresh` is true, sys-monitord runs an immediate connectivity check.
+/// When false, it returns the last cached result from monitord's background watcher.
+pub fn internet_availability(force_refresh: bool) -> bool {
     match call_method(
         constant::DBUS_SYSMONITORD_DESTINATION,
         constant::DBUS_SYSMONITORD_OBJECT,
         constant::DBUS_SYSMONITORD_INTERFACE,
         constant::DBUS_CONNECTIVITY_METHOD,
-        Some(true), // payload: true means forcing the check instead of using cached value from monitord
+        Some(force_refresh),
         constant::DBUS_INTERNET_CHECK_TIMEOUT,
     ) {
         Ok(response) => response.read1::<bool>().unwrap_or(false),
@@ -234,7 +237,7 @@ pub fn internet_availability() -> bool {
 pub fn on_internet_available<F: FnOnce() + Send + Sync + 'static>(cb: F, stop: Arc<AtomicBool>) {
     tokio::task::spawn_blocking(move || {
         while !stop.load(Ordering::Relaxed) {
-            let internet = internet_availability();
+            let internet = internet_availability(true);
             if internet {
                 cb();
                 break;

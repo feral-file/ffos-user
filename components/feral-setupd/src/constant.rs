@@ -89,6 +89,6 @@ pub const DBUS_RELAYER_TOPIC_ID_METHOD: &str = "GetRelayerTopicID";
 // pub const DBUS_CONTROLD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
 pub const DBUS_MAX_RETRIES: usize = 6;
 pub const DBUS_ACK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
-pub const DBUS_INTERNET_CHECK_TIMEOUT: u64 = 1000; // 1 second
+pub const DBUS_INTERNET_CHECK_TIMEOUT: u64 = 7000; // 7 second
 pub const DBUS_RELAYER_CHECK_TIMEOUT: u64 = 31 * 1000; // 31 seconds
 pub const DBUS_LISTEN_WAKE_UP_INTERVAL: u64 = 1000; // 1 second
