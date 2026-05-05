@@ -24,6 +24,7 @@ func expectDeviceStatusOSMocks(t *testing.T, mockOS *mocks.MockOS) {
 	t.Helper()
 	mockOS.EXPECT().ReadFile(constants.SCREEN_ORIENTATION_FILE).Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile(constants.FF1_CONFIG_FILE).Return([]byte(testFF1ConfigJSON), nil).Times(1)
+	mockOS.EXPECT().ReadFile(constants.SLEEP_SCHEDULE_FILE).Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/analytics-toggle-off").Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().ReadFile("/home/feralfile/.state/beta-features-toggle-on").Return(nil, os.ErrNotExist).Times(1)
 	mockOS.EXPECT().IsNotExist(gomock.Any()).DoAndReturn(func(err error) bool { return os.IsNotExist(err) }).AnyTimes()

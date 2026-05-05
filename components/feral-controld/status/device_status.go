@@ -12,6 +12,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
+	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"golang.org/x/sync/errgroup"
@@ -60,16 +61,17 @@ func NewDeviceStatus(
 
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
-	ScreenRotation      string            `json:"screenRotation,omitempty"`
-	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
-	InstalledVersion    string            `json:"installedVersion,omitempty"`
-	LatestVersion       string            `json:"latestVersion,omitempty"`
-	AnalyticsDisabled   bool              `json:"analyticsDisabled,omitempty"`
-	BetaFeaturesEnabled bool              `json:"betaFeaturesEnabled,omitempty"`
-	MACInfo             map[string]string `json:"macInfo,omitempty"`
-	Volume              *int              `json:"volume,omitempty"`
-	IsMuted             *bool             `json:"isMuted,omitempty"`
-	DisplayURL          *string           `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
+	ScreenRotation      string                `json:"screenRotation,omitempty"`
+	ConnectedWifi       string                `json:"connectedWifi,omitempty"`
+	InstalledVersion    string                `json:"installedVersion,omitempty"`
+	LatestVersion       string                `json:"latestVersion,omitempty"`
+	AnalyticsDisabled   bool                  `json:"analyticsDisabled,omitempty"`
+	BetaFeaturesEnabled bool                  `json:"betaFeaturesEnabled,omitempty"`
+	MACInfo             map[string]string     `json:"macInfo,omitempty"`
+	Volume              *int                  `json:"volume,omitempty"`
+	IsMuted             *bool                 `json:"isMuted,omitempty"`
+	DisplayURL          *string               `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
+	SleepSchedule       *sleepschedule.Status `json:"sleepSchedule,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information
@@ -86,6 +88,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	var volume *int
 	var isMuted *bool
 	var displayURL *string
+	var sleepScheduleStatus *sleepschedule.Status
 
 	// Chrome UI document URL. This is the same target listing the poller uses, but
 	// keeping it here preserves the response shape for direct CMD_DEVICE_STATUS calls.
@@ -179,6 +182,18 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 		return nil
 	})
 
+	g.Go(func() error {
+		record, err := sleepschedule.Load(d.os, d.json)
+		if err != nil {
+			if d.os.IsNotExist(err) {
+				return nil
+			}
+			return nil
+		}
+		sleepScheduleStatus, _ = sleepschedule.EffectiveStatus(time.Now(), record)
+		return nil
+	})
+
 	// Get analytics toggle (disabled when file exists)
 	g.Go(func() error {
 		const analyticsTogglePath = "/home/feralfile/.state/analytics-toggle-off"
@@ -268,6 +283,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 	response.Volume = volume
 	response.IsMuted = isMuted
 	response.DisplayURL = displayURL
+	response.SleepSchedule = sleepScheduleStatus
 
 	// Get MAC info from config (fetched once at startup)
 	cfg := config.Get()

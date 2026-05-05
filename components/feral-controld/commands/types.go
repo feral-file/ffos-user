@@ -38,6 +38,9 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_SSH_ACCESS:                 true,
 	CMD_DDC_PANEL_CONTROL:          true,
 	CMD_DDC_PANEL_STATUS:           true,
+	CMD_SET_SLEEP_SCHEDULE:         true,
+	CMD_SLEEP_NOW:                  true,
+	CMD_WAKE_NOW:                   true,
 }
 
 type Command struct {
@@ -76,6 +79,10 @@ const (
 	CMD_SSH_ACCESS                 Type = "sshAccess"
 	CMD_DISPLAY_DEFAULT_PLAYLIST   Type = "displayDefaultPlaylist"
 	CMD_REFRESH_ARTWORK            Type = "refreshArtwork"
+	CMD_SET_SLEEP_SCHEDULE         Type = "setSleepSchedule"
+	CMD_SLEEP_NOW                  Type = "sleepNow"
+	CMD_WAKE_NOW                   Type = "wakeNow"
+	CMD_SET_SLEEP_MODE             Type = "setSleepMode"
 	// CMD_DDC_PANEL_CONTROL drives the attached panel over DDC via ddcutil (brightness, contrast,
 	// speaker volume, mute, and power). One JSON command type; request body selects the operation.
 	CMD_DDC_PANEL_CONTROL Type = "ddcPanelControl"
