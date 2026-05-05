@@ -1023,9 +1023,11 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	e.logger.Info("Executing upload logs command via DBus")
 
 	var cmdArgs struct {
-		UserID string `json:"userId"`
-		APIKey string `json:"apiKey"`
-		Title  string `json:"title"`
+		UserID               string `json:"userId"`
+		APIKey               string `json:"apiKey"`
+		Title                string `json:"title"`
+		SupportBundleID      string `json:"supportBundleID"`
+		SupportBundleIDSnake string `json:"support_bundle_id"`
 	}
 
 	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
@@ -1036,13 +1038,42 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 		return nil, fmt.Errorf("missing required arguments: userId, apiKey, and title are required")
 	}
 
+	supportBundleID := strings.TrimSpace(cmdArgs.SupportBundleID)
+	if supportBundleID == "" {
+		supportBundleID = strings.TrimSpace(cmdArgs.SupportBundleIDSnake)
+	}
+
+	member := dbus.SETUPD_EVENT_UPLOAD_LOGS
+	body := []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title}
+	if supportBundleID != "" {
+		// Use an additive D-Bus signal for bundled uploads so older setupd listeners
+		// keep the original upload_logs contract unchanged. The new signal carries
+		// JSON bytes so support-bundle metadata can evolve additively.
+		payload, err := e.json.Marshal(struct {
+			UserID          string `json:"user_id"`
+			APIKey          string `json:"api_key"`
+			Title           string `json:"title"`
+			SupportBundleID string `json:"support_bundle_id"`
+		}{
+			UserID:          cmdArgs.UserID,
+			APIKey:          cmdArgs.APIKey,
+			Title:           cmdArgs.Title,
+			SupportBundleID: supportBundleID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal bundled upload logs payload: %w", err)
+		}
+		member = dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE
+		body = []interface{}{payload}
+	}
+
 	// Send DBus signal to setupd to handle log upload
 	err := e.dbus.RetryableSend(ctx,
 		godbus.DBusPayload{
 			Interface: dbus.INTERFACE,
 			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
-			Body:      []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title},
+			Member:    member,
+			Body:      body,
 		})
 	if err != nil {
 		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)

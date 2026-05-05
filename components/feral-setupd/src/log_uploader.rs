@@ -215,6 +215,8 @@ fn write_zip_streaming(
 struct LogSubmissionRequest {
     device_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    support_bundle_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
@@ -243,23 +245,39 @@ struct LogSubmissionResponse {
 }
 
 /// Requests a pre-signed S3 upload URL from the v2 API.
+fn build_log_submission_request(
+    device_id: &str,
+    source: &str,
+    branch: &str,
+    version: &str,
+    support_bundle_id: Option<&str>,
+) -> LogSubmissionRequest {
+    LogSubmissionRequest {
+        device_id: device_id.to_string(),
+        support_bundle_id: support_bundle_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        title: None,
+        source: Some(source.to_string()),
+        tags: vec!["device-logs".to_string()],
+        branch: Some(branch.to_string()),
+        version: Some(version.to_string()),
+    }
+}
+
 async fn get_presigned_url(
     device_id: &str,
     api_key: &str,
     source: &str,
     branch: &str,
     version: &str,
+    support_bundle_id: Option<&str>,
 ) -> Result<String, u8> {
     println!("LOG_UPLOADER: Requesting pre-signed URL from v2 API");
 
-    let request_body = LogSubmissionRequest {
-        device_id: device_id.to_string(),
-        title: None,
-        source: Some(source.to_string()),
-        tags: vec!["device-logs".to_string()],
-        branch: Some(branch.to_string()),
-        version: Some(version.to_string()),
-    };
+    let request_body =
+        build_log_submission_request(device_id, source, branch, version, support_bundle_id);
 
     let client = reqwest::Client::new();
 
@@ -381,6 +399,7 @@ pub async fn submit_logs(
     source: &str,
     branch: &str,
     version: &str,
+    support_bundle_id: Option<&str>,
 ) -> Result<(), u8> {
     println!("LOG_UPLOADER: Starting log submission (v2 API, streaming)");
 
@@ -396,7 +415,15 @@ pub async fn submit_logs(
     // Ensure temp file and directory cleanup on all exit paths
     let result = async {
         // Step 2: Get pre-signed URL from v2 API
-        let upload_url = get_presigned_url(device_id, api_key, source, branch, version).await?;
+        let upload_url = get_presigned_url(
+            device_id,
+            api_key,
+            source,
+            branch,
+            version,
+            support_bundle_id,
+        )
+        .await?;
 
         // Step 3: Stream upload zip to S3
         upload_zip_to_s3(&upload_url, &zip_path).await?;
@@ -426,4 +453,45 @@ pub async fn submit_logs(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_log_submission_request_includes_support_bundle_id() {
+        let request = build_log_submission_request(
+            "ff1-device",
+            "dbus",
+            "develop",
+            "1.2.3",
+            Some(" bundle-123 "),
+        );
+
+        let value = serde_json::to_value(request).expect("serialize request");
+
+        assert_eq!(
+            value,
+            json!({
+                "device_id": "ff1-device",
+                "support_bundle_id": "bundle-123",
+                "source": "dbus",
+                "tags": ["device-logs"],
+                "branch": "develop",
+                "version": "1.2.3"
+            })
+        );
+    }
+
+    #[test]
+    fn build_log_submission_request_omits_empty_support_bundle_id() {
+        let request =
+            build_log_submission_request("ff1-device", "ble", "develop", "1.2.3", Some("   "));
+
+        let value = serde_json::to_value(request).expect("serialize request");
+
+        assert!(value.get("support_bundle_id").is_none());
+    }
 }

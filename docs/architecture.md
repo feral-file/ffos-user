@@ -47,6 +47,7 @@ feral-controld      --[show_pairing_qr_code]-> feral-setupd
                     --[factory_reset]--------> feral-setupd
                     --[system_update]--------> feral-setupd
                     --[upload_logs]----------> feral-setupd
+                    --[upload_logs_with_bundle]-> feral-setupd
 ```
 
 **RPC direction** (request/response):

@@ -51,7 +51,7 @@ There is currently no version suffix in any D-Bus name. Adding a version suffix 
 | Bus name | Object path | Interface | Type | Members |
 |---|---|---|---|---|
 | `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | RPC | `GetRelayerTopicID() → (string, error)` |
-| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | Signal emitter (received from setupd via controld bus) | `show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs` |
+| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | Signal emitter (received from setupd via controld bus) | `show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle` |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | RPC | `GetConnectivityStatus(refresh bool) → (bool, error)`, `GetSysMetrics() → (*SysDBusMetrics, error)` |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | Signal emitter | `sysmetrics`, `connectivity_change`, `sysevent` |
 | `com.feralfile.watchdog` | — | — | Bus name only (no exported RPCs currently) | — |
@@ -110,6 +110,8 @@ All messages are JSON. The message envelope is:
 
 **Command type constants** are defined in `components/feral-controld/commands/types.go`. New remote commands must be added there with a corresponding entry in `deviceCtlCommands` if they require executor handling.
 
+The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional `supportBundleID` or `support_bundle_id`. Without a bundle id, `feral-controld` emits the original `upload_logs(user_id, api_key, title)` signal. With a bundle id, it emits additive `upload_logs_with_bundle(payload []byte)` where `payload` is JSON containing `user_id`, `api_key`, `title`, and `support_bundle_id`, so the old D-Bus signal payload shape stays unchanged and the new bundled upload payload can grow additively.
+
 **Relayer outbound notifications (`feral-controld`):** The device periodically pushes JSON notifications over the relayer WebSocket (and local hub clients) with an envelope that includes `notification_type` and a structured `message`. At minimum:
 
 - `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts.
@@ -146,6 +148,8 @@ The BLE command characteristic uses a binary encoding:
 | `CMD_KEEP_WIFI` | `keep_wifi` | Keep current WiFi and proceed |
 | `CMD_FACTORY_RESET` | `factory_reset` | Initiate factory reset |
 | `CMD_SEND_LOGS` | `send_log` | Upload device logs |
+
+`send_log` accepts `user_id`, `api_key`, and `title` parameters, plus an optional fourth `support_bundle_id` parameter. When present, `feral-setupd` includes it in the FF1 `/v2/ff1/log-submissions` request so support-logs can join FF1 evidence into the support bundle.
 
 **`device_info` string format** (returned by `get_info`):
 
