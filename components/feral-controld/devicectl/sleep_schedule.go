@@ -221,14 +221,14 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 		return err
 	}
 
-	if e.panelDDC != nil {
-		if err := e.applyFfpPowerState(ctx, state); err != nil {
-			e.logger.Warn("Failed to align FFP power with sleep state",
-				zap.Error(err),
-				zap.String("state", string(state)),
-				zap.String("reason", reason))
-		}
-	}
+	// if e.panelDDC != nil {
+	// 	if err := e.applyFfpPowerState(ctx, state); err != nil {
+	// 		e.logger.Warn("Failed to align FFP power with sleep state",
+	// 			zap.Error(err),
+	// 			zap.String("state", string(state)),
+	// 			zap.String("reason", reason))
+	// 	}
+	// }
 
 	if e.statusPoller != nil {
 		e.statusPoller.ForceRefresh()
