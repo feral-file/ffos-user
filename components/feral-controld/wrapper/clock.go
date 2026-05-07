@@ -10,7 +10,7 @@ import (
 type Clock interface {
 	Now() time.Time
 	Sleep(d time.Duration)
-	// SleepContext waits until d elapses unless ctx is cancelled first. Returns ctx.Err() when ctx is done before d.
+	// SleepContext waits until d elapses unless ctx is canceled first. Returns ctx.Err() when ctx is done before d.
 	SleepContext(ctx context.Context, d time.Duration) error
 	NewTicker(d time.Duration) Ticker
 }
