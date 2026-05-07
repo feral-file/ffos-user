@@ -22,10 +22,7 @@ func NewClock() Clock {
 }
 
 func (t *clock) Now() time.Time {
-	// Always return UTC so sleep schedule clock-times (HH:MM strings) are
-	// interpreted consistently regardless of the system timezone configured
-	// on the device. Callers must treat sleepTime/wakeTime as UTC values.
-	return time.Now().UTC()
+	return time.Now()
 }
 
 func (t *clock) Sleep(d time.Duration) {

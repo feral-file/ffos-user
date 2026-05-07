@@ -9,7 +9,7 @@ import (
 )
 
 func TestEffectiveStatus_DaytimeWindow(t *testing.T) {
-	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.Local)
 	status, changed := EffectiveStatus(now, &Record{
 		Enabled:   true,
 		SleepTime: "22:00",
@@ -25,7 +25,7 @@ func TestEffectiveStatus_DaytimeWindow(t *testing.T) {
 }
 
 func TestEffectiveStatus_OvernightSleepingWindow(t *testing.T) {
-	now := time.Date(2026, 5, 5, 23, 15, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 5, 23, 15, 0, 0, time.Local)
 	status, changed := EffectiveStatus(now, &Record{
 		Enabled:   true,
 		SleepTime: "22:00",
@@ -41,7 +41,7 @@ func TestEffectiveStatus_OvernightSleepingWindow(t *testing.T) {
 }
 
 func TestNormalize_ExpiredOverride(t *testing.T) {
-	now := time.Date(2026, 5, 5, 8, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 5, 8, 0, 0, 0, time.Local)
 	expired := now.Add(-time.Minute)
 	record, changed := Normalize(&Record{
 		Enabled:       true,
@@ -58,7 +58,7 @@ func TestNormalize_ExpiredOverride(t *testing.T) {
 }
 
 func TestManualSleep_UsesNextWakeBoundary(t *testing.T) {
-	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.Local)
 	record, err := ManualSleep(&Record{
 		Enabled:   true,
 		SleepTime: "22:00",
@@ -75,7 +75,7 @@ func TestManualSleep_UsesNextWakeBoundary(t *testing.T) {
 }
 
 func TestManualWake_UsesNextSleepBoundary(t *testing.T) {
-	now := time.Date(2026, 5, 5, 23, 30, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 5, 23, 30, 0, 0, time.Local)
 	record, err := ManualWake(&Record{
 		Enabled:   true,
 		SleepTime: "22:00",

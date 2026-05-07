@@ -17,12 +17,6 @@ const (
 	StateSleeping State = "sleeping"
 )
 
-// Record holds the persisted sleep schedule configuration.
-// SleepTime and WakeTime are wall-clock strings in "HH:MM" format and are
-// always interpreted as UTC. The daemon pins time.Now() to UTC so that
-// schedule behaviour is independent of the system timezone configured on
-// the device. Callers (e.g. the Flutter app) must send and display these
-// values in UTC, converting to/from local time on the client side.
 type Record struct {
 	Enabled       bool       `json:"enabled"`
 	SleepTime     string     `json:"sleepTime,omitempty"`
