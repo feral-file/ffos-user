@@ -2005,13 +2005,76 @@ func TestExecutor_MouseLongPressEvent_SleepsAndReleases(t *testing.T) {
 
 	gomock.InOrder(
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
-		ts.mockClock.EXPECT().Sleep(1*time.Second),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(nil),
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
 	)
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseLongPressEvent_ContextCanceledDuringHoldReleasesDefer(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(context.Canceled),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, result)
 }
 
 func TestExecutor_MouseLongPressEvent_ReleaseFailureAttemptsCleanup(t *testing.T) {
@@ -2069,7 +2132,7 @@ func TestExecutor_MouseLongPressEvent_ReleaseFailureAttemptsCleanup(t *testing.T
 	releaseErr := errors.New("release failed")
 	gomock.InOrder(
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
-		ts.mockClock.EXPECT().Sleep(1*time.Second),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(nil),
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, releaseErr),
 		// cleanup attempt
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
@@ -2131,7 +2194,7 @@ func TestExecutor_MouseLongPressEvent_MiddleButton(t *testing.T) {
 	}
 	gomock.InOrder(
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
-		ts.mockClock.EXPECT().Sleep(1*time.Second),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(nil),
 		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
 	)
 	result, err := ts.executor.Execute(ts.ctx, cmd)

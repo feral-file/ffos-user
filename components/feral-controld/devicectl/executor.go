@@ -145,7 +145,7 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_MOUSE_DOUBLE_TAP_EVENT:
 		result, err = e.handleMouseDoubleTapEvent(bytes)
 	case commands.CMD_MOUSE_LONG_PRESS_EVENT:
-		result, err = e.handleMouseLongPressEvent(bytes)
+		result, err = e.handleMouseLongPressEvent(ctx, bytes)
 	case commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT:
 		result, err = e.handleMouseClickAndDragEvent(bytes)
 	case commands.CMD_ZOOM_GESTURE:
@@ -841,7 +841,7 @@ func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (e *executor) handleMouseLongPressEvent(args []byte) (interface{}, error) {
+func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (interface{}, error) {
 	e.initializeScreenDimensions()
 
 	button, pressedButtons, err := e.parseMouseButton(args)
@@ -888,7 +888,11 @@ func (e *executor) handleMouseLongPressEvent(args []byte) (interface{}, error) {
 	}
 	pressed = true
 
-	e.clock.Sleep(1 * time.Second)
+	// Hold duration must respect ctx so teardown can unwind without waiting the full second
+	// while the button is still logically down in Chromium.
+	if err := e.clock.SleepContext(ctx, 1*time.Second); err != nil {
+		return nil, err
+	}
 
 	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
 	if err != nil {
