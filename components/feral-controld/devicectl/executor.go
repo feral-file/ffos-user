@@ -841,7 +841,7 @@ func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (interface{}, error) {
+func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (result interface{}, err error) {
 	e.initializeScreenDimensions()
 
 	button, pressedButtons, err := e.parseMouseButton(args)
@@ -876,8 +876,16 @@ func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (
 			return
 		}
 		_, releaseErr := e.cdp.Send("Input.dispatchMouseEvent", upParams)
+		pressed = false
 		if releaseErr != nil {
 			e.logger.Error("Failed to release mouse button via CDP during cleanup", zap.Error(releaseErr))
+			// Join with any return err (e.g. ctx cancel during hold vs CDP stuck-button cleanup failure).
+			cleanupErr := fmt.Errorf("failed to release mouse button during cleanup: %w", releaseErr)
+			if err != nil {
+				err = errors.Join(err, cleanupErr)
+				return
+			}
+			err = cleanupErr
 		}
 	}()
 
@@ -890,7 +898,7 @@ func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (
 
 	// Hold duration must respect ctx so teardown can unwind without waiting the full second
 	// while the button is still logically down in Chromium.
-	if err := e.clock.SleepContext(ctx, 1*time.Second); err != nil {
+	if err = e.clock.SleepContext(ctx, 1*time.Second); err != nil {
 		return nil, err
 	}
 

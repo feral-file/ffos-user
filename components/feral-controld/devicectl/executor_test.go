@@ -2077,6 +2077,72 @@ func TestExecutor_MouseLongPressEvent_ContextCanceledDuringHoldReleasesDefer(t *
 	assert.Nil(t, result)
 }
 
+func TestExecutor_MouseLongPressEvent_ContextCanceledDuringHold_CleanupReleaseFails(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	cleanupErr := errors.New("cdp release failed during cleanup")
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(context.Canceled),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, cleanupErr),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Nil(t, result)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.ErrorIs(t, err, cleanupErr)
+	assert.Contains(t, err.Error(), "failed to release mouse button during cleanup")
+}
+
 func TestExecutor_MouseLongPressEvent_ReleaseFailureAttemptsCleanup(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
