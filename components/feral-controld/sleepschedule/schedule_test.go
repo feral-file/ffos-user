@@ -8,6 +8,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestEffectiveStatus_DefaultRecord_DisabledNoTransitions(t *testing.T) {
+	for _, now := range []time.Time{
+		time.Date(2026, 5, 5, 14, 30, 0, 0, time.UTC),
+		time.Date(2026, 5, 5, 23, 0, 0, 0, time.UTC),
+	} {
+		t.Run(now.Format(time.RFC3339), func(t *testing.T) {
+			status, changed := EffectiveStatus(now, DefaultRecord())
+			require.NotNil(t, status)
+			assert.False(t, changed)
+			assert.False(t, status.Enabled)
+			assert.Equal(t, DefaultSleepTime, status.SleepTime)
+			assert.Equal(t, DefaultWakeTime, status.WakeTime)
+			assert.Equal(t, StateAwake, status.CurrentState)
+			assert.Nil(t, status.NextTransitionAt)
+		})
+	}
+}
+
 func TestEffectiveStatus_DaytimeWindow(t *testing.T) {
 	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.Local)
 	status, changed := EffectiveStatus(now, &Record{

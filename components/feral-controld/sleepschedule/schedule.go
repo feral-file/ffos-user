@@ -15,6 +15,12 @@ type State string
 const (
 	StateAwake    State = "awake"
 	StateSleeping State = "sleeping"
+
+	// DefaultSleepTime and DefaultWakeTime pre-fill the record when
+	// sleep-schedule.json is missing or empty; EffectiveStatus ignores the
+	// window until enabled is true. HH:MM uses the caller's time.Location().
+	DefaultSleepTime = "22:00"
+	DefaultWakeTime  = "07:30"
 )
 
 type Record struct {
@@ -67,7 +73,11 @@ func (c ClockTime) OnDay(t time.Time) time.Time {
 }
 
 func DefaultRecord() *Record {
-	return &Record{}
+	return &Record{
+		Enabled:   false,
+		SleepTime: DefaultSleepTime,
+		WakeTime:  DefaultWakeTime,
+	}
 }
 
 func Validate(record *Record) error {

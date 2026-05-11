@@ -137,7 +137,7 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 		return nil, err
 	}
 	if record == nil {
-		record = &sleepschedule.Record{}
+		record = sleepschedule.DefaultRecord()
 	}
 
 	record.Enabled = cmd.Enabled
