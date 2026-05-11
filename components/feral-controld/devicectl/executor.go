@@ -1043,8 +1043,12 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 		supportBundleID = strings.TrimSpace(cmdArgs.SupportBundleIDSnake)
 	}
 
-	member := dbus.SETUPD_EVENT_UPLOAD_LOGS
-	body := []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title}
+	legacyPayload := godbus.DBusPayload{
+		Interface: dbus.INTERFACE,
+		Path:      dbus.PATH,
+		Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
+		Body:      []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title},
+	}
 	if supportBundleID != "" {
 		// Use an additive D-Bus signal for bundled uploads so older setupd listeners
 		// keep the original upload_logs contract unchanged. The new signal carries
@@ -1063,19 +1067,25 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal bundled upload logs payload: %w", err)
 		}
-		member = dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE
-		body = []interface{}{payload}
+		bundledPayload := godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
+			Body:      []interface{}{payload},
+		}
+		if err := e.dbus.RetryableSend(ctx, bundledPayload); err == nil {
+			return CmdOK, nil
+		} else {
+			e.logger.Warn("bundled upload logs signal failed; falling back to legacy upload_logs signal", zap.Error(err))
+			if fallbackErr := e.dbus.RetryableSend(ctx, legacyPayload); fallbackErr != nil {
+				return nil, fmt.Errorf("failed to send bundled upload logs signal: %w; legacy fallback failed: %v", err, fallbackErr)
+			}
+			return CmdOK, nil
+		}
 	}
 
 	// Send DBus signal to setupd to handle log upload
-	err := e.dbus.RetryableSend(ctx,
-		godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    member,
-			Body:      body,
-		})
-	if err != nil {
+	if err := e.dbus.RetryableSend(ctx, legacyPayload); err != nil {
 		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)
 	}
 
