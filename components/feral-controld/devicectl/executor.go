@@ -2,6 +2,7 @@ package devicectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1078,7 +1079,7 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 		} else {
 			e.logger.Warn("bundled upload logs signal failed; falling back to legacy upload_logs signal", zap.Error(err))
 			if fallbackErr := e.dbus.RetryableSend(ctx, legacyPayload); fallbackErr != nil {
-				return nil, fmt.Errorf("failed to send bundled upload logs signal: %w; legacy fallback failed: %v", err, fallbackErr)
+				return nil, fmt.Errorf("failed to send bundled upload logs signal; legacy fallback failed: %w", errors.Join(err, fallbackErr))
 			}
 			return CmdOK, nil
 		}
