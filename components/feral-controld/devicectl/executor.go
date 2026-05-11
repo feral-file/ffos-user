@@ -1023,9 +1023,11 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	e.logger.Info("Executing upload logs command via DBus")
 
 	var cmdArgs struct {
-		UserID string `json:"userId"`
-		APIKey string `json:"apiKey"`
-		Title  string `json:"title"`
+		UserID               string `json:"userId"`
+		APIKey               string `json:"apiKey"`
+		Title                string `json:"title"`
+		SupportBundleID      string `json:"supportBundleID"`
+		SupportBundleIDSnake string `json:"support_bundle_id"`
 	}
 
 	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
@@ -1036,15 +1038,49 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 		return nil, fmt.Errorf("missing required arguments: userId, apiKey, and title are required")
 	}
 
-	// Send DBus signal to setupd to handle log upload
-	err := e.dbus.RetryableSend(ctx,
-		godbus.DBusPayload{
+	supportBundleID := strings.TrimSpace(cmdArgs.SupportBundleID)
+	if supportBundleID == "" {
+		supportBundleID = strings.TrimSpace(cmdArgs.SupportBundleIDSnake)
+	}
+
+	legacyPayload := godbus.DBusPayload{
+		Interface: dbus.INTERFACE,
+		Path:      dbus.PATH,
+		Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
+		Body:      []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title},
+	}
+	if supportBundleID != "" {
+		// Use an additive D-Bus signal for bundled uploads so older setupd listeners
+		// keep the original upload_logs contract unchanged. The new signal carries
+		// JSON bytes so support-bundle metadata can evolve additively.
+		payload, err := e.json.Marshal(struct {
+			UserID          string `json:"user_id"`
+			APIKey          string `json:"api_key"`
+			Title           string `json:"title"`
+			SupportBundleID string `json:"support_bundle_id"`
+		}{
+			UserID:          cmdArgs.UserID,
+			APIKey:          cmdArgs.APIKey,
+			Title:           cmdArgs.Title,
+			SupportBundleID: supportBundleID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal bundled upload logs payload: %w", err)
+		}
+		bundledPayload := godbus.DBusPayload{
 			Interface: dbus.INTERFACE,
 			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
-			Body:      []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title},
-		})
-	if err != nil {
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
+			Body:      []interface{}{payload},
+		}
+		if err := e.dbus.RetryableSend(ctx, bundledPayload); err != nil {
+			return nil, fmt.Errorf("failed to send bundled upload logs signal: %w", err)
+		}
+		return CmdOK, nil
+	}
+
+	// Send DBus signal to setupd to handle log upload
+	if err := e.dbus.RetryableSend(ctx, legacyPayload); err != nil {
 		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)
 	}
 

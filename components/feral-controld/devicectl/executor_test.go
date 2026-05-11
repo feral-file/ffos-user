@@ -3213,9 +3213,11 @@ func TestExecutor_UploadLogs_Success(t *testing.T) {
 		Unmarshal(gomock.Any(), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			if args, ok := v.(*struct {
-				UserID string `json:"userId"`
-				APIKey string `json:"apiKey"`
-				Title  string `json:"title"`
+				UserID               string `json:"userId"`
+				APIKey               string `json:"apiKey"`
+				Title                string `json:"title"`
+				SupportBundleID      string `json:"supportBundleID"`
+				SupportBundleIDSnake string `json:"support_bundle_id"`
 			}); ok {
 				args.UserID = "test-user-id"
 				args.APIKey = "test-api-key"
@@ -3238,6 +3240,173 @@ func TestExecutor_UploadLogs_Success(t *testing.T) {
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_UploadLogs_WithSupportBundleID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_UPLOAD_LOGS,
+		Arguments: map[string]interface{}{
+			"userId":          "test-user-id",
+			"apiKey":          "test-api-key",
+			"title":           "test-title",
+			"supportBundleID": "bundle-123",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","supportBundleID":"bundle-123"}`), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			if args, ok := v.(*struct {
+				UserID               string `json:"userId"`
+				APIKey               string `json:"apiKey"`
+				Title                string `json:"title"`
+				SupportBundleID      string `json:"supportBundleID"`
+				SupportBundleIDSnake string `json:"support_bundle_id"`
+			}); ok {
+				args.UserID = "test-user-id"
+				args.APIKey = "test-api-key"
+				args.Title = "test-title"
+				args.SupportBundleID = "bundle-123"
+			}
+			return nil
+		})
+
+	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-123"}`)
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return(bundledPayload, nil)
+
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
+			Body:      []interface{}{bundledPayload},
+		}).
+		Return(nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_UploadLogs_WithSnakeCaseSupportBundleID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_UPLOAD_LOGS,
+		Arguments: map[string]interface{}{
+			"userId":            "test-user-id",
+			"apiKey":            "test-api-key",
+			"title":             "test-title",
+			"support_bundle_id": "bundle-456",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","support_bundle_id":"bundle-456"}`), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			if args, ok := v.(*struct {
+				UserID               string `json:"userId"`
+				APIKey               string `json:"apiKey"`
+				Title                string `json:"title"`
+				SupportBundleID      string `json:"supportBundleID"`
+				SupportBundleIDSnake string `json:"support_bundle_id"`
+			}); ok {
+				args.UserID = "test-user-id"
+				args.APIKey = "test-api-key"
+				args.Title = "test-title"
+				args.SupportBundleIDSnake = "bundle-456"
+			}
+			return nil
+		})
+
+	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-456"}`)
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return(bundledPayload, nil)
+
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
+			Body:      []interface{}{bundledPayload},
+		}).
+		Return(nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_UploadLogs_WithSupportBundleIDReturnsBundledSignalError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_UPLOAD_LOGS,
+		Arguments: map[string]interface{}{
+			"userId":          "test-user-id",
+			"apiKey":          "test-api-key",
+			"title":           "test-title",
+			"supportBundleID": "bundle-123",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","supportBundleID":"bundle-123"}`), nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			if args, ok := v.(*struct {
+				UserID               string `json:"userId"`
+				APIKey               string `json:"apiKey"`
+				Title                string `json:"title"`
+				SupportBundleID      string `json:"supportBundleID"`
+				SupportBundleIDSnake string `json:"support_bundle_id"`
+			}); ok {
+				args.UserID = "test-user-id"
+				args.APIKey = "test-api-key"
+				args.Title = "test-title"
+				args.SupportBundleID = "bundle-123"
+			}
+			return nil
+		})
+
+	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-123"}`)
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return(bundledPayload, nil)
+
+	ts.mockDBus.EXPECT().
+		RetryableSend(ts.ctx, godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
+			Body:      []interface{}{bundledPayload},
+		}).
+		Return(errors.New("ack timeout"))
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to send bundled upload logs signal")
+	assert.Contains(t, err.Error(), "ack timeout")
 }
 
 func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
@@ -3320,9 +3489,11 @@ func TestExecutor_UploadLogs_DBusError(t *testing.T) {
 		Unmarshal(gomock.Any(), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			if args, ok := v.(*struct {
-				UserID string `json:"userId"`
-				APIKey string `json:"apiKey"`
-				Title  string `json:"title"`
+				UserID               string `json:"userId"`
+				APIKey               string `json:"apiKey"`
+				Title                string `json:"title"`
+				SupportBundleID      string `json:"supportBundleID"`
+				SupportBundleIDSnake string `json:"support_bundle_id"`
 			}); ok {
 				args.UserID = "test-user-id"
 				args.APIKey = "test-api-key"

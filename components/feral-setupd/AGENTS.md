@@ -83,8 +83,8 @@ daemon paths.
 
 ### D-Bus signals received (`src/dbus_utils.rs`, `src/constant.rs`)
 
-`feral-setupd` listens for four signals sent by `feral-controld` on controld's
-own bus. All four arrive on:
+`feral-setupd` listens for signals sent by `feral-controld` on controld's
+own bus. They arrive on:
 - Bus name: `com.feralfile.controld`
 - Object path: `/com/feralfile/controld`
 - Interface: `com.feralfile.controld.general`
@@ -95,6 +95,7 @@ own bus. All four arrive on:
 | `factory_reset` | Starts the factory-reset flow |
 | `system_update` | Triggers a software update |
 | `upload_logs` | Uploads device logs |
+| `upload_logs_with_bundle` | Uploads device logs with a `support_bundle_id` for support evidence unification |
 
 **ACK mechanism**: `listen_for_signal` in `dbus_utils.rs` calls the registered
 callback when a signal is received, then immediately emits `{member}_ack` back
@@ -144,6 +145,15 @@ vector so it fits the existing BLE encoder.
 
 There is intentionally no separate BLE `get_device_info` command; `get_info`
 is the canonical source for `device_info`.
+
+### Log upload support bundle
+
+BLE `send_log` keeps the existing first three parameters (`user_id`, `api_key`,
+`title`) and accepts an optional fourth `support_bundle_id`. D-Bus keeps the
+original `upload_logs(user_id, api_key, title)` signal and uses additive
+`upload_logs_with_bundle(payload []byte)` when controld needs to attach FF1
+logs to a support bundle. The bundled payload is JSON and includes `user_id`,
+`api_key`, `title`, and `support_bundle_id`.
 
 ## Keep this file updated
 
