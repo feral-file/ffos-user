@@ -2,7 +2,6 @@ package devicectl
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1074,15 +1073,10 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
 			Body:      []interface{}{payload},
 		}
-		if err := e.dbus.RetryableSend(ctx, bundledPayload); err == nil {
-			return CmdOK, nil
-		} else {
-			e.logger.Warn("bundled upload logs signal failed; falling back to legacy upload_logs signal", zap.Error(err))
-			if fallbackErr := e.dbus.RetryableSend(ctx, legacyPayload); fallbackErr != nil {
-				return nil, fmt.Errorf("failed to send bundled upload logs signal; legacy fallback failed: %w", errors.Join(err, fallbackErr))
-			}
-			return CmdOK, nil
+		if err := e.dbus.RetryableSend(ctx, bundledPayload); err != nil {
+			return nil, fmt.Errorf("failed to send bundled upload logs signal: %w", err)
 		}
+		return CmdOK, nil
 	}
 
 	// Send DBus signal to setupd to handle log upload
