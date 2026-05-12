@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
@@ -17,6 +18,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
@@ -36,6 +38,7 @@ type testSetup struct {
 	mockDBus         *mocks.MockDBus
 	mockStatus       *mocks.MockStatusPoller
 	mockJSON         *mocks.MockJSON
+	mockClock        *mocks.MockClock
 	mockOS           *mocks.MockOS
 	mockExec         *mocks.MockExec
 	mockExecCmd      *mocks.MockExecCmd
@@ -55,6 +58,7 @@ func setup(t *testing.T) *testSetup {
 	mockDBus := mocks.NewMockDBus(ctrl)
 	mockStatus := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
 	mockExec := mocks.NewMockExec(ctrl)
 	mockExecCmd := mocks.NewMockExecCmd(ctrl)
@@ -68,7 +72,19 @@ func setup(t *testing.T) *testSetup {
 	panelDDC := ddc.New(mockExec, logger)
 
 	// Create executor with mocks
-	executor := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, panelDDC, mockJSON, mockOS, mockExec, mockMath, logger)
+	executor := devicectl.New(
+		mockCDP,
+		mockDBus,
+		mockDeviceStatus,
+		mockStatus,
+		panelDDC,
+		mockJSON,
+		mockOS,
+		mockExec,
+		mockMath,
+		mockClock,
+		logger,
+	)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -78,6 +94,7 @@ func setup(t *testing.T) *testSetup {
 		mockDBus:         mockDBus,
 		mockStatus:       mockStatus,
 		mockJSON:         mockJSON,
+		mockClock:        mockClock,
 		mockOS:           mockOS,
 		mockExec:         mockExec,
 		mockExecCmd:      mockExecCmd,
@@ -1646,6 +1663,17 @@ func TestExecutor_MouseTapEvent_Success(t *testing.T) {
 			"height": screenHeight,
 		}, nil)
 
+	// parseMouseButton default left
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
 	// Mock CDP Send for mouse press
 	downParams := map[string]interface{}{
 		"type":       "mousePressed",
@@ -1678,6 +1706,1677 @@ func TestExecutor_MouseTapEvent_Success(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_MouseTapEvent_RightButton(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Set up test data
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_TAP_EVENT,
+		Arguments: map[string]interface{}{
+			"button": "right",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"button":"right"}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"button":"right"}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = "right"
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "right",
+		"buttons":    2,
+		"clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", downParams).
+		Return(nil, nil)
+
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "right",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", upParams).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseTapEvent_InvalidButton(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_TAP_EVENT,
+		Arguments: map[string]interface{}{
+			"button": "nope",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"button":"nope"}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"button":"nope"}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			p := v.(*struct {
+				Button string `json:"button"`
+			})
+			p.Button = "nope"
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown mouse button")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_MouseDoubleTapEvent_DefaultLeft(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_DOUBLE_TAP_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	// parseMouseButton default left
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	firstDown := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	firstUp := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+	secondDown := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 2,
+	}
+	secondUp := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 2,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstDown).Return(nil, nil)
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstUp).Return(nil, nil)
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", secondDown).Return(nil, nil)
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", secondUp).Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseDoubleTapEvent_ReleaseFailureAttemptsCleanup(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_DOUBLE_TAP_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	// parseMouseButton default left
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	firstDown := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	firstUp := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	releaseErr := errors.New("release failed")
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstDown).Return(nil, nil),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstUp).Return(nil, releaseErr),
+		// cleanup attempt
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", firstUp).Return(nil, nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to release mouse button")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_MouseLongPressEvent_SleepsAndReleases(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(nil),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseLongPressEvent_ContextCanceledDuringHoldReleasesDefer(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(context.Canceled),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, result)
+}
+
+func TestExecutor_MouseLongPressEvent_ContextCanceledDuringHold_CleanupReleaseFails(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	cleanupErr := errors.New("cdp release failed during cleanup")
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(context.Canceled),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, cleanupErr),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Nil(t, result)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.ErrorIs(t, err, cleanupErr)
+	assert.Contains(t, err.Error(), "failed to release mouse button during cleanup")
+}
+
+func TestExecutor_MouseLongPressEvent_ReleaseFailureAttemptsCleanup(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = ""
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	releaseErr := errors.New("release failed")
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(nil),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, releaseErr),
+		// cleanup attempt
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
+	)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to release mouse button")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_MouseLongPressEvent_MiddleButton(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{
+			"button": "middle",
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{"button":"middle"}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"button":"middle"}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				Button string `json:"button"`
+			})
+			args.Button = "middle"
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "middle",
+		"buttons":    4,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "middle",
+		"buttons":    0,
+		"clickCount": 1,
+	}
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", downParams).Return(nil, nil),
+		ts.mockClock.EXPECT().SleepContext(ts.ctx, 1*time.Second).Return(nil),
+		ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", upParams).Return(nil, nil),
+	)
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseClickAndDragEvent_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID": "test-msg-id",
+			"cursorOffsets": []map[string]interface{}{
+				{"dx": 10.0, "dy": 5.0},
+			},
+		},
+	}
+
+	argsJSON := `{"messageID":"test-msg-id","cursorOffsets":[{"dx":10.0,"dy":5.0}]}`
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(argsJSON), nil)
+
+	// Screen init
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"width":  screenWidth,
+			"height": screenHeight,
+		}, nil)
+
+	// First unmarshal: clickAndDrag checks offsets are non-empty
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{
+				{DX: 10.0, DY: 5.0},
+			}
+			return nil
+		})
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", downParams).
+		Return(nil, nil)
+
+	// Second unmarshal: handleMouseMoveEventWithButtons does full decode
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				MessageID     string `json:"messageID"`
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			args.MessageID = "test-msg-id"
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{
+				{DX: 10.0, DY: 5.0},
+			}
+			return nil
+		})
+
+	// magnitude sqrt(10^2 + 5^2)
+	ts.mockMath.EXPECT().Sqrt(125.0).Return(11.180339887498949)
+
+	// bounds after one step: (960,540) -> (970,545)
+	ts.mockMath.EXPECT().Min(970.0, 1920.0).Return(970.0)
+	ts.mockMath.EXPECT().Max(0.0, 970.0).Return(970.0)
+	ts.mockMath.EXPECT().Min(545.0, 1080.0).Return(545.0)
+	ts.mockMath.EXPECT().Max(0.0, 545.0).Return(545.0)
+
+	ts.mockJSON.EXPECT().
+		Marshal(map[string]interface{}{
+			"messageID": "test-msg-id",
+			"message": map[string]interface{}{
+				"command": "cursorUpdate",
+				"request": map[string]interface{}{
+					"positions": []map[string]float64{
+						{"x": 970.0, "y": 545.0},
+					},
+				},
+			},
+		}).
+		Return([]byte(`{"messageID":"test-msg-id","message":{"command":"cursorUpdate","request":{"positions":[{"x":970,"y":545}]}}}`), nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", map[string]interface{}{
+			"expression": `window.handleCDPRequest({"messageID":"test-msg-id","message":{"command":"cursorUpdate","request":{"positions":[{"x":970,"y":545}]}}})`,
+		}).
+		Return(nil, nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":       "mouseMoved",
+			"x":          970.0,
+			"y":          545.0,
+			"button":     "none",
+			"buttons":    1,
+			"clickCount": 0,
+		}).
+		Return(nil, nil)
+
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":       "mouseReleased",
+			"x":          970.0,
+			"y":          545.0,
+			"button":     "left",
+			"buttons":    0,
+			"clickCount": 1,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_MouseClickAndDragEvent_ReleaseFailureReturnsError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID": "release-failure",
+			"cursorOffsets": []map[string]interface{}{
+				{"dx": 2.0, "dy": 0.0},
+			},
+		},
+	}
+	argsJSON := `{"messageID":"release-failure","cursorOffsets":[{"dx":2.0,"dy":0.0}]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag probe)")
+			}
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 2, DY: 0}}
+			return nil
+		}).
+		Times(1)
+	down := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          centerX,
+		"y":          centerY,
+		"button":     "left",
+		"buttons":    1,
+		"clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", down).Return(nil, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				MessageID     string `json:"messageID"`
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag move)")
+			}
+			args.MessageID = "release-failure"
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 2, DY: 0}}
+			return nil
+		})
+	ts.mockMath.EXPECT().Sqrt(4.0).Return(2.0)
+	ts.mockMath.EXPECT().Min(962.0, 1920.0).Return(962.0)
+	ts.mockMath.EXPECT().Max(0.0, 962.0).Return(962.0)
+	ts.mockMath.EXPECT().Min(540.0, 1080.0).Return(540.0)
+	ts.mockMath.EXPECT().Max(0.0, 540.0).Return(540.0)
+	ts.mockJSON.EXPECT().
+		Marshal(map[string]interface{}{
+			"messageID": "release-failure",
+			"message": map[string]interface{}{
+				"command": "cursorUpdate",
+				"request": map[string]interface{}{
+					"positions": []map[string]float64{{"x": 962.0, "y": 540.0}},
+				},
+			},
+		}).
+		Return([]byte(`{"messageID":"release-failure","message":{"command":"cursorUpdate","request":{"positions":[{"x":962,"y":540}]}}}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", map[string]interface{}{
+			"expression": `window.handleCDPRequest({"messageID":"release-failure","message":{"command":"cursorUpdate","request":{"positions":[{"x":962,"y":540}]}}})`,
+		}).
+		Return(nil, nil)
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":       "mouseMoved",
+			"x":          962.0,
+			"y":          540.0,
+			"button":     "none",
+			"buttons":    1,
+			"clickCount": 0,
+		}).
+		Return(nil, nil)
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":       "mouseReleased",
+			"x":          962.0,
+			"y":          540.0,
+			"button":     "left",
+			"buttons":    0,
+			"clickCount": 1,
+		}).
+		Return(nil, errors.New("release failed"))
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to release mouse button")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_MouseClickAndDragEvent_ReleasesOnMoveError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID": "m1",
+			"cursorOffsets": []map[string]interface{}{
+				{"dx": 1.0, "dy": 0.0},
+			},
+		},
+	}
+	argsJSON := `{"messageID":"m1","cursorOffsets":[{"dx":1.0,"dy":0.0}]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag probe)")
+			}
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 1, DY: 0}}
+			return nil
+		}).
+		Times(1)
+	down := map[string]interface{}{
+		"type": "mousePressed", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 1, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", down).Return(nil, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		Return(errors.New("unmarshal move failed")).
+		Times(1)
+	// best-effort release at current cursor (still at center) when move step fails
+	release := map[string]interface{}{
+		"type": "mouseReleased", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 0, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", release).Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unmarshal move failed")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_MouseClickAndDragEvent_MoveErrorAndCleanupReleaseErrorJoined(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID": "m2",
+			"cursorOffsets": []map[string]interface{}{
+				{"dx": 1.0, "dy": 0.0},
+			},
+		},
+	}
+	argsJSON := `{"messageID":"m2","cursorOffsets":[{"dx":1.0,"dy":0.0}]}`
+
+	moveRoot := errors.New("unmarshal move failed")
+	cleanupRoot := errors.New("cdp cleanup release failed")
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args, ok := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			if !ok {
+				return errors.New("unexpected unmarshal type (click-and-drag probe)")
+			}
+			args.CursorOffsets = []struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}{{DX: 1, DY: 0}}
+			return nil
+		}).
+		Times(1)
+	down := map[string]interface{}{
+		"type": "mousePressed", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 1, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", down).Return(nil, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		Return(moveRoot).
+		Times(1)
+	release := map[string]interface{}{
+		"type": "mouseReleased", "x": centerX, "y": centerY,
+		"button": "left", "buttons": 0, "clickCount": 1,
+	}
+	ts.mockCDP.EXPECT().Send("Input.dispatchMouseEvent", release).Return(nil, cleanupRoot)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.True(t, errors.Is(err, moveRoot), "expected move error in joined result")
+	assert.True(t, errors.Is(err, cleanupRoot), "expected cleanup release error in joined result")
+}
+
+func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.05, 0.98},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.05,0.98]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.05, 0.98}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.05,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, nil)
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       0.98,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_WithMessageID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"messageID":  "z1",
+			"scaleSteps": []float64{1.1},
+		},
+	}
+	argsJSON := `{"messageID":"z1","scaleSteps":[1.1]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.MessageID = "z1"
+			in.ScaleSteps = []float64{1.1}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.1,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_EmptyScaleSteps(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{"scaleSteps": []float64{}},
+	}
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(`{"scaleSteps":[]}`), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"scaleSteps":[]}`), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = nil
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_CDPError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.01},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.01]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.01}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.01,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, errors.New("cdp pinch failed"))
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to process zoom gesture")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_ZoomGestureEvent_UnsupportedExperimentalMethod(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.02},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.02]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.02}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.02,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "unknown method", Unsupported: true})
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":      "mouseWheel",
+			"x":         centerX,
+			"y":         centerY,
+			"deltaX":    0,
+			"deltaY":    -120.0,
+			"button":    "none",
+			"buttons":   0,
+			"modifiers": 2,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_PinchUnsupportedUsesFallback(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{0.98},
+		},
+	}
+	argsJSON := `{"scaleSteps":[0.98]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{0.98}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       0.98,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "Method not found", Unsupported: true})
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":      "mouseWheel",
+			"x":         centerX,
+			"y":         centerY,
+			"deltaX":    0,
+			"deltaY":    120.0,
+			"button":    "none",
+			"buttons":   0,
+			"modifiers": 2,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_NeutralScaleDoesNotFallback(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.0},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.0}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.0,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "Method not found", Unsupported: true})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_FallbackMagnitudeGrowsWithScale(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.5},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.5]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.5}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.5,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "unknown method", Unsupported: true})
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":      "mouseWheel",
+			"x":         centerX,
+			"y":         centerY,
+			"deltaX":    0,
+			"deltaY":    -600.0,
+			"button":    "none",
+			"buttons":   0,
+			"modifiers": 2,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_PinchNotSupportedFails(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.02},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.02]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.02}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.02,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, errors.New("feature not supported"))
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to process zoom gesture")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_ZoomGestureEvent_InvalidScaleStepFailsFast(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{0},
+		},
+	}
+	argsJSON := `{"scaleSteps":[0]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{0}
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "scaleSteps must be positive")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_ZoomGestureEvent_InvalidScaleStepFailsBeforeDispatch(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.05, 0},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.05,0]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.05, 0}
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "scaleSteps must be positive")
+	assert.Nil(t, result)
+}
+
+func TestExecutor_ZoomGestureEvent_UnsupportedWordingFallbacks(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{0.98},
+		},
+	}
+	argsJSON := `{"scaleSteps":[0.98]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{0.98}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       0.98,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "wasn't found", Unsupported: true})
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":      "mouseWheel",
+			"x":         centerX,
+			"y":         centerY,
+			"deltaX":    0,
+			"deltaY":    120.0,
+			"button":    "none",
+			"buttons":   0,
+			"modifiers": 2,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_UnsupportedMethodWithNameFallbacks(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.02},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.02]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.02}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.02,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "method not found", Unsupported: true})
+	ts.mockCDP.EXPECT().
+		Send("Input.dispatchMouseEvent", map[string]interface{}{
+			"type":      "mouseWheel",
+			"x":         centerX,
+			"y":         centerY,
+			"deltaX":    0,
+			"deltaY":    -120.0,
+			"button":    "none",
+			"buttons":   0,
+			"modifiers": 2,
+		}).
+		Return(nil, nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
+func TestExecutor_ZoomGestureEvent_TargetNotFoundDoesNotFallback(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+	centerX := screenWidth / 2
+	centerY := screenHeight / 2
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.02},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.02]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.02}
+			return nil
+		})
+	ts.mockCDP.EXPECT().
+		Send("Input.synthesizePinchGesture", map[string]interface{}{
+			"x":                 centerX,
+			"y":                 centerY,
+			"scaleFactor":       1.02,
+			"relativeSpeed":     800,
+			"gestureSourceType": "default",
+		}).
+		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "Target not found", Unsupported: false})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to process zoom gesture")
+	assert.Nil(t, result)
+}
+
 func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1706,6 +3405,17 @@ func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
 				ts.mockCDP.EXPECT().
 					Send("Runtime.evaluate", gomock.Any()).
 					Return(nil, errors.New("cdp screen failed"))
+
+				// parseMouseButton default left
+				ts.mockJSON.EXPECT().
+					Unmarshal([]byte(`{}`), gomock.Any()).
+					DoAndReturn(func(_ []byte, v interface{}) error {
+						args := v.(*struct {
+							Button string `json:"button"`
+						})
+						args.Button = ""
+						return nil
+					})
 
 				// Mock CDP Send for mouse press (should still work with default dimensions)
 				ts.mockCDP.EXPECT().
@@ -1753,6 +3463,17 @@ func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
 						"height": 1080.0,
 					}, nil)
 
+				// parseMouseButton default left
+				ts.mockJSON.EXPECT().
+					Unmarshal([]byte(`{}`), gomock.Any()).
+					DoAndReturn(func(_ []byte, v interface{}) error {
+						args := v.(*struct {
+							Button string `json:"button"`
+						})
+						args.Button = ""
+						return nil
+					})
+
 				// Mock CDP Send for mouse press to fail
 				ts.mockCDP.EXPECT().
 					Send("Input.dispatchMouseEvent", gomock.Any()).
@@ -1776,24 +3497,47 @@ func TestExecutor_MouseTapEvent_Errors(t *testing.T) {
 						"height": 1080.0,
 					}, nil)
 
-				// Mock CDP Send for mouse press success
-				ts.mockCDP.EXPECT().
-					Send("Input.dispatchMouseEvent", gomock.Any()).
-					DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
-						// Verify mousePressed event
-						assert.Equal(t, "mousePressed", params["type"])
-						assert.Equal(t, 960.0, params["x"]) // Screen center
-						assert.Equal(t, 540.0, params["y"])
-						assert.Equal(t, "left", params["button"])
-						assert.Equal(t, 1, params["buttons"])
-						assert.Equal(t, 1, params["clickCount"])
-						return nil, nil
+				// parseMouseButton default left
+				ts.mockJSON.EXPECT().
+					Unmarshal([]byte(`{}`), gomock.Any()).
+					DoAndReturn(func(_ []byte, v interface{}) error {
+						args := v.(*struct {
+							Button string `json:"button"`
+						})
+						args.Button = ""
+						return nil
 					})
 
-				// Mock CDP Send for mouse release to fail
-				ts.mockCDP.EXPECT().
-					Send("Input.dispatchMouseEvent", gomock.Any()).
-					Return(nil, errors.New("cdp mouse release failed"))
+				releaseErr := errors.New("cdp mouse release failed")
+				gomock.InOrder(
+					// Mock CDP Send for mouse press success
+					ts.mockCDP.EXPECT().
+						Send("Input.dispatchMouseEvent", gomock.Any()).
+						DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+							// Verify mousePressed event
+							assert.Equal(t, "mousePressed", params["type"])
+							assert.Equal(t, 960.0, params["x"]) // Screen center
+							assert.Equal(t, 540.0, params["y"])
+							assert.Equal(t, "left", params["button"])
+							assert.Equal(t, 1, params["buttons"])
+							assert.Equal(t, 1, params["clickCount"])
+							return nil, nil
+						}),
+					// Mock CDP Send for mouse release to fail
+					ts.mockCDP.EXPECT().
+						Send("Input.dispatchMouseEvent", gomock.Any()).
+						DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+							assert.Equal(t, "mouseReleased", params["type"])
+							return nil, releaseErr
+						}),
+					// Cleanup: best-effort release retry
+					ts.mockCDP.EXPECT().
+						Send("Input.dispatchMouseEvent", gomock.Any()).
+						DoAndReturn(func(method string, params map[string]interface{}) (interface{}, error) {
+							assert.Equal(t, "mouseReleased", params["type"])
+							return nil, nil
+						}),
+				)
 			},
 			wantErr: "failed to release mouse button",
 		},
@@ -3524,12 +5268,25 @@ func TestExecutor_NewHandler(t *testing.T) {
 	mockDeviceStatus := mocks.NewMockDeviceStatus(ctrl)
 	mockStatus := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
 	mockExec := mocks.NewMockExec(ctrl)
 	mockMath := mocks.NewMockMath(ctrl)
 	panelDDC := mocks.NewMockPanelDDC(ctrl)
 
-	handler := devicectl.New(mockCDP, mockDBus, mockDeviceStatus, mockStatus, panelDDC, mockJSON, mockOS, mockExec, mockMath, logger)
+	handler := devicectl.New(
+		mockCDP,
+		mockDBus,
+		mockDeviceStatus,
+		mockStatus,
+		panelDDC,
+		mockJSON,
+		mockOS,
+		mockExec,
+		mockMath,
+		mockClock,
+		logger,
+	)
 	assert.NotNil(t, handler)
 }
 
