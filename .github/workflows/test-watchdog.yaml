@@ -5,6 +5,7 @@ on:
     paths:
       - 'components/feral-watchdog/**/*.go'
       - '.golangci.yml'
+      - 'Makefile'
       - 'components/feral-watchdog/go.mod'
       - 'components/feral-watchdog/go.sum'
   workflow_call:
@@ -26,9 +27,6 @@ jobs:
   test:
     name: Test feral-watchdog (Go)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./components/feral-watchdog
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,13 +38,12 @@ jobs:
           cache: true
           cache-dependency-path: components/feral-watchdog/go.sum
 
-      - name: Install dependencies
-        run: go mod download
+      - name: Run local verification target
+        run: make verify-feral-watchdog-test
 
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: Run tests with coverage
+      - name: Generate coverage
+        if: ${{ inputs.upload-coverage == true }}
+        working-directory: ./components/feral-watchdog
         run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
 
       - name: Upload coverage to Codecov
