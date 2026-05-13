@@ -327,11 +327,16 @@ func applyOverride(record *Record, now time.Time, state State) (*Record, error) 
 }
 
 func nextOccurrence(now time.Time, clockTime ClockTime) time.Time {
+	loc := now.Location()
 	candidate := clockTime.OnDay(now)
-	if !candidate.After(now) {
-		return candidate.Add(24 * time.Hour)
+	if candidate.After(now) {
+		return candidate
 	}
-	return candidate
+	// Advance by one local calendar day, not Add(24*time.Hour). On DST transition
+	// days a civil day is not always 86400s long; +24h skews the next wall-clock
+	// slot (see sleepschedule tests: Europe/Paris spring 2025).
+	noonNext := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, loc).AddDate(0, 0, 1)
+	return clockTime.OnDay(noonNext)
 }
 
 func isSleepingAt(now time.Time, sleepTime, wakeTime ClockTime) bool {

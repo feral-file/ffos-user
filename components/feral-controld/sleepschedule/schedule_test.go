@@ -92,6 +92,47 @@ func TestManualSleep_UsesNextWakeBoundary(t *testing.T) {
 	assert.True(t, record.OverrideUntil.After(now))
 }
 
+func TestNextOccurrence_SameLocalDayWhenStillAhead(t *testing.T) {
+	loc := time.FixedZone("CST8", 8*3600)
+	now := time.Date(2026, 5, 5, 14, 30, 0, 0, loc)
+	ct := ClockTime{Hour: 22, Minute: 0}
+	got := nextOccurrence(now, ct)
+	want := time.Date(2026, 5, 5, 22, 0, 0, 0, loc)
+	assert.Equal(t, want, got)
+}
+
+func TestNextOccurrence_DstSpringEuropeParis_WallClockNextDay(t *testing.T) {
+	paris, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Skip("tzdata unavailable:", err)
+	}
+	// Spring forward night 2025-03-30: 02:00 CET -> 03:00 CEST. After transition,
+	// +24h from "today's" 02:30 wall slot skews +1h vs the next calendar day's 02:30.
+	now := time.Date(2025, 3, 30, 18, 0, 0, 0, paris)
+	ct := ClockTime{Hour: 2, Minute: 30}
+	got := nextOccurrence(now, ct)
+	want := time.Date(2025, 3, 31, 2, 30, 0, 0, paris)
+	assert.Equal(t, want, got)
+	assert.Equal(t, 2, got.Hour())
+	assert.Equal(t, 30, got.Minute())
+}
+
+func TestNextOccurrence_NextDayUsesCalendarAdvance_NotRaw86400s(t *testing.T) {
+	paris, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Skip("tzdata unavailable:", err)
+	}
+	now := time.Date(2025, 3, 30, 18, 0, 0, 0, paris)
+	ct := ClockTime{Hour: 2, Minute: 30}
+	candidate := ct.OnDay(now)
+	require.False(t, candidate.After(now))
+
+	legacy := candidate.Add(24 * time.Hour)
+	got := nextOccurrence(now, ct)
+	assert.NotEqual(t, legacy, got, "legacy +24h must not match calendar next occurrence on this DST edge")
+	assert.Equal(t, time.Hour, legacy.Sub(got), "calendar next is one hour earlier than +24h at this Paris spring edge")
+}
+
 func TestManualWake_UsesNextSleepBoundary(t *testing.T) {
 	now := time.Date(2026, 5, 5, 23, 30, 0, 0, time.Local)
 	record, err := ManualWake(&Record{
