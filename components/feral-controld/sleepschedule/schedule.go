@@ -99,60 +99,45 @@ func LocalTimezone() *time.Location {
 func loadZoneFromLocaltimeSymlink() (*time.Location, bool) {
 	target, err := stdsys.Readlink("/etc/localtime")
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: readlink /etc/localtime failed: %v", err)
 		return nil, false
 	}
-
 	const zoneMarker = "zoneinfo/"
 	idx := strings.Index(target, zoneMarker)
 	if idx < 0 {
-		log.Printf("[sleepschedule] LocalTimezone: marker %q not found in symlink target %q", zoneMarker, target)
 		return nil, false
 	}
-
-	name := target[idx+len(zoneMarker):]
-	loc, err := time.LoadLocation(name)
+	loc, err := time.LoadLocation(target[idx+len(zoneMarker):])
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: LoadLocation(%q) failed: %v", name, err)
 		return nil, false
 	}
-
-	log.Printf("[sleepschedule] LocalTimezone: resolved %q via /etc/localtime symlink", name)
 	return loc, true
 }
 
 func loadZoneFromEtcTimezone() (*time.Location, bool) {
 	data, err := stdsys.ReadFile("/etc/timezone")
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: read /etc/timezone failed: %v", err)
 		return nil, false
 	}
 	name := strings.TrimSpace(string(data))
 	if name == "" {
-		log.Printf("[sleepschedule] LocalTimezone: /etc/timezone is empty")
 		return nil, false
 	}
 	loc, err := time.LoadLocation(name)
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: LoadLocation(%q from /etc/timezone) failed: %v", name, err)
 		return nil, false
 	}
-	log.Printf("[sleepschedule] LocalTimezone: resolved %q via /etc/timezone", name)
 	return loc, true
 }
 
 func loadZoneFromLocaltimeData() (*time.Location, bool) {
 	data, err := stdsys.ReadFile("/etc/localtime")
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: read /etc/localtime failed: %v", err)
 		return nil, false
 	}
 	loc, err := time.LoadLocationFromTZData("Local", data)
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: LoadLocationFromTZData(/etc/localtime) failed: %v", err)
 		return nil, false
 	}
-	log.Printf("[sleepschedule] LocalTimezone: resolved via raw /etc/localtime TZif data")
 	return loc, true
 }
 
