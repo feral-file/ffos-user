@@ -2,6 +2,7 @@ package sleepschedule
 
 import (
 	"fmt"
+	stdsys "os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -69,20 +70,38 @@ func (c ClockTime) Format() string {
 	return fmt.Sprintf("%02d:%02d", c.Hour, c.Minute)
 }
 
-// LoadSystemTimezone reads the IANA timezone name from /etc/timezone and
-// returns the corresponding Location. This bypasses time.Local, which Go
-// caches once at process start: if feral-controld starts before the device
-// timezone is configured (e.g. during initial setup), time.Local stays UTC
-// for the entire process lifetime even after /etc/localtime is later set.
-// Falls back to time.Local when /etc/timezone is absent or unreadable.
+// LoadSystemTimezone returns the device's current local timezone, bypassing
+// Go's process-level time.Local cache. time.Local is read once at process
+// start; if feral-controld starts before the timezone is configured, it stays
+// UTC for the lifetime of that process even after /etc/localtime is updated.
+//
+// Resolution order:
+//  1. /etc/timezone — plain IANA name, present on Debian/Ubuntu.
+//  2. /etc/localtime symlink — present on all Linux distros; target path
+//     encodes the IANA name as /usr/share/zoneinfo/<name>.
+//  3. time.Local — last resort if neither file is readable.
 func LoadSystemTimezone(os wrapper.OS) *time.Location {
-	data, err := os.ReadFile("/etc/timezone")
-	if err == nil {
-		name := strings.TrimSpace(string(data))
-		if loc, err := time.LoadLocation(name); err == nil {
-			return loc
+	// /etc/timezone (Debian/Ubuntu style — plain text IANA name)
+	if data, err := os.ReadFile("/etc/timezone"); err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" {
+			if loc, err := time.LoadLocation(name); err == nil {
+				return loc
+			}
 		}
 	}
+
+	// /etc/localtime is a symlink → /usr/share/zoneinfo/<name>.
+	// Reading the symlink target is always fresh: it reflects whatever
+	// timedatectl / setup wrote, regardless of when this process started.
+	if target, err := stdsys.Readlink("/etc/localtime"); err == nil {
+		const zonePrefix = "/usr/share/zoneinfo/"
+		if strings.HasPrefix(target, zonePrefix) {
+			if loc, err := time.LoadLocation(target[len(zonePrefix):]); err == nil {
+				return loc
+			}
+		}
+	}
+
 	return time.Local
 }
 
