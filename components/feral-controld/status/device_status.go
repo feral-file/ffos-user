@@ -61,17 +61,20 @@ func NewDeviceStatus(
 
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
-	ScreenRotation      string                `json:"screenRotation,omitempty"`
-	ConnectedWifi       string                `json:"connectedWifi,omitempty"`
-	InstalledVersion    string                `json:"installedVersion,omitempty"`
-	LatestVersion       string                `json:"latestVersion,omitempty"`
-	AnalyticsDisabled   bool                  `json:"analyticsDisabled,omitempty"`
-	BetaFeaturesEnabled bool                  `json:"betaFeaturesEnabled,omitempty"`
-	MACInfo             map[string]string     `json:"macInfo,omitempty"`
-	Volume              *int                  `json:"volume,omitempty"`
-	IsMuted             *bool                 `json:"isMuted,omitempty"`
-	DisplayURL          *string               `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
-	SleepSchedule       *sleepschedule.Status `json:"sleepSchedule,omitempty"`
+	ScreenRotation      string            `json:"screenRotation,omitempty"`
+	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
+	InstalledVersion    string            `json:"installedVersion,omitempty"`
+	LatestVersion       string            `json:"latestVersion,omitempty"`
+	AnalyticsDisabled   bool              `json:"analyticsDisabled,omitempty"`
+	BetaFeaturesEnabled bool              `json:"betaFeaturesEnabled,omitempty"`
+	MACInfo             map[string]string `json:"macInfo,omitempty"`
+	Volume              *int              `json:"volume,omitempty"`
+	IsMuted             *bool             `json:"isMuted,omitempty"`
+	DisplayURL          *string           `json:"displayURL,omitempty"` // Chrome UI URL from CDP; omitted if unavailable.
+	// SleepSchedule is derived from persisted schedule + wall clock (see sleepschedule).
+	// It reflects intended FF1 sleep mode; FFP panel DDC power may lag after transitions
+	// because controld aligns panel power asynchronously (best-effort, eventual vs. ddcPanelStatus).
+	SleepSchedule *sleepschedule.Status `json:"sleepSchedule,omitempty"`
 }
 
 // GetStatus retrieves comprehensive device status information

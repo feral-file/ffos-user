@@ -13,10 +13,13 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 )
 
-// ffpSleepPowerControlTimeout bounds best-effort panel DDC power alignment after
-// sleep transitions. ApplyControl can take many seconds on failure; the relayer
-// path that updates the sleep schedule is much tighter, so this work must not
-// block applySleepTransition (see applyFfpPowerStateAsync).
+// ffpSleepPowerControlTimeout bounds each DDC ApplyControl attempt in the sleep
+// power-alignment worker. ApplyControl can take many seconds on failure; relayer
+// paths must not block on it (see applyFfpPowerStateAsync).
+//
+// The worker uses a detached timeout context so relayer request cancellation does
+// not abort an in-flight DDC call. Process exit still abandons queued or running
+// work without draining the worker (best-effort only).
 const ffpSleepPowerControlTimeout = 60 * time.Second
 
 // sleepPowerAlignJob carries one best-effort FFP panel power alignment request.
@@ -229,8 +232,22 @@ func (e *executor) applyManualSleepOverride(ctx context.Context, state sleepsche
 }
 
 func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule.State, reason string) error {
-	// Keep FF1 sleep mode and FFP panel power changes in one transition helper so
-	// schedule ticks and manual overrides cannot drift into separate control paths.
+	// Single entry point so schedule ticks and manual overrides cannot drift across CDP vs. DDC.
+	// Cross-subsystem contract (schedule loop + setSleepSchedule + sleepNow/wakeNow):
+	//
+	//   • Player sleep mode (CDP) is synchronous on ctx: failure returns to the
+	//     caller; success means the FF1 player is driven to the requested mode.
+	//
+	//   • FFP panel power (DDC) is best-effort and asynchronous: it must not block
+	//     relayer deadlines. A single worker serializes ApplyControl and coalesces
+	//     rapid transitions; failures are logged only.
+	//
+	//   • Status refresh runs immediately after CDP succeeds. Notifications may
+	//     therefore show the new sleepSchedule / player sleep state while DDC-derived
+	//     panel fields (e.g. from ddcPanelStatus) are still catching up — eventual
+	//     consistency across hardware vs. player.
+	//
+	//   • Shutdown does not wait for queued or in-flight DDC alignment.
 	if err := e.applyPlayerSleepMode(ctx, state == sleepschedule.StateSleeping); err != nil {
 		return err
 	}
@@ -244,13 +261,13 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 	return nil
 }
 
-// applyFfpPowerStateAsync aligns panel power with the sleep state without blocking
-// the caller. FFP DDC can exceed relayer deadlines even when player sleep mode
-// already succeeded; failures are logged only.
+// applyFfpPowerStateAsync enqueues best-effort panel power alignment; it never blocks
+// the caller. See applySleepTransition for the full contract (eventual DDC vs.
+// synchronous player, status refresh timing, shutdown).
 //
-// A dedicated worker serializes ApplyControl calls and coalesces pending jobs so
-// a slow DDC completion cannot apply stale power after a newer transition (for
-// example sleep then wake while the first DDC round-trip is still in flight).
+// A dedicated worker serializes ApplyControl and coalesces pending jobs so a slow
+// DDC completion cannot apply stale power after a newer transition (e.g. sleep
+// then wake while the first round-trip is still in flight).
 func (e *executor) applyFfpPowerStateAsync(state sleepschedule.State, reason string) {
 	if e.panelDDC == nil {
 		return
@@ -285,6 +302,9 @@ func (e *executor) runSleepPowerAlignWorker() {
 	for {
 		job := <-e.sleepPowerAlignCh
 		job = e.drainCoalescedSleepPowerAlignJobs(job)
+		// Detached from the relayer/schedule ctx so a cancelled HTTP/WebSocket request
+		// does not abort DDC mid-flight; alignment remains best-effort with bounded
+		// wall time only (see ffpSleepPowerControlTimeout).
 		ddcCtx, cancel := context.WithTimeout(context.Background(), ffpSleepPowerControlTimeout)
 		if err := e.applyFfpPowerState(ddcCtx, job.state); err != nil {
 			e.logger.Warn("Failed to align FFP power with sleep state (best effort)",
