@@ -298,6 +298,11 @@ func applyOverride(record *Record, now time.Time, state State) (*Record, error) 
 	updated.OverrideState = state.Ptr()
 	updated.OverrideUntil = nil
 
+	// When the schedule is disabled there is no next automatic boundary, so
+	// OverrideUntil stays nil and Normalize will never time out this override.
+	// devicectl clears Override* on every setSleepSchedule save so re-enabling
+	// (or changing hours) cannot inherit a stale sleepNow/wakeNow from while off.
+
 	if record.Enabled {
 		sleepTime, err := ParseClockTime(record.SleepTime)
 		if err != nil {

@@ -161,10 +161,11 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 		record.WakeTime = cmd.WakeTime
 	}
 
-	if !record.Enabled {
-		record.OverrideState = nil
-		record.OverrideUntil = nil
-	}
+	// Recomputing the schedule should always drop any stale manual override.
+	// Otherwise a previous sleepNow/wakeNow call can keep winning after the
+	// schedule is re-enabled.
+	record.OverrideState = nil
+	record.OverrideUntil = nil
 
 	if err := sleepschedule.Save(e.os, e.json, record); err != nil {
 		return nil, err
