@@ -2,6 +2,8 @@ package sleepschedule
 
 import (
 	"fmt"
+	"log"
+	stdsys "os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -66,6 +68,42 @@ func ParseClockTime(raw string) (ClockTime, error) {
 
 func (c ClockTime) Format() string {
 	return fmt.Sprintf("%02d:%02d", c.Hour, c.Minute)
+}
+
+// LocalTimezone reads the device's current timezone fresh from /etc/localtime
+// on every call. This bypasses Go's process-level time.Local cache, which is
+// set once at startup — if feral-controld starts before the timezone is
+// configured, time.Local stays UTC for the entire process lifetime.
+//
+// The symlink target may be absolute (/usr/share/zoneinfo/...) or relative
+// (../usr/share/zoneinfo/...) depending on the distro, so we search for the
+// "zoneinfo/" marker rather than requiring a fixed prefix.
+// Falls back to time.Local if the symlink is absent or unreadable.
+func LocalTimezone() *time.Location {
+	target, err := stdsys.Readlink("/etc/localtime")
+	if err != nil {
+		log.Printf("[sleepschedule] LocalTimezone: readlink /etc/localtime failed: %v — falling back to time.Local (%s)", err, time.Local)
+		return time.Local
+	}
+
+	log.Printf("[sleepschedule] LocalTimezone: /etc/localtime -> %s", target)
+
+	const zoneMarker = "zoneinfo/"
+	idx := strings.Index(target, zoneMarker)
+	if idx < 0 {
+		log.Printf("[sleepschedule] LocalTimezone: marker %q not found in %q — falling back to time.Local (%s)", zoneMarker, target, time.Local)
+		return time.Local
+	}
+
+	name := target[idx+len(zoneMarker):]
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		log.Printf("[sleepschedule] LocalTimezone: LoadLocation(%q) failed: %v — falling back to time.Local (%s)", name, err, time.Local)
+		return time.Local
+	}
+
+	log.Printf("[sleepschedule] LocalTimezone: resolved %q", name)
+	return loc
 }
 
 func (c ClockTime) OnDay(t time.Time) time.Time {

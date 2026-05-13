@@ -190,7 +190,7 @@ func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, err
 			}
 			return nil
 		}
-		sleepScheduleStatus, _ = sleepschedule.EffectiveStatus(time.Now(), record)
+		sleepScheduleStatus, _ = sleepschedule.EffectiveStatus(time.Now().In(sleepschedule.LocalTimezone()), record)
 		return nil
 	})
 

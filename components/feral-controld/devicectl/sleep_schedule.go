@@ -53,7 +53,7 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 			continue
 		}
 
-		now := e.clock.Now()
+		now := e.clock.Now().In(sleepschedule.LocalTimezone())
 		normalized, changed := sleepschedule.Normalize(record, now)
 		if changed {
 			if err := sleepschedule.Save(e.os, e.json, normalized); err != nil {
@@ -157,7 +157,7 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 		return nil, err
 	}
 
-	now := e.clock.Now()
+	now := e.clock.Now().In(sleepschedule.LocalTimezone())
 	status, _ := sleepschedule.EffectiveStatus(now, record)
 	if err := e.applySleepTransition(ctx, status.CurrentState, "schedule-update"); err != nil {
 		return nil, err
@@ -184,7 +184,7 @@ func (e *executor) applyManualSleepOverride(ctx context.Context, state sleepsche
 		return nil, err
 	}
 
-	now := e.clock.Now()
+	now := e.clock.Now().In(sleepschedule.LocalTimezone())
 	var updated *sleepschedule.Record
 	switch state {
 	case sleepschedule.StateSleeping:
