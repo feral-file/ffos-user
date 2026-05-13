@@ -113,12 +113,12 @@ func main() {
 	// Initialize system command executor
 	commandHandler := NewCommandHandler(log, vmagentClient)
 
-	// Initialize CDP client
+	// Initialize CDP client. Chromium owns the CDP socket lifecycle and can be
+	// temporarily absent during boot, OTA, kiosk restarts, or crash recovery. The
+	// watchdog must keep its own recovery monitors alive in those states instead
+	// of letting systemd restart this process and amplify Sentry noise.
 	cdpClient := cdp.NewDefault(&cdp.Config{Endpoint: config.CDPConfig.Endpoint}, log)
-	err = cdpClient.Init(ctx)
-	if err != nil {
-		log.Fatal("CDP init failed", zap.Error(err))
-	}
+	initCDPBestEffort(ctx, cdpClient, log)
 	defer cdpClient.Close()
 
 	// Initialize resource monitors
@@ -185,4 +185,12 @@ func main() {
 	}
 
 	log.Info("feral-watchdog daemon shutdown complete")
+}
+
+func initCDPBestEffort(ctx context.Context, cdpClient cdp.ClientInterface, log *zap.Logger) bool {
+	if err := cdpClient.Init(ctx); err != nil {
+		log.Warn("CDP init unavailable; watchdog will retry on demand", zap.Error(err))
+		return false
+	}
+	return true
 }

@@ -39,9 +39,13 @@ func NewChromiumMonitor(cdpEndpoint string, logger *zap.Logger, commandHandler *
 		client: &http.Client{
 			Timeout: CHROMIUM_REQUEST_TIMEOUT,
 		},
-		logger:             logger,
-		restartHistory:     make([]time.Time, 0, CHROMIUM_RESTART_HISTORY_SIZE),
-		lastSuccessfulResp: time.Time{},
+		logger:         logger,
+		restartHistory: make([]time.Time, 0, CHROMIUM_RESTART_HISTORY_SIZE),
+		// Chromium can be legitimately unavailable while kiosk startup or
+		// restart is in progress. Starting the grace window at monitor creation
+		// prevents a single early refused connection from becoming an immediate
+		// restart/reboot decision.
+		lastSuccessfulResp: time.Now(),
 		commandHandler:     commandHandler,
 	}
 }
