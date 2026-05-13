@@ -253,6 +253,8 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
 
+	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)
+
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
 	if err != nil {

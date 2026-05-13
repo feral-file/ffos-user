@@ -82,6 +82,19 @@ type executor struct {
 	clock wrapper.Clock
 
 	panelDDC ddc.PanelDDC
+
+	// Serialized, coalescing queue for applyFfpPowerStateAsync (see sleep_schedule.go).
+	sleepPowerAlignCh        chan sleepPowerAlignJob
+	sleepPowerAlignOnce      sync.Once
+	sleepPowerAlignEnqueueMu sync.Mutex
+
+	sleepScheduleWakeCh chan struct{}
+	sleepScheduleMu     sync.Mutex
+	sleepScheduleRun    bool
+
+	// sleepScheduleFileMu: serialize sleep-schedule.json Load/Save (loop + commands).
+	// Do not hold across waits, applySleepTransition, or wakeSleepScheduleLoop.
+	sleepScheduleFileMu sync.Mutex
 }
 
 func New(
@@ -180,6 +193,12 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.ddcPanelControl(ctx, bytes)
 	case commands.CMD_DDC_PANEL_STATUS:
 		result, err = e.ddcPanelStatus(ctx, bytes)
+	case commands.CMD_SET_SLEEP_SCHEDULE:
+		result, err = e.setSleepSchedule(ctx, bytes)
+	case commands.CMD_SLEEP_NOW:
+		result, err = e.sleepNow(ctx)
+	case commands.CMD_WAKE_NOW:
+		result, err = e.wakeNow(ctx)
 	default:
 		return nil, fmt.Errorf("invalid command: %s", cmd)
 	}
