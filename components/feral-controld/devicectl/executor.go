@@ -91,6 +91,10 @@ type executor struct {
 	sleepScheduleWakeCh chan struct{}
 	sleepScheduleMu     sync.Mutex
 	sleepScheduleRun    bool
+
+	// sleepScheduleFileMu: serialize sleep-schedule.json Load/Save (loop + commands).
+	// Do not hold across waits, applySleepTransition, or wakeSleepScheduleLoop.
+	sleepScheduleFileMu sync.Mutex
 }
 
 func New(

@@ -60,8 +60,10 @@ func (e *executor) startSleepScheduleLoop(ctx context.Context) {
 
 func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 	for {
+		e.sleepScheduleFileMu.Lock()
 		record, err := sleepschedule.Load(e.os, e.json)
 		if err != nil {
+			e.sleepScheduleFileMu.Unlock()
 			e.logger.Error("Failed to load sleep schedule", zap.Error(err))
 			if !e.waitForSleepScheduleSignal(ctx, 30*time.Second) {
 				return
@@ -76,6 +78,7 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 				e.logger.Error("Failed to persist normalized sleep schedule", zap.Error(err))
 			}
 		}
+		e.sleepScheduleFileMu.Unlock()
 
 		status, _ := sleepschedule.EffectiveStatus(now, normalized)
 		if err := e.applySleepTransition(ctx, status.CurrentState, "schedule-loop"); err != nil {
@@ -148,8 +151,10 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
+	e.sleepScheduleFileMu.Lock()
 	record, err := sleepschedule.Load(e.os, e.json)
 	if err != nil {
+		e.sleepScheduleFileMu.Unlock()
 		return nil, err
 	}
 	if record == nil {
@@ -171,8 +176,10 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 	record.OverrideUntil = nil
 
 	if err := sleepschedule.Save(e.os, e.json, record); err != nil {
+		e.sleepScheduleFileMu.Unlock()
 		return nil, err
 	}
+	e.sleepScheduleFileMu.Unlock()
 
 	now := e.clock.Now().In(sleepschedule.LocalTimezone())
 	status, _ := sleepschedule.EffectiveStatus(now, record)
@@ -196,8 +203,10 @@ func (e *executor) wakeNow(ctx context.Context) (interface{}, error) {
 }
 
 func (e *executor) applyManualSleepOverride(ctx context.Context, state sleepschedule.State) (interface{}, error) {
+	e.sleepScheduleFileMu.Lock()
 	record, err := sleepschedule.Load(e.os, e.json)
 	if err != nil {
+		e.sleepScheduleFileMu.Unlock()
 		return nil, err
 	}
 
@@ -212,12 +221,15 @@ func (e *executor) applyManualSleepOverride(ctx context.Context, state sleepsche
 		err = fmt.Errorf("unsupported manual sleep override state %q", state)
 	}
 	if err != nil {
+		e.sleepScheduleFileMu.Unlock()
 		return nil, err
 	}
 
 	if err := sleepschedule.Save(e.os, e.json, updated); err != nil {
+		e.sleepScheduleFileMu.Unlock()
 		return nil, err
 	}
+	e.sleepScheduleFileMu.Unlock()
 
 	status, _ := sleepschedule.EffectiveStatus(now, updated)
 	if err := e.applySleepTransition(ctx, state, "manual-override"); err != nil {
@@ -302,7 +314,7 @@ func (e *executor) runSleepPowerAlignWorker() {
 	for {
 		job := <-e.sleepPowerAlignCh
 		job = e.drainCoalescedSleepPowerAlignJobs(job)
-		// Detached from the relayer/schedule ctx so a cancelled HTTP/WebSocket request
+		// Detached from the relayer/schedule ctx so a canceled HTTP/WebSocket request
 		// does not abort DDC mid-flight; alignment remains best-effort with bounded
 		// wall time only (see ffpSleepPowerControlTimeout).
 		ddcCtx, cancel := context.WithTimeout(context.Background(), ffpSleepPowerControlTimeout)
