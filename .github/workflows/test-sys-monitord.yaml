@@ -5,6 +5,7 @@ on:
     paths:
       - 'components/feral-sys-monitord/**/*.go'
       - '.golangci.yml'
+      - 'Makefile'
       - 'components/feral-sys-monitord/go.mod'
       - 'components/feral-sys-monitord/go.sum'
   workflow_call:
@@ -26,9 +27,6 @@ jobs:
   test:
     name: Test feral-sys-monitord (Go)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./components/feral-sys-monitord
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,13 +38,12 @@ jobs:
           cache: true
           cache-dependency-path: components/feral-sys-monitord/go.sum
 
-      - name: Install dependencies
-        run: go mod download
+      - name: Run local verification target
+        run: make verify-feral-sys-monitord-test
 
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: Run tests with coverage
+      - name: Generate coverage
+        if: ${{ inputs.upload-coverage == true }}
+        working-directory: ./components/feral-sys-monitord
         run: go test -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/mocks|/wrapper")
 
       - name: Upload coverage to Codecov

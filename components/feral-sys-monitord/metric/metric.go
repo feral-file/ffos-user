@@ -46,6 +46,8 @@ func init() {
 	metricsRegistry.MustRegister(CPUTemperatureCelsius, CPUUptimeSeconds)
 }
 
+var errBestEffortMetricUnavailable = errors.New("best-effort metric unavailable")
+
 func MetricsGatherer() prometheus.Gatherer {
 	return metricsRegistry
 }
@@ -167,6 +169,9 @@ func (p *SysResMonitor) tick(ctx context.Context, interval time.Duration, fns ..
 		for _, fn := range fns {
 			err := fn(ctx)
 			if err != nil {
+				if errors.Is(err, errBestEffortMetricUnavailable) {
+					continue
+				}
 				p.logger.Error("Failed to monitor system resources", zap.Error(err))
 				continue
 			}
@@ -651,8 +656,8 @@ func (p *SysResMonitor) monitorScreen(ctx context.Context) error {
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		p.logger.Error("Failed to get screen metrics", zap.String("stderr", stderr.String()), zap.Error(err))
-		return err
+		p.logger.Warn("Screen metrics unavailable", zap.String("stderr", strings.TrimSpace(stderr.String())), zap.Error(err))
+		return fmt.Errorf("%w: screen metrics", errBestEffortMetricUnavailable)
 	}
 
 	lines := strings.Split(string(output), "\n")

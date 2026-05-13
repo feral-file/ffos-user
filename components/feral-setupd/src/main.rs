@@ -379,6 +379,18 @@ async fn setup_dbus_listeners(
     )
     .await?;
 
+    // Listen for support-bundled upload logs signal
+    let upload_logs_with_bundle_cb =
+        callbacks::create_upload_logs_with_bundle_dbus_cb(app_state.clone());
+    dbus_utils::listen_for_signal(
+        constant::DBUS_CONTROLD_OBJECT,
+        constant::DBUS_CONTROLD_INTERFACE,
+        constant::DBUS_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
+        stop_dbus_listener.clone(),
+        upload_logs_with_bundle_cb,
+    )
+    .await?;
+
     // Listen for system update signal
     let system_update_cb =
         callbacks::create_system_update_dbus_cb(app_state.clone(), chrome.clone());
@@ -456,10 +468,23 @@ mod callbacks {
         AppState, Cdp, WifiError, ble, constant, dbus_utils, internet_setup_successfully_cb,
         persistent_state, show_factory_reset, show_message, show_qrcode, show_webapp, wifi_utils,
     };
+    use serde::Deserialize;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
     use tokio::task;
+
+    #[derive(Deserialize)]
+    struct BundledUploadLogsPayload {
+        api_key: String,
+        support_bundle_id: String,
+    }
+
+    fn parse_bundled_upload_logs_payload(
+        payload: &[u8],
+    ) -> serde_json::Result<BundledUploadLogsPayload> {
+        serde_json::from_slice::<BundledUploadLogsPayload>(payload)
+    }
 
     pub fn create_bt_connected_cb(
         app_state: Arc<AppState>,
@@ -719,11 +744,19 @@ mod callbacks {
         source: &str,
         branch: &str,
         version: &str,
+        support_bundle_id: Option<&str>,
     ) {
         println!("MAIN: Uploading logs (source: {source})");
 
-        if let Err(e) =
-            super::log_uploader::submit_logs(device_id, api_key, source, branch, version).await
+        if let Err(e) = super::log_uploader::submit_logs(
+            device_id,
+            api_key,
+            source,
+            branch,
+            version,
+            support_bundle_id,
+        )
+        .await
         {
             eprintln!("MAIN: Failed to submit logs: error code {e}");
         } else {
@@ -732,13 +765,22 @@ mod callbacks {
     }
 
     pub fn create_submit_logs_cb(app_state: Arc<AppState>) -> ble::SubmitLogsCallback {
-        Box::new(move |_user_id, api_key, _title| {
+        Box::new(move |_user_id, api_key, _title, support_bundle_id| {
             let api_key = api_key.to_string();
+            let support_bundle_id = support_bundle_id.map(str::to_string);
             let device_id = app_state.device_id.clone();
             let branch = app_state.branch.clone();
             let version = app_state.current_version.clone();
             Box::pin(async move {
-                do_upload_logs(&device_id, &api_key, "ble", &branch, &version).await;
+                do_upload_logs(
+                    &device_id,
+                    &api_key,
+                    "ble",
+                    &branch,
+                    &version,
+                    support_bundle_id.as_deref(),
+                )
+                .await;
             })
         })
     }
@@ -760,9 +802,67 @@ mod callbacks {
             let branch = app_state.branch.clone();
             let version = app_state.current_version.clone();
             task::spawn(async move {
-                do_upload_logs(&device_id, &api_key, "dbus", &branch, &version).await;
+                do_upload_logs(&device_id, &api_key, "dbus", &branch, &version, None).await;
             });
         })
+    }
+
+    pub fn create_upload_logs_with_bundle_dbus_cb(
+        app_state: Arc<AppState>,
+    ) -> dbus_utils::ListenCallback {
+        Box::new(move |msg| {
+            println!("MAIN: Upload logs with bundle DBus callback received");
+            let payload = match msg.read1::<Vec<u8>>() {
+                Ok(payload) => payload,
+                Err(e) => {
+                    eprintln!("MAIN: Failed to read bundled upload logs payload: {e:#?}");
+                    return;
+                }
+            };
+            let payload = match parse_bundled_upload_logs_payload(&payload) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    eprintln!("MAIN: Failed to parse bundled upload logs payload: {e:#?}");
+                    return;
+                }
+            };
+
+            let device_id = app_state.device_id.clone();
+            let branch = app_state.branch.clone();
+            let version = app_state.current_version.clone();
+            task::spawn(async move {
+                do_upload_logs(
+                    &device_id,
+                    &payload.api_key,
+                    "dbus",
+                    &branch,
+                    &version,
+                    Some(&payload.support_bundle_id),
+                )
+                .await;
+            });
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parse_bundled_upload_logs_payload_accepts_controld_schema() {
+            let payload = br#"{
+                "user_id": "ignored-user",
+                "api_key": "test-api-key",
+                "title": "ignored-title",
+                "support_bundle_id": "bundle-123"
+            }"#;
+
+            let parsed =
+                parse_bundled_upload_logs_payload(payload).expect("parse bundled upload payload");
+
+            assert_eq!(parsed.api_key, "test-api-key");
+            assert_eq!(parsed.support_bundle_id, "bundle-123");
+        }
     }
 }
 

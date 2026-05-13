@@ -253,6 +253,8 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
 
+	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)
+
 	// send ready notification to systemd
 	sent, err := app.Daemon.SdNotify(false, go_daemon.SdNotifyReady)
 	if err != nil {
@@ -402,7 +404,19 @@ func initializeApp(
 	watchdog := watchdog.New(logger)
 
 	// Executor
-	executor := devicectl.New(cdp, dbusClient, deviceStatus, poller, ddcPanel, json, os, exec, math, logger)
+	executor := devicectl.New(
+		cdp,
+		dbusClient,
+		deviceStatus,
+		poller,
+		ddcPanel,
+		json,
+		os,
+		exec,
+		math,
+		clock,
+		logger,
+	)
 
 	// FFIndexer
 	ffIndexer := ffindexer.New(httpClient, json, io, logger)

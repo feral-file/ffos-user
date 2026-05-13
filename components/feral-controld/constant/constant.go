@@ -6,6 +6,7 @@ const (
 
 	SCREEN_ORIENTATION_FILE = "/home/feralfile/.state/screen-orientation"
 	STATE_FILE              = "/home/feralfile/.state/controld.state"
+	SLEEP_SCHEDULE_FILE     = "/home/feralfile/.state/sleep-schedule.json"
 	CONFIG_FILE             = "/home/feralfile/.config/controld.json"
 
 	SSH_AUTHORIZED_KEYS_FILE = "/home/feralfile/.ssh/authorized_keys"
