@@ -9,6 +9,9 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
 ### Monitoring Logic
 
 - Checks Chromium health via CDP every 5 seconds
+- Treats Chromium/CDP as a recoverable runtime dependency during startup,
+  kiosk restart, OTA, and crash recovery; the watchdog stays alive and retries
+  CDP access instead of exiting on a single refused connection
 - If health check fails or returns non-200, checks time since last successful response
 - If no successful response for over 20 seconds, restarts `chromium-kiosk.service`
 - If 3 restarts occur within 5 minutes, triggers a system reboot

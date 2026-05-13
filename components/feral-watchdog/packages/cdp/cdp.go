@@ -292,6 +292,10 @@ func (c *Client) IsReconnectionError(err error) bool {
 		return false
 	}
 
+	if errors.Is(err, ErrCDPConnectionNotInitialized) {
+		return true
+	}
+
 	// Check for websocket close errors
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) {
@@ -326,12 +330,12 @@ func (c *Client) IsReconnectionError(err error) bool {
 }
 
 func (c *Client) Reconnect(ctx context.Context) error {
-	if c.isReconnecting {
-		return nil
-	}
-
 	c.logger.Info("Reconnecting to CDP")
 	c.mu.Lock()
+	if c.isReconnecting {
+		c.mu.Unlock()
+		return nil
+	}
 	c.isReconnecting = true
 	defer func() {
 		c.isReconnecting = false
@@ -361,6 +365,36 @@ func (c *Client) Reconnect(ctx context.Context) error {
 	return c.initLocked(ctx)
 }
 
+func (c *Client) sendWithReconnect(ctx context.Context, method string, params map[string]interface{}) (interface{}, error) {
+	// Startup and renderer recovery can leave CDP temporarily unavailable. CDP
+	// actions are therefore best-effort reconnect points instead of reasons for
+	// the watchdog process to exit.
+	if !c.Initialized() {
+		if err := c.Reconnect(ctx); err != nil {
+			return nil, fmt.Errorf("failed to reconnect: %w", err)
+		}
+	}
+
+	result, err := c.Send(method, params)
+	if err == nil {
+		return result, nil
+	}
+
+	if !c.IsReconnectionError(err) {
+		return nil, err
+	}
+
+	if reconnErr := c.Reconnect(ctx); reconnErr != nil {
+		return nil, fmt.Errorf("failed to reconnect: %w", reconnErr)
+	}
+
+	result, err = c.Send(method, params)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // sendWatchdogEvent sends a watchdog event to the website via CDP
 func (c *Client) sendWatchdogEvent(ctx context.Context, eventType string) error {
 	expression := fmt.Sprintf("window.handleWatchdogEvent(%q)", eventType)
@@ -369,20 +403,8 @@ func (c *Client) sendWatchdogEvent(ctx context.Context, eventType string) error 
 		"expression": expression,
 	}
 
-	_, err := c.Send(METHOD_EVALUATE, params)
-	if err != nil {
-		if c.IsReconnectionError(err) {
-			if reconnErr := c.Reconnect(ctx); reconnErr != nil {
-				return fmt.Errorf("failed to reconnect: %w", reconnErr)
-			}
-			// Retry after reconnect
-			_, err = c.Send(METHOD_EVALUATE, params)
-			if err != nil {
-				return fmt.Errorf("failed to send watchdog event: %w", err)
-			}
-		} else {
-			return fmt.Errorf("failed to send watchdog event: %w", err)
-		}
+	if _, err := c.sendWithReconnect(ctx, METHOD_EVALUATE, params); err != nil {
+		return fmt.Errorf("failed to send watchdog event: %w", err)
 	}
 
 	return nil
@@ -414,20 +436,8 @@ func (c *Client) Navigate(ctx context.Context, url string) error {
 	params := map[string]interface{}{
 		"url": url,
 	}
-	_, err := c.Send(METHOD_NAVIGATE, params)
-	if err != nil {
-		if c.IsReconnectionError(err) {
-			if reconnErr := c.Reconnect(ctx); reconnErr != nil {
-				return fmt.Errorf("failed to reconnect: %w", reconnErr)
-			}
-			// Retry navigation after reconnect
-			_, err = c.Send(METHOD_NAVIGATE, params)
-			if err != nil {
-				return fmt.Errorf("failed to navigate to %s: %w", url, err)
-			}
-		} else {
-			return fmt.Errorf("failed to navigate to %s: %w", url, err)
-		}
+	if _, err := c.sendWithReconnect(ctx, METHOD_NAVIGATE, params); err != nil {
+		return fmt.Errorf("failed to navigate to %s: %w", url, err)
 	}
 	return nil
 }

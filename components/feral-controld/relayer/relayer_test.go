@@ -1325,6 +1325,83 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
 }
 
+func TestClient_ReadMessage_ErrorAfterClose_DoesNotReconnect(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	setupMockTicker(ts)
+
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Time{}).
+		AnyTimes()
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		SetPongHandler(gomock.Any()).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.PingMessage, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		SetReadDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	readReturned := make(chan struct{})
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			close(readStarted)
+			<-releaseRead
+			defer close(readReturned)
+			return 0, nil, &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}
+		}).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), gomock.Any()).
+		Return(nil).
+		Times(1)
+
+	releaseOnce := sync.Once{}
+	ts.mockConn.EXPECT().
+		Close().
+		DoAndReturn(func() error {
+			releaseOnce.Do(func() { close(releaseRead) })
+			return nil
+		}).
+		Times(1)
+
+	err := ts.client.Connect(ts.ctx)
+	assert.NoError(t, err, "expected no error, got %v", err)
+
+	select {
+	case <-readStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("ReadMessage should have started")
+	}
+
+	ts.client.Close()
+
+	select {
+	case <-readReturned:
+	case <-time.After(1 * time.Second):
+		t.Fatal("read loop should return after close")
+	}
+
+	assert.False(t, ts.client.IsConnected(), "expected client to remain disconnected after close")
+}
+
 func TestClient_Ping_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
