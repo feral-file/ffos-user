@@ -70,40 +70,90 @@ func (c ClockTime) Format() string {
 	return fmt.Sprintf("%02d:%02d", c.Hour, c.Minute)
 }
 
-// LocalTimezone reads the device's current timezone fresh from /etc/localtime
-// on every call. This bypasses Go's process-level time.Local cache, which is
-// set once at startup — if feral-controld starts before the timezone is
-// configured, time.Local stays UTC for the entire process lifetime.
+// LocalTimezone reads the device's current timezone fresh on every call.
+// This bypasses Go's process-level time.Local cache, which is set once at
+// startup — if feral-controld starts before the timezone is configured,
+// time.Local stays UTC for the entire process lifetime.
 //
-// The symlink target may be absolute (/usr/share/zoneinfo/...) or relative
-// (../usr/share/zoneinfo/...) depending on the distro, so we search for the
-// "zoneinfo/" marker rather than requiring a fixed prefix.
-// Falls back to time.Local if the symlink is absent or unreadable.
+// Resolution order, picking the first that succeeds:
+//  1. /etc/localtime as a symlink → named zone (gives "Asia/Taipei" in logs).
+//  2. /etc/timezone text file → named zone (Debian/Ubuntu style).
+//  3. /etc/localtime read as raw TZif data → unnamed "Local" zone with the
+//     correct offsets. Works when /etc/localtime is a regular file copy
+//     rather than a symlink, and does not require tzdata on disk.
+//  4. time.Local (likely stale UTC) as a last resort.
 func LocalTimezone() *time.Location {
+	if loc, ok := loadZoneFromLocaltimeSymlink(); ok {
+		return loc
+	}
+	if loc, ok := loadZoneFromEtcTimezone(); ok {
+		return loc
+	}
+	if loc, ok := loadZoneFromLocaltimeData(); ok {
+		return loc
+	}
+	log.Printf("[sleepschedule] LocalTimezone: all resolvers failed — falling back to time.Local (%s)", time.Local)
+	return time.Local
+}
+
+func loadZoneFromLocaltimeSymlink() (*time.Location, bool) {
 	target, err := stdsys.Readlink("/etc/localtime")
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: readlink /etc/localtime failed: %v — falling back to time.Local (%s)", err, time.Local)
-		return time.Local
+		log.Printf("[sleepschedule] LocalTimezone: readlink /etc/localtime failed: %v", err)
+		return nil, false
 	}
-
-	log.Printf("[sleepschedule] LocalTimezone: /etc/localtime -> %s", target)
 
 	const zoneMarker = "zoneinfo/"
 	idx := strings.Index(target, zoneMarker)
 	if idx < 0 {
-		log.Printf("[sleepschedule] LocalTimezone: marker %q not found in %q — falling back to time.Local (%s)", zoneMarker, target, time.Local)
-		return time.Local
+		log.Printf("[sleepschedule] LocalTimezone: marker %q not found in symlink target %q", zoneMarker, target)
+		return nil, false
 	}
 
 	name := target[idx+len(zoneMarker):]
 	loc, err := time.LoadLocation(name)
 	if err != nil {
-		log.Printf("[sleepschedule] LocalTimezone: LoadLocation(%q) failed: %v — falling back to time.Local (%s)", name, err, time.Local)
-		return time.Local
+		log.Printf("[sleepschedule] LocalTimezone: LoadLocation(%q) failed: %v", name, err)
+		return nil, false
 	}
 
-	log.Printf("[sleepschedule] LocalTimezone: resolved %q", name)
-	return loc
+	log.Printf("[sleepschedule] LocalTimezone: resolved %q via /etc/localtime symlink", name)
+	return loc, true
+}
+
+func loadZoneFromEtcTimezone() (*time.Location, bool) {
+	data, err := stdsys.ReadFile("/etc/timezone")
+	if err != nil {
+		log.Printf("[sleepschedule] LocalTimezone: read /etc/timezone failed: %v", err)
+		return nil, false
+	}
+	name := strings.TrimSpace(string(data))
+	if name == "" {
+		log.Printf("[sleepschedule] LocalTimezone: /etc/timezone is empty")
+		return nil, false
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		log.Printf("[sleepschedule] LocalTimezone: LoadLocation(%q from /etc/timezone) failed: %v", name, err)
+		return nil, false
+	}
+	log.Printf("[sleepschedule] LocalTimezone: resolved %q via /etc/timezone", name)
+	return loc, true
+}
+
+func loadZoneFromLocaltimeData() (*time.Location, bool) {
+	data, err := stdsys.ReadFile("/etc/localtime")
+	if err != nil {
+		log.Printf("[sleepschedule] LocalTimezone: read /etc/localtime failed: %v", err)
+		return nil, false
+	}
+	loc, err := time.LoadLocationFromTZData("Local", data)
+	if err != nil {
+		log.Printf("[sleepschedule] LocalTimezone: LoadLocationFromTZData(/etc/localtime) failed: %v", err)
+		return nil, false
+	}
+	log.Printf("[sleepschedule] LocalTimezone: resolved via raw /etc/localtime TZif data")
+	return loc, true
 }
 
 func (c ClockTime) OnDay(t time.Time) time.Time {
