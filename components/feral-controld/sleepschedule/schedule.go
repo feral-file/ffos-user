@@ -18,7 +18,8 @@ const (
 
 	// DefaultSleepTime and DefaultWakeTime pre-fill the record when
 	// sleep-schedule.json is missing or empty; EffectiveStatus ignores the
-	// window until enabled is true. HH:MM uses the caller's time.Location().
+	// window until enabled is true. HH:MM is anchored to the timezone
+	// returned by LoadSystemTimezone, not the Go process-level time.Local.
 	DefaultSleepTime = "22:00"
 	DefaultWakeTime  = "07:30"
 )
@@ -68,8 +69,29 @@ func (c ClockTime) Format() string {
 	return fmt.Sprintf("%02d:%02d", c.Hour, c.Minute)
 }
 
-func (c ClockTime) OnDay(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), c.Hour, c.Minute, 0, 0, t.Location())
+// LoadSystemTimezone reads the IANA timezone name from /etc/timezone and
+// returns the corresponding Location. This bypasses time.Local, which Go
+// caches once at process start: if feral-controld starts before the device
+// timezone is configured (e.g. during initial setup), time.Local stays UTC
+// for the entire process lifetime even after /etc/localtime is later set.
+// Falls back to time.Local when /etc/timezone is absent or unreadable.
+func LoadSystemTimezone(os wrapper.OS) *time.Location {
+	data, err := os.ReadFile("/etc/timezone")
+	if err == nil {
+		name := strings.TrimSpace(string(data))
+		if loc, err := time.LoadLocation(name); err == nil {
+			return loc
+		}
+	}
+	return time.Local
+}
+
+// OnDay anchors the clock time to the calendar date of t, interpreted in loc.
+// loc is separate from t so a UTC clock can still express "07:00 in the
+// device's local timezone" — both concerns stay explicit at the call site.
+func (c ClockTime) OnDay(t time.Time, loc *time.Location) time.Time {
+	tLoc := t.In(loc)
+	return time.Date(tLoc.Year(), tLoc.Month(), tLoc.Day(), c.Hour, c.Minute, 0, 0, loc)
 }
 
 func DefaultRecord() *Record {
@@ -149,7 +171,11 @@ func Save(os wrapper.OS, json wrapper.JSON, record *Record) error {
 	return nil
 }
 
-func EffectiveStatus(now time.Time, record *Record) (*Status, bool) {
+// EffectiveStatus derives the current sleep state from record at now.
+// loc must be the device's local timezone (from LoadSystemTimezone); it is
+// used to anchor HH:MM wall-clock times to concrete instants. Keeping loc
+// separate from now allows a UTC clock to coexist with a local schedule.
+func EffectiveStatus(now time.Time, record *Record, loc *time.Location) (*Status, bool) {
 	record, changed := Normalize(record, now)
 	if record == nil {
 		record = DefaultRecord()
@@ -183,13 +209,13 @@ func EffectiveStatus(now time.Time, record *Record) (*Status, bool) {
 		return status, changed
 	}
 
-	if isSleepingAt(now, sleepTime, wakeTime) {
+	if isSleepingAt(now, sleepTime, wakeTime, loc) {
 		status.CurrentState = StateSleeping
-		status.NextTransitionAt = timePtr(nextOccurrence(now, wakeTime))
+		status.NextTransitionAt = timePtr(nextOccurrence(now, wakeTime, loc))
 		return status, changed
 	}
 
-	status.NextTransitionAt = timePtr(nextOccurrence(now, sleepTime))
+	status.NextTransitionAt = timePtr(nextOccurrence(now, sleepTime, loc))
 	return status, changed
 }
 
@@ -207,15 +233,15 @@ func Normalize(record *Record, now time.Time) (*Record, bool) {
 	return &normalized, true
 }
 
-func ManualSleep(record *Record, now time.Time) (*Record, error) {
-	return applyOverride(record, now, StateSleeping)
+func ManualSleep(record *Record, now time.Time, loc *time.Location) (*Record, error) {
+	return applyOverride(record, now, StateSleeping, loc)
 }
 
-func ManualWake(record *Record, now time.Time) (*Record, error) {
-	return applyOverride(record, now, StateAwake)
+func ManualWake(record *Record, now time.Time, loc *time.Location) (*Record, error) {
+	return applyOverride(record, now, StateAwake, loc)
 }
 
-func applyOverride(record *Record, now time.Time, state State) (*Record, error) {
+func applyOverride(record *Record, now time.Time, state State, loc *time.Location) (*Record, error) {
 	record, _ = Normalize(record, now)
 	if record == nil {
 		record = DefaultRecord()
@@ -237,9 +263,9 @@ func applyOverride(record *Record, now time.Time, state State) (*Record, error) 
 
 		switch state {
 		case StateSleeping:
-			updated.OverrideUntil = timePtr(nextOccurrence(now, wakeTime))
+			updated.OverrideUntil = timePtr(nextOccurrence(now, wakeTime, loc))
 		case StateAwake:
-			updated.OverrideUntil = timePtr(nextOccurrence(now, sleepTime))
+			updated.OverrideUntil = timePtr(nextOccurrence(now, sleepTime, loc))
 		default:
 			return nil, fmt.Errorf("unknown override state %q", state)
 		}
@@ -248,17 +274,17 @@ func applyOverride(record *Record, now time.Time, state State) (*Record, error) 
 	return &updated, nil
 }
 
-func nextOccurrence(now time.Time, clockTime ClockTime) time.Time {
-	candidate := clockTime.OnDay(now)
+func nextOccurrence(now time.Time, clockTime ClockTime, loc *time.Location) time.Time {
+	candidate := clockTime.OnDay(now, loc)
 	if !candidate.After(now) {
 		return candidate.Add(24 * time.Hour)
 	}
 	return candidate
 }
 
-func isSleepingAt(now time.Time, sleepTime, wakeTime ClockTime) bool {
-	sleepToday := sleepTime.OnDay(now)
-	wakeToday := wakeTime.OnDay(now)
+func isSleepingAt(now time.Time, sleepTime, wakeTime ClockTime, loc *time.Location) bool {
+	sleepToday := sleepTime.OnDay(now, loc)
+	wakeToday := wakeTime.OnDay(now, loc)
 
 	if sleepToday.Before(wakeToday) {
 		return !now.Before(sleepToday) && now.Before(wakeToday)

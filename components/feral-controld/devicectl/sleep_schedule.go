@@ -61,7 +61,7 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 			}
 		}
 
-		status, _ := sleepschedule.EffectiveStatus(now, normalized)
+		status, _ := sleepschedule.EffectiveStatus(now, normalized, sleepschedule.LoadSystemTimezone(e.os))
 		if err := e.applySleepTransition(ctx, status.CurrentState, "schedule-loop"); err != nil {
 			e.logger.Error("Failed to apply sleep schedule transition",
 				zap.Error(err),
@@ -158,7 +158,7 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 	}
 
 	now := e.clock.Now()
-	status, _ := sleepschedule.EffectiveStatus(now, record)
+	status, _ := sleepschedule.EffectiveStatus(now, record, sleepschedule.LoadSystemTimezone(e.os))
 	if err := e.applySleepTransition(ctx, status.CurrentState, "schedule-update"); err != nil {
 		return nil, err
 	}
@@ -188,9 +188,9 @@ func (e *executor) applyManualSleepOverride(ctx context.Context, state sleepsche
 	var updated *sleepschedule.Record
 	switch state {
 	case sleepschedule.StateSleeping:
-		updated, err = sleepschedule.ManualSleep(record, now)
+		updated, err = sleepschedule.ManualSleep(record, now, sleepschedule.LoadSystemTimezone(e.os))
 	case sleepschedule.StateAwake:
-		updated, err = sleepschedule.ManualWake(record, now)
+		updated, err = sleepschedule.ManualWake(record, now, sleepschedule.LoadSystemTimezone(e.os))
 	default:
 		err = fmt.Errorf("unsupported manual sleep override state %q", state)
 	}
@@ -202,7 +202,7 @@ func (e *executor) applyManualSleepOverride(ctx context.Context, state sleepsche
 		return nil, err
 	}
 
-	status, _ := sleepschedule.EffectiveStatus(now, updated)
+	status, _ := sleepschedule.EffectiveStatus(now, updated, sleepschedule.LoadSystemTimezone(e.os))
 	if err := e.applySleepTransition(ctx, state, "manual-override"); err != nil {
 		return nil, err
 	}

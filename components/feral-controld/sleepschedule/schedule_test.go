@@ -14,7 +14,7 @@ func TestEffectiveStatus_DefaultRecord_DisabledNoTransitions(t *testing.T) {
 		time.Date(2026, 5, 5, 23, 0, 0, 0, time.UTC),
 	} {
 		t.Run(now.Format(time.RFC3339), func(t *testing.T) {
-			status, changed := EffectiveStatus(now, DefaultRecord())
+			status, changed := EffectiveStatus(now, DefaultRecord(), time.UTC)
 			require.NotNil(t, status)
 			assert.False(t, changed)
 			assert.False(t, status.Enabled)
@@ -27,12 +27,12 @@ func TestEffectiveStatus_DefaultRecord_DisabledNoTransitions(t *testing.T) {
 }
 
 func TestEffectiveStatus_DaytimeWindow(t *testing.T) {
-	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.Local)
+	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.UTC)
 	status, changed := EffectiveStatus(now, &Record{
 		Enabled:   true,
 		SleepTime: "22:00",
 		WakeTime:  "07:00",
-	})
+	}, time.UTC)
 
 	require.NotNil(t, status)
 	assert.False(t, changed)
@@ -43,12 +43,12 @@ func TestEffectiveStatus_DaytimeWindow(t *testing.T) {
 }
 
 func TestEffectiveStatus_OvernightSleepingWindow(t *testing.T) {
-	now := time.Date(2026, 5, 5, 23, 15, 0, 0, time.Local)
+	now := time.Date(2026, 5, 5, 23, 15, 0, 0, time.UTC)
 	status, changed := EffectiveStatus(now, &Record{
 		Enabled:   true,
 		SleepTime: "22:00",
 		WakeTime:  "07:00",
-	})
+	}, time.UTC)
 
 	require.NotNil(t, status)
 	assert.False(t, changed)
@@ -59,7 +59,7 @@ func TestEffectiveStatus_OvernightSleepingWindow(t *testing.T) {
 }
 
 func TestNormalize_ExpiredOverride(t *testing.T) {
-	now := time.Date(2026, 5, 5, 8, 0, 0, 0, time.Local)
+	now := time.Date(2026, 5, 5, 8, 0, 0, 0, time.UTC)
 	expired := now.Add(-time.Minute)
 	record, changed := Normalize(&Record{
 		Enabled:       true,
@@ -76,12 +76,12 @@ func TestNormalize_ExpiredOverride(t *testing.T) {
 }
 
 func TestManualSleep_UsesNextWakeBoundary(t *testing.T) {
-	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.Local)
+	now := time.Date(2026, 5, 5, 14, 30, 0, 0, time.UTC)
 	record, err := ManualSleep(&Record{
 		Enabled:   true,
 		SleepTime: "22:00",
 		WakeTime:  "07:00",
-	}, now)
+	}, now, time.UTC)
 
 	require.NoError(t, err)
 	require.NotNil(t, record.OverrideState)
@@ -93,12 +93,12 @@ func TestManualSleep_UsesNextWakeBoundary(t *testing.T) {
 }
 
 func TestManualWake_UsesNextSleepBoundary(t *testing.T) {
-	now := time.Date(2026, 5, 5, 23, 30, 0, 0, time.Local)
+	now := time.Date(2026, 5, 5, 23, 30, 0, 0, time.UTC)
 	record, err := ManualWake(&Record{
 		Enabled:   true,
 		SleepTime: "22:00",
 		WakeTime:  "07:00",
-	}, now)
+	}, now, time.UTC)
 
 	require.NoError(t, err)
 	require.NotNil(t, record.OverrideState)
