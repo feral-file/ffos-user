@@ -83,6 +83,11 @@ type executor struct {
 
 	panelDDC ddc.PanelDDC
 
+	// Serialized, coalescing queue for applyFfpPowerStateAsync (see sleep_schedule.go).
+	sleepPowerAlignCh        chan sleepPowerAlignJob
+	sleepPowerAlignOnce      sync.Once
+	sleepPowerAlignEnqueueMu sync.Mutex
+
 	sleepScheduleWakeCh chan struct{}
 	sleepScheduleMu     sync.Mutex
 	sleepScheduleRun    bool

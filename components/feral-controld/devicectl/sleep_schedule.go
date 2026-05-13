@@ -13,6 +13,19 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 )
 
+// ffpSleepPowerControlTimeout bounds best-effort panel DDC power alignment after
+// sleep transitions. ApplyControl can take many seconds on failure; the relayer
+// path that updates the sleep schedule is much tighter, so this work must not
+// block applySleepTransition (see applyFfpPowerStateAsync).
+const ffpSleepPowerControlTimeout = 60 * time.Second
+
+// sleepPowerAlignJob carries one best-effort FFP panel power alignment request.
+// A single worker processes these in order and coalesces bursts to the latest state.
+type sleepPowerAlignJob struct {
+	state  sleepschedule.State
+	reason string
+}
+
 type sleepScheduleCommand struct {
 	Enabled   bool   `json:"enabled"`
 	SleepTime string `json:"sleepTime"`
@@ -221,20 +234,76 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 		return err
 	}
 
-	// if e.panelDDC != nil {
-	// 	if err := e.applyFfpPowerState(ctx, state); err != nil {
-	// 		e.logger.Warn("Failed to align FFP power with sleep state",
-	// 			zap.Error(err),
-	// 			zap.String("state", string(state)),
-	// 			zap.String("reason", reason))
-	// 	}
-	// }
+	e.applyFfpPowerStateAsync(state, reason)
 
 	if e.statusPoller != nil {
 		e.statusPoller.ForceRefresh()
 	}
 
 	return nil
+}
+
+// applyFfpPowerStateAsync aligns panel power with the sleep state without blocking
+// the caller. FFP DDC can exceed relayer deadlines even when player sleep mode
+// already succeeded; failures are logged only.
+//
+// A dedicated worker serializes ApplyControl calls and coalesces pending jobs so
+// a slow DDC completion cannot apply stale power after a newer transition (for
+// example sleep then wake while the first DDC round-trip is still in flight).
+func (e *executor) applyFfpPowerStateAsync(state sleepschedule.State, reason string) {
+	if e.panelDDC == nil {
+		return
+	}
+	e.sleepPowerAlignOnce.Do(func() {
+		e.sleepPowerAlignCh = make(chan sleepPowerAlignJob, 1)
+		go e.runSleepPowerAlignWorker()
+	})
+	e.enqueueCoalescedSleepPowerAlign(sleepPowerAlignJob{state: state, reason: reason})
+}
+
+func (e *executor) enqueueCoalescedSleepPowerAlign(job sleepPowerAlignJob) {
+	e.sleepPowerAlignEnqueueMu.Lock()
+	defer e.sleepPowerAlignEnqueueMu.Unlock()
+	for {
+		select {
+		case e.sleepPowerAlignCh <- job:
+			return
+		default:
+			// Drop at most one pending item without blocking: the worker may consume
+			// the queue between our full send attempt and this receive, and a blocking
+			// receive here would deadlock with enqueueMu held.
+			select {
+			case <-e.sleepPowerAlignCh:
+			default:
+			}
+		}
+	}
+}
+
+func (e *executor) runSleepPowerAlignWorker() {
+	for {
+		job := <-e.sleepPowerAlignCh
+		job = e.drainCoalescedSleepPowerAlignJobs(job)
+		ddcCtx, cancel := context.WithTimeout(context.Background(), ffpSleepPowerControlTimeout)
+		if err := e.applyFfpPowerState(ddcCtx, job.state); err != nil {
+			e.logger.Warn("Failed to align FFP power with sleep state (best effort)",
+				zap.Error(err),
+				zap.String("state", string(job.state)),
+				zap.String("reason", job.reason))
+		}
+		cancel()
+	}
+}
+
+func (e *executor) drainCoalescedSleepPowerAlignJobs(job sleepPowerAlignJob) sleepPowerAlignJob {
+	for {
+		select {
+		case j := <-e.sleepPowerAlignCh:
+			job = j
+		default:
+			return job
+		}
+	}
 }
 
 func (e *executor) applyPlayerSleepMode(ctx context.Context, sleepMode bool) error {
