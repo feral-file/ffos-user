@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,19 +22,6 @@ var (
 	ErrNoPageTargetFound           = errors.New("no page target found in Chromium instance")
 	ErrMultiplePageTargetsFound    = errors.New("multiple page targets found in Chromium instance")
 )
-
-type RemoteError struct {
-	Method      string
-	Description string
-	Unsupported bool
-}
-
-func (e *RemoteError) Error() string {
-	if e.Method == "" {
-		return fmt.Sprintf("CDP error: %s", e.Description)
-	}
-	return fmt.Sprintf("CDP error: %s: %s", e.Method, e.Description)
-}
 
 const (
 	// CDP Methods
@@ -336,12 +322,7 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		zap.String("response", string(response)))
 
 	var resp struct {
-		ID    int `json:"id"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-			Data    any    `json:"data"`
-		} `json:"error"`
+		ID     int `json:"id"`
 		Result struct {
 			Result struct {
 				Type        string      `json:"type"`
@@ -356,32 +337,13 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		return nil, fmt.Errorf("failed to parse CDP response: %w", err)
 	}
 
-	if resp.Error != nil {
-		return nil, &RemoteError{
-			Method:      method,
-			Description: resp.Error.Message,
-			Unsupported: isUnsupportedRemoteMethodError(method, resp.Error.Code),
-		}
-	}
-
 	result := resp.Result.Result
 
 	// Check for uncaught errors
 	if result.Type == TYPE_OBJECT &&
 		result.Subtype != nil &&
 		*result.Subtype == SUBTYPE_ERROR {
-		description := "remote error"
-		switch {
-		case result.Description != nil && strings.TrimSpace(*result.Description) != "":
-			description = *result.Description
-		case result.ClassName != nil && strings.TrimSpace(*result.ClassName) != "":
-			description = *result.ClassName
-		}
-		return nil, &RemoteError{
-			Method:      method,
-			Description: description,
-			Unsupported: false,
-		}
+		return nil, fmt.Errorf("CDP error: %v", *result.Description)
 	}
 
 	// Check for response type mismatch
@@ -399,10 +361,6 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	default:
 		return nil, fmt.Errorf("CDP response type mismatch: %s", result.Type)
 	}
-}
-
-func isUnsupportedRemoteMethodError(method string, code int) bool {
-	return method == "Input.synthesizePinchGesture" && code == -32601
 }
 
 // Close closes the CDP connection

@@ -5,7 +5,6 @@
 package mocks
 
 import (
-	"context"
 	reflect "reflect"
 	time "time"
 
@@ -75,20 +74,6 @@ func (m *MockClock) Sleep(d time.Duration) {
 func (mr *MockClockMockRecorder) Sleep(d interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Sleep", reflect.TypeOf((*MockClock)(nil).Sleep), d)
-}
-
-// SleepContext mocks base method.
-func (m *MockClock) SleepContext(ctx context.Context, d time.Duration) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SleepContext", ctx, d)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// SleepContext indicates an expected call of SleepContext.
-func (mr *MockClockMockRecorder) SleepContext(ctx, d interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SleepContext", reflect.TypeOf((*MockClock)(nil).SleepContext), ctx, d)
 }
 
 // MockTicker is a mock of Ticker interface.
