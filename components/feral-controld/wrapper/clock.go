@@ -1,17 +1,12 @@
 //nolint:gosec
 package wrapper
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 //go:generate mockgen -source=clock.go -destination=../mocks/clock.go -package=mocks -mock_names=Clock=MockClock
 type Clock interface {
 	Now() time.Time
 	Sleep(d time.Duration)
-	// SleepContext waits until d elapses unless ctx is canceled first. Returns ctx.Err() when ctx is done before d.
-	SleepContext(ctx context.Context, d time.Duration) error
 	NewTicker(d time.Duration) Ticker
 }
 
@@ -27,23 +22,6 @@ func (t *clock) Now() time.Time {
 
 func (t *clock) Sleep(d time.Duration) {
 	time.Sleep(d)
-}
-
-func (t *clock) SleepContext(ctx context.Context, d time.Duration) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func (t *clock) NewTicker(d time.Duration) Ticker {

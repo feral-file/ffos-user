@@ -112,12 +112,6 @@ The following command names are routed to `devicectl` and use the standard relay
 
 | Command | Request fields | Notes |
 |---|---|---|
-| `dragGesture` | `cursorOffsets` | Array of `{dx, dy}` step deltas. |
-| `tapGesture` | `button` | `button` selects left, right, or middle; missing or empty defaults to left. |
-| `doubleTapGesture` | `button` | Same button selection as `tapGesture`. |
-| `longPressGesture` | `button` | Same button selection as `tapGesture`. |
-| `clickAndDragGesture` | `cursorOffsets` | Press, move, then release. The executor treats release failure as an error because Chromium can remain pressed. |
-| `zoomGesture` | `scaleSteps` | Array of positive float scale factors. Pinch synthesis is attempted first and falls back to wheel zoom only when the method is unsupported. |
 | `setSleepSchedule` | `enabled`, optional `sleepTime`, `wakeTime` (HH:MM) | Persists the FF1 sleep/wake window and enables or disables automatic transitions. |
 | `sleepNow` | — | Manual override toward sleep until the next schedule boundary (when the schedule is enabled). |
 | `wakeNow` | — | Manual override toward awake until the next schedule boundary (when the schedule is enabled). |
