@@ -77,7 +77,8 @@ pub type ConnectWifiCallback = Box<dyn Fn(&str, &str) -> AsyncBleResult + Send +
 pub type KeepWifiCallback = Box<dyn Fn() -> AsyncBleResult + Send + Sync>;
 pub type GetInfoCallback = Option<Box<dyn Fn() -> Vec<String> + Send + Sync>>;
 pub type FactoryResetCallback = Option<Box<dyn Fn() -> AsyncUnit + Send + Sync>>;
-pub type SubmitLogsCallback = Box<dyn Fn(&str, &str, &str) -> AsyncUnit + Send + Sync>;
+pub type SubmitLogsCallback =
+    Box<dyn Fn(&str, &str, &str, Option<&str>) -> AsyncUnit + Send + Sync>;
 
 pub struct BleCallbacks {
     pub bt_connected: BTConnectedCallback,
@@ -756,7 +757,7 @@ async fn handle_submit_logs(
 ) -> Result<(), ReqError> {
     println!("BLE log-submit: start reply_id={reply_id}");
 
-    // Expect userId, apiKey, and title
+    // Expect userId, apiKey, title, and optionally support_bundle_id.
     if params.len() < 3 {
         eprintln!(
             "BLE log-submit: invalid params len={}, expected at least 3",
@@ -773,11 +774,19 @@ async fn handle_submit_logs(
     let user_id = params[0].clone();
     let api_key = params[1].clone();
     let title = params[2].clone();
+    let support_bundle_id = params
+        .get(3)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
-    println!("BLE log-submit: user={user_id} title={title}");
+    println!(
+        "BLE log-submit: user={user_id} title={title} support_bundle_id={}",
+        support_bundle_id.unwrap_or("")
+    );
 
     // Trigger the callback without waiting for completion
-    let cb_future = cb(&user_id, &api_key, &title);
+    let cb_future = cb(&user_id, &api_key, &title, support_bundle_id);
     tokio::spawn(async move {
         cb_future.await;
     });

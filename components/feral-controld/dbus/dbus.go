@@ -27,10 +27,11 @@ const (
 	MONITORD_EVENT_SYSMETRICS               godbus.Member    = "sysmetrics"
 	MONITORD_EVENT_CONNECTIVITY_CHANGE      godbus.Member    = "connectivity_change"
 
-	SETUPD_EVENT_SHOW_PAIRING_QR_CODE godbus.Member = "show_pairing_qr_code"
-	SETUPD_EVENT_FACTORY_RESET        godbus.Member = "factory_reset"
-	SETUPD_EVENT_SYSTEM_UPDATE        godbus.Member = "system_update"
-	SETUPD_EVENT_UPLOAD_LOGS          godbus.Member = "upload_logs"
+	SETUPD_EVENT_SHOW_PAIRING_QR_CODE    godbus.Member = "show_pairing_qr_code"
+	SETUPD_EVENT_FACTORY_RESET           godbus.Member = "factory_reset"
+	SETUPD_EVENT_SYSTEM_UPDATE           godbus.Member = "system_update"
+	SETUPD_EVENT_UPLOAD_LOGS             godbus.Member = "upload_logs"
+	SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE godbus.Member = "upload_logs_with_bundle"
 )
 
 //go:generate mockgen -source=dbus.go -destination=../mocks/dbus.go -package=mocks -mock_names=DBus=MockDBus

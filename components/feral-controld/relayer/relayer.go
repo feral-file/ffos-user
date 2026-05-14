@@ -380,9 +380,21 @@ func (r *relayer) background(ctx context.Context) {
 				r.Unlock()
 				_, msg, err := conn.ReadMessage()
 				if err != nil {
-					r.logger.Error("Failed to read message. Will attempt to reconnect shortly", zap.Error(err))
+					if r.shouldStop(ctx) {
+						r.logger.Info("Relayer read loop stopped after connection shutdown", zap.Error(err))
+						return
+					}
+
+					r.logger.Warn("Relayer read failed; reconnecting",
+						zap.Error(err),
+						zap.Bool("abnormal_closure", isAbnormalClosure(err)),
+					)
 					err := r.reconnect(ctx)
 					if err != nil {
+						if r.shouldStop(ctx) {
+							r.logger.Info("Skipping relayer reconnect failure during shutdown", zap.Error(err))
+							return
+						}
 						// Stop the program and let the systemd restart it
 						r.logger.Error("Failed to reconnect to Relayer, the controld will be restarted by systemd shortly", zap.Error(err))
 						r.os.Exit(1)
@@ -509,6 +521,28 @@ func (r *relayer) Close() {
 	}
 
 	r.closeConn()
+}
+
+// shouldStop is checked after blocking socket calls return so shutdown-driven
+// close errors do not get mistaken for remote disconnects that need reconnecting.
+func (r *relayer) shouldStop(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+	}
+
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func isAbnormalClosure(err error) bool {
+	var closeErr *websocket.CloseError
+	return errors.As(err, &closeErr) && closeErr.Code == websocket.CloseAbnormalClosure
 }
 
 func (r *relayer) closeConn() {

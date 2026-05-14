@@ -51,7 +51,7 @@ There is currently no version suffix in any D-Bus name. Adding a version suffix 
 | Bus name | Object path | Interface | Type | Members |
 |---|---|---|---|---|
 | `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | RPC | `GetRelayerTopicID() → (string, error)` |
-| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | Signal emitter (received from setupd via controld bus) | `show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs` |
+| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | Signal emitter (received from setupd via controld bus) | `show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle` |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | RPC | `GetConnectivityStatus(refresh bool) → (bool, error)`, `GetSysMetrics() → (*SysDBusMetrics, error)` |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | Signal emitter | `sysmetrics`, `connectivity_change`, `sysevent` |
 | `com.feralfile.watchdog` | — | — | Bus name only (no exported RPCs currently) | — |
@@ -106,14 +106,30 @@ All messages are JSON. The message envelope is:
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
+**Device-control relayer commands**
+
+The following command names are routed to `devicectl` and use the standard relayer/hub envelope (`command` plus `request`):
+
+| Command | Request fields | Notes |
+|---|---|---|
+| `setSleepSchedule` | `enabled`, optional `sleepTime`, `wakeTime` (HH:MM) | Persists the FF1 sleep/wake window and enables or disables automatic transitions. |
+| `sleepNow` | — | Manual override toward sleep until the next schedule boundary (when the schedule is enabled). |
+| `wakeNow` | — | Manual override toward awake until the next schedule boundary (when the schedule is enabled). |
+
 `devicectl` also exposes two device-control commands for panel control over DDC/CI via `ddcutil`: `ddcPanelControl` (set brightness, contrast, speaker volume, mute, or power using a single JSON request body that selects the action) and `ddcPanelStatus` (query the same VCPs and return a structured status object). Both share the standard relayer/hub envelope; detailed field shapes live alongside the executor in `devicectl/ddc.go`.
 
+**Sleep schedule vs. FFP panel power (contract):** `setSleepSchedule`, `sleepNow`, and `wakeNow` apply **FF1 player sleep mode** over CDP **synchronously** for the purpose of command success: if the handler returns success, the player has been asked to enter or leave sleep mode on that request path. **FFP panel power** (DDC standby / on) is aligned **asynchronously** in a dedicated worker so slow or flaky `ddcutil` calls do not block relayer or hub deadlines. DDC failures are **best-effort** (logged; command success is still possible). Rapid sleep/wake transitions are **coalesced** so an older in-flight DDC call cannot overwrite a newer intended state. **`device_status.message.sleepSchedule`** (and the `sleepSchedule` object returned on these commands) reflects the **schedule and player sleep intent**; **DDC-derived fields** (for example from `ddcPanelStatus`) may **temporarily disagree** until alignment completes (**eventual consistency**). **`device_status` refresh** after a transition may run before DDC finishes, so consumers must not assume panel power and player sleep mode flip in the same notification. On **process exit**, `feral-controld` does **not** wait for queued or in-flight DDC alignment work.
+
+Successful `setSleepSchedule`, `sleepNow`, and `wakeNow` responses include `{"ok": true, "sleepSchedule": { ... }}` where `sleepSchedule` matches `sleepschedule.Status` JSON: `enabled` (bool), `sleepTime` / `wakeTime` (HH:MM strings), `currentState` (`awake` | `sleeping`), optional `overrideState`, optional `overrideUntil` / `nextTransitionAt` (RFC3339 timestamps when present). The same object shape appears under `device_status.message.sleepSchedule` when the schedule file is readable (omitted when the file is missing or unreadable without blocking status).
+
 **Command type constants** are defined in `components/feral-controld/commands/types.go`. New remote commands must be added there with a corresponding entry in `deviceCtlCommands` if they require executor handling.
+
+The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional `supportBundleID` or `support_bundle_id`. Without a bundle id, `feral-controld` emits the original `upload_logs(user_id, api_key, title)` signal. With a bundle id, it emits additive `upload_logs_with_bundle(payload []byte)` where `payload` is JSON containing `user_id`, `api_key`, `title`, and `support_bundle_id`, so the old D-Bus signal payload shape stays unchanged and the new bundled upload payload can grow additively.
 
 **Relayer outbound notifications (`feral-controld`):** The device periodically pushes JSON notifications over the relayer WebSocket (and local hub clients) with an envelope that includes `notification_type` and a structured `message`. At minimum:
 
 - `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts.
-- `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, and best-effort `displayURL`). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead.
+- `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, best-effort `displayURL`, and optional `sleepSchedule`). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead. When present, `sleepSchedule` follows the same **sleep vs. DDC** eventual-consistency rules as the `setSleepSchedule` / `sleepNow` / `wakeNow` contract above.
 
 ### Hub WebSocket protocol (port 1111)
 
@@ -146,6 +162,8 @@ The BLE command characteristic uses a binary encoding:
 | `CMD_KEEP_WIFI` | `keep_wifi` | Keep current WiFi and proceed |
 | `CMD_FACTORY_RESET` | `factory_reset` | Initiate factory reset |
 | `CMD_SEND_LOGS` | `send_log` | Upload device logs |
+
+`send_log` accepts `user_id`, `api_key`, and `title` parameters, plus an optional fourth `support_bundle_id` parameter. When present, `feral-setupd` includes it in the FF1 `/v2/ff1/log-submissions` request so support-logs can join FF1 evidence into the support bundle.
 
 **`device_info` string format** (returned by `get_info`):
 

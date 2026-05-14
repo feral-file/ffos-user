@@ -9,6 +9,7 @@ on:
       - 'components/feral-setupd/Cargo.lock'
       - 'components/feral-setupd/rustfmt.toml'
       - 'components/feral-setupd/clippy.toml'
+      - 'Makefile'
   pull_request:
     paths:
       - 'components/feral-setupd/src/**'
@@ -16,6 +17,7 @@ on:
       - 'components/feral-setupd/Cargo.lock'
       - 'components/feral-setupd/rustfmt.toml'
       - 'components/feral-setupd/clippy.toml'
+      - 'Makefile'
 
 permissions:
   contents: read
@@ -28,9 +30,6 @@ jobs:
   lint:
     name: Lint feral-setupd (Rust)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./components/feral-setupd
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -58,11 +57,5 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Run cargo check
-        run: cargo check --all-targets --all-features --verbose
+      - name: Run local verification target
+        run: make verify-setupd-lint
