@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -65,6 +66,27 @@ func (c *CommandHandler) restartKiosk(ctx context.Context) {
 	} else {
 		c.logger.Info("Successfully restarted chromium-kiosk service")
 	}
+}
+
+// isKioskActivating reports whether chromium-kiosk.service is currently in
+// systemd's "activating" sub-state. It is consulted by the Chromium hang
+// detector to suppress redundant restarts while systemd is mid-restart —
+// whether the restart was issued by us, by chromium-kiosk.service's own
+// Restart=always policy, or by an external actor (OTA, operator).
+//
+// Failure modes are deliberately treated as "not activating" rather than
+// surfaced as an error: this is a defensive check on the escalation path,
+// and a systemctl outage should not block the watchdog from acting if
+// Chromium is genuinely hung.
+//
+// `systemctl is-active` returns non-zero for any non-active state including
+// "activating", so we ignore the exit code and parse stdout. `is-active`
+// prints the SubState-equivalent ("active", "activating", "failed", ...)
+// on a single line.
+func (c *CommandHandler) isKioskActivating(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "systemctl", "--user", "is-active", "chromium-kiosk.service")
+	output, _ := cmd.Output()
+	return strings.TrimSpace(string(output)) == "activating"
 }
 
 // rebootSystem initiates a system reboot

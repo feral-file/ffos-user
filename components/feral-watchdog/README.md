@@ -8,13 +8,32 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
 
 ### Monitoring Logic
 
-- Checks Chromium health via CDP every 5 seconds
+- Checks Chromium health via CDP every 5 seconds (`GET /json/version`).
 - Treats Chromium/CDP as a recoverable runtime dependency during startup,
   kiosk restart, OTA, and crash recovery; the watchdog stays alive and retries
-  CDP access instead of exiting on a single refused connection
-- If health check fails or returns non-200, checks time since last successful response
-- If no successful response for over 20 seconds, restarts `chromium-kiosk.service`
-- If 3 restarts occur within 5 minutes, triggers a system reboot
+  CDP access instead of exiting on a single refused connection.
+- Hang detection uses two different budgets depending on whether Chromium
+  has spoken to the watchdog yet:
+  - **Pre-connect (cold boot or post-restart):** until we receive the first
+    `200` from `/json/version`, sustained failures are tolerated for up to
+    **90 seconds** (`CHROMIUM_STARTUP_GRACE`). This budget covers
+    `feral-player.service` (`TimeoutStartSec=45s`) plus
+    `chromium-kiosk.service` (`RestartSec=5`) plus Chromium's own bring-up.
+  - **Post-connect (steady state):** once we have seen a success, silence
+    beyond **20 seconds** (`CHROMIUM_HANG_THRESHOLD`) is treated as a real
+    renderer hang and triggers a kiosk restart.
+- Before escalating, the monitor consults `systemctl --user is-active
+  chromium-kiosk.service`. If the kiosk is already in `activating` (e.g.
+  systemd's own `Restart=always` is between attempts, OTA is mid-restart,
+  or an operator just ran `systemctl restart`), the monitor defers rather
+  than piling a redundant restart on top.
+- After issuing a restart the monitor returns to pre-connect mode so the
+  next 90 seconds of failed checks do not pile a second restart onto the
+  in-progress one. Without this reset, the 20 s hang threshold would trip
+  again ~25 s into Chromium's cold start and exhaust the restart budget on
+  healthy devices.
+- Recovery action: `systemctl --user restart chromium-kiosk.service`.
+- If 3 restarts occur within 5 minutes, triggers a system reboot.
 
 ## Resource Monitoring (RAM, GPU, DISK)
 
