@@ -2690,6 +2690,14 @@ func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
 			"width":      screenWidth,
 			"height":     screenHeight,
 		}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -2751,6 +2759,14 @@ func TestExecutor_ZoomGestureEvent_WithMessageID(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -2833,6 +2849,14 @@ func TestExecutor_ZoomGestureEvent_CDPError(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -2884,6 +2908,14 @@ func TestExecutor_ZoomGestureEvent_UnsupportedExperimentalMethod(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -3016,6 +3048,14 @@ func TestExecutor_ZoomGestureEvent_NeutralScaleDoesNotFallback(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -3066,6 +3106,14 @@ func TestExecutor_ZoomGestureEvent_FallbackMagnitudeGrowsWithScale(t *testing.T)
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -3128,6 +3176,14 @@ func TestExecutor_ZoomGestureEvent_PinchNotSupportedFails(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -3321,6 +3377,14 @@ func TestExecutor_ZoomGestureEvent_UnsupportedMethodWithNameFallbacks(t *testing
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {
@@ -3383,6 +3447,14 @@ func TestExecutor_ZoomGestureEvent_TargetNotFoundDoesNotFallback(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{
+			"offsetLeft": 0.0,
+			"offsetTop":  0.0,
+			"width":      screenWidth,
+			"height":     screenHeight,
+		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
 		DoAndReturn(func(_ []byte, v interface{}) error {

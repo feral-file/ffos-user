@@ -1060,12 +1060,8 @@ func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
 }
 
 func (e *executor) zoomGesturePoint(scaleFactor float64) (float64, float64) {
-	if scaleFactor < 1 {
-		viewportX, viewportY, viewportWidth, viewportHeight := e.currentVisualViewport()
-		return e.innerToVisualViewport(e.cursorPositionX, e.cursorPositionY, viewportX, viewportY, viewportWidth, viewportHeight)
-	}
-
-	return e.cursorPositionX, e.cursorPositionY
+	viewportX, viewportY, viewportWidth, viewportHeight := e.currentVisualViewport()
+	return e.innerToVisualViewport(e.cursorPositionX, e.cursorPositionY, viewportX, viewportY, viewportWidth, viewportHeight)
 }
 
 func (e *executor) innerToVisualViewport(x, y, viewportX, viewportY, viewportWidth, viewportHeight float64) (float64, float64) {
