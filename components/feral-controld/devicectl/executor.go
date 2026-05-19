@@ -2,7 +2,9 @@ package devicectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,7 +154,15 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_MOUSE_DRAG_EVENT:
 		result, err = e.handleMouseMoveEvent(bytes)
 	case commands.CMD_MOUSE_TAP_EVENT:
-		result, err = e.handleMouseTapEvent()
+		result, err = e.handleMouseTapEvent(bytes)
+	case commands.CMD_MOUSE_DOUBLE_TAP_EVENT:
+		result, err = e.handleMouseDoubleTapEvent(bytes)
+	case commands.CMD_MOUSE_LONG_PRESS_EVENT:
+		result, err = e.handleMouseLongPressEvent(ctx, bytes)
+	case commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT:
+		result, err = e.handleMouseClickAndDragEvent(bytes)
+	case commands.CMD_ZOOM_GESTURE:
+		result, err = e.handleZoomGestureEvent(bytes)
 	case commands.CMD_PROFILE:
 		result, err = e.getSysMetrics()
 	case commands.CMD_SCREEN_ROTATION:
@@ -562,6 +572,38 @@ func printableASCIIKeyEvent(keyCode int) (key string, code string, text string) 
 	}
 }
 
+type mouseButtonWire string
+
+const (
+	mouseButtonLeft   mouseButtonWire = "left"
+	mouseButtonRight  mouseButtonWire = "right"
+	mouseButtonMiddle mouseButtonWire = "middle"
+)
+
+func (e *executor) parseMouseButton(args []byte) (button string, buttons int, err error) {
+	var cmdArgs struct {
+		Button string `json:"button"`
+	}
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
+		return "", 0, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	wire := mouseButtonWire(cmdArgs.Button)
+	if wire == "" {
+		wire = mouseButtonLeft
+	}
+	switch wire {
+	case mouseButtonLeft:
+		return "left", 1, nil
+	case mouseButtonRight:
+		return "right", 2, nil
+	case mouseButtonMiddle:
+		return "middle", 4, nil
+	default:
+		return "", 0, fmt.Errorf("invalid arguments: unknown mouse button: %s", cmdArgs.Button)
+	}
+}
+
 func (e *executor) initializeScreenDimensions() {
 	if e.screenInitialized {
 		return
@@ -607,7 +649,10 @@ func (e *executor) initializeScreenDimensions() {
 		zap.Float64("cursorY", e.cursorPositionY))
 }
 
-func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
+func (e *executor) handleMouseMoveEventWithButtons(
+	args []byte,
+	pressedButtons int,
+) (interface{}, error) {
 	// Initialize screen dimensions if not done already
 	e.initializeScreenDimensions()
 
@@ -698,40 +743,215 @@ func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
 	}
 
 	// 2. Send the final mouse event to actually move the cursor
-	if len(absolutePositions) > 0 {
-		// Get the last position for the final mouseMoved event
-		moveParams := map[string]interface{}{
-			"type":       "mouseMoved",
-			"x":          e.cursorPositionX,
-			"y":          e.cursorPositionY,
-			"button":     "none",
-			"buttons":    0,
-			"clickCount": 0,
-		}
-
-		_, err = e.cdp.Send("Input.dispatchMouseEvent", moveParams)
-		if err != nil {
-			e.logger.Error("Failed to move mouse via CDP", zap.Error(err))
-			return nil, fmt.Errorf("failed to move mouse: %w", err)
-		}
-
-		e.logger.Info("Mouse moved to final position",
-			zap.Float64("x", e.cursorPositionX),
-			zap.Float64("y", e.cursorPositionY))
+	moveParams := map[string]interface{}{
+		"type":       "mouseMoved",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     "none",
+		"buttons":    pressedButtons,
+		"clickCount": 0,
 	}
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", moveParams)
+	if err != nil {
+		e.logger.Error("Failed to move mouse via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to move mouse: %w", err)
+	}
+
+	e.logger.Info("Mouse moved to final position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
 
 	return CmdOK, nil
 }
 
-func (e *executor) handleMouseTapEvent() (interface{}, error) {
+func (e *executor) handleMouseMoveEvent(args []byte) (interface{}, error) {
+	return e.handleMouseMoveEventWithButtons(args, 0)
+}
+
+func (e *executor) handleMouseTapEvent(args []byte) (interface{}, error) {
 	// Initialize screen dimensions if not done already
 	e.initializeScreenDimensions()
+
+	button, pressedButtons, err := e.parseMouseButton(args)
+	if err != nil {
+		return nil, err
+	}
 
 	e.logger.Info("Mouse tap event at current position",
 		zap.Float64("x", e.cursorPositionX),
 		zap.Float64("y", e.cursorPositionY))
 
-	// 1. Press mouse button at current position
+	if err := e.dispatchMouseClick(button, pressedButtons, 1); err != nil {
+		return nil, err
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) dispatchMouseClick(button string, pressedButtons int, clickCount int) (err error) {
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    pressedButtons,
+		"clickCount": clickCount,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    0,
+		"clickCount": clickCount,
+	}
+
+	pressed := false
+	defer func() {
+		if !pressed {
+			return
+		}
+		_, releaseErr := e.cdp.Send("Input.dispatchMouseEvent", upParams)
+		if releaseErr != nil {
+			e.logger.Error("Failed to release mouse button via CDP during cleanup", zap.Error(releaseErr))
+		}
+	}()
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	if err != nil {
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		return fmt.Errorf("failed to press mouse button: %w", err)
+	}
+	pressed = true
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
+	if err != nil {
+		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
+		return fmt.Errorf("failed to release mouse button: %w", err)
+	}
+	pressed = false
+
+	return nil
+}
+
+func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
+	e.initializeScreenDimensions()
+
+	button, pressedButtons, err := e.parseMouseButton(args)
+	if err != nil {
+		return nil, err
+	}
+
+	e.logger.Info("Mouse double tap event at current position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
+
+	// Chromium's dblclick handling is sequence-sensitive: a single press/release
+	// pair with clickCount=2 can still collapse to a plain click on targets that
+	// inspect the full click sequence. Emit two clicks so the second one carries
+	// the double-click count expected by dblclick/double-tap handlers.
+	for clickCount := 1; clickCount <= 2; clickCount++ {
+		if err := e.dispatchMouseClick(button, pressedButtons, clickCount); err != nil {
+			return nil, err
+		}
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (result interface{}, err error) {
+	e.initializeScreenDimensions()
+
+	button, pressedButtons, err := e.parseMouseButton(args)
+	if err != nil {
+		return nil, err
+	}
+
+	e.logger.Info("Mouse long press event at current position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
+
+	downParams := map[string]interface{}{
+		"type":       "mousePressed",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    pressedButtons,
+		"clickCount": 1,
+	}
+	upParams := map[string]interface{}{
+		"type":       "mouseReleased",
+		"x":          e.cursorPositionX,
+		"y":          e.cursorPositionY,
+		"button":     button,
+		"buttons":    0,
+		"clickCount": 1,
+	}
+
+	pressed := false
+	defer func() {
+		if !pressed {
+			return
+		}
+		_, releaseErr := e.cdp.Send("Input.dispatchMouseEvent", upParams)
+		pressed = false
+		if releaseErr != nil {
+			e.logger.Error("Failed to release mouse button via CDP during cleanup", zap.Error(releaseErr))
+			// Join with any return err (e.g. ctx cancel during hold vs CDP stuck-button cleanup failure).
+			cleanupErr := fmt.Errorf("failed to release mouse button during cleanup: %w", releaseErr)
+			if err != nil {
+				err = errors.Join(err, cleanupErr)
+				return
+			}
+			err = cleanupErr
+		}
+	}()
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	if err != nil {
+		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to press mouse button: %w", err)
+	}
+	pressed = true
+
+	// Hold duration must respect ctx so teardown can unwind without waiting the full second
+	// while the button is still logically down in Chromium.
+	if err = e.clock.SleepContext(ctx, 1*time.Second); err != nil {
+		return nil, err
+	}
+
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
+	if err != nil {
+		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
+		return nil, fmt.Errorf("failed to release mouse button: %w", err)
+	}
+	pressed = false
+
+	return CmdOK, nil
+}
+
+func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}, err error) {
+	e.initializeScreenDimensions()
+
+	// Parse cursor offsets to decide whether we should press/move/release.
+	var cursorArgs struct {
+		CursorOffsets []struct {
+			DX float64 `json:"dx"`
+			DY float64 `json:"dy"`
+		} `json:"cursorOffsets"`
+	}
+	if err := e.json.Unmarshal(args, &cursorArgs); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if len(cursorArgs.CursorOffsets) == 0 {
+		return CmdOK, nil
+	}
+
+	e.logger.Info("Mouse click-and-drag event at current position",
+		zap.Float64("x", e.cursorPositionX),
+		zap.Float64("y", e.cursorPositionY))
+
 	downParams := map[string]interface{}{
 		"type":       "mousePressed",
 		"x":          e.cursorPositionX,
@@ -740,30 +960,152 @@ func (e *executor) handleMouseTapEvent() (interface{}, error) {
 		"buttons":    1,
 		"clickCount": 1,
 	}
-
-	_, err := e.cdp.Send("Input.dispatchMouseEvent", downParams)
+	_, err = e.cdp.Send("Input.dispatchMouseEvent", downParams)
 	if err != nil {
 		e.logger.Error("Failed to press mouse button via CDP", zap.Error(err))
 		return nil, fmt.Errorf("failed to press mouse button: %w", err)
 	}
+	// Each click-and-drag batch is press + move + release. If the move step fails, we still
+	// must release the button; otherwise the page can keep a stuck mouse-down in Chromium
+	// until a later event clears it. Failed cleanup releases are always surfaced: alone when
+	// the move succeeded, or joined with the move error so a stuck-button cleanup failure is
+	// not dropped when the move path already failed.
+	defer func() {
+		up := map[string]interface{}{
+			"type":       "mouseReleased",
+			"x":          e.cursorPositionX,
+			"y":          e.cursorPositionY,
+			"button":     "left",
+			"buttons":    0,
+			"clickCount": 1,
+		}
+		if _, relErr := e.cdp.Send("Input.dispatchMouseEvent", up); relErr != nil {
+			e.logger.Error("click-and-drag: best-effort release after batch failed", zap.Error(relErr))
+			releaseErr := fmt.Errorf("failed to release mouse button during cleanup: %w", relErr)
+			if err == nil {
+				err = releaseErr
+			} else {
+				err = errors.Join(err, releaseErr)
+			}
+			result = nil
+		}
+	}()
 
-	// 2. Release mouse button
-	upParams := map[string]interface{}{
-		"type":       "mouseReleased",
-		"x":          e.cursorPositionX,
-		"y":          e.cursorPositionY,
-		"button":     "left",
-		"buttons":    0,
-		"clickCount": 1,
-	}
-
-	_, err = e.cdp.Send("Input.dispatchMouseEvent", upParams)
+	_, err = e.handleMouseMoveEventWithButtons(args, 1)
 	if err != nil {
-		e.logger.Error("Failed to release mouse button via CDP", zap.Error(err))
-		return nil, fmt.Errorf("failed to release mouse button: %w", err)
+		return nil, err
 	}
 
 	return CmdOK, nil
+}
+
+// handleZoomGestureEvent synthesizes pinch gestures at the CDP boundary. We
+// keep this in controld so the player UI does not need to understand a separate
+// gesture command.
+func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
+	e.initializeScreenDimensions()
+
+	var in struct {
+		MessageID  string    `json:"messageID"`
+		ScaleSteps []float64 `json:"scaleSteps"`
+	}
+	if err := e.json.Unmarshal(args, &in); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if len(in.ScaleSteps) == 0 {
+		return CmdOK, nil
+	}
+
+	for _, step := range in.ScaleSteps {
+		if step <= 0 {
+			return nil, fmt.Errorf("invalid arguments: scaleSteps must be positive: %v", step)
+		}
+	}
+
+	for _, step := range in.ScaleSteps {
+		if err := e.sendZoomPinchGesture(step); err != nil {
+			if !isUnsupportedPinchGestureError(err) {
+				e.logger.Error("Failed to synthesize pinch gesture", zap.Error(err))
+				return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
+			}
+
+			e.logger.Warn("Pinch gesture unsupported, falling back to wheel zoom", zap.Error(err))
+			if fallbackErr := e.sendZoomWheelGesture(step); fallbackErr != nil {
+				e.logger.Error("Failed to dispatch zoom fallback", zap.Error(fallbackErr))
+				return nil, fmt.Errorf("failed to process zoom gesture: %w", fallbackErr)
+			}
+		}
+	}
+
+	return CmdOK, nil
+}
+
+func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
+	params := map[string]interface{}{
+		"x":                 e.cursorPositionX,
+		"y":                 e.cursorPositionY,
+		"scaleFactor":       scaleFactor,
+		"relativeSpeed":     800,
+		"gestureSourceType": "default",
+	}
+
+	_, err := e.cdp.Send("Input.synthesizePinchGesture", params)
+	if err != nil {
+		return fmt.Errorf("synthesize pinch gesture: %w", err)
+	}
+
+	return nil
+}
+
+func (e *executor) sendZoomWheelGesture(scaleFactor float64) error {
+	if scaleFactor == 1 {
+		return nil
+	}
+
+	deltaY := zoomWheelDeltaY(scaleFactor)
+	if scaleFactor > 1 {
+		deltaY = -deltaY
+	}
+
+	params := map[string]interface{}{
+		"type":      "mouseWheel",
+		"x":         e.cursorPositionX,
+		"y":         e.cursorPositionY,
+		"deltaX":    0,
+		"deltaY":    deltaY,
+		"button":    "none",
+		"buttons":   0,
+		"modifiers": 2,
+	}
+
+	_, err := e.cdp.Send("Input.dispatchMouseEvent", params)
+	if err != nil {
+		return fmt.Errorf("dispatch wheel gesture: %w", err)
+	}
+
+	return nil
+}
+
+func zoomWheelDeltaY(scaleFactor float64) float64 {
+	magnitude := math.Abs(math.Log2(scaleFactor))
+	steps := math.Round(magnitude * 8)
+	if steps < 1 {
+		steps = 1
+	}
+	return 120.0 * steps
+}
+
+func isUnsupportedPinchGestureError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var remoteErr *cdp.RemoteError
+	if !errors.As(err, &remoteErr) {
+		return false
+	}
+
+	return remoteErr.Method == "Input.synthesizePinchGesture" && remoteErr.Unsupported
 }
 
 func (e *executor) shutdown(ctx context.Context) (interface{}, error) {

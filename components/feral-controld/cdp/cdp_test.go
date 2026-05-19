@@ -787,7 +787,12 @@ func TestClient_Send_Success(t *testing.T) {
 		Unmarshal([]byte(cdpResponse), gomock.Any()).
 		DoAndReturn(func(data []byte, v interface{}) error {
 			resp := v.(*struct {
-				ID     int `json:"id"`
+				ID    int `json:"id"`
+				Error *struct {
+					Code    int         `json:"code"`
+					Message string      `json:"message"`
+					Data    interface{} `json:"data"`
+				} `json:"error"`
 				Result struct {
 					Result struct {
 						Type        string      `json:"type"`
@@ -1220,7 +1225,12 @@ func TestClient_Send_Error(t *testing.T) {
 					Unmarshal(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(data []byte, v interface{}) error {
 						resp := v.(*struct {
-							ID     int `json:"id"`
+							ID    int `json:"id"`
+							Error *struct {
+								Code    int         `json:"code"`
+								Message string      `json:"message"`
+								Data    interface{} `json:"data"`
+							} `json:"error"`
 							Result struct {
 								Result struct {
 									Type        string      `json:"type"`
@@ -1241,7 +1251,210 @@ func TestClient_Send_Error(t *testing.T) {
 					}).
 					Times(1)
 			},
-			wantErr: "CDP error: Test error",
+			wantErr: "CDP error: Runtime.evaluate: Test error",
+		},
+		{
+			name: "CDP error object without description",
+			setupFunc: func(ts *testSetup) {
+				// Initialize the client first
+				responseBody := "fake response body"
+				mockResponse := &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(strings.NewReader(responseBody)),
+				}
+
+				// Expect HTTP GET to return response body
+				ts.mockHTTP.EXPECT().
+					Do(gomock.Any()).
+					Return(mockResponse, nil).
+					Times(1)
+
+				// Expect io.ReadAll to return response body
+				ts.mockIO.EXPECT().
+					ReadAll(gomock.Any()).
+					Return([]byte(responseBody), nil).
+					Times(1)
+
+				// Expect json.Unmarshal to unmarshal response body
+				ts.mockJSON.EXPECT().
+					Unmarshal(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						targets := v.(*[]struct {
+							Type                 string `json:"type"`
+							Title                string `json:"title"`
+							WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+						})
+						*targets = []struct {
+							Type                 string `json:"type"`
+							Title                string `json:"title"`
+							WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+						}{
+							{
+								Type:                 "page",
+								Title:                "Test Page",
+								WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/123",
+							},
+						}
+						return nil
+					}).
+					Times(1)
+
+				// Expect dialer to dial and return connection
+				ts.mockDialer.EXPECT().
+					DialContext(ts.ctx, gomock.Any(), nil).
+					Return(ts.mockConn, nil, nil).
+					Times(1)
+
+				// Initialize
+				err := ts.client.Init(ts.ctx)
+				assert.NoError(t, err)
+				assert.True(t, ts.client.Initialized())
+
+				// Expect JSON marshal to succeed
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte(`{"test":"data"}`), nil).
+					Times(1)
+
+				// Expect WriteMessage to succeed
+				ts.mockConn.EXPECT().
+					WriteMessage(websocket.TextMessage, gomock.Any()).
+					Return(nil).
+					Times(1)
+
+				// Expect ReadMessage to succeed
+				ts.mockConn.EXPECT().
+					ReadMessage().
+					Return(websocket.TextMessage, []byte{}, nil).
+					Times(1)
+
+				// Expect JSON unmarshal to succeed and return error response with no description
+				ts.mockJSON.EXPECT().
+					Unmarshal(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						resp := v.(*struct {
+							ID    int `json:"id"`
+							Error *struct {
+								Code    int         `json:"code"`
+								Message string      `json:"message"`
+								Data    interface{} `json:"data"`
+							} `json:"error"`
+							Result struct {
+								Result struct {
+									Type        string      `json:"type"`
+									Subtype     *string     `json:"subtype"`
+									ClassName   *string     `json:"className"`
+									Description *string     `json:"description"`
+									Value       interface{} `json:"value"`
+								} `json:"result"`
+							} `json:"result"`
+						})
+						resp.ID = 1
+						resp.Result.Result.Type = cdp.TYPE_OBJECT
+						subtype := cdp.SUBTYPE_ERROR
+						resp.Result.Result.Subtype = &subtype
+						className := "TypeError"
+						resp.Result.Result.ClassName = &className
+						resp.Result.Result.Description = nil
+						return nil
+					}).
+					Times(1)
+			},
+			wantErr: "CDP error: Runtime.evaluate: TypeError",
+		},
+		{
+			name: "CDP top-level error envelope",
+			setupFunc: func(ts *testSetup) {
+				responseBody := "fake response body"
+				mockResponse := &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(strings.NewReader(responseBody)),
+				}
+
+				ts.mockHTTP.EXPECT().
+					Do(gomock.Any()).
+					Return(mockResponse, nil).
+					Times(1)
+
+				ts.mockIO.EXPECT().
+					ReadAll(gomock.Any()).
+					Return([]byte(responseBody), nil).
+					Times(1)
+
+				ts.mockJSON.EXPECT().
+					Unmarshal(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						targets := v.(*[]struct {
+							Type                 string `json:"type"`
+							Title                string `json:"title"`
+							WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+						})
+						*targets = []struct {
+							Type                 string `json:"type"`
+							Title                string `json:"title"`
+							WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+						}{
+							{Type: "page", Title: "Test Page", WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/123"},
+						}
+						return nil
+					}).
+					Times(1)
+
+				ts.mockDialer.EXPECT().
+					DialContext(ts.ctx, gomock.Any(), nil).
+					Return(ts.mockConn, nil, nil).
+					Times(1)
+
+				err := ts.client.Init(ts.ctx)
+				assert.NoError(t, err)
+				assert.True(t, ts.client.Initialized())
+
+				ts.mockJSON.EXPECT().
+					Marshal(gomock.Any()).
+					Return([]byte(`{"id":1,"method":"Runtime.evaluate","params":{"expression":"test"}}`), nil).
+					Times(1)
+				ts.mockConn.EXPECT().
+					WriteMessage(websocket.TextMessage, gomock.Any()).
+					Return(nil).
+					Times(1)
+				ts.mockConn.EXPECT().
+					ReadMessage().
+					Return(websocket.TextMessage, []byte(`{"id":1,"error":{"code":-32601,"message":"Method not found"}}`), nil).
+					Times(1)
+				ts.mockJSON.EXPECT().
+					Unmarshal([]byte(`{"id":1,"error":{"code":-32601,"message":"Method not found"}}`), gomock.Any()).
+					DoAndReturn(func(data []byte, v interface{}) error {
+						resp := v.(*struct {
+							ID    int `json:"id"`
+							Error *struct {
+								Code    int         `json:"code"`
+								Message string      `json:"message"`
+								Data    interface{} `json:"data"`
+							} `json:"error"`
+							Result struct {
+								Result struct {
+									Type        string      `json:"type"`
+									Subtype     *string     `json:"subtype"`
+									ClassName   *string     `json:"className"`
+									Description *string     `json:"description"`
+									Value       interface{} `json:"value"`
+								} `json:"result"`
+							} `json:"result"`
+						})
+						resp.ID = 1
+						resp.Error = &struct {
+							Code    int         `json:"code"`
+							Message string      `json:"message"`
+							Data    interface{} `json:"data"`
+						}{
+							Code:    -32601,
+							Message: "Method not found",
+						}
+						return nil
+					}).
+					Times(1)
+			},
+			wantErr: "CDP error: Runtime.evaluate: Method not found",
 		},
 		{
 			name: "CDP invalid string response",
@@ -1324,7 +1537,12 @@ func TestClient_Send_Error(t *testing.T) {
 					Unmarshal(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(data []byte, v interface{}) error {
 						resp := v.(*struct {
-							ID     int `json:"id"`
+							ID    int `json:"id"`
+							Error *struct {
+								Code    int         `json:"code"`
+								Message string      `json:"message"`
+								Data    interface{} `json:"data"`
+							} `json:"error"`
 							Result struct {
 								Result struct {
 									Type        string      `json:"type"`
@@ -1432,7 +1650,12 @@ func TestClient_Send_Error(t *testing.T) {
 					Unmarshal(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(data []byte, v interface{}) error {
 						resp := v.(*struct {
-							ID     int `json:"id"`
+							ID    int `json:"id"`
+							Error *struct {
+								Code    int         `json:"code"`
+								Message string      `json:"message"`
+								Data    interface{} `json:"data"`
+							} `json:"error"`
 							Result struct {
 								Result struct {
 									Type        string      `json:"type"`
@@ -1484,6 +1707,212 @@ func TestClient_Send_Error(t *testing.T) {
 			ts.client.Close()
 		})
 	}
+}
+
+func TestClient_Send_PinchingUnsupportedTopLevelError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	responseBody := "fake response body"
+	mockResponse := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(responseBody)),
+	}
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		Return(mockResponse, nil).
+		Times(1)
+
+	ts.mockIO.EXPECT().
+		ReadAll(gomock.Any()).
+		Return([]byte(responseBody), nil).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			targets := v.(*[]struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			})
+			*targets = []struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			}{
+				{Type: "page", Title: "Test Page", WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/123"},
+			}
+			return nil
+		}).
+		Times(1)
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, nil, nil).
+		Times(1)
+
+	err := ts.client.Init(ts.ctx)
+	assert.NoError(t, err)
+	assert.True(t, ts.client.Initialized())
+
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"id":1,"method":"Input.synthesizePinchGesture","params":{"x":1,"y":2}}`), nil).
+		Times(1)
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.TextMessage, gomock.Any()).
+		Return(nil).
+		Times(1)
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		Return(websocket.TextMessage, []byte(`{"id":1,"error":{"code":-32601,"message":"método no encontrado"}}`), nil).
+		Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"id":1,"error":{"code":-32601,"message":"método no encontrado"}}`), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			resp := v.(*struct {
+				ID    int `json:"id"`
+				Error *struct {
+					Code    int         `json:"code"`
+					Message string      `json:"message"`
+					Data    interface{} `json:"data"`
+				} `json:"error"`
+				Result struct {
+					Result struct {
+						Type        string      `json:"type"`
+						Subtype     *string     `json:"subtype"`
+						ClassName   *string     `json:"className"`
+						Description *string     `json:"description"`
+						Value       interface{} `json:"value"`
+					} `json:"result"`
+				} `json:"result"`
+			})
+			resp.ID = 1
+			resp.Error = &struct {
+				Code    int         `json:"code"`
+				Message string      `json:"message"`
+				Data    interface{} `json:"data"`
+			}{
+				Code:    -32601,
+				Message: "método no encontrado",
+			}
+			return nil
+		}).
+		Times(1)
+
+	result, err := ts.client.Send("Input.synthesizePinchGesture", map[string]interface{}{"x": 1, "y": 2})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+
+	var remoteErr *cdp.RemoteError
+	assert.ErrorAs(t, err, &remoteErr)
+	assert.True(t, remoteErr.Unsupported)
+	assert.Equal(t, "Input.synthesizePinchGesture", remoteErr.Method)
+}
+
+func TestClient_Send_PinchingUnsupportedTopLevelErrorFromProtocolEnvelope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	responseBody := "fake response body"
+	mockResponse := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(responseBody)),
+	}
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		Return(mockResponse, nil).
+		Times(1)
+
+	ts.mockIO.EXPECT().
+		ReadAll(gomock.Any()).
+		Return([]byte(responseBody), nil).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			targets := v.(*[]struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			})
+			*targets = []struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			}{
+				{Type: "page", Title: "Test Page", WebSocketDebuggerURL: "ws://localhost:9222/devtools/page/123"},
+			}
+			return nil
+		}).
+		Times(1)
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, nil, nil).
+		Times(1)
+
+	err := ts.client.Init(ts.ctx)
+	assert.NoError(t, err)
+	assert.True(t, ts.client.Initialized())
+
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{"id":1,"method":"Input.synthesizePinchGesture","params":{"x":1,"y":2}}`), nil).
+		Times(1)
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.TextMessage, gomock.Any()).
+		Return(nil).
+		Times(1)
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		Return(websocket.TextMessage, []byte(`{"id":1,"error":{"code":-32601,"message":"method not found"}}`), nil).
+		Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(`{"id":1,"error":{"code":-32601,"message":"method not found"}}`), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			resp := v.(*struct {
+				ID    int `json:"id"`
+				Error *struct {
+					Code    int         `json:"code"`
+					Message string      `json:"message"`
+					Data    interface{} `json:"data"`
+				} `json:"error"`
+				Result struct {
+					Result struct {
+						Type        string      `json:"type"`
+						Subtype     *string     `json:"subtype"`
+						ClassName   *string     `json:"className"`
+						Description *string     `json:"description"`
+						Value       interface{} `json:"value"`
+					} `json:"result"`
+				} `json:"result"`
+			})
+			resp.ID = 1
+			resp.Error = &struct {
+				Code    int         `json:"code"`
+				Message string      `json:"message"`
+				Data    interface{} `json:"data"`
+			}{
+				Code:    -32601,
+				Message: "method not found",
+			}
+			return nil
+		}).
+		Times(1)
+
+	result, err := ts.client.Send("Input.synthesizePinchGesture", map[string]interface{}{"x": 1, "y": 2})
+	assert.Error(t, err)
+	assert.Nil(t, result)
+
+	var remoteErr *cdp.RemoteError
+	assert.ErrorAs(t, err, &remoteErr)
+	assert.True(t, remoteErr.Unsupported)
+	assert.Equal(t, "Input.synthesizePinchGesture", remoteErr.Method)
 }
 
 func TestClient_Send_Async(t *testing.T) {
@@ -1610,7 +2039,12 @@ func TestClient_Send_Async(t *testing.T) {
 
 			// Check if this is a CDP response structure (the first unmarshal call)
 			if _, ok := v.(*struct {
-				ID     int `json:"id"`
+				ID    int `json:"id"`
+				Error *struct {
+					Code    int         `json:"code"`
+					Message string      `json:"message"`
+					Data    interface{} `json:"data"`
+				} `json:"error"`
 				Result struct {
 					Result struct {
 						Type        string      `json:"type"`
@@ -1628,7 +2062,12 @@ func TestClient_Send_Async(t *testing.T) {
 				if _, err := fmt.Sscanf(string(data), `{"id":%d,`, &rawResp.ID); err == nil {
 					// This is the CDP response unmarshal
 					resp := v.(*struct {
-						ID     int `json:"id"`
+						ID    int `json:"id"`
+						Error *struct {
+							Code    int         `json:"code"`
+							Message string      `json:"message"`
+							Data    interface{} `json:"data"`
+						} `json:"error"`
 						Result struct {
 							Result struct {
 								Type        string      `json:"type"`
