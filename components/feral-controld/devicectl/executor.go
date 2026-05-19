@@ -1065,13 +1065,9 @@ func (e *executor) zoomGesturePoint(scaleFactor float64) (float64, float64) {
 }
 
 func (e *executor) innerToVisualViewport(x, y, viewportX, viewportY, viewportWidth, viewportHeight float64) (float64, float64) {
-	if e.screenWidth <= 0 || e.screenHeight <= 0 {
-		return viewportX, viewportY
-	}
-
-	visualX := viewportX + (x/e.screenWidth)*viewportWidth
-	visualY := viewportY + (y/e.screenHeight)*viewportHeight
-	return e.clampToViewport(visualX, visualY, viewportX, viewportY, viewportWidth, viewportHeight)
+	visualX := x - viewportX
+	visualY := y - viewportY
+	return e.clampToViewport(visualX, visualY, 0, 0, viewportWidth, viewportHeight)
 }
 
 func (e *executor) currentVisualViewport() (float64, float64, float64, float64) {
