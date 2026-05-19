@@ -1046,12 +1046,30 @@ func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
 		"y":                 e.cursorPositionY,
 		"scaleFactor":       scaleFactor,
 		"relativeSpeed":     800,
-		"gestureSourceType": "default",
+		"gestureSourceType": "touch",
 	}
 
 	_, err := e.cdp.Send("Input.synthesizePinchGesture", params)
 	if err != nil {
 		return fmt.Errorf("synthesize pinch gesture: %w", err)
+	}
+
+	if err := e.resetPageScale(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (e *executor) resetPageScale() error {
+	// Some artwork documents do not consume a synthetic pinch, allowing Chromium
+	// to apply page-scale zoom. Keep browser scale fixed so later gestures do not
+	// operate on a stuck zoomed page.
+	_, err := e.cdp.Send("Emulation.setPageScaleFactor", map[string]interface{}{
+		"pageScaleFactor": 1,
+	})
+	if err != nil {
+		return fmt.Errorf("reset page scale: %w", err)
 	}
 
 	return nil
@@ -1075,7 +1093,7 @@ func (e *executor) sendZoomWheelGesture(scaleFactor float64) error {
 		"deltaY":    deltaY,
 		"button":    "none",
 		"buttons":   0,
-		"modifiers": 2,
+		"modifiers": 0,
 	}
 
 	_, err := e.cdp.Send("Input.dispatchMouseEvent", params)
