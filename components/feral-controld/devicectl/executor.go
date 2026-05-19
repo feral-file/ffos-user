@@ -1062,13 +1062,20 @@ func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
 func (e *executor) zoomGesturePoint(scaleFactor float64) (float64, float64) {
 	if scaleFactor < 1 {
 		viewportX, viewportY, viewportWidth, viewportHeight := e.currentVisualViewport()
-		// Zoom-out pinch gestures are more sensitive to edge proximity in Chromium.
-		// Keep the anchor centered in the current visual viewport so the gesture
-		// stays valid after Chromium has already applied a previous zoom.
-		return viewportX + viewportWidth/2, viewportY + viewportHeight/2
+		return e.innerToVisualViewport(e.cursorPositionX, e.cursorPositionY, viewportX, viewportY, viewportWidth, viewportHeight)
 	}
 
 	return e.cursorPositionX, e.cursorPositionY
+}
+
+func (e *executor) innerToVisualViewport(x, y, viewportX, viewportY, viewportWidth, viewportHeight float64) (float64, float64) {
+	if e.screenWidth <= 0 || e.screenHeight <= 0 {
+		return viewportX, viewportY
+	}
+
+	visualX := viewportX + (x/e.screenWidth)*viewportWidth
+	visualY := viewportY + (y/e.screenHeight)*viewportHeight
+	return e.clampToViewport(visualX, visualY, viewportX, viewportY, viewportWidth, viewportHeight)
 }
 
 func (e *executor) currentVisualViewport() (float64, float64, float64, float64) {
