@@ -2737,6 +2737,76 @@ func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_ZoomGestureEvent_MapsAnchorForDifferentScaleSteps(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	screenWidth := 1920.0
+	screenHeight := 1080.0
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.5, 0.5, 2.25, 0.25},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.5,0.5,2.25,0.25]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": screenWidth, "height": screenHeight}, nil)
+	for _, viewport := range []map[string]interface{}{
+		{"offsetLeft": 0.0, "offsetTop": 0.0, "width": 1920.0, "height": 1080.0},
+		{"offsetLeft": 120.0, "offsetTop": 80.0, "width": 1280.0, "height": 720.0},
+		{"offsetLeft": 300.0, "offsetTop": 200.0, "width": 960.0, "height": 540.0},
+		{"offsetLeft": 500.0, "offsetTop": 300.0, "width": 640.0, "height": 360.0},
+	} {
+		ts.mockCDP.EXPECT().
+			Send("Runtime.evaluate", gomock.Any()).
+			Return(viewport, nil)
+	}
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.5, 0.5, 2.25, 0.25}
+			return nil
+		})
+
+	for _, want := range []struct {
+		scale float64
+		x     float64
+		y     float64
+	}{
+		{scale: 1.5, x: 960, y: 540},
+		{scale: 0.5, x: 840, y: 460},
+		{scale: 2.25, x: 660, y: 340},
+		{scale: 0.25, x: 460, y: 240},
+	} {
+		ts.mockCDP.EXPECT().
+			Send("Input.synthesizePinchGesture", map[string]interface{}{
+				"x":                 want.x,
+				"y":                 want.y,
+				"scaleFactor":       want.scale,
+				"relativeSpeed":     3200,
+				"gestureSourceType": "default",
+				"modifiers":         0,
+			}).
+			Return(nil, nil)
+	}
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
+}
+
 func TestExecutor_ZoomGestureEvent_WithMessageID(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
