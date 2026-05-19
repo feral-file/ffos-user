@@ -1045,8 +1045,9 @@ func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
 		"x":                 e.cursorPositionX,
 		"y":                 e.cursorPositionY,
 		"scaleFactor":       scaleFactor,
-		"relativeSpeed":     800,
-		"gestureSourceType": "touch",
+		"relativeSpeed":     3200,
+		"gestureSourceType": "default",
+		"modifiers":         0,
 	}
 
 	_, err := e.cdp.Send("Input.synthesizePinchGesture", params)

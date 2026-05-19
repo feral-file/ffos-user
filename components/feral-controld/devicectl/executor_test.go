@@ -2700,8 +2700,9 @@ func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.05,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, nil)
 	ts.mockCDP.EXPECT().
@@ -2709,8 +2710,9 @@ func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       0.98,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, nil)
 
@@ -2760,8 +2762,9 @@ func TestExecutor_ZoomGestureEvent_WithMessageID(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.1,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, nil)
 
@@ -2840,8 +2843,9 @@ func TestExecutor_ZoomGestureEvent_CDPError(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.01,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, errors.New("cdp pinch failed"))
 
@@ -2890,8 +2894,9 @@ func TestExecutor_ZoomGestureEvent_UnsupportedExperimentalMethod(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.02,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "unknown method", Unsupported: true})
 	ts.mockCDP.EXPECT().
@@ -2951,8 +2956,9 @@ func TestExecutor_ZoomGestureEvent_PinchUnsupportedUsesFallback(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       0.98,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "Method not found", Unsupported: true})
 	ts.mockCDP.EXPECT().
@@ -3012,8 +3018,9 @@ func TestExecutor_ZoomGestureEvent_NeutralScaleDoesNotFallback(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.0,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "Method not found", Unsupported: true})
 
@@ -3061,8 +3068,9 @@ func TestExecutor_ZoomGestureEvent_FallbackMagnitudeGrowsWithScale(t *testing.T)
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.5,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "unknown method", Unsupported: true})
 	ts.mockCDP.EXPECT().
@@ -3122,8 +3130,9 @@ func TestExecutor_ZoomGestureEvent_PinchNotSupportedFails(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.02,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, errors.New("feature not supported"))
 
@@ -3244,8 +3253,9 @@ func TestExecutor_ZoomGestureEvent_UnsupportedWordingFallbacks(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       0.98,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "wasn't found", Unsupported: true})
 	ts.mockCDP.EXPECT().
@@ -3305,8 +3315,9 @@ func TestExecutor_ZoomGestureEvent_UnsupportedMethodWithNameFallbacks(t *testing
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.02,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "method not found", Unsupported: true})
 	ts.mockCDP.EXPECT().
@@ -3366,8 +3377,9 @@ func TestExecutor_ZoomGestureEvent_TargetNotFoundDoesNotFallback(t *testing.T) {
 			"x":                 centerX,
 			"y":                 centerY,
 			"scaleFactor":       1.02,
-			"relativeSpeed":     800,
-			"gestureSourceType": "touch",
+			"relativeSpeed":     3200,
+			"gestureSourceType": "default",
+			"modifiers":         0,
 		}).
 		Return(nil, &cdp.RemoteError{Method: "Input.synthesizePinchGesture", Description: "Target not found", Unsupported: false})
 
