@@ -1041,9 +1041,10 @@ func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 }
 
 func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
+	x, y := e.zoomGesturePoint(scaleFactor)
 	params := map[string]interface{}{
-		"x":                 e.cursorPositionX,
-		"y":                 e.cursorPositionY,
+		"x":                 x,
+		"y":                 y,
 		"scaleFactor":       scaleFactor,
 		"relativeSpeed":     3200,
 		"gestureSourceType": "default",
@@ -1056,6 +1057,88 @@ func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
 	}
 
 	return nil
+}
+
+func (e *executor) zoomGesturePoint(scaleFactor float64) (float64, float64) {
+	if scaleFactor < 1 {
+		viewportX, viewportY, viewportWidth, viewportHeight := e.currentVisualViewport()
+		// Zoom-out pinch gestures are more sensitive to edge proximity in Chromium.
+		// Keep the anchor centered in the current visual viewport so the gesture
+		// stays valid after Chromium has already applied a previous zoom.
+		return viewportX + viewportWidth/2, viewportY + viewportHeight/2
+	}
+
+	return e.cursorPositionX, e.cursorPositionY
+}
+
+func (e *executor) currentVisualViewport() (float64, float64, float64, float64) {
+	viewportX, viewportY := 0.0, 0.0
+	viewportWidth, viewportHeight := e.screenWidth, e.screenHeight
+
+	evalParams := map[string]interface{}{
+		"expression": `
+			(() => {
+				const vv = window.visualViewport;
+				return vv ? {
+					offsetLeft: vv.offsetLeft,
+					offsetTop: vv.offsetTop,
+					width: vv.width,
+					height: vv.height
+				} : null;
+			})()`,
+		"returnByValue": true,
+	}
+
+	result, err := e.cdp.Send("Runtime.evaluate", evalParams)
+	if err != nil {
+		e.logger.Warn("Failed to get visual viewport; using screen bounds", zap.Error(err))
+		return viewportX, viewportY, viewportWidth, viewportHeight
+	}
+
+	if result == nil {
+		return viewportX, viewportY, viewportWidth, viewportHeight
+	}
+
+	viewport, ok := result.(map[string]interface{})
+	if !ok {
+		return viewportX, viewportY, viewportWidth, viewportHeight
+	}
+
+	if offsetLeft, ok := viewport["offsetLeft"].(float64); ok {
+		viewportX = offsetLeft
+	}
+	if offsetTop, ok := viewport["offsetTop"].(float64); ok {
+		viewportY = offsetTop
+	}
+	if width, ok := viewport["width"].(float64); ok && width > 0 {
+		viewportWidth = width
+	}
+	if height, ok := viewport["height"].(float64); ok && height > 0 {
+		viewportHeight = height
+	}
+
+	return viewportX, viewportY, viewportWidth, viewportHeight
+}
+
+func (e *executor) clampToViewport(x, y, viewportX, viewportY, viewportWidth, viewportHeight float64) (float64, float64) {
+	minX := viewportX
+	maxX := viewportX + viewportWidth
+	minY := viewportY
+	maxY := viewportY + viewportHeight
+
+	if x < minX {
+		x = minX
+	} else if x > maxX {
+		x = maxX
+	}
+
+	if y < minY {
+		y = minY
+	} else if y > maxY {
+		y = maxY
+	}
+
+	return x, y
 }
 
 func (e *executor) sendZoomWheelGesture(scaleFactor float64) error {
