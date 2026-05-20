@@ -2014,6 +2014,27 @@ func TestExecutor_MouseLongPressEvent_SleepsAndReleases(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_MouseLongPressEvent_ContextCanceledBeforeDispatch(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_MOUSE_LONG_PRESS_EVENT,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ctx, cancel := context.WithCancel(ts.ctx)
+	cancel()
+
+	result, err := ts.executor.Execute(ctx, cmd)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, result)
+}
+
 func TestExecutor_MouseLongPressEvent_ContextCanceledDuringHoldReleasesDefer(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -3035,6 +3056,12 @@ func TestExecutor_ZoomGestureEvent_PinchUnsupportedUsesFallback(t *testing.T) {
 	screenHeight := 1080.0
 	centerX := screenWidth / 2
 	centerY := screenHeight / 2
+	viewportX := 120.0
+	viewportY := 80.0
+	viewportW := 1280.0
+	viewportH := 720.0
+	fallbackX := centerX - viewportX
+	fallbackY := centerY - viewportY
 
 	cmd := commands.Command{
 		Type: commands.CMD_ZOOM_GESTURE,
@@ -3051,10 +3078,10 @@ func TestExecutor_ZoomGestureEvent_PinchUnsupportedUsesFallback(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Runtime.evaluate", gomock.Any()).
 		Return(map[string]interface{}{
-			"offsetLeft": 0.0,
-			"offsetTop":  0.0,
-			"width":      screenWidth,
-			"height":     screenHeight,
+			"offsetLeft": viewportX,
+			"offsetTop":  viewportY,
+			"width":      viewportW,
+			"height":     viewportH,
 		}, nil)
 	ts.mockJSON.EXPECT().
 		Unmarshal([]byte(argsJSON), gomock.Any()).
@@ -3071,8 +3098,8 @@ func TestExecutor_ZoomGestureEvent_PinchUnsupportedUsesFallback(t *testing.T) {
 		})
 	ts.mockCDP.EXPECT().
 		Send("Input.synthesizePinchGesture", map[string]interface{}{
-			"x":                 centerX,
-			"y":                 centerY,
+			"x":                 fallbackX,
+			"y":                 fallbackY,
 			"scaleFactor":       0.98,
 			"relativeSpeed":     3200,
 			"gestureSourceType": "default",
@@ -3082,8 +3109,8 @@ func TestExecutor_ZoomGestureEvent_PinchUnsupportedUsesFallback(t *testing.T) {
 	ts.mockCDP.EXPECT().
 		Send("Input.dispatchMouseEvent", map[string]interface{}{
 			"type":      "mouseWheel",
-			"x":         centerX,
-			"y":         centerY,
+			"x":         fallbackX,
+			"y":         fallbackY,
 			"deltaX":    0,
 			"deltaY":    120.0,
 			"button":    "none",

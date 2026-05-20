@@ -861,6 +861,10 @@ func (e *executor) handleMouseDoubleTapEvent(args []byte) (interface{}, error) {
 }
 
 func (e *executor) handleMouseLongPressEvent(ctx context.Context, args []byte) (result interface{}, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	e.initializeScreenDimensions()
 
 	button, pressedButtons, err := e.parseMouseButton(args)
@@ -1023,14 +1027,15 @@ func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 	}
 
 	for _, step := range in.ScaleSteps {
-		if err := e.sendZoomPinchGesture(step); err != nil {
+		x, y := e.zoomGesturePoint(step)
+		if err := e.sendZoomPinchGesture(step, x, y); err != nil {
 			if !isUnsupportedPinchGestureError(err) {
 				e.logger.Error("Failed to synthesize pinch gesture", zap.Error(err))
 				return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
 			}
 
 			e.logger.Warn("Pinch gesture unsupported, falling back to wheel zoom", zap.Error(err))
-			if fallbackErr := e.sendZoomWheelGesture(step); fallbackErr != nil {
+			if fallbackErr := e.sendZoomWheelGesture(step, x, y); fallbackErr != nil {
 				e.logger.Error("Failed to dispatch zoom fallback", zap.Error(fallbackErr))
 				return nil, fmt.Errorf("failed to process zoom gesture: %w", fallbackErr)
 			}
@@ -1040,8 +1045,7 @@ func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 	return CmdOK, nil
 }
 
-func (e *executor) sendZoomPinchGesture(scaleFactor float64) error {
-	x, y := e.zoomGesturePoint(scaleFactor)
+func (e *executor) sendZoomPinchGesture(scaleFactor, x, y float64) error {
 	params := map[string]interface{}{
 		"x":                 x,
 		"y":                 y,
@@ -1140,7 +1144,7 @@ func (e *executor) clampToViewport(x, y, viewportX, viewportY, viewportWidth, vi
 	return x, y
 }
 
-func (e *executor) sendZoomWheelGesture(scaleFactor float64) error {
+func (e *executor) sendZoomWheelGesture(scaleFactor, x, y float64) error {
 	if scaleFactor == 1 {
 		return nil
 	}
@@ -1152,8 +1156,8 @@ func (e *executor) sendZoomWheelGesture(scaleFactor float64) error {
 
 	params := map[string]interface{}{
 		"type":      "mouseWheel",
-		"x":         e.cursorPositionX,
-		"y":         e.cursorPositionY,
+		"x":         x,
+		"y":         y,
 		"deltaX":    0,
 		"deltaY":    deltaY,
 		"button":    "none",
