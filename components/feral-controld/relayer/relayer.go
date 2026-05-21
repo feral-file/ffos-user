@@ -49,6 +49,7 @@ type Response struct {
 }
 
 type Payload struct {
+	Type      string  `json:"type,omitempty"`
 	MessageID string  `json:"messageID"`
 	Message   Message `json:"message"`
 }
@@ -414,11 +415,20 @@ func (r *relayer) background(ctx context.Context) {
 
 				r.logger.Info("Received message",
 					zap.ByteString("message", logMsg),
+					zap.String("type", payload.Type),
 					zap.String("messageID", payload.MessageID),
 					zap.String("command", derefString(payload.Message.Command)),
 					zap.String("topicID", derefString(payload.Message.TopicID)),
 					zap.Int("message_length", len(msg)),
 				)
+
+				if payload.Type == "pong" {
+					r.logger.Info("Received application pong from relayer")
+					if err := conn.SetReadDeadline(time.Time{}); err != nil {
+						r.logger.Error("Failed to clear read deadline after pong", zap.Error(err))
+					}
+					continue
+				}
 
 				// Forward payload to handlers
 				for _, handler := range r.handlers {
@@ -485,7 +495,7 @@ func (r *relayer) ping() {
 	}
 
 	r.logger.Info("Sending relayer ping")
-	if err := r.conn.WriteMessage(websocket.PingMessage, []byte("ping")); err != nil {
+	if err := r.conn.WriteJSON(map[string]string{"type": "ping"}); err != nil {
 		r.logger.Error("Failed to send ping", zap.Error(err))
 		return
 	} else {

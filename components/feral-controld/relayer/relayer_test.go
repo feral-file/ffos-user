@@ -134,7 +134,7 @@ func TestClient_Connect_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -198,7 +198,7 @@ func TestClient_Connect_Async(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -479,7 +479,7 @@ func TestClient_RetryableConnect_FailsThenSucceeds(t *testing.T) {
 
 	// Expect conn to send ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -686,7 +686,7 @@ func TestClient_RetryableConnect_UnknownError_RetryLimitNotExceeded(t *testing.T
 
 	// Expect conn to send ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -750,7 +750,7 @@ func TestClient_SendMessage_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -845,7 +845,7 @@ func TestClient_Close_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -914,7 +914,7 @@ func TestClient_Close_Error(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1128,7 +1128,7 @@ func TestClient_ReceiveMessage_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1218,7 +1218,7 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1262,7 +1262,7 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 
 	// Expect second conn to write ping
 	mockConn2.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1346,7 +1346,7 @@ func TestClient_ReadMessage_ErrorAfterClose_DoesNotReconnect(t *testing.T) {
 		Times(1)
 
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1429,8 +1429,8 @@ func TestClient_Ping_Success(t *testing.T) {
 	pingCalled := make(chan struct{})
 	once := sync.Once{}
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, []byte("ping")).
-		DoAndReturn(func(messageType int, data []byte) error {
+		WriteJSON(map[string]string{"type": "ping"}).
+		DoAndReturn(func(_ interface{}) error {
 			once.Do(func() {
 				close(pingCalled)
 			})
@@ -1507,8 +1507,8 @@ func TestClient_Ping_Error(t *testing.T) {
 	pingCalled := make(chan struct{})
 	once := sync.Once{}
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
-		DoAndReturn(func(messageType int, data []byte) error {
+		WriteJSON(gomock.Any()).
+		DoAndReturn(func(_ interface{}) error {
 			once.Do(func() {
 				close(pingCalled)
 			})
@@ -1584,8 +1584,8 @@ func TestClient_Ping_ContextCanceled(t *testing.T) {
 	pingAfterCancel := make(chan struct{})
 
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, []byte("ping")).
-		DoAndReturn(func(messageType int, data []byte) error {
+		WriteJSON(map[string]string{"type": "ping"}).
+		DoAndReturn(func(_ interface{}) error {
 			count := atomic.AddInt32(&pingCallCount, 1)
 			if count == 1 {
 				close(firstPingCalled)
@@ -1680,7 +1680,7 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
