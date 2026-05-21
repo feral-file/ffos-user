@@ -1039,6 +1039,12 @@ func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 				e.logger.Error("Failed to dispatch zoom fallback", zap.Error(fallbackErr))
 				return nil, fmt.Errorf("failed to process zoom gesture: %w", fallbackErr)
 			}
+			continue
+		}
+
+		if err := e.resetPageScaleFactor(); err != nil {
+			e.logger.Error("Failed to reset page scale after pinch gesture", zap.Error(err))
+			return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
 		}
 	}
 
@@ -1058,6 +1064,20 @@ func (e *executor) sendZoomPinchGesture(scaleFactor, x, y float64) error {
 	_, err := e.cdp.Send("Input.synthesizePinchGesture", params)
 	if err != nil {
 		return fmt.Errorf("synthesize pinch gesture: %w", err)
+	}
+
+	return nil
+}
+
+// Pinch input can leave Chromium's page scale changed even when the gesture is
+// meant to drive artwork behavior, so we normalize the page scale after each
+// successful pinch and keep the browser from retaining zoom state.
+func (e *executor) resetPageScaleFactor() error {
+	_, err := e.cdp.Send("Emulation.setPageScaleFactor", map[string]interface{}{
+		"pageScaleFactor": 1.0,
+	})
+	if err != nil {
+		return fmt.Errorf("set page scale factor: %w", err)
 	}
 
 	return nil

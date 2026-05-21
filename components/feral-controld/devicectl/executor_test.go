@@ -110,6 +110,14 @@ func (ts *testSetup) teardown() {
 	ts.ctrl.Finish()
 }
 
+func expectPageScaleReset(ts *testSetup) {
+	ts.mockCDP.EXPECT().
+		Send("Emulation.setPageScaleFactor", map[string]interface{}{
+			"pageScaleFactor": 1.0,
+		}).
+		Return(nil, nil)
+}
+
 func TestExecutor_Execute_InvalidCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -2742,6 +2750,7 @@ func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
 			"modifiers":         0,
 		}).
 		Return(nil, nil)
+	expectPageScaleReset(ts)
 	ts.mockCDP.EXPECT().
 		Send("Input.synthesizePinchGesture", map[string]interface{}{
 			"x":                 centerX,
@@ -2752,6 +2761,7 @@ func TestExecutor_ZoomGestureEvent_Success(t *testing.T) {
 			"modifiers":         0,
 		}).
 		Return(nil, nil)
+	expectPageScaleReset(ts)
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
@@ -2821,6 +2831,7 @@ func TestExecutor_ZoomGestureEvent_MapsAnchorForDifferentScaleSteps(t *testing.T
 				"modifiers":         0,
 			}).
 			Return(nil, nil)
+		expectPageScaleReset(ts)
 	}
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
@@ -2882,6 +2893,7 @@ func TestExecutor_ZoomGestureEvent_WithMessageID(t *testing.T) {
 			"modifiers":         0,
 		}).
 		Return(nil, nil)
+	expectPageScaleReset(ts)
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
