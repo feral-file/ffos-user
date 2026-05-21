@@ -16,7 +16,7 @@ func TestExecutor_InnerToVisualViewport_ClampsToVisualBounds(t *testing.T) {
 
 	x, y := e.innerToVisualViewport(3000, -10, 100, 200, 960, 540)
 	if x != 960 || y != 0 {
-		t.Fatalf("expected clamped point (960,0), got (%v,%v)", x, y)
+		t.Fatalf("expected clamped point (960,0), got (%v,%v) ", x, y)
 	}
 }
 
