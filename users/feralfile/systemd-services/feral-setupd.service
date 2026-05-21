@@ -1,7 +1,7 @@
 [Unit]
 Description=Feral File Setup Service
 PartOf=chromium-ready.target
-After=system-ready.target feral-player.service
+After=system-ready.target feral-player.service feral-controld.service
 StartLimitBurst=5
 StartLimitIntervalSec=600
 

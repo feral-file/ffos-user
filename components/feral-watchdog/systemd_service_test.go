@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestSystemdMonitor_ServiceFailedMetric_EmittedOnceWhileStuck(t *testing.T) {
@@ -90,6 +92,72 @@ func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 }
 
+// When chromium-ready.target is down, an inactive feral-controld/feral-setupd
+// is the expected teardown window and is logged at Info; feral-player and
+// feral-sys-monitord are not gated, so their inactive state stays an Error.
+func TestSystemdMonitor_InactiveServiceLogLevel_TargetDown(t *testing.T) {
+	installFakeSystemctl(t)
+	t.Setenv("FF_TEST_CHROMIUM_READY_STATE", "inactive")
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	monitor := NewSystemdMonitor(nil, logger, NewCommandHandler(logger, nil), nil)
+
+	setServiceStates(t, "inactive", "inactive", "inactive", "inactive")
+	requireNoError(t, monitor.check(context.Background()))
+
+	assertInactiveLogLevels(t, logs, map[string]zapcore.Level{
+		"feral-controld.service":     zapcore.InfoLevel,
+		"feral-setupd.service":       zapcore.InfoLevel,
+		"feral-player.service":       zapcore.ErrorLevel,
+		"feral-sys-monitord.service": zapcore.ErrorLevel,
+	})
+}
+
+// When chromium-ready.target is active, feral-controld/feral-setupd must be
+// running; an inactive reading there is a genuine fault and is logged at Error.
+func TestSystemdMonitor_InactiveServiceLogLevel_TargetActive(t *testing.T) {
+	installFakeSystemctl(t)
+	t.Setenv("FF_TEST_CHROMIUM_READY_STATE", "active")
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core)
+	monitor := NewSystemdMonitor(nil, logger, NewCommandHandler(logger, nil), nil)
+
+	// Only controld/setupd inactive; player/sys-monitord stay active.
+	setServiceStates(t, "active", "inactive", "inactive", "active")
+	requireNoError(t, monitor.check(context.Background()))
+
+	assertInactiveLogLevels(t, logs, map[string]zapcore.Level{
+		"feral-controld.service": zapcore.ErrorLevel,
+		"feral-setupd.service":   zapcore.ErrorLevel,
+	})
+}
+
+// assertInactiveLogLevels checks that every "Systemd: Service is inactive" log
+// entry was emitted at the level expected for its service, and that every
+// expected service produced exactly such an entry.
+func assertInactiveLogLevels(t *testing.T, logs *observer.ObservedLogs, want map[string]zapcore.Level) {
+	t.Helper()
+	seen := make(map[string]bool)
+	for _, entry := range logs.FilterMessage("Systemd: Service is inactive").All() {
+		service, _ := entry.ContextMap()["service"].(string)
+		wantLevel, ok := want[service]
+		if !ok {
+			t.Fatalf("inactive log for unexpected service %q", service)
+		}
+		if entry.Level != wantLevel {
+			t.Fatalf("service %q inactive logged at %v, want %v", service, entry.Level, wantLevel)
+		}
+		seen[service] = true
+	}
+	for service := range want {
+		if !seen[service] {
+			t.Fatalf("no inactive log entry recorded for %q", service)
+		}
+	}
+}
+
 func newTestSystemdMonitor(t *testing.T) (*SystemdMonitor, *metricCollectorRoundTripper) {
 	t.Helper()
 	installFakeSystemctl(t)
@@ -113,18 +181,32 @@ func installFakeSystemctl(t *testing.T) {
 	dir := t.TempDir()
 	systemctlPath := filepath.Join(dir, "systemctl")
 	systemctlScript := `#!/bin/sh
-service=""
+verb=""
+unit=""
 prev=""
 for arg in "$@"; do
-  if [ "$prev" = "show" ]; then
-    service="$arg"
+  if [ "$prev" = "show" ] || [ "$prev" = "is-active" ]; then
+    verb="$prev"
+    unit="$arg"
     break
   fi
   prev="$arg"
 done
 
+if [ "$verb" = "is-active" ]; then
+  case "$unit" in
+    "chromium-ready.target")
+      echo "${FF_TEST_CHROMIUM_READY_STATE:-inactive}"
+      ;;
+    *)
+      echo "active"
+      ;;
+  esac
+  exit 0
+fi
+
 state="active"
-case "$service" in
+case "$unit" in
   "feral-player.service")
     state="${FF_TEST_PLAYER_STATE:-active}"
     ;;
