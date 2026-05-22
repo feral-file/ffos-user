@@ -475,7 +475,7 @@ async fn fetch_remote_version_once(url: &str) -> Result<UpstreamVersion> {
 
 #[cfg(test)]
 mod classify_version_fetch_error_tests {
-    use super::{classify_version_fetch_error, VersionFetchFailureKind};
+    use super::{VersionFetchFailureKind, classify_version_fetch_error};
     use anyhow::Context;
 
     #[test]
@@ -491,9 +491,8 @@ mod classify_version_fetch_error_tests {
 
     #[test]
     fn http_status_line_4xx_is_client() {
-        let e = anyhow::anyhow!(
-            "HTTP 404 Not Found from distributor at https://example.invalid: body"
-        );
+        let e =
+            anyhow::anyhow!("HTTP 404 Not Found from distributor at https://example.invalid: body");
         assert_eq!(
             classify_version_fetch_error(&e),
             VersionFetchFailureKind::Client
