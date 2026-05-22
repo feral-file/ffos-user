@@ -1099,7 +1099,7 @@ async fn check_and_update_system(
 ) -> Result<UpdateCheckResult> {
     // TV progress while HTTP retries run inside `fetch_remote_version` (sender dropped before
     // the final classified failure copy so the last screen is stable).
-    let (prog_tx, prog_rx) = mpsc::channel::<(u32, u32)>(16);
+    let (prog_tx, mut prog_rx) = mpsc::channel::<(u32, u32)>(16);
     let progress_task = {
         let chrome = chrome.clone();
         let app_state = app_state.clone();
