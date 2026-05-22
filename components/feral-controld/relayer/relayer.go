@@ -282,7 +282,8 @@ func (r *relayer) Connect(ctx context.Context) error {
 		zap.String("cf_ray", cfRay),
 	)
 
-	// Set pong handler
+	// Keep the transport pong handler during rollout so older relayer builds can
+	// still keep the socket alive before the JSON ping/pong path is deployed.
 	conn.SetPongHandler(func(_ string) error {
 		r.logger.Info("Received pong from relayer")
 		return conn.SetReadDeadline(time.Time{})
@@ -422,8 +423,9 @@ func (r *relayer) background(ctx context.Context) {
 					zap.Int("message_length", len(msg)),
 				)
 
-				// Application pong is the relayer keepalive response: refresh the
-				// deadline, then stop before command handlers see the control frame.
+				// Application pong is the relayer keepalive response when the new
+				// protocol is deployed. Transport pong stays enabled as a rollout
+				// fallback so older relayer builds do not time out during release.
 				if payload.Type == "pong" {
 					r.logger.Info("Received application pong from relayer")
 					if err := conn.SetReadDeadline(time.Time{}); err != nil {
