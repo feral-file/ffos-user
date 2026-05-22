@@ -152,7 +152,7 @@ pub async fn is_update_required(
 ) -> std::result::Result<bool, VersionFetchError> {
     let current = cfg::current_version()
         .await
-        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
     let remote_versions = fetch_remote_version(false, progress).await?;
     Ok(current < remote_versions.min_runtime_version)
 }
@@ -163,7 +163,7 @@ pub async fn is_update_available(
 ) -> std::result::Result<bool, VersionFetchError> {
     let current = cfg::current_version()
         .await
-        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
     let remote_versions = fetch_remote_version(false, progress).await?;
     Ok(current < remote_versions.latest_version)
 }
@@ -181,7 +181,7 @@ pub async fn is_too_old_to_upgrade(
 ) -> std::result::Result<bool, VersionFetchError> {
     let current = cfg::current_version()
         .await
-        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
     let remote_versions = fetch_remote_version(false, progress).await?;
 
     if let Some(min_upgradeable) = &remote_versions.min_upgradeable_version {
@@ -380,10 +380,10 @@ async fn fetch_remote_version(
 
     let endpoint = cfg::endpoint()
         .await
-        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
     let branch = cfg::branch()
         .await
-        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
     let url = format!(
         "{}{}{}",
         endpoint,
