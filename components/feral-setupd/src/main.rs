@@ -24,7 +24,7 @@ use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tokio::{
-    sync::Mutex,
+    sync::{Mutex, mpsc},
     task,
     time::{self, Duration},
 };
@@ -1031,7 +1031,10 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
 }
 
 async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
-    let latest_version = updater::latest_version().await.unwrap_or_default();
+    let latest_version = updater::latest_version().await.unwrap_or_else(|e| {
+        eprintln!("MAIN: latest_version for update banner: {e:#?}");
+        "Unknown".to_string()
+    });
     let base_msg = format!("{} {}", &constant::UPDATING_MSG_PREFIX, latest_version);
     let default_subtext = constant::UPDATING_MSG_SUBTEXT;
     let _ = show_system_upgrade(
@@ -1094,20 +1097,48 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
+    // TV progress while HTTP retries run inside `fetch_remote_version` (sender dropped before
+    // the final classified failure copy so the last screen is stable).
+    let (prog_tx, prog_rx) = mpsc::channel::<(u32, u32)>(16);
+    let progress_task = {
+        let chrome = chrome.clone();
+        let app_state = app_state.clone();
+        tokio::spawn(async move {
+            while let Some((_attempt, _max)) = prog_rx.recv().await {
+                if let Err(e) =
+                    show_message(&chrome, &app_state, constant::VERSION_CHECK_PROGRESS_TV_MSG).await
+                {
+                    eprintln!("MAIN: version-check progress UI failed: {e:#?}");
+                }
+            }
+        })
+    };
+
     // Always fetch the remote version first to ensure we have the latest info
-    updater::refresh_remote_version().await;
+    updater::refresh_remote_version(Some(prog_tx.clone())).await;
     // First check if device is too old to auto-upgrade
-    match updater::is_too_old_to_upgrade().await {
+    match updater::is_too_old_to_upgrade(Some(prog_tx.clone())).await {
         Ok(true) => {
+            // Finish progress UI before reflashing screens; otherwise queued progress
+            // navigations can overwrite the QR/message we are about to show.
+            drop(prog_tx);
+            if let Err(join_err) = progress_task.await {
+                eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
+            }
+
             // Device is too old, show reflashing QR code
             if let Ok(Some(flashing_guide)) = updater::flashing_guide_url().await {
                 let current_version = app_state.current_version.clone();
-                let latest_version = updater::latest_version()
-                    .await
-                    .unwrap_or_else(|_| "Unknown".to_string());
+                let latest_version = updater::latest_version().await.unwrap_or_else(|e| {
+                    eprintln!("MAIN: latest_version for reflashing banner: {e:#?}");
+                    "Unknown".to_string()
+                });
                 let min_upgradeable = updater::min_upgradeable_version()
                     .await
-                    .unwrap_or(None)
+                    .unwrap_or_else(|e| {
+                        eprintln!("MAIN: min_upgradeable_version for reflashing banner: {e:#?}");
+                        None
+                    })
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 match execution {
@@ -1173,9 +1204,14 @@ async fn check_and_update_system(
 
     // Check if update is needed based on mode
     let needs_update = match mode {
-        UpdateMode::Required => updater::is_update_required().await,
-        UpdateMode::Available => updater::is_update_available().await,
+        UpdateMode::Required => updater::is_update_required(Some(prog_tx.clone())).await,
+        UpdateMode::Available => updater::is_update_available(Some(prog_tx.clone())).await,
     };
+
+    drop(prog_tx);
+    if let Err(join_err) = progress_task.await {
+        eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
+    }
 
     match needs_update {
         Ok(true) => {
@@ -1195,28 +1231,20 @@ async fn check_and_update_system(
             }
             Ok(UpdateCheckResult::NoUpdateNeeded)
         }
-        Err(e) => {
-            eprintln!("MAIN: Error checking for update: {e:#?}");
+        Err(ve) => {
+            eprintln!("MAIN: Error checking for update: {ve:#?}");
+            let tv_msg = ve.kind().tv_message();
             match execution {
                 UpdateExecution::Blocking => {
-                    show_message(
-                        chrome,
-                        app_state,
-                        constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
-                    )
-                    .await?;
+                    show_message(chrome, app_state, tv_msg).await?;
                 }
                 UpdateExecution::NonBlocking => {
+                    let tv_msg = tv_msg.to_string();
                     task::spawn({
                         let app_state = app_state.clone();
                         let chrome = chrome.clone();
                         async move {
-                            let _ = show_message(
-                                &chrome,
-                                &app_state,
-                                constant::UPDATER_FAILED_TO_CHECK_VERSION_MSG,
-                            )
-                            .await;
+                            let _ = show_message(&chrome, &app_state, &tv_msg).await;
                         }
                     });
                 }
@@ -1252,7 +1280,8 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
 }
 
 async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &str) -> Result<()> {
-    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, message);
+    let encoded = urlencoding::encode(message);
+    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
     chrome
         .navigate(&message_url)
         .await
