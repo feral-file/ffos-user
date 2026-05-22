@@ -177,6 +177,70 @@ func TestChromiumMonitorActivatingKioskDefersRestart(t *testing.T) {
 	}
 }
 
+func TestChromiumMonitorDetachedDisplaySkipsHealthCheckAndRestart(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.displayDetector = staticDisplayDetector{state: DisplayState{Known: true, Connected: false}}
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + 30*time.Second))
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected detached display check to be skipped without error, got %v", err)
+	}
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("expected no restart while display is detached, got %s", got)
+	}
+}
+
+func TestChromiumMonitorDetachedDisplayResetsPostConnectState(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.displayDetector = staticDisplayDetector{state: DisplayState{Known: true, Connected: false}}
+
+	monitor.mu.Lock()
+	monitor.hasEverConnected = true
+	monitor.lastSuccessfulResp = time.Now().Add(-(CHROMIUM_HANG_THRESHOLD + 5*time.Second))
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err != nil {
+		t.Fatalf("expected detached display check to be skipped without error, got %v", err)
+	}
+
+	monitor.mu.Lock()
+	if monitor.hasEverConnected {
+		t.Fatal("expected detached display to reset post-connect state")
+	}
+	if !monitor.lastSuccessfulResp.IsZero() {
+		t.Fatalf("expected detached display to clear last success, got %v", monitor.lastSuccessfulResp)
+	}
+	monitor.mu.Unlock()
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("expected no restart while display is detached, got %s", got)
+	}
+}
+
+func TestChromiumMonitorUnknownDisplayPreservesStartupEscalation(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.displayDetector = staticDisplayDetector{state: DisplayState{Known: false}}
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + 30*time.Second))
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected health check to fail against closed endpoint")
+	}
+	if got := readRestartCount(t, countFile); got != "1" {
+		t.Fatalf("expected existing restart behavior when display state is unknown, got %s", got)
+	}
+}
+
 func closedLocalHTTPEndpoint(t *testing.T) string {
 	t.Helper()
 

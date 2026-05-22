@@ -61,6 +61,8 @@ type ChromiumMonitor struct {
 	monitorStart       time.Time
 	lastSuccessfulResp time.Time
 	commandHandler     *CommandHandler
+	displayDetector    DisplayDetector
+	displayDetached    bool
 }
 
 // NewChromiumMonitor creates a new Chromium monitor instance.
@@ -82,6 +84,7 @@ func NewChromiumMonitor(cdpEndpoint string, logger *zap.Logger, commandHandler *
 		hasEverConnected: false,
 		monitorStart:     time.Now(),
 		commandHandler:   commandHandler,
+		displayDetector:  NewSysfsDisplayDetector(),
 	}
 }
 
@@ -116,6 +119,10 @@ func (m *ChromiumMonitor) Stop() {
 
 // check performs a single CDP health check
 func (m *ChromiumMonitor) check(ctx context.Context) error {
+	if m.skipForDetachedDisplay() {
+		return nil
+	}
+
 	versionURL := fmt.Sprintf("%s/json/version", m.cdpEndpoint)
 
 	// Create context with timeout
@@ -157,9 +164,51 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	m.mu.Lock()
 	m.lastSuccessfulResp = time.Now()
 	m.hasEverConnected = true
+	m.displayDetached = false
 	m.mu.Unlock()
 
 	return nil
+}
+
+// skipForDetachedDisplay suppresses Chromium recovery while the device has no
+// physical monitor attached. FF1 can legitimately run detached; in that state
+// Chromium may not be startable, so CDP absence is not a browser hang. The
+// monitor state is reset to pre-connect mode so reconnect receives the normal
+// startup grace window instead of immediate post-connect hang escalation.
+func (m *ChromiumMonitor) skipForDetachedDisplay() bool {
+	if m.displayDetector == nil {
+		return false
+	}
+
+	state := m.displayDetector.State()
+	if !state.Known {
+		return false
+	}
+
+	if state.Connected {
+		m.mu.Lock()
+		wasDetached := m.displayDetached
+		m.displayDetached = false
+		m.mu.Unlock()
+		if wasDetached {
+			m.logger.Info("Chromium: Monitor connected; resuming Chromium health checks")
+		}
+		return false
+	}
+
+	now := time.Now()
+	m.mu.Lock()
+	firstDetachedCheck := !m.displayDetached
+	m.displayDetached = true
+	m.hasEverConnected = false
+	m.monitorStart = now
+	m.lastSuccessfulResp = time.Time{}
+	m.mu.Unlock()
+
+	if firstDetachedCheck {
+		m.logger.Info("Chromium: No monitor connected; skipping Chromium health checks")
+	}
+	return true
 }
 
 // checkHangState decides whether sustained failure to reach /json/version
@@ -173,6 +222,10 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 // activating state so we don't pile a fresh restart onto a restart that
 // systemd or someone else (OTA, user) is already running.
 func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
+	if m.skipForDetachedDisplay() {
+		return
+	}
+
 	m.mu.Lock()
 	hasEverConnected := m.hasEverConnected
 	timeSinceLast := time.Since(m.lastSuccessfulResp)

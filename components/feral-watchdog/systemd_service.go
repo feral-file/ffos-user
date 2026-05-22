@@ -44,6 +44,7 @@ type SystemdMonitor struct {
 	logger                  *zap.Logger
 	commandHandler          *CommandHandler
 	vmagentClient           *VmagentClient
+	displayDetector         DisplayDetector
 	lastServiceStates       map[string]*SystemdServiceStatus // Track last state to detect recovery
 	failureIncidentReported bool
 }
@@ -55,6 +56,7 @@ func NewSystemdMonitor(cdpClient *cdp.Client, logger *zap.Logger, commandHandler
 		logger:                  logger,
 		commandHandler:          commandHandler,
 		vmagentClient:           vmagentClient,
+		displayDetector:         NewSysfsDisplayDetector(),
 		lastServiceStates:       make(map[string]*SystemdServiceStatus),
 		failureIncidentReported: false,
 	}
@@ -81,8 +83,17 @@ func (m *SystemdMonitor) Start(ctx context.Context) {
 	}
 }
 
+func (m *SystemdMonitor) displayDetached() bool {
+	if m.displayDetector == nil {
+		return false
+	}
+	state := m.displayDetector.State()
+	return state.Known && !state.Connected
+}
+
 func (m *SystemdMonitor) check(ctx context.Context) error {
 	hasFailedService := false
+	displayDetached := m.displayDetached()
 
 	for service := range systemdServices {
 		state, err := m.commandHandler.checkSystemdUserServiceStatus(ctx, service)
@@ -102,6 +113,7 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 		lastState := m.lastServiceStates[service]
 		hasRecovered := lastState != nil && *lastState == SYSTEMD_SERVICE_STATUS_FAILED && *state == SYSTEMD_SERVICE_STATUS_ACTIVE
 		hasJustFailed := (lastState == nil || *lastState != SYSTEMD_SERVICE_STATUS_FAILED) && *state == SYSTEMD_SERVICE_STATUS_FAILED
+		updateLastState := true
 
 		switch *state {
 		case SYSTEMD_SERVICE_STATUS_ACTIVE:
@@ -123,6 +135,17 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 					zap.String("service", service))
 			}
 		case SYSTEMD_SERVICE_STATUS_FAILED:
+			if displayDetached && servicesGatedByChromiumReady[service] {
+				m.logger.Info("Systemd: Service is failed",
+					zap.String("service", service),
+					zap.Bool("expected_detached_display", true))
+				// Do not latch the failure while detached. If the monitor comes
+				// back and the service is still failed, the next connected check
+				// must report it as a fresh actionable incident.
+				updateLastState = false
+				break
+			}
+
 			hasFailedService = true
 			m.logger.Error("Systemd: Service is failed",
 				zap.String("service", service),
@@ -142,7 +165,7 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 			// teardown window. If the target is active the service should be
 			// running too, so an inactive reading there is a genuine fault.
 			expectedTeardown := servicesGatedByChromiumReady[service] &&
-				!m.commandHandler.isUnitActive(ctx, chromiumReadyTarget)
+				(displayDetached || !m.commandHandler.isUnitActive(ctx, chromiumReadyTarget))
 			if expectedTeardown {
 				m.logger.Info("Systemd: Service is inactive",
 					zap.String("service", service),
@@ -157,8 +180,9 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 				zap.Any("state", state))
 		}
 
-		// Update last state
-		m.lastServiceStates[service] = state
+		if updateLastState {
+			m.lastServiceStates[service] = state
+		}
 	}
 
 	if hasFailedService && !m.failureIncidentReported {

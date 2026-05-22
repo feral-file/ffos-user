@@ -134,6 +134,52 @@ func TestSystemdMonitor_InactiveServiceLogLevel_TargetActive(t *testing.T) {
 	})
 }
 
+func TestSystemdMonitor_DetachedDisplaySuppressesGatedServiceFailures(t *testing.T) {
+	monitor, collector := newTestSystemdMonitor(t)
+	monitor.displayDetector = staticDisplayDetector{state: DisplayState{Known: true, Connected: false}}
+	ctx := context.Background()
+
+	setServiceStates(t, "active", "failed", "failed", "active")
+	requireNoError(t, monitor.check(ctx))
+	requireNoError(t, monitor.check(ctx))
+
+	metrics := collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 0)
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-setupd.service"} 1`, 0)
+	assertMetricCount(t, metrics, "service_failed_incident 1", 0)
+}
+
+func TestSystemdMonitor_GatedServiceFailureReportsAfterReconnect(t *testing.T) {
+	monitor, collector := newTestSystemdMonitor(t)
+	ctx := context.Background()
+
+	monitor.displayDetector = staticDisplayDetector{state: DisplayState{Known: true, Connected: false}}
+	setServiceStates(t, "active", "failed", "failed", "active")
+	requireNoError(t, monitor.check(ctx))
+
+	monitor.displayDetector = staticDisplayDetector{state: DisplayState{Known: true, Connected: true}}
+	requireNoError(t, monitor.check(ctx))
+
+	metrics := collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-setupd.service"} 1`, 1)
+	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
+}
+
+func TestSystemdMonitor_DetachedDisplayDoesNotSuppressAlwaysOnServiceFailures(t *testing.T) {
+	monitor, collector := newTestSystemdMonitor(t)
+	monitor.displayDetector = staticDisplayDetector{state: DisplayState{Known: true, Connected: false}}
+	ctx := context.Background()
+
+	setServiceStates(t, "failed", "inactive", "inactive", "active")
+	requireNoError(t, monitor.check(ctx))
+	requireNoError(t, monitor.check(ctx))
+
+	metrics := collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
+	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
+}
+
 // assertInactiveLogLevels checks that every "Systemd: Service is inactive" log
 // entry was emitted at the level expected for its service, and that every
 // expected service produced exactly such an entry.
