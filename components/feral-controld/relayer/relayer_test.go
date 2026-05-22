@@ -1480,6 +1480,99 @@ func TestClient_Ping_Success(t *testing.T) {
 	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
 }
 
+func TestClient_ApplicationPong_RefreshesDeadlineWithoutDispatchingHandlers(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	setupMockTicker(ts)
+
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Time{}).
+		AnyTimes()
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil)
+
+	ts.mockConn.EXPECT().
+		SetPongHandler(gomock.Any()).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		WriteJSON(map[string]string{"type": "ping"}).
+		Return(nil).
+		AnyTimes()
+
+	pongDeadlineCleared := make(chan struct{}, 1)
+	ts.mockConn.EXPECT().
+		SetReadDeadline(gomock.Any()).
+		DoAndReturn(func(deadline time.Time) error {
+			if deadline.IsZero() {
+				select {
+				case pongDeadlineCleared <- struct{}{}:
+				default:
+				}
+			}
+			return nil
+		}).
+		AnyTimes()
+
+	pongBytes, err := json.Marshal(map[string]string{"type": "pong"})
+	assert.NoError(t, err, "expected no error marshalling pong payload")
+
+	releaseRead := make(chan struct{})
+	var readCount int32
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			count := atomic.AddInt32(&readCount, 1)
+			if count == 1 {
+				return websocket.TextMessage, pongBytes, nil
+			}
+
+			<-releaseRead
+			return 0, nil, errors.New("test read stop")
+		}).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		Close().
+		Return(nil).
+		AnyTimes()
+
+	handlerCalled := make(chan struct{}, 1)
+	ts.client.OnRelayerMessage(func(ctx context.Context, payload relayer.Payload) error {
+		handlerCalled <- struct{}{}
+		return nil
+	})
+
+	err = ts.client.Connect(ts.ctx)
+	assert.NoError(t, err, "expected no error, got %v", err)
+	assert.True(t, ts.client.IsConnected(), "expected client to be connected")
+
+	select {
+	case <-pongDeadlineCleared:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("application pong should clear the read deadline")
+	}
+
+	select {
+	case <-handlerCalled:
+		t.Fatal("application pong should not be dispatched to relayer handlers")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	ts.client.Close()
+	close(releaseRead)
+	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
+}
+
 func TestClient_Ping_Error(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

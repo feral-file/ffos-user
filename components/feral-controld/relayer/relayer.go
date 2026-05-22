@@ -422,6 +422,8 @@ func (r *relayer) background(ctx context.Context) {
 					zap.Int("message_length", len(msg)),
 				)
 
+				// Application pong is the relayer keepalive response: refresh the
+				// deadline, then stop before command handlers see the control frame.
 				if payload.Type == "pong" {
 					r.logger.Info("Received application pong from relayer")
 					if err := conn.SetReadDeadline(time.Time{}); err != nil {
