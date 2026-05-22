@@ -5,6 +5,7 @@ use rand::Rng;
 use regex::Regex;
 use semver::Version;
 use serde::Deserialize;
+use std::fmt;
 use std::{process::Stdio, sync::RwLock, time::Duration};
 use tokio::{
     fs,
@@ -19,11 +20,116 @@ use tokio::{
 // ---------- Cache ----------
 static REMOTE_VERSIONS: RwLock<Option<UpstreamVersion>> = RwLock::new(None);
 
+// ---------- Version fetch errors / progress ----------
+
+/// Notifies `(current_attempt, max_attempts)` **before** each HTTP attempt (1-based),
+/// so setup UI can refresh a generic “checking for updates” line while `fetch_remote_version` retries.
+pub type FetchProgressTx = mpsc::Sender<(u32, u32)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionFetchFailureKind {
+    Network,
+    Server,
+    Client,
+    Parse,
+    Unknown,
+}
+
+impl VersionFetchFailureKind {
+    #[must_use]
+    pub fn tv_message(self) -> &'static str {
+        match self {
+            Self::Network => constant::VERSION_CHECK_FAILED_NETWORK_MSG,
+            Self::Server => constant::VERSION_CHECK_FAILED_SERVER_MSG,
+            Self::Client => constant::VERSION_CHECK_FAILED_CLIENT_MSG,
+            Self::Parse => constant::VERSION_CHECK_FAILED_PARSE_MSG,
+            Self::Unknown => constant::VERSION_CHECK_FAILED_UNKNOWN_MSG,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct VersionFetchError {
+    kind: VersionFetchFailureKind,
+    source: anyhow::Error,
+}
+
+impl VersionFetchError {
+    pub fn new(kind: VersionFetchFailureKind, source: anyhow::Error) -> Self {
+        Self { kind, source }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> VersionFetchFailureKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for VersionFetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.source)
+    }
+}
+
+impl std::error::Error for VersionFetchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn classify_version_fetch_error(err: &anyhow::Error) -> VersionFetchFailureKind {
+    let full = err.to_string();
+    const HTTP_PREFIX: &str = "HTTP ";
+    if full.starts_with(HTTP_PREFIX) {
+        if let Some(rest) = full.strip_prefix(HTTP_PREFIX) {
+            if let Some(c) = rest.chars().next() {
+                if c == '4' {
+                    return VersionFetchFailureKind::Client;
+                }
+                if c == '5' {
+                    return VersionFetchFailureKind::Server;
+                }
+            }
+        }
+    }
+
+    for cause in err.chain() {
+        if let Some(re) = cause.downcast_ref::<reqwest::Error>() {
+            if re.is_decode() {
+                return VersionFetchFailureKind::Parse;
+            }
+            if let Some(status) = re.status() {
+                if status.is_server_error() {
+                    return VersionFetchFailureKind::Server;
+                }
+                if status.is_client_error() {
+                    return VersionFetchFailureKind::Client;
+                }
+            }
+            if re.is_timeout() || re.is_connect() {
+                return VersionFetchFailureKind::Network;
+            }
+        }
+    }
+
+    if full.contains("decoding distributor JSON")
+        || full.contains("parsing upstream semver")
+        || full.contains("parsing min_upgradeable_version semver")
+    {
+        return VersionFetchFailureKind::Parse;
+    }
+
+    VersionFetchFailureKind::Unknown
+}
+
 // ---------- Public API ----------
 
 /// Force refresh the cached remote version information.
-pub async fn refresh_remote_version() {
-    let _ = fetch_remote_version(true).await;
+///
+/// `progress` is used during setup to drive TV copy between HTTP attempts; periodic
+/// refresh passes `None` so we never spam the UI from the background task.
+pub async fn refresh_remote_version(progress: Option<FetchProgressTx>) {
+    let _ = fetch_remote_version(true, progress).await;
 }
 
 /// Spawn a background task that periodically refreshes the cached remote version.
@@ -34,37 +140,49 @@ pub fn spawn_remote_version_refresher() {
         loop {
             time::sleep(interval).await;
             println!("UPDATER: Periodic remote version refresh triggered");
-            refresh_remote_version().await;
+            refresh_remote_version(None).await;
         }
     });
 }
 
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum supported version and an update is therefore required.
-pub async fn is_update_required() -> Result<bool> {
-    let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version(false).await?;
+pub async fn is_update_required(
+    progress: Option<FetchProgressTx>,
+) -> std::result::Result<bool, VersionFetchError> {
+    let current = cfg::current_version()
+        .await
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+    let remote_versions = fetch_remote_version(false, progress).await?;
     Ok(current < remote_versions.min_runtime_version)
 }
 
 /// Return `Ok(true)` when a newer version is available from the distributor.
-pub async fn is_update_available() -> Result<bool> {
-    let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version(false).await?;
+pub async fn is_update_available(
+    progress: Option<FetchProgressTx>,
+) -> std::result::Result<bool, VersionFetchError> {
+    let current = cfg::current_version()
+        .await
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+    let remote_versions = fetch_remote_version(false, progress).await?;
     Ok(current < remote_versions.latest_version)
 }
 
 /// Return the latest version from the remote server.
-pub async fn latest_version() -> Result<String> {
-    let remote_versions = fetch_remote_version(false).await?;
+pub async fn latest_version() -> std::result::Result<String, VersionFetchError> {
+    let remote_versions = fetch_remote_version(false, None).await?;
     Ok(remote_versions.latest_version.to_string())
 }
 
 /// Return `Ok(true)` when the running build is **below** the distributor's
 /// minimum upgradeable version, meaning the device needs to be reflashed.
-pub async fn is_too_old_to_upgrade() -> Result<bool> {
-    let current = cfg::current_version().await?;
-    let remote_versions = fetch_remote_version(false).await?;
+pub async fn is_too_old_to_upgrade(
+    progress: Option<FetchProgressTx>,
+) -> std::result::Result<bool, VersionFetchError> {
+    let current = cfg::current_version()
+        .await
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+    let remote_versions = fetch_remote_version(false, progress).await?;
 
     if let Some(min_upgradeable) = &remote_versions.min_upgradeable_version {
         Ok(current < *min_upgradeable)
@@ -74,14 +192,14 @@ pub async fn is_too_old_to_upgrade() -> Result<bool> {
 }
 
 /// Return the flashing guide URL from the remote server, if available.
-pub async fn flashing_guide_url() -> Result<Option<String>> {
-    let remote_versions = fetch_remote_version(false).await?;
+pub async fn flashing_guide_url() -> std::result::Result<Option<String>, VersionFetchError> {
+    let remote_versions = fetch_remote_version(false, None).await?;
     Ok(remote_versions.flashing_guide.clone())
 }
 
 /// Return the minimum upgradeable version from the remote server, if available.
-pub async fn min_upgradeable_version() -> Result<Option<String>> {
-    let remote_versions = fetch_remote_version(false).await?;
+pub async fn min_upgradeable_version() -> std::result::Result<Option<String>, VersionFetchError> {
+    let remote_versions = fetch_remote_version(false, None).await?;
     Ok(remote_versions
         .min_upgradeable_version
         .as_ref()
@@ -248,7 +366,10 @@ struct UpstreamVersion {
     latest_version: Version,
 }
 
-async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
+async fn fetch_remote_version(
+    refresh: bool,
+    progress: Option<FetchProgressTx>,
+) -> std::result::Result<UpstreamVersion, VersionFetchError> {
     // Check if we have a cached version
     if !refresh {
         let cache = REMOTE_VERSIONS.read().unwrap();
@@ -257,19 +378,34 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
         }
     }
 
+    let endpoint = cfg::endpoint()
+        .await
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
+    let branch = cfg::branch()
+        .await
+        .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e.into()))?;
     let url = format!(
         "{}{}{}",
-        cfg::endpoint().await?,
+        endpoint,
         constant::UPDATER_UPSTREAM_CONFIG_URL_SUFFIX,
-        cfg::branch().await?
+        branch
     );
 
     // Retry logic: attempt up to UPDATER_VERSION_CHECK_RETRIES times
     let max_retries = constant::UPDATER_VERSION_CHECK_RETRIES;
     let retry_delay = Duration::from_millis(constant::UPDATER_VERSION_CHECK_RETRY_DELAY);
-    let mut last_error: Option<anyhow::Error> = None;
+    let mut last_error: Option<VersionFetchError> = None;
 
     for attempt in 1..=max_retries {
+        if let Some(tx) = &progress {
+            if tx.send((attempt, max_retries)).await.is_err() {
+                // Receiver dropped (setup finished); keep fetching without UI updates.
+                eprintln!(
+                    "UPDATER: progress channel closed; continuing version fetch without TV updates"
+                );
+            }
+        }
+
         println!("UPDATER: Fetching version info from {url} (attempt {attempt}/{max_retries})");
 
         match fetch_remote_version_once(&url).await {
@@ -283,7 +419,8 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
             }
             Err(e) => {
                 eprintln!("UPDATER: Version check attempt {attempt}/{max_retries} failed: {e:#}");
-                last_error = Some(e);
+                let kind = classify_version_fetch_error(&e);
+                last_error = Some(VersionFetchError::new(kind, e));
 
                 // Don't sleep after the last attempt
                 if attempt < max_retries {
@@ -293,8 +430,12 @@ async fn fetch_remote_version(refresh: bool) -> Result<UpstreamVersion> {
         }
     }
 
-    Err(last_error
-        .unwrap_or_else(|| anyhow::anyhow!("Version check failed after {max_retries} attempts")))
+    Err(last_error.unwrap_or_else(|| {
+        VersionFetchError::new(
+            VersionFetchFailureKind::Unknown,
+            anyhow::anyhow!("Version check failed after {max_retries} attempts"),
+        )
+    }))
 }
 
 /// Single attempt to fetch remote version (no retry logic).
