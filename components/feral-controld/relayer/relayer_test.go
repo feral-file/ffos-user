@@ -1519,7 +1519,7 @@ func TestClient_ApplicationPong_RefreshesDeadlineWithoutDispatchingHandlers(t *t
 		AnyTimes()
 
 	pongBytes, err := json.Marshal(map[string]string{"type": "pong"})
-	assert.NoError(t, err, "expected no error marshalling pong payload")
+	assert.NoError(t, err, "expected no error marshaling pong payload")
 
 	releaseRead := make(chan struct{})
 	var readCount int32
