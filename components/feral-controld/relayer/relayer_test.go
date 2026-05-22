@@ -57,6 +57,13 @@ func setup(t *testing.T) *testSetup {
 	mockOS := mocks.NewMockOS(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 
+	// Transport pings are part of the rollout-compatible keepalive path, so
+	// most relayer tests can accept them without caring about the exact timing.
+	mockConn.EXPECT().
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
 	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, mockJSON, logger)
 
 	return &testSetup{
@@ -1429,6 +1436,11 @@ func TestClient_Ping_Success(t *testing.T) {
 	pingCalled := make(chan struct{})
 	once := sync.Once{}
 	ts.mockConn.EXPECT().
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		WriteJSON(map[string]string{"type": "ping"}).
 		DoAndReturn(func(_ interface{}) error {
 			once.Do(func() {
@@ -1498,6 +1510,11 @@ func TestClient_ApplicationPong_RefreshesDeadlineWithoutDispatchingHandlers(t *t
 	ts.mockConn.EXPECT().
 		SetPongHandler(gomock.Any()).
 		Times(1)
+
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
 
 	ts.mockConn.EXPECT().
 		WriteJSON(map[string]string{"type": "ping"}).
@@ -1596,6 +1613,13 @@ func TestClient_Ping_Error(t *testing.T) {
 		SetPongHandler(gomock.Any()).
 		Times(1)
 
+	// Expect the transport keepalive deadline to be refreshed before the
+	// application ping write fails.
+	ts.mockConn.EXPECT().
+		SetReadDeadline(time.Time{}.Add(relayer.PONG_WAIT)).
+		Return(nil).
+		AnyTimes()
+
 	// Expect conn to write ping
 	pingCalled := make(chan struct{})
 	once := sync.Once{}
@@ -1675,6 +1699,11 @@ func TestClient_Ping_ContextCanceled(t *testing.T) {
 	var pingCallCount int32
 	firstPingCalled := make(chan struct{})
 	pingAfterCancel := make(chan struct{})
+
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
 
 	ts.mockConn.EXPECT().
 		WriteJSON(map[string]string{"type": "ping"}).

@@ -103,9 +103,9 @@ All messages are JSON. The message envelope is:
 ```
 
 **Relayer keepalive control messages:**
-- `controld` sends `{"type":"ping"}` on the relayer WebSocket to keep the connection alive.
-- The relayer should reply with `{"type":"pong"}` once the new keepalive path is deployed.
-- During rollout, transport-level WebSocket pong frames remain accepted so older relayer builds do not time out before the protocol upgrade lands.
+- `controld` sends both a transport-level WebSocket `Ping` frame and an application-level `{"type":"ping"}` message on the relayer WebSocket.
+- The relayer should reply to the transport ping with a WebSocket `Pong` frame and to the application ping with `{"type":"pong"}` once the new keepalive path is deployed.
+- During rollout, either pong path may keep the connection alive so older relayer builds do not time out before the protocol upgrade lands.
 - `pong` is handled internally by `relayer` and is not dispatched to `commandrouter` or command handlers.
 
 **Command routing logic (inside controld):**

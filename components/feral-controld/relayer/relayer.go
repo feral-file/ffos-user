@@ -282,8 +282,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 		zap.String("cf_ray", cfRay),
 	)
 
-	// Keep the transport pong handler during rollout so older relayer builds can
-	// still keep the socket alive before the JSON ping/pong path is deployed.
+	// Set pong handler
 	conn.SetPongHandler(func(_ string) error {
 		r.logger.Info("Received pong from relayer")
 		return conn.SetReadDeadline(time.Time{})
@@ -423,9 +422,8 @@ func (r *relayer) background(ctx context.Context) {
 					zap.Int("message_length", len(msg)),
 				)
 
-				// Application pong is the relayer keepalive response when the new
-				// protocol is deployed. Transport pong stays enabled as a rollout
-				// fallback so older relayer builds do not time out during release.
+				// Application pong is the relayer keepalive response: refresh the
+				// deadline, then stop before command handlers see the control frame.
 				if payload.Type == "pong" {
 					r.logger.Info("Received application pong from relayer")
 					if err := conn.SetReadDeadline(time.Time{}); err != nil {
@@ -489,7 +487,8 @@ func (r *relayer) Send(ctx context.Context, data interface{}) error {
 	return r.conn.WriteMessage(websocket.TextMessage, jsonData)
 }
 
-// ping sends a ping to keep the connection alive
+// ping sends both transport and application keepalive frames so older and newer
+// relayer builds can keep the connection alive during rollout.
 func (r *relayer) ping() {
 	r.Lock()
 	defer r.Unlock()
@@ -499,14 +498,18 @@ func (r *relayer) ping() {
 	}
 
 	r.logger.Info("Sending relayer ping")
+	deadline := r.clock.Now().Add(PONG_WAIT)
+
+	if err := r.conn.SetReadDeadline(deadline); err != nil {
+		r.logger.Error("Failed to set read deadline before transport ping", zap.Error(err))
+	}
+
+	if err := r.conn.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+		r.logger.Error("Failed to send transport ping", zap.Error(err))
+	}
+
 	if err := r.conn.WriteJSON(map[string]string{"type": "ping"}); err != nil {
-		r.logger.Error("Failed to send ping", zap.Error(err))
-		return
-	} else {
-		err = r.conn.SetReadDeadline(r.clock.Now().Add(PONG_WAIT))
-		if err != nil {
-			r.logger.Error("Failed to set read deadline", zap.Error(err))
-		}
+		r.logger.Error("Failed to send application ping", zap.Error(err))
 	}
 }
 
