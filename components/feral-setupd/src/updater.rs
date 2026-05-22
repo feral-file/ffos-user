@@ -472,3 +472,73 @@ async fn fetch_remote_version_once(url: &str) -> Result<UpstreamVersion> {
 
     Ok(versions)
 }
+
+#[cfg(test)]
+mod classify_version_fetch_error_tests {
+    use super::{classify_version_fetch_error, VersionFetchFailureKind};
+    use anyhow::Context;
+
+    #[test]
+    fn http_status_line_5xx_is_server() {
+        let e = anyhow::anyhow!(
+            "HTTP 503 Service Unavailable from distributor at https://example.invalid: body"
+        );
+        assert_eq!(
+            classify_version_fetch_error(&e),
+            VersionFetchFailureKind::Server
+        );
+    }
+
+    #[test]
+    fn http_status_line_4xx_is_client() {
+        let e = anyhow::anyhow!(
+            "HTTP 404 Not Found from distributor at https://example.invalid: body"
+        );
+        assert_eq!(
+            classify_version_fetch_error(&e),
+            VersionFetchFailureKind::Client
+        );
+    }
+
+    #[test]
+    fn decoding_distributor_json_context_is_parse() {
+        let e = Err::<(), _>(anyhow::anyhow!("invalid JSON"))
+            .context("decoding distributor JSON")
+            .unwrap_err();
+        assert_eq!(
+            classify_version_fetch_error(&e),
+            VersionFetchFailureKind::Parse
+        );
+    }
+
+    #[test]
+    fn parsing_upstream_semver_context_is_parse() {
+        let e = Err::<(), _>(anyhow::anyhow!("not a semver"))
+            .context("parsing upstream semver")
+            .unwrap_err();
+        assert_eq!(
+            classify_version_fetch_error(&e),
+            VersionFetchFailureKind::Parse
+        );
+    }
+
+    #[test]
+    fn parsing_min_upgradeable_semver_context_is_parse() {
+        let e = Err::<(), _>(anyhow::anyhow!("bad"))
+            .context("parsing min_upgradeable_version semver")
+            .unwrap_err();
+        assert_eq!(
+            classify_version_fetch_error(&e),
+            VersionFetchFailureKind::Parse
+        );
+    }
+
+    #[test]
+    fn unrelated_message_is_unknown() {
+        let e = anyhow::anyhow!("something else entirely");
+        assert_eq!(
+            classify_version_fetch_error(&e),
+            VersionFetchFailureKind::Unknown
+        );
+    }
+}
