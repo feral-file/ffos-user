@@ -112,7 +112,7 @@ The following command names are routed to `devicectl` and use the standard relay
 
 | Command | Request fields | Notes |
 |---|---|---|
-| `dragGesture` | `cursorOffsets` | Array of `{dx, dy}` step deltas . |
+| `dragGesture` | `cursorOffsets` | Array of `{dx, dy}` step deltas. |
 | `tapGesture` | `button` | `button` selects left, right, or middle; missing or empty defaults to left. |
 | `doubleTapGesture` | `button` | Same button selection as `tapGesture`. |
 | `longPressGesture` | `button` | Same button selection as `tapGesture`. |
