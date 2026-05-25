@@ -1104,6 +1104,24 @@ fn available_system_update_follow_up(
     }
 }
 
+/// Whether `check_and_update_system` drives the transient “checking for updates” TV line.
+///
+/// `NonBlocking` callers (BLE) must not attach version-check progress to CDP navigation;
+/// that work stays on the HTTP fetch path only so mobile notifications are not delayed.
+#[must_use]
+fn version_check_progress_tv_enabled(execution: UpdateExecution) -> bool {
+    matches!(execution, UpdateExecution::Blocking)
+}
+
+/// After the progress sender is dropped, join the progress task when TV ordering matters.
+async fn finish_version_check_progress(progress_task: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(task) = progress_task {
+        if let Err(join_err) = task.await {
+            eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
+        }
+    }
+}
+
 /// Shared system update logic that checks version status and optionally triggers an update.
 ///
 /// This function handles:
@@ -1126,13 +1144,13 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
-    // TV progress while HTTP retries run inside `fetch_remote_version` (sender dropped before
-    // the final classified failure copy so the last screen is stable).
-    let (prog_tx, mut prog_rx) = mpsc::channel::<(u32, u32)>(16);
-    let progress_task = {
+    // TV progress while HTTP retries run inside `fetch_remote_version` (Blocking only).
+    let progress_tv = version_check_progress_tv_enabled(execution);
+    let (mut prog_tx, progress_task) = if progress_tv {
+        let (prog_tx, mut prog_rx) = mpsc::channel::<(u32, u32)>(16);
         let chrome = chrome.clone();
         let app_state = app_state.clone();
-        tokio::spawn(async move {
+        let progress_task = tokio::spawn(async move {
             while let Some((_attempt, _max)) = prog_rx.recv().await {
                 if let Err(e) =
                     show_message(&chrome, &app_state, constant::VERSION_CHECK_PROGRESS_TV_MSG).await
@@ -1140,20 +1158,20 @@ async fn check_and_update_system(
                     eprintln!("MAIN: version-check progress UI failed: {e:#?}");
                 }
             }
-        })
+        });
+        (Some(prog_tx), Some(progress_task))
+    } else {
+        (None, None)
     };
-
     // Always fetch the remote version first to ensure we have the latest info
-    updater::refresh_remote_version(Some(prog_tx.clone())).await;
+    updater::refresh_remote_version(prog_tx.clone()).await;
     // First check if device is too old to auto-upgrade
-    match updater::is_too_old_to_upgrade(Some(prog_tx.clone())).await {
+    match updater::is_too_old_to_upgrade(prog_tx.clone()).await {
         Ok(true) => {
             // Finish progress UI before reflashing screens; otherwise queued progress
             // navigations can overwrite the QR/message we are about to show.
-            drop(prog_tx);
-            if let Err(join_err) = progress_task.await {
-                eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
-            }
+            prog_tx.take();
+            finish_version_check_progress(progress_task).await;
 
             // Device is too old, show reflashing QR code
             if let Ok(Some(flashing_guide)) = updater::flashing_guide_url().await {
@@ -1233,14 +1251,12 @@ async fn check_and_update_system(
 
     // Check if update is needed based on mode
     let needs_update = match mode {
-        UpdateMode::Required => updater::is_update_required(Some(prog_tx.clone())).await,
-        UpdateMode::Available => updater::is_update_available(Some(prog_tx.clone())).await,
+        UpdateMode::Required => updater::is_update_required(prog_tx.clone()).await,
+        UpdateMode::Available => updater::is_update_available(prog_tx.clone()).await,
     };
 
-    drop(prog_tx);
-    if let Err(join_err) = progress_task.await {
-        eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
-    }
+    prog_tx.take();
+    finish_version_check_progress(progress_task).await;
 
     match needs_update {
         Ok(true) => {
@@ -1383,9 +1399,11 @@ async fn wait_for_controld(timeout: Duration) -> Result<()> {
 #[cfg(test)]
 mod available_system_update_follow_up_tests {
     use super::{
-        AvailableSystemUpdateFollowUp, UpdateCheckResult, available_system_update_follow_up,
+        AvailableSystemUpdateFollowUp, UpdateCheckResult, UpdateExecution,
+        available_system_update_follow_up, version_check_progress_tv_enabled,
     };
     use anyhow::anyhow;
+    use tokio::sync::mpsc;
 
     #[test]
     fn no_update_needed_returns_to_webapp() {
@@ -1425,5 +1443,30 @@ mod available_system_update_follow_up_tests {
             available_system_update_follow_up(&Err(anyhow!("cdp navigate failed"))),
             AvailableSystemUpdateFollowUp::LogFailure,
         );
+    }
+
+    #[test]
+    fn ble_nonblocking_skips_version_check_progress_tv() {
+        assert!(!version_check_progress_tv_enabled(
+            UpdateExecution::NonBlocking
+        ));
+    }
+
+    #[test]
+    fn blocking_startup_and_dbus_enable_version_check_progress_tv() {
+        assert!(version_check_progress_tv_enabled(UpdateExecution::Blocking));
+    }
+
+    /// Guardrail: progress task must observe channel close once orchestration drops
+    /// its last `Sender` clone (see `prog_tx.take()` before `finish_version_check_progress`).
+    #[tokio::test]
+    async fn progress_task_joins_after_all_senders_dropped() {
+        let (tx, mut rx) = mpsc::channel::<(u32, u32)>(1);
+        let task = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("progress task should exit after senders dropped")
+            .expect("progress task join");
     }
 }
