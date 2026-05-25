@@ -39,6 +39,9 @@ const (
 	BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
 	// SavedVolumeFile stores the user's volume setting to persist across reboots.
 	SavedVolumeFile = "/home/feralfile/.state/saved-volume"
+	// maxClickAndDragCursorOffsets bounds a single pressed drag batch so one
+	// relayer request cannot hold Chromium in mouse-down state for unbounded work.
+	maxClickAndDragCursorOffsets = 16
 	// maxZoomGestureSteps bounds a single zoom request so relayer traffic cannot
 	// monopolize the executor on arbitrarily large gesture batches.
 	maxZoomGestureSteps = 16
@@ -953,6 +956,9 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}
 	}
 	if len(cursorArgs.CursorOffsets) == 0 {
 		return CmdOK, nil
+	}
+	if len(cursorArgs.CursorOffsets) > maxClickAndDragCursorOffsets {
+		return nil, fmt.Errorf("invalid arguments: cursorOffsets exceeds maximum of %d", maxClickAndDragCursorOffsets)
 	}
 
 	e.logger.Info("Mouse click-and-drag event at current position",

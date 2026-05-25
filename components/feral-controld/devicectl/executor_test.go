@@ -2437,6 +2437,53 @@ func TestExecutor_MouseClickAndDragEvent_Success(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_MouseClickAndDragEvent_RejectsOversizedCursorOffsets(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cursorOffsets := make([]map[string]interface{}, 0, 17)
+	for i := 0; i < 17; i++ {
+		cursorOffsets = append(cursorOffsets, map[string]interface{}{"dx": 1.0, "dy": 0.0})
+	}
+
+	cmd := commands.Command{
+		Type: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT,
+		Arguments: map[string]interface{}{
+			"messageID":     "oversized",
+			"cursorOffsets": cursorOffsets,
+		},
+	}
+
+	argsJSON := `{"messageID":"oversized","cursorOffsets":[{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0},{"dx":1.0,"dy":0.0}]}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			args := v.(*struct {
+				CursorOffsets []struct {
+					DX float64 `json:"dx"`
+					DY float64 `json:"dy"`
+				} `json:"cursorOffsets"`
+			})
+			args.CursorOffsets = make([]struct {
+				DX float64 `json:"dx"`
+				DY float64 `json:"dy"`
+			}, 17)
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "cursorOffsets exceeds maximum of 16")
+}
+
 func TestExecutor_MouseClickAndDragEvent_ReleaseFailureReturnsError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
