@@ -528,7 +528,7 @@ mod callbacks {
             Box::pin(async move {
                 let should_show_welcome = {
                     let page = app_state.page.lock().await;
-                    matches!(*page, super::Page::QRCode(_))
+                    matches!(*page, super::Page::QRCode(_, _))
                 };
                 if should_show_welcome {
                     let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
@@ -943,7 +943,7 @@ async fn wait_for_shutdown() {
 }
 
 async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
-    let qrcode_url = build_qrcode_url(app_state).await;
+    let qrcode_url = build_qrcode_url(app_state);
     let mut page = app_state.page.lock().await;
     // Replaying the same QR signal should not force Chromium to rebuild the
     // screen. That churn keeps the renderer and GPU hot even though the
