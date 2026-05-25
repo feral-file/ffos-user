@@ -684,15 +684,23 @@ mod callbacks {
 
         // Use Available mode for user-triggered updates (check for any newer version)
         // Use Blocking execution since D-Bus callback runs in a spawned task anyway
-        if let Err(e) = super::check_and_update_system(
+        let result = super::check_and_update_system(
             app_state,
             chromium,
             super::UpdateMode::Available,
             super::UpdateExecution::Blocking,
         )
-        .await
-        {
-            eprintln!("MAIN: System update failed: {e:#?}");
+        .await;
+        match super::available_system_update_follow_up(&result) {
+            super::AvailableSystemUpdateFollowUp::ReturnToWebApp => {
+                // Already on the latest build: leave the transient progress screen without
+                // showing extra TV copy (user stays on / returns to the bundled web app).
+                let _ = show_webapp(app_state, chromium).await;
+            }
+            super::AvailableSystemUpdateFollowUp::LogFailure => {
+                eprintln!("MAIN: System update failed: {result:#?}");
+            }
+            super::AvailableSystemUpdateFollowUp::NoOp => {}
         }
     }
 
@@ -1075,6 +1083,27 @@ pub enum UpdateCheckResult {
     VersionCheckFailed,
 }
 
+/// Follow-up after `check_and_update_system(UpdateMode::Available, …)` in the D-Bus path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvailableSystemUpdateFollowUp {
+    /// Optional check found no newer build; leave the transient progress route quietly.
+    ReturnToWebApp,
+    /// Blocking orchestration failed (CDP navigate, updater start, etc.).
+    LogFailure,
+    /// Core already drove TV/updater (update started, reflash, classified fetch error).
+    NoOp,
+}
+
+fn available_system_update_follow_up(
+    result: &Result<UpdateCheckResult>,
+) -> AvailableSystemUpdateFollowUp {
+    match result {
+        Ok(UpdateCheckResult::NoUpdateNeeded) => AvailableSystemUpdateFollowUp::ReturnToWebApp,
+        Err(_) => AvailableSystemUpdateFollowUp::LogFailure,
+        Ok(_) => AvailableSystemUpdateFollowUp::NoOp,
+    }
+}
+
 /// Shared system update logic that checks version status and optionally triggers an update.
 ///
 /// This function handles:
@@ -1348,5 +1377,53 @@ async fn wait_for_controld(timeout: Duration) -> Result<()> {
     match time::timeout(timeout, wait_future).await {
         Ok(_) => Ok(()),
         Err(_) => Err(anyhow::anyhow!("Timeout waiting for controld connection")),
+    }
+}
+
+#[cfg(test)]
+mod available_system_update_follow_up_tests {
+    use super::{
+        AvailableSystemUpdateFollowUp, UpdateCheckResult, available_system_update_follow_up,
+    };
+    use anyhow::anyhow;
+
+    #[test]
+    fn no_update_needed_returns_to_webapp() {
+        assert_eq!(
+            available_system_update_follow_up(&Ok(UpdateCheckResult::NoUpdateNeeded)),
+            AvailableSystemUpdateFollowUp::ReturnToWebApp,
+        );
+    }
+
+    #[test]
+    fn update_started_is_no_op_for_dbus_follow_up() {
+        assert_eq!(
+            available_system_update_follow_up(&Ok(UpdateCheckResult::UpdateStarted)),
+            AvailableSystemUpdateFollowUp::NoOp,
+        );
+    }
+
+    #[test]
+    fn too_old_to_upgrade_is_no_op_for_dbus_follow_up() {
+        assert_eq!(
+            available_system_update_follow_up(&Ok(UpdateCheckResult::TooOldToUpgrade)),
+            AvailableSystemUpdateFollowUp::NoOp,
+        );
+    }
+
+    #[test]
+    fn version_check_failed_is_no_op_for_dbus_follow_up() {
+        assert_eq!(
+            available_system_update_follow_up(&Ok(UpdateCheckResult::VersionCheckFailed)),
+            AvailableSystemUpdateFollowUp::NoOp,
+        );
+    }
+
+    #[test]
+    fn orchestration_error_is_logged_only() {
+        assert_eq!(
+            available_system_update_follow_up(&Err(anyhow!("cdp navigate failed"))),
+            AvailableSystemUpdateFollowUp::LogFailure,
+        );
     }
 }
