@@ -2931,6 +2931,85 @@ func TestExecutor_ZoomGestureEvent_EmptyScaleSteps(t *testing.T) {
 	assert.Equal(t, devicectl.CmdOK, result)
 }
 
+func TestExecutor_ZoomGestureEvent_RejectsOversizedScaleSteps(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	steps := make([]float64, 0, 17)
+	for i := 0; i < cap(steps); i++ {
+		steps = append(steps, 1.01)
+	}
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": steps,
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01,1.01]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = steps
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "scaleSteps exceeds maximum")
+}
+
+func TestExecutor_ZoomGestureEvent_StopsOnContextCancellation(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ctx, cancel := context.WithCancel(ts.ctx)
+	cancel()
+
+	cmd := commands.Command{
+		Type: commands.CMD_ZOOM_GESTURE,
+		Arguments: map[string]interface{}{
+			"scaleSteps": []float64{1.05, 0.98},
+		},
+	}
+	argsJSON := `{"scaleSteps":[1.05,0.98]}`
+
+	ts.mockJSON.EXPECT().Marshal(cmd.Arguments).Return([]byte(argsJSON), nil)
+	ts.mockCDP.EXPECT().
+		Send("Runtime.evaluate", gomock.Any()).
+		Return(map[string]interface{}{"width": 1920.0, "height": 1080.0}, nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(argsJSON), gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			in, ok := v.(*struct {
+				MessageID  string    `json:"messageID"`
+				ScaleSteps []float64 `json:"scaleSteps"`
+			})
+			if !ok {
+				return errors.New("unexpected type in zoomGesture unmarshal")
+			}
+			in.ScaleSteps = []float64{1.05, 0.98}
+			return nil
+		})
+
+	result, err := ts.executor.Execute(ctx, cmd)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, result)
+}
+
 func TestExecutor_ZoomGestureEvent_CDPError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

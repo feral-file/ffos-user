@@ -39,6 +39,9 @@ const (
 	BetaFeaturesToggleOnFile = "/home/feralfile/.state/beta-features-toggle-on"
 	// SavedVolumeFile stores the user's volume setting to persist across reboots.
 	SavedVolumeFile = "/home/feralfile/.state/saved-volume"
+	// maxZoomGestureSteps bounds a single zoom request so relayer traffic cannot
+	// monopolize the executor on arbitrarily large gesture batches.
+	maxZoomGestureSteps = 16
 )
 
 type Device struct {
@@ -162,7 +165,7 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 	case commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT:
 		result, err = e.handleMouseClickAndDragEvent(bytes)
 	case commands.CMD_ZOOM_GESTURE:
-		result, err = e.handleZoomGestureEvent(bytes)
+		result, err = e.handleZoomGestureEvent(ctx, bytes)
 	case commands.CMD_PROFILE:
 		result, err = e.getSysMetrics()
 	case commands.CMD_SCREEN_ROTATION:
@@ -1006,7 +1009,7 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}
 // handleZoomGestureEvent synthesizes pinch gestures at the CDP boundary. We
 // keep this in controld so the player UI does not need to understand a separate
 // gesture command.
-func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
+func (e *executor) handleZoomGestureEvent(ctx context.Context, args []byte) (interface{}, error) {
 	e.initializeScreenDimensions()
 
 	var in struct {
@@ -1019,6 +1022,9 @@ func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 	if len(in.ScaleSteps) == 0 {
 		return CmdOK, nil
 	}
+	if len(in.ScaleSteps) > maxZoomGestureSteps {
+		return nil, fmt.Errorf("invalid arguments: scaleSteps exceeds maximum of %d", maxZoomGestureSteps)
+	}
 
 	for _, step := range in.ScaleSteps {
 		if step <= 0 {
@@ -1027,6 +1033,12 @@ func (e *executor) handleZoomGestureEvent(args []byte) (interface{}, error) {
 	}
 
 	for _, step := range in.ScaleSteps {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		x, y := e.zoomGesturePoint(step)
 		if err := e.sendZoomPinchGesture(step, x, y); err != nil {
 			if !isUnsupportedPinchGestureError(err) {
