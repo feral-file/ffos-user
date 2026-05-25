@@ -1012,9 +1012,8 @@ func (e *executor) handleMouseClickAndDragEvent(args []byte) (result interface{}
 	return CmdOK, nil
 }
 
-// handleZoomGestureEvent synthesizes pinch gestures at the CDP boundary. We
-// keep this in controld so the player UI does not need to understand a separate
-// gesture command.
+// handleZoomGestureEvent dispatches non-Ctrl wheel input at the CDP boundary.
+// This avoids Chromium page zoom while still giving artwork a zoom-like input.
 func (e *executor) handleZoomGestureEvent(ctx context.Context, args []byte) (interface{}, error) {
 	e.initializeScreenDimensions()
 
@@ -1046,59 +1045,13 @@ func (e *executor) handleZoomGestureEvent(ctx context.Context, args []byte) (int
 		}
 
 		x, y := e.zoomGesturePoint(step)
-		if err := e.sendZoomPinchGesture(step, x, y); err != nil {
-			if !isUnsupportedPinchGestureError(err) {
-				e.logger.Error("Failed to synthesize pinch gesture", zap.Error(err))
-				return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
-			}
-
-			e.logger.Warn("Pinch gesture unsupported, falling back to wheel zoom", zap.Error(err))
-			if fallbackErr := e.sendZoomWheelGesture(step, x, y); fallbackErr != nil {
-				e.logger.Error("Failed to dispatch zoom fallback", zap.Error(fallbackErr))
-				return nil, fmt.Errorf("failed to process zoom gesture: %w", fallbackErr)
-			}
-			continue
-		}
-
-		if err := e.resetPageScaleFactor(); err != nil {
-			e.logger.Error("Failed to reset page scale after pinch gesture", zap.Error(err))
+		if err := e.sendZoomWheelGesture(step, x, y); err != nil {
+			e.logger.Error("Failed to dispatch zoom wheel gesture", zap.Error(err))
 			return nil, fmt.Errorf("failed to process zoom gesture: %w", err)
 		}
 	}
 
 	return CmdOK, nil
-}
-
-func (e *executor) sendZoomPinchGesture(scaleFactor, x, y float64) error {
-	params := map[string]interface{}{
-		"x":                 x,
-		"y":                 y,
-		"scaleFactor":       scaleFactor,
-		"relativeSpeed":     3200,
-		"gestureSourceType": "default",
-		"modifiers":         0,
-	}
-
-	_, err := e.cdp.Send("Input.synthesizePinchGesture", params)
-	if err != nil {
-		return fmt.Errorf("synthesize pinch gesture: %w", err)
-	}
-
-	return nil
-}
-
-// Pinch input can leave Chromium's page scale changed even when the gesture is
-// meant to drive artwork behavior, so we normalize the page scale after each
-// successful pinch and keep the browser from retaining zoom state.
-func (e *executor) resetPageScaleFactor() error {
-	_, err := e.cdp.Send("Emulation.setPageScaleFactor", map[string]interface{}{
-		"pageScaleFactor": 1.0,
-	})
-	if err != nil {
-		return fmt.Errorf("set page scale factor: %w", err)
-	}
-
-	return nil
 }
 
 func (e *executor) zoomGesturePoint(scaleFactor float64) (float64, float64) {
@@ -1218,19 +1171,6 @@ func zoomWheelDeltaY(scaleFactor float64) float64 {
 		steps = 1
 	}
 	return 120.0 * steps
-}
-
-func isUnsupportedPinchGestureError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var remoteErr *cdp.RemoteError
-	if !errors.As(err, &remoteErr) {
-		return false
-	}
-
-	return remoteErr.Method == "Input.synthesizePinchGesture" && remoteErr.Unsupported
 }
 
 func (e *executor) shutdown(ctx context.Context) (interface{}, error) {

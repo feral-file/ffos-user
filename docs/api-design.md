@@ -117,7 +117,7 @@ The following command names are routed to `devicectl` and use the standard relay
 | `doubleTapGesture` | `button` | Same button selection as `tapGesture`. |
 | `longPressGesture` | `button` | Same button selection as `tapGesture`. |
 | `clickAndDragGesture` | `cursorOffsets` | Press, move, then release. The executor treats release failure as an error because Chromium can remain pressed. Batches are capped at 16 offsets to keep a single request from monopolizing the executor. |
-| `zoomGesture` | `scaleSteps` | Array of positive float scale factors. The executor uses `Input.synthesizePinchGesture` with the default gesture source, resets Chromium page scale after each successful pinch, and falls back to non-Ctrl wheel input only when pinch synthesis is unsupported. |
+| `zoomGesture` | `scaleSteps` | Array of positive float scale factors. The executor dispatches non-Ctrl `mouseWheel` input at the current cursor anchor so Chromium does not apply browser/page zoom. |
 | `setSleepSchedule` | `enabled`, optional `sleepTime`, `wakeTime` (HH:MM) | Persists the FF1 sleep/wake window and enables or disables automatic transitions. |
 | `sleepNow` | — | Manual override toward sleep until the next schedule boundary (when the schedule is enabled). |
 | `wakeNow` | — | Manual override toward awake until the next schedule boundary (when the schedule is enabled). |
