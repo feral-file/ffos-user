@@ -111,11 +111,10 @@ progress/messages via regex, and streams progress/error lines back to callers.
 
 Distributor version metadata (`/api/latest/...`) is fetched with bounded retries;
 failures are classified (network vs HTTP class vs parse) for TV copy, and
-`check_and_update_system` attaches a progress channel for **`UpdateExecution::Blocking`**
-only so the launcher shows a short “checking for updates” line while HTTP retries run;
-`NonBlocking` (BLE) passes `None` so CDP progress navigations are not on the mobile
-response path. Only `refresh_remote_version`, `is_too_old_to_upgrade`, `is_update_required`,
-and `is_update_available` accept that channel; helpers like `latest_version` read
+`check_and_update_system` can attach a progress channel so the launcher shows
+a short “checking for updates” line while those HTTP retries run.
+Only `refresh_remote_version`, `is_too_old_to_upgrade`, `is_update_required`, and
+`is_update_available` accept that channel; helpers like `latest_version` read
 metadata without driving the progress UI.
 
 Two enums control update behaviour:
