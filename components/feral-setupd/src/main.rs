@@ -913,9 +913,9 @@ async fn wait_for_shutdown() {
 
 async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let qrcode_url = build_qrcode_url(app_state);
-    let mut page = app_state.page.lock().await;
     // QRCode url is dynamically built
     // So we always navigate to make sure the url is correct
+    let mut page = app_state.page.lock().await;
     chrome
         .navigate(&qrcode_url)
         .await
