@@ -63,7 +63,7 @@ fn unix_s() -> i64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Page {
     None(i64),
-    QRCode(i64, String),
+    QRCode(i64),
     Message(i64, String),
     SystemUpgrade(i64),
     FactoryReset(i64),
@@ -72,7 +72,7 @@ enum Page {
 }
 
 impl Page {
-    /// Check if the page should be kept when bluetooth disconnects.
+    /// Check if the page should be kept when bluetooth disconnects
     fn should_keep_on_bt_disconnect(&self) -> bool {
         matches!(
             self,
@@ -81,37 +81,6 @@ impl Page {
                 | Page::FactoryReset(_)
                 | Page::ReflashingRequired(_, _)
         )
-    }
-
-    fn timestamp(&self) -> i64 {
-        match self {
-            Page::None(ts) => *ts,
-            Page::QRCode(ts, _) => *ts,
-            Page::Message(ts, _) => *ts,
-            Page::SystemUpgrade(ts) => *ts,
-            Page::FactoryReset(ts) => *ts,
-            Page::WebApp(ts) => *ts,
-            Page::ReflashingRequired(ts, _) => *ts,
-        }
-    }
-
-    fn page_type(&self) -> &str {
-        match self {
-            Page::None(_) => "None",
-            Page::QRCode(_, _) => "QRCode",
-            Page::Message(_, _) => "Message",
-            Page::SystemUpgrade(_) => "SystemUpgrade",
-            Page::FactoryReset(_) => "FactoryReset",
-            Page::WebApp(_) => "WebApp",
-            Page::ReflashingRequired(_, _) => "ReflashingRequired",
-        }
-    }
-
-    fn qrcode_url(&self) -> Option<&str> {
-        match self {
-            Page::QRCode(_, url) => Some(url.as_str()),
-            _ => None,
-        }
     }
 }
 
@@ -528,7 +497,7 @@ mod callbacks {
             Box::pin(async move {
                 let should_show_welcome = {
                     let page = app_state.page.lock().await;
-                    matches!(*page, super::Page::QRCode(_, _))
+                    matches!(*page, super::Page::QRCode(_))
                 };
                 if should_show_welcome {
                     let _ = show_message(&chromium, &app_state, constant::WELCOME_MSG).await;
@@ -945,19 +914,14 @@ async fn wait_for_shutdown() {
 async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let qrcode_url = build_qrcode_url(app_state);
     let mut page = app_state.page.lock().await;
-    // Replaying the same QR signal should not force Chromium to rebuild the
-    // screen. That churn keeps the renderer and GPU hot even though the
-    // visible state did not change.
-    if page.qrcode_url() == Some(qrcode_url.as_str()) {
-        return Ok(());
-    }
-
+    // QRCode url is dynamically built
+    // So we always navigate to make sure the url is correct
     chrome
         .navigate(&qrcode_url)
         .await
         .with_context(|| format!("navigating to {qrcode_url}"))?;
     println!("MAIN: Navigated to {qrcode_url}");
-    *page = Page::QRCode(unix_s(), qrcode_url);
+    *page = Page::QRCode(unix_s());
     Ok(())
 }
 
@@ -1355,25 +1319,5 @@ async fn wait_for_controld(timeout: Duration) -> Result<()> {
     match time::timeout(timeout, wait_future).await {
         Ok(_) => Ok(()),
         Err(_) => Err(anyhow::anyhow!("Timeout waiting for controld connection")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Page;
-
-    #[test]
-    fn page_tracks_qrcode_url() {
-        assert_eq!(
-            Page::QRCode(1, "file:///qr?a=1".to_string()).qrcode_url(),
-            Some("file:///qr?a=1")
-        );
-        assert_eq!(Page::WebApp(1).qrcode_url(), None);
-        assert_eq!(Page::Message(1, "hello".to_string()).qrcode_url(), None);
-        assert_eq!(Page::None(1).qrcode_url(), None);
-        assert_eq!(
-            Page::ReflashingRequired(1, "help".to_string()).qrcode_url(),
-            None
-        );
     }
 }
