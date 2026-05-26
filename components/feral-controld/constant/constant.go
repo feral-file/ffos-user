@@ -1,6 +1,9 @@
 package constant
 
 const (
+	// WEBAPP_URL is the bundled local player served by feral-player.service.
+	WEBAPP_URL = "http://127.0.0.1:8080/"
+
 	FF1_CONFIG_FILE = "/home/feralfile/ff1-config.json"
 	HOSTNAME_FILE   = "/etc/hostname"
 

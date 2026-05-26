@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -21,9 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
 
-const (
-	POLL_INTERVAL = 5 * time.Second
-)
+const POLL_INTERVAL = 5 * time.Second
 
 type LoopMode string
 
@@ -200,6 +200,22 @@ func (s *poller) ForceRefresh() {
 }
 
 func (s *poller) pollPlayerStatus(ctx context.Context) {
+	pageURL, err := s.cdp.PageNavigationURL(ctx)
+	if err != nil {
+		s.logger.Debug("Failed to read page URL before player status poll", zap.Error(err))
+	} else if !isPlayerPageURL(pageURL) {
+		// The launcher screens are intentionally static and do not answer
+		// checkStatus. Skipping the CDP command here avoids keeping Chromium's
+		// renderer busy while the device is showing QR or setup screens.
+		// We still advance the playback sample window so duration accounting
+		// does not attribute launcher time to the last artwork sample.
+		s.updateArtPlaybackMetrics(false, time.Now())
+		s.logger.Info("Skipping player status poll because Chromium is not on the player page",
+			zap.String("page_url", pageURL),
+		)
+		return
+	}
+
 	now := time.Now()
 
 	playerStatus, err := s.FetchPlayerStatus(ctx)
@@ -237,6 +253,10 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	s.logger.Info("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, lightweightPlayerStatus)
+}
+
+func isPlayerPageURL(url string) bool {
+	return strings.HasPrefix(url, constants.WEBAPP_URL)
 }
 
 func (s *poller) sendNotification(ctx context.Context, notificationType relayer.NotificationType, message interface{}) {
