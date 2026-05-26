@@ -65,9 +65,8 @@ type GPUMetrics struct {
 	CurrentTemperature float64 `json:"current_temperature"`
 	MaxTemperature     float64 `json:"max_temperature"`
 	// GPUBusy is shader/engine utilization % from the driver (amdgpu gpu_busy_percent
-	// or i915 gt_busy_percent / intel_gpu_top engines). Prefer this over frequency_percent.
-	GPUBusy          float64 `json:"gpu_busy"`
-	FrequencyPercent float64 `json:"frequency_percent"`
+	// or i915 gt_busy_percent / intel_gpu_top engines).
+	GPUBusy float64 `json:"gpu_busy"`
 }
 
 type MemoryMetrics struct {
@@ -553,7 +552,6 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 	}
 	p.Lock()
 	p.lastMetrics.GPU.MaxFrequency = max
-	p.applyGPUDerivedPercentages()
 	p.Unlock()
 
 	return nil
@@ -623,7 +621,6 @@ func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 	} else {
 		p.lastMetrics.GPU.GPUBusy = 0
 	}
-	p.applyGPUDerivedPercentages()
 	p.Unlock()
 
 	if deviceErr != nil {

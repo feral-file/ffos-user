@@ -11,15 +11,6 @@ import (
 
 var amdSclkMHzPattern = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*Mhz`)
 
-// gpuFrequencyPercent exposes current/max clock as a percentage for clients that
-// still want clock-ratio semantics. FF app should prefer gpu_busy when available.
-func gpuFrequencyPercent(currentMHz, maxMHz float64) float64 {
-	if maxMHz <= 0 {
-		return 0
-	}
-	return currentMHz / maxMHz * 100
-}
-
 // discoverGPUDevicePath returns /sys/class/drm/cardN/device for the primary GPU.
 func discoverGPUDevicePath() (string, error) {
 	entries, err := os.ReadDir("/sys/class/drm")
@@ -133,11 +124,4 @@ func resolveGPUBusy(engineBusy float64, devicePath string) (float64, error) {
 		return 0, errBestEffortMetricUnavailable
 	}
 	return readGPUBusyPercent(devicePath)
-}
-
-func (p *SysResMonitor) applyGPUDerivedPercentages() {
-	p.lastMetrics.GPU.FrequencyPercent = gpuFrequencyPercent(
-		p.lastMetrics.GPU.CurrentFrequency,
-		p.lastMetrics.GPU.MaxFrequency,
-	)
 }
