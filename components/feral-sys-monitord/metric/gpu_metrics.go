@@ -11,6 +11,41 @@ import (
 
 var amdSclkMHzPattern = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*Mhz`)
 
+type gpuDeviceCandidate struct {
+	devicePath string
+	bootVGA    bool
+}
+
+func hasGPUCharacteristics(devicePath string) bool {
+	for _, marker := range []string{"gpu_busy_percent", "gt_busy_percent", "pp_dpm_sclk", "gt_max_freq_mhz"} {
+		if _, err := os.Stat(filepath.Join(devicePath, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func isBootVGA(devicePath string) bool {
+	//nolint:gosec // G304: devicePath is discovered from /sys/class/drm and the filename is fixed.
+	data, err := os.ReadFile(filepath.Join(devicePath, "boot_vga"))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "1"
+}
+
+func pickGPUDevicePath(candidates []gpuDeviceCandidate) (string, bool) {
+	for _, candidate := range candidates {
+		if candidate.bootVGA {
+			return candidate.devicePath, true
+		}
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	return candidates[0].devicePath, true
+}
+
 // discoverGPUDevicePath returns /sys/class/drm/cardN/device for the primary GPU.
 func discoverGPUDevicePath() (string, error) {
 	entries, err := os.ReadDir("/sys/class/drm")
@@ -18,6 +53,7 @@ func discoverGPUDevicePath() (string, error) {
 		return "", err
 	}
 
+	var candidates []gpuDeviceCandidate
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasPrefix(name, "card") || strings.Contains(name, "-") {
@@ -30,12 +66,18 @@ func discoverGPUDevicePath() (string, error) {
 			continue
 		}
 
-		// Prefer the card that exposes GPU utilization or Intel GT frequency caps.
-		for _, marker := range []string{"gpu_busy_percent", "gt_busy_percent", "pp_dpm_sclk", "gt_max_freq_mhz"} {
-			if _, err := os.Stat(filepath.Join(devicePath, marker)); err == nil {
-				return devicePath, nil
-			}
+		if !hasGPUCharacteristics(devicePath) {
+			continue
 		}
+
+		candidates = append(candidates, gpuDeviceCandidate{
+			devicePath: devicePath,
+			bootVGA:    isBootVGA(devicePath),
+		})
+	}
+
+	if path, ok := pickGPUDevicePath(candidates); ok {
+		return path, nil
 	}
 
 	return "", fmt.Errorf("no GPU drm device path found")
@@ -128,4 +170,11 @@ func resolveGPUBusy(engineBusy float64, engineBusyFound bool, devicePath string)
 		return 0, errBestEffortMetricUnavailable
 	}
 	return readGPUBusyPercent(devicePath)
+}
+
+func shouldSuppressIntelGPUUpdate(devicePath string, busyErr error) error {
+	if devicePath == "" && busyErr != nil {
+		return errBestEffortMetricUnavailable
+	}
+	return nil
 }

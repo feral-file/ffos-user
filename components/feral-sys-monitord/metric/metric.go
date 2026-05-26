@@ -506,8 +506,6 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 	p.lastMetrics.GPU.CurrentFrequency = current
 	if busyErr == nil {
 		p.lastMetrics.GPU.GPUBusy = gpuBusy
-	} else {
-		p.lastMetrics.GPU.GPUBusy = 0
 	}
 	p.Unlock()
 
@@ -518,8 +516,12 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 		)
 	}
 
+	if err := shouldSuppressIntelGPUUpdate(devicePath, busyErr); err != nil {
+		return err
+	}
+
 	if devicePath == "" {
-		return errBestEffortMetricUnavailable
+		return nil
 	}
 
 	// Get the max frequency from the same DRM device used for engine busy.
@@ -603,8 +605,6 @@ func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 	}
 	if busyErr == nil {
 		p.lastMetrics.GPU.GPUBusy = gpuBusy
-	} else {
-		p.lastMetrics.GPU.GPUBusy = 0
 	}
 	p.Unlock()
 

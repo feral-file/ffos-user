@@ -66,3 +66,49 @@ func TestMaxEngineBusyPercent_PreservesZero(t *testing.T) {
 		t.Fatalf("maxEngineBusyPercent() = %v, want 0", busy)
 	}
 }
+
+func TestPickGPUDevicePathPrefersBootVGA(t *testing.T) {
+	t.Parallel()
+
+	path, ok := pickGPUDevicePath([]gpuDeviceCandidate{
+		{devicePath: "/sys/class/drm/card1/device", bootVGA: false},
+		{devicePath: "/sys/class/drm/card0/device", bootVGA: true},
+	})
+	if !ok {
+		t.Fatal("expected a GPU device path to be selected")
+	}
+	if path != "/sys/class/drm/card0/device" {
+		t.Fatalf("pickGPUDevicePath() = %q, want boot VGA adapter", path)
+	}
+}
+
+func TestPickGPUDevicePathFallsBackToFirstCandidate(t *testing.T) {
+	t.Parallel()
+
+	path, ok := pickGPUDevicePath([]gpuDeviceCandidate{
+		{devicePath: "/sys/class/drm/card2/device"},
+		{devicePath: "/sys/class/drm/card3/device"},
+	})
+	if !ok {
+		t.Fatal("expected a GPU device path to be selected")
+	}
+	if path != "/sys/class/drm/card2/device" {
+		t.Fatalf("pickGPUDevicePath() = %q, want first candidate", path)
+	}
+}
+
+func TestShouldSuppressIntelGPUUpdate(t *testing.T) {
+	t.Parallel()
+
+	if err := shouldSuppressIntelGPUUpdate("/sys/class/drm/card0/device", nil); err != nil {
+		t.Fatalf("shouldSuppressIntelGPUUpdate() = %v, want nil when device path exists", err)
+	}
+
+	if err := shouldSuppressIntelGPUUpdate("", nil); err != nil {
+		t.Fatalf("shouldSuppressIntelGPUUpdate() = %v, want nil when busy metric already succeeded", err)
+	}
+
+	if err := shouldSuppressIntelGPUUpdate("", errBestEffortMetricUnavailable); !errors.Is(err, errBestEffortMetricUnavailable) {
+		t.Fatalf("shouldSuppressIntelGPUUpdate() = %v, want unavailable", err)
+	}
+}
