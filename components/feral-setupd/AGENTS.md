@@ -110,9 +110,12 @@ Runs/monitors the updater systemd unit, tails the updater log file, extracts
 progress/messages via regex, and streams progress/error lines back to callers.
 
 Distributor version metadata (`/api/latest/...`) is fetched with bounded retries;
-failures are classified (network vs HTTP class vs parse) for TV copy, and
-`check_and_update_system` can attach a progress channel so the launcher shows
-a short “checking for updates” line while those HTTP retries run.
+failures are classified (network vs HTTP class vs parse) for TV copy. For
+`UpdateExecution::Blocking` only, `check_and_update_system` attaches a progress
+channel so the launcher shows a short “checking for updates” line while those
+HTTP retries run; the channel is drained before final TV screens. For
+`UpdateExecution::NonBlocking` (BLE), updater calls pass `None` so CDP progress
+navigations are not on the mobile response path.
 Only `refresh_remote_version`, `is_too_old_to_upgrade`, `is_update_required`, and
 `is_update_available` accept that channel; helpers like `latest_version` read
 metadata without driving the progress UI.

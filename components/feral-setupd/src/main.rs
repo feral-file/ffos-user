@@ -1126,34 +1126,16 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
-    // TV progress while HTTP retries run inside `fetch_remote_version` (sender dropped before
-    // the final classified failure copy so the last screen is stable).
-    let (prog_tx, mut prog_rx) = mpsc::channel::<(u32, u32)>(16);
-    let progress_task = {
-        let chrome = chrome.clone();
-        let app_state = app_state.clone();
-        tokio::spawn(async move {
-            while let Some((_attempt, _max)) = prog_rx.recv().await {
-                if let Err(e) =
-                    show_message(&chrome, &app_state, constant::VERSION_CHECK_PROGRESS_TV_MSG).await
-                {
-                    eprintln!("MAIN: version-check progress UI failed: {e:#?}");
-                }
-            }
-        })
-    };
+    let progress = VersionCheckProgress::start(execution, chrome.clone(), app_state.clone());
 
     // Always fetch the remote version first to ensure we have the latest info
-    updater::refresh_remote_version(Some(prog_tx.clone())).await;
+    updater::refresh_remote_version(progress.as_updater_progress()).await;
     // First check if device is too old to auto-upgrade
-    match updater::is_too_old_to_upgrade(Some(prog_tx.clone())).await {
+    match updater::is_too_old_to_upgrade(progress.as_updater_progress()).await {
         Ok(true) => {
             // Finish progress UI before reflashing screens; otherwise queued progress
             // navigations can overwrite the QR/message we are about to show.
-            drop(prog_tx);
-            if let Err(join_err) = progress_task.await {
-                eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
-            }
+            progress.finish().await;
 
             // Device is too old, show reflashing QR code
             if let Ok(Some(flashing_guide)) = updater::flashing_guide_url().await {
@@ -1233,14 +1215,13 @@ async fn check_and_update_system(
 
     // Check if update is needed based on mode
     let needs_update = match mode {
-        UpdateMode::Required => updater::is_update_required(Some(prog_tx.clone())).await,
-        UpdateMode::Available => updater::is_update_available(Some(prog_tx.clone())).await,
+        UpdateMode::Required => updater::is_update_required(progress.as_updater_progress()).await,
+        UpdateMode::Available => {
+            updater::is_update_available(progress.as_updater_progress()).await
+        }
     };
 
-    drop(prog_tx);
-    if let Err(join_err) = progress_task.await {
-        eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
-    }
+    progress.finish().await;
 
     match needs_update {
         Ok(true) => {
@@ -1279,6 +1260,65 @@ async fn check_and_update_system(
                 }
             }
             Ok(UpdateCheckResult::VersionCheckFailed)
+        }
+    }
+}
+
+/// Drives TV “checking for updates” copy during distributor HTTP retries.
+///
+/// Only [`UpdateExecution::Blocking`] attaches a channel: BLE uses [`UpdateExecution::NonBlocking`]
+/// and passes `None` into the updater so CDP navigations are not on the mobile response path.
+/// When active, the sender is dropped and the task drained before final TV screens so progress
+/// cannot overwrite reflash, failure, or update UI.
+struct VersionCheckProgress {
+    tx: Option<updater::FetchProgressTx>,
+    task: Option<task::JoinHandle<()>>,
+}
+
+impl VersionCheckProgress {
+    #[must_use]
+    fn uses_tv_progress(execution: UpdateExecution) -> bool {
+        matches!(execution, UpdateExecution::Blocking)
+    }
+
+    fn start(execution: UpdateExecution, chrome: Arc<Cdp>, app_state: Arc<AppState>) -> Self {
+        if !Self::uses_tv_progress(execution) {
+            return Self {
+                tx: None,
+                task: None,
+            };
+        }
+
+        let (prog_tx, mut prog_rx) = mpsc::channel::<(u32, u32)>(16);
+        let progress_task = tokio::spawn(async move {
+            while let Some((_attempt, _max)) = prog_rx.recv().await {
+                if let Err(e) =
+                    show_message(&chrome, &app_state, constant::VERSION_CHECK_PROGRESS_TV_MSG).await
+                {
+                    eprintln!("MAIN: version-check progress UI failed: {e:#?}");
+                }
+            }
+        });
+
+        Self {
+            tx: Some(prog_tx),
+            task: Some(progress_task),
+        }
+    }
+
+    fn as_updater_progress(&self) -> Option<updater::FetchProgressTx> {
+        self.tx.clone()
+    }
+
+    async fn finish(self) {
+        let Some(tx) = self.tx else {
+            return;
+        };
+        drop(tx);
+        if let Some(task) = self.task {
+            if let Err(join_err) = task.await {
+                eprintln!("MAIN: version-check progress task ended with: {join_err:#?}");
+            }
         }
     }
 }
@@ -1377,6 +1417,43 @@ async fn wait_for_controld(timeout: Duration) -> Result<()> {
     match time::timeout(timeout, wait_future).await {
         Ok(_) => Ok(()),
         Err(_) => Err(anyhow::anyhow!("Timeout waiting for controld connection")),
+    }
+}
+
+#[cfg(test)]
+mod version_check_progress_tests {
+    use super::{UpdateExecution, VersionCheckProgress};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    #[test]
+    fn tv_progress_only_for_blocking_execution() {
+        assert!(VersionCheckProgress::uses_tv_progress(
+            UpdateExecution::Blocking
+        ));
+        assert!(!VersionCheckProgress::uses_tv_progress(
+            UpdateExecution::NonBlocking
+        ));
+    }
+
+    /// Mirrors `check_and_update_system`: ephemeral `Sender` clones must not outlive `finish`,
+    /// or the progress receiver task never sees the channel close.
+    #[tokio::test]
+    async fn progress_receiver_exits_after_all_senders_dropped() {
+        let (tx, mut rx) = mpsc::channel::<(u32, u32)>(16);
+        let per_updater_call = tx.clone();
+        drop(per_updater_call);
+
+        let receiver_task = tokio::spawn(async move {
+            while rx.recv().await.is_some() {}
+        });
+
+        drop(tx);
+        timeout(Duration::from_secs(1), receiver_task)
+            .await
+            .expect("receiver should finish within 1s")
+            .expect("receiver task join");
     }
 }
 
