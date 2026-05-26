@@ -93,7 +93,7 @@ own bus. They arrive on:
 |---|---|
 | `show_pairing_qr_code` | Navigates CDP to the QR code page |
 | `factory_reset` | Starts the factory-reset flow |
-| `system_update` | Triggers a software update |
+| `system_update` | Optional version check (`UpdateMode::Available`); on `NoUpdateNeeded`, restores the TV page snapshot from before the check (`WebApp` → webapp, QR/message/recovery → prior surface, not unconditional webapp) |
 | `upload_logs` | Uploads device logs |
 | `upload_logs_with_bundle` | Uploads device logs with a `support_bundle_id` for support evidence unification |
 
