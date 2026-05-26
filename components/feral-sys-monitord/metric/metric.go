@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -498,10 +497,10 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 	}
 
 	current := result[0].Frequency.Actual
-	engineBusy := maxEngineBusyPercent(result[0].Engines)
+	engineBusy, engineBusyFound := maxEngineBusyPercent(result[0].Engines)
 
 	devicePath, deviceErr := discoverGPUDevicePath()
-	gpuBusy, busyErr := resolveGPUBusy(engineBusy, devicePath)
+	gpuBusy, busyErr := resolveGPUBusy(engineBusy, engineBusyFound, devicePath)
 
 	p.Lock()
 	p.lastMetrics.GPU.CurrentFrequency = current
@@ -519,27 +518,13 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 		)
 	}
 
-	// Discover the card name using `ls /sys/class/drm/`
-	cmd = exec.CommandContext(ctx, "ls", "/sys/class/drm/")
-	cmd.Stderr = &stderr
-	output, err = cmd.Output()
-	if err != nil {
-		p.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
-		return err
-	}
-	lines := strings.Split(string(output), "\n")
-	var card string
-	for _, line := range lines {
-		regex := regexp.MustCompile(`^card[0-9]+`)
-		if regex.MatchString(line) {
-			card = regex.FindString(line)
-			break
-		}
+	if devicePath == "" {
+		return errBestEffortMetricUnavailable
 	}
 
-	// Get the max frequency
+	// Get the max frequency from the same DRM device used for engine busy.
 	//nolint:gosec
-	cmd = exec.CommandContext(ctx, "cat", "/sys/class/drm/"+card+"/gt_max_freq_mhz")
+	cmd = exec.CommandContext(ctx, "cat", filepath.Join(devicePath, "gt_max_freq_mhz"))
 	cmd.Stderr = &stderr
 	output, err = cmd.Output()
 	if err != nil {
@@ -602,7 +587,7 @@ func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 	devicePath, deviceErr := discoverGPUDevicePath()
 	var maxMHz float64
 	var maxErr error
-	gpuBusy, busyErr := resolveGPUBusy(0, devicePath)
+	gpuBusy, busyErr := resolveGPUBusy(0, false, devicePath)
 	if deviceErr == nil {
 		maxMHz, maxErr = readAMDMaxSclkMHz(devicePath)
 	} else {

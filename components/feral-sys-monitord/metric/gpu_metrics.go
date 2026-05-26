@@ -105,19 +105,23 @@ func readAMDMaxSclkMHz(devicePath string) (float64, error) {
 
 func maxEngineBusyPercent(engines map[string]struct {
 	Busy float64 `json:"busy"`
-}) float64 {
+}) (float64, bool) {
+	if len(engines) == 0 {
+		return 0, false
+	}
+
 	var maxBusy float64
 	for _, engine := range engines {
 		if engine.Busy > maxBusy {
 			maxBusy = engine.Busy
 		}
 	}
-	return maxBusy
+	return maxBusy, true
 }
 
 // resolveGPUBusy prefers intel_gpu_top engine busy, then falls back to sysfs.
-func resolveGPUBusy(engineBusy float64, devicePath string) (float64, error) {
-	if engineBusy > 0 {
+func resolveGPUBusy(engineBusy float64, engineBusyFound bool, devicePath string) (float64, error) {
+	if engineBusyFound {
 		return engineBusy, nil
 	}
 	if devicePath == "" {
