@@ -32,6 +32,8 @@ type GPUMetrics struct {
 	CurrentFrequency   float64 `json:"current_frequency"`
 	CurrentTemperature float64 `json:"current_temperature"`
 	MaxTemperature     float64 `json:"max_temperature"`
+	GPUBusy            float64 `json:"gpu_busy"`
+	FrequencyPercent   float64 `json:"frequency_percent"`
 }
 
 type MemoryMetrics struct {

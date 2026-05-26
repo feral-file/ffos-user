@@ -64,6 +64,10 @@ type GPUMetrics struct {
 	CurrentFrequency   float64 `json:"current_frequency"`
 	CurrentTemperature float64 `json:"current_temperature"`
 	MaxTemperature     float64 `json:"max_temperature"`
+	// GPUBusy is shader/engine utilization % from the driver (amdgpu gpu_busy_percent
+	// or i915 gt_busy_percent / intel_gpu_top engines). Prefer this over frequency_percent.
+	GPUBusy          float64 `json:"gpu_busy"`
+	FrequencyPercent float64 `json:"frequency_percent"`
 }
 
 type MemoryMetrics struct {
@@ -482,6 +486,9 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 		Frequency struct {
 			Actual float64 `json:"actual"`
 		} `json:"frequency"`
+		Engines map[string]struct {
+			Busy float64 `json:"busy"`
+		} `json:"engines"`
 	}
 	err = json.Unmarshal([]byte(outputString), &result)
 	if err != nil {
@@ -492,9 +499,26 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 	}
 
 	current := result[0].Frequency.Actual
+	engineBusy := maxEngineBusyPercent(result[0].Engines)
+
+	devicePath, deviceErr := discoverGPUDevicePath()
+	gpuBusy, busyErr := resolveGPUBusy(engineBusy, devicePath)
+
 	p.Lock()
 	p.lastMetrics.GPU.CurrentFrequency = current
+	if busyErr == nil {
+		p.lastMetrics.GPU.GPUBusy = gpuBusy
+	} else {
+		p.lastMetrics.GPU.GPUBusy = 0
+	}
 	p.Unlock()
+
+	if busyErr != nil {
+		p.logger.Debug("GPU busy metric unavailable on Intel path",
+			zap.Error(busyErr),
+			zap.Error(deviceErr),
+		)
+	}
 
 	// Discover the card name using `ls /sys/class/drm/`
 	cmd = exec.CommandContext(ctx, "ls", "/sys/class/drm/")
@@ -529,6 +553,7 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 	}
 	p.Lock()
 	p.lastMetrics.GPU.MaxFrequency = max
+	p.applyGPUDerivedPercentages()
 	p.Unlock()
 
 	return nil
@@ -545,6 +570,8 @@ func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 
 	lines := strings.Split(string(output), "\n")
 	var inAMDGPU bool
+	var currentMHz float64
+	var gotCurrent bool
 
 	for _, line := range lines {
 		// Look for amdgpu section
@@ -569,14 +596,47 @@ func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 				continue
 			}
 			// Convert from Hz to MHz
-			current := freq / 1000000.0
-			p.Lock()
-			p.lastMetrics.GPU.CurrentFrequency = current
-			p.Unlock()
+			currentMHz = freq / 1000000.0
+			gotCurrent = true
 		}
-		p.Lock()
-		p.lastMetrics.GPU.MaxFrequency = 2000.0 // 2000 MHz max for AMD Ryzen™ 7 5825U
-		p.Unlock()
+	}
+
+	devicePath, deviceErr := discoverGPUDevicePath()
+	var maxMHz float64
+	var maxErr error
+	gpuBusy, busyErr := resolveGPUBusy(0, devicePath)
+	if deviceErr == nil {
+		maxMHz, maxErr = readAMDMaxSclkMHz(devicePath)
+	} else {
+		maxErr = deviceErr
+	}
+
+	p.Lock()
+	if gotCurrent {
+		p.lastMetrics.GPU.CurrentFrequency = currentMHz
+	}
+	if maxErr == nil {
+		p.lastMetrics.GPU.MaxFrequency = maxMHz
+	}
+	if busyErr == nil {
+		p.lastMetrics.GPU.GPUBusy = gpuBusy
+	} else {
+		p.lastMetrics.GPU.GPUBusy = 0
+	}
+	p.applyGPUDerivedPercentages()
+	p.Unlock()
+
+	if deviceErr != nil {
+		p.logger.Debug("AMD GPU device path unavailable for busy/max metrics", zap.Error(deviceErr))
+	} else if maxErr != nil {
+		p.logger.Debug("AMD GPU max sclk unavailable", zap.Error(maxErr))
+	}
+	if busyErr != nil {
+		p.logger.Debug("AMD GPU busy metric unavailable", zap.Error(busyErr))
+	}
+
+	if !gotCurrent && maxErr != nil && busyErr != nil {
+		return fmt.Errorf("no AMD GPU frequency or sysfs metrics available")
 	}
 
 	return nil
