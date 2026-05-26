@@ -682,6 +682,9 @@ mod callbacks {
             return;
         }
 
+        // Snapshot before the version check overwrites `page` with transient progress copy.
+        let prior_page = app_state.page.lock().await.clone();
+
         // Use Available mode for user-triggered updates (check for any newer version)
         // Use Blocking execution since D-Bus callback runs in a spawned task anyway
         let result = super::check_and_update_system(
@@ -691,11 +694,14 @@ mod callbacks {
             super::UpdateExecution::Blocking,
         )
         .await;
-        match super::available_system_update_follow_up(&result) {
-            super::AvailableSystemUpdateFollowUp::ReturnToWebApp => {
-                // Already on the latest build: leave the transient progress screen without
-                // showing extra TV copy (user stays on / returns to the bundled web app).
+        match super::available_system_update_follow_up(&result, &prior_page) {
+            super::AvailableSystemUpdateFollowUp::RestoreWebApp => {
                 let _ = show_webapp(app_state, chromium).await;
+            }
+            super::AvailableSystemUpdateFollowUp::RestorePriorPage => {
+                if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await {
+                    eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
+                }
             }
             super::AvailableSystemUpdateFollowUp::LogFailure => {
                 eprintln!("MAIN: System update failed: {result:#?}");
@@ -1086,8 +1092,10 @@ pub enum UpdateCheckResult {
 /// Follow-up after `check_and_update_system(UpdateMode::Available, …)` in the D-Bus path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AvailableSystemUpdateFollowUp {
-    /// Optional check found no newer build; leave the transient progress route quietly.
-    ReturnToWebApp,
+    /// No newer build while the user was already on the bundled web app.
+    RestoreWebApp,
+    /// No newer build; re-show the setup/recovery/message surface from before the check.
+    RestorePriorPage,
     /// Blocking orchestration failed (CDP navigate, updater start, etc.).
     LogFailure,
     /// Core already drove TV/updater (update started, reflash, classified fetch error).
@@ -1096,9 +1104,14 @@ enum AvailableSystemUpdateFollowUp {
 
 fn available_system_update_follow_up(
     result: &Result<UpdateCheckResult>,
+    prior_page: &Page,
 ) -> AvailableSystemUpdateFollowUp {
     match result {
-        Ok(UpdateCheckResult::NoUpdateNeeded) => AvailableSystemUpdateFollowUp::ReturnToWebApp,
+        Ok(UpdateCheckResult::NoUpdateNeeded) => match prior_page {
+            Page::WebApp(_) => AvailableSystemUpdateFollowUp::RestoreWebApp,
+            Page::None(_) | Page::SystemUpgrade(_) => AvailableSystemUpdateFollowUp::NoOp,
+            _ => AvailableSystemUpdateFollowUp::RestorePriorPage,
+        },
         Err(_) => AvailableSystemUpdateFollowUp::LogFailure,
         Ok(_) => AvailableSystemUpdateFollowUp::NoOp,
     }
@@ -1323,6 +1336,57 @@ impl VersionCheckProgress {
     }
 }
 
+/// Re-show the TV surface that was active before an optional version check replaced it
+/// with transient progress copy. Called from the D-Bus `system_update` no-update path only.
+async fn restore_prior_page(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    prior: Page,
+) -> Result<()> {
+    match prior {
+        Page::WebApp(_) => show_webapp(app_state, chrome).await,
+        Page::QRCode(_) => show_qrcode(app_state, chrome).await,
+        Page::Message(_, text) => show_message(chrome, app_state, &text).await,
+        Page::FactoryReset(_) => show_factory_reset(chrome, app_state).await,
+        Page::ReflashingRequired(_, message) => {
+            restore_reflashing_page(app_state, chrome, &message).await
+        }
+        Page::SystemUpgrade(_) | Page::None(_) => Ok(()),
+    }
+}
+
+async fn restore_reflashing_page(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    fallback_message: &str,
+) -> Result<()> {
+    if let Ok(Some(flashing_guide)) = updater::flashing_guide_url().await {
+        let current_version = app_state.current_version.clone();
+        let latest_version = updater::latest_version().await.unwrap_or_else(|e| {
+            eprintln!("MAIN: latest_version for reflashing restore: {e:#?}");
+            "Unknown".to_string()
+        });
+        let min_upgradeable = updater::min_upgradeable_version()
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("MAIN: min_upgradeable_version for reflashing restore: {e:#?}");
+                None
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        show_reflashing_qrcode(
+            app_state,
+            chrome,
+            &flashing_guide,
+            &current_version,
+            &latest_version,
+            &min_upgradeable,
+        )
+        .await
+    } else {
+        show_message(chrome, app_state, fallback_message).await
+    }
+}
+
 async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let mut page = app_state.page.lock().await;
 
@@ -1460,22 +1524,61 @@ mod version_check_progress_tests {
 #[cfg(test)]
 mod available_system_update_follow_up_tests {
     use super::{
-        AvailableSystemUpdateFollowUp, UpdateCheckResult, available_system_update_follow_up,
+        AvailableSystemUpdateFollowUp, Page, UpdateCheckResult, available_system_update_follow_up,
     };
     use anyhow::anyhow;
 
     #[test]
-    fn no_update_needed_returns_to_webapp() {
+    fn no_update_needed_after_webapp_restores_webapp() {
         assert_eq!(
-            available_system_update_follow_up(&Ok(UpdateCheckResult::NoUpdateNeeded)),
-            AvailableSystemUpdateFollowUp::ReturnToWebApp,
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::WebApp(0),
+            ),
+            AvailableSystemUpdateFollowUp::RestoreWebApp,
+        );
+    }
+
+    #[test]
+    fn no_update_needed_after_qrcode_restores_prior_page() {
+        assert_eq!(
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::QRCode(0),
+            ),
+            AvailableSystemUpdateFollowUp::RestorePriorPage,
+        );
+    }
+
+    #[test]
+    fn no_update_needed_after_message_restores_prior_page() {
+        assert_eq!(
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::Message(0, "Welcome".to_string()),
+            ),
+            AvailableSystemUpdateFollowUp::RestorePriorPage,
+        );
+    }
+
+    #[test]
+    fn no_update_needed_with_unknown_prior_page_is_no_op() {
+        assert_eq!(
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::None(0),
+            ),
+            AvailableSystemUpdateFollowUp::NoOp,
         );
     }
 
     #[test]
     fn update_started_is_no_op_for_dbus_follow_up() {
         assert_eq!(
-            available_system_update_follow_up(&Ok(UpdateCheckResult::UpdateStarted)),
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::UpdateStarted),
+                &Page::WebApp(0),
+            ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
     }
@@ -1483,7 +1586,10 @@ mod available_system_update_follow_up_tests {
     #[test]
     fn too_old_to_upgrade_is_no_op_for_dbus_follow_up() {
         assert_eq!(
-            available_system_update_follow_up(&Ok(UpdateCheckResult::TooOldToUpgrade)),
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::TooOldToUpgrade),
+                &Page::WebApp(0),
+            ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
     }
@@ -1491,7 +1597,10 @@ mod available_system_update_follow_up_tests {
     #[test]
     fn version_check_failed_is_no_op_for_dbus_follow_up() {
         assert_eq!(
-            available_system_update_follow_up(&Ok(UpdateCheckResult::VersionCheckFailed)),
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::VersionCheckFailed),
+                &Page::WebApp(0),
+            ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
     }
@@ -1499,7 +1608,10 @@ mod available_system_update_follow_up_tests {
     #[test]
     fn orchestration_error_is_logged_only() {
         assert_eq!(
-            available_system_update_follow_up(&Err(anyhow!("cdp navigate failed"))),
+            available_system_update_follow_up(
+                &Err(anyhow!("cdp navigate failed")),
+                &Page::WebApp(0),
+            ),
             AvailableSystemUpdateFollowUp::LogFailure,
         );
     }
