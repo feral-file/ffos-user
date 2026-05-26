@@ -8,8 +8,8 @@ import (
 func TestParseAMDMaxSclkMHz(t *testing.T) {
 	t.Parallel()
 
-	const sample = `0: 200Mhz 
-1: 700Mhz 
+	const sample = `0: 200Mhz
+1: 700Mhz
 2: 2200Mhz *
 `
 

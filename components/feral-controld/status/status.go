@@ -204,11 +204,10 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	if err != nil {
 		s.logger.Debug("Failed to read page URL before player status poll", zap.Error(err))
 	} else if !isPlayerPageURL(pageURL) {
-		// The launcher screens are intentionally static and do not answer
-		// checkStatus. Skipping the CDP command here avoids keeping Chromium's
-		// renderer busy while the device is showing QR or setup screens.
-		// We still advance the playback sample window so duration accounting
-		// does not attribute launcher time to the last artwork sample.
+		// Non-player pages do not support checkStatus at all, so polling CDP here
+		// cannot produce a real player update. Skipping the command avoids waking
+		// Chromium on QR/setup screens while keeping playback-duration accounting
+		// moving forward with a "not playing" sample.
 		s.updateArtPlaybackMetrics(false, time.Now())
 		s.logger.Info("Skipping player status poll because Chromium is not on the player page",
 			zap.String("page_url", pageURL),
