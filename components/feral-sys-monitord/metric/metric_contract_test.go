@@ -15,7 +15,7 @@ func TestSysMetricsDBusPreservesGpuContractFields(t *testing.T) {
 			MaxFrequency:       2200,
 			CurrentTemperature: 42,
 			MaxTemperature:     95,
-			GPUBusy:            0,
+			GPUBusy:            7.5,
 		},
 		Timestamp: time.Unix(123, 456000000),
 	}
@@ -23,6 +23,21 @@ func TestSysMetricsDBusPreservesGpuContractFields(t *testing.T) {
 	payload, err := json.Marshal(metrics)
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var encoded map[string]any
+	if err := json.Unmarshal(payload, &encoded); err != nil {
+		t.Fatalf("json.Unmarshal() into map error = %v", err)
+	}
+	gpu, ok := encoded["gpu"].(map[string]any)
+	if !ok {
+		t.Fatal("encoded payload does not contain a gpu object")
+	}
+	if _, ok := gpu["gpu_busy"]; !ok {
+		t.Fatal("encoded payload does not contain gpu_busy")
+	}
+	if got, ok := gpu["gpu_busy"].(float64); !ok || got != 7.5 {
+		t.Fatalf("encoded GPU busy = %v, want 7.5", got)
 	}
 
 	var decoded SysMetrics
@@ -36,8 +51,8 @@ func TestSysMetricsDBusPreservesGpuContractFields(t *testing.T) {
 	if decoded.GPU.MaxFrequency != 2200 {
 		t.Fatalf("decoded GPU max frequency = %v, want 2200", decoded.GPU.MaxFrequency)
 	}
-	if decoded.GPU.GPUBusy != 0 {
-		t.Fatalf("decoded GPU busy = %v, want 0", decoded.GPU.GPUBusy)
+	if decoded.GPU.GPUBusy != 7.5 {
+		t.Fatalf("decoded GPU busy = %v, want 7.5", decoded.GPU.GPUBusy)
 	}
 }
 

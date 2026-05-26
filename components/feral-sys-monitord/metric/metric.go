@@ -524,17 +524,14 @@ func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
 		return nil
 	}
 
-	// Get the max frequency from the same DRM device used for engine busy.
-	//nolint:gosec
-	cmd = exec.CommandContext(ctx, "cat", filepath.Join(devicePath, "gt_max_freq_mhz"))
-	cmd.Stderr = &stderr
-	output, err = cmd.Output()
+	cardPath := filepath.Dir(devicePath)
+	// Probe both device-level and card-level Intel frequency files.
+	max, err := readFirstExistingSysfsFloat(
+		filepath.Join(devicePath, "gt_max_freq_mhz"),
+		filepath.Join(cardPath, "gt_max_freq_mhz"),
+	)
 	if err != nil {
-		p.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
-		return err
-	}
-	max, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
-	if err != nil {
+		p.logger.Error("Failed to get Intel GPU max frequency", zap.Error(err))
 		return err
 	}
 	p.Lock()

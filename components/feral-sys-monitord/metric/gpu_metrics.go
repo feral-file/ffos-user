@@ -110,6 +110,34 @@ func readGPUBusyPercent(devicePath string) (float64, error) {
 	return 0, fmt.Errorf("no gpu busy sysfs file under %s", devicePath)
 }
 
+// readFirstExistingSysfsFloat probes multiple sysfs paths and returns the first readable value.
+// It keeps Intel card-level and device-level frequency files compatible across kernels.
+func readFirstExistingSysfsFloat(paths ...string) (float64, error) {
+	var missingErr error
+	for _, path := range paths {
+		//nolint:gosec // G304: paths are discovered sysfs locations plus fixed filenames.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				missingErr = err
+				continue
+			}
+			return 0, err
+		}
+
+		value, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s: %w", path, err)
+		}
+		return value, nil
+	}
+
+	if missingErr != nil {
+		return 0, missingErr
+	}
+	return 0, fmt.Errorf("no sysfs paths provided")
+}
+
 // parseAMDMaxSclkMHz returns the highest P-state MHz line from pp_dpm_sclk.
 func parseAMDMaxSclkMHz(ppDPM string) (float64, error) {
 	var maxMHz float64

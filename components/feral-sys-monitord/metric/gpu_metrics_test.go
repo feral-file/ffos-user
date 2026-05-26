@@ -2,6 +2,8 @@ package metric
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -110,5 +112,60 @@ func TestShouldSuppressIntelGPUUpdate(t *testing.T) {
 
 	if err := shouldSuppressIntelGPUUpdate("", errBestEffortMetricUnavailable); !errors.Is(err, errBestEffortMetricUnavailable) {
 		t.Fatalf("shouldSuppressIntelGPUUpdate() = %v, want unavailable", err)
+	}
+}
+
+func TestReadFirstExistingSysfsFloatPrefersDevicePath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cardPath := filepath.Join(root, "card0")
+	devicePath := filepath.Join(cardPath, "device")
+
+	if err := os.MkdirAll(devicePath, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(devicePath, "gt_max_freq_mhz"), []byte("2100\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cardPath, "gt_max_freq_mhz"), []byte("2200\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	maxMHz, err := readFirstExistingSysfsFloat(
+		filepath.Join(devicePath, "gt_max_freq_mhz"),
+		filepath.Join(cardPath, "gt_max_freq_mhz"),
+	)
+	if err != nil {
+		t.Fatalf("readFirstExistingSysfsFloat() error = %v", err)
+	}
+	if maxMHz != 2100 {
+		t.Fatalf("readFirstExistingSysfsFloat() = %v, want 2100", maxMHz)
+	}
+}
+
+func TestReadFirstExistingSysfsFloatFallsBackToCardPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cardPath := filepath.Join(root, "card0")
+	devicePath := filepath.Join(cardPath, "device")
+
+	if err := os.MkdirAll(cardPath, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cardPath, "gt_max_freq_mhz"), []byte("2200\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	maxMHz, err := readFirstExistingSysfsFloat(
+		filepath.Join(devicePath, "gt_max_freq_mhz"),
+		filepath.Join(cardPath, "gt_max_freq_mhz"),
+	)
+	if err != nil {
+		t.Fatalf("readFirstExistingSysfsFloat() error = %v", err)
+	}
+	if maxMHz != 2200 {
+		t.Fatalf("readFirstExistingSysfsFloat() = %v, want 2200", maxMHz)
 	}
 }
