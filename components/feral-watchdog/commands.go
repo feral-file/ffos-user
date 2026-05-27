@@ -89,6 +89,19 @@ func (c *CommandHandler) isKioskActivating(ctx context.Context) bool {
 	return strings.TrimSpace(string(output)) == "activating"
 }
 
+// isUnitActive reports whether the given systemd --user unit is currently in
+// the "active" state. The systemd monitor uses it to tell a genuine service
+// failure apart from an expected teardown: feral-controld/feral-setupd are
+// PartOf=chromium-ready.target, so they are legitimately inactive whenever
+// that target is down. `is-active` returns non-zero for any non-active state,
+// so the exit code is ignored and stdout is parsed; a systemctl outage is
+// treated as "not active".
+func (c *CommandHandler) isUnitActive(ctx context.Context, unit string) bool {
+	cmd := exec.CommandContext(ctx, "systemctl", "--user", "is-active", unit)
+	output, _ := cmd.Output()
+	return strings.TrimSpace(string(output)) == "active"
+}
+
 // rebootSystem initiates a system reboot
 func (c *CommandHandler) rebootSystem(ctx context.Context, reason CrashReason) {
 	c.mu.Lock()

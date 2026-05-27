@@ -102,6 +102,12 @@ All messages are JSON. The message envelope is:
 }
 ```
 
+**Relayer keepalive control messages:**
+- `controld` sends both a transport-level WebSocket `Ping` frame and an application-level `{"type":"ping"}` message on the relayer WebSocket.
+- The relayer should reply to the transport ping with a WebSocket `Pong` frame and to the application ping with `{"type":"pong"}` once the new keepalive path is deployed.
+- During rollout, either pong path may keep the connection alive so older relayer builds do not time out before the protocol upgrade lands.
+- `pong` is handled internally by `relayer` and is not dispatched to `commandrouter` or command handlers.
+
 **Command routing logic (inside controld):**
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
@@ -112,6 +118,12 @@ The following command names are routed to `devicectl` and use the standard relay
 
 | Command | Request fields | Notes |
 |---|---|---|
+| `dragGesture` | `cursorOffsets` | Array of `{dx, dy}` step deltas. |
+| `tapGesture` | `button` | `button` selects left, right, or middle; missing or empty defaults to left. |
+| `doubleTapGesture` | `button` | Same button selection as `tapGesture`. |
+| `longPressGesture` | `button` | Same button selection as `tapGesture`. |
+| `clickAndDragGesture` | `cursorOffsets` | Press, move, then release. The executor treats release failure as an error because Chromium can remain pressed. Batches are capped at 16 offsets to keep a single request from monopolizing the executor. |
+| `zoomGesture` | `scaleSteps` | Array of positive float scale factors. The executor dispatches non-Ctrl `mouseWheel` input at the current cursor anchor so Chromium does not apply browser/page zoom. |
 | `setSleepSchedule` | `enabled`, optional `sleepTime`, `wakeTime` (HH:MM) | Persists the FF1 sleep/wake window and enables or disables automatic transitions. |
 | `sleepNow` | — | Manual override toward sleep until the next schedule boundary (when the schedule is enabled). |
 | `wakeNow` | — | Manual override toward awake until the next schedule boundary (when the schedule is enabled). |
