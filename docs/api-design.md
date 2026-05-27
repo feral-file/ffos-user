@@ -102,6 +102,12 @@ All messages are JSON. The message envelope is:
 }
 ```
 
+**Relayer keepalive control messages:**
+- `controld` sends both a transport-level WebSocket `Ping` frame and an application-level `{"type":"ping"}` message on the relayer WebSocket.
+- The relayer should reply to the transport ping with a WebSocket `Pong` frame and to the application ping with `{"type":"pong"}` once the new keepalive path is deployed.
+- During rollout, either pong path may keep the connection alive so older relayer builds do not time out before the protocol upgrade lands.
+- `pong` is handled internally by `relayer` and is not dispatched to `commandrouter` or command handlers.
+
 **Command routing logic (inside controld):**
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
