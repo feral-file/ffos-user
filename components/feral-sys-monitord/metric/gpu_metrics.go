@@ -16,11 +16,14 @@ type gpuDeviceCandidate struct {
 	bootVGA    bool
 }
 
-func hasGPUCharacteristics(devicePath string) bool {
+func hasGPUCharacteristics(cardPath, devicePath string) bool {
 	for _, marker := range []string{"gpu_busy_percent", "gt_busy_percent", "pp_dpm_sclk", "gt_max_freq_mhz"} {
 		if _, err := os.Stat(filepath.Join(devicePath, marker)); err == nil {
 			return true
 		}
+	}
+	if _, err := os.Stat(filepath.Join(cardPath, "gt_max_freq_mhz")); err == nil {
+		return true
 	}
 	return false
 }
@@ -48,7 +51,11 @@ func pickGPUDevicePath(candidates []gpuDeviceCandidate) (string, bool) {
 
 // discoverGPUDevicePath returns /sys/class/drm/cardN/device for the primary GPU.
 func discoverGPUDevicePath() (string, error) {
-	entries, err := os.ReadDir("/sys/class/drm")
+	return discoverGPUDevicePathFrom("/sys/class/drm")
+}
+
+func discoverGPUDevicePathFrom(drmPath string) (string, error) {
+	entries, err := os.ReadDir(drmPath)
 	if err != nil {
 		return "", err
 	}
@@ -60,13 +67,14 @@ func discoverGPUDevicePath() (string, error) {
 			continue
 		}
 
-		devicePath := filepath.Join("/sys/class/drm", name, "device")
+		cardPath := filepath.Join(drmPath, name)
+		devicePath := filepath.Join(cardPath, "device")
 		info, err := os.Stat(devicePath)
 		if err != nil || !info.IsDir() {
 			continue
 		}
 
-		if !hasGPUCharacteristics(devicePath) {
+		if !hasGPUCharacteristics(cardPath, devicePath) {
 			continue
 		}
 

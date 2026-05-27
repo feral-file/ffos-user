@@ -99,6 +99,29 @@ func TestPickGPUDevicePathFallsBackToFirstCandidate(t *testing.T) {
 	}
 }
 
+func TestDiscoverGPUDevicePathAcceptsCardLevelIntelMaxFrequency(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cardPath := filepath.Join(root, "card0")
+	devicePath := filepath.Join(cardPath, "device")
+
+	if err := os.MkdirAll(devicePath, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cardPath, "gt_max_freq_mhz"), []byte("2200\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	path, err := discoverGPUDevicePathFrom(root)
+	if err != nil {
+		t.Fatalf("discoverGPUDevicePathFrom() error = %v", err)
+	}
+	if path != devicePath {
+		t.Fatalf("discoverGPUDevicePathFrom() = %q, want %q", path, devicePath)
+	}
+}
+
 func TestShouldSuppressIntelGPUUpdate(t *testing.T) {
 	t.Parallel()
 
