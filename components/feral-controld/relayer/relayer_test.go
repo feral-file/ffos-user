@@ -57,6 +57,13 @@ func setup(t *testing.T) *testSetup {
 	mockOS := mocks.NewMockOS(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 
+	// Transport pings are part of the rollout-compatible keepalive path, so
+	// most relayer tests can accept them without caring about the exact timing.
+	mockConn.EXPECT().
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
 	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, mockJSON, logger)
 
 	return &testSetup{
@@ -134,7 +141,7 @@ func TestClient_Connect_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -198,7 +205,7 @@ func TestClient_Connect_Async(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -479,7 +486,7 @@ func TestClient_RetryableConnect_FailsThenSucceeds(t *testing.T) {
 
 	// Expect conn to send ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -686,7 +693,7 @@ func TestClient_RetryableConnect_UnknownError_RetryLimitNotExceeded(t *testing.T
 
 	// Expect conn to send ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -750,7 +757,7 @@ func TestClient_SendMessage_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -845,7 +852,7 @@ func TestClient_Close_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -914,7 +921,7 @@ func TestClient_Close_Error(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1128,7 +1135,7 @@ func TestClient_ReceiveMessage_Success(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1218,7 +1225,7 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1262,7 +1269,7 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 
 	// Expect second conn to write ping
 	mockConn2.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1346,7 +1353,7 @@ func TestClient_ReadMessage_ErrorAfterClose_DoesNotReconnect(t *testing.T) {
 		Times(1)
 
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -1429,8 +1436,13 @@ func TestClient_Ping_Success(t *testing.T) {
 	pingCalled := make(chan struct{})
 	once := sync.Once{}
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, []byte("ping")).
-		DoAndReturn(func(messageType int, data []byte) error {
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		WriteJSON(map[string]string{"type": "ping"}).
+		DoAndReturn(func(_ interface{}) error {
 			once.Do(func() {
 				close(pingCalled)
 			})
@@ -1480,6 +1492,104 @@ func TestClient_Ping_Success(t *testing.T) {
 	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
 }
 
+func TestClient_ApplicationPong_RefreshesDeadlineWithoutDispatchingHandlers(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	setupMockTicker(ts)
+
+	ts.mockClock.EXPECT().
+		Now().
+		Return(time.Time{}).
+		AnyTimes()
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil)
+
+	ts.mockConn.EXPECT().
+		SetPongHandler(gomock.Any()).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		WriteJSON(map[string]string{"type": "ping"}).
+		Return(nil).
+		AnyTimes()
+
+	pongDeadlineCleared := make(chan struct{}, 1)
+	ts.mockConn.EXPECT().
+		SetReadDeadline(gomock.Any()).
+		DoAndReturn(func(deadline time.Time) error {
+			if deadline.IsZero() {
+				select {
+				case pongDeadlineCleared <- struct{}{}:
+				default:
+				}
+			}
+			return nil
+		}).
+		AnyTimes()
+
+	pongBytes, err := json.Marshal(map[string]string{"type": "pong"})
+	assert.NoError(t, err, "expected no error marshaling pong payload")
+
+	releaseRead := make(chan struct{})
+	var readCount int32
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			count := atomic.AddInt32(&readCount, 1)
+			if count == 1 {
+				return websocket.TextMessage, pongBytes, nil
+			}
+
+			<-releaseRead
+			return 0, nil, errors.New("test read stop")
+		}).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		Close().
+		Return(nil).
+		AnyTimes()
+
+	handlerCalled := make(chan struct{}, 1)
+	ts.client.OnRelayerMessage(func(ctx context.Context, payload relayer.Payload) error {
+		handlerCalled <- struct{}{}
+		return nil
+	})
+
+	err = ts.client.Connect(ts.ctx)
+	assert.NoError(t, err, "expected no error, got %v", err)
+	assert.True(t, ts.client.IsConnected(), "expected client to be connected")
+
+	select {
+	case <-pongDeadlineCleared:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("application pong should clear the read deadline")
+	}
+
+	select {
+	case <-handlerCalled:
+		t.Fatal("application pong should not be dispatched to relayer handlers")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	ts.client.Close()
+	close(releaseRead)
+	assert.False(t, ts.client.IsConnected(), "expected client to be disconnected after close")
+}
+
 func TestClient_Ping_Error(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -1503,12 +1613,19 @@ func TestClient_Ping_Error(t *testing.T) {
 		SetPongHandler(gomock.Any()).
 		Times(1)
 
+	// Expect the transport keepalive deadline to be refreshed before the
+	// application ping write fails.
+	ts.mockConn.EXPECT().
+		SetReadDeadline(time.Time{}.Add(relayer.PONG_WAIT)).
+		Return(nil).
+		AnyTimes()
+
 	// Expect conn to write ping
 	pingCalled := make(chan struct{})
 	once := sync.Once{}
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
-		DoAndReturn(func(messageType int, data []byte) error {
+		WriteJSON(gomock.Any()).
+		DoAndReturn(func(_ interface{}) error {
 			once.Do(func() {
 				close(pingCalled)
 			})
@@ -1584,8 +1701,13 @@ func TestClient_Ping_ContextCanceled(t *testing.T) {
 	pingAfterCancel := make(chan struct{})
 
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, []byte("ping")).
-		DoAndReturn(func(messageType int, data []byte) error {
+		WriteControl(websocket.PingMessage, nil, gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		WriteJSON(map[string]string{"type": "ping"}).
+		DoAndReturn(func(_ interface{}) error {
 			count := atomic.AddInt32(&pingCallCount, 1)
 			if count == 1 {
 				close(firstPingCalled)
@@ -1680,7 +1802,7 @@ func TestClient_ReadMessage_PermanentError_ExitsProgram(t *testing.T) {
 
 	// Expect conn to write ping
 	ts.mockConn.EXPECT().
-		WriteMessage(websocket.PingMessage, gomock.Any()).
+		WriteJSON(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 

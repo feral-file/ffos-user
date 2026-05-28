@@ -13,6 +13,11 @@ import (
 const (
 	// Chromium configuration
 	SYSTEMD_CHECK_INTERVAL = 30 * time.Second // Check systemd service status every 30 seconds
+
+	// chromiumReadyTarget gates feral-controld/feral-setupd. While it is not
+	// active those services are expected to be inactive (teardown window);
+	// while it is active they must be running, so inactive is a fault.
+	chromiumReadyTarget = "chromium-ready.target"
 )
 
 var (
@@ -21,6 +26,15 @@ var (
 		"feral-setupd.service":       true,
 		"feral-controld.service":     true,
 		"feral-sys-monitord.service": true,
+	}
+
+	// servicesGatedByChromiumReady are PartOf=chromium-ready.target: systemd
+	// tears them down whenever that target stops (before the first CDP-up and
+	// during every Chromium restart window). For these, an inactive reading is
+	// only a genuine fault when chromium-ready.target is itself active.
+	servicesGatedByChromiumReady = map[string]bool{
+		"feral-controld.service": true,
+		"feral-setupd.service":   true,
 	}
 )
 
@@ -123,9 +137,20 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 				}
 			}
 		case SYSTEMD_SERVICE_STATUS_INACTIVE:
-			m.logger.Error("Systemd: Service is inactive",
-				zap.String("service", service),
-				zap.String("dependency", service))
+			// A gated service (PartOf=chromium-ready.target) is expected to be
+			// inactive only while that target is down — the normal Chromium
+			// teardown window. If the target is active the service should be
+			// running too, so an inactive reading there is a genuine fault.
+			expectedTeardown := servicesGatedByChromiumReady[service] &&
+				!m.commandHandler.isUnitActive(ctx, chromiumReadyTarget)
+			if expectedTeardown {
+				m.logger.Info("Systemd: Service is inactive",
+					zap.String("service", service),
+					zap.Bool("expected_teardown", true))
+			} else {
+				m.logger.Error("Systemd: Service is inactive",
+					zap.String("service", service))
+			}
 		default:
 			m.logger.Error("Systemd: Unknown service state",
 				zap.String("service", service),

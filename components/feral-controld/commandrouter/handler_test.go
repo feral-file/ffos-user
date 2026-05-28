@@ -16,6 +16,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -172,6 +173,41 @@ func TestCommandHandler_Process_ControldCommand_Error(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, execError, err)
 	assert.Nil(t, result)
+}
+
+func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cases := []struct {
+		name string
+		cmd  commands.Type
+	}{
+		{name: "doubleTapGesture", cmd: commands.CMD_MOUSE_DOUBLE_TAP_EVENT},
+		{name: "longPressGesture", cmd: commands.CMD_MOUSE_LONG_PRESS_EVENT},
+		{name: "clickAndDragGesture", cmd: commands.CMD_MOUSE_CLICK_AND_DRAG_EVENT},
+		{name: "zoomGesture", cmd: commands.CMD_ZOOM_GESTURE},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts.mockExecutor.EXPECT().
+				Execute(ts.ctx, commands.Command{
+					Type:      tc.cmd,
+					Arguments: map[string]interface{}{},
+				}).
+				Return(devicectl.CmdOK, nil).
+				Times(1)
+
+			result, err := ts.handler.Process(ts.ctx, commands.Command{
+				Type:      tc.cmd,
+				Arguments: map[string]interface{}{},
+			})
+
+			assert.NoError(t, err)
+			assert.Equal(t, devicectl.CmdOK, result)
+		})
+	}
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
