@@ -696,17 +696,10 @@ mod callbacks {
         .await;
         match super::available_system_update_follow_up(&result, &prior_page) {
             super::AvailableSystemUpdateFollowUp::RestoreWebApp => {
-                if let Err(e) =
-                    super::restore_webapp_after_no_update_check(app_state, chromium).await
-                {
-                    eprintln!("MAIN: Failed to restore webapp after no-update check: {e:#?}");
-                }
+                let _ = show_webapp(app_state, chromium).await;
             }
             super::AvailableSystemUpdateFollowUp::RestorePriorPage => {
-                if let Err(e) =
-                    super::restore_prior_page_after_no_update_check(app_state, chromium, prior_page)
-                        .await
-                {
+                if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await {
                     eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
                 }
             }
@@ -1236,7 +1229,9 @@ async fn check_and_update_system(
     // Check if update is needed based on mode
     let needs_update = match mode {
         UpdateMode::Required => updater::is_update_required(progress.as_updater_progress()).await,
-        UpdateMode::Available => updater::is_update_available(progress.as_updater_progress()).await,
+        UpdateMode::Available => {
+            updater::is_update_available(progress.as_updater_progress()).await
+        }
     };
 
     progress.finish().await;
@@ -1341,168 +1336,26 @@ impl VersionCheckProgress {
     }
 }
 
-/// True when `page` is still the transient copy shown during distributor HTTP retries.
-fn is_version_check_progress_page(page: &Page) -> bool {
-    matches!(
-        page,
-        Page::Message(_, text) if text.as_str() == constant::VERSION_CHECK_PROGRESS_TV_MSG
-    )
-}
-
-/// Commit `new_page` only when the current page is still the transient version-check progress
-/// copy. Used for the "already on webapp" fast path where no navigation is needed.
-async fn try_commit_page_if_still_progress(page: &Mutex<Page>, new_page: Page) -> bool {
-    let mut current = page.lock().await;
-    if !is_version_check_progress_page(&current) {
-        return false;
-    }
-    *current = new_page;
-    true
-}
-
-/// Navigate to `url` and commit `new_page`, but only when the current page is still the
-/// transient version-check progress copy. The page lock is held across the entire
-/// navigate+commit sequence so that a concurrent `show_*` call that holds the same lock
-/// for its own navigate+commit will be seen atomically: whichever path acquires the lock
-/// first wins, and the loser either finds the page changed (restore → skip) or
-/// unconditionally commits its own state (show_* → overwrite).
-///
-/// Invariant: all `show_*` functions that can race with this path must also hold the page
-/// lock during navigate. Violating this allows a concurrent navigate to slip onto the screen
-/// between our lock check and our navigate, producing a visual/state divergence.
-async fn navigate_and_commit_if_still_progress(
-    page: &Mutex<Page>,
-    chrome: &Arc<Cdp>,
-    url: &str,
-    new_page: Page,
-) -> Result<bool> {
-    let mut current = page.lock().await;
-    if !is_version_check_progress_page(&current) {
-        return Ok(false);
-    }
-    chrome
-        .navigate(url)
-        .await
-        .with_context(|| format!("navigating to {url}"))?;
-    *current = new_page;
-    Ok(true)
-}
-
-async fn restore_webapp_after_no_update_check(
-    app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
-) -> Result<()> {
-    // Best-effort early exit to avoid unnecessary I/O. The real guard is inside
-    // `try_commit_page_if_still_progress` / `navigate_and_commit_if_still_progress`
-    // which hold the page lock for the entire check+write (or check+navigate+write).
-    if !is_version_check_progress_page(&app_state.page.lock().await) {
-        println!("MAIN: skip webapp restore after no-update check; page changed during check");
-        return Ok(());
-    }
-
-    let webapp_url = constant::WEBAPP_URL;
-    let current_url = chrome.get_current_url().await?;
-    if current_url.starts_with(webapp_url) {
-        // Already on webapp — just commit state, no navigate needed.
-        if !try_commit_page_if_still_progress(&app_state.page, Page::WebApp(unix_s())).await {
-            println!("MAIN: skip webapp restore after no-update check; page changed during check");
-        }
-        return Ok(());
-    }
-
-    // Sleep outside the lock so a concurrent show_* that already holds the lock
-    // for its own navigate+commit is not blocked by us sleeping.
-    time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
-
-    if !navigate_and_commit_if_still_progress(
-        &app_state.page,
-        chrome,
-        webapp_url,
-        Page::WebApp(unix_s()),
-    )
-    .await?
-    {
-        println!("MAIN: skip webapp restore after no-update check; page changed during check");
-    } else {
-        println!("MAIN: Navigated to {webapp_url}");
-    }
-    Ok(())
-}
-
-async fn restore_prior_page_after_no_update_check(
+/// Re-show the TV surface that was active before an optional version check replaced it
+/// with transient progress copy. Called from the D-Bus `system_update` no-update path only.
+async fn restore_prior_page(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
     prior: Page,
 ) -> Result<()> {
     match prior {
-        Page::WebApp(_) => restore_webapp_after_no_update_check(app_state, chrome).await,
-        Page::QRCode(_) => {
-            let qrcode_url = build_qrcode_url(app_state);
-            if !navigate_and_commit_if_still_progress(
-                &app_state.page,
-                chrome,
-                &qrcode_url,
-                Page::QRCode(unix_s()),
-            )
-            .await?
-            {
-                println!(
-                    "MAIN: skip prior-page restore after no-update check; page changed during check"
-                );
-            } else {
-                println!("MAIN: Navigated to {qrcode_url}");
-            }
-            Ok(())
-        }
-        Page::Message(_, text) => {
-            let encoded = urlencoding::encode(&text);
-            let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
-            if !navigate_and_commit_if_still_progress(
-                &app_state.page,
-                chrome,
-                &message_url,
-                Page::Message(unix_s(), text),
-            )
-            .await?
-            {
-                println!(
-                    "MAIN: skip prior-page restore after no-update check; page changed during check"
-                );
-            } else {
-                println!("MAIN: Navigated to {message_url}");
-            }
-            Ok(())
-        }
-        Page::FactoryReset(_) => {
-            let message_url = format!(
-                "{}{}",
-                constant::MSG_URL_PREFIX,
-                constant::FACTORY_RESET_MSG
-            );
-            if !navigate_and_commit_if_still_progress(
-                &app_state.page,
-                chrome,
-                &message_url,
-                Page::FactoryReset(unix_s()),
-            )
-            .await?
-            {
-                println!(
-                    "MAIN: skip prior-page restore after no-update check; page changed during check"
-                );
-            } else {
-                println!("MAIN: Navigated to {message_url}");
-            }
-            Ok(())
-        }
+        Page::WebApp(_) => show_webapp(app_state, chrome).await,
+        Page::QRCode(_) => show_qrcode(app_state, chrome).await,
+        Page::Message(_, text) => show_message(chrome, app_state, &text).await,
+        Page::FactoryReset(_) => show_factory_reset(chrome, app_state).await,
         Page::ReflashingRequired(_, message) => {
-            restore_reflashing_page_after_no_update(app_state, chrome, &message).await
+            restore_reflashing_page(app_state, chrome, &message).await
         }
         Page::SystemUpgrade(_) | Page::None(_) => Ok(()),
     }
 }
 
-async fn restore_reflashing_page_after_no_update(
+async fn restore_reflashing_page(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
     fallback_message: &str,
@@ -1520,49 +1373,18 @@ async fn restore_reflashing_page_after_no_update(
                 None
             })
             .unwrap_or_else(|| "Unknown".to_string());
-
-        let message = format!(
-            "We've moved too far ahead for this version to catch up. Your FF1 is too far behind to auto-upgrade. Current version: {current_version} Latest version: {latest_version} Minimum upgradeable version: {min_upgradeable}. Scan the code above for step-by-step reflashing instructions, or contact us for help. support@feralfile.com"
-        );
-        let qrcode_url = format!(
-            "{}&qr_content={}&message={}",
-            constant::QRCODE_URL_PREFIX,
-            urlencoding::encode(&flashing_guide),
-            urlencoding::encode(&message)
-        );
-
-        if !navigate_and_commit_if_still_progress(
-            &app_state.page,
+        show_reflashing_qrcode(
+            app_state,
             chrome,
-            &qrcode_url,
-            Page::ReflashingRequired(unix_s(), message),
+            &flashing_guide,
+            &current_version,
+            &latest_version,
+            &min_upgradeable,
         )
-        .await?
-        {
-            println!(
-                "MAIN: skip prior-page restore after no-update check; page changed during check"
-            );
-        } else {
-            println!("MAIN: Navigated to reflashing QR code: {qrcode_url}");
-        }
-        return Ok(());
-    }
-
-    let encoded = urlencoding::encode(fallback_message);
-    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
-    if !navigate_and_commit_if_still_progress(
-        &app_state.page,
-        chrome,
-        &message_url,
-        Page::Message(unix_s(), fallback_message.to_string()),
-    )
-    .await?
-    {
-        println!("MAIN: skip prior-page restore after no-update check; page changed during check");
+        .await
     } else {
-        println!("MAIN: Navigated to {message_url}");
+        show_message(chrome, app_state, fallback_message).await
     }
-    Ok(())
 }
 
 async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
@@ -1593,15 +1415,13 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
 async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &str) -> Result<()> {
     let encoded = urlencoding::encode(message);
     let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
-    // Hold the page lock across navigate+commit so the no-update restore path, which also
-    // holds the lock for its navigate_and_commit_if_still_progress call, sees an atomic
-    // boundary: whichever path acquires the lock first wins, preventing visual/state divergence.
-    let mut page = app_state.page.lock().await;
     chrome
         .navigate(&message_url)
         .await
         .with_context(|| format!("navigating to {message_url}"))?;
     println!("MAIN: Navigated to {message_url}");
+
+    let mut page = app_state.page.lock().await;
     *page = Page::Message(unix_s(), message.to_string());
     Ok(())
 }
@@ -1612,12 +1432,13 @@ async fn show_system_upgrade(
     message: &str,
 ) -> Result<()> {
     let message_url = format!("{}{}", constant::MSG_URL_PREFIX, message);
-    let mut page = app_state.page.lock().await;
     chrome
         .navigate(&message_url)
         .await
         .with_context(|| format!("navigating to {message_url}"))?;
     println!("MAIN: Navigated to {message_url}");
+
+    let mut page = app_state.page.lock().await;
     *page = Page::SystemUpgrade(unix_s());
     Ok(())
 }
@@ -1628,12 +1449,13 @@ async fn show_factory_reset(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) -> Res
         constant::MSG_URL_PREFIX,
         constant::FACTORY_RESET_MSG
     );
-    let mut page = app_state.page.lock().await;
     chrome
         .navigate(&message_url)
         .await
         .with_context(|| format!("navigating to {message_url}"))?;
     println!("MAIN: Navigated to {message_url}");
+
+    let mut page = app_state.page.lock().await;
     *page = Page::FactoryReset(unix_s());
     Ok(())
 }
@@ -1687,90 +1509,15 @@ mod version_check_progress_tests {
         let per_updater_call = tx.clone();
         drop(per_updater_call);
 
-        let receiver_task = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let receiver_task = tokio::spawn(async move {
+            while rx.recv().await.is_some() {}
+        });
 
         drop(tx);
         timeout(Duration::from_secs(1), receiver_task)
             .await
             .expect("receiver should finish within 1s")
             .expect("receiver task join");
-    }
-}
-
-#[cfg(test)]
-mod version_check_progress_page_tests {
-    use super::{Page, is_version_check_progress_page, try_commit_page_if_still_progress};
-    use crate::constant;
-    use tokio::sync::Mutex;
-
-    #[test]
-    fn progress_page_matches_version_check_copy() {
-        assert!(is_version_check_progress_page(&Page::Message(
-            0,
-            constant::VERSION_CHECK_PROGRESS_TV_MSG.to_string(),
-        )));
-    }
-
-    #[test]
-    fn other_pages_are_not_version_check_progress() {
-        assert!(!is_version_check_progress_page(&Page::QRCode(0)));
-        assert!(!is_version_check_progress_page(&Page::WebApp(0)));
-        assert!(!is_version_check_progress_page(&Page::FactoryReset(0)));
-        assert!(!is_version_check_progress_page(&Page::Message(
-            0,
-            "Welcome".to_string(),
-        )));
-    }
-
-    /// If a concurrent show_* path (BLE, factory-reset) has already written a real page,
-    /// the restore commit is rejected. `navigate_and_commit_if_still_progress` contains
-    /// the same guard; this tests the underlying primitive it delegates to.
-    #[tokio::test]
-    async fn commit_skips_when_page_is_no_longer_progress() {
-        let page = Mutex::new(Page::FactoryReset(0));
-        assert!(
-            !try_commit_page_if_still_progress(&page, Page::QRCode(1)).await,
-            "must not overwrite a non-progress page"
-        );
-        assert!(matches!(*page.lock().await, Page::FactoryReset(0)));
-    }
-
-    #[tokio::test]
-    async fn commit_succeeds_when_still_on_progress() {
-        let page = Mutex::new(Page::Message(
-            0,
-            constant::VERSION_CHECK_PROGRESS_TV_MSG.to_string(),
-        ));
-        assert!(
-            try_commit_page_if_still_progress(&page, Page::QRCode(1)).await,
-            "must commit when page is still the progress copy"
-        );
-        assert!(matches!(*page.lock().await, Page::QRCode(1)));
-    }
-
-    /// Verifies the invariant that `navigate_and_commit_if_still_progress` requires: all
-    /// show_* functions that can race with the restore path also hold the page lock during
-    /// navigate+commit, so their page writes are visible to the restore's lock check.
-    /// (The full navigate race is integration-level and requires a mock CDP to test end-to-end.)
-    #[tokio::test]
-    async fn concurrent_commit_while_holding_lock_is_seen_by_restore_check() {
-        let page = Mutex::new(Page::Message(
-            0,
-            constant::VERSION_CHECK_PROGRESS_TV_MSG.to_string(),
-        ));
-
-        // Simulate a show_factory_reset that acquired the lock, navigated, and committed.
-        {
-            let mut guard = page.lock().await;
-            *guard = Page::FactoryReset(0);
-        }
-
-        // Restore path then tries to commit — must see FactoryReset and skip.
-        assert!(
-            !try_commit_page_if_still_progress(&page, Page::QRCode(1)).await,
-            "restore must not overwrite a page committed by a concurrent show_*"
-        );
-        assert!(matches!(*page.lock().await, Page::FactoryReset(0)));
     }
 }
 
