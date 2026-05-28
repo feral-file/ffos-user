@@ -93,7 +93,7 @@ own bus. They arrive on:
 |---|---|
 | `show_pairing_qr_code` | Navigates CDP to the QR code page |
 | `factory_reset` | Starts the factory-reset flow |
-| `system_update` | Optional version check (`UpdateMode::Available`); on `NoUpdateNeeded`, restores the TV page snapshot from before the check (`WebApp` → webapp, QR/message/recovery → prior surface, not unconditional webapp) |
+| `system_update` | Optional version check (`UpdateMode::Available`); on `NoUpdateNeeded`, restores the pre-check TV page using `navigate_and_commit_if_still_progress`, which holds the `page` mutex across the entire navigate+commit sequence. All `show_*` functions that can race with this path also hold the same mutex during navigate+commit, so whichever path acquires the lock first wins atomically with no visual/state divergence. |
 | `upload_logs` | Uploads device logs |
 | `upload_logs_with_bundle` | Uploads device logs with a `support_bundle_id` for support evidence unification |
 
