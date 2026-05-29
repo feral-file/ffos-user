@@ -119,6 +119,12 @@ navigations are not on the mobile response path.
 Only `refresh_remote_version`, `is_too_old_to_upgrade`, `is_update_required`, and
 `is_update_available` accept that channel; helpers like `latest_version` read
 metadata without driving the progress UI.
+`UpdateMode::Available` no longer restores a stale TV surface blindly: the
+progress flow uses a dedicated `Page::VersionCheckProgress(session_id, …)`
+marker, and the no-update restore path only runs while the same session is
+still current. Version-check UI commits are serialized through the
+`ui_transition` mutex; keep any new version-check UI transitions aligned with
+that ownership rule.
 
 Two enums control update behaviour:
 

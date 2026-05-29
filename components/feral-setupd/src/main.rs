@@ -19,7 +19,7 @@ use ble::{Ble, BleCallbacks};
 use cdp::Cdp;
 use connectivity::Connectivity;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
@@ -69,6 +69,7 @@ enum Page {
     FactoryReset(i64),
     WebApp(i64),
     ReflashingRequired(i64, String),
+    VersionCheckProgress(u64, i64),
 }
 
 impl Page {
@@ -92,6 +93,11 @@ struct AppState {
     state_store: PersistentState,
     internet: Connectivity,
     page: Mutex<Page>,
+    // Serializes CDP-driven UI commits so a newer transition can finish before
+    // version-check progress or restore logic tries to write the screen again.
+    ui_transition: Mutex<()>,
+    // Monotonically increasing owner for version-check UI sessions.
+    version_check_session: AtomicU64,
 
     // This is the flag to indicate whether we should automatically redirect to webapp
     // when internet is available.
@@ -206,6 +212,8 @@ async fn init_app_state(ble_service: &Arc<Ble>) -> Result<Arc<AppState>> {
         state_store: PersistentState::new(constant::CACHE_FILEPATH)?,
         internet: Connectivity::spawn().await,
         page: Mutex::new(Page::None(unix_s())),
+        ui_transition: Mutex::new(()),
+        version_check_session: AtomicU64::new(0),
         auto_proceed: AtomicBool::new(false),
     });
     sentry::configure_scope(|scope| {
@@ -420,16 +428,28 @@ async fn internet_setup_successfully_cb(
     )
     .await
     {
-        Ok(UpdateCheckResult::TooOldToUpgrade) => {
+        Ok(UpdateCheckOutcome {
+            result: UpdateCheckResult::TooOldToUpgrade,
+            ..
+        }) => {
             return Err(ble::BleStatus::VersionTooOld);
         }
-        Ok(UpdateCheckResult::UpdateStarted) => {
+        Ok(UpdateCheckOutcome {
+            result: UpdateCheckResult::UpdateStarted,
+            ..
+        }) => {
             return Err(ble::BleStatus::DeviceUpdating);
         }
-        Ok(UpdateCheckResult::VersionCheckFailed) => {
+        Ok(UpdateCheckOutcome {
+            result: UpdateCheckResult::VersionCheckFailed,
+            ..
+        }) => {
             return Err(ble::BleStatus::VersionCheckFailed);
         }
-        Ok(UpdateCheckResult::NoUpdateNeeded) => {} // Continue with normal flow
+        Ok(UpdateCheckOutcome {
+            result: UpdateCheckResult::NoUpdateNeeded,
+            ..
+        }) => {} // Continue with normal flow
         Err(e) => {
             // This shouldn't happen with NonBlocking, but handle it anyway
             eprintln!("MAIN: Error during update check: {e:#?}");
@@ -694,12 +714,35 @@ mod callbacks {
             super::UpdateExecution::Blocking,
         )
         .await;
-        match super::available_system_update_follow_up(&result, &prior_page) {
+        let current_page = app_state.page.lock().await.clone();
+        match super::available_system_update_follow_up(&result, &prior_page, &current_page) {
             super::AvailableSystemUpdateFollowUp::RestoreWebApp => {
-                let _ = show_webapp(app_state, chromium).await;
+                if let Err(e) = super::restore_prior_page(
+                    app_state,
+                    chromium,
+                    prior_page,
+                    match &result {
+                        Ok(outcome) => outcome.session_id,
+                        Err(_) => 0,
+                    },
+                )
+                .await
+                {
+                    eprintln!("MAIN: Failed to restore webapp after no-update check: {e:#?}");
+                }
             }
             super::AvailableSystemUpdateFollowUp::RestorePriorPage => {
-                if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await {
+                if let Err(e) = super::restore_prior_page(
+                    app_state,
+                    chromium,
+                    prior_page,
+                    match &result {
+                        Ok(outcome) => outcome.session_id,
+                        Err(_) => 0,
+                    },
+                )
+                .await
+                {
                     eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
                 }
             }
@@ -926,6 +969,11 @@ async fn wait_for_shutdown() {
 }
 
 async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    show_qrcode_locked(app_state, chrome).await
+}
+
+async fn show_qrcode_locked(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let qrcode_url = build_qrcode_url(app_state);
     // QRCode url is dynamically built
     // So we always navigate to make sure the url is correct
@@ -940,6 +988,26 @@ async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
 }
 
 async fn show_reflashing_qrcode(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    flashing_guide_url: &str,
+    current_version: &str,
+    latest_version: &str,
+    min_upgradeable_version: &str,
+) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    show_reflashing_qrcode_locked(
+        app_state,
+        chrome,
+        flashing_guide_url,
+        current_version,
+        latest_version,
+        min_upgradeable_version,
+    )
+    .await
+}
+
+async fn show_reflashing_qrcode_locked(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
     flashing_guide_url: &str,
@@ -1000,15 +1068,24 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
     )
     .await?
     {
-        UpdateCheckResult::TooOldToUpgrade | UpdateCheckResult::UpdateStarted => {
+        UpdateCheckOutcome {
+            result: UpdateCheckResult::TooOldToUpgrade | UpdateCheckResult::UpdateStarted,
+            ..
+        } => {
             // Device is either too old or updating; don't proceed with normal flow
             return Ok(());
         }
-        UpdateCheckResult::VersionCheckFailed => {
+        UpdateCheckOutcome {
+            result: UpdateCheckResult::VersionCheckFailed,
+            ..
+        } => {
             // Error was already shown to user, but we treat this as a hard failure
             return Err(anyhow::anyhow!("Failed to check version information"));
         }
-        UpdateCheckResult::NoUpdateNeeded => {} // Continue with normal flow
+        UpdateCheckOutcome {
+            result: UpdateCheckResult::NoUpdateNeeded,
+            ..
+        } => {} // Continue with normal flow
     }
 
     // No update, ensure we have a topic ID if possible and then
@@ -1089,6 +1166,12 @@ pub enum UpdateCheckResult {
     VersionCheckFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpdateCheckOutcome {
+    result: UpdateCheckResult,
+    session_id: u64,
+}
+
 /// Follow-up after `check_and_update_system(UpdateMode::Available, …)` in the D-Bus path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AvailableSystemUpdateFollowUp {
@@ -1103,18 +1186,36 @@ enum AvailableSystemUpdateFollowUp {
 }
 
 fn available_system_update_follow_up(
-    result: &Result<UpdateCheckResult>,
+    result: &Result<UpdateCheckOutcome>,
     prior_page: &Page,
+    current_page: &Page,
 ) -> AvailableSystemUpdateFollowUp {
     match result {
-        Ok(UpdateCheckResult::NoUpdateNeeded) => match prior_page {
-            Page::WebApp(_) => AvailableSystemUpdateFollowUp::RestoreWebApp,
-            Page::None(_) | Page::SystemUpgrade(_) => AvailableSystemUpdateFollowUp::NoOp,
-            _ => AvailableSystemUpdateFollowUp::RestorePriorPage,
-        },
+        Ok(outcome) if outcome.result == UpdateCheckResult::NoUpdateNeeded => {
+            if !is_version_check_progress_page_for(current_page, outcome.session_id) {
+                return AvailableSystemUpdateFollowUp::NoOp;
+            }
+
+            match prior_page {
+                Page::WebApp(_) => AvailableSystemUpdateFollowUp::RestoreWebApp,
+                Page::None(_) | Page::SystemUpgrade(_) => AvailableSystemUpdateFollowUp::NoOp,
+                _ => AvailableSystemUpdateFollowUp::RestorePriorPage,
+            }
+        }
         Err(_) => AvailableSystemUpdateFollowUp::LogFailure,
         Ok(_) => AvailableSystemUpdateFollowUp::NoOp,
     }
+}
+
+fn is_version_check_progress_page_for(page: &Page, session_id: u64) -> bool {
+    matches!(page, Page::VersionCheckProgress(current_session, _) if *current_session == session_id)
+}
+
+fn next_version_check_session(app_state: &Arc<AppState>) -> u64 {
+    app_state
+        .version_check_session
+        .fetch_add(1, Ordering::Relaxed)
+        + 1
 }
 
 /// Shared system update logic that checks version status and optionally triggers an update.
@@ -1138,8 +1239,13 @@ async fn check_and_update_system(
     chrome: &Arc<Cdp>,
     mode: UpdateMode,
     execution: UpdateExecution,
-) -> Result<UpdateCheckResult> {
-    let progress = VersionCheckProgress::start(execution, chrome.clone(), app_state.clone());
+) -> Result<UpdateCheckOutcome> {
+    let session_id = next_version_check_session(app_state);
+    let progress =
+        VersionCheckProgress::start(execution, chrome.clone(), app_state.clone(), session_id);
+    if VersionCheckProgress::uses_tv_progress(execution) {
+        set_version_check_progress_page(app_state, session_id).await;
+    }
 
     // Always fetch the remote version first to ensure we have the latest info
     updater::refresh_remote_version(progress.as_updater_progress()).await;
@@ -1217,7 +1323,10 @@ async fn check_and_update_system(
                     }
                 }
             }
-            return Ok(UpdateCheckResult::TooOldToUpgrade);
+            return Ok(UpdateCheckOutcome {
+                result: UpdateCheckResult::TooOldToUpgrade,
+                session_id,
+            });
         }
         Ok(false) => {} // Device can be upgraded, continue
         Err(e) => {
@@ -1229,9 +1338,7 @@ async fn check_and_update_system(
     // Check if update is needed based on mode
     let needs_update = match mode {
         UpdateMode::Required => updater::is_update_required(progress.as_updater_progress()).await,
-        UpdateMode::Available => {
-            updater::is_update_available(progress.as_updater_progress()).await
-        }
+        UpdateMode::Available => updater::is_update_available(progress.as_updater_progress()).await,
     };
 
     progress.finish().await;
@@ -1246,13 +1353,19 @@ async fn check_and_update_system(
                     task::spawn(update(app_state.clone(), chrome.clone()));
                 }
             }
-            Ok(UpdateCheckResult::UpdateStarted)
+            Ok(UpdateCheckOutcome {
+                result: UpdateCheckResult::UpdateStarted,
+                session_id,
+            })
         }
         Ok(false) => {
             if mode == UpdateMode::Available {
                 println!("MAIN: System update requested but no update available");
             }
-            Ok(UpdateCheckResult::NoUpdateNeeded)
+            Ok(UpdateCheckOutcome {
+                result: UpdateCheckResult::NoUpdateNeeded,
+                session_id,
+            })
         }
         Err(ve) => {
             eprintln!("MAIN: Error checking for update: {ve:#?}");
@@ -1272,7 +1385,10 @@ async fn check_and_update_system(
                     });
                 }
             }
-            Ok(UpdateCheckResult::VersionCheckFailed)
+            Ok(UpdateCheckOutcome {
+                result: UpdateCheckResult::VersionCheckFailed,
+                session_id,
+            })
         }
     }
 }
@@ -1294,7 +1410,12 @@ impl VersionCheckProgress {
         matches!(execution, UpdateExecution::Blocking)
     }
 
-    fn start(execution: UpdateExecution, chrome: Arc<Cdp>, app_state: Arc<AppState>) -> Self {
+    fn start(
+        execution: UpdateExecution,
+        chrome: Arc<Cdp>,
+        app_state: Arc<AppState>,
+        session_id: u64,
+    ) -> Self {
         if !Self::uses_tv_progress(execution) {
             return Self {
                 tx: None,
@@ -1305,9 +1426,7 @@ impl VersionCheckProgress {
         let (prog_tx, mut prog_rx) = mpsc::channel::<(u32, u32)>(16);
         let progress_task = tokio::spawn(async move {
             while let Some((_attempt, _max)) = prog_rx.recv().await {
-                if let Err(e) =
-                    show_message(&chrome, &app_state, constant::VERSION_CHECK_PROGRESS_TV_MSG).await
-                {
+                if let Err(e) = show_version_check_progress(&chrome, &app_state, session_id).await {
                     eprintln!("MAIN: version-check progress UI failed: {e:#?}");
                 }
             }
@@ -1342,20 +1461,37 @@ async fn restore_prior_page(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
     prior: Page,
+    session_id: u64,
 ) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    let current_page = app_state.page.lock().await.clone();
+    if !is_version_check_progress_page_for(&current_page, session_id) {
+        return Ok(());
+    }
+
     match prior {
-        Page::WebApp(_) => show_webapp(app_state, chrome).await,
-        Page::QRCode(_) => show_qrcode(app_state, chrome).await,
-        Page::Message(_, text) => show_message(chrome, app_state, &text).await,
-        Page::FactoryReset(_) => show_factory_reset(chrome, app_state).await,
+        Page::WebApp(_) => show_webapp_locked(app_state, chrome).await,
+        Page::QRCode(_) => show_qrcode_locked(app_state, chrome).await,
+        Page::Message(_, text) => show_message_locked(chrome, app_state, &text).await,
+        Page::FactoryReset(_) => show_factory_reset_locked(chrome, app_state).await,
         Page::ReflashingRequired(_, message) => {
-            restore_reflashing_page(app_state, chrome, &message).await
+            restore_reflashing_page_locked(app_state, chrome, &message).await
         }
+        Page::VersionCheckProgress(_, _) => Ok(()),
         Page::SystemUpgrade(_) | Page::None(_) => Ok(()),
     }
 }
 
 async fn restore_reflashing_page(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    fallback_message: &str,
+) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    restore_reflashing_page_locked(app_state, chrome, fallback_message).await
+}
+
+async fn restore_reflashing_page_locked(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
     fallback_message: &str,
@@ -1373,7 +1509,7 @@ async fn restore_reflashing_page(
                 None
             })
             .unwrap_or_else(|| "Unknown".to_string());
-        show_reflashing_qrcode(
+        show_reflashing_qrcode_locked(
             app_state,
             chrome,
             &flashing_guide,
@@ -1383,11 +1519,16 @@ async fn restore_reflashing_page(
         )
         .await
     } else {
-        show_message(chrome, app_state, fallback_message).await
+        show_message_locked(chrome, app_state, fallback_message).await
     }
 }
 
 async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    show_webapp_locked(app_state, chrome).await
+}
+
+async fn show_webapp_locked(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
     let mut page = app_state.page.lock().await;
 
     let webapp_url = constant::WEBAPP_URL;
@@ -1413,6 +1554,15 @@ async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()>
 }
 
 async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &str) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    show_message_locked(chrome, app_state, message).await
+}
+
+async fn show_message_locked(
+    chrome: &Arc<Cdp>,
+    app_state: &Arc<AppState>,
+    message: &str,
+) -> Result<()> {
     let encoded = urlencoding::encode(message);
     let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
     chrome
@@ -1426,7 +1576,61 @@ async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &st
     Ok(())
 }
 
+async fn set_version_check_progress_page(app_state: &Arc<AppState>, session_id: u64) {
+    let _transition = app_state.ui_transition.lock().await;
+    set_version_check_progress_page_locked(app_state, session_id).await;
+}
+
+async fn set_version_check_progress_page_locked(app_state: &Arc<AppState>, session_id: u64) {
+    let mut page = app_state.page.lock().await;
+    *page = Page::VersionCheckProgress(session_id, unix_s());
+}
+
+async fn show_version_check_progress(
+    chrome: &Arc<Cdp>,
+    app_state: &Arc<AppState>,
+    session_id: u64,
+) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    show_version_check_progress_locked(chrome, app_state, session_id).await
+}
+
+async fn show_version_check_progress_locked(
+    chrome: &Arc<Cdp>,
+    app_state: &Arc<AppState>,
+    session_id: u64,
+) -> Result<()> {
+    let current_page = app_state.page.lock().await.clone();
+    if !is_version_check_progress_page_for(&current_page, session_id) {
+        return Ok(());
+    }
+
+    let encoded = urlencoding::encode(constant::VERSION_CHECK_PROGRESS_TV_MSG);
+    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
+    chrome
+        .navigate(&message_url)
+        .await
+        .with_context(|| format!("navigating to {message_url}"))?;
+    println!("MAIN: Navigated to {message_url}");
+
+    let mut page = app_state.page.lock().await;
+    if matches!(*page, Page::VersionCheckProgress(current_session, _) if current_session == session_id)
+    {
+        *page = Page::VersionCheckProgress(session_id, unix_s());
+    }
+    Ok(())
+}
+
 async fn show_system_upgrade(
+    chrome: &Arc<Cdp>,
+    app_state: &Arc<AppState>,
+    message: &str,
+) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    show_system_upgrade_locked(chrome, app_state, message).await
+}
+
+async fn show_system_upgrade_locked(
     chrome: &Arc<Cdp>,
     app_state: &Arc<AppState>,
     message: &str,
@@ -1444,6 +1648,11 @@ async fn show_system_upgrade(
 }
 
 async fn show_factory_reset(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) -> Result<()> {
+    let _transition = app_state.ui_transition.lock().await;
+    show_factory_reset_locked(chrome, app_state).await
+}
+
+async fn show_factory_reset_locked(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) -> Result<()> {
     let message_url = format!(
         "{}{}",
         constant::MSG_URL_PREFIX,
@@ -1509,9 +1718,7 @@ mod version_check_progress_tests {
         let per_updater_call = tx.clone();
         drop(per_updater_call);
 
-        let receiver_task = tokio::spawn(async move {
-            while rx.recv().await.is_some() {}
-        });
+        let receiver_task = tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
         drop(tx);
         timeout(Duration::from_secs(1), receiver_task)
@@ -1524,7 +1731,8 @@ mod version_check_progress_tests {
 #[cfg(test)]
 mod available_system_update_follow_up_tests {
     use super::{
-        AvailableSystemUpdateFollowUp, Page, UpdateCheckResult, available_system_update_follow_up,
+        AvailableSystemUpdateFollowUp, Page, UpdateCheckOutcome, UpdateCheckResult,
+        available_system_update_follow_up,
     };
     use anyhow::anyhow;
 
@@ -1532,8 +1740,12 @@ mod available_system_update_follow_up_tests {
     fn no_update_needed_after_webapp_restores_webapp() {
         assert_eq!(
             available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::NoUpdateNeeded,
+                    session_id: 1,
+                }),
                 &Page::WebApp(0),
+                &Page::VersionCheckProgress(1, 1),
             ),
             AvailableSystemUpdateFollowUp::RestoreWebApp,
         );
@@ -1543,8 +1755,12 @@ mod available_system_update_follow_up_tests {
     fn no_update_needed_after_qrcode_restores_prior_page() {
         assert_eq!(
             available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::NoUpdateNeeded,
+                    session_id: 1,
+                }),
                 &Page::QRCode(0),
+                &Page::VersionCheckProgress(1, 1),
             ),
             AvailableSystemUpdateFollowUp::RestorePriorPage,
         );
@@ -1554,8 +1770,12 @@ mod available_system_update_follow_up_tests {
     fn no_update_needed_after_message_restores_prior_page() {
         assert_eq!(
             available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::NoUpdateNeeded,
+                    session_id: 1,
+                }),
                 &Page::Message(0, "Welcome".to_string()),
+                &Page::VersionCheckProgress(1, 1),
             ),
             AvailableSystemUpdateFollowUp::RestorePriorPage,
         );
@@ -1565,8 +1785,27 @@ mod available_system_update_follow_up_tests {
     fn no_update_needed_with_unknown_prior_page_is_no_op() {
         assert_eq!(
             available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::NoUpdateNeeded,
+                    session_id: 1,
+                }),
                 &Page::None(0),
+                &Page::VersionCheckProgress(1, 1),
+            ),
+            AvailableSystemUpdateFollowUp::NoOp,
+        );
+    }
+
+    #[test]
+    fn no_update_needed_skips_restore_when_current_page_changed() {
+        assert_eq!(
+            available_system_update_follow_up(
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::NoUpdateNeeded,
+                    session_id: 1,
+                }),
+                &Page::WebApp(0),
+                &Page::VersionCheckProgress(2, 1),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
@@ -1576,8 +1815,12 @@ mod available_system_update_follow_up_tests {
     fn update_started_is_no_op_for_dbus_follow_up() {
         assert_eq!(
             available_system_update_follow_up(
-                &Ok(UpdateCheckResult::UpdateStarted),
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::UpdateStarted,
+                    session_id: 1,
+                }),
                 &Page::WebApp(0),
+                &Page::VersionCheckProgress(1, 1),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
@@ -1587,8 +1830,12 @@ mod available_system_update_follow_up_tests {
     fn too_old_to_upgrade_is_no_op_for_dbus_follow_up() {
         assert_eq!(
             available_system_update_follow_up(
-                &Ok(UpdateCheckResult::TooOldToUpgrade),
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::TooOldToUpgrade,
+                    session_id: 1,
+                }),
                 &Page::WebApp(0),
+                &Page::VersionCheckProgress(1, 1),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
@@ -1598,8 +1845,12 @@ mod available_system_update_follow_up_tests {
     fn version_check_failed_is_no_op_for_dbus_follow_up() {
         assert_eq!(
             available_system_update_follow_up(
-                &Ok(UpdateCheckResult::VersionCheckFailed),
+                &Ok(UpdateCheckOutcome {
+                    result: UpdateCheckResult::VersionCheckFailed,
+                    session_id: 1,
+                }),
                 &Page::WebApp(0),
+                &Page::VersionCheckProgress(1, 1),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
@@ -1611,6 +1862,7 @@ mod available_system_update_follow_up_tests {
             available_system_update_follow_up(
                 &Err(anyhow!("cdp navigate failed")),
                 &Page::WebApp(0),
+                &Page::VersionCheckProgress(1, 1),
             ),
             AvailableSystemUpdateFollowUp::LogFailure,
         );
