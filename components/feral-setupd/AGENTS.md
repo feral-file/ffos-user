@@ -109,13 +109,20 @@ with an error.
 Runs/monitors the updater systemd unit, tails the updater log file, extracts
 progress/messages via regex, and streams progress/error lines back to callers.
 
-Distributor version metadata (`/api/latest/...`) is fetched with bounded retries;
+Distributor version metadata (`/api/latest/...`) is fetched with bounded retries,
+each attempt capped by `UPDATER_VERSION_CHECK_REQUEST_TIMEOUT` so a stalled
+connect/TLS/read fails fast (classified as network) instead of hanging the check;
 failures are classified (network vs HTTP class vs parse) for TV copy. For
 `UpdateExecution::Blocking` only, `check_and_update_system` attaches a progress
 channel so the launcher shows a short “checking for updates” line while those
 HTTP retries run; the channel is drained before final TV screens. For
 `UpdateExecution::NonBlocking` (BLE), updater calls pass `None` so CDP progress
 navigations are not on the mobile response path.
+`check_and_update_system` begins with a forced `refresh_remote_version`; when that
+live fetch fails it surfaces the classified error and returns `VersionCheckFailed`
+rather than falling back to stale cached metadata (the decision helpers then read
+the freshly refreshed cache). The hourly background refresher instead ignores
+failures and keeps serving the last-known cache.
 Only `refresh_remote_version`, `is_too_old_to_upgrade`, `is_update_required`, and
 `is_update_available` accept that channel; helpers like `latest_version` read
 metadata without driving the progress UI.

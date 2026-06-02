@@ -21,6 +21,10 @@ pub const UPDATER_UPSTREAM_CONFIG_URL_SUFFIX: &str = "/api/latest/";
 pub const UPDATER_PROCESS_LOG_FILE: &str = "/var/log/updaterd.log";
 pub const UPDATER_VERSION_CHECK_RETRIES: u32 = 3;
 pub const UPDATER_VERSION_CHECK_RETRY_DELAY: u64 = 2 * 1000; // 2 seconds between retries
+/// Per-attempt HTTP timeout so an unstable connection (stalled connect/TLS/read) fails fast
+/// with a classified network error instead of hanging the blocking/D-Bus check on the
+/// "Checking for updates..." screen until the OS socket timeout fires.
+pub const UPDATER_VERSION_CHECK_REQUEST_TIMEOUT: u64 = 10 * 1000; // 10 seconds per attempt
 pub const UPDATER_REMOTE_VERSION_REFRESH_INTERVAL: u64 = 60 * 60 * 1000; // 1 hour
 
 /// Shown on the TV between HTTP retry attempts while checking for updates.

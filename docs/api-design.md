@@ -263,9 +263,9 @@ The mobile app expects a BLE notification within a reasonable time after a write
 
 ### Updater version check
 
-`feral-setupd` retries the remote version check up to `UPDATER_VERSION_CHECK_RETRIES` (3) times with a 2-second delay between retries before treating the check as failed.
+`feral-setupd` retries the remote version check up to `UPDATER_VERSION_CHECK_RETRIES` (3) times with a 2-second delay between retries before treating the check as failed. Each attempt is additionally capped by `UPDATER_VERSION_CHECK_REQUEST_TIMEOUT` (10s) so an unstable connection (stalled connect/TLS/read) fails fast with a classified network error instead of hanging on the “checking for updates” screen until the OS socket timeout.
 
-During `check_and_update_system`, each HTTP fetch attempt notifies a small progress channel so setup can navigate the TV to a short “checking for updates” line before the request runs. When the subsequent required/available version comparison fails after those retries (the `is_update_required` / `is_update_available` error path), the TV message is chosen from a coarse failure class (network vs HTTP 5xx vs HTTP 4xx vs parse/unexpected body vs unknown); other branches may log and continue without that classified copy. BLE status code `6` (`BLE_ERR_CODE_VERSION_CHECK_FAILED`) is unchanged.
+During `check_and_update_system`, each HTTP fetch attempt notifies a small progress channel so setup can navigate the TV to a short “checking for updates” line before the request runs. The function starts with a forced `refresh_remote_version`; if that live fetch fails it surfaces the classified copy and returns `VersionCheckFailed` instead of falling back to stale cached metadata (so an outage or a newly raised minimum version is not masked). When a later required/available comparison fails (the `is_update_required` / `is_update_available` error path), the TV message is likewise chosen from a coarse failure class (network vs HTTP 5xx vs HTTP 4xx vs parse/unexpected body vs unknown). BLE status code `6` (`BLE_ERR_CODE_VERSION_CHECK_FAILED`) is unchanged.
 
 ---
 

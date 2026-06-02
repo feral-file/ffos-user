@@ -98,6 +98,9 @@ fn classify_version_fetch_error(err: &anyhow::Error) -> VersionFetchFailureKind 
             if re.is_decode() {
                 return VersionFetchFailureKind::Parse;
             }
+            if re.is_timeout() || re.is_connect() {
+                return VersionFetchFailureKind::Network;
+            }
             if let Some(status) = re.status() {
                 if status.is_server_error() {
                     return VersionFetchFailureKind::Server;
@@ -105,8 +108,11 @@ fn classify_version_fetch_error(err: &anyhow::Error) -> VersionFetchFailureKind 
                 if status.is_client_error() {
                     return VersionFetchFailureKind::Client;
                 }
-            }
-            if re.is_timeout() || re.is_connect() {
+            } else {
+                // A reqwest error carrying no HTTP status is a transport-layer failure
+                // (DNS, TLS, connection/body transport). Classify as network so the most
+                // common onboarding failure — flaky Wi-Fi — gets the actionable Wi-Fi copy
+                // instead of the umbrella "contact support" message.
                 return VersionFetchFailureKind::Network;
             }
         }
@@ -126,10 +132,15 @@ fn classify_version_fetch_error(err: &anyhow::Error) -> VersionFetchFailureKind 
 
 /// Force refresh the cached remote version information.
 ///
-/// `progress` is used during setup to drive TV copy between HTTP attempts; periodic
-/// refresh passes `None` so we never spam the UI from the background task.
-pub async fn refresh_remote_version(progress: Option<FetchProgressTx>) {
-    let _ = fetch_remote_version(true, progress).await;
+/// Returns the classified error when the live fetch fails so callers on a
+/// user-triggered/blocking path can surface actionable copy instead of silently
+/// falling back to (possibly stale) cached metadata. `progress` is used during setup
+/// to drive TV copy between HTTP attempts; periodic refresh passes `None` so we never
+/// spam the UI from the background task.
+pub async fn refresh_remote_version(
+    progress: Option<FetchProgressTx>,
+) -> std::result::Result<(), VersionFetchError> {
+    fetch_remote_version(true, progress).await.map(|_| ())
 }
 
 /// Spawn a background task that periodically refreshes the cached remote version.
@@ -140,7 +151,8 @@ pub fn spawn_remote_version_refresher() {
         loop {
             time::sleep(interval).await;
             println!("UPDATER: Periodic remote version refresh triggered");
-            refresh_remote_version(None).await;
+            // Background refresh tolerates failures: keep serving the last-known cache.
+            let _ = refresh_remote_version(None).await;
         }
     });
 }
@@ -442,6 +454,9 @@ async fn fetch_remote_version(
 async fn fetch_remote_version_once(url: &str) -> Result<UpstreamVersion> {
     let resp = reqwest::Client::new()
         .get(url)
+        .timeout(Duration::from_millis(
+            constant::UPDATER_VERSION_CHECK_REQUEST_TIMEOUT,
+        ))
         .send()
         .await
         .with_context(|| format!("fetching {url}"))?;
@@ -538,6 +553,29 @@ mod classify_version_fetch_error_tests {
         assert_eq!(
             classify_version_fetch_error(&e),
             VersionFetchFailureKind::Unknown
+        );
+    }
+
+    /// Exercises the `reqwest::Error` downcast arms with a REAL transport error (no HTTP
+    /// status), wrapped exactly like `fetch_remote_version_once` wraps it. Connecting to a
+    /// closed local port is deterministic and offline, and must classify as network so flaky
+    /// Wi-Fi / DNS / TLS failures get the actionable copy rather than the umbrella message.
+    #[tokio::test]
+    async fn transport_error_without_status_is_network() {
+        let reqwest_err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("connecting to a closed local port should fail");
+        assert!(
+            reqwest_err.status().is_none(),
+            "a connection failure should not carry an HTTP status"
+        );
+        let wrapped = anyhow::Error::new(reqwest_err).context("fetching http://127.0.0.1:1/");
+        assert_eq!(
+            classify_version_fetch_error(&wrapped),
+            VersionFetchFailureKind::Network
         );
     }
 }

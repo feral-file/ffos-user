@@ -696,11 +696,27 @@ mod callbacks {
         .await;
         match super::available_system_update_follow_up(&result, &prior_page) {
             super::AvailableSystemUpdateFollowUp::RestoreWebApp => {
-                let _ = show_webapp(app_state, chromium).await;
+                // Only restore if nothing else navigated the TV while retries were in flight.
+                // Bind to a local so the page lock is released before re-navigating (the restore
+                // helpers re-lock `page`, and the tokio Mutex is not reentrant).
+                let still_progress =
+                    super::is_version_check_progress_page(&app_state.page.lock().await);
+                if still_progress {
+                    let _ = show_webapp(app_state, chromium).await;
+                }
             }
             super::AvailableSystemUpdateFollowUp::RestorePriorPage => {
-                if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await {
-                    eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
+                let still_progress =
+                    super::is_version_check_progress_page(&app_state.page.lock().await);
+                if still_progress {
+                    if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await
+                    {
+                        eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
+                    }
+                } else {
+                    println!(
+                        "MAIN: Skipping TV restore after no-update check; page changed during check"
+                    );
                 }
             }
             super::AvailableSystemUpdateFollowUp::LogFailure => {
@@ -1117,6 +1133,16 @@ fn available_system_update_follow_up(
     }
 }
 
+/// True when `page` is the transient "Checking for updates..." surface a version check shows.
+///
+/// The D-Bus `system_update` callback is spawned and ACKed immediately, so other UI transitions
+/// (e.g. pairing moving the TV to the web app) can land while the check's HTTP retries are still
+/// in flight. We only restore the pre-check snapshot when the current page is still this transient
+/// surface; otherwise a newer page owns the screen and must not be clobbered by the stale snapshot.
+fn is_version_check_progress_page(page: &Page) -> bool {
+    matches!(page, Page::Message(_, text) if text == constant::VERSION_CHECK_PROGRESS_TV_MSG)
+}
+
 /// Shared system update logic that checks version status and optionally triggers an update.
 ///
 /// This function handles:
@@ -1141,9 +1167,14 @@ async fn check_and_update_system(
 ) -> Result<UpdateCheckResult> {
     let progress = VersionCheckProgress::start(execution, chrome.clone(), app_state.clone());
 
-    // Always fetch the remote version first to ensure we have the latest info
-    updater::refresh_remote_version(progress.as_updater_progress()).await;
-    // First check if device is too old to auto-upgrade
+    // Force a fresh fetch first. This is a user-triggered/blocking check, so a failed live
+    // refresh must surface as classified copy rather than silently falling back to stale
+    // cached metadata (which could hide an outage or a newly raised minimum version).
+    if let Err(ve) = updater::refresh_remote_version(progress.as_updater_progress()).await {
+        progress.finish().await;
+        return show_version_check_failure(app_state, chrome, execution, ve).await;
+    }
+    // First check if device is too old to auto-upgrade (reads the freshly refreshed cache)
     match updater::is_too_old_to_upgrade(progress.as_updater_progress()).await {
         Ok(true) => {
             // Finish progress UI before reflashing screens; otherwise queued progress
@@ -1229,9 +1260,7 @@ async fn check_and_update_system(
     // Check if update is needed based on mode
     let needs_update = match mode {
         UpdateMode::Required => updater::is_update_required(progress.as_updater_progress()).await,
-        UpdateMode::Available => {
-            updater::is_update_available(progress.as_updater_progress()).await
-        }
+        UpdateMode::Available => updater::is_update_available(progress.as_updater_progress()).await,
     };
 
     progress.finish().await;
@@ -1254,27 +1283,38 @@ async fn check_and_update_system(
             }
             Ok(UpdateCheckResult::NoUpdateNeeded)
         }
-        Err(ve) => {
-            eprintln!("MAIN: Error checking for update: {ve:#?}");
-            let tv_msg = ve.kind().tv_message();
-            match execution {
-                UpdateExecution::Blocking => {
-                    show_message(chrome, app_state, tv_msg).await?;
+        Err(ve) => show_version_check_failure(app_state, chrome, execution, ve).await,
+    }
+}
+
+/// Render the classified version-check failure copy and report [`UpdateCheckResult::VersionCheckFailed`].
+///
+/// `Blocking` navigates inline (callers may await the screen); `NonBlocking` (BLE) spawns the
+/// navigation so the mobile response is not held on CDP.
+async fn show_version_check_failure(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    execution: UpdateExecution,
+    ve: updater::VersionFetchError,
+) -> Result<UpdateCheckResult> {
+    eprintln!("MAIN: Error checking for update: {ve:#?}");
+    let tv_msg = ve.kind().tv_message();
+    match execution {
+        UpdateExecution::Blocking => {
+            show_message(chrome, app_state, tv_msg).await?;
+        }
+        UpdateExecution::NonBlocking => {
+            let tv_msg = tv_msg.to_string();
+            task::spawn({
+                let app_state = app_state.clone();
+                let chrome = chrome.clone();
+                async move {
+                    let _ = show_message(&chrome, &app_state, &tv_msg).await;
                 }
-                UpdateExecution::NonBlocking => {
-                    let tv_msg = tv_msg.to_string();
-                    task::spawn({
-                        let app_state = app_state.clone();
-                        let chrome = chrome.clone();
-                        async move {
-                            let _ = show_message(&chrome, &app_state, &tv_msg).await;
-                        }
-                    });
-                }
-            }
-            Ok(UpdateCheckResult::VersionCheckFailed)
+            });
         }
     }
+    Ok(UpdateCheckResult::VersionCheckFailed)
 }
 
 /// Drives TV “checking for updates” copy during distributor HTTP retries.
@@ -1509,9 +1549,7 @@ mod version_check_progress_tests {
         let per_updater_call = tx.clone();
         drop(per_updater_call);
 
-        let receiver_task = tokio::spawn(async move {
-            while rx.recv().await.is_some() {}
-        });
+        let receiver_task = tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
         drop(tx);
         timeout(Duration::from_secs(1), receiver_task)
@@ -1614,5 +1652,35 @@ mod available_system_update_follow_up_tests {
             ),
             AvailableSystemUpdateFollowUp::LogFailure,
         );
+    }
+}
+
+#[cfg(test)]
+mod is_version_check_progress_page_tests {
+    use super::{Page, constant, is_version_check_progress_page};
+
+    #[test]
+    fn transient_progress_message_is_recognized() {
+        assert!(is_version_check_progress_page(&Page::Message(
+            0,
+            constant::VERSION_CHECK_PROGRESS_TV_MSG.to_string(),
+        )));
+    }
+
+    #[test]
+    fn other_message_is_not_progress_page() {
+        assert!(!is_version_check_progress_page(&Page::Message(
+            0,
+            "Welcome".to_string(),
+        )));
+    }
+
+    #[test]
+    fn non_message_pages_are_not_progress_page() {
+        // A page another operation may have navigated to while retries were in flight
+        // must not be mistaken for the transient version-check surface.
+        assert!(!is_version_check_progress_page(&Page::WebApp(0)));
+        assert!(!is_version_check_progress_page(&Page::QRCode(0)));
+        assert!(!is_version_check_progress_page(&Page::None(0)));
     }
 }
