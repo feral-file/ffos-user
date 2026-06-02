@@ -515,6 +515,11 @@ mod callbacks {
             let chromium = chromium.clone();
 
             Box::pin(async move {
+                // Reads the canonical `page`. During a blocking version check that page is the
+                // real prior surface (e.g. webapp), not the transient "Checking..." copy — the
+                // progress UI navigates transiently and never records `page`. So a disconnect
+                // mid-check now acts on the actual surface (keeping webapp/recovery instead of
+                // dropping an already-settled device to QR), matching steady-state behavior.
                 let should_go_qrcode = {
                     let page = app_state.page.lock().await;
                     !page.should_keep_on_bt_disconnect()
@@ -682,7 +687,9 @@ mod callbacks {
             return;
         }
 
-        // Snapshot before the version check overwrites `page` with transient progress copy.
+        // Snapshot the canonical page before the check. The progress UI is transient and never
+        // records `page`, so this snapshot only changes if ANOTHER operation navigates during the
+        // check — which is exactly what the restore decision must detect.
         let prior_page = app_state.page.lock().await.clone();
 
         // Use Available mode for user-triggered updates (check for any newer version)
@@ -694,29 +701,20 @@ mod callbacks {
             super::UpdateExecution::Blocking,
         )
         .await;
-        match super::available_system_update_follow_up(&result, &prior_page) {
+
+        // Re-read the canonical page after the check. If it no longer equals `prior_page`, another
+        // operation took ownership of the TV while retries were in flight and we must not restore.
+        let current_page = app_state.page.lock().await.clone();
+        match super::available_system_update_follow_up(&result, &prior_page, &current_page) {
             super::AvailableSystemUpdateFollowUp::RestoreWebApp => {
-                // Only restore if nothing else navigated the TV while retries were in flight.
-                // Bind to a local so the page lock is released before re-navigating (the restore
-                // helpers re-lock `page`, and the tokio Mutex is not reentrant).
-                let still_progress =
-                    super::is_version_check_progress_page(&app_state.page.lock().await);
-                if still_progress {
-                    let _ = show_webapp(app_state, chromium).await;
-                }
+                // `show_webapp` has a fast-path that skips navigation when CDP is already on the
+                // webapp URL; here the TV shows the transient progress URL (not the webapp URL),
+                // so it always re-navigates and the transient screen is corrected.
+                let _ = show_webapp(app_state, chromium).await;
             }
             super::AvailableSystemUpdateFollowUp::RestorePriorPage => {
-                let still_progress =
-                    super::is_version_check_progress_page(&app_state.page.lock().await);
-                if still_progress {
-                    if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await
-                    {
-                        eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
-                    }
-                } else {
-                    println!(
-                        "MAIN: Skipping TV restore after no-update check; page changed during check"
-                    );
+                if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await {
+                    eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
                 }
             }
             super::AvailableSystemUpdateFollowUp::LogFailure => {
@@ -1118,29 +1116,35 @@ enum AvailableSystemUpdateFollowUp {
     NoOp,
 }
 
+/// Decide the no-update follow-up for the D-Bus `system_update` path.
+///
+/// The callback is spawned and ACKed immediately, so another operation (e.g. pairing moving the
+/// TV to the web app) can navigate the canonical page while this check's HTTP retries are still in
+/// flight. Because the version-check progress UI is transient (it never records `page` — see
+/// `navigate_transient_message`), `current_page != prior_page` is a precise signal that some OTHER
+/// operation took ownership of the screen during the check; in that case we must NOT restore our
+/// pre-check snapshot and clobber the newer page. Only when the page is unchanged do we re-show the
+/// snapshot (the transient progress copy is what's actually on the TV, so a re-navigation is needed).
 fn available_system_update_follow_up(
     result: &Result<UpdateCheckResult>,
     prior_page: &Page,
+    current_page: &Page,
 ) -> AvailableSystemUpdateFollowUp {
     match result {
-        Ok(UpdateCheckResult::NoUpdateNeeded) => match prior_page {
-            Page::WebApp(_) => AvailableSystemUpdateFollowUp::RestoreWebApp,
-            Page::None(_) | Page::SystemUpgrade(_) => AvailableSystemUpdateFollowUp::NoOp,
-            _ => AvailableSystemUpdateFollowUp::RestorePriorPage,
-        },
+        Ok(UpdateCheckResult::NoUpdateNeeded) => {
+            if current_page != prior_page {
+                // A newer navigation owns the screen; leave it alone.
+                return AvailableSystemUpdateFollowUp::NoOp;
+            }
+            match prior_page {
+                Page::WebApp(_) => AvailableSystemUpdateFollowUp::RestoreWebApp,
+                Page::None(_) | Page::SystemUpgrade(_) => AvailableSystemUpdateFollowUp::NoOp,
+                _ => AvailableSystemUpdateFollowUp::RestorePriorPage,
+            }
+        }
         Err(_) => AvailableSystemUpdateFollowUp::LogFailure,
         Ok(_) => AvailableSystemUpdateFollowUp::NoOp,
     }
-}
-
-/// True when `page` is the transient "Checking for updates..." surface a version check shows.
-///
-/// The D-Bus `system_update` callback is spawned and ACKed immediately, so other UI transitions
-/// (e.g. pairing moving the TV to the web app) can land while the check's HTTP retries are still
-/// in flight. We only restore the pre-check snapshot when the current page is still this transient
-/// surface; otherwise a newer page owns the screen and must not be clobbered by the stale snapshot.
-fn is_version_check_progress_page(page: &Page) -> bool {
-    matches!(page, Page::Message(_, text) if text == constant::VERSION_CHECK_PROGRESS_TV_MSG)
 }
 
 /// Shared system update logic that checks version status and optionally triggers an update.
@@ -1165,7 +1169,7 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
-    let progress = VersionCheckProgress::start(execution, chrome.clone(), app_state.clone());
+    let progress = VersionCheckProgress::start(execution, chrome.clone());
 
     // Force a fresh fetch first. This is a user-triggered/blocking check, so a failed live
     // refresh must surface as classified copy rather than silently falling back to stale
@@ -1334,7 +1338,9 @@ impl VersionCheckProgress {
         matches!(execution, UpdateExecution::Blocking)
     }
 
-    fn start(execution: UpdateExecution, chrome: Arc<Cdp>, app_state: Arc<AppState>) -> Self {
+    // No `app_state`: progress navigations are transient and must NOT record the canonical
+    // page (see `navigate_transient_message`), so the receiver task only needs the CDP handle.
+    fn start(execution: UpdateExecution, chrome: Arc<Cdp>) -> Self {
         if !Self::uses_tv_progress(execution) {
             return Self {
                 tx: None,
@@ -1346,7 +1352,8 @@ impl VersionCheckProgress {
         let progress_task = tokio::spawn(async move {
             while let Some((_attempt, _max)) = prog_rx.recv().await {
                 if let Err(e) =
-                    show_message(&chrome, &app_state, constant::VERSION_CHECK_PROGRESS_TV_MSG).await
+                    navigate_transient_message(&chrome, constant::VERSION_CHECK_PROGRESS_TV_MSG)
+                        .await
                 {
                     eprintln!("MAIN: version-check progress UI failed: {e:#?}");
                 }
@@ -1466,6 +1473,23 @@ async fn show_message(chrome: &Arc<Cdp>, app_state: &Arc<AppState>, message: &st
     Ok(())
 }
 
+/// Navigate the TV to a transient message WITHOUT recording it as the canonical `app_state.page`.
+///
+/// Used by the version-check progress UI. Because it never mutates `page`, a lagging progress
+/// navigation can no longer overwrite the page state set by a newer (possibly concurrent)
+/// transition — so the no-update restore guard reads a truthful page identity and cannot be
+/// tricked into clobbering a page another operation navigated to during the check.
+async fn navigate_transient_message(chrome: &Arc<Cdp>, message: &str) -> Result<()> {
+    let encoded = urlencoding::encode(message);
+    let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
+    chrome
+        .navigate(&message_url)
+        .await
+        .with_context(|| format!("navigating to transient {message_url}"))?;
+    println!("MAIN: Navigated to transient {message_url}");
+    Ok(())
+}
+
 async fn show_system_upgrade(
     chrome: &Arc<Cdp>,
     app_state: &Arc<AppState>,
@@ -1566,11 +1590,15 @@ mod available_system_update_follow_up_tests {
     };
     use anyhow::anyhow;
 
+    // For the "no other operation navigated during the check" cases, `current_page` equals
+    // `prior_page` (the transient progress UI never records the canonical page).
+
     #[test]
     fn no_update_needed_after_webapp_restores_webapp() {
         assert_eq!(
             available_system_update_follow_up(
                 &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::WebApp(0),
                 &Page::WebApp(0),
             ),
             AvailableSystemUpdateFollowUp::RestoreWebApp,
@@ -1583,6 +1611,7 @@ mod available_system_update_follow_up_tests {
             available_system_update_follow_up(
                 &Ok(UpdateCheckResult::NoUpdateNeeded),
                 &Page::QRCode(0),
+                &Page::QRCode(0),
             ),
             AvailableSystemUpdateFollowUp::RestorePriorPage,
         );
@@ -1593,6 +1622,7 @@ mod available_system_update_follow_up_tests {
         assert_eq!(
             available_system_update_follow_up(
                 &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::Message(0, "Welcome".to_string()),
                 &Page::Message(0, "Welcome".to_string()),
             ),
             AvailableSystemUpdateFollowUp::RestorePriorPage,
@@ -1605,6 +1635,35 @@ mod available_system_update_follow_up_tests {
             available_system_update_follow_up(
                 &Ok(UpdateCheckResult::NoUpdateNeeded),
                 &Page::None(0),
+                &Page::None(0),
+            ),
+            AvailableSystemUpdateFollowUp::NoOp,
+        );
+    }
+
+    /// The race the fix targets: while the check ran, another operation navigated the TV from the
+    /// pre-check QR page to the web app. The follow-up must NOT restore the stale QR snapshot.
+    #[test]
+    fn concurrent_navigation_during_check_is_not_clobbered() {
+        assert_eq!(
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::QRCode(0),
+                &Page::WebApp(1),
+            ),
+            AvailableSystemUpdateFollowUp::NoOp,
+        );
+    }
+
+    /// Same prior/current page kind but a newer timestamp means another operation re-navigated
+    /// during the check; treat it as a concurrent transition and do not restore.
+    #[test]
+    fn renavigation_to_same_page_kind_is_not_restored() {
+        assert_eq!(
+            available_system_update_follow_up(
+                &Ok(UpdateCheckResult::NoUpdateNeeded),
+                &Page::QRCode(0),
+                &Page::QRCode(7),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
@@ -1615,6 +1674,7 @@ mod available_system_update_follow_up_tests {
         assert_eq!(
             available_system_update_follow_up(
                 &Ok(UpdateCheckResult::UpdateStarted),
+                &Page::WebApp(0),
                 &Page::WebApp(0),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
@@ -1627,6 +1687,7 @@ mod available_system_update_follow_up_tests {
             available_system_update_follow_up(
                 &Ok(UpdateCheckResult::TooOldToUpgrade),
                 &Page::WebApp(0),
+                &Page::WebApp(0),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
         );
@@ -1637,6 +1698,7 @@ mod available_system_update_follow_up_tests {
         assert_eq!(
             available_system_update_follow_up(
                 &Ok(UpdateCheckResult::VersionCheckFailed),
+                &Page::WebApp(0),
                 &Page::WebApp(0),
             ),
             AvailableSystemUpdateFollowUp::NoOp,
@@ -1649,38 +1711,9 @@ mod available_system_update_follow_up_tests {
             available_system_update_follow_up(
                 &Err(anyhow!("cdp navigate failed")),
                 &Page::WebApp(0),
+                &Page::WebApp(0),
             ),
             AvailableSystemUpdateFollowUp::LogFailure,
         );
-    }
-}
-
-#[cfg(test)]
-mod is_version_check_progress_page_tests {
-    use super::{Page, constant, is_version_check_progress_page};
-
-    #[test]
-    fn transient_progress_message_is_recognized() {
-        assert!(is_version_check_progress_page(&Page::Message(
-            0,
-            constant::VERSION_CHECK_PROGRESS_TV_MSG.to_string(),
-        )));
-    }
-
-    #[test]
-    fn other_message_is_not_progress_page() {
-        assert!(!is_version_check_progress_page(&Page::Message(
-            0,
-            "Welcome".to_string(),
-        )));
-    }
-
-    #[test]
-    fn non_message_pages_are_not_progress_page() {
-        // A page another operation may have navigated to while retries were in flight
-        // must not be mistaken for the transient version-check surface.
-        assert!(!is_version_check_progress_page(&Page::WebApp(0)));
-        assert!(!is_version_check_progress_page(&Page::QRCode(0)));
-        assert!(!is_version_check_progress_page(&Page::None(0)));
     }
 }

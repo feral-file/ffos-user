@@ -93,7 +93,7 @@ own bus. They arrive on:
 |---|---|
 | `show_pairing_qr_code` | Navigates CDP to the QR code page |
 | `factory_reset` | Starts the factory-reset flow |
-| `system_update` | Optional version check (`UpdateMode::Available`); on `NoUpdateNeeded`, restores the TV page snapshot from before the check (`WebApp` → webapp, QR/message/recovery → prior surface, not unconditional webapp) |
+| `system_update` | Optional version check (`UpdateMode::Available`); on `NoUpdateNeeded`, restores the TV page snapshot from before the check (`WebApp` → webapp, QR/message/recovery → prior surface, not unconditional webapp) **only if the canonical `page` is unchanged** — if another operation navigated during the check (`current_page != prior_page`) the restore is skipped so the newer page is not clobbered |
 | `upload_logs` | Uploads device logs |
 | `upload_logs_with_bundle` | Uploads device logs with a `support_bundle_id` for support evidence unification |
 
@@ -115,7 +115,11 @@ connect/TLS/read fails fast (classified as network) instead of hanging the check
 failures are classified (network vs HTTP class vs parse) for TV copy. For
 `UpdateExecution::Blocking` only, `check_and_update_system` attaches a progress
 channel so the launcher shows a short “checking for updates” line while those
-HTTP retries run; the channel is drained before final TV screens. For
+HTTP retries run; the channel is drained before final TV screens. Progress
+navigations are **transient** (`navigate_transient_message`) — they update the TV
+but never record the canonical `app_state.page`, so a lagging progress write can
+never overwrite a page another operation set, and the no-update restore guard can
+trust `current_page == prior_page` as a true ownership signal. For
 `UpdateExecution::NonBlocking` (BLE), updater calls pass `None` so CDP progress
 navigations are not on the mobile response path.
 `check_and_update_system` begins with a forced `refresh_remote_version`; when that
