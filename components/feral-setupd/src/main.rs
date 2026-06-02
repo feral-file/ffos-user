@@ -687,11 +687,6 @@ mod callbacks {
             return;
         }
 
-        // Snapshot the canonical page before the check. The progress UI is transient and never
-        // records `page`, so this snapshot only changes if ANOTHER operation navigates during the
-        // check — which is exactly what the restore decision must detect.
-        let prior_page = app_state.page.lock().await.clone();
-
         // Use Available mode for user-triggered updates (check for any newer version)
         // Use Blocking execution since D-Bus callback runs in a spawned task anyway
         let result = super::check_and_update_system(
@@ -702,18 +697,18 @@ mod callbacks {
         )
         .await;
 
-        // Re-read the canonical page after the check. If it no longer equals `prior_page`, another
-        // operation took ownership of the TV while retries were in flight and we must not restore.
-        let current_page = app_state.page.lock().await.clone();
-        match super::available_system_update_follow_up(&result, &prior_page, &current_page) {
-            super::AvailableSystemUpdateFollowUp::RestoreWebApp => {
-                // `show_webapp` has a fast-path that skips navigation when CDP is already on the
-                // webapp URL; here the TV shows the transient progress URL (not the webapp URL),
-                // so it always re-navigates and the transient screen is corrected.
-                let _ = show_webapp(app_state, chromium).await;
-            }
-            super::AvailableSystemUpdateFollowUp::RestorePriorPage => {
-                if let Err(e) = super::restore_prior_page(app_state, chromium, prior_page).await {
+        match super::available_system_update_follow_up(&result) {
+            super::AvailableSystemUpdateFollowUp::RestoreCurrentPage => {
+                // The transient progress UI may have left the TV on the "Checking for updates..."
+                // URL. The progress task is already drained (`finish()` inside the check), so it
+                // cannot race this re-show. We read the canonical page NOW and re-show it: if
+                // another operation navigated during the check, this re-asserts THAT page rather
+                // than a stale pre-check snapshot; otherwise it restores the pre-check surface.
+                // (This is safe against the progress task, not a full atomic guarantee — a foreign
+                // navigation in the small window between this read and the re-show is last-writer,
+                // same as any other navigation, and self-corrects on the next transition.)
+                let current_page = app_state.page.lock().await.clone();
+                if let Err(e) = super::navigate_to_page(app_state, chromium, current_page).await {
                     eprintln!("MAIN: Failed to restore TV page after no-update check: {e:#?}");
                 }
             }
@@ -1106,42 +1101,30 @@ pub enum UpdateCheckResult {
 /// Follow-up after `check_and_update_system(UpdateMode::Available, …)` in the D-Bus path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AvailableSystemUpdateFollowUp {
-    /// No newer build while the user was already on the bundled web app.
-    RestoreWebApp,
-    /// No newer build; re-show the setup/recovery/message surface from before the check.
-    RestorePriorPage,
+    /// No newer build: re-show the CURRENT canonical page so the TV leaves the transient
+    /// "Checking for updates..." URL the progress UI may have painted.
+    RestoreCurrentPage,
     /// Blocking orchestration failed (CDP navigate, updater start, etc.).
     LogFailure,
-    /// Core already drove TV/updater (update started, reflash, classified fetch error).
+    /// Core already drove the final TV screen (update started, reflash, classified fetch error).
     NoOp,
 }
 
-/// Decide the no-update follow-up for the D-Bus `system_update` path.
+/// Decide the follow-up for the D-Bus `system_update` path.
 ///
-/// The callback is spawned and ACKed immediately, so another operation (e.g. pairing moving the
-/// TV to the web app) can navigate the canonical page while this check's HTTP retries are still in
-/// flight. Because the version-check progress UI is transient (it never records `page` — see
-/// `navigate_transient_message`), `current_page != prior_page` is a precise signal that some OTHER
-/// operation took ownership of the screen during the check; in that case we must NOT restore our
-/// pre-check snapshot and clobber the newer page. Only when the page is unchanged do we re-show the
-/// snapshot (the transient progress copy is what's actually on the TV, so a re-navigation is needed).
+/// On `NoUpdateNeeded` the core did NOT navigate a final screen, so the TV is whatever was painted
+/// last — and because the version-check progress UI is transient (`navigate_transient_message`
+/// never records `page`), that may be the "Checking for updates..." URL even though the canonical
+/// page moved on. The caller therefore re-shows the CURRENT canonical page (read after the check):
+/// this both corrects a stuck transient screen and is inherently clobber-safe — it re-asserts the
+/// page another operation may have set during the check, never a stale pre-check snapshot. The
+/// progress task is already drained by `finish()` before this runs, so no later transient
+/// navigation can race the re-show. Other results already drove their own final screen → `NoOp`.
 fn available_system_update_follow_up(
     result: &Result<UpdateCheckResult>,
-    prior_page: &Page,
-    current_page: &Page,
 ) -> AvailableSystemUpdateFollowUp {
     match result {
-        Ok(UpdateCheckResult::NoUpdateNeeded) => {
-            if current_page != prior_page {
-                // A newer navigation owns the screen; leave it alone.
-                return AvailableSystemUpdateFollowUp::NoOp;
-            }
-            match prior_page {
-                Page::WebApp(_) => AvailableSystemUpdateFollowUp::RestoreWebApp,
-                Page::None(_) | Page::SystemUpgrade(_) => AvailableSystemUpdateFollowUp::NoOp,
-                _ => AvailableSystemUpdateFollowUp::RestorePriorPage,
-            }
-        }
+        Ok(UpdateCheckResult::NoUpdateNeeded) => AvailableSystemUpdateFollowUp::RestoreCurrentPage,
         Err(_) => AvailableSystemUpdateFollowUp::LogFailure,
         Ok(_) => AvailableSystemUpdateFollowUp::NoOp,
     }
@@ -1256,8 +1239,13 @@ async fn check_and_update_system(
         }
         Ok(false) => {} // Device can be upgraded, continue
         Err(e) => {
+            // Continue with the update check if this fails. This is safe because the forced
+            // `refresh_remote_version` above already succeeded (otherwise we'd have early-returned),
+            // so the cache is populated and this read is unlikely to fail; the subsequent
+            // `is_update_required`/`is_update_available` reads the same cache and surfaces any
+            // classified error there. The reflash gate is only skipped on a genuinely transient
+            // post-refresh failure, recovered on the next check.
             eprintln!("MAIN: Error checking if device is too old: {e:#?}");
-            // Continue with update check if this fails
         }
     }
 
@@ -1383,14 +1371,19 @@ impl VersionCheckProgress {
     }
 }
 
-/// Re-show the TV surface that was active before an optional version check replaced it
-/// with transient progress copy. Called from the D-Bus `system_update` no-update path only.
-async fn restore_prior_page(
-    app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
-    prior: Page,
-) -> Result<()> {
-    match prior {
+/// Navigate the TV to the given canonical `page`, re-asserting it on screen.
+///
+/// Used by the D-Bus `system_update` no-update path to leave the transient progress URL. For
+/// `WebApp`, `show_webapp`'s fast-path skips the navigation when CDP is already on the webapp URL
+/// (so an already-correct screen is not needlessly reloaded).
+///
+/// `SystemUpgrade`/`None` are intentional no-ops: `SystemUpgrade` is owned by an in-flight update
+/// op that drives its own screen, and `None` is the pre-surface boot state. The only way to reach
+/// here with `None` is a `system_update` fired before any real surface was established at early
+/// boot; the concurrent `on_startup_with_internet` flow then establishes the surface, so the TV
+/// does not stay on the transient screen. Neither carries a re-showable surface here.
+async fn navigate_to_page(app_state: &Arc<AppState>, chrome: &Arc<Cdp>, page: Page) -> Result<()> {
+    match page {
         Page::WebApp(_) => show_webapp(app_state, chrome).await,
         Page::QRCode(_) => show_qrcode(app_state, chrome).await,
         Page::Message(_, text) => show_message(chrome, app_state, &text).await,
@@ -1586,97 +1579,26 @@ mod version_check_progress_tests {
 #[cfg(test)]
 mod available_system_update_follow_up_tests {
     use super::{
-        AvailableSystemUpdateFollowUp, Page, UpdateCheckResult, available_system_update_follow_up,
+        AvailableSystemUpdateFollowUp, UpdateCheckResult, available_system_update_follow_up,
     };
     use anyhow::anyhow;
 
-    // For the "no other operation navigated during the check" cases, `current_page` equals
-    // `prior_page` (the transient progress UI never records the canonical page).
-
+    /// No update → re-show the current canonical page. The caller reads the CURRENT page (after the
+    /// check) and re-navigates to it, which both corrects a stuck transient progress screen and
+    /// re-asserts any page another operation set during the check (never clobbering it with a stale
+    /// snapshot). This is why the decision needs no prior/current comparison here.
     #[test]
-    fn no_update_needed_after_webapp_restores_webapp() {
+    fn no_update_needed_restores_current_page() {
         assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
-                &Page::WebApp(0),
-                &Page::WebApp(0),
-            ),
-            AvailableSystemUpdateFollowUp::RestoreWebApp,
-        );
-    }
-
-    #[test]
-    fn no_update_needed_after_qrcode_restores_prior_page() {
-        assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
-                &Page::QRCode(0),
-                &Page::QRCode(0),
-            ),
-            AvailableSystemUpdateFollowUp::RestorePriorPage,
-        );
-    }
-
-    #[test]
-    fn no_update_needed_after_message_restores_prior_page() {
-        assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
-                &Page::Message(0, "Welcome".to_string()),
-                &Page::Message(0, "Welcome".to_string()),
-            ),
-            AvailableSystemUpdateFollowUp::RestorePriorPage,
-        );
-    }
-
-    #[test]
-    fn no_update_needed_with_unknown_prior_page_is_no_op() {
-        assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
-                &Page::None(0),
-                &Page::None(0),
-            ),
-            AvailableSystemUpdateFollowUp::NoOp,
-        );
-    }
-
-    /// The race the fix targets: while the check ran, another operation navigated the TV from the
-    /// pre-check QR page to the web app. The follow-up must NOT restore the stale QR snapshot.
-    #[test]
-    fn concurrent_navigation_during_check_is_not_clobbered() {
-        assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
-                &Page::QRCode(0),
-                &Page::WebApp(1),
-            ),
-            AvailableSystemUpdateFollowUp::NoOp,
-        );
-    }
-
-    /// Same prior/current page kind but a newer timestamp means another operation re-navigated
-    /// during the check; treat it as a concurrent transition and do not restore.
-    #[test]
-    fn renavigation_to_same_page_kind_is_not_restored() {
-        assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::NoUpdateNeeded),
-                &Page::QRCode(0),
-                &Page::QRCode(7),
-            ),
-            AvailableSystemUpdateFollowUp::NoOp,
+            available_system_update_follow_up(&Ok(UpdateCheckResult::NoUpdateNeeded)),
+            AvailableSystemUpdateFollowUp::RestoreCurrentPage,
         );
     }
 
     #[test]
     fn update_started_is_no_op_for_dbus_follow_up() {
         assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::UpdateStarted),
-                &Page::WebApp(0),
-                &Page::WebApp(0),
-            ),
+            available_system_update_follow_up(&Ok(UpdateCheckResult::UpdateStarted)),
             AvailableSystemUpdateFollowUp::NoOp,
         );
     }
@@ -1684,11 +1606,7 @@ mod available_system_update_follow_up_tests {
     #[test]
     fn too_old_to_upgrade_is_no_op_for_dbus_follow_up() {
         assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::TooOldToUpgrade),
-                &Page::WebApp(0),
-                &Page::WebApp(0),
-            ),
+            available_system_update_follow_up(&Ok(UpdateCheckResult::TooOldToUpgrade)),
             AvailableSystemUpdateFollowUp::NoOp,
         );
     }
@@ -1696,11 +1614,7 @@ mod available_system_update_follow_up_tests {
     #[test]
     fn version_check_failed_is_no_op_for_dbus_follow_up() {
         assert_eq!(
-            available_system_update_follow_up(
-                &Ok(UpdateCheckResult::VersionCheckFailed),
-                &Page::WebApp(0),
-                &Page::WebApp(0),
-            ),
+            available_system_update_follow_up(&Ok(UpdateCheckResult::VersionCheckFailed)),
             AvailableSystemUpdateFollowUp::NoOp,
         );
     }
@@ -1708,11 +1622,7 @@ mod available_system_update_follow_up_tests {
     #[test]
     fn orchestration_error_is_logged_only() {
         assert_eq!(
-            available_system_update_follow_up(
-                &Err(anyhow!("cdp navigate failed")),
-                &Page::WebApp(0),
-                &Page::WebApp(0),
-            ),
+            available_system_update_follow_up(&Err(anyhow!("cdp navigate failed"))),
             AvailableSystemUpdateFollowUp::LogFailure,
         );
     }

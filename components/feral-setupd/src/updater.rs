@@ -79,17 +79,14 @@ impl std::error::Error for VersionFetchError {
 
 fn classify_version_fetch_error(err: &anyhow::Error) -> VersionFetchFailureKind {
     let full = err.to_string();
-    const HTTP_PREFIX: &str = "HTTP ";
-    if full.starts_with(HTTP_PREFIX) {
-        if let Some(rest) = full.strip_prefix(HTTP_PREFIX) {
-            if let Some(c) = rest.chars().next() {
-                if c == '4' {
-                    return VersionFetchFailureKind::Client;
-                }
-                if c == '5' {
-                    return VersionFetchFailureKind::Server;
-                }
-            }
+    // The HTTP error string is built as "HTTP {status} ..." where `status` Displays as e.g.
+    // "503 Service Unavailable", so the first character after the prefix is the HTTP class digit.
+    // `strip_prefix` returns `None` when the prefix is absent, so no separate `starts_with` is needed.
+    if let Some(rest) = full.strip_prefix("HTTP ") {
+        match rest.chars().next() {
+            Some('4') => return VersionFetchFailureKind::Client,
+            Some('5') => return VersionFetchFailureKind::Server,
+            _ => {}
         }
     }
 
@@ -410,7 +407,8 @@ async fn fetch_remote_version(
 
     for attempt in 1..=max_retries {
         if let Some(tx) = &progress {
-            if tx.send((attempt, max_retries)).await.is_err() {
+            let sent = tx.send((attempt, max_retries)).await;
+            if sent.is_err() {
                 // Receiver dropped (setup finished); keep fetching without UI updates.
                 eprintln!(
                     "UPDATER: progress channel closed; continuing version fetch without TV updates"
