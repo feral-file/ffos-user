@@ -1154,10 +1154,21 @@ async fn check_and_update_system(
 ) -> Result<UpdateCheckResult> {
     let progress = VersionCheckProgress::start(execution, chrome.clone());
 
+    // BLE/NonBlocking flows hold the mobile notification open until this fetch resolves
+    // (`handle_connect_wifi` awaits the callback before replying), so cap them to a single
+    // attempt (worst case ≈ one request timeout) instead of the full ~34s retry budget that
+    // would violate the BLE response contract (docs/api-design.md "BLE response"). Blocking
+    // startup/D-Bus flows can wait, so they keep the full budget for resilience.
+    let retries = match execution {
+        UpdateExecution::Blocking => updater::RefreshRetries::Full,
+        UpdateExecution::NonBlocking => updater::RefreshRetries::Single,
+    };
+
     // Force a fresh fetch first. This is a user-triggered/blocking check, so a failed live
     // refresh must surface as classified copy rather than silently falling back to stale
     // cached metadata (which could hide an outage or a newly raised minimum version).
-    if let Err(ve) = updater::refresh_remote_version(progress.as_updater_progress()).await {
+    if let Err(ve) = updater::refresh_remote_version(retries, progress.as_updater_progress()).await
+    {
         progress.finish().await;
         return show_version_check_failure(app_state, chrome, execution, ve).await;
     }

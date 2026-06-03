@@ -127,17 +127,48 @@ fn classify_version_fetch_error(err: &anyhow::Error) -> VersionFetchFailureKind 
 
 // ---------- Public API ----------
 
+/// Bounds how many HTTP attempts a forced version refresh makes before failing.
+///
+/// Why this exists: BLE flows hold the mobile notification open until the version fetch
+/// resolves (`handle_connect_wifi` awaits the callback before `notify_central`), so they must
+/// fail fast to honor the "BLE response" contract in `docs/api-design.md`. The full retry
+/// budget can take ~34s on distributor/network slowness (3 attempts × 10s timeout + 2s
+/// backoffs), which would blow that contract. Blocking startup/D-Bus flows can wait, so they
+/// keep the full budget for resilience on flaky networks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshRetries {
+    /// One attempt, no retry/backoff (worst case ≈ a single request timeout). For
+    /// latency-sensitive (BLE / `NonBlocking`) callers that gate a mobile response.
+    Single,
+    /// Full retry budget (`UPDATER_VERSION_CHECK_RETRIES`) with backoff. For Blocking callers.
+    Full,
+}
+
+impl RefreshRetries {
+    #[must_use]
+    pub fn max_attempts(self) -> u32 {
+        match self {
+            RefreshRetries::Single => 1,
+            RefreshRetries::Full => constant::UPDATER_VERSION_CHECK_RETRIES,
+        }
+    }
+}
+
 /// Force refresh the cached remote version information.
 ///
 /// Returns the classified error when the live fetch fails so callers on a
 /// user-triggered/blocking path can surface actionable copy instead of silently
-/// falling back to (possibly stale) cached metadata. `progress` is used during setup
-/// to drive TV copy between HTTP attempts; periodic refresh passes `None` so we never
+/// falling back to (possibly stale) cached metadata. `retries` bounds the retry budget so
+/// latency-sensitive BLE callers fail fast (see `RefreshRetries`). `progress` is used during
+/// setup to drive TV copy between HTTP attempts; periodic refresh passes `None` so we never
 /// spam the UI from the background task.
 pub async fn refresh_remote_version(
+    retries: RefreshRetries,
     progress: Option<FetchProgressTx>,
 ) -> std::result::Result<(), VersionFetchError> {
-    fetch_remote_version(true, progress).await.map(|_| ())
+    fetch_remote_version(true, retries, progress)
+        .await
+        .map(|_| ())
 }
 
 /// Spawn a background task that periodically refreshes the cached remote version.
@@ -148,8 +179,9 @@ pub fn spawn_remote_version_refresher() {
         loop {
             time::sleep(interval).await;
             println!("UPDATER: Periodic remote version refresh triggered");
-            // Background refresh tolerates failures: keep serving the last-known cache.
-            let _ = refresh_remote_version(None).await;
+            // Background refresh tolerates failures: keep serving the last-known cache. No mobile
+            // response is waiting on it, so use the full retry budget for resilience.
+            let _ = refresh_remote_version(RefreshRetries::Full, None).await;
         }
     });
 }
@@ -162,7 +194,7 @@ pub async fn is_update_required(
     let current = cfg::current_version()
         .await
         .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
-    let remote_versions = fetch_remote_version(false, progress).await?;
+    let remote_versions = fetch_remote_version(false, RefreshRetries::Full, progress).await?;
     Ok(current < remote_versions.min_runtime_version)
 }
 
@@ -173,13 +205,13 @@ pub async fn is_update_available(
     let current = cfg::current_version()
         .await
         .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
-    let remote_versions = fetch_remote_version(false, progress).await?;
+    let remote_versions = fetch_remote_version(false, RefreshRetries::Full, progress).await?;
     Ok(current < remote_versions.latest_version)
 }
 
 /// Return the latest version from the remote server.
 pub async fn latest_version() -> std::result::Result<String, VersionFetchError> {
-    let remote_versions = fetch_remote_version(false, None).await?;
+    let remote_versions = fetch_remote_version(false, RefreshRetries::Full, None).await?;
     Ok(remote_versions.latest_version.to_string())
 }
 
@@ -191,7 +223,7 @@ pub async fn is_too_old_to_upgrade(
     let current = cfg::current_version()
         .await
         .map_err(|e| VersionFetchError::new(VersionFetchFailureKind::Unknown, e))?;
-    let remote_versions = fetch_remote_version(false, progress).await?;
+    let remote_versions = fetch_remote_version(false, RefreshRetries::Full, progress).await?;
 
     if let Some(min_upgradeable) = &remote_versions.min_upgradeable_version {
         Ok(current < *min_upgradeable)
@@ -202,13 +234,13 @@ pub async fn is_too_old_to_upgrade(
 
 /// Return the flashing guide URL from the remote server, if available.
 pub async fn flashing_guide_url() -> std::result::Result<Option<String>, VersionFetchError> {
-    let remote_versions = fetch_remote_version(false, None).await?;
+    let remote_versions = fetch_remote_version(false, RefreshRetries::Full, None).await?;
     Ok(remote_versions.flashing_guide.clone())
 }
 
 /// Return the minimum upgradeable version from the remote server, if available.
 pub async fn min_upgradeable_version() -> std::result::Result<Option<String>, VersionFetchError> {
-    let remote_versions = fetch_remote_version(false, None).await?;
+    let remote_versions = fetch_remote_version(false, RefreshRetries::Full, None).await?;
     Ok(remote_versions
         .min_upgradeable_version
         .as_ref()
@@ -377,6 +409,7 @@ struct UpstreamVersion {
 
 async fn fetch_remote_version(
     refresh: bool,
+    retries: RefreshRetries,
     progress: Option<FetchProgressTx>,
 ) -> std::result::Result<UpstreamVersion, VersionFetchError> {
     // Check if we have a cached version
@@ -400,15 +433,54 @@ async fn fetch_remote_version(
         branch
     );
 
-    // Retry logic: attempt up to UPDATER_VERSION_CHECK_RETRIES times
-    let max_retries = constant::UPDATER_VERSION_CHECK_RETRIES;
     let retry_delay = Duration::from_millis(constant::UPDATER_VERSION_CHECK_RETRY_DELAY);
+    let versions = run_with_retries(
+        &url,
+        retries.max_attempts(),
+        retry_delay,
+        progress.as_ref(),
+        {
+            let url = url.clone();
+            move || {
+                let url = url.clone();
+                async move { fetch_remote_version_once(&url).await }
+            }
+        },
+    )
+    .await?;
+
+    // Store in cache
+    {
+        let mut cache = REMOTE_VERSIONS.write().unwrap();
+        *cache = Some(versions.clone());
+    }
+    Ok(versions)
+}
+
+/// Run `attempt_fn` up to `max_attempts` times, sleeping `retry_delay` between tries and
+/// classifying the final failure.
+///
+/// Extracted from `fetch_remote_version` so the retry budget — which differs per caller (see
+/// `RefreshRetries`) — can be exercised in unit tests with an injected failing seam, without real
+/// network or waiting on the OS socket timeout. `progress` is notified `(attempt, max_attempts)`
+/// before each try so setup can refresh the "checking for updates" TV line between retries; a
+/// closed receiver (setup finished) is logged and ignored so the fetch still completes.
+async fn run_with_retries<F, Fut>(
+    url: &str,
+    max_attempts: u32,
+    retry_delay: Duration,
+    progress: Option<&FetchProgressTx>,
+    mut attempt_fn: F,
+) -> std::result::Result<UpstreamVersion, VersionFetchError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<UpstreamVersion>>,
+{
     let mut last_error: Option<VersionFetchError> = None;
 
-    for attempt in 1..=max_retries {
-        if let Some(tx) = &progress {
-            let sent = tx.send((attempt, max_retries)).await;
-            if sent.is_err() {
+    for attempt in 1..=max_attempts {
+        if let Some(tx) = progress {
+            if tx.send((attempt, max_attempts)).await.is_err() {
                 // Receiver dropped (setup finished); keep fetching without UI updates.
                 eprintln!(
                     "UPDATER: progress channel closed; continuing version fetch without TV updates"
@@ -416,24 +488,17 @@ async fn fetch_remote_version(
             }
         }
 
-        println!("UPDATER: Fetching version info from {url} (attempt {attempt}/{max_retries})");
+        println!("UPDATER: Fetching version info from {url} (attempt {attempt}/{max_attempts})");
 
-        match fetch_remote_version_once(&url).await {
-            Ok(versions) => {
-                // Store in cache
-                {
-                    let mut cache = REMOTE_VERSIONS.write().unwrap();
-                    *cache = Some(versions.clone());
-                }
-                return Ok(versions);
-            }
+        match attempt_fn().await {
+            Ok(versions) => return Ok(versions),
             Err(e) => {
-                eprintln!("UPDATER: Version check attempt {attempt}/{max_retries} failed: {e:#}");
+                eprintln!("UPDATER: Version check attempt {attempt}/{max_attempts} failed: {e:#}");
                 let kind = classify_version_fetch_error(&e);
                 last_error = Some(VersionFetchError::new(kind, e));
 
                 // Don't sleep after the last attempt
-                if attempt < max_retries {
+                if attempt < max_attempts {
                     time::sleep(retry_delay).await;
                 }
             }
@@ -443,7 +508,7 @@ async fn fetch_remote_version(
     Err(last_error.unwrap_or_else(|| {
         VersionFetchError::new(
             VersionFetchFailureKind::Unknown,
-            anyhow::anyhow!("Version check failed after {max_retries} attempts"),
+            anyhow::anyhow!("Version check failed after {max_attempts} attempts"),
         )
     }))
 }
@@ -484,6 +549,79 @@ async fn fetch_remote_version_once(url: &str) -> Result<UpstreamVersion> {
     };
 
     Ok(versions)
+}
+
+#[cfg(test)]
+mod retry_budget_tests {
+    use super::{RefreshRetries, UpstreamVersion, run_with_retries};
+    use crate::constant;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    #[test]
+    fn single_is_one_attempt_full_is_configured_retries() {
+        assert_eq!(RefreshRetries::Single.max_attempts(), 1);
+        assert_eq!(
+            RefreshRetries::Full.max_attempts(),
+            constant::UPDATER_VERSION_CHECK_RETRIES
+        );
+    }
+
+    /// The BLE/NonBlocking contract: a stalled/failing distributor must NOT drive the full retry
+    /// budget before the caller (which gates the mobile BLE notification) can return. With a seam
+    /// that always fails, `Single` performs exactly one attempt and gives up — so the BLE callback
+    /// is never held through the ~34s full-retry path on distributor/network slowness.
+    #[tokio::test]
+    async fn single_does_not_retry_failing_fetch() {
+        let calls = AtomicU32::new(0);
+        let result = run_with_retries(
+            "http://distributor.invalid/",
+            RefreshRetries::Single.max_attempts(),
+            // Non-zero delay would be skipped after the final (and only) attempt anyway; using a
+            // real value guards against a regression that retries despite max_attempts == 1.
+            Duration::from_millis(constant::UPDATER_VERSION_CHECK_RETRY_DELAY),
+            None,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<UpstreamVersion, _>(anyhow::anyhow!("stalled fetch")) }
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an always-failing fetch must surface an error"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "NonBlocking (Single) must perform exactly one attempt, not the full retry budget"
+        );
+    }
+
+    /// Blocking callers can wait, so they exhaust the configured retry budget on failure.
+    #[tokio::test]
+    async fn full_retries_failing_fetch() {
+        let calls = AtomicU32::new(0);
+        let result = run_with_retries(
+            "http://distributor.invalid/",
+            RefreshRetries::Full.max_attempts(),
+            Duration::ZERO, // keep the test fast; we assert attempt count, not backoff timing
+            None,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<UpstreamVersion, _>(anyhow::anyhow!("stalled fetch")) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            constant::UPDATER_VERSION_CHECK_RETRIES,
+            "Blocking (Full) must exhaust the configured retry budget"
+        );
+    }
 }
 
 #[cfg(test)]
