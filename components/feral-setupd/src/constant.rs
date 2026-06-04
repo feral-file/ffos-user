@@ -21,8 +21,25 @@ pub const UPDATER_UPSTREAM_CONFIG_URL_SUFFIX: &str = "/api/latest/";
 pub const UPDATER_PROCESS_LOG_FILE: &str = "/var/log/updaterd.log";
 pub const UPDATER_VERSION_CHECK_RETRIES: u32 = 3;
 pub const UPDATER_VERSION_CHECK_RETRY_DELAY: u64 = 2 * 1000; // 2 seconds between retries
+/// Per-attempt HTTP timeout so an unstable connection (stalled connect/TLS/read) fails fast
+/// with a classified network error instead of hanging the blocking/D-Bus check on the
+/// "Checking for updates..." screen until the OS socket timeout fires.
+pub const UPDATER_VERSION_CHECK_REQUEST_TIMEOUT: u64 = 10 * 1000; // 10 seconds per attempt
 pub const UPDATER_REMOTE_VERSION_REFRESH_INTERVAL: u64 = 60 * 60 * 1000; // 1 hour
-pub const UPDATER_FAILED_TO_CHECK_VERSION_MSG: &str = "FF1 needs to check for critical updates before playing art. If your network is stable and this persists, contact support@feralfile.com - your device may need hands-on help.";
+
+/// Shown on the TV between HTTP retry attempts while checking for updates.
+pub const VERSION_CHECK_PROGRESS_TV_MSG: &str = "Checking for updates...";
+
+/// Unclassified distributor/config failures; keep umbrella guidance for odd edge cases.
+pub const VERSION_CHECK_FAILED_UNKNOWN_MSG: &str = "FF1 needs to check for critical updates before playing art. If your network is stable and this persists, contact support@feralfile.com - your device may need hands-on help.";
+
+pub const VERSION_CHECK_FAILED_NETWORK_MSG: &str = "We could not reach the update server. Your Wi-Fi may be unstable—move closer to the router, wait a moment, then try again from the app.";
+
+pub const VERSION_CHECK_FAILED_SERVER_MSG: &str = "The update service is temporarily unavailable. Please wait a few minutes and try again from the app.";
+
+pub const VERSION_CHECK_FAILED_CLIENT_MSG: &str = "The update server rejected this request (configuration issue). If this keeps happening, contact support@feralfile.com.";
+
+pub const VERSION_CHECK_FAILED_PARSE_MSG: &str = "We received an unexpected response from the update server. Please try again later or contact support@feralfile.com.";
 
 // Bluetooth configuration
 pub const SERVICE_UUID: Uuid = Uuid::from_u128(0xf7826da64fa24e988024bc5b71e0893e_u128);

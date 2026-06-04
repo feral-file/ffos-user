@@ -93,7 +93,7 @@ own bus. They arrive on:
 |---|---|
 | `show_pairing_qr_code` | Navigates CDP to the QR code page |
 | `factory_reset` | Starts the factory-reset flow |
-| `system_update` | Triggers a software update |
+| `system_update` | Optional version check (`UpdateMode::Available`); on `NoUpdateNeeded`, re-shows the **current** canonical page (read after the check, once the progress task is drained) so the TV leaves the transient "Checking for updates..." URL. Re-showing `current` (not the pre-check snapshot) both fixes a stuck transient screen and re-asserts any page another operation navigated to during the check — never clobbering it (`SystemUpgrade`/`None` have no surface → no-op) |
 | `upload_logs` | Uploads device logs |
 | `upload_logs_with_bundle` | Uploads device logs with a `support_bundle_id` for support evidence unification |
 
@@ -108,6 +108,29 @@ with an error.
 
 Runs/monitors the updater systemd unit, tails the updater log file, extracts
 progress/messages via regex, and streams progress/error lines back to callers.
+
+Distributor version metadata (`/api/latest/...`) is fetched with bounded retries,
+each attempt capped by `UPDATER_VERSION_CHECK_REQUEST_TIMEOUT` so a stalled
+connect/TLS/read fails fast (classified as network) instead of hanging the check;
+failures are classified (network vs HTTP class vs parse) for TV copy. For
+`UpdateExecution::Blocking` only, `check_and_update_system` attaches a progress
+channel so the launcher shows a short “checking for updates” line while those
+HTTP retries run; the channel is drained (`finish()`) before any final TV screen.
+Progress navigations are **transient** (`navigate_transient_message`) — they update
+the TV but never record the canonical `app_state.page`, so a lagging progress write
+can never overwrite a page another operation set. Because the screen may still be on
+the transient URL afterwards, the no-update path re-shows the current canonical page
+(read after the task is drained) to leave it. For `UpdateExecution::NonBlocking`
+(BLE), updater calls pass `None` so CDP progress navigations are not on the mobile
+response path.
+`check_and_update_system` begins with a forced `refresh_remote_version`; when that
+live fetch fails it surfaces the classified error and returns `VersionCheckFailed`
+rather than falling back to stale cached metadata (the decision helpers then read
+the freshly refreshed cache). The hourly background refresher instead ignores
+failures and keeps serving the last-known cache.
+Only `refresh_remote_version`, `is_too_old_to_upgrade`, `is_update_required`, and
+`is_update_available` accept that channel; helpers like `latest_version` read
+metadata without driving the progress UI.
 
 Two enums control update behaviour:
 
