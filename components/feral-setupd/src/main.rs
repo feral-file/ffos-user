@@ -113,7 +113,13 @@ struct AppState {
 }
 
 const MAX_UPDATE_RETRIES: u8 = 3;
-const UPDATE_FAILED_MSG: &str = "Update didn't complete. Use your phone to try again, or restart the device. If it still fails, contact support@feralfile.com.";
+
+// Message shown when update fails (fresh failure during current session)
+const UPDATE_FAILED_FRESH_MSG: &str = "Update didn't complete. Use your phone to try again, or restart the device. If it still fails, contact support@feralfile.com.";
+
+// Message shown on reboot when UpdateFailed phase is restored from disk.
+// User already restarted, so guide them to retry via phone or contact support.
+const UPDATE_FAILED_RECOVERED_MSG: &str = "Previous update failed. The device attempted to update but couldn't complete. Use your phone to retry the update. If the problem persists, contact support@feralfile.com for assistance.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdateErrorType {
@@ -821,6 +827,17 @@ mod callbacks {
                 if !app_state.internet.is_online(true).await {
                     return Err(ble::BleStatus::WifiRequired);
                 }
+
+                // Clear and persist UpdateFailed phase on explicit keep_wifi retry.
+                // User is confirming internet/WiFi is working, so attempt recovery.
+                if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+                    println!("BLE: Clearing UpdateFailed phase on keep_wifi retry attempt");
+                    app_state.lifecycle.set(SetupPhase::Idle);
+                    if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
+                        eprintln!("BLE: Failed to persist phase clear: {e:#?}");
+                    }
+                }
+
                 internet_setup_successfully_cb(&app_state, &chromium).await
             })
         })
@@ -1234,12 +1251,14 @@ async fn show_reflashing_qrcode(
 ///   should not continue.
 async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
     // If UpdateFailed phase is set, skip automatic update check on startup.
-    // Show the failure message (same as handle_permanent_update_failure) since internet is ready.
+    // Show the failure message (different from fresh failure) since this is reboot recovery.
     // Mobile app will see update_failed via device_info polling and can trigger explicit retry.
     if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
         println!("MAIN: Skipping startup update check - UpdateFailed phase is set");
-        println!("MAIN: Showing failure message and waiting for explicit BLE/D-Bus retry");
-        show_system_upgrade(&chrome, &app_state, UPDATE_FAILED_MSG).await?;
+        println!(
+            "MAIN: Showing recovered failure message and waiting for explicit BLE/D-Bus retry"
+        );
+        show_system_upgrade(&chrome, &app_state, UPDATE_FAILED_RECOVERED_MSG).await?;
         return Ok(());
     }
 
@@ -1419,6 +1438,7 @@ async fn attempt_update(
 
 /// Show a clear failure message and keep it visible while `setup_phase=update_failed`.
 /// Mobile app can trigger retry via `keep_wifi` or `connect_wifi` BLE commands.
+/// Uses fresh failure message since this is called immediately after update failure.
 async fn handle_permanent_update_failure(
     app_state: &Arc<AppState>,
     chrome: &Arc<Cdp>,
@@ -1430,9 +1450,8 @@ async fn handle_permanent_update_failure(
         eprintln!("MAIN: Failed to persist UpdateFailed phase: {e:#?}");
         eprintln!("MAIN: Phase is set in memory; mobile sees update_failed until restart");
     }
-    // Show error message and stay on it - don't transition to QR code.
-    // Mobile app will see update_failed and can trigger retry.
-    let _ = show_system_upgrade(chrome, app_state, UPDATE_FAILED_MSG).await;
+    // Show fresh failure message - user can try restarting or retry via phone
+    let _ = show_system_upgrade(chrome, app_state, UPDATE_FAILED_FRESH_MSG).await;
 }
 
 /// Result of checking and potentially executing a system update.
@@ -2497,6 +2516,35 @@ mod tests {
 
         // Now mobile sees Ready
         assert_eq!(app_state.lifecycle.get(), SetupPhase::Ready);
+    }
+
+    #[test]
+    fn keep_wifi_retry_clears_update_failed_phase() {
+        let lifecycle = SetupLifecycle::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let state_store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        // Set and persist UpdateFailed phase (simulating previous update failure)
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&state_store).unwrap();
+        assert_eq!(lifecycle.get(), SetupPhase::UpdateFailed);
+
+        // Simulate keep_wifi retry: clear and persist
+        if lifecycle.get() == SetupPhase::UpdateFailed {
+            lifecycle.set(SetupPhase::Idle);
+            lifecycle.persist(&state_store).unwrap();
+        }
+
+        // Verify phase is cleared in memory
+        assert_eq!(lifecycle.get(), SetupPhase::Idle);
+
+        // Simulate reboot: restore from disk
+        let lifecycle_after_reboot = SetupLifecycle::new();
+        lifecycle_after_reboot.restore_from_store(&state_store);
+
+        // Verify UpdateFailed is not restored (cleared by keep_wifi)
+        assert_eq!(lifecycle_after_reboot.get(), SetupPhase::Idle);
     }
 }
 
