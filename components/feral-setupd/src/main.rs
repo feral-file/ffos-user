@@ -742,13 +742,33 @@ mod callbacks {
             Box::pin(async move {
                 let start_time = Instant::now();
 
-                // Clear and persist UpdateFailed phase on explicit WiFi retry before any operations.
-                // This ensures the persisted state is cleared even if the connection fails early.
+                // Clear and restore UpdateFailed phase on explicit WiFi retry.
+                // Restore the pre-failure durable phase if tracked, otherwise use Idle.
                 if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
-                    println!("BLE: Clearing UpdateFailed phase on WiFi retry attempt");
-                    app_state.lifecycle.set(SetupPhase::Idle);
+                    use crate::persistent_state::PRE_FAILURE_PHASE;
+
+                    let restored_phase =
+                        if let Some(phase_str) = app_state.state_store.get(PRE_FAILURE_PHASE) {
+                            let phase = SetupPhase::from_str(&phase_str);
+                            println!(
+                                "BLE: Restoring pre-failure phase '{}' on WiFi retry",
+                                phase.as_str()
+                            );
+                            phase
+                        } else {
+                            println!(
+                                "BLE: Clearing UpdateFailed to Idle (no pre-failure phase tracked)"
+                            );
+                            SetupPhase::Idle
+                        };
+
+                    app_state.lifecycle.set(restored_phase);
+
+                    // Clear the pre-failure tracking
+                    app_state.state_store.set(PRE_FAILURE_PHASE, "");
+
                     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
-                        eprintln!("BLE: Failed to persist phase clear: {e:#?}");
+                        eprintln!("BLE: Failed to persist phase restoration: {e:#?}");
                     }
                 }
 
@@ -828,13 +848,33 @@ mod callbacks {
                     return Err(ble::BleStatus::WifiRequired);
                 }
 
-                // Clear and persist UpdateFailed phase on explicit keep_wifi retry.
-                // User is confirming internet/WiFi is working, so attempt recovery.
+                // Clear and restore UpdateFailed phase on explicit keep_wifi retry.
+                // Restore the pre-failure durable phase if tracked, otherwise use Idle.
                 if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
-                    println!("BLE: Clearing UpdateFailed phase on keep_wifi retry attempt");
-                    app_state.lifecycle.set(SetupPhase::Idle);
+                    use crate::persistent_state::PRE_FAILURE_PHASE;
+
+                    let restored_phase =
+                        if let Some(phase_str) = app_state.state_store.get(PRE_FAILURE_PHASE) {
+                            let phase = SetupPhase::from_str(&phase_str);
+                            println!(
+                                "BLE: Restoring pre-failure phase '{}' on keep_wifi retry",
+                                phase.as_str()
+                            );
+                            phase
+                        } else {
+                            println!(
+                                "BLE: Clearing UpdateFailed to Idle (no pre-failure phase tracked)"
+                            );
+                            SetupPhase::Idle
+                        };
+
+                    app_state.lifecycle.set(restored_phase);
+
+                    // Clear the pre-failure tracking
+                    app_state.state_store.set(PRE_FAILURE_PHASE, "");
+
                     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
-                        eprintln!("BLE: Failed to persist phase clear: {e:#?}");
+                        eprintln!("BLE: Failed to persist phase restoration: {e:#?}");
                     }
                 }
 
@@ -1444,7 +1484,22 @@ async fn handle_permanent_update_failure(
     chrome: &Arc<Cdp>,
     error: &anyhow::Error,
 ) {
+    use crate::persistent_state::PRE_FAILURE_PHASE;
+
     eprintln!("MAIN: Permanent update failure: {error:#?}");
+
+    // Store the current durable phase before entering UpdateFailed.
+    // This allows recovery flows to restore the original paired/ready state after successful retry.
+    let current = app_state.lifecycle.get();
+    if current.is_durable() && current != SetupPhase::UpdateFailed {
+        app_state
+            .state_store
+            .set(PRE_FAILURE_PHASE, current.as_str());
+        if let Err(e) = app_state.state_store.save() {
+            eprintln!("MAIN: Failed to persist pre-failure phase: {e:#?}");
+        }
+    }
+
     app_state.lifecycle.set(SetupPhase::UpdateFailed);
     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
         eprintln!("MAIN: Failed to persist UpdateFailed phase: {e:#?}");
@@ -1536,6 +1591,11 @@ async fn check_and_update_system(
             return Ok(UpdateCheckResult::UpdateInProgress);
         }
     };
+
+    // Preserve the current phase to restore if no update is needed.
+    // Without this, durable phases (Ready, Pairing) would be lost during the
+    // mandatory no-update check, demoting paired devices to QR setup.
+    let phase_before_check = app_state.lifecycle.get();
 
     app_state.lifecycle.set(SetupPhase::CheckingVersion);
 
@@ -1691,9 +1751,11 @@ async fn check_and_update_system(
             if mode == UpdateMode::Available {
                 println!("MAIN: System update requested but no update available");
             }
-            // Only reset transient phases; preserve durable phases like Ready and Pairing
-            let current = app_state.lifecycle.get();
-            if !current.is_durable() {
+            // Restore the original phase if it was durable (Ready, Pairing), otherwise reset to Idle.
+            // This preserves paired device state across mandatory startup update checks.
+            if phase_before_check.is_durable() {
+                app_state.lifecycle.set(phase_before_check);
+            } else {
                 app_state.lifecycle.set(SetupPhase::Idle);
             }
             Ok(UpdateCheckResult::NoUpdateNeeded)

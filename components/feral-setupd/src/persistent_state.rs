@@ -24,6 +24,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// - `setup_phase`: Current setup phase (pairing, ready, update_failed, or empty for transient states)
 /// - `topic_id`: Relayer topic identifier used by the web app
 /// - `connected`: Whether the device has ever successfully connected to the internet
+/// - `pre_failure_phase`: Tracks the durable phase before entering update_failed (ready or pairing)
 ///
 /// The `save_lock` ensures concurrent saves from BLE, D-Bus, startup, and
 /// update tasks are serialized to prevent temp file overwrites and lost updates.
@@ -37,6 +38,7 @@ pub struct PersistentState {
 pub const SETUP_PHASE: &str = "setup_phase";
 pub const TOPIC_ID: &str = "topic_id";
 pub const CONNECTED: &str = "connected";
+pub const PRE_FAILURE_PHASE: &str = "pre_failure_phase";
 
 impl PersistentState {
     pub fn new(filepath: &str) -> Result<Self> {

@@ -54,7 +54,7 @@ impl SetupPhase {
         }
     }
 
-    fn from_str(s: &str) -> SetupPhase {
+    pub fn from_str(s: &str) -> SetupPhase {
         match s {
             "wifi_connecting" => SetupPhase::WifiConnecting,
             "checking_version" => SetupPhase::CheckingVersion,
@@ -362,5 +362,207 @@ mod tests {
 
         // Should restore Pairing since invariant is satisfied
         assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+    }
+
+    #[test]
+    fn restored_ready_phase_survives_no_update_check() {
+        let store = test_store();
+
+        // Simulate a paired device with Ready phase
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic-123");
+        store.set(crate::persistent_state::SETUP_PHASE, "ready");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+
+        // Simulate no-update check: preserve phase_before_check
+        let phase_before_check = lifecycle.get();
+        lifecycle.set(SetupPhase::CheckingVersion);
+
+        // Simulate Ok(false) branch - should restore original durable phase
+        if phase_before_check.is_durable() {
+            lifecycle.set(phase_before_check);
+        } else {
+            lifecycle.set(SetupPhase::Idle);
+        }
+
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+    }
+
+    #[test]
+    fn restored_pairing_phase_survives_no_update_check() {
+        let store = test_store();
+
+        // Simulate a device in pairing with topic_id
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic-456");
+        store.set(crate::persistent_state::SETUP_PHASE, "pairing");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+
+        // Simulate no-update check
+        let phase_before_check = lifecycle.get();
+        lifecycle.set(SetupPhase::CheckingVersion);
+
+        // Simulate Ok(false) branch
+        if phase_before_check.is_durable() {
+            lifecycle.set(phase_before_check);
+        } else {
+            lifecycle.set(SetupPhase::Idle);
+        }
+
+        assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+    }
+
+    #[test]
+    fn legacy_migration_survives_no_update_check() {
+        let store = test_store();
+
+        // Simulate legacy paired device (no setup_phase key)
+        store.set("paired", "true");
+        store.set(crate::persistent_state::TOPIC_ID, "legacy-topic-789");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+
+        // Should migrate to Ready
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+
+        // Simulate no-update check
+        let phase_before_check = lifecycle.get();
+        lifecycle.set(SetupPhase::CheckingVersion);
+
+        // Simulate Ok(false) branch
+        if phase_before_check.is_durable() {
+            lifecycle.set(phase_before_check);
+        } else {
+            lifecycle.set(SetupPhase::Idle);
+        }
+
+        // Should still be Ready after no-update check
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+    }
+
+    #[test]
+    fn update_failed_recovery_restores_ready_phase() {
+        let store = test_store();
+
+        // Start in Ready
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic-ready");
+        store.set(crate::persistent_state::SETUP_PHASE, "ready");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+
+        // Simulate update failure: store pre-failure phase
+        let current = lifecycle.get();
+        if current.is_durable() && current != SetupPhase::UpdateFailed {
+            store.set(crate::persistent_state::PRE_FAILURE_PHASE, current.as_str());
+            store.save().unwrap();
+        }
+
+        // Enter UpdateFailed
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        // Simulate retry: restore pre-failure phase
+        let restored_phase =
+            if let Some(phase_str) = store.get(crate::persistent_state::PRE_FAILURE_PHASE) {
+                SetupPhase::from_str(&phase_str)
+            } else {
+                SetupPhase::Idle
+            };
+
+        lifecycle.set(restored_phase);
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "");
+        lifecycle.persist(&store).unwrap();
+
+        // After successful update and reboot
+        let lifecycle2 = SetupLifecycle::new();
+        lifecycle2.restore_from_store(&store);
+
+        // Should restore to Ready, not Idle
+        assert_eq!(lifecycle2.get(), SetupPhase::Ready);
+    }
+
+    #[test]
+    fn update_failed_recovery_restores_pairing_phase() {
+        let store = test_store();
+
+        // Start in Pairing
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic-pairing");
+        store.set(crate::persistent_state::SETUP_PHASE, "pairing");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+
+        // Simulate update failure: store pre-failure phase
+        let current = lifecycle.get();
+        if current.is_durable() && current != SetupPhase::UpdateFailed {
+            store.set(crate::persistent_state::PRE_FAILURE_PHASE, current.as_str());
+            store.save().unwrap();
+        }
+
+        // Enter UpdateFailed
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        // Simulate retry: restore pre-failure phase
+        let restored_phase =
+            if let Some(phase_str) = store.get(crate::persistent_state::PRE_FAILURE_PHASE) {
+                SetupPhase::from_str(&phase_str)
+            } else {
+                SetupPhase::Idle
+            };
+
+        lifecycle.set(restored_phase);
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "");
+        lifecycle.persist(&store).unwrap();
+
+        // After successful update and reboot
+        let lifecycle2 = SetupLifecycle::new();
+        lifecycle2.restore_from_store(&store);
+
+        // Should restore to Pairing with topic_id intact
+        assert_eq!(lifecycle2.get(), SetupPhase::Pairing);
+    }
+
+    #[test]
+    fn update_failed_without_pre_failure_phase_returns_to_idle() {
+        let store = test_store();
+
+        // Device in UpdateFailed without pre_failure_phase tracked
+        // (e.g., old code or edge case)
+        store.set(crate::persistent_state::SETUP_PHASE, "update_failed");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::UpdateFailed);
+
+        // Simulate retry without pre_failure_phase
+        let restored_phase =
+            if let Some(phase_str) = store.get(crate::persistent_state::PRE_FAILURE_PHASE) {
+                SetupPhase::from_str(&phase_str)
+            } else {
+                SetupPhase::Idle
+            };
+
+        lifecycle.set(restored_phase);
+        lifecycle.persist(&store).unwrap();
+
+        // After retry, should be Idle (no pre-failure phase to restore)
+        let lifecycle2 = SetupLifecycle::new();
+        lifecycle2.restore_from_store(&store);
+        assert_eq!(lifecycle2.get(), SetupPhase::Idle);
     }
 }
