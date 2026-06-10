@@ -565,4 +565,113 @@ mod tests {
         lifecycle2.restore_from_store(&store);
         assert_eq!(lifecycle2.get(), SetupPhase::Idle);
     }
+
+    #[test]
+    fn production_flow_ready_through_update_failure_preserves_phase() {
+        let store = test_store();
+
+        // Start: Device is Ready with topic_id
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic");
+        store.set(crate::persistent_state::SETUP_PHASE, "ready");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+
+        // Production flow: check_and_update_system captures phase_before_check
+        let phase_before_check = lifecycle.get();
+
+        // Store PRE_FAILURE_PHASE if durable (mimics check_and_update_system)
+        if phase_before_check.is_durable() && phase_before_check != SetupPhase::UpdateFailed {
+            store.set(
+                crate::persistent_state::PRE_FAILURE_PHASE,
+                phase_before_check.as_str(),
+            );
+            store.save().unwrap();
+        }
+
+        // Enter CheckingVersion
+        lifecycle.set(SetupPhase::CheckingVersion);
+
+        // Enter Updating
+        lifecycle.set(SetupPhase::Updating);
+
+        // Update fails → handle_permanent_update_failure
+        // (PRE_FAILURE_PHASE already stored, current phase is Updating)
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        // User retries via BLE/D-Bus → restore PRE_FAILURE_PHASE
+        let restored_phase =
+            if let Some(phase_str) = store.get(crate::persistent_state::PRE_FAILURE_PHASE) {
+                SetupPhase::from_str(&phase_str)
+            } else {
+                SetupPhase::Idle
+            };
+
+        lifecycle.set(restored_phase);
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "");
+        lifecycle.persist(&store).unwrap();
+
+        // After successful update and reboot
+        let lifecycle2 = SetupLifecycle::new();
+        lifecycle2.restore_from_store(&store);
+
+        // Should restore to Ready (not Idle!)
+        assert_eq!(lifecycle2.get(), SetupPhase::Ready);
+    }
+
+    #[test]
+    fn production_flow_pairing_through_update_failure_preserves_phase() {
+        let store = test_store();
+
+        // Start: Device is Pairing with topic_id
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic-pairing");
+        store.set(crate::persistent_state::SETUP_PHASE, "pairing");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+
+        // Production flow: check_and_update_system captures phase_before_check
+        let phase_before_check = lifecycle.get();
+
+        // Store PRE_FAILURE_PHASE if durable (mimics check_and_update_system)
+        if phase_before_check.is_durable() && phase_before_check != SetupPhase::UpdateFailed {
+            store.set(
+                crate::persistent_state::PRE_FAILURE_PHASE,
+                phase_before_check.as_str(),
+            );
+            store.save().unwrap();
+        }
+
+        // Enter CheckingVersion → Updating
+        lifecycle.set(SetupPhase::CheckingVersion);
+        lifecycle.set(SetupPhase::Updating);
+
+        // Update fails while in Updating (transient, not durable)
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        // Retry restores PRE_FAILURE_PHASE
+        let restored_phase =
+            if let Some(phase_str) = store.get(crate::persistent_state::PRE_FAILURE_PHASE) {
+                SetupPhase::from_str(&phase_str)
+            } else {
+                SetupPhase::Idle
+            };
+
+        lifecycle.set(restored_phase);
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "");
+        lifecycle.persist(&store).unwrap();
+
+        // After reboot
+        let lifecycle2 = SetupLifecycle::new();
+        lifecycle2.restore_from_store(&store);
+
+        // Should restore to Pairing with topic_id intact
+        assert_eq!(lifecycle2.get(), SetupPhase::Pairing);
+    }
 }

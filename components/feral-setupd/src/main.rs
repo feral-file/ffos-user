@@ -954,13 +954,31 @@ mod callbacks {
             return;
         }
 
-        // Clear UpdateFailed phase after confirming internet is available.
-        // Update attempt will begin, so we can safely clear the recovery signal.
+        // Clear and restore UpdateFailed phase on explicit D-Bus manual retry.
+        // Restore the pre-failure durable phase if tracked, otherwise use Idle.
         if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
-            println!("DBUS: Clearing UpdateFailed phase on manual system update trigger");
-            app_state.lifecycle.set(SetupPhase::Idle);
+            use crate::persistent_state::PRE_FAILURE_PHASE;
+
+            let restored_phase =
+                if let Some(phase_str) = app_state.state_store.get(PRE_FAILURE_PHASE) {
+                    let phase = SetupPhase::from_str(&phase_str);
+                    println!(
+                        "DBUS: Restoring pre-failure phase '{}' on manual system update",
+                        phase.as_str()
+                    );
+                    phase
+                } else {
+                    println!("DBUS: Clearing UpdateFailed to Idle (no pre-failure phase tracked)");
+                    SetupPhase::Idle
+                };
+
+            app_state.lifecycle.set(restored_phase);
+
+            // Clear the pre-failure tracking
+            app_state.state_store.set(PRE_FAILURE_PHASE, "");
+
             if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
-                eprintln!("DBUS: Failed to persist phase clear: {e:#?}");
+                eprintln!("DBUS: Failed to persist phase restoration: {e:#?}");
                 return;
             }
         }
@@ -1484,21 +1502,10 @@ async fn handle_permanent_update_failure(
     chrome: &Arc<Cdp>,
     error: &anyhow::Error,
 ) {
-    use crate::persistent_state::PRE_FAILURE_PHASE;
-
     eprintln!("MAIN: Permanent update failure: {error:#?}");
 
-    // Store the current durable phase before entering UpdateFailed.
-    // This allows recovery flows to restore the original paired/ready state after successful retry.
-    let current = app_state.lifecycle.get();
-    if current.is_durable() && current != SetupPhase::UpdateFailed {
-        app_state
-            .state_store
-            .set(PRE_FAILURE_PHASE, current.as_str());
-        if let Err(e) = app_state.state_store.save() {
-            eprintln!("MAIN: Failed to persist pre-failure phase: {e:#?}");
-        }
-    }
+    // PRE_FAILURE_PHASE was already stored in check_and_update_system before entering
+    // CheckingVersion, capturing the original Ready/Pairing phase before transient states.
 
     app_state.lifecycle.set(SetupPhase::UpdateFailed);
     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
@@ -1596,6 +1603,19 @@ async fn check_and_update_system(
     // Without this, durable phases (Ready, Pairing) would be lost during the
     // mandatory no-update check, demoting paired devices to QR setup.
     let phase_before_check = app_state.lifecycle.get();
+
+    // Store durable phase as PRE_FAILURE_PHASE before entering transient states.
+    // This ensures update_failed recovery can restore Ready/Pairing even though
+    // the failure occurs while in Updating (transient).
+    if phase_before_check.is_durable() && phase_before_check != SetupPhase::UpdateFailed {
+        use crate::persistent_state::PRE_FAILURE_PHASE;
+        app_state
+            .state_store
+            .set(PRE_FAILURE_PHASE, phase_before_check.as_str());
+        if let Err(e) = app_state.state_store.save() {
+            eprintln!("MAIN: Failed to persist pre-failure phase: {e:#?}");
+        }
+    }
 
     app_state.lifecycle.set(SetupPhase::CheckingVersion);
 

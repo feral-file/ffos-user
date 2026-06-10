@@ -238,19 +238,23 @@ decisions, updater behavior, and shared-state synchronization.
 
 ### Toolchain
 
-CI linting uses Rust toolchain `1.88.0`. The Docker image is pinned to match
-that via the `Dockerfile` argument:
+CI linting uses Rust toolchain `1.88.0` on Ubuntu.
 
-- Default: `RUST_TOOLCHAIN=1.88.0`
-- Override: `docker build --build-arg RUST_TOOLCHAIN=1.88.0 -t arch-dev .`
+Local verification matching CI:
+- Run `scripts/verify-setupd-docker.sh` (uses `ubuntu:latest` + Rust 1.88.0)
+- Runs all checks: fmt, clippy, check, test
+
+The `components/feral-setupd/Dockerfile` provides an Arch Linux development
+environment for other use cases, but is not used for CI verification.
 
 ## Verification for touched work
 
-- Run these in Linux or the provided Docker environment for the touched crate:
-- `cargo fmt --all -- --check`
-- `cargo check --all-targets --all-features`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-targets --all-features`
+- Run `scripts/verify-setupd-docker.sh` from repo root (matches CI environment)
+- Or run these manually in Linux for the touched crate:
+  - `cargo fmt --all -- --check`
+  - `cargo check --all-targets --all-features`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
 
 If a command reports warnings that indicate code changes are needed, fix them before committing unless the team explicitly agrees to keep that warning class.
 
