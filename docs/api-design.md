@@ -180,14 +180,15 @@ The BLE command characteristic uses a binary encoding:
 **`device_info` string format** (returned by `get_info`):
 
 ```
-<device_id>|<topic_id>|<internet>|<branch>|<version>
+<device_id>|<topic_id>|<internet>|<branch>|<version>|<setup_phase>
 ```
 
 - `branch` is URL-safe encoded: `/` replaced with `%2F`.
-- `internet` is the string `"true"` or `"false"` (cached connectivity value).
+- `internet` is the string `"true"` or `"false"` (cached connectivity value; force-refreshed during `checking_version` and `updating` when mobile polls `get_info`).
 - `topic_id` may be empty string if not yet assigned.
+- `setup_phase` reflects current setup progress. Values: `idle`, `wifi_connecting`, `checking_version`, `updating`, `update_failed`, `pairing`, `ready`. Mobile apps poll this field to detect update failures and drive recovery UI. Older firmware omitting this field should be treated as `idle` by mobile clients.
 
-This format is a contract between `feral-setupd` and the mobile app. Do not add, remove, or reorder fields without a coordinated mobile-app release.
+This format is a contract between `feral-setupd` and the mobile app. The sixth field is an additive extension; do not remove or reorder existing fields without a coordinated mobile-app release.
 
 ---
 

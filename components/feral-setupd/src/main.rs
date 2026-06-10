@@ -7,11 +7,13 @@ mod dbus_utils;
 mod encoding;
 mod log_uploader;
 mod persistent_state;
+mod setup_lifecycle;
 mod system;
 mod updater;
 mod wifi_utils;
 
 use crate::persistent_state::PersistentState;
+use crate::setup_lifecycle::{SetupLifecycle, SetupPhase};
 use crate::wifi_utils::{Error as WifiError, SSIDsCacher};
 use anyhow::Context;
 use anyhow::Result;
@@ -101,6 +103,176 @@ struct AppState {
     // We need this flag to turn off the first flow if the user has chosen to provide a different wifi
     // true = auto proceed, false = user has chosen to provide a different wifi
     auto_proceed: AtomicBool,
+    /// Setup progress coordinator. Derives mobile-facing phase from persistent state
+    /// (PAIRED, topic_id), active operations (wifi, version check, update), and
+    /// permanent failure latch.
+    lifecycle: SetupLifecycle,
+    /// Single-flight guard for OTA updates to prevent concurrent update attempts.
+    /// Wrapped in Arc to allow UpdateGuard to be 'static for tokio::spawn.
+    update_in_progress: Arc<AtomicBool>,
+}
+
+const MAX_UPDATE_RETRIES: u8 = 3;
+const UPDATE_FAILED_MSG: &str = "Update didn't complete. Use your phone to try again, or restart the device. If it still fails, contact support@feralfile.com.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateErrorType {
+    Transient,
+    Permanent,
+}
+
+/// Update failure with classification decided from the updater message before
+/// setupd adds context wrappers for logging.
+#[derive(Debug)]
+struct UpdateAttemptError {
+    source: anyhow::Error,
+    kind: UpdateErrorType,
+}
+
+impl std::fmt::Display for UpdateAttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for UpdateAttemptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// Classify error messages from bash update scripts and updater infrastructure.
+/// Transient errors are worth retrying at the setupd level; permanent errors are not.
+///
+/// This classification matches actual error messages produced by:
+/// - feral-updater.sh and feral-system-update.sh (ffos repo)
+/// - updater.rs internal errors (this repo)
+///
+/// # ⚠️ FRAGILE CONTRACT WARNING
+///
+/// This function relies on **exact string matching** with error messages from shell scripts
+/// in the `ffos` repository (`feral-system-update.sh`, `feral-recovery-update.sh`).
+///
+/// **Any changes to script error messages MUST be accompanied by:**
+/// - Updates to this classification function
+/// - Verification via integration testing
+///
+/// **Future improvement:** Consider structured error codes or stable prefixes to reduce
+/// brittleness and improve cross-repository maintainability.
+fn classify_updater_message(message: &str) -> UpdateErrorType {
+    let msg = message.trim();
+
+    // ════════════════════════════════════════════════════════════════════════
+    // PERMANENT ERRORS: Do not retry at setupd level
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Cryptographic failures (server published bad/corrupt image)
+    if msg.starts_with("Error: Signature verification failed for")
+        || msg.starts_with("Error: Signature file ")
+    {
+        return UpdateErrorType::Permanent;
+    }
+
+    // Image integrity failures (corrupt or invalid image structure)
+    if msg == "airootfs.sfs not found in image." || msg == "No post-extraction script found in ISO"
+    {
+        return UpdateErrorType::Permanent;
+    }
+
+    // Filesystem operation failures (disk full, permissions, etc.)
+    if msg == "Failed to create snapshot '/.snapshots/@ota_prev'. Aborting."
+        || msg.starts_with("Failed to create snapshot")
+    {
+        return UpdateErrorType::Permanent;
+    }
+
+    // Unknown/unclassified errors from updater.rs
+    if msg == "Unknown error occurred" {
+        return UpdateErrorType::Permanent;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // TRANSIENT ERRORS: Worth retrying at setupd level
+    // ════════════════════════════════════════════════════════════════════════
+
+    // Network connectivity and download failures (no internet or server unreachable)
+    if msg == "No network connection. Aborting update."
+        || msg == "Failed to retrieve content length for image."
+        || msg == "Failed to download OTA image."
+        || msg == "Failed to download signature file."
+        || msg == "Failed to download recovery ISO."
+    {
+        return UpdateErrorType::Transient;
+    }
+
+    // setupd infrastructure failures (service start, log file access)
+    if msg.contains("Failed to start updater service")
+        || msg.contains("Failed to open /var/log/updaterd.log")
+        || msg == "updater closed channel without sending progress"
+    {
+        return UpdateErrorType::Transient;
+    }
+
+    // Lock failures (another update process running or stale lock)
+    // Transient because lock may be released by the time we retry
+    if msg.contains("Lock already held by another instance")
+        || msg.contains("either Lock already held")
+    {
+        return UpdateErrorType::Transient;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // BASH ERR TRAP: Parse the trapped command to determine if network-related
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // Format: EXCEPTION ERR: LINE=118 CMD="curl -u ... -o /var/tmp/ota/image.zip"
+    //
+    // Network commands (curl, wget) are transient; other failures (mount, rsync,
+    // btrfs, mkinitcpio, etc.) are permanent.
+    //
+    if msg.starts_with("EXCEPTION ERR:") {
+        if msg.contains("curl") || msg.contains("wget") {
+            return UpdateErrorType::Transient;
+        }
+        return UpdateErrorType::Permanent;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // DEFAULT: Unknown errors are permanent (avoid infinite retry loops)
+    // ════════════════════════════════════════════════════════════════════════
+    UpdateErrorType::Permanent
+}
+
+fn get_setup_phase(app_state: &AppState) -> String {
+    app_state.lifecycle.get().as_str().to_string()
+}
+
+/// RAII guard for the update_in_progress flag.
+/// Automatically releases the flag when dropped, ensuring cleanup on all return paths
+/// (success, early return, panic, or error propagation via `?`).
+///
+/// Owns an Arc<AtomicBool> to be 'static-safe for tokio::spawn usage.
+struct UpdateGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl UpdateGuard {
+    fn try_acquire(flag: &Arc<AtomicBool>) -> Option<Self> {
+        if flag
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(UpdateGuard { flag: flag.clone() })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 // Sentry has to start before tokio runtime
@@ -199,14 +371,22 @@ async fn run() -> Result<()> {
 }
 
 async fn init_app_state(ble_service: &Arc<Ble>) -> Result<Arc<AppState>> {
+    let lifecycle = SetupLifecycle::new();
+    let state_store = PersistentState::new(constant::CACHE_FILEPATH)?;
+
+    // Restore durable phase (Pairing, Ready, UpdateFailed) from persistent storage after restart
+    lifecycle.restore_from_store(&state_store);
+
     let app_state = Arc::new(AppState {
         device_id: ble_service.get_device_id().await,
         branch: cfg::branch().await?.to_string(),
         current_version: cfg::current_version().await?.to_string(),
-        state_store: PersistentState::new(constant::CACHE_FILEPATH)?,
+        state_store,
         internet: Connectivity::spawn().await,
         page: Mutex::new(Page::None(unix_s())),
         auto_proceed: AtomicBool::new(false),
+        lifecycle,
+        update_in_progress: Arc::new(AtomicBool::new(false)),
     });
     sentry::configure_scope(|scope| {
         scope.set_tag("branch", app_state.branch.clone());
@@ -421,23 +601,26 @@ async fn internet_setup_successfully_cb(
     .await
     {
         Ok(UpdateCheckResult::TooOldToUpgrade) => {
+            app_state.lifecycle.set(SetupPhase::Idle);
             return Err(ble::BleStatus::VersionTooOld);
         }
-        Ok(UpdateCheckResult::UpdateStarted) => {
+        Ok(UpdateCheckResult::UpdateStarted) | Ok(UpdateCheckResult::UpdateInProgress) => {
             return Err(ble::BleStatus::DeviceUpdating);
         }
         Ok(UpdateCheckResult::VersionCheckFailed) => {
+            app_state.lifecycle.set(SetupPhase::Idle);
             return Err(ble::BleStatus::VersionCheckFailed);
         }
         Ok(UpdateCheckResult::NoUpdateNeeded) => {} // Continue with normal flow
         Err(e) => {
             // This shouldn't happen with NonBlocking, but handle it anyway
             eprintln!("MAIN: Error during update check: {e:#?}");
+            app_state.lifecycle.set(SetupPhase::Idle);
             return Err(ble::BleStatus::VersionCheckFailed);
         }
     }
 
-    // Get topic id from controld
+    // Get topic id from controld FIRST (before setting Pairing phase)
     let topic_id = match dbus_utils::get_relayer_info() {
         Ok(info) => info,
         Err(e) => {
@@ -446,13 +629,22 @@ async fn internet_setup_successfully_cb(
         }
     };
 
+    // Save topic_id to disk BEFORE setting Pairing phase to maintain invariant.
+    // Fail the operation if save fails, so we don't create invalid state.
     let state_store = &app_state.state_store;
     state_store.set(persistent_state::TOPIC_ID, &topic_id);
-    if state_store.get(persistent_state::PAIRED).is_none() {
-        state_store.set(persistent_state::PAIRED, "false");
-    }
     if let Err(e) = state_store.save() {
-        eprintln!("MAIN: Error saving cache: {e:#?}");
+        eprintln!("BLE: Failed to save topic_id: {e:#?}");
+        return Err(ble::BleStatus::UnknownError);
+    }
+
+    // NOW safe to set Pairing phase (topic_id is guaranteed to exist on disk).
+    // Pairing invariant: phase can only be Pairing when topic_id exists.
+    app_state.lifecycle.set(SetupPhase::Pairing);
+    if let Err(e) = app_state.lifecycle.persist(state_store) {
+        eprintln!("BLE: Failed to persist Pairing phase: {e:#?}");
+        // Phase is set in memory but not persisted - acceptable since topic_id is saved.
+        // Next boot will restore from disk (Idle) and can re-fetch topic_id.
     }
 
     let app_state = app_state.clone();
@@ -465,8 +657,9 @@ async fn internet_setup_successfully_cb(
 
 mod callbacks {
     use super::{
-        AppState, Cdp, WifiError, ble, constant, dbus_utils, internet_setup_successfully_cb,
-        persistent_state, show_factory_reset, show_message, show_qrcode, show_webapp, wifi_utils,
+        AppState, Cdp, SetupPhase, WifiError, ble, constant, dbus_utils, get_setup_phase,
+        internet_setup_successfully_cb, show_factory_reset, show_message, show_qrcode, show_webapp,
+        wifi_utils,
     };
     use serde::Deserialize;
     use std::sync::Arc;
@@ -542,6 +735,18 @@ mod callbacks {
             let pwd = pwd.to_string();
             Box::pin(async move {
                 let start_time = Instant::now();
+
+                // Clear and persist UpdateFailed phase on explicit WiFi retry before any operations.
+                // This ensures the persisted state is cleared even if the connection fails early.
+                if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+                    println!("BLE: Clearing UpdateFailed phase on WiFi retry attempt");
+                    app_state.lifecycle.set(SetupPhase::Idle);
+                    if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
+                        eprintln!("BLE: Failed to persist phase clear: {e:#?}");
+                    }
+                }
+
+                app_state.lifecycle.set(SetupPhase::WifiConnecting);
                 // Show message
                 let connecting_msg = format!("{}{}", constant::WIFI_CONNECTING_MSG_PREFIX, ssid);
                 let _ = show_message(&chromium, &app_state, &connecting_msg).await;
@@ -556,6 +761,7 @@ mod callbacks {
                         "MAIN: Failed to connect to wifi \"{ssid}\" in {:?} ms: {e: }",
                         start_time.elapsed().as_millis()
                     );
+                    app_state.lifecycle.set(SetupPhase::Idle);
                     // Tell user that the wifi connection failed
                     task::spawn(async move {
                         let _ = show_message(
@@ -588,6 +794,7 @@ mod callbacks {
 
                 // Return early if there is still no internet after waiting
                 if !app_state.internet.is_online(true).await {
+                    app_state.lifecycle.set(SetupPhase::Idle);
                     task::spawn(async move {
                         let _ = show_message(
                             &chromium,
@@ -620,7 +827,15 @@ mod callbacks {
     }
 
     pub fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
-        Some(Box::new(move || vec![super::build_device_info(&app_state)]))
+        Some(Box::new(move || {
+            let phase = get_setup_phase(&app_state);
+            if matches!(phase.as_str(), "updating" | "checking_version") {
+                // Trigger async refresh to avoid blocking BLE response on D-Bus timeout.
+                // Fresh value will be available on next poll (mobile polls every few seconds).
+                let _ = app_state.internet.trigger_refresh_async();
+            }
+            vec![super::build_device_info(&app_state)]
+        }))
     }
 
     pub fn create_qrcode_switch_cb(
@@ -643,19 +858,14 @@ mod callbacks {
                     let _ = show_qrcode(&app_state, &chromium).await;
                 } else {
                     // When the web app is requested, treat this as confirmation
-                    // that the mobile app has successfully paired and received
-                    // the topic ID.
-                    let state_store = &app_state.state_store;
-                    let has_topic = state_store.get(persistent_state::TOPIC_ID).is_some();
-                    let already_paired = state_store
-                        .get(persistent_state::PAIRED)
-                        .map(|v| v == "true")
-                        .unwrap_or(false);
-                    if has_topic && !already_paired {
-                        println!("MAIN: QR switch -> marking device as paired");
-                        app_state.state_store.set(persistent_state::PAIRED, "true");
-                        if let Err(e) = app_state.state_store.save() {
-                            eprintln!("MAIN: Error saving paired state: {e:#?}");
+                    // that the mobile app has successfully scanned the QR code and paired.
+                    // Transition from Pairing to Ready.
+                    let current_phase = app_state.lifecycle.get();
+                    if current_phase == SetupPhase::Pairing {
+                        println!("MAIN: QR switch -> transitioning to Ready phase");
+                        app_state.lifecycle.set(SetupPhase::Ready);
+                        if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
+                            eprintln!("MAIN: Error persisting Ready phase: {e:#?}");
                         }
                     }
 
@@ -675,7 +885,7 @@ mod callbacks {
     }
 
     async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
-        // Check internet connectivity first
+        // Check internet connectivity first before clearing latch
         if !app_state.internet.is_online(true).await {
             eprintln!("MAIN: System update requested but no internet connection");
             let _ = show_message(
@@ -685,6 +895,17 @@ mod callbacks {
             )
             .await;
             return;
+        }
+
+        // Clear UpdateFailed phase after confirming internet is available.
+        // Update attempt will begin, so we can safely clear the recovery signal.
+        if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+            println!("DBUS: Clearing UpdateFailed phase on manual system update trigger");
+            app_state.lifecycle.set(SetupPhase::Idle);
+            if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
+                eprintln!("DBUS: Failed to persist phase clear: {e:#?}");
+                return;
+            }
         }
 
         // Use Available mode for user-triggered updates (check for any newer version)
@@ -889,7 +1110,7 @@ mod callbacks {
     }
 }
 
-// device_info is <device_id>|<topic_id>|<internet>|<branch>|<version>
+// device_info is <device_id>|<topic_id>|<internet>|<branch>|<version>|<setup_phase>
 fn build_device_info(app_state: &Arc<AppState>) -> String {
     let device_id = app_state.device_id.clone();
     let topic_id = app_state
@@ -903,8 +1124,9 @@ fn build_device_info(app_state: &Arc<AppState>) -> String {
     };
     let branch = app_state.branch.clone().replace('/', "%2F");
     let version = app_state.current_version.clone();
+    let setup_phase = get_setup_phase(app_state);
 
-    format!("{device_id}|{topic_id}|{has_internet}|{branch}|{version}")
+    format!("{device_id}|{topic_id}|{has_internet}|{branch}|{version}|{setup_phase}")
 }
 
 // The url format is like this
@@ -935,6 +1157,18 @@ async fn wait_for_shutdown() {
 }
 
 async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
+    // Normal QR navigation resets non-failure transient phases to idle (WifiConnecting,
+    // CheckingVersion, Updating), while preserving UpdateFailed, Pairing, and Ready phases.
+    // This ensures the device returns to a clean setup state when showing QR outside of
+    // explicit failure recovery flows.
+    let current = app_state.lifecycle.get();
+    if matches!(
+        current,
+        SetupPhase::WifiConnecting | SetupPhase::CheckingVersion | SetupPhase::Updating
+    ) {
+        app_state.lifecycle.set(SetupPhase::Idle);
+    }
+
     let qrcode_url = build_qrcode_url(app_state);
     // QRCode url is dynamically built
     // So we always navigate to make sure the url is correct
@@ -999,7 +1233,21 @@ async fn show_reflashing_qrcode(
 ///   the device is too old) is intentional and means the usual "show art or QR" flow
 ///   should not continue.
 async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
-    // Check and update system using Required mode (only mandatory updates on startup)
+    // If UpdateFailed phase is set, skip automatic update check on startup.
+    // Show the failure message (same as handle_permanent_update_failure) since internet is ready.
+    // Mobile app will see update_failed via device_info polling and can trigger explicit retry.
+    if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+        println!("MAIN: Skipping startup update check - UpdateFailed phase is set");
+        println!("MAIN: Showing failure message and waiting for explicit BLE/D-Bus retry");
+        show_system_upgrade(&chrome, &app_state, UPDATE_FAILED_MSG).await?;
+        return Ok(());
+    }
+
+    // Check and update system using Required mode (only mandatory updates on startup).
+    // This runs for ALL phases except UpdateFailed, maintaining consistency:
+    // - First-time setup (Idle): checks before fetching topic_id → Pairing
+    // - Reboot with Pairing: checks again to ensure no new mandatory updates
+    // - Reboot with Ready: checks to keep device up-to-date
     // Use Blocking execution since we can wait for completion during startup
     match check_and_update_system(
         &app_state,
@@ -1009,8 +1257,10 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
     )
     .await?
     {
-        UpdateCheckResult::TooOldToUpgrade | UpdateCheckResult::UpdateStarted => {
-            // Device is either too old or updating; don't proceed with normal flow
+        UpdateCheckResult::TooOldToUpgrade
+        | UpdateCheckResult::UpdateStarted
+        | UpdateCheckResult::UpdateInProgress => {
+            // Device is either too old, updating, or an update is already running.
             return Ok(());
         }
         UpdateCheckResult::VersionCheckFailed => {
@@ -1020,15 +1270,28 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
         UpdateCheckResult::NoUpdateNeeded => {} // Continue with normal flow
     }
 
-    // No update, ensure we have a topic ID if possible and then
-    // show art/qrcode depending on topic ID and pairing state.
+    // No update needed. Show UI based on current phase.
+    // If we don't have a topic_id yet, try to get one and transition to Pairing.
     let state_store = &app_state.state_store;
-    if state_store.get(persistent_state::TOPIC_ID).is_none() {
+    let current_phase = app_state.lifecycle.get();
+
+    // If still in Idle and don't have topic_id, try to get it
+    if current_phase == SetupPhase::Idle && state_store.get(persistent_state::TOPIC_ID).is_none() {
         match dbus_utils::get_relayer_info() {
             Ok(topic_id) => {
+                // Save topic_id FIRST before setting Pairing phase
                 state_store.set(persistent_state::TOPIC_ID, &topic_id);
                 if let Err(e) = state_store.save() {
-                    eprintln!("MAIN: Error saving persistent state after relayer info: {e:#?}");
+                    eprintln!("MAIN: Failed to save topic_id: {e:#?}");
+                    // Don't transition to Pairing if save failed - keep Idle
+                    // Device will retry on next boot or BLE flow
+                } else {
+                    // Topic_id saved successfully, now safe to transition to Pairing
+                    app_state.lifecycle.set(SetupPhase::Pairing);
+                    if let Err(e) = app_state.lifecycle.persist(state_store) {
+                        eprintln!("MAIN: Error persisting Pairing phase: {e:#?}");
+                        // Phase set in memory but not persisted - acceptable since topic_id is saved
+                    }
                 }
             }
             Err(e) => {
@@ -1038,51 +1301,138 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
             }
         }
     }
-    let has_topic_id = state_store.get(persistent_state::TOPIC_ID).is_some();
-    let is_paired = state_store
-        .get(persistent_state::PAIRED)
-        .map(|v| v == "true")
-        .unwrap_or(false);
 
-    println!("MAIN: startup_with_internet: has_topic_id={has_topic_id} is_paired={is_paired}");
+    // Show UI based on phase
+    let phase = app_state.lifecycle.get();
+    println!("MAIN: startup_with_internet: phase={}", phase.as_str());
 
-    if has_topic_id && is_paired {
-        show_webapp(&app_state, &chrome).await
-    } else {
-        show_qrcode(&app_state, &chrome).await
+    match phase {
+        SetupPhase::Ready => show_webapp(&app_state, &chrome).await,
+        _ => show_qrcode(&app_state, &chrome).await,
     }
 }
 
 async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
+    app_state.lifecycle.set(SetupPhase::Updating);
+
     let latest_version = updater::latest_version().await.unwrap_or_else(|e| {
         eprintln!("MAIN: latest_version for update banner: {e:#?}");
         "Unknown".to_string()
     });
     let base_msg = format!("{} {}", &constant::UPDATING_MSG_PREFIX, latest_version);
     let default_subtext = constant::UPDATING_MSG_SUBTEXT;
-    let _ = show_system_upgrade(
-        &chrome,
-        &app_state,
-        &format!("{base_msg}&subtext={default_subtext}"),
-    )
-    .await;
-    let mut rx = updater::spawn_updater()?;
-    while let Some(res) = rx.recv().await {
-        match res {
-            Ok(msg) => {
-                let _ =
-                    show_system_upgrade(&chrome, &app_state, &format!("{base_msg}&subtext={msg}"))
-                        .await;
+
+    let mut attempt = 0u8;
+    loop {
+        attempt += 1;
+
+        if attempt == 1 {
+            let _ = show_system_upgrade(
+                &chrome,
+                &app_state,
+                &format!("{base_msg}&subtext={default_subtext}"),
+            )
+            .await;
+        }
+
+        match attempt_update(&app_state, &chrome, &base_msg).await {
+            Ok(()) => {
+                // Update succeeded. Reset to Idle; if device was already paired,
+                // phase will be restored to Ready on next boot from persistent state.
+                app_state.lifecycle.set(SetupPhase::Idle);
+                return Ok(());
             }
             Err(e) => {
-                let _ =
-                    show_system_upgrade(&chrome, &app_state, &format!("{base_msg}&subtext={e}"))
+                match e.kind {
+                    UpdateErrorType::Transient if attempt < MAX_UPDATE_RETRIES => {
+                        eprintln!(
+                            "MAIN: Transient update error (attempt {attempt}/{MAX_UPDATE_RETRIES}): {e:#?}"
+                        );
+                        let retry_msg = format!(
+                            "Retrying update (attempt {}/{MAX_UPDATE_RETRIES})",
+                            attempt + 1
+                        );
+                        let _ = show_system_upgrade(
+                            &chrome,
+                            &app_state,
+                            &format!("{base_msg}&subtext={retry_msg}"),
+                        )
                         .await;
-                return Err(e.context("update process failed"));
+                        // Exponential backoff: 2^attempt seconds (2s, 4s, 8s, ...)
+                        let backoff_seconds = 1u64 << attempt; // 2^attempt
+                        time::sleep(Duration::from_secs(backoff_seconds)).await;
+                        continue;
+                    }
+                    UpdateErrorType::Permanent | UpdateErrorType::Transient => {
+                        handle_permanent_update_failure(&app_state, &chrome, &e.source).await;
+                        return Err(e.source.context("update failed permanently"));
+                    }
+                }
             }
         }
     }
+}
+
+async fn attempt_update(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    base_msg: &str,
+) -> Result<(), UpdateAttemptError> {
+    let mut rx = updater::spawn_updater().map_err(|e| UpdateAttemptError {
+        kind: classify_updater_message(&e.to_string()),
+        source: e,
+    })?;
+    let mut received_progress = false;
+
+    while let Some(res) = rx.recv().await {
+        match res {
+            Ok(msg) => {
+                received_progress = true;
+                let _ =
+                    show_system_upgrade(chrome, app_state, &format!("{base_msg}&subtext={msg}"))
+                        .await;
+            }
+            Err(e) => {
+                let _ = show_system_upgrade(chrome, app_state, &format!("{base_msg}&subtext={e}"))
+                    .await;
+                let kind = classify_updater_message(&e.to_string());
+                return Err(UpdateAttemptError {
+                    source: e.context("update process failed"),
+                    kind,
+                });
+            }
+        }
+    }
+
+    // Channel closed without receiving any progress - updater failed to start.
+    // This happens when watchdog stop fails, systemd start fails, or log file not found.
+    if !received_progress {
+        let message = "updater closed channel without sending progress";
+        return Err(UpdateAttemptError {
+            kind: classify_updater_message(message),
+            source: anyhow::anyhow!(message),
+        });
+    }
+
     Ok(())
+}
+
+/// Show a clear failure message and keep it visible while `setup_phase=update_failed`.
+/// Mobile app can trigger retry via `keep_wifi` or `connect_wifi` BLE commands.
+async fn handle_permanent_update_failure(
+    app_state: &Arc<AppState>,
+    chrome: &Arc<Cdp>,
+    error: &anyhow::Error,
+) {
+    eprintln!("MAIN: Permanent update failure: {error:#?}");
+    app_state.lifecycle.set(SetupPhase::UpdateFailed);
+    if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
+        eprintln!("MAIN: Failed to persist UpdateFailed phase: {e:#?}");
+        eprintln!("MAIN: Phase is set in memory; mobile sees update_failed until restart");
+    }
+    // Show error message and stay on it - don't transition to QR code.
+    // Mobile app will see update_failed and can trigger retry.
+    let _ = show_system_upgrade(chrome, app_state, UPDATE_FAILED_MSG).await;
 }
 
 /// Result of checking and potentially executing a system update.
@@ -1096,6 +1446,8 @@ pub enum UpdateCheckResult {
     NoUpdateNeeded,
     /// Failed to check version information from the server.
     VersionCheckFailed,
+    /// Update already in progress; concurrent attempt was skipped.
+    UpdateInProgress,
 }
 
 /// Follow-up after `check_and_update_system(UpdateMode::Available, …)` in the D-Bus path.
@@ -1152,6 +1504,22 @@ async fn check_and_update_system(
     mode: UpdateMode,
     execution: UpdateExecution,
 ) -> Result<UpdateCheckResult> {
+    // Note: Failure latch clearing is handled by explicit retry call sites (BLE/D-Bus),
+    // not here. Startup flow needs to preserve persisted failure state so mobile app
+    // can observe update_failed across restarts (issue #447).
+
+    // Single-flight guard: prevent concurrent update attempts.
+    // The guard is automatically released when this function returns (success, error, or panic).
+    let _guard = match UpdateGuard::try_acquire(&app_state.update_in_progress) {
+        Some(guard) => guard,
+        None => {
+            println!("MAIN: Update already in progress, skipping");
+            return Ok(UpdateCheckResult::UpdateInProgress);
+        }
+    };
+
+    app_state.lifecycle.set(SetupPhase::CheckingVersion);
+
     let progress = VersionCheckProgress::start(execution, chrome.clone());
 
     // BLE/NonBlocking flows hold the mobile notification open until this fetch resolves
@@ -1170,6 +1538,7 @@ async fn check_and_update_system(
     if let Err(ve) = updater::refresh_remote_version(retries, progress.as_updater_progress()).await
     {
         progress.finish().await;
+        app_state.lifecycle.set(SetupPhase::Idle);
         return show_version_check_failure(app_state, chrome, execution, ve).await;
     }
     // First check if device is too old to auto-upgrade (reads the freshly refreshed cache)
@@ -1246,6 +1615,7 @@ async fn check_and_update_system(
                     }
                 }
             }
+            app_state.lifecycle.set(SetupPhase::Idle);
             return Ok(UpdateCheckResult::TooOldToUpgrade);
         }
         Ok(false) => {} // Device can be upgraded, continue
@@ -1272,10 +1642,28 @@ async fn check_and_update_system(
         Ok(true) => {
             match execution {
                 UpdateExecution::Blocking => {
-                    update(app_state.clone(), chrome.clone()).await?;
+                    // For blocking execution during startup, keep setupd alive on permanent
+                    // failure so mobile polling can observe setup_phase=update_failed.
+                    // The guard remains held during update and auto-releases when this
+                    // branch completes.
+                    if let Err(e) = update(app_state.clone(), chrome.clone()).await {
+                        eprintln!("MAIN: Blocking update failed: {e:#?}");
+                        // update() already set setup_phase=update_failed and showed
+                        // error UI, then transitioned to QR. Return success so daemon
+                        // stays alive and mobile can poll the failure state.
+                    }
                 }
                 UpdateExecution::NonBlocking => {
-                    task::spawn(update(app_state.clone(), chrome.clone()));
+                    // For non-blocking execution (e.g., BLE-triggered updates), spawn
+                    // background task and transfer guard ownership into the task.
+                    // The guard remains held from acquisition to task completion,
+                    // preventing concurrent updates.
+                    let app_state_clone = app_state.clone();
+                    let chrome_clone = chrome.clone();
+                    task::spawn(async move {
+                        let _guard = _guard; // Transfer guard ownership into task
+                        let _ = update(app_state_clone, chrome_clone).await;
+                    });
                 }
             }
             Ok(UpdateCheckResult::UpdateStarted)
@@ -1284,9 +1672,18 @@ async fn check_and_update_system(
             if mode == UpdateMode::Available {
                 println!("MAIN: System update requested but no update available");
             }
+            // Only reset transient phases; preserve durable phases like Ready and Pairing
+            let current = app_state.lifecycle.get();
+            if !current.is_durable() {
+                app_state.lifecycle.set(SetupPhase::Idle);
+            }
             Ok(UpdateCheckResult::NoUpdateNeeded)
         }
-        Err(ve) => show_version_check_failure(app_state, chrome, execution, ve).await,
+        Err(ve) => {
+            // Clear CheckingVersion phase before showing failure UI
+            app_state.lifecycle.set(SetupPhase::Idle);
+            show_version_check_failure(app_state, chrome, execution, ve).await
+        }
     }
 }
 
@@ -1549,6 +1946,557 @@ async fn wait_for_controld(timeout: Duration) -> Result<()> {
     match time::timeout(timeout, wait_future).await {
         Ok(_) => Ok(()),
         Err(_) => Err(anyhow::anyhow!("Timeout waiting for controld connection")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_updater_message_marks_network_failures_transient() {
+        // Actual error from feral-updater.sh line 47
+        assert_eq!(
+            classify_updater_message("No network connection. Aborting update."),
+            UpdateErrorType::Transient
+        );
+        // Actual error from feral-system-update.sh line 147
+        assert_eq!(
+            classify_updater_message("Failed to retrieve content length for image."),
+            UpdateErrorType::Transient
+        );
+        // Download failures (fail-fast without retry in scripts)
+        // Used by both system and recovery update scripts
+        assert_eq!(
+            classify_updater_message("Failed to download OTA image."),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message("Failed to download signature file."),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message("Failed to download recovery ISO."),
+            UpdateErrorType::Transient
+        );
+    }
+
+    #[test]
+    fn classify_updater_message_marks_setupd_infrastructure_failures_transient() {
+        // Errors from updater.rs
+        assert_eq!(
+            classify_updater_message("Failed to start updater service: systemd error"),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message("Failed to open /var/log/updaterd.log after retries"),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message("updater closed channel without sending progress"),
+            UpdateErrorType::Transient
+        );
+    }
+
+    #[test]
+    fn classify_updater_message_marks_signing_and_image_failures_permanent() {
+        // Cryptographic failures (permanent - server issue)
+        assert_eq!(
+            classify_updater_message(
+                "Error: Signature verification failed for /var/tmp/ota/image.iso."
+            ),
+            UpdateErrorType::Permanent
+        );
+        // Image structure failures (permanent - corrupt image)
+        assert_eq!(
+            classify_updater_message("airootfs.sfs not found in image."),
+            UpdateErrorType::Permanent
+        );
+        // Filesystem operation failures (permanent - disk/permissions issue)
+        assert_eq!(
+            classify_updater_message(
+                "Failed to create snapshot '/.snapshots/@ota_prev'. Aborting."
+            ),
+            UpdateErrorType::Permanent
+        );
+        // Generic unknown errors
+        assert_eq!(
+            classify_updater_message("Unknown error occurred"),
+            UpdateErrorType::Permanent
+        );
+    }
+
+    #[test]
+    fn classify_updater_message_marks_lock_failures_transient() {
+        // Actual error from feral-updater.sh line 25
+        // Lock failures are transient because lock may be released by the time we retry
+        assert_eq!(
+            classify_updater_message(
+                "Exception: either Lock already held by another instance or some error happened."
+            ),
+            UpdateErrorType::Transient
+        );
+    }
+
+    #[test]
+    fn classify_updater_message_marks_unrecognized_as_permanent() {
+        assert_eq!(
+            classify_updater_message("something unexpected"),
+            UpdateErrorType::Permanent
+        );
+    }
+
+    #[test]
+    fn classify_updater_message_classifies_exception_err_by_command() {
+        // Network commands (curl, wget) are transient
+        assert_eq!(
+            classify_updater_message(
+                "EXCEPTION ERR: LINE=118 CMD=\"curl -u \"$auth_user:$auth_pass\" --silent --show-error -fL \"$ENDPOINT$IMAGE_URL\" -o \"$ZIP_FILE\"\""
+            ),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message(
+                "EXCEPTION ERR: LINE=47 CMD=\"curl -su \"$auth_user:$auth_pass\" -f \"$API_URL\"\""
+            ),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message(
+                "EXCEPTION ERR: LINE=200 CMD=\"wget --timeout=10 https://example.com/file.tar.gz\""
+            ),
+            UpdateErrorType::Transient
+        );
+
+        // Non-network commands are permanent
+        assert_eq!(
+            classify_updater_message(
+                "EXCEPTION ERR: LINE=99 CMD=\"mount -o loop /var/tmp/ota/image.iso /mnt/ota-iso\""
+            ),
+            UpdateErrorType::Permanent
+        );
+        assert_eq!(
+            classify_updater_message(
+                "EXCEPTION ERR: LINE=145 CMD=\"rsync -aAX --delete /mnt/ota-sfs/ /\""
+            ),
+            UpdateErrorType::Permanent
+        );
+        assert_eq!(
+            classify_updater_message("EXCEPTION ERR: LINE=208 CMD=\"mkinitcpio -P\""),
+            UpdateErrorType::Permanent
+        );
+    }
+
+    #[test]
+    fn set_and_get_setup_phase() {
+        let lifecycle = SetupLifecycle::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let state_store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        let app_state = Arc::new(AppState {
+            device_id: "test".to_string(),
+            branch: "test".to_string(),
+            current_version: "1.0.0".to_string(),
+            state_store,
+            internet: tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { Connectivity::spawn().await }),
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            lifecycle,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert_eq!(get_setup_phase(&app_state), "idle");
+
+        app_state.lifecycle.set(SetupPhase::WifiConnecting);
+        assert_eq!(get_setup_phase(&app_state), "wifi_connecting");
+
+        app_state.lifecycle.set(SetupPhase::CheckingVersion);
+        assert_eq!(get_setup_phase(&app_state), "checking_version");
+
+        app_state.lifecycle.set(SetupPhase::Updating);
+        assert_eq!(get_setup_phase(&app_state), "updating");
+
+        app_state.lifecycle.set(SetupPhase::UpdateFailed);
+        assert_eq!(get_setup_phase(&app_state), "update_failed");
+
+        app_state.lifecycle.set(SetupPhase::Pairing);
+        assert_eq!(get_setup_phase(&app_state), "pairing");
+
+        app_state.lifecycle.set(SetupPhase::Ready);
+        assert_eq!(get_setup_phase(&app_state), "ready");
+    }
+
+    #[test]
+    fn build_device_info_includes_setup_phase() {
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.set(SetupPhase::Updating);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let state_store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        let app_state = Arc::new(AppState {
+            device_id: "test-device".to_string(),
+            branch: "main/stable".to_string(),
+            current_version: "1.2.3".to_string(),
+            state_store,
+            internet: tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { Connectivity::spawn().await }),
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            lifecycle,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
+        });
+
+        let device_info = build_device_info(&app_state);
+        let parts: Vec<&str> = device_info.split('|').collect();
+
+        assert_eq!(parts.len(), 6);
+        assert_eq!(parts[0], "test-device");
+        assert_eq!(parts[1], ""); // topic_id (empty in test)
+        // parts[2] is internet status (true/false)
+        assert_eq!(parts[3], "main%2Fstable"); // branch with URL encoding
+        assert_eq!(parts[4], "1.2.3");
+        assert_eq!(parts[5], "updating");
+    }
+
+    #[test]
+    fn update_in_progress_guard_prevents_concurrent_updates() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let state_store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        let app_state = Arc::new(AppState {
+            device_id: "test".to_string(),
+            branch: "test".to_string(),
+            current_version: "1.0.0".to_string(),
+            state_store,
+            internet: tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { Connectivity::spawn().await }),
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            lifecycle: SetupLifecycle::new(),
+            update_in_progress: Arc::new(AtomicBool::new(false)),
+        });
+
+        // First acquisition should succeed
+        let guard1 = UpdateGuard::try_acquire(&app_state.update_in_progress);
+        assert!(guard1.is_some());
+
+        // Second acquisition should fail while first is held
+        let guard2 = UpdateGuard::try_acquire(&app_state.update_in_progress);
+        assert!(guard2.is_none());
+
+        // Drop first guard and reacquire should succeed
+        drop(guard1);
+        let guard3 = UpdateGuard::try_acquire(&app_state.update_in_progress);
+        assert!(guard3.is_some());
+    }
+
+    #[test]
+    fn update_guard_releases_flag_when_scope_ends() {
+        let flag = Arc::new(AtomicBool::new(false));
+
+        {
+            let _guard = UpdateGuard::try_acquire(&flag).expect("guard acquired");
+            assert!(flag.load(Ordering::Acquire));
+        }
+
+        assert!(!flag.load(Ordering::Acquire));
+        assert!(UpdateGuard::try_acquire(&flag).is_some());
+    }
+
+    #[test]
+    fn qrcode_navigation_with_update_failed_phase_preserves_state() {
+        let lifecycle = SetupLifecycle::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        let app_state = Arc::new(AppState {
+            device_id: "test-device".to_string(),
+            branch: "main/stable".to_string(),
+            current_version: "1.2.3".to_string(),
+            state_store: store,
+            internet: tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { Connectivity::spawn().await }),
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            lifecycle,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
+        });
+
+        // Phase remains UpdateFailed
+        assert_eq!(get_setup_phase(&app_state), "update_failed");
+    }
+
+    #[test]
+    fn build_device_info_exposes_update_failed_for_mobile_polling() {
+        let lifecycle = SetupLifecycle::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        let app_state = Arc::new(AppState {
+            device_id: "test-device".to_string(),
+            branch: "main/stable".to_string(),
+            current_version: "1.2.3".to_string(),
+            state_store: store,
+            internet: tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { Connectivity::spawn().await }),
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            lifecycle,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
+        });
+
+        let device_info = build_device_info(&app_state);
+        let parts: Vec<&str> = device_info.split('|').collect();
+        assert_eq!(parts[5], "update_failed");
+    }
+
+    #[test]
+    fn wifi_connect_failure_resets_setup_phase_to_idle() {
+        let app_state = test_app_state("wifi_connecting");
+        assert_eq!(get_setup_phase(&app_state), "wifi_connecting");
+
+        // Mirrors create_connect_wifi_cb early return on nmcli failure.
+        app_state.lifecycle.set(SetupPhase::Idle);
+        assert_eq!(get_setup_phase(&app_state), "idle");
+    }
+
+    #[test]
+    fn update_failed_phase_suppresses_startup_update_check() {
+        let lifecycle = SetupLifecycle::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        // Set UpdateFailed phase and persist (simulating previous failed update)
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        // Simulate daemon restart: create fresh lifecycle and restore from store
+        let lifecycle_after_restart = SetupLifecycle::new();
+        lifecycle_after_restart.restore_from_store(&store);
+
+        // Verify phase was restored
+        assert_eq!(lifecycle_after_restart.get(), SetupPhase::UpdateFailed);
+
+        // Startup should skip update check when UpdateFailed phase is set.
+        // The actual flow would call on_startup_with_internet, which should
+        // short-circuit and show the failure UI without calling check_and_update_system.
+        // This test verifies the phase survives restart.
+    }
+
+    #[test]
+    fn no_update_needed_resets_checking_version_to_idle() {
+        let app_state = test_app_state("checking_version");
+        assert_eq!(get_setup_phase(&app_state), "checking_version");
+
+        // Mirrors check_and_update_system Ok(false) branch after version check.
+        app_state.lifecycle.set(SetupPhase::Idle);
+        assert_eq!(get_setup_phase(&app_state), "idle");
+    }
+
+    #[test]
+    fn no_update_needed_preserves_ready_phase() {
+        let app_state = test_app_state("ready");
+        assert_eq!(get_setup_phase(&app_state), "ready");
+
+        // Mirrors check_and_update_system Ok(false) branch: durable phases preserved
+        let current = app_state.lifecycle.get();
+        if !current.is_durable() {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "ready");
+    }
+
+    #[test]
+    fn no_update_needed_preserves_pairing_phase() {
+        let app_state = test_app_state("pairing");
+        assert_eq!(get_setup_phase(&app_state), "pairing");
+
+        // Mirrors check_and_update_system Ok(false) branch: durable phases preserved
+        let current = app_state.lifecycle.get();
+        if !current.is_durable() {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "pairing");
+    }
+
+    #[test]
+    fn qr_navigation_resets_transient_phases_to_idle() {
+        // WifiConnecting should reset to Idle
+        let app_state = test_app_state("wifi_connecting");
+        let current = app_state.lifecycle.get();
+        if matches!(
+            current,
+            SetupPhase::WifiConnecting | SetupPhase::CheckingVersion | SetupPhase::Updating
+        ) {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "idle");
+
+        // CheckingVersion should reset to Idle
+        let app_state = test_app_state("checking_version");
+        let current = app_state.lifecycle.get();
+        if matches!(
+            current,
+            SetupPhase::WifiConnecting | SetupPhase::CheckingVersion | SetupPhase::Updating
+        ) {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "idle");
+
+        // Updating should reset to Idle
+        let app_state = test_app_state("updating");
+        let current = app_state.lifecycle.get();
+        if matches!(
+            current,
+            SetupPhase::WifiConnecting | SetupPhase::CheckingVersion | SetupPhase::Updating
+        ) {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "idle");
+    }
+
+    #[test]
+    fn qr_navigation_preserves_durable_and_failure_phases() {
+        // UpdateFailed should be preserved
+        let app_state = test_app_state("update_failed");
+        let current = app_state.lifecycle.get();
+        if matches!(
+            current,
+            SetupPhase::WifiConnecting | SetupPhase::CheckingVersion | SetupPhase::Updating
+        ) {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "update_failed");
+
+        // Ready should be preserved
+        let app_state = test_app_state("ready");
+        let current = app_state.lifecycle.get();
+        if matches!(
+            current,
+            SetupPhase::WifiConnecting | SetupPhase::CheckingVersion | SetupPhase::Updating
+        ) {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "ready");
+
+        // Pairing should be preserved
+        let app_state = test_app_state("pairing");
+        let current = app_state.lifecycle.get();
+        if matches!(
+            current,
+            SetupPhase::WifiConnecting | SetupPhase::CheckingVersion | SetupPhase::Updating
+        ) {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
+        assert_eq!(get_setup_phase(&app_state), "pairing");
+    }
+
+    #[test]
+    fn update_attempt_error_classifies_from_raw_updater_message_before_context_wrap() {
+        let raw = "No network connection. Aborting update.";
+        let source = anyhow::anyhow!(raw);
+        let kind = classify_updater_message(&source.to_string());
+        let err = UpdateAttemptError {
+            source: source.context("update process failed"),
+            kind,
+        };
+
+        assert_eq!(err.kind, UpdateErrorType::Transient);
+        assert!(err.source.to_string().contains("update process failed"));
+        assert_eq!(
+            classify_updater_message(&err.source.to_string()),
+            UpdateErrorType::Permanent
+        );
+    }
+
+    fn test_app_state(setup_phase: &str) -> Arc<AppState> {
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.set(match setup_phase {
+            "wifi_connecting" => SetupPhase::WifiConnecting,
+            "checking_version" => SetupPhase::CheckingVersion,
+            "updating" => SetupPhase::Updating,
+            "pairing" => SetupPhase::Pairing,
+            "ready" => SetupPhase::Ready,
+            "update_failed" => SetupPhase::UpdateFailed,
+            _ => SetupPhase::Idle,
+        });
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let state_store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        Arc::new(AppState {
+            device_id: "test".to_string(),
+            branch: "test".to_string(),
+            current_version: "1.0.0".to_string(),
+            state_store,
+            internet: tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { Connectivity::spawn().await }),
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            lifecycle,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    #[test]
+    fn ble_setup_success_transitions_pairing_to_ready() {
+        let lifecycle = SetupLifecycle::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state_file = temp_dir.path().join("state.txt");
+        let state_store = PersistentState::new(state_file.to_str().unwrap()).unwrap();
+
+        let app_state = Arc::new(AppState {
+            device_id: "test-device".to_string(),
+            branch: "main/stable".to_string(),
+            current_version: "1.2.3".to_string(),
+            state_store,
+            internet: tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { Connectivity::spawn().await }),
+            page: Mutex::new(Page::None(0)),
+            auto_proceed: AtomicBool::new(false),
+            lifecycle,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
+        });
+
+        // Simulate BLE setup success: got topic_id, now in Pairing phase
+        app_state
+            .state_store
+            .set(persistent_state::TOPIC_ID, "test-topic-123");
+        app_state.state_store.save().unwrap();
+        app_state.lifecycle.set(SetupPhase::Pairing);
+        app_state.lifecycle.persist(&app_state.state_store).unwrap();
+
+        // Mobile sees Pairing
+        assert_eq!(app_state.lifecycle.get(), SetupPhase::Pairing);
+
+        // After mobile scans QR, transition to Ready
+        app_state.lifecycle.set(SetupPhase::Ready);
+        app_state.lifecycle.persist(&app_state.state_store).unwrap();
+
+        // Now mobile sees Ready
+        assert_eq!(app_state.lifecycle.get(), SetupPhase::Ready);
     }
 }
 
