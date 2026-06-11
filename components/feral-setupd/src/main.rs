@@ -1054,27 +1054,35 @@ mod callbacks {
 
         match super::available_system_update_follow_up(&result) {
             super::AvailableSystemUpdateFollowUp::RestoreCurrentPage => {
-                // Check if current page is a stale failure screen that needs phase-driven recovery.
-                // For other legitimate pages (factory reset, reflashing, messages), they persist
-                // through the update check and don't need explicit restoration.
-                let page = app_state.page.lock().await;
-                let needs_phase_recovery = matches!(*page, super::Page::SystemUpgrade(..));
-                drop(page);
-
-                if needs_phase_recovery {
-                    // Stale SystemUpgrade screen from previous failure: use phase-driven navigation
-                    // to ensure the TV matches the actual device state after retry clears UpdateFailed.
-                    let phase = app_state.lifecycle.get();
-                    let nav_result = match phase {
-                        super::SetupPhase::Ready => super::show_webapp(app_state, chromium).await,
-                        _ => super::show_qrcode(app_state, chromium).await,
-                    };
-                    if let Err(e) = nav_result {
-                        eprintln!("MAIN: Failed to navigate after D-Bus retry no-update: {e:#?}");
+                // The blocking version-check progress UI repaints Chromium with the transient
+                // "Checking for updates..." screen and intentionally does NOT record
+                // app_state.page (see navigate_transient_message). So after a no-update result
+                // the TV is left on that transient screen while app_state.page still holds the
+                // real canonical surface. We must actively re-show that canonical page or the
+                // device stays stuck on "Checking for updates...". The decision is factored into
+                // restore_page_target so it can be unit-tested without driving CDP.
+                let current_page = { app_state.page.lock().await.clone() };
+                let target = super::restore_page_target(&current_page, app_state.lifecycle.get());
+                let nav_result = match target {
+                    super::RestorePageTarget::Webapp => {
+                        super::show_webapp(app_state, chromium).await
                     }
+                    super::RestorePageTarget::Qrcode => {
+                        super::show_qrcode(app_state, chromium).await
+                    }
+                    super::RestorePageTarget::Message(msg) => {
+                        super::show_message(chromium, app_state, &msg).await
+                    }
+                    super::RestorePageTarget::FactoryReset => {
+                        super::show_factory_reset(chromium, app_state).await
+                    }
+                    super::RestorePageTarget::NoChange => Ok(()),
+                };
+                if let Err(e) = nav_result {
+                    eprintln!(
+                        "MAIN: Failed to restore canonical page after D-Bus no-update: {e:#?}"
+                    );
                 }
-                // Else: legitimate current page (factory reset, reflashing, messages, QR, webapp)
-                // persists through update check progress UI and doesn't need restoration.
             }
             super::AvailableSystemUpdateFollowUp::LogFailure => {
                 eprintln!("MAIN: System update failed: {result:#?}");
@@ -1639,6 +1647,43 @@ fn available_system_update_follow_up(
         Ok(UpdateCheckResult::NoUpdateNeeded) => AvailableSystemUpdateFollowUp::RestoreCurrentPage,
         Err(_) => AvailableSystemUpdateFollowUp::LogFailure,
         Ok(_) => AvailableSystemUpdateFollowUp::NoOp,
+    }
+}
+
+/// Canonical surface to re-show after a D-Bus `NoUpdateNeeded` check.
+///
+/// The version-check progress UI repaints Chromium with a transient "Checking for updates..."
+/// screen without recording `app_state.page`, so the no-update follow-up must actively re-show the
+/// real canonical surface or the TV stays stuck on that transient screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestorePageTarget {
+    Webapp,
+    Qrcode,
+    Message(String),
+    FactoryReset,
+    /// Nothing to restore. `ReflashingRequired` cannot be rebuilt from the stored page state (the
+    /// flashing-guide URL / QR content is not retained) and is unreachable on `NoUpdateNeeded`
+    /// anyway, since a too-old device returns `TooOldToUpgrade`. `None` has no canonical surface.
+    NoChange,
+}
+
+/// Decide which canonical page to re-show after a D-Bus no-update check.
+///
+/// `SystemUpgrade` is treated as a stale failure screen: once the manual retry cleared
+/// `update_failed`, re-painting the failure copy would be wrong, so it maps to the phase-appropriate
+/// surface (webapp when `Ready`, otherwise QR). Every other re-showable page maps back to itself so
+/// Chromium leaves the transient progress screen.
+fn restore_page_target(page: &Page, phase: SetupPhase) -> RestorePageTarget {
+    match page {
+        Page::SystemUpgrade(_) => match phase {
+            SetupPhase::Ready => RestorePageTarget::Webapp,
+            _ => RestorePageTarget::Qrcode,
+        },
+        Page::WebApp(_) => RestorePageTarget::Webapp,
+        Page::QRCode(_) => RestorePageTarget::Qrcode,
+        Page::Message(_, msg) => RestorePageTarget::Message(msg.clone()),
+        Page::FactoryReset(_) => RestorePageTarget::FactoryReset,
+        Page::ReflashingRequired(..) | Page::None(_) => RestorePageTarget::NoChange,
     }
 }
 
@@ -2748,6 +2793,84 @@ mod available_system_update_follow_up_tests {
         assert_eq!(
             available_system_update_follow_up(&Err(anyhow!("cdp navigate failed"))),
             AvailableSystemUpdateFollowUp::LogFailure,
+        );
+    }
+}
+
+#[cfg(test)]
+mod restore_page_target_tests {
+    use super::{Page, RestorePageTarget, SetupPhase, restore_page_target, unix_s};
+
+    /// Regression for PR #206 review 4475472053: after a manual D-Bus no-update check, the
+    /// transient "Checking for updates..." progress screen must be cleared by re-showing the real
+    /// canonical surface. The progress UI never records `app_state.page`, so the canonical page is
+    /// still the pre-check surface and must map back to itself (not a no-op, which left the TV stuck).
+    #[test]
+    fn webapp_canonical_page_reshows_webapp() {
+        assert_eq!(
+            restore_page_target(&Page::WebApp(unix_s()), SetupPhase::Ready),
+            RestorePageTarget::Webapp,
+        );
+    }
+
+    #[test]
+    fn qrcode_canonical_page_reshows_qrcode() {
+        assert_eq!(
+            restore_page_target(&Page::QRCode(unix_s()), SetupPhase::Pairing),
+            RestorePageTarget::Qrcode,
+        );
+    }
+
+    #[test]
+    fn message_canonical_page_reshows_same_message() {
+        let msg = "Setting things up".to_string();
+        assert_eq!(
+            restore_page_target(&Page::Message(unix_s(), msg.clone()), SetupPhase::Idle),
+            RestorePageTarget::Message(msg),
+        );
+    }
+
+    #[test]
+    fn factory_reset_canonical_page_reshows_factory_reset() {
+        assert_eq!(
+            restore_page_target(&Page::FactoryReset(unix_s()), SetupPhase::Idle),
+            RestorePageTarget::FactoryReset,
+        );
+    }
+
+    /// Stale failure screen: a prior UpdateFailed left `SystemUpgrade` as the canonical page, but
+    /// the retry that produced NoUpdateNeeded already cleared update_failed. Re-showing the failure
+    /// copy would be wrong, so route to the phase-appropriate surface instead.
+    #[test]
+    fn stale_system_upgrade_routes_by_phase() {
+        assert_eq!(
+            restore_page_target(&Page::SystemUpgrade(unix_s()), SetupPhase::Ready),
+            RestorePageTarget::Webapp,
+        );
+        assert_eq!(
+            restore_page_target(&Page::SystemUpgrade(unix_s()), SetupPhase::Pairing),
+            RestorePageTarget::Qrcode,
+        );
+        assert_eq!(
+            restore_page_target(&Page::SystemUpgrade(unix_s()), SetupPhase::Idle),
+            RestorePageTarget::Qrcode,
+        );
+    }
+
+    /// Reflashing cannot be rebuilt from stored page state and is unreachable on NoUpdateNeeded;
+    /// None has no surface. Both leave the page unchanged.
+    #[test]
+    fn reflashing_and_none_make_no_change() {
+        assert_eq!(
+            restore_page_target(
+                &Page::ReflashingRequired(unix_s(), "reflash".to_string()),
+                SetupPhase::Idle,
+            ),
+            RestorePageTarget::NoChange,
+        );
+        assert_eq!(
+            restore_page_target(&Page::None(unix_s()), SetupPhase::Idle),
+            RestorePageTarget::NoChange,
         );
     }
 }

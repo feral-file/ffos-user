@@ -120,7 +120,7 @@ Each service owns its own state files exclusively. No service should read or wri
 
 Rules:
 - State writes must be atomic. Use write-to-temp-then-rename (`FILE.tmp` → `FILE`).
-- State files are human-readable JSON. Add fields additively; never rename or remove fields without a migration path.
+- State files are human-readable text. Most use JSON, but `feral-setupd`'s `setupd` file uses a flat `key=value` line format (one key per line). Add fields additively; never rename or remove fields without a migration path.
 - State is not a message bus. Services that need to react to changes in another service's state must use D-Bus signals, not file polling.
 - `ff1-config.json` is read-only at runtime for all services. Only updater scripts write it. It does not control the local player URL.
 - SSH authorized keys (`/home/feralfile/.ssh/authorized_keys`) are managed by `feral-controld` on behalf of the `sshAccess` command.
