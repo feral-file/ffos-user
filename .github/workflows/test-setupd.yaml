@@ -9,6 +9,7 @@ on:
       - 'components/feral-setupd/rustfmt.toml'
       - 'components/feral-setupd/clippy.toml'
       - 'Makefile'
+      - 'scripts/verify-setupd-docker.sh'
       - 'scripts/test-serve-feral-player.sh'
       - 'users/feralfile/scripts/serve-feral-player.sh'
       - 'users/feralfile/systemd-services/feral-player.service'

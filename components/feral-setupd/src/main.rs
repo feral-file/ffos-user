@@ -268,6 +268,19 @@ fn ble_action_block_during_update(update_in_progress: &AtomicBool) -> Option<ble
     }
 }
 
+/// Phase the BLE setup wrapper should leave behind when a version check ends without an update
+/// (failure or critical error). `check_and_update_system` already restored the pre-check durable
+/// phase (Ready/Pairing) before returning, so the wrapper must NOT blindly force Idle or it would
+/// demote a device that just recovered from `update_failed` via a BLE retry. Only non-durable
+/// phases collapse to Idle.
+fn ble_terminal_reset_phase(current: SetupPhase) -> SetupPhase {
+    if current.is_durable() {
+        current
+    } else {
+        SetupPhase::Idle
+    }
+}
+
 /// RAII guard for the update_in_progress flag.
 /// Automatically releases the flag when dropped, ensuring cleanup on all return paths
 /// (success, early return, panic, or error propagation via `?`).
@@ -638,14 +651,21 @@ async fn internet_setup_successfully_cb(
             return Err(ble::BleStatus::DeviceUpdating);
         }
         Ok(UpdateCheckResult::VersionCheckFailed) => {
-            app_state.lifecycle.set(SetupPhase::Idle);
+            // Preserve the durable phase check_and_update_system already restored (Ready/Pairing);
+            // only collapse to Idle for non-durable phases. Forcing Idle here would demote a device
+            // that just recovered from update_failed via this BLE retry.
+            app_state
+                .lifecycle
+                .set(ble_terminal_reset_phase(app_state.lifecycle.get()));
             return Err(ble::BleStatus::VersionCheckFailed);
         }
         Ok(UpdateCheckResult::NoUpdateNeeded) => {} // Continue with normal flow
         Err(e) => {
             // This shouldn't happen with NonBlocking, but handle it anyway
             eprintln!("MAIN: Error during update check: {e:#?}");
-            app_state.lifecycle.set(SetupPhase::Idle);
+            app_state
+                .lifecycle
+                .set(ble_terminal_reset_phase(app_state.lifecycle.get()));
             return Err(ble::BleStatus::VersionCheckFailed);
         }
     }
@@ -2467,6 +2487,43 @@ mod tests {
         }
 
         assert_eq!(ble_action_block_during_update(&flag), None);
+    }
+
+    /// Regression for PR #206 review 4475817494: a BLE retry from update_failed restores a durable
+    /// phase, and a subsequent VersionCheckFailed must NOT demote it back to Idle. The wrapper
+    /// keeps durable phases (check_and_update_system already restored them) and only collapses
+    /// non-durable phases.
+    #[test]
+    fn ble_terminal_reset_preserves_durable_phase() {
+        assert_eq!(
+            ble_terminal_reset_phase(SetupPhase::Ready),
+            SetupPhase::Ready,
+        );
+        assert_eq!(
+            ble_terminal_reset_phase(SetupPhase::Pairing),
+            SetupPhase::Pairing,
+        );
+        assert_eq!(
+            ble_terminal_reset_phase(SetupPhase::UpdateFailed),
+            SetupPhase::UpdateFailed,
+        );
+    }
+
+    #[test]
+    fn ble_terminal_reset_collapses_non_durable_phase() {
+        assert_eq!(ble_terminal_reset_phase(SetupPhase::Idle), SetupPhase::Idle);
+        assert_eq!(
+            ble_terminal_reset_phase(SetupPhase::WifiConnecting),
+            SetupPhase::Idle,
+        );
+        assert_eq!(
+            ble_terminal_reset_phase(SetupPhase::CheckingVersion),
+            SetupPhase::Idle,
+        );
+        assert_eq!(
+            ble_terminal_reset_phase(SetupPhase::Updating),
+            SetupPhase::Idle,
+        );
     }
 
     #[test]

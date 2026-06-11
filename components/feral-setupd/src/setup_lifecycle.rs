@@ -107,6 +107,14 @@ impl SetupLifecycle {
         if let Some(phase_str) = store.get(SETUP_PHASE) {
             let phase = SetupPhase::from_str(&phase_str);
 
+            // Only durable phases are valid persisted state. A non-durable phase on disk
+            // (empty string written by persist(), a stale write, or a hand-repaired file)
+            // must never survive a restart as an in-progress operation, so collapse it to Idle.
+            if !phase.is_durable() {
+                *self.phase.lock().unwrap() = SetupPhase::Idle;
+                return;
+            }
+
             // Validate Pairing invariant: must have topic_id
             if phase == SetupPhase::Pairing {
                 let has_topic = store.get(crate::persistent_state::TOPIC_ID).is_some();
@@ -346,6 +354,27 @@ mod tests {
 
         // Should auto-correct to Idle
         assert_eq!(lifecycle.get(), SetupPhase::Idle);
+    }
+
+    #[test]
+    fn persisted_transient_phase_restores_as_idle() {
+        // Defense-in-depth (PR #206 review 4475817494): even if persist() normally clears transient
+        // phases, a stale or hand-repaired state file with a transient phase string must not
+        // resurrect an in-progress operation across restart.
+        for transient in ["wifi_connecting", "checking_version", "updating"] {
+            let store = test_store();
+            store.set("setup_phase", transient);
+            store.save().unwrap();
+
+            let lifecycle = SetupLifecycle::new();
+            lifecycle.restore_from_store(&store);
+
+            assert_eq!(
+                lifecycle.get(),
+                SetupPhase::Idle,
+                "transient phase '{transient}' should restore as Idle"
+            );
+        }
     }
 
     #[test]
