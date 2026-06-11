@@ -491,8 +491,17 @@ async fn startup_without_internet(
     // We now have internet, but we need to check if
     // the internet comes from bluetooth (auto_proceed is set to false)
     // if it's from bluetooth, we shouldn't do anything else as the bluetooth
-    // flow will handle it
-    if app_state.auto_proceed.load(Ordering::Acquire) {
+    // flow will handle it.
+    //
+    // Use compare_exchange so the auto-advance fires at most once and cannot race
+    // a concurrent BLE connect_wifi that clears auto_proceed right after we observe
+    // internet. Claiming the flag (true -> false) here also prevents a later BLE
+    // flow from re-triggering startup once we've taken ownership.
+    if app_state
+        .auto_proceed
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
         on_startup_with_internet(app_state.clone(), chrome.clone()).await?;
     }
     Ok(())
@@ -773,8 +782,15 @@ mod callbacks {
                     // Clear the pre-failure tracking
                     app_state.state_store.set(PRE_FAILURE_PHASE, "");
 
+                    // Abort the retry if the cleared UpdateFailed phase cannot be persisted.
+                    // Proceeding would leave setup_phase=update_failed on disk while the
+                    // in-memory phase says otherwise, so a crash/reboot mid-retry would
+                    // resurrect UpdateFailed. Mirrors the D-Bus do_system_update guard.
                     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
-                        eprintln!("BLE: Failed to persist phase restoration: {e:#?}");
+                        eprintln!(
+                            "BLE: Failed to persist phase restoration, aborting retry: {e:#?}"
+                        );
+                        return Err(ble::BleStatus::UnknownError);
                     }
 
                     // Re-save durable phase to PRE_FAILURE_PHASE before entering transient state.
@@ -894,8 +910,15 @@ mod callbacks {
                     // Clear the pre-failure tracking
                     app_state.state_store.set(PRE_FAILURE_PHASE, "");
 
+                    // Abort the retry if the cleared UpdateFailed phase cannot be persisted.
+                    // Proceeding would leave setup_phase=update_failed on disk while the
+                    // in-memory phase says otherwise, so a crash/reboot mid-retry would
+                    // resurrect UpdateFailed. Mirrors the D-Bus do_system_update guard.
                     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
-                        eprintln!("BLE: Failed to persist phase restoration: {e:#?}");
+                        eprintln!(
+                            "BLE: Failed to persist phase restoration, aborting retry: {e:#?}"
+                        );
+                        return Err(ble::BleStatus::UnknownError);
                     }
 
                     // Re-save durable phase to PRE_FAILURE_PHASE before entering transient state.
@@ -1461,7 +1484,18 @@ async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
             Ok(()) => {
                 // Update succeeded. Reset to Idle; if device was already paired,
                 // phase will be restored to Ready on next boot from persistent state.
+                //
+                // Clear the stale recovery marker. PRE_FAILURE_PHASE was written before
+                // entering the transient update states, but is only overwritten on a
+                // subsequent check when the prior phase is durable. Leaving it set would
+                // let a later failure that starts from a non-durable phase restore a
+                // phantom Ready/Pairing during update_failed recovery.
+                use crate::persistent_state::PRE_FAILURE_PHASE;
+                app_state.state_store.set(PRE_FAILURE_PHASE, "");
                 app_state.lifecycle.set(SetupPhase::Idle);
+                if let Err(e) = app_state.state_store.save() {
+                    eprintln!("MAIN: Failed to clear PRE_FAILURE_PHASE on update success: {e:#?}");
+                }
                 return Ok(());
             }
             Err(e) => {
