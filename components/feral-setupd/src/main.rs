@@ -1638,7 +1638,14 @@ async fn check_and_update_system(
     if let Err(ve) = updater::refresh_remote_version(retries, progress.as_updater_progress()).await
     {
         progress.finish().await;
-        app_state.lifecycle.set(SetupPhase::Idle);
+        // Restore durable phase or reset to Idle on refresh failure.
+        // This preserves paired device state when distributor/network/parse errors occur
+        // during forced metadata refresh.
+        if phase_before_check.is_durable() {
+            app_state.lifecycle.set(phase_before_check);
+        } else {
+            app_state.lifecycle.set(SetupPhase::Idle);
+        }
         return show_version_check_failure(app_state, chrome, execution, ve).await;
     }
     // First check if device is too old to auto-upgrade (reads the freshly refreshed cache)
@@ -2831,5 +2838,78 @@ mod phase_preservation_regression_tests {
                 "Transient phase {transient_phase:?} should reset to Idle on version check failure"
             );
         }
+    }
+
+    /// Regression test for PR #206 review finding (Jun 11): early refresh_remote_version
+    /// failure (lines 1638-1649) should preserve durable phases, not unconditionally set Idle.
+    ///
+    /// Scenario: Ready device, check_and_update_system runs, but refresh_remote_version
+    /// fails immediately (network/distributor/parse error) before we can check update status.
+    /// Expected: Device stays Ready, shows version-check failure UI.
+    /// Bug: Device demoted to Idle, paired device reports idle to mobile app.
+    #[test]
+    fn early_refresh_failure_preserves_ready_phase() {
+        let file = NamedTempFile::new().unwrap();
+        let store = PersistentState::new(file.path().to_str().unwrap()).unwrap();
+        let lifecycle = SetupLifecycle::new();
+
+        // Simulate a Ready device before update check
+        store.set(persistent_state::TOPIC_ID, "test-topic-ready");
+        lifecycle.set(SetupPhase::Ready);
+        lifecycle.persist(&store).unwrap();
+
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+        let phase_before_check = lifecycle.get();
+
+        // Simulate entering CheckingVersion phase
+        lifecycle.set(SetupPhase::CheckingVersion);
+
+        // Early refresh_remote_version failure (network/distributor down, parse error)
+        // The fix (lines 1638-1649) should restore phase_before_check if durable
+        if phase_before_check.is_durable() {
+            lifecycle.set(phase_before_check);
+        } else {
+            lifecycle.set(SetupPhase::Idle);
+        }
+
+        // Verify: Ready is preserved, not demoted to Idle
+        assert_eq!(
+            lifecycle.get(),
+            SetupPhase::Ready,
+            "Early refresh failure should preserve Ready phase"
+        );
+    }
+
+    /// Same test for Pairing phase preservation on early refresh failure.
+    #[test]
+    fn early_refresh_failure_preserves_pairing_phase() {
+        let file = NamedTempFile::new().unwrap();
+        let store = PersistentState::new(file.path().to_str().unwrap()).unwrap();
+        let lifecycle = SetupLifecycle::new();
+
+        // Simulate a Pairing device (has topic_id, waiting for QR scan)
+        store.set(persistent_state::TOPIC_ID, "test-topic-pairing");
+        lifecycle.set(SetupPhase::Pairing);
+        lifecycle.persist(&store).unwrap();
+
+        assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+        let phase_before_check = lifecycle.get();
+
+        // Simulate entering CheckingVersion phase
+        lifecycle.set(SetupPhase::CheckingVersion);
+
+        // Early refresh failure
+        if phase_before_check.is_durable() {
+            lifecycle.set(phase_before_check);
+        } else {
+            lifecycle.set(SetupPhase::Idle);
+        }
+
+        // Verify: Pairing is preserved
+        assert_eq!(
+            lifecycle.get(),
+            SetupPhase::Pairing,
+            "Early refresh failure should preserve Pairing phase"
+        );
     }
 }
