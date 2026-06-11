@@ -253,6 +253,21 @@ fn get_setup_phase(app_state: &AppState) -> String {
     app_state.lifecycle.get().as_str().to_string()
 }
 
+/// Gate for BLE setup actions (`connect_wifi`, `keep_wifi`) while an OTA owns the device.
+///
+/// A non-blocking update holds `update_in_progress` for its entire lifetime (version check,
+/// retries, backoff, install up to reboot). Letting a concurrent BLE setup action run during that
+/// window would clobber `setup_phase=updating` that mobile is polling and, for `connect_wifi`,
+/// switch Wi-Fi via nmcli mid-download. Returning `Some(DeviceUpdating)` lets callers reject the
+/// request before any phase/UI/network side effects, leaving the updater in sole control.
+fn ble_action_block_during_update(update_in_progress: &AtomicBool) -> Option<ble::BleStatus> {
+    if update_in_progress.load(Ordering::Acquire) {
+        Some(ble::BleStatus::DeviceUpdating)
+    } else {
+        None
+    }
+}
+
 /// RAII guard for the update_in_progress flag.
 /// Automatically releases the flag when dropped, ensuring cleanup on all return paths
 /// (success, early return, panic, or error propagation via `?`).
@@ -678,9 +693,9 @@ async fn internet_setup_successfully_cb(
 
 mod callbacks {
     use super::{
-        AppState, Cdp, SetupPhase, WifiError, ble, constant, dbus_utils, get_setup_phase,
-        internet_setup_successfully_cb, show_factory_reset, show_message, show_qrcode, show_webapp,
-        wifi_utils,
+        AppState, Cdp, SetupPhase, WifiError, ble, ble_action_block_during_update, constant,
+        dbus_utils, get_setup_phase, internet_setup_successfully_cb, show_factory_reset,
+        show_message, show_qrcode, show_webapp, wifi_utils,
     };
     use serde::Deserialize;
     use std::sync::Arc;
@@ -756,6 +771,17 @@ mod callbacks {
             let pwd = pwd.to_string();
             Box::pin(async move {
                 let start_time = Instant::now();
+
+                // Reject Wi-Fi reconfiguration while an OTA owns the device. The non-blocking
+                // update holds the guard until the background update() finishes; mutating
+                // setup_phase/UI or switching networks via nmcli here would clobber the
+                // updating phase mobile polls and could disrupt the in-flight download. Bail
+                // before any side effects so the updater stays in sole control.
+                if let Some(status) = ble_action_block_during_update(&app_state.update_in_progress)
+                {
+                    println!("BLE: connect_wifi rejected, update in progress");
+                    return Err(status);
+                }
 
                 // Clear and restore UpdateFailed phase on explicit WiFi retry.
                 // Restore the pre-failure durable phase if tracked, otherwise use Idle.
@@ -881,6 +907,14 @@ mod callbacks {
             let app_state = app_state.clone();
             let chromium = chromium.clone();
             Box::pin(async move {
+                // Reject while an OTA owns the device, before any phase/UI side effects, so the
+                // updater keeps control of setup_phase mobile polls (mirrors connect_wifi).
+                if let Some(status) = ble_action_block_during_update(&app_state.update_in_progress)
+                {
+                    println!("BLE: keep_wifi rejected, update in progress");
+                    return Err(status);
+                }
+
                 if !app_state.internet.is_online(true).await {
                     return Err(ble::BleStatus::WifiRequired);
                 }
@@ -970,6 +1004,15 @@ mod callbacks {
             }
             println!("MAIN: QR switch -> qrcode_requested={qrcode_requested}");
             tokio::runtime::Handle::current().block_on(async move {
+                // Ignore QR/webapp switches while an OTA owns the device. show_qrcode would reset
+                // the transient Updating phase to Idle and navigate Chromium off the upgrade
+                // screen, both of which clobber the updater-owned state mobile is polling. The
+                // updater drives the screen until it completes (reboot) or latches update_failed.
+                if ble_action_block_during_update(&app_state.update_in_progress).is_some() {
+                    println!("MAIN: QR switch ignored, update in progress");
+                    return;
+                }
+
                 if qrcode_requested {
                     let _ = show_qrcode(&app_state, &chromium).await;
                 } else {
@@ -2390,6 +2433,40 @@ mod tests {
 
         assert!(!flag.load(Ordering::Acquire));
         assert!(UpdateGuard::try_acquire(&flag).is_some());
+    }
+
+    /// Regression for PR #206 review 4475717770: BLE setup actions (connect_wifi/keep_wifi) and the
+    /// QR switch must bail before side effects while a non-blocking OTA holds the guard, so the
+    /// updater-owned setup_phase mobile polls is not clobbered and Wi-Fi is not switched mid-update.
+    #[test]
+    fn ble_action_blocked_only_while_update_in_progress() {
+        let flag = AtomicBool::new(false);
+        assert_eq!(ble_action_block_during_update(&flag), None);
+
+        // While an update holds the guard, the action is rejected with DeviceUpdating.
+        let held = AtomicBool::new(true);
+        assert_eq!(
+            ble_action_block_during_update(&held),
+            Some(ble::BleStatus::DeviceUpdating),
+        );
+    }
+
+    /// The gate must track the real UpdateGuard lifecycle: blocked while a guard is held, allowed
+    /// again once it drops (so a finished/failed update re-opens BLE setup actions).
+    #[test]
+    fn ble_action_gate_follows_update_guard_lifecycle() {
+        let flag = Arc::new(AtomicBool::new(false));
+        assert_eq!(ble_action_block_during_update(&flag), None);
+
+        {
+            let _guard = UpdateGuard::try_acquire(&flag).expect("guard acquired");
+            assert_eq!(
+                ble_action_block_during_update(&flag),
+                Some(ble::BleStatus::DeviceUpdating),
+            );
+        }
+
+        assert_eq!(ble_action_block_during_update(&flag), None);
     }
 
     #[test]
