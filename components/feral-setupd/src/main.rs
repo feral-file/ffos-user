@@ -644,13 +644,19 @@ async fn internet_setup_successfully_cb(
         return Err(ble::BleStatus::UnknownError);
     }
 
-    // NOW safe to set Pairing phase (topic_id is guaranteed to exist on disk).
-    // Pairing invariant: phase can only be Pairing when topic_id exists.
-    app_state.lifecycle.set(SetupPhase::Pairing);
-    if let Err(e) = app_state.lifecycle.persist(state_store) {
-        eprintln!("BLE: Failed to persist Pairing phase: {e:#?}");
-        // Phase is set in memory but not persisted - acceptable since topic_id is saved.
-        // Next boot will restore from disk (Idle) and can re-fetch topic_id.
+    // Only transition to Pairing if not already Ready.
+    // Ready devices completing a BLE retry should stay Ready, not be demoted to Pairing.
+    // This preserves the durable Ready phase across update check cycles.
+    let current_phase = app_state.lifecycle.get();
+    if current_phase != SetupPhase::Ready {
+        // NOW safe to set Pairing phase (topic_id is guaranteed to exist on disk).
+        // Pairing invariant: phase can only be Pairing when topic_id exists.
+        app_state.lifecycle.set(SetupPhase::Pairing);
+        if let Err(e) = app_state.lifecycle.persist(state_store) {
+            eprintln!("BLE: Failed to persist Pairing phase: {e:#?}");
+            // Phase is set in memory but not persisted - acceptable since topic_id is saved.
+            // Next boot will restore from disk (Idle) and can re-fetch topic_id.
+        }
     }
 
     let app_state = app_state.clone();
@@ -770,6 +776,21 @@ mod callbacks {
                     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
                         eprintln!("BLE: Failed to persist phase restoration: {e:#?}");
                     }
+
+                    // Re-save durable phase to PRE_FAILURE_PHASE before entering transient state.
+                    // This ensures the phase survives the update check cycle and can be restored
+                    // if the retry fails again. Without this, a second failure would have no
+                    // durable phase to restore from, permanently losing Ready/Pairing state.
+                    if restored_phase.is_durable() && restored_phase != SetupPhase::UpdateFailed {
+                        app_state
+                            .state_store
+                            .set(PRE_FAILURE_PHASE, restored_phase.as_str());
+                        if let Err(e) = app_state.state_store.save() {
+                            eprintln!(
+                                "BLE: Failed to re-save PRE_FAILURE_PHASE before retry: {e:#?}"
+                            );
+                        }
+                    }
                 }
 
                 app_state.lifecycle.set(SetupPhase::WifiConnecting);
@@ -875,6 +896,21 @@ mod callbacks {
 
                     if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
                         eprintln!("BLE: Failed to persist phase restoration: {e:#?}");
+                    }
+
+                    // Re-save durable phase to PRE_FAILURE_PHASE before entering transient state.
+                    // This ensures the phase survives the update check cycle and can be restored
+                    // if the retry fails again. Without this, a second failure would have no
+                    // durable phase to restore from, permanently losing Ready/Pairing state.
+                    if restored_phase.is_durable() && restored_phase != SetupPhase::UpdateFailed {
+                        app_state
+                            .state_store
+                            .set(PRE_FAILURE_PHASE, restored_phase.as_str());
+                        if let Err(e) = app_state.state_store.save() {
+                            eprintln!(
+                                "BLE: Failed to re-save PRE_FAILURE_PHASE before retry: {e:#?}"
+                            );
+                        }
                     }
                 }
 
@@ -995,19 +1031,27 @@ mod callbacks {
 
         match super::available_system_update_follow_up(&result) {
             super::AvailableSystemUpdateFollowUp::RestoreCurrentPage => {
-                // After clearing UpdateFailed and checking for updates, navigate based on
-                // the restored phase rather than the current page. The current page might still
-                // be SystemUpgrade (the failure screen) from a previous update attempt, and
-                // navigate_to_page treats SystemUpgrade as a no-op. Use phase-driven navigation
-                // to ensure the TV matches the actual device state after recovery.
-                let phase = app_state.lifecycle.get();
-                let nav_result = match phase {
-                    super::SetupPhase::Ready => super::show_webapp(app_state, chromium).await,
-                    _ => super::show_qrcode(app_state, chromium).await,
-                };
-                if let Err(e) = nav_result {
-                    eprintln!("MAIN: Failed to navigate after D-Bus retry no-update: {e:#?}");
+                // Check if current page is a stale failure screen that needs phase-driven recovery.
+                // For other legitimate pages (factory reset, reflashing, messages), they persist
+                // through the update check and don't need explicit restoration.
+                let page = app_state.page.lock().await;
+                let needs_phase_recovery = matches!(*page, super::Page::SystemUpgrade(..));
+                drop(page);
+
+                if needs_phase_recovery {
+                    // Stale SystemUpgrade screen from previous failure: use phase-driven navigation
+                    // to ensure the TV matches the actual device state after retry clears UpdateFailed.
+                    let phase = app_state.lifecycle.get();
+                    let nav_result = match phase {
+                        super::SetupPhase::Ready => super::show_webapp(app_state, chromium).await,
+                        _ => super::show_qrcode(app_state, chromium).await,
+                    };
+                    if let Err(e) = nav_result {
+                        eprintln!("MAIN: Failed to navigate after D-Bus retry no-update: {e:#?}");
+                    }
                 }
+                // Else: legitimate current page (factory reset, reflashing, messages, QR, webapp)
+                // persists through update check progress UI and doesn't need restoration.
             }
             super::AvailableSystemUpdateFollowUp::LogFailure => {
                 eprintln!("MAIN: System update failed: {result:#?}");
