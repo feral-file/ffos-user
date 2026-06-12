@@ -889,6 +889,14 @@ mod callbacks {
                     }
                 }
 
+                // Capture the durable phase (Ready/Pairing) this device had before the BLE setup.
+                // The mandatory update check inside internet_setup_successfully_cb snapshots the
+                // LIVE phase as its no-update restore target. WifiConnecting is transient, so if it
+                // were still live at that point a no-update result would collapse to Idle and the
+                // setup-success path would then demote a previously Ready device to Pairing. We
+                // restore this captured phase just before the check (see below).
+                let phase_before_wifi_connect = app_state.lifecycle.get();
+
                 app_state.lifecycle.set(SetupPhase::WifiConnecting);
                 // Show message
                 let connecting_msg = format!("{}{}", constant::WIFI_CONNECTING_MSG_PREFIX, ssid);
@@ -948,6 +956,13 @@ mod callbacks {
                     });
                     return Err(ble::BleStatus::NoInternet);
                 }
+
+                // Restore the pre-connect durable phase so the mandatory update check's no-update
+                // restoration keeps Ready/Pairing instead of resetting the transient WifiConnecting
+                // to Idle (which would demote a previously Ready device to Pairing in the
+                // setup-success path). Idle/Pairing devices are unchanged: a first-time Idle device
+                // still flows to topic_id fetch -> Pairing below.
+                app_state.lifecycle.set(phase_before_wifi_connect);
                 internet_setup_successfully_cb(&app_state, &chromium).await
             })
         })
@@ -3183,6 +3198,61 @@ mod phase_preservation_regression_tests {
             lifecycle.get(),
             SetupPhase::Ready,
             "Version check failure should preserve Ready phase"
+        );
+    }
+
+    /// Regression for PR #206 review 4482579315: a Ready device using BLE connect_wifi as the
+    /// explicit update_failed retry must stay Ready after a no-update result, not be demoted to
+    /// Pairing.
+    ///
+    /// Bug ordering: connect_wifi restored Ready from PRE_FAILURE_PHASE, then set the transient
+    /// WifiConnecting before the update check. check_and_update_system snapshots the LIVE phase as
+    /// its no-update restore target, so WifiConnecting collapsed to Idle, and the setup-success
+    /// path then persisted Pairing (since phase != Ready). The fix captures the pre-connect phase
+    /// and restores it before the check so the snapshot is the durable Ready.
+    #[test]
+    fn connect_wifi_retry_no_update_keeps_ready_phase() {
+        let file = NamedTempFile::new().unwrap();
+        let store = PersistentState::new(file.path().to_str().unwrap()).unwrap();
+        let lifecycle = SetupLifecycle::new();
+
+        // Ready device that latched update_failed; PRE_FAILURE_PHASE tracks the durable Ready.
+        store.set(persistent_state::TOPIC_ID, "topic-ready-retry");
+        store.set(persistent_state::PRE_FAILURE_PHASE, "ready");
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        // connect_wifi retry restores the pre-failure phase.
+        let restored_phase =
+            SetupPhase::from_str(&store.get(persistent_state::PRE_FAILURE_PHASE).unwrap());
+        lifecycle.set(restored_phase);
+        assert_eq!(lifecycle.get(), SetupPhase::Ready);
+
+        // Fix: capture the pre-connect durable phase before entering the transient WifiConnecting.
+        let phase_before_wifi_connect = lifecycle.get();
+        lifecycle.set(SetupPhase::WifiConnecting);
+
+        // Fix: restore the captured phase before the update check snapshots phase_before_check.
+        lifecycle.set(phase_before_wifi_connect);
+        let phase_before_check = lifecycle.get();
+
+        // Update check transient + no-update restoration (Ok(false) branch).
+        lifecycle.set(SetupPhase::CheckingVersion);
+        if phase_before_check.is_durable() {
+            lifecycle.set(phase_before_check);
+        } else {
+            lifecycle.set(SetupPhase::Idle);
+        }
+
+        // setup-success path: only demote to Pairing if not already Ready.
+        if lifecycle.get() != SetupPhase::Ready {
+            lifecycle.set(SetupPhase::Pairing);
+        }
+
+        assert_eq!(
+            lifecycle.get(),
+            SetupPhase::Ready,
+            "connect_wifi retry with no update must keep a Ready device Ready, not demote to Pairing",
         );
     }
 

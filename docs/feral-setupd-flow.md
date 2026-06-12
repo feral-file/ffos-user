@@ -88,7 +88,10 @@ stateDiagram-v2
 
 - **`pairing` requires `topic_id` on disk.** On restore, if `setup_phase=pairing` but `topic_id` is missing, phase is corrected to `idle`.
 - **`ready` is set only after pairing confirmation** via the D-Bus `show_pairing_qr_code(false)` signal (QR switch to webapp). BLE Wi-Fi success transitions to `pairing`, not `ready`.
-- **Legacy migration:** devices with old `paired=true` + `topic_id` but no `setup_phase` key restore as `ready`.
+- **Legacy migration:** devices with old firmware (no `setup_phase` key) migrate as follows:
+  - `paired=true` + `topic_id` → `ready` (fully paired)
+  - `topic_id` only (no `paired=true`) → `pairing` (topic allocated but pairing not confirmed)
+  - Neither → `idle` (fresh device)
 
 ---
 
@@ -231,6 +234,7 @@ sequenceDiagram
     B->>B: Restore pre_failure_phase, persist
     B->>B: Re-save pre_failure_phase before transient state
   end
+  B->>B: Capture pre-connect phase
   B->>B: phase = wifi_connecting, show connecting UI
   B->>B: auto_proceed = false
   B->>N: nmcli connect
@@ -241,6 +245,7 @@ sequenceDiagram
     B->>B: phase = idle
     B-->>M: NoInternet
   else success
+    B->>B: Restore captured phase before check
     B->>U: internet_setup_successfully_cb (Required, NonBlocking)
     alt update in progress (guard held)
       B-->>M: DeviceUpdating
@@ -263,10 +268,11 @@ Notes:
 - Ready devices stay `ready` after a successful retry (not demoted to `pairing`)
 - On `UpdateFailed` retry, `pre_failure_phase` is restored and re-saved before transient states so a second failure can still recover
 - On version-check failure or general error after `UpdateFailed` retry, the wrapper uses **terminal phase logic**: preserve durable phases (`ready`, `pairing`), collapse transient phases (`checking_version`, etc.) to `idle`. This prevents demoting a device that just recovered from `update_failed` via a BLE retry.
+- **Phase capture/restore around `WifiConnecting`:** `connect_wifi` captures the pre-connect durable phase (Ready/Pairing) before entering the transient `WifiConnecting`, then restores it before the update check. This ensures `check_and_update_system`'s no-update restoration snapshots the true durable phase instead of the transient one, preventing a Ready device from being demoted to Pairing after a successful retry.
 
 ### Case — `keep_wifi`
 
-Same update-failure retry clearing as `connect_wifi`, but skips nmcli (keeps current Wi-Fi). Rejected with `DeviceUpdating` if OTA guard is held. Requires internet before proceeding.
+Same update-failure retry clearing as `connect_wifi`, but skips nmcli (keeps current Wi-Fi) and does **not** set `WifiConnecting` before the check. Rejected with `DeviceUpdating` if OTA guard is held. Requires internet before proceeding. Because it never enters `WifiConnecting`, its phase snapshot is always the restored durable phase and doesn't need the explicit capture/restore that `connect_wifi` requires.
 
 ---
 

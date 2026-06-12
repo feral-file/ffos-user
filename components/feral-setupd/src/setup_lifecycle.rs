@@ -129,14 +129,24 @@ impl SetupLifecycle {
 
             *self.phase.lock().unwrap() = phase;
         } else {
-            // Legacy migration: paired=true + topic_id exists → Ready phase
-            // This ensures devices upgrading from old firmware (which used paired flag)
-            // maintain their paired state and reach the webapp instead of QR setup.
+            // Legacy migration (no setup_phase key = pre-phase firmware on disk).
             let is_legacy_paired = store.get("paired").as_deref() == Some("true");
             let has_topic = store.get("topic_id").is_some();
 
             if is_legacy_paired && has_topic {
+                // Fully paired on old firmware → Ready, so the device reaches the webapp
+                // instead of QR setup.
                 *self.phase.lock().unwrap() = SetupPhase::Ready;
+            } else if has_topic {
+                // Topic allocated but pairing not yet confirmed before the upgrade. Old firmware
+                // set paired=true only when the QR switch flipped to the webapp, so a device
+                // interrupted between topic allocation and that confirmation has topic_id but no
+                // paired flag. Without this branch it would restore as Idle; startup then skips
+                // re-fetching a topic (one already exists) and shows QR with setup_phase=idle,
+                // and the QR-switch confirmation only promotes Ready from Pairing — so Ready is
+                // never persisted and every reboot loops back to QR. Restoring Pairing satisfies
+                // the topic_id invariant and lets the pairing confirmation promote to Ready.
+                *self.phase.lock().unwrap() = SetupPhase::Pairing;
             }
         }
     }
@@ -308,11 +318,16 @@ mod tests {
         assert_eq!(lifecycle.get(), SetupPhase::Ready);
     }
 
+    /// Regression for PR #206 review 4482579315: a legacy device interrupted between topic
+    /// allocation and pairing confirmation (topic_id present, paired not yet true) must migrate to
+    /// Pairing, not Idle. Restoring as Idle made startup skip the topic re-fetch and left the
+    /// QR-switch confirmation unable to persist Ready (it only promotes from Pairing), looping the
+    /// device back to QR on every reboot.
     #[test]
-    fn legacy_unpaired_state_stays_idle() {
+    fn legacy_topic_without_paired_flag_migrates_to_pairing() {
         let store = test_store();
 
-        // Old firmware state: paired=false or missing, topic_id may or may not exist
+        // Old firmware state: topic allocated but pairing not confirmed (paired=false / missing).
         store.set("paired", "false");
         store.set("topic_id", "some-topic");
         store.save().unwrap();
@@ -320,7 +335,22 @@ mod tests {
         let lifecycle = SetupLifecycle::new();
         lifecycle.restore_from_store(&store);
 
-        // Should remain Idle, not migrate to Ready
+        // Migrates to Pairing (not Ready, since pairing was never confirmed) and the topic_id
+        // invariant for Pairing holds.
+        assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+    }
+
+    /// A truly fresh legacy device (no topic_id, not paired) has nothing to migrate and stays Idle.
+    #[test]
+    fn legacy_fresh_device_without_topic_stays_idle() {
+        let store = test_store();
+
+        store.set("paired", "false");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+
         assert_eq!(lifecycle.get(), SetupPhase::Idle);
     }
 
