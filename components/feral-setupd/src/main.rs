@@ -281,6 +281,28 @@ fn ble_terminal_reset_phase(current: SetupPhase) -> SetupPhase {
     }
 }
 
+/// Whether the BLE success path must fetch a fresh relayer topic from controld.
+///
+/// `GetRelayerTopicID` blocks up to `DBUS_RELAYER_CHECK_TIMEOUT` (31s) and the BLE handler awaits
+/// the setup callback before replying to the phone, so an unconditional fetch defeats the bounded
+/// BLE response and can fail an already-provisioned device with `ServerUnreachable` even though it
+/// already holds the topic it should return. Only contact controld when no usable topic is
+/// persisted yet (first-time setup); a Pairing/Ready device returns its persisted topic immediately.
+fn needs_relayer_topic_fetch(persisted_topic: Option<&str>) -> bool {
+    !matches!(persisted_topic, Some(topic) if !topic.is_empty())
+}
+
+/// Whether a `show_pairing_qr_code` switch (QR or webapp) must be ignored.
+///
+/// A permanent update failure latches the durable `UpdateFailed` phase and leaves the failure
+/// message on screen until an explicit BLE/D-Bus retry clears it. `handle_permanent_update_failure`
+/// releases the update guard, so gating only on `update_in_progress` is not enough: a later QR/webapp
+/// switch from controld could navigate Chromium off the failure surface while `setup_phase` is still
+/// `update_failed`. Block both switch directions until recovery clears the latch.
+fn qr_switch_blocked_by_update_failed(phase: SetupPhase) -> bool {
+    phase == SetupPhase::UpdateFailed
+}
+
 /// RAII guard for the update_in_progress flag.
 /// Automatically releases the flag when dropped, ensuring cleanup on all return paths
 /// (success, early return, panic, or error propagation via `?`).
@@ -704,23 +726,34 @@ async fn internet_setup_successfully_cb(
         }
     }
 
-    // Get topic id from controld FIRST (before setting Pairing phase)
-    let topic_id = match dbus_utils::get_relayer_info() {
-        Ok(info) => info,
-        Err(e) => {
-            eprintln!("BLE: can't get relayer data from controld: {e:#?}");
-            return Err(ble::BleStatus::ServerUnreachable);
-        }
-    };
-
-    // Save topic_id to disk BEFORE setting Pairing phase to maintain invariant.
-    // Fail the operation if save fails, so we don't create invalid state.
+    // Reuse a persisted topic instead of re-fetching from controld on every BLE success.
+    // get_relayer_info() blocks up to 31s and the BLE handler awaits this callback before replying,
+    // so a Pairing/Ready device (which already has its topic) must return immediately rather than
+    // risk a slow/failed GetRelayerTopicID. Only first-time setup (no usable persisted topic) hits
+    // the network. See needs_relayer_topic_fetch.
     let state_store = &app_state.state_store;
-    state_store.set(persistent_state::TOPIC_ID, &topic_id);
-    if let Err(e) = state_store.save() {
-        eprintln!("BLE: Failed to save topic_id: {e:#?}");
-        return Err(ble::BleStatus::UnknownError);
-    }
+    let persisted_topic = state_store.get(persistent_state::TOPIC_ID);
+    let topic_id = if needs_relayer_topic_fetch(persisted_topic.as_deref()) {
+        let fetched = match dbus_utils::get_relayer_info() {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("BLE: can't get relayer data from controld: {e:#?}");
+                return Err(ble::BleStatus::ServerUnreachable);
+            }
+        };
+
+        // Save topic_id to disk BEFORE setting Pairing phase to maintain invariant.
+        // Fail the operation if save fails, so we don't create invalid state.
+        state_store.set(persistent_state::TOPIC_ID, &fetched);
+        if let Err(e) = state_store.save() {
+            eprintln!("BLE: Failed to save topic_id: {e:#?}");
+            return Err(ble::BleStatus::UnknownError);
+        }
+        fetched
+    } else {
+        // Unwrap is safe: needs_relayer_topic_fetch returned false only for Some(non-empty).
+        persisted_topic.expect("persisted topic present when fetch is skipped")
+    };
 
     // Only transition to Pairing if not already Ready.
     // Ready devices completing a BLE retry should stay Ready, not be demoted to Pairing.
@@ -748,8 +781,9 @@ async fn internet_setup_successfully_cb(
 mod callbacks {
     use super::{
         AppState, Cdp, SetupPhase, WifiError, ble, ble_action_block_during_update, constant,
-        dbus_utils, get_setup_phase, internet_setup_successfully_cb, show_factory_reset,
-        show_message, show_qrcode, show_webapp, wifi_utils,
+        dbus_utils, get_setup_phase, internet_setup_successfully_cb,
+        qr_switch_blocked_by_update_failed, show_factory_reset, show_message, show_qrcode,
+        show_webapp, wifi_utils,
     };
     use serde::Deserialize;
     use std::sync::Arc;
@@ -1079,6 +1113,16 @@ mod callbacks {
                 // updater drives the screen until it completes (reboot) or latches update_failed.
                 if ble_action_block_during_update(&app_state.update_in_progress).is_some() {
                     println!("MAIN: QR switch ignored, update in progress");
+                    return;
+                }
+
+                // Stay on the permanent-failure surface until an explicit retry clears the latch.
+                // handle_permanent_update_failure releases the update guard but keeps setup_phase ==
+                // update_failed, so without this a QR/webapp switch from controld would navigate
+                // Chromium off the failure message while the device still reports update_failed.
+                // Only BLE connect_wifi/keep_wifi or D-Bus system_update clear the latch and move on.
+                if qr_switch_blocked_by_update_failed(app_state.lifecycle.get()) {
+                    println!("MAIN: QR switch ignored, update_failed latched (awaiting retry)");
                     return;
                 }
 
@@ -2626,6 +2670,38 @@ mod tests {
             ble_terminal_reset_phase(SetupPhase::Updating),
             SetupPhase::Idle,
         );
+    }
+
+    /// Regression for PR #206 review 4482768497: the BLE no-update success path must not call the
+    /// blocking GetRelayerTopicID when a usable topic is already persisted (Pairing/Ready recovery);
+    /// it should return the persisted topic immediately. Only first-time setup (no/empty topic)
+    /// contacts controld.
+    #[test]
+    fn relayer_topic_fetch_only_when_no_persisted_topic() {
+        assert!(needs_relayer_topic_fetch(None));
+        assert!(needs_relayer_topic_fetch(Some("")));
+        assert!(!needs_relayer_topic_fetch(Some("topic-abc")));
+    }
+
+    /// Regression for PR #206 review 4482768497: a show_pairing_qr_code switch (either direction)
+    /// must be ignored while update_failed is latched, so the device stays on the failure surface
+    /// until an explicit retry clears it. Every other phase allows the switch.
+    #[test]
+    fn qr_switch_blocked_only_in_update_failed() {
+        assert!(qr_switch_blocked_by_update_failed(SetupPhase::UpdateFailed));
+        for phase in [
+            SetupPhase::Idle,
+            SetupPhase::WifiConnecting,
+            SetupPhase::CheckingVersion,
+            SetupPhase::Updating,
+            SetupPhase::Pairing,
+            SetupPhase::Ready,
+        ] {
+            assert!(
+                !qr_switch_blocked_by_update_failed(phase),
+                "phase {phase:?} must not block the QR switch",
+            );
+        }
     }
 
     #[test]
