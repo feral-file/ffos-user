@@ -109,9 +109,23 @@ impl SetupLifecycle {
 
             // Only durable phases are valid persisted state. A non-durable phase on disk
             // (empty string written by persist(), a stale write, or a hand-repaired file)
-            // must never survive a restart as an in-progress operation, so collapse it to Idle.
+            // must never survive a restart as an in-progress operation.
             if !phase.is_durable() {
-                *self.phase.lock().unwrap() = SetupPhase::Idle;
+                // If a usable topic_id is on disk the device already allocated a relayer topic, so
+                // it was at least Pairing. Collapsing to a bare Idle would strand it: startup only
+                // fetches a topic when `Idle && topic_id is none`, and the QR confirmation only
+                // promotes Ready from Pairing — so it would loop on QR forever (the same trap the
+                // legacy absent-key migration below avoids, here for an explicit empty/non-durable
+                // setup_phase). Restore Pairing to satisfy the topic_id invariant and let the
+                // pairing confirmation promote to Ready.
+                let has_topic = store
+                    .get(crate::persistent_state::TOPIC_ID)
+                    .is_some_and(|t| !t.is_empty());
+                *self.phase.lock().unwrap() = if has_topic {
+                    SetupPhase::Pairing
+                } else {
+                    SetupPhase::Idle
+                };
                 return;
             }
 
@@ -405,6 +419,53 @@ mod tests {
                 "transient phase '{transient}' should restore as Idle"
             );
         }
+    }
+
+    /// Regression for PR #206 review 4483882810: an explicit empty `setup_phase=` (written by
+    /// persist() for a non-durable phase) together with a usable topic_id must restore to Pairing,
+    /// not Idle. A bare Idle would strand the device because startup only fetches a topic when
+    /// `Idle && no topic`, and QR confirmation only promotes from Pairing — recreating the QR reboot
+    /// loop that the legacy absent-key migration avoids.
+    #[test]
+    fn empty_phase_with_topic_restores_pairing() {
+        let store = test_store();
+        store.set(crate::persistent_state::SETUP_PHASE, "");
+        store.set(crate::persistent_state::TOPIC_ID, "topic-empty-phase");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+
+        assert_eq!(lifecycle.get(), SetupPhase::Pairing);
+    }
+
+    /// The empty/non-durable case without a topic stays Idle: there is no allocated topic to strand,
+    /// so a fresh device must remain at the start of setup.
+    #[test]
+    fn empty_phase_without_topic_stays_idle() {
+        let store = test_store();
+        store.set(crate::persistent_state::SETUP_PHASE, "");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+
+        assert_eq!(lifecycle.get(), SetupPhase::Idle);
+    }
+
+    /// An empty topic_id is not usable, so an empty phase with a blank topic must not be promoted to
+    /// Pairing (which would violate the topic_id invariant).
+    #[test]
+    fn empty_phase_with_blank_topic_stays_idle() {
+        let store = test_store();
+        store.set(crate::persistent_state::SETUP_PHASE, "");
+        store.set(crate::persistent_state::TOPIC_ID, "");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+
+        assert_eq!(lifecycle.get(), SetupPhase::Idle);
     }
 
     #[test]

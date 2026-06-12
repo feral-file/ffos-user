@@ -88,6 +88,7 @@ stateDiagram-v2
 
 - **`pairing` requires `topic_id` on disk.** On restore, if `setup_phase=pairing` but `topic_id` is missing, phase is corrected to `idle`.
 - **`ready` is set only after pairing confirmation** via the D-Bus `show_pairing_qr_code(false)` signal (QR switch to webapp). BLE Wi-Fi success transitions to `pairing`, not `ready`.
+- **A persisted topic implies at least `pairing`.** On restore, a non-durable/empty `setup_phase` (the value `persist()` writes for transient phases) **with** a usable `topic_id` is promoted to `pairing` rather than collapsed to `idle`. A bare `idle` would strand the device — startup only fetches a topic when `idle && topic_id is none`, and QR confirmation only promotes from `pairing` — so it would loop on QR forever.
 - **Legacy migration:** devices with old firmware (no `setup_phase` key) migrate as follows:
   - `paired=true` + `topic_id` → `ready` (fully paired)
   - `topic_id` only (no `paired=true`) → `pairing` (topic allocated but pairing not confirmed)
@@ -131,7 +132,7 @@ While one path holds the guard:
 
 - Other paths **fail to acquire** and return early with no side effects
 - **`connect_wifi` / `keep_wifi`** bail with `DeviceUpdating` before touching phase/UI/Wi-Fi
-- **`qr_switch`** bails before navigating Chromium
+- **`qr_switch`** skips Chromium navigation (but still records the durable `pairing → ready` confirmation first — see Pairing confirmation below)
 - **`do_system_update`** returns early before connectivity probe or `update_failed` latch mutation
 - **`on_startup_with_internet`** skips the startup update check and stays alive
 
@@ -312,7 +313,7 @@ flowchart TD
 | `UpdateMode` | `Required` (mandatory only) | `Required` | `Available` (any newer) |
 | `UpdateExecution` | `Blocking` | `NonBlocking` | `Blocking` |
 
-**Phase preservation:** `phase_before_check` is captured before entering `checking_version`. On `NoUpdateNeeded` or version-check failure, durable phases (`ready`, `pairing`) are restored instead of demoting to `idle`.
+**Phase preservation:** `phase_before_check` is captured before entering `checking_version`. On `NoUpdateNeeded` or version-check failure, durable phases (`ready`, `pairing`) are restored instead of demoting to `idle`. As a refinement (`phase_after_inflight_check`), a `ready` that a pairing confirmation recorded **during** the check is never demoted back to a captured `pairing`, so a confirmation that lands mid-check is not silently lost.
 
 **Progress UI:** only `Blocking` execution drives transient `"Checking for updates..."` TV copy. BLE uses a single HTTP retry budget so the mobile response is not blocked for ~34s.
 
@@ -409,12 +410,14 @@ The `NoUpdateNeeded` follow-up exists because blocking progress UI leaves Chromi
 
 When mobile completes pairing, controld emits `show_pairing_qr_code(false)`:
 
-1. Acquire `UpdateGuard`; bail before navigation if another path already owns the device
-2. If `update_failed` phase is latched, bail (stay on failure surface until explicit retry)
-3. If current phase is `pairing` → set `ready`, persist
-4. `show_webapp`
+1. **Record the durable `pairing → ready` transition first, before any ownership/navigation gate.** The pairing confirmation is a one-shot D-Bus signal (controld ACKs it after the callback returns and does not re-emit), so it must never be dropped because an OTA happens to own the device. The transition fires when the live phase is `pairing`, or when an in-flight OTA op has transiently masked `pairing` with a non-durable phase while a `topic_id` is already persisted.
+2. Acquire `UpdateGuard` for **navigation only**. If an OTA owns the device, skip painting — the durable transition is already recorded and the post-update reboot (or a later canonical-page restore) repaints the webapp.
+3. If `update_failed` is latched, skip navigation (stay on failure surface until explicit retry).
+4. `show_webapp`.
 
-The inverse signal (`true`) shows the setup QR via `show_qrcode`, which resets transient phases (`wifi_connecting`, `checking_version`, `updating`) to `idle` but **preserves** durable phases (`pairing`, `ready`, `update_failed`).
+This split is the fix for a regression (introduced when QR switching was first gated during OTA): gating the **whole** switch on the guard dropped the durable confirmation and could leave the device stuck in `pairing` while mobile believed pairing succeeded. To keep the confirmation from being demoted, `check_and_update_system`'s no-update/failure restore refuses to demote a `ready` that appeared mid-check back to `pairing`.
+
+The inverse signal (`true`) shows the setup QR via `show_qrcode` (navigation, still guard-gated), which resets transient phases (`wifi_connecting`, `checking_version`, `updating`) to `idle` but **preserves** durable phases (`pairing`, `ready`, `update_failed`).
 
 ---
 
