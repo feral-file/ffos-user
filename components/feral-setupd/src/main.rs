@@ -465,6 +465,29 @@ async fn start_ble(
     Ok(())
 }
 
+/// Whether a startup path must short-circuit to the `UpdateFailed` recovery screen instead of the
+/// normal QR / update-check flow.
+///
+/// Both the online (`on_startup_with_internet`) and offline (`startup_without_internet`) paths
+/// consult this so they stay in lockstep: an offline reboot must show the same failure UI as an
+/// online reboot. Only the durable `UpdateFailed` phase qualifies — any other phase proceeds with
+/// the normal flow. Keeping the decision in one predicate prevents the two branches from drifting.
+fn startup_requires_update_failed_recovery(phase: SetupPhase) -> bool {
+    phase == SetupPhase::UpdateFailed
+}
+
+/// Reboot-recovery UI for a persisted `UpdateFailed` phase.
+///
+/// Shows the recovered-failure message and leaves the phase untouched. Recovery is driven by an
+/// explicit BLE/D-Bus retry (which also re-establishes connectivity), so callers must `return`
+/// after this instead of falling through to QR / auto-proceed / update-check. Centralizing the
+/// surface keeps the online and offline startup branches identical if the message changes.
+async fn show_update_failed_recovery(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
+    println!("MAIN: UpdateFailed phase restored; showing recovered failure message");
+    println!("MAIN: Waiting for explicit BLE/D-Bus retry");
+    show_system_upgrade(chrome, app_state, UPDATE_FAILED_RECOVERED_MSG).await
+}
+
 /// Startup path when the device does **not** have internet at boot time.
 ///
 /// When this is called:
@@ -497,6 +520,17 @@ async fn startup_without_internet(
         "MAIN: Get SSIDs in {:?} ms",
         start_time.elapsed().as_millis()
     );
+
+    // UpdateFailed reboot recovery must show the failure screen even when offline. Otherwise the
+    // device would display QR (and a BLE connect could swap in the welcome message) while still
+    // reporting setup_phase=update_failed to the mobile app. Recovery happens via an explicit
+    // BLE/D-Bus retry that brings its own connectivity, so we skip QR/poll/auto-proceed here. The
+    // SSID cache was warmed above so the recovery BLE scan stays fast.
+    if startup_requires_update_failed_recovery(app_state.lifecycle.get()) {
+        let _ = show_update_failed_recovery(app_state, chrome).await;
+        return Ok(());
+    }
+
     let _ = show_qrcode(app_state, chrome).await;
     app_state.auto_proceed.store(true, Ordering::Release);
     // If somehow, the device has internet
@@ -1064,6 +1098,15 @@ mod callbacks {
     }
 
     async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
+        // Reject while an OTA already owns the device, BEFORE any connectivity probe, no-internet
+        // navigation, or UpdateFailed latch clear/restore. check_and_update_system's UpdateGuard
+        // would otherwise only reject AFTER these side effects have mutated UI/persisted state,
+        // so mirror the BLE/QR early gates and bail out first.
+        if ble_action_block_during_update(&app_state.update_in_progress).is_some() {
+            println!("MAIN: system_update ignored, update already in progress");
+            return;
+        }
+
         // Check internet connectivity first before clearing latch
         if !app_state.internet.is_online(true).await {
             eprintln!("MAIN: System update requested but no internet connection");
@@ -1450,12 +1493,9 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
     // If UpdateFailed phase is set, skip automatic update check on startup.
     // Show the failure message (different from fresh failure) since this is reboot recovery.
     // Mobile app will see update_failed via device_info polling and can trigger explicit retry.
-    if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+    if startup_requires_update_failed_recovery(app_state.lifecycle.get()) {
         println!("MAIN: Skipping startup update check - UpdateFailed phase is set");
-        println!(
-            "MAIN: Showing recovered failure message and waiting for explicit BLE/D-Bus retry"
-        );
-        show_system_upgrade(&chrome, &app_state, UPDATE_FAILED_RECOVERED_MSG).await?;
+        show_update_failed_recovery(&app_state, &chrome).await?;
         return Ok(());
     }
 
@@ -2487,6 +2527,30 @@ mod tests {
         }
 
         assert_eq!(ble_action_block_during_update(&flag), None);
+    }
+
+    /// Regression for PR #206 review 4475889867: an offline reboot in UpdateFailed must short-circuit
+    /// to the recovery screen just like the online path, instead of falling through to QR while still
+    /// advertising setup_phase=update_failed. Only UpdateFailed triggers recovery; every other phase
+    /// proceeds with the normal startup flow, keeping both startup branches in lockstep.
+    #[test]
+    fn startup_recovery_only_for_update_failed() {
+        assert!(startup_requires_update_failed_recovery(
+            SetupPhase::UpdateFailed
+        ));
+        for phase in [
+            SetupPhase::Idle,
+            SetupPhase::WifiConnecting,
+            SetupPhase::CheckingVersion,
+            SetupPhase::Updating,
+            SetupPhase::Pairing,
+            SetupPhase::Ready,
+        ] {
+            assert!(
+                !startup_requires_update_failed_recovery(phase),
+                "phase {phase:?} must not trigger UpdateFailed recovery",
+            );
+        }
     }
 
     /// Regression for PR #206 review 4475817494: a BLE retry from update_failed restores a durable
