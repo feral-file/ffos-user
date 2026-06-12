@@ -32,16 +32,14 @@ This project is Linux-only at runtime, so local checks should run in the provide
 
 The codebase is organized into focused modules:
 
-- **`main.rs`** (643 lines) - Entry point, orchestration, signal handling, integration tests
-- **`app_state.rs`** (123 lines) - Core state types (`AppState`, `Page` enum)
-- **`phase_logic.rs`** (252 lines) - Phase transition guards and validators
-- **`ui.rs`** (348 lines) - Chrome DevTools Protocol navigation functions
-- **`update_coordinator.rs`** (1030 lines) - OTA update orchestration and retry logic
-- **`callbacks.rs`** (760 lines) - BLE and D-Bus callback factories
-- **`startup.rs`** (442 lines) - Initialization and startup flows
-- **`dbus_handlers.rs`** (101 lines) - D-Bus listener setup
-
-See `MODULE_GUIDE.md` for detailed module responsibilities and `REFACTORING_SUMMARY.md` for refactoring history.
+- **`main.rs`** - Entry point, orchestration, signal handling, integration tests
+- **`app_state.rs`** - Core state types (`AppState`, `Page` enum)
+- **`phase_logic.rs`** - Phase transition guards and validators
+- **`ui.rs`** - Chrome DevTools Protocol navigation functions
+- **`update_coordinator.rs`** - OTA update orchestration and retry logic
+- **`callbacks.rs`** - BLE and D-Bus callback factories
+- **`startup.rs`** - Initialization and startup flows
+- **`dbus_handlers.rs`** - D-Bus listener setup
 
 ### Startup flow (orchestrated in `src/main.rs`, implemented across modules)
 
@@ -170,7 +168,7 @@ Two enums control update behaviour:
 
 ## Architectural direction
 - Keep `src/main.rs` as lifecycle and orchestration glue, not a dumping ground for unrelated logic.
-- Keep modules focused: each module has a single, clear responsibility (see `MODULE_GUIDE.md`).
+- Keep modules focused: each module has a single, clear responsibility.
 - Keep BLE parsing, UI navigation, persistence, connectivity, and updater behavior in focused modules.
 - Treat BLE command payloads and `device_info` as interface contracts.
 - If a change affects setup sequencing, callback ordering, or shared state, preserve the rationale in comments.

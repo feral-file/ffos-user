@@ -699,6 +699,34 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
+    fn classify_updater_message_marks_network_failures_transient() {
+        // Actual error from feral-updater.sh line 47
+        assert_eq!(
+            classify_updater_message("No network connection. Aborting update."),
+            UpdateErrorType::Transient
+        );
+        // Actual error from feral-system-update.sh line 147
+        assert_eq!(
+            classify_updater_message("Failed to retrieve content length for image."),
+            UpdateErrorType::Transient
+        );
+        // Download failures (fail-fast without retry in scripts)
+        // Used by both system and recovery update scripts
+        assert_eq!(
+            classify_updater_message("Failed to download OTA image."),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message("Failed to download signature file."),
+            UpdateErrorType::Transient
+        );
+        assert_eq!(
+            classify_updater_message("Failed to download recovery ISO."),
+            UpdateErrorType::Transient
+        );
+    }
+
+    #[test]
     fn classify_updater_message_marks_setupd_infrastructure_failures_transient() {
         // Errors from updater.rs
         assert_eq!(
@@ -711,6 +739,18 @@ mod tests {
         );
         assert_eq!(
             classify_updater_message("updater closed channel without sending progress"),
+            UpdateErrorType::Transient
+        );
+    }
+
+    #[test]
+    fn classify_updater_message_marks_lock_failures_transient() {
+        // Actual error from feral-updater.sh line 25
+        // Lock failures are transient because lock may be released by the time we retry
+        assert_eq!(
+            classify_updater_message(
+                "Exception: either Lock already held by another instance or some error happened."
+            ),
             UpdateErrorType::Transient
         );
     }
