@@ -253,21 +253,6 @@ fn get_setup_phase(app_state: &AppState) -> String {
     app_state.lifecycle.get().as_str().to_string()
 }
 
-/// Gate for BLE setup actions (`connect_wifi`, `keep_wifi`) while an OTA owns the device.
-///
-/// A non-blocking update holds `update_in_progress` for its entire lifetime (version check,
-/// retries, backoff, install up to reboot). Letting a concurrent BLE setup action run during that
-/// window would clobber `setup_phase=updating` that mobile is polling and, for `connect_wifi`,
-/// switch Wi-Fi via nmcli mid-download. Returning `Some(DeviceUpdating)` lets callers reject the
-/// request before any phase/UI/network side effects, leaving the updater in sole control.
-fn ble_action_block_during_update(update_in_progress: &AtomicBool) -> Option<ble::BleStatus> {
-    if update_in_progress.load(Ordering::Acquire) {
-        Some(ble::BleStatus::DeviceUpdating)
-    } else {
-        None
-    }
-}
-
 /// Phase the BLE setup wrapper should leave behind when a version check ends without an update
 /// (failure or critical error). `check_and_update_system` already restored the pre-check durable
 /// phase (Ready/Pairing) before returning, so the wrapper must NOT blindly force Idle or it would
@@ -688,14 +673,18 @@ async fn setup_dbus_listeners(
 async fn internet_setup_successfully_cb(
     app_state: &Arc<AppState>,
     chromium: &Arc<Cdp>,
+    guard: UpdateGuard,
 ) -> Result<String, ble::BleStatus> {
     // Check and update system using Required mode (only mandatory updates)
-    // Use NonBlocking execution since BLE flow needs to return quickly
+    // Use NonBlocking execution since BLE flow needs to return quickly.
+    // `guard` was acquired by the BLE callback before any Wi-Fi/phase/UI side effects and is handed
+    // off here so the whole retry is serialized against OTA.
     match check_and_update_system(
         app_state,
         chromium,
         UpdateMode::Required,
         UpdateExecution::NonBlocking,
+        guard,
     )
     .await
     {
@@ -780,10 +769,9 @@ async fn internet_setup_successfully_cb(
 
 mod callbacks {
     use super::{
-        AppState, Cdp, SetupPhase, WifiError, ble, ble_action_block_during_update, constant,
-        dbus_utils, get_setup_phase, internet_setup_successfully_cb,
-        qr_switch_blocked_by_update_failed, show_factory_reset, show_message, show_qrcode,
-        show_webapp, wifi_utils,
+        AppState, Cdp, SetupPhase, UpdateGuard, WifiError, ble, constant, dbus_utils,
+        get_setup_phase, internet_setup_successfully_cb, qr_switch_blocked_by_update_failed,
+        show_factory_reset, show_message, show_qrcode, show_webapp, wifi_utils,
     };
     use serde::Deserialize;
     use std::sync::Arc;
@@ -860,16 +848,20 @@ mod callbacks {
             Box::pin(async move {
                 let start_time = Instant::now();
 
-                // Reject Wi-Fi reconfiguration while an OTA owns the device. The non-blocking
-                // update holds the guard until the background update() finishes; mutating
-                // setup_phase/UI or switching networks via nmcli here would clobber the
-                // updating phase mobile polls and could disrupt the in-flight download. Bail
-                // before any side effects so the updater stays in sole control.
-                if let Some(status) = ble_action_block_during_update(&app_state.update_in_progress)
-                {
-                    println!("BLE: connect_wifi rejected, update in progress");
-                    return Err(status);
-                }
+                // Acquire device ownership BEFORE any side effects, serializing this retry against
+                // OTA for its entire duration. A load-only precheck left a TOCTOU window: it could
+                // observe "no update", a concurrent task could then acquire ownership, and this path
+                // would still switch Wi-Fi via nmcli (disrupting an in-flight download) and clobber
+                // the setup_phase/UI mobile polls. Holding the guard from here through the update
+                // check (handed to internet_setup_successfully_cb) closes that window. RAII releases
+                // it on every early return below.
+                let guard = match UpdateGuard::try_acquire(&app_state.update_in_progress) {
+                    Some(guard) => guard,
+                    None => {
+                        println!("BLE: connect_wifi rejected, update in progress");
+                        return Err(ble::BleStatus::DeviceUpdating);
+                    }
+                };
 
                 // Clear and restore UpdateFailed phase on explicit WiFi retry.
                 // Restore the pre-failure durable phase if tracked, otherwise use Idle.
@@ -997,7 +989,7 @@ mod callbacks {
                 // setup-success path). Idle/Pairing devices are unchanged: a first-time Idle device
                 // still flows to topic_id fetch -> Pairing below.
                 app_state.lifecycle.set(phase_before_wifi_connect);
-                internet_setup_successfully_cb(&app_state, &chromium).await
+                internet_setup_successfully_cb(&app_state, &chromium, guard).await
             })
         })
     }
@@ -1010,13 +1002,18 @@ mod callbacks {
             let app_state = app_state.clone();
             let chromium = chromium.clone();
             Box::pin(async move {
-                // Reject while an OTA owns the device, before any phase/UI side effects, so the
-                // updater keeps control of setup_phase mobile polls (mirrors connect_wifi).
-                if let Some(status) = ble_action_block_during_update(&app_state.update_in_progress)
-                {
-                    println!("BLE: keep_wifi rejected, update in progress");
-                    return Err(status);
-                }
+                // Acquire device ownership before any phase/UI side effects so the whole retry is
+                // serialized against OTA (mirrors connect_wifi). A load-only precheck left a TOCTOU
+                // window where a concurrent task could acquire ownership after the check while this
+                // path still cleared/restored the persisted UpdateFailed latch. RAII releases the
+                // guard on every early return below.
+                let guard = match UpdateGuard::try_acquire(&app_state.update_in_progress) {
+                    Some(guard) => guard,
+                    None => {
+                        println!("BLE: keep_wifi rejected, update in progress");
+                        return Err(ble::BleStatus::DeviceUpdating);
+                    }
+                };
 
                 if !app_state.internet.is_online(true).await {
                     return Err(ble::BleStatus::WifiRequired);
@@ -1074,7 +1071,7 @@ mod callbacks {
                     }
                 }
 
-                internet_setup_successfully_cb(&app_state, &chromium).await
+                internet_setup_successfully_cb(&app_state, &chromium, guard).await
             })
         })
     }
@@ -1107,14 +1104,20 @@ mod callbacks {
             }
             println!("MAIN: QR switch -> qrcode_requested={qrcode_requested}");
             tokio::runtime::Handle::current().block_on(async move {
-                // Ignore QR/webapp switches while an OTA owns the device. show_qrcode would reset
-                // the transient Updating phase to Idle and navigate Chromium off the upgrade
-                // screen, both of which clobber the updater-owned state mobile is polling. The
-                // updater drives the screen until it completes (reboot) or latches update_failed.
-                if ble_action_block_during_update(&app_state.update_in_progress).is_some() {
-                    println!("MAIN: QR switch ignored, update in progress");
-                    return;
-                }
+                // Take device ownership for the whole navigation. show_qrcode would reset the
+                // transient Updating phase to Idle and navigate Chromium off the upgrade screen,
+                // both of which clobber the updater-owned state mobile is polling. Acquiring the
+                // guard (instead of a load-only precheck) closes the TOCTOU window where an OTA could
+                // start mid-navigation. If an OTA already owns the device we can't acquire it, so we
+                // ignore the switch. The guard is held until this block returns (RAII), serializing
+                // the navigation against a concurrent update check.
+                let _guard = match UpdateGuard::try_acquire(&app_state.update_in_progress) {
+                    Some(guard) => guard,
+                    None => {
+                        println!("MAIN: QR switch ignored, update in progress");
+                        return;
+                    }
+                };
 
                 // Stay on the permanent-failure surface until an explicit retry clears the latch.
                 // handle_permanent_update_failure releases the update guard but keeps setup_phase ==
@@ -1157,14 +1160,18 @@ mod callbacks {
     }
 
     async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
-        // Reject while an OTA already owns the device, BEFORE any connectivity probe, no-internet
-        // navigation, or UpdateFailed latch clear/restore. check_and_update_system's UpdateGuard
-        // would otherwise only reject AFTER these side effects have mutated UI/persisted state,
-        // so mirror the BLE/QR early gates and bail out first.
-        if ble_action_block_during_update(&app_state.update_in_progress).is_some() {
-            println!("MAIN: system_update ignored, update already in progress");
-            return;
-        }
+        // Acquire device ownership BEFORE any connectivity probe, no-internet navigation, or
+        // UpdateFailed latch clear/restore. A load-only precheck left a TOCTOU window where a
+        // concurrent task could acquire ownership after the check while this path still mutated the
+        // persisted latch and UI. Holding the guard from here through check_and_update_system (which
+        // receives it) serializes the whole manual retry against OTA. RAII releases it on return.
+        let guard = match UpdateGuard::try_acquire(&app_state.update_in_progress) {
+            Some(guard) => guard,
+            None => {
+                println!("MAIN: system_update ignored, update already in progress");
+                return;
+            }
+        };
 
         // Check internet connectivity first before clearing latch
         if !app_state.internet.is_online(true).await {
@@ -1214,6 +1221,7 @@ mod callbacks {
             chromium,
             super::UpdateMode::Available,
             super::UpdateExecution::Blocking,
+            guard,
         )
         .await;
 
@@ -1563,12 +1571,26 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
     // - First-time setup (Idle): checks before fetching topic_id → Pairing
     // - Reboot with Pairing: checks again to ensure no new mandatory updates
     // - Reboot with Ready: checks to keep device up-to-date
-    // Use Blocking execution since we can wait for completion during startup
+    // Use Blocking execution since we can wait for completion during startup.
+    //
+    // Acquire device ownership before the check. In the rare case an OTA already owns the device
+    // (e.g. a BLE retry started one during the offline->online transition), skip the startup check
+    // entirely and stay alive; the owner drives the UI. This matches the old behavior where the
+    // self-acquire failed and returned UpdateInProgress (-> Halt -> Ok), just without the redundant
+    // result hop.
+    let guard = match UpdateGuard::try_acquire(&app_state.update_in_progress) {
+        Some(guard) => guard,
+        None => {
+            println!("MAIN: startup update check skipped, update already in progress");
+            return Ok(());
+        }
+    };
     let check_result = check_and_update_system(
         &app_state,
         &chrome,
         UpdateMode::Required,
         UpdateExecution::Blocking,
+        guard,
     )
     .await?;
     match startup_update_check_outcome(check_result) {
@@ -1884,6 +1906,13 @@ fn restore_page_target(page: &Page, phase: SetupPhase) -> RestorePageTarget {
 /// * `chrome` - CDP connection for UI updates
 /// * `mode` - Controls whether to check for required updates only or any available update
 /// * `execution` - Controls whether operations block or run in background
+/// * `guard` - The already-acquired device-ownership guard. Callers MUST acquire this at their
+///   entry point (before any phase/UI/network side effects) so setup actions and OTA are serialized
+///   end-to-end, not just at this function's boundary. This closes the TOCTOU window where a load-only
+///   precheck could pass and a concurrent task then acquired ownership while the first path kept
+///   mutating Wi-Fi/phase/UI. The guard is released by RAII when this function returns, except on a
+///   non-blocking `UpdateStarted`, where ownership transfers into the background `update()` task and
+///   is held until the device reboots.
 ///
 /// # Returns
 /// * `Ok(UpdateCheckResult)` indicating what action was taken
@@ -1893,20 +1922,15 @@ async fn check_and_update_system(
     chrome: &Arc<Cdp>,
     mode: UpdateMode,
     execution: UpdateExecution,
+    guard: UpdateGuard,
 ) -> Result<UpdateCheckResult> {
     // Note: Failure latch clearing is handled by explicit retry call sites (BLE/D-Bus),
     // not here. Startup flow needs to preserve persisted failure state so mobile app
     // can observe update_failed across restarts (issue #447).
 
-    // Single-flight guard: prevent concurrent update attempts.
-    // The guard is automatically released when this function returns (success, error, or panic).
-    let _guard = match UpdateGuard::try_acquire(&app_state.update_in_progress) {
-        Some(guard) => guard,
-        None => {
-            println!("MAIN: Update already in progress, skipping");
-            return Ok(UpdateCheckResult::UpdateInProgress);
-        }
-    };
+    // Ownership was acquired by the caller before its side effects. Bind it here so RAII releases it
+    // on every return path (and so the non-blocking branch can move it into the update task).
+    let _guard = guard;
 
     // Preserve the current phase to restore if no update is needed.
     // Without this, durable phases (Ready, Pairing) would be lost during the
@@ -2577,38 +2601,52 @@ mod tests {
         assert!(UpdateGuard::try_acquire(&flag).is_some());
     }
 
-    /// Regression for PR #206 review 4475717770: BLE setup actions (connect_wifi/keep_wifi) and the
-    /// QR switch must bail before side effects while a non-blocking OTA holds the guard, so the
-    /// updater-owned setup_phase mobile polls is not clobbered and Wi-Fi is not switched mid-update.
+    /// Regression for PR #206 review 4483457995: setup actions and OTA must be serialized at the
+    /// operation level via the single ownership token, not a load-only precheck. This models the
+    /// race shape directly: once one path holds the guard (an OTA owns the device), every other
+    /// entry point (connect_wifi / keep_wifi / do_system_update / qr_switch / startup) fails to
+    /// acquire and must bail BEFORE any phase/UI/Wi-Fi side effects. Acquiring at entry (rather than
+    /// loading then acquiring later inside check_and_update_system) is what closes the TOCTOU window.
     #[test]
-    fn ble_action_blocked_only_while_update_in_progress() {
-        let flag = AtomicBool::new(false);
-        assert_eq!(ble_action_block_during_update(&flag), None);
+    fn device_ownership_is_exclusive_across_entry_points() {
+        let flag = Arc::new(AtomicBool::new(false));
 
-        // While an update holds the guard, the action is rejected with DeviceUpdating.
-        let held = AtomicBool::new(true);
-        assert_eq!(
-            ble_action_block_during_update(&held),
-            Some(ble::BleStatus::DeviceUpdating),
+        // An OTA owns the device.
+        let ota_guard = UpdateGuard::try_acquire(&flag).expect("first acquire succeeds");
+
+        // Every other entry point's entry-time acquire is rejected, so they bail before side effects.
+        assert!(
+            UpdateGuard::try_acquire(&flag).is_none(),
+            "a second entry point must not acquire ownership while an OTA holds it",
+        );
+
+        // Once the OTA releases (completed/failed update), ownership is available again.
+        drop(ota_guard);
+        assert!(
+            UpdateGuard::try_acquire(&flag).is_some(),
+            "ownership must be reacquirable after the holder drops it",
         );
     }
 
     /// The gate must track the real UpdateGuard lifecycle: blocked while a guard is held, allowed
-    /// again once it drops (so a finished/failed update re-opens BLE setup actions).
+    /// again once it drops (so a finished/failed update re-opens setup actions).
     #[test]
     fn ble_action_gate_follows_update_guard_lifecycle() {
         let flag = Arc::new(AtomicBool::new(false));
-        assert_eq!(ble_action_block_during_update(&flag), None);
+        assert!(UpdateGuard::try_acquire(&flag).is_some());
 
         {
             let _guard = UpdateGuard::try_acquire(&flag).expect("guard acquired");
-            assert_eq!(
-                ble_action_block_during_update(&flag),
-                Some(ble::BleStatus::DeviceUpdating),
+            assert!(
+                UpdateGuard::try_acquire(&flag).is_none(),
+                "ownership is exclusive while a guard is held",
             );
         }
 
-        assert_eq!(ble_action_block_during_update(&flag), None);
+        assert!(
+            UpdateGuard::try_acquire(&flag).is_some(),
+            "ownership is available again after the guard drops",
+        );
     }
 
     /// Regression for PR #206 review 4475889867: an offline reboot in UpdateFailed must short-circuit

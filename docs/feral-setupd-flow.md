@@ -125,14 +125,17 @@ After a D-Bus manual update check with `NoUpdateNeeded`, setupd must **re-show t
 
 `update_in_progress` (RAII `UpdateGuard`) serializes OTA attempts across BLE, startup, and D-Bus entry points.
 
-While the guard is held:
+**Guard-threading pattern:** Each mutating operation (`connect_wifi`, `keep_wifi`, `do_system_update`, `on_startup_with_internet`, `qr_switch`) acquires the `UpdateGuard` at its **entry point**, **before any side effects** (phase changes, UI navigation, Wi-Fi switching, latch mutation). This closes the TOCTOU window: if one path already holds the guard (an OTA owns the device), every other entry point fails to acquire and bails immediately. The caller then passes the owned guard down the call chain (e.g., `connect_wifi` → `internet_setup_successfully_cb` → `check_and_update_system`).
 
-- A second `check_and_update_system` call returns `UpdateInProgress`
-- **`connect_wifi` / `keep_wifi` are rejected** with `DeviceUpdating` before any phase/UI/network side effects
-- **D-Bus QR switch is ignored** so `show_qrcode` cannot reset `updating` → `idle` or navigate off the upgrade screen
-- **D-Bus `system_update` returns early** before connectivity probe or `update_failed` latch mutation
+While one path holds the guard:
 
-Non-blocking BLE updates transfer guard ownership into a background task; the guard is released only when `update()` completes.
+- Other paths **fail to acquire** and return early with no side effects
+- **`connect_wifi` / `keep_wifi`** bail with `DeviceUpdating` before touching phase/UI/Wi-Fi
+- **`qr_switch`** bails before navigating Chromium
+- **`do_system_update`** returns early before connectivity probe or `update_failed` latch mutation
+- **`on_startup_with_internet`** skips the startup update check and stays alive
+
+Non-blocking BLE updates transfer guard ownership into a background task; the guard is released only when `update()` completes or fails.
 
 **Important distinction:** The guard (`update_in_progress`) tracks **active OTA operations** (transient states like `checking_version`, `updating`). The durable `UpdateFailed` phase is **not** an active update — it's a persisted failure latch. So BLE `connect_wifi` / `keep_wifi` are **not** blocked in `UpdateFailed` phase; they're the intended recovery mechanism that clears the latch and restores connectivity.
 
@@ -190,13 +193,15 @@ flowchart TD
   Entry([on_startup_with_internet]) --> Failed{phase == update_failed?}
   Failed -->|yes| ShowFail[Show recovered failure message]
   ShowFail --> WaitRetry[Skip auto update; wait for explicit retry]
-  Failed -->|no| Check[check_and_update_system Required Blocking]
+  Failed -->|no| Guard{Acquire guard?}
+  Guard -->|no| OtaOwned[Return; OTA already owns device]
+  Guard -->|yes| Check[check_and_update_system Required Blocking, guard]
   Check --> TooOld{Too old?}
   TooOld -->|yes| Reflash[Show reflashing QR / message]
   TooOld -->|no| Updating{Update started?}
   Updating -->|yes| Done1[Return; updater owns UI]
   Updating -->|no| NoUpdate{No update needed?}
-  NoUpdate -->|version check failed| Err[Show error; startup may fail]
+  NoUpdate -->|version check failed| Halt[Halt startup; daemon stays alive]
   NoUpdate -->|OK| PhaseLogic[Restore durable phase if any]
   PhaseLogic --> Topic{Idle and no topic_id?}
   Topic -->|yes| FetchTopic[Get topic from controld → pairing]
@@ -227,13 +232,14 @@ sequenceDiagram
   participant U as check_and_update_system
 
   M->>B: connect_wifi(ssid, pwd)
-  alt update_in_progress
-    B-->>M: DeviceUpdating (guard held by active OTA)
+  alt Cannot acquire guard (OTA owns device)
+    B-->>M: DeviceUpdating (bail before side effects)
   end
   alt UpdateFailed retry
     B->>B: Restore pre_failure_phase, persist
     B->>B: Re-save pre_failure_phase before transient state
   end
+  Note over B: Guard acquired; held until response or error
   B->>B: Capture pre-connect phase
   B->>B: phase = wifi_connecting, show connecting UI
   B->>B: auto_proceed = false
@@ -246,10 +252,9 @@ sequenceDiagram
     B-->>M: NoInternet
   else success
     B->>B: Restore captured phase before check
-    B->>U: internet_setup_successfully_cb (Required, NonBlocking)
-    alt update in progress (guard held)
-      B-->>M: DeviceUpdating
-    else update started (spawned)
+    B->>U: internet_setup_successfully_cb (guard passed)
+    alt update started (spawned)
+      Note over B,U: Guard transfers to background task
       B-->>M: DeviceUpdating
     else version check failed
       B->>B: Terminal phase (durable if was durable, else idle)
@@ -264,6 +269,7 @@ sequenceDiagram
 
 Notes:
 
+- **Guard acquired at entry:** `connect_wifi` acquires the `UpdateGuard` before any side effects (clearing `UpdateFailed`, setting `WifiConnecting`, calling nmcli). If another path already owns the device, it bails with `DeviceUpdating` immediately. The guard is held through the entire operation and passed to `internet_setup_successfully_cb` → `check_and_update_system`.
 - Mandatory update check runs **before** fetching `topic_id` and entering `pairing`
 - Ready devices stay `ready` after a successful retry (not demoted to `pairing`)
 - On `UpdateFailed` retry, `pre_failure_phase` is restored and re-saved before transient states so a second failure can still recover
@@ -272,7 +278,7 @@ Notes:
 
 ### Case — `keep_wifi`
 
-Same update-failure retry clearing as `connect_wifi`, but skips nmcli (keeps current Wi-Fi) and does **not** set `WifiConnecting` before the check. Rejected with `DeviceUpdating` if OTA guard is held. Requires internet before proceeding. Because it never enters `WifiConnecting`, its phase snapshot is always the restored durable phase and doesn't need the explicit capture/restore that `connect_wifi` requires.
+Same update-failure retry clearing as `connect_wifi`, but skips nmcli (keeps current Wi-Fi) and does **not** set `WifiConnecting` before the check. Acquires the `UpdateGuard` at entry; bails with `DeviceUpdating` before any side effects if another path already owns the device. Requires internet before proceeding. Because it never enters `WifiConnecting`, its phase snapshot is always the restored durable phase and doesn't need the explicit capture/restore that `connect_wifi` requires.
 
 ---
 
@@ -282,9 +288,7 @@ Shared by startup, BLE, and D-Bus paths.
 
 ```mermaid
 flowchart TD
-  Start([check_and_update_system]) --> Guard{Acquire UpdateGuard?}
-  Guard -->|no| InProg[Return UpdateInProgress]
-  Guard -->|yes| SavePre[Save pre_failure_phase if durable]
+  Start([check_and_update_system<br/>guard already owned by caller]) --> SavePre[Save pre_failure_phase if durable]
   SavePre --> CV[phase = checking_version]
   CV --> Refresh[refresh_remote_version]
   Refresh -->|fail| RestoreEarly[Restore durable phase or idle]
@@ -294,7 +298,7 @@ flowchart TD
   TooOld -->|no| Need{Update needed for mode?}
   Need -->|yes| Exec{Blocking or NonBlocking?}
   Exec -->|Blocking| RunUpdate[await update]
-  Exec -->|NonBlocking| Spawn[spawn update + hold guard]
+  Exec -->|NonBlocking| Spawn[spawn update, transfer guard to task]
   RunUpdate --> Started[Return UpdateStarted]
   Spawn --> Started
   Need -->|no| RestoreNoUpdate[Restore phase_before_check if durable else idle]
@@ -374,14 +378,15 @@ If persist fails during retry clear, BLE paths abort; D-Bus path returns early (
 
 ```mermaid
 flowchart TD
-  Sig([controld emits system_update]) --> Guard{update_in_progress?}
-  Guard -->|yes| Reject[Return early: update already owns device]
-  Guard -->|no| Online{Internet?}
+  Sig([controld emits system_update]) --> Guard{Acquire guard?}
+  Guard -->|no| Reject[Return early: OTA already owns device]
+  Guard -->|yes| Online{Internet?}
+  Note over Online: Guard held from here through check
   Online -->|no| Msg[Show no-internet message]
   Online -->|yes| Clear{update_failed?}
   Clear -->|yes| Restore[Restore pre_failure_phase, persist]
   Clear -->|no| Check
-  Restore --> Check[check_and_update_system Available Blocking]
+  Restore --> Check[check_and_update_system Available Blocking, guard]
   Check --> Result{Result}
   Result -->|UpdateStarted / TooOld / VersionCheckFailed| NoOp[Core already drove final UI]
   Result -->|NoUpdateNeeded| RestorePage[Re-show canonical page]
@@ -396,7 +401,7 @@ flowchart TD
 
 The `NoUpdateNeeded` follow-up exists because blocking progress UI leaves Chromium on a transient URL. `restore_page_target()` maps the canonical page back to the correct CDP navigation.
 
-**Early rejection:** `do_system_update` checks `update_in_progress` **before** probing connectivity or mutating the `update_failed` latch, matching the BLE/QR early gates so D-Bus cannot trigger side effects while an OTA already owns the device.
+**Guard acquisition at entry:** `do_system_update` acquires the `UpdateGuard` at its entry point, **before** probing connectivity or mutating the `update_failed` latch. If another path already owns the device (guard acquisition fails), it returns immediately with no side effects. The owned guard is then passed through to `check_and_update_system`, serializing the entire manual retry against OTA.
 
 ---
 
@@ -404,9 +409,10 @@ The `NoUpdateNeeded` follow-up exists because blocking progress UI leaves Chromi
 
 When mobile completes pairing, controld emits `show_pairing_qr_code(false)`:
 
-1. Ignored if `update_in_progress` (updater owns the screen)
-2. If current phase is `pairing` → set `ready`, persist
-3. `show_webapp`
+1. Acquire `UpdateGuard`; bail before navigation if another path already owns the device
+2. If `update_failed` phase is latched, bail (stay on failure surface until explicit retry)
+3. If current phase is `pairing` → set `ready`, persist
+4. `show_webapp`
 
 The inverse signal (`true`) shows the setup QR via `show_qrcode`, which resets transient phases (`wifi_connecting`, `checking_version`, `updating`) to `idle` but **preserves** durable phases (`pairing`, `ready`, `update_failed`).
 
