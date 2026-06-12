@@ -1505,25 +1505,20 @@ async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) ->
     // - Reboot with Pairing: checks again to ensure no new mandatory updates
     // - Reboot with Ready: checks to keep device up-to-date
     // Use Blocking execution since we can wait for completion during startup
-    match check_and_update_system(
+    let check_result = check_and_update_system(
         &app_state,
         &chrome,
         UpdateMode::Required,
         UpdateExecution::Blocking,
     )
-    .await?
-    {
-        UpdateCheckResult::TooOldToUpgrade
-        | UpdateCheckResult::UpdateStarted
-        | UpdateCheckResult::UpdateInProgress => {
-            // Device is either too old, updating, or an update is already running.
-            return Ok(());
-        }
-        UpdateCheckResult::VersionCheckFailed => {
-            // Error was already shown to user, but we treat this as a hard failure
-            return Err(anyhow::anyhow!("Failed to check version information"));
-        }
-        UpdateCheckResult::NoUpdateNeeded => {} // Continue with normal flow
+    .await?;
+    match startup_update_check_outcome(check_result) {
+        // Too old, updating, already running, or a failed version check. The core check already
+        // drove the canonical UI and restored the phase; stay alive and stop here so we do not
+        // overwrite that surface or exit the daemon. See startup_update_check_outcome for why a
+        // failed check must NOT be fatal.
+        StartupUpdateOutcome::Halt => return Ok(()),
+        StartupUpdateOutcome::Continue => {} // No update needed: continue with normal flow.
     }
 
     // No update needed. Show UI based on current phase.
@@ -1719,6 +1714,34 @@ pub enum UpdateCheckResult {
     VersionCheckFailed,
     /// Update already in progress; concurrent attempt was skipped.
     UpdateInProgress,
+}
+
+/// How `on_startup_with_internet` proceeds after the mandatory startup update check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupUpdateOutcome {
+    /// Stop the startup flow early and leave the daemon running in steady state. The core check
+    /// already drove the canonical UI (reflashing screen, updater-owned progress, or failure copy)
+    /// and restored the correct phase, so startup must NOT continue to topic_id/QR/webapp logic.
+    Halt,
+    /// Continue to topic_id fetch and surface selection (the normal no-update path).
+    Continue,
+}
+
+/// Map a mandatory startup update-check result to the startup control-flow decision.
+///
+/// Critically, `VersionCheckFailed` maps to `Halt`, NOT a fatal error: a transient
+/// distributor/network/parse failure during the startup check must keep `feral-setupd` alive as a
+/// BLE/polling retry surface. Propagating an error instead would exit the process and, under
+/// `Restart=always` + `StartLimitBurst=5`, crash-loop the daemon until systemd stops restarting it.
+/// The failure UI and durable-phase restoration already happened inside `check_and_update_system`.
+fn startup_update_check_outcome(result: UpdateCheckResult) -> StartupUpdateOutcome {
+    match result {
+        UpdateCheckResult::TooOldToUpgrade
+        | UpdateCheckResult::UpdateStarted
+        | UpdateCheckResult::UpdateInProgress
+        | UpdateCheckResult::VersionCheckFailed => StartupUpdateOutcome::Halt,
+        UpdateCheckResult::NoUpdateNeeded => StartupUpdateOutcome::Continue,
+    }
 }
 
 /// Follow-up after `check_and_update_system(UpdateMode::Available, …)` in the D-Bus path.
@@ -2991,6 +3014,50 @@ mod available_system_update_follow_up_tests {
         assert_eq!(
             available_system_update_follow_up(&Err(anyhow!("cdp navigate failed"))),
             AvailableSystemUpdateFollowUp::LogFailure,
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_update_check_outcome_tests {
+    use super::{StartupUpdateOutcome, UpdateCheckResult, startup_update_check_outcome};
+
+    /// Regression for PR #206 review 4482497555: a failed mandatory startup version check must NOT
+    /// be fatal. on_startup_with_internet previously turned VersionCheckFailed into an Err that
+    /// propagated to main() and exited the process; with Restart=always + StartLimitBurst=5 a
+    /// transient distributor/network outage would crash-loop setupd until systemd gave up, killing
+    /// BLE advertising and the mobile retry surface. It must Halt (stay alive) instead.
+    #[test]
+    fn version_check_failed_halts_without_killing_daemon() {
+        assert_eq!(
+            startup_update_check_outcome(UpdateCheckResult::VersionCheckFailed),
+            StartupUpdateOutcome::Halt,
+        );
+    }
+
+    /// Too-old, update-started, and already-in-progress all left the daemon alive (early Ok) before
+    /// the refactor; lock that in so the helper keeps matching the historic control flow.
+    #[test]
+    fn updater_owned_results_halt_startup() {
+        for result in [
+            UpdateCheckResult::TooOldToUpgrade,
+            UpdateCheckResult::UpdateStarted,
+            UpdateCheckResult::UpdateInProgress,
+        ] {
+            assert_eq!(
+                startup_update_check_outcome(result),
+                StartupUpdateOutcome::Halt,
+                "result {result:?} must halt startup",
+            );
+        }
+    }
+
+    /// Only NoUpdateNeeded continues into topic_id fetch / surface selection.
+    #[test]
+    fn no_update_needed_continues_startup() {
+        assert_eq!(
+            startup_update_check_outcome(UpdateCheckResult::NoUpdateNeeded),
+            StartupUpdateOutcome::Continue,
         );
     }
 }
