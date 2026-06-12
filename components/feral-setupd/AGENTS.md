@@ -28,7 +28,22 @@ This project is Linux-only at runtime, so local checks should run in the provide
 
 ## Architecture
 
-### Startup flow (`src/main.rs`)
+### Module Organization (Post-Refactoring)
+
+The codebase is organized into focused modules:
+
+- **`main.rs`** (643 lines) - Entry point, orchestration, signal handling, integration tests
+- **`app_state.rs`** (123 lines) - Core state types (`AppState`, `Page` enum)
+- **`phase_logic.rs`** (252 lines) - Phase transition guards and validators
+- **`ui.rs`** (348 lines) - Chrome DevTools Protocol navigation functions
+- **`update_coordinator.rs`** (1030 lines) - OTA update orchestration and retry logic
+- **`callbacks.rs`** (760 lines) - BLE and D-Bus callback factories
+- **`startup.rs`** (442 lines) - Initialization and startup flows
+- **`dbus_handlers.rs`** (101 lines) - D-Bus listener setup
+
+See `MODULE_GUIDE.md` for detailed module responsibilities and `REFACTORING_SUMMARY.md` for refactoring history.
+
+### Startup flow (orchestrated in `src/main.rs`, implemented across modules)
 
 1. **Initialize state**:
    - Create BLE service (`Ble::new()`), build `AppState` (device id, branch,
@@ -108,12 +123,7 @@ up to `DBUS_MAX_RETRIES` (6) times, waiting up to `DBUS_ACK_TIMEOUT` (5 s) per
 attempt before resending. If no ack arrives after all retries, the send fails
 with an error.
 
-### Updater (`src/updater.rs`)
-
-Runs/monitors the updater systemd unit, tails the updater log file, extracts
-progress/messages via regex, and streams progress/error lines back to callers.
-
-### Updater (`src/updater.rs`)
+### Update coordination (`src/update_coordinator.rs` + `src/updater.rs`)
 
 Runs/monitors the updater systemd unit, tails the updater log file, extracts
 progress/messages via regex, and streams progress/error lines back to callers.
@@ -160,9 +170,11 @@ Two enums control update behaviour:
 
 ## Architectural direction
 - Keep `src/main.rs` as lifecycle and orchestration glue, not a dumping ground for unrelated logic.
+- Keep modules focused: each module has a single, clear responsibility (see `MODULE_GUIDE.md`).
 - Keep BLE parsing, UI navigation, persistence, connectivity, and updater behavior in focused modules.
 - Treat BLE command payloads and `device_info` as interface contracts.
 - If a change affects setup sequencing, callback ordering, or shared state, preserve the rationale in comments.
+- Tests are distributed across modules: unit tests live with their modules, integration tests in `main.rs`.
 
 ## Key data contracts
 
