@@ -65,7 +65,7 @@ pub async fn show_reflashing_qrcode(
 ) -> Result<()> {
     // Build message with version information
     let message = format!(
-        "We've moved too far ahead for this version to catch up. Your FF1 is too far behind to auto-upgrade. Current version: {current_version} Latest version: {latest_version} Minimum upgradeable version: {min_upgradeable_version}. Scan the code above for step-by-step reflashing instructions, or contact us for help. support@feralfile.com"
+        "We've moved too far ahead for this version to catch up. Your Art Computer is too far behind to auto-upgrade. Current version: {current_version} Latest version: {latest_version} Minimum upgradeable version: {min_upgradeable_version}. Scan the code above for step-by-step reflashing instructions, or contact us for help. support@feralfile.com"
     );
 
     // Build URL with QR code step and flashing guide as the QR content
