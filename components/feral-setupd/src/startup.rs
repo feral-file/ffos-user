@@ -290,29 +290,33 @@ pub async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>
     let state_store = &app_state.state_store;
     let current_phase = app_state.lifecycle.get();
 
-    // If still in Idle and don't have topic_id, try to get it
-    if current_phase == SetupPhase::Idle && state_store.get(persistent_state::TOPIC_ID).is_none() {
-        match dbus_utils::get_relayer_info() {
-            Ok(topic_id) => {
-                // Save topic_id FIRST before setting Pairing phase
-                state_store.set(persistent_state::TOPIC_ID, &topic_id);
-                if let Err(e) = state_store.save() {
-                    eprintln!("MAIN: Failed to save topic_id: {e:#?}");
-                    // Don't transition to Pairing if save failed - keep Idle
-                    // Device will retry on next boot or BLE flow
-                } else {
-                    // Topic_id saved successfully, now safe to transition to Pairing
-                    app_state.lifecycle.set(SetupPhase::Pairing);
-                    if let Err(e) = app_state.lifecycle.persist(state_store) {
-                        eprintln!("MAIN: Error persisting Pairing phase: {e:#?}");
-                        // Phase set in memory but not persisted - acceptable since topic_id is saved
+    // If still in Idle and don't have a non-empty topic_id, try to get it
+    if current_phase == SetupPhase::Idle {
+        let topic = state_store.get(persistent_state::TOPIC_ID);
+        let needs_topic = !matches!(topic.as_deref(), Some(t) if !t.is_empty());
+        if needs_topic {
+            match dbus_utils::get_relayer_info() {
+                Ok(topic_id) => {
+                    // Save topic_id FIRST before setting Pairing phase
+                    state_store.set(persistent_state::TOPIC_ID, &topic_id);
+                    if let Err(e) = state_store.save() {
+                        eprintln!("MAIN: Failed to save topic_id: {e:#?}");
+                        // Don't transition to Pairing if save failed - keep Idle
+                        // Device will retry on next boot or BLE flow
+                    } else {
+                        // Topic_id saved successfully, now safe to transition to Pairing
+                        app_state.lifecycle.set(SetupPhase::Pairing);
+                        if let Err(e) = app_state.lifecycle.persist(state_store) {
+                            eprintln!("MAIN: Error persisting Pairing phase: {e:#?}");
+                            // Phase set in memory but not persisted - acceptable since topic_id is saved
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                eprintln!(
-                    "MAIN: startup_with_internet: can't get relayer data from controld: {e:#?}"
-                );
+                Err(e) => {
+                    eprintln!(
+                        "MAIN: startup_with_internet: can't get relayer data from controld: {e:#?}"
+                    );
+                }
             }
         }
     }

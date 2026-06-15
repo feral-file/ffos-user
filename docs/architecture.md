@@ -111,7 +111,7 @@ Each service owns its own state files exclusively. No service should read or wri
 |---|---|---|
 | `feral-controld` | `/home/feralfile/.state/controld.state` | Relayer topic ID, connected device (ID, name, platform) |
 | `feral-controld` | `/home/feralfile/.state/screen-orientation` | Last committed screen orientation value |
-| `feral-setupd` | `/home/feralfile/.state/setupd` | Setup state: `setup_phase` (durable recovery state), `topic_id` (relayer topic), `connected` (first-internet flag). Legacy `paired` flag migrated to `setup_phase=ready` on upgrade. |
+| `feral-setupd` | `/home/feralfile/.state/setupd` | Setup state: `setup_phase` (durable recovery state), `pre_failure_phase` (phase to restore after OTA recovery), `topic_id` (relayer topic), `connected` (first-internet flag). Legacy `paired` flag migrated to `setup_phase=ready` on upgrade. |
 | updater scripts | `/home/feralfile/ff1-config.json` | Device branch, current version, update channel URLs (read-only at runtime by services) |
 | system | `/etc/hostname` | Device hostname (read-only at runtime; used by `controld` for mDNS identity) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-count` | Chromium OOM kill count (read by `controld` OOM recoverer) |

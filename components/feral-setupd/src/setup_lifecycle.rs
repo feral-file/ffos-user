@@ -129,9 +129,11 @@ impl SetupLifecycle {
                 return;
             }
 
-            // Validate Pairing invariant: must have topic_id
+            // Validate Pairing invariant: must have non-empty topic_id
             if phase == SetupPhase::Pairing {
-                let has_topic = store.get(crate::persistent_state::TOPIC_ID).is_some();
+                let has_topic = store
+                    .get(crate::persistent_state::TOPIC_ID)
+                    .is_some_and(|t| !t.is_empty());
                 if !has_topic {
                     eprintln!(
                         "LIFECYCLE: Invalid state on restore: Pairing phase without topic_id, correcting to Idle"
@@ -145,7 +147,7 @@ impl SetupLifecycle {
         } else {
             // Legacy migration (no setup_phase key = pre-phase firmware on disk).
             let is_legacy_paired = store.get("paired").as_deref() == Some("true");
-            let has_topic = store.get("topic_id").is_some();
+            let has_topic = store.get("topic_id").is_some_and(|t| !t.is_empty());
 
             if is_legacy_paired && has_topic {
                 // Fully paired on old firmware → Ready, so the device reaches the webapp
