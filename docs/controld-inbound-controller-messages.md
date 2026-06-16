@@ -77,6 +77,13 @@ sends an RPC response whose `message` body is:
 }
 ```
 
+The command-router rejection reply (rate limit / concurrency budget) is
+reliable. The relayer-side shed reply under **dispatch saturation** is
+**best-effort**: to keep its read loop responsive under a sustained storm, the
+relayer drops the reply when its shed-response writers are all busy. Controllers
+must not depend on receiving it in that case and should fall back to a request
+timeout and retry.
+
 The LAN-hub ingress reports the same condition as HTTP `429`. Controllers
 should treat this as "device busy", back off, and retry; the command was not
 applied. Control-plane messages (e.g. the `system`/topic-state message above)

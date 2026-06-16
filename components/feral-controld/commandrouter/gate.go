@@ -159,11 +159,29 @@ func NewGate(inner Handler, cfg GateConfig, logger *zap.Logger) Handler {
 	}
 }
 
-// policyFor returns the policy and limiter key for a command type.
+// defaultLimiterKey is the shared token-bucket key for every command type that
+// falls through to GateConfig.Default. Keying an unclassified type by its own
+// name would hand each attacker-chosen command string (unknown-1, unknown-2,
+// ...) a fresh burst budget AND allocate a token bucket per name without bound,
+// defeating storm protection for arbitrary CDP-forwarded names. A single fixed
+// key shares the default budget across all of them and caps limiter state at
+// one bucket. The leading NUL keeps it distinct from any real command type or
+// Group, which are printable identifiers.
+const defaultLimiterKey = "\x00default"
+
+// policyFor returns the policy and limiter key for a command type. Classified
+// types (present in cfg.Policies) key by their Group or their own name — a
+// fixed, bounded set. Unclassified types all share defaultLimiterKey so the
+// default budget is genuinely shared and limiter state stays bounded.
 func (g *gate) policyFor(t commands.Type) (Policy, string) {
 	p, ok := g.cfg.Policies[t]
 	if !ok {
 		p = g.cfg.Default
+		key := p.Group
+		if key == "" {
+			key = defaultLimiterKey
+		}
+		return p, key
 	}
 	key := p.Group
 	if key == "" {

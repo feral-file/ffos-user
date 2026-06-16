@@ -222,6 +222,8 @@ Most command failures are not standardized: when an executor command fails, `con
 }
 ```
 
+The command-router rejection reply (rate limit / concurrency budget) is reliable. The relayer-side shed reply under **dispatch saturation** is **best-effort**: to avoid blocking its read loop under a sustained storm, the relayer drops the reply when its shed-response writers are all busy. Controllers must not rely on receiving it for that case and should fall back to a request timeout and retry.
+
 The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
 
 ### Command-storm protection

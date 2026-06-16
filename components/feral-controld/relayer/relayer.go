@@ -54,12 +54,13 @@ const (
 
 	// MAX_INFLIGHT_SHED_RESPONSES caps the goroutines emitting "rate_limited"
 	// replies for shed commands. The replies are written off the read loop
-	// (Send takes the connection lock and writes with no deadline), so under the
-	// very storm we are shedding a slow/backpressured socket must not be able to
-	// wedge reads, pong handling, and pings behind one blocking write. When all
-	// slots are busy the reply is dropped: a best-effort courtesy reply is worth
-	// less than a responsive read loop, and a genuinely dead socket is torn down
-	// by the keepalive path instead.
+	// (Send takes the connection lock; its write is deadline-bounded but still
+	// holds the lock for up to WRITE_WAIT), so under the very storm we are
+	// shedding a slow/backpressured socket must not be able to wedge reads, pong
+	// handling, and pings behind one blocking write. When all slots are busy the
+	// reply is dropped: a best-effort courtesy reply is worth less than a
+	// responsive read loop, and a genuinely dead socket is torn down by the
+	// keepalive path instead.
 	MAX_INFLIGHT_SHED_RESPONSES = 16
 )
 
@@ -551,12 +552,13 @@ func (r *relayer) runHandlers(ctx context.Context, payload Payload, handlers []H
 }
 
 // shedResponseAsync emits a shed "rate_limited" reply without blocking the
-// caller (the read loop). Send takes the connection lock and writes to the
-// websocket with no deadline, so writing inline under a storm could stall
-// reads, pong handling, and pings behind one slow write. Hand the reply to a
-// bounded set of writer goroutines instead, and drop it when they are all busy:
-// a dropped best-effort reply is preferable to a wedged read loop, and a
-// genuinely dead socket is detected and reconnected by the keepalive path.
+// caller (the read loop). Send takes the connection lock and its write, though
+// now deadline-bounded, can still hold that lock for up to WRITE_WAIT, so
+// writing inline under a storm could stall reads, pong handling, and pings
+// behind one slow write. Hand the reply to a bounded set of writer goroutines
+// instead, and drop it when they are all busy: a dropped best-effort reply is
+// preferable to a wedged read loop, and a genuinely dead socket is detected and
+// reconnected by the keepalive path.
 // Writes stay serialized for gorilla's single-writer requirement because every
 // writer goroutine, like ping and Send, takes the connection lock.
 func (r *relayer) shedResponseAsync(ctx context.Context, payload Payload) {

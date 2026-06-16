@@ -2,6 +2,7 @@ package commandrouter
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -223,6 +224,45 @@ func TestGate_WeightAboveBudgetClampsToFullBudget(t *testing.T) {
 
 	close(inner.block)
 	assert.Equal(t, int64(1), inner.calls.Load(), "rejected command never reached inner")
+}
+
+// A storm of unique, attacker-controlled command names must share the single
+// default budget, not each receive a fresh token bucket. Otherwise storm
+// protection is trivially bypassed (every new name buys a fresh burst) and
+// limiter state grows without bound — one bucket per attacker string. Both
+// hazards are regressions from the command-storm review.
+func TestGate_UnclassifiedCommandsShareDefaultBudget(t *testing.T) {
+	inner := &stubHandler{result: "ok"}
+	cfg := GateConfig{
+		Enabled:       true,
+		MaxConcurrent: 16,
+		// No explicit policies: every command falls through to Default. Rate > 0
+		// so the bucket actually limits; the frozen clock means no mid-test refill.
+		Default: Policy{Rate: 1, Burst: 3, Weight: 1},
+		now:     frozenClock(),
+	}
+	g := NewGate(inner, cfg, zap.NewNop())
+
+	accepted := 0
+	var lastErr error
+	for i := 0; i < 20; i++ {
+		cmd := commands.Command{Type: commands.Type(fmt.Sprintf("unknown-%d", i))}
+		if _, err := g.Process(context.Background(), cmd); err == nil {
+			accepted++
+		} else {
+			lastErr = err
+		}
+	}
+
+	// Only burst-many commands pass, even though every name is unique: they
+	// share one bucket. Per-name buckets would have accepted all 20.
+	assert.Equal(t, 3, accepted, "unclassified commands share the default burst budget")
+	require.Error(t, lastErr)
+	assert.True(t, IsRateLimited(lastErr))
+
+	// And the whole storm allocated exactly one token bucket.
+	gate := g.(*gate)
+	assert.Equal(t, 1, len(gate.limiters.buckets), "a storm of unique names must not allocate one bucket per name")
 }
 
 func TestArgsHash(t *testing.T) {
