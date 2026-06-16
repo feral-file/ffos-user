@@ -64,6 +64,13 @@ func setup(t *testing.T) *testSetup {
 		Return(nil).
 		AnyTimes()
 
+	// Writes (sends and the application ping) now set a write deadline first;
+	// accept it everywhere so individual tests need not restate it.
+	mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
 	client := relayer.New("ws://localhost:8080", "test-api-key", mockDialer, mockRandomizer, mockClock, mockOS, mockJSON, logger)
 
 	return &testSetup{
@@ -1290,6 +1297,12 @@ func TestClient_ReceiveMessage_Error(t *testing.T) {
 	// Expect second conn to set read deadline
 	mockConn2.EXPECT().
 		SetReadDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	// Expect second conn to set write deadline before writes
+	mockConn2.EXPECT().
+		SetWriteDeadline(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
