@@ -436,6 +436,66 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	assert.Equal(t, "expired", outcome.Message.(map[string]any)["status"])
 }
 
+func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode:   "PAIR-123",
+		expiresAt:     time.Now().Add(time.Minute),
+		rejectionSent: make(chan struct{}, 1),
+		closed:        make(chan struct{}, 1),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+
+	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+
+	s.Stop()
+
+	select {
+	case <-ch.rejectionSent:
+	case <-ch.closed:
+		t.Fatal("channel closed before terminal cancellation rejection was sent")
+	case <-time.After(time.Second):
+		t.Fatal("expected approval cancellation rejection")
+	}
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{approvalCancellationStatus}, ch.rejectionReasons)
+	assert.Equal(t, 0, ch.closeCount, "terminal cancellation must remain pollable for the browser")
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assert.Equal(t, approvalCancellationStatus, outcome.Message.(map[string]any)["status"])
+}
+
 func TestWaitForMintRequest_AdvancesCursorPastIgnoredPollResult(t *testing.T) {
 	s := newTestService()
 	ch := &fakeBrokerChannel{

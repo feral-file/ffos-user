@@ -33,6 +33,8 @@ const (
 	defaultSessionTTLSeconds  = 3600
 	maxSessionTTLSeconds      = 86400
 	maxApprovalRequestIDBytes = 16
+
+	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
 )
 
 type Options struct {
@@ -525,7 +527,9 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 				return
 			}
 			terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
+			return
 		}
+		terminalSent = s.sendApprovalCancelled(active, *request, approvalRequestID)
 		return
 	case <-expireTimer.C:
 		if decision, ok := s.acceptedDecision(pending); ok {
@@ -542,6 +546,18 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 		}
 	}
+}
+
+func (s *service) sendApprovalCancelled(active *activePairing, request minter.MintRequest, approvalRequestID string) bool {
+	terminalCtx, cancel := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
+	defer cancel()
+	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: approvalCancellationStatus, Retryable: true})
+	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus)
+	if err != nil {
+		s.logger.Warn("Failed to send mint pairing cancellation to browser", zap.Error(err), zap.String("channelID", active.channelID))
+		return false
+	}
+	return true
 }
 
 func (s *service) sendApprovalExpired(active *activePairing, request minter.MintRequest, approvalRequestID string) bool {
