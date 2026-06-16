@@ -132,8 +132,11 @@ type gate struct {
 	cfg      GateConfig
 	limiters *limiterSet
 	sem      *semaphore.Weighted
-	flight   singleflight.Group
-	logger   *zap.Logger
+	// maxConcurrent mirrors cfg.MaxConcurrent (the semaphore size) so admit can
+	// clamp a command's weight to the budget. Only meaningful when sem != nil.
+	maxConcurrent int64
+	flight        singleflight.Group
+	logger        *zap.Logger
 }
 
 // NewGate wraps inner with command-storm protection. When cfg.Enabled is false
@@ -147,11 +150,12 @@ func NewGate(inner Handler, cfg GateConfig, logger *zap.Logger) Handler {
 		sem = semaphore.NewWeighted(cfg.MaxConcurrent)
 	}
 	return &gate{
-		inner:    inner,
-		cfg:      cfg,
-		limiters: newLimiterSet(cfg.now),
-		sem:      sem,
-		logger:   logger,
+		inner:         inner,
+		cfg:           cfg,
+		limiters:      newLimiterSet(cfg.now),
+		sem:           sem,
+		maxConcurrent: cfg.MaxConcurrent,
+		logger:        logger,
 	}
 }
 
@@ -213,6 +217,17 @@ func (g *gate) admit(ctx context.Context, command commands.Command, p Policy, ke
 		weight := p.Weight
 		if weight < 1 {
 			weight = 1
+		}
+		// Clamp the weight to the total budget. A configured MaxConcurrent
+		// smaller than a policy's Weight (e.g. a hand-tuned maxConcurrent of
+		// 1-3 against the default heavy Weight of 4) would otherwise make
+		// TryAcquire(weight) fail forever — even on a fully idle device —
+		// silently bricking that command type. Capping means a heavy command
+		// instead reserves the whole budget while in flight: throttled against
+		// other work, but never permanently rejected. maxConcurrent is >= 1
+		// here because sem is only non-nil when MaxConcurrent > 0.
+		if weight > g.maxConcurrent {
+			weight = g.maxConcurrent
 		}
 		if !g.sem.TryAcquire(weight) {
 			g.logger.Warn("Command rejected: concurrency budget exhausted",

@@ -172,6 +172,59 @@ func TestGate_ConcurrencyBudgetExhausted(t *testing.T) {
 	assert.Equal(t, int64(2), inner.calls.Load(), "rejected command never reached inner")
 }
 
+// A configured MaxConcurrent smaller than a command's policy weight must not
+// permanently disable that command. Before the clamp, TryAcquire(weight) on a
+// too-small semaphore failed forever — even on an idle device — silently
+// bricking heavy commands (e.g. the default Weight 4 against a hand-tuned
+// maxConcurrent of 1-3). Regression for the command-storm review finding.
+func TestGate_WeightAboveBudgetStillAdmitsWhenIdle(t *testing.T) {
+	inner := &stubHandler{result: "ok"}
+	cfg := GateConfig{
+		Enabled:       true,
+		MaxConcurrent: 2, // below the policy weight of 4
+		Policies:      map[commands.Type]Policy{testCmd: {Rate: 0, Weight: 4}},
+		now:           frozenClock(),
+	}
+	g := NewGate(inner, cfg, zap.NewNop())
+
+	res, err := g.Process(context.Background(), commands.Command{Type: testCmd, Arguments: map[string]any{"i": 1}})
+	require.NoError(t, err, "a weight-above-budget command must still be admitted when idle")
+	assert.Equal(t, "ok", res)
+	assert.Equal(t, int64(1), inner.calls.Load())
+}
+
+// With the weight clamped to the budget, a heavy command reserves the whole
+// budget while in flight, so a concurrent heavy command is rejected (legibly
+// rate-limited) rather than silently never admitted.
+func TestGate_WeightAboveBudgetClampsToFullBudget(t *testing.T) {
+	inner := &stubHandler{
+		result:  "ok",
+		block:   make(chan struct{}),
+		entered: make(chan struct{}, 1),
+	}
+	cfg := GateConfig{
+		Enabled:       true,
+		MaxConcurrent: 2, // below the policy weight of 4
+		Policies:      map[commands.Type]Policy{testCmd: {Rate: 0, Weight: 4}},
+		now:           frozenClock(),
+	}
+	g := NewGate(inner, cfg, zap.NewNop())
+
+	// Hold one heavy command in flight; clamped to weight 2 it occupies the
+	// entire budget.
+	go func() {
+		_, _ = g.Process(context.Background(), commands.Command{Type: testCmd, Arguments: map[string]any{"i": 1}})
+	}()
+	<-inner.entered
+
+	_, err := g.Process(context.Background(), commands.Command{Type: testCmd, Arguments: map[string]any{"i": 2}})
+	require.Error(t, err)
+	assert.True(t, IsRateLimited(err), "second heavy command is rejected while the budget is reserved")
+
+	close(inner.block)
+	assert.Equal(t, int64(1), inner.calls.Load(), "rejected command never reached inner")
+}
+
 func TestArgsHash(t *testing.T) {
 	// Order-independent: maps built in different orders hash identically.
 	a := map[string]any{"a": 1.0, "b": "x", "c": true}

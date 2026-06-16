@@ -41,6 +41,16 @@ const (
 	// command router; this is a coarse crash-prevention backstop for the
 	// dispatch fan-out itself.
 	MAX_INFLIGHT_HANDLERS = 256
+
+	// MAX_INFLIGHT_SHED_RESPONSES caps the goroutines emitting "rate_limited"
+	// replies for shed commands. The replies are written off the read loop
+	// (Send takes the connection lock and writes with no deadline), so under the
+	// very storm we are shedding a slow/backpressured socket must not be able to
+	// wedge reads, pong handling, and pings behind one blocking write. When all
+	// slots are busy the reply is dropped: a best-effort courtesy reply is worth
+	// less than a responsive read loop, and a genuinely dead socket is torn down
+	// by the keepalive path instead.
+	MAX_INFLIGHT_SHED_RESPONSES = 16
 )
 
 type Message struct {
@@ -127,6 +137,7 @@ type relayer struct {
 	pingDoneChan chan struct{}
 	handlers     []Handler
 	dispatchSem  chan struct{}
+	shedSem      chan struct{}
 
 	// Logger
 	logger *zap.Logger
@@ -155,6 +166,7 @@ func New(
 		logger:      logger,
 		handlers:    []Handler{},
 		dispatchSem: make(chan struct{}, MAX_INFLIGHT_HANDLERS),
+		shedSem:     make(chan struct{}, MAX_INFLIGHT_SHED_RESPONSES),
 	}
 }
 
@@ -300,6 +312,12 @@ func (r *relayer) Connect(ctx context.Context) error {
 	if r.pingDoneChan == nil {
 		r.pingDoneChan = make(chan struct{})
 	}
+	// Capture the stop channel locally before launching the goroutine. reconnect
+	// and Close reassign r.pingDoneChan (to nil) under the lock; selecting on the
+	// field directly would race with that write on every loop iteration. The
+	// local snapshot is the exact channel this goroutine must watch for its own
+	// lifetime, so closing the field's channel still wakes it.
+	pingDone := r.pingDoneChan
 
 	// Start pinging
 	ticker := r.clock.NewTicker(PING_INTERVAL)
@@ -312,7 +330,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 			case <-r.done:
 				ticker.Stop()
 				return
-			case <-r.pingDoneChan:
+			case <-pingDone:
 				ticker.Stop()
 				return
 			case <-ticker.C():
@@ -441,64 +459,93 @@ func (r *relayer) background(ctx context.Context) {
 					continue
 				}
 
-				// Forward payload to handlers. Command fan-out is bounded by a
-				// dispatch slot per handler so a command storm cannot spawn
-				// unbounded goroutines. Control-plane messages (topic/system
-				// state) are rare and must NOT be shed by command pressure, so
-				// they bypass the slot entirely.
-				//
-				// One slot is reserved per handler; with the expected single
-				// registered handler (the mediator) that is one slot per
-				// message. If multiple handlers are ever registered, revisit
-				// slot accounting before relying on more than one handler.
-				for _, handler := range r.handlers {
-					p := payload
-					h := handler
-
-					isControlPlane := payload.MessageID == MESSAGE_ID_SYSTEM
-					acquired := false
-					if !isControlPlane {
-						select {
-						case r.dispatchSem <- struct{}{}:
-							acquired = true
-						default:
-							// Saturated: shed this command, but reply legibly so
-							// the caller sees a rate-limit rejection instead of a
-							// silent timeout (feral-file/ffos-user#208).
-							r.logger.Warn("Relayer dispatch saturated, shedding command",
-								zap.String("messageID", payload.MessageID),
-								zap.String("command", derefString(payload.Message.Command)),
-							)
-							r.sendShedResponse(ctx, p)
-							continue
-						}
-					}
-
-					// Run the handler in a separate goroutine to avoid blocking the main thread
-					go func(ctx context.Context, payload Payload, handler Handler, acquired bool) {
-						if acquired {
-							defer func() { <-r.dispatchSem }()
-						}
-						select {
-						case <-ctx.Done():
-							return
-						case <-r.done:
-							return
-						default:
-							if err := handler(ctx, payload); err != nil {
-								r.logger.Error("Failed to handle message",
-									zap.Error(err),
-									zap.String("messageID", payload.MessageID),
-									zap.String("command", derefString(payload.Message.Command)),
-								)
-							}
-							return
-						}
-					}(ctx, p, h, acquired)
-				}
+				r.dispatchMessage(ctx, payload)
 			}
 		}
 	}()
+}
+
+// dispatchMessage fans a single decoded payload out to the registered handlers.
+//
+// Command fan-out is bounded by a dispatch slot per handler so a command storm
+// cannot spawn unbounded goroutines and exhaust device memory. Control-plane
+// messages (topic/system state) are rare and must NOT be shed by command
+// pressure, so they bypass the slot entirely.
+//
+// One slot is reserved per handler; with the expected single registered handler
+// (the mediator) that is one slot per message. If multiple handlers are ever
+// registered, revisit slot accounting before relying on more than one handler.
+//
+// Extracted from the read loop so the saturation/shed path is unit-testable
+// without the full connection machinery.
+func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
+	isControlPlane := payload.MessageID == MESSAGE_ID_SYSTEM
+	for _, handler := range r.handlers {
+		acquired := false
+		if !isControlPlane {
+			select {
+			case r.dispatchSem <- struct{}{}:
+				acquired = true
+			default:
+				// Saturated: shed this command, but reply legibly so the caller
+				// sees a rate-limit rejection instead of a silent timeout
+				// (feral-file/ffos-user#208). The reply is emitted off the read
+				// loop (shedResponseAsync) so a blocked write cannot wedge it.
+				r.logger.Warn("Relayer dispatch saturated, shedding command",
+					zap.String("messageID", payload.MessageID),
+					zap.String("command", derefString(payload.Message.Command)),
+				)
+				r.shedResponseAsync(ctx, payload)
+				continue
+			}
+		}
+
+		// Run the handler in a separate goroutine to avoid blocking the read loop.
+		go func(ctx context.Context, payload Payload, handler Handler, acquired bool) {
+			if acquired {
+				defer func() { <-r.dispatchSem }()
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-r.done:
+				return
+			default:
+				if err := handler(ctx, payload); err != nil {
+					r.logger.Error("Failed to handle message",
+						zap.Error(err),
+						zap.String("messageID", payload.MessageID),
+						zap.String("command", derefString(payload.Message.Command)),
+					)
+				}
+				return
+			}
+		}(ctx, payload, handler, acquired)
+	}
+}
+
+// shedResponseAsync emits a shed "rate_limited" reply without blocking the
+// caller (the read loop). Send takes the connection lock and writes to the
+// websocket with no deadline, so writing inline under a storm could stall
+// reads, pong handling, and pings behind one slow write. Hand the reply to a
+// bounded set of writer goroutines instead, and drop it when they are all busy:
+// a dropped best-effort reply is preferable to a wedged read loop, and a
+// genuinely dead socket is detected and reconnected by the keepalive path.
+// Writes stay serialized for gorilla's single-writer requirement because every
+// writer goroutine, like ping and Send, takes the connection lock.
+func (r *relayer) shedResponseAsync(ctx context.Context, payload Payload) {
+	select {
+	case r.shedSem <- struct{}{}:
+		go func(payload Payload) {
+			defer func() { <-r.shedSem }()
+			r.sendShedResponse(ctx, payload)
+		}(payload)
+	default:
+		r.logger.Warn("Relayer shed-response writers saturated, dropping rate-limited reply",
+			zap.String("messageID", payload.MessageID),
+			zap.String("command", derefString(payload.Message.Command)),
+		)
+	}
 }
 
 // sendShedResponse replies to a command that was shed under dispatch

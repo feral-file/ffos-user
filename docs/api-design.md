@@ -240,7 +240,7 @@ It is on by default with tuned defaults. The optional `commandStorm` config sect
 ```
 
 - `disabled` (default `false`) — turn the gate off entirely.
-- `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget.
+- `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever.
 
 ### BLE error codes
 
