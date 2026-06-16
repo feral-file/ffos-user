@@ -1041,7 +1041,11 @@ Error cases:
 - `disabled`: `mintPairing.enabled` is false.
 - `invalid_config`: broker base URL is missing.
 - `topic_not_ready`: device has no current relayer topic ID.
+- `broker_unavailable`: broker channel creation failed before a pairing code
+  was available.
 - `broker_response_invalid`: broker did not return a pairing code.
+- `display_unavailable`: Chromium/CDP did not accept the pairing QR page
+  navigation.
 
 On success, `feral-controld` navigates Chromium to the dedicated mint-pairing
 QR page and passes `pairing_code` in the page URL. The QR code encodes that

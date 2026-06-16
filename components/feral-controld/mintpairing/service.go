@@ -288,7 +288,8 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		ShortCodeRequested: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("start broker channel: %w", err)
+		s.logger.Warn("Failed to start mint pairing broker channel", zap.Error(err))
+		return commandError("broker_unavailable", "failed to start mint pairing broker channel", true), nil
 	}
 
 	display := channel.PairingDisplay()
@@ -313,7 +314,8 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, pairingCode); err != nil {
 		sessionCancel()
 		s.closeChannel(channel)
-		return nil, fmt.Errorf("show mint pairing QR code: %w", err)
+		s.logger.Warn("Failed to display mint pairing QR code", zap.Error(err), zap.String("channelID", active.channelID))
+		return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 	}
 
 	s.mu.Lock()
@@ -467,16 +469,17 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		return
 	}
 
+	expireTimer := time.NewTimer(time.Until(expiresAt))
+	defer expireTimer.Stop()
+
 	select {
 	case <-ctx.Done():
-		return
-	case <-time.After(time.Until(expiresAt)):
-		_, err := active.channel.SendMintRejection(ctx, *request, minter.MintRejection{Reason: "approval_expired", Retryable: true})
-		terminalSent = err == nil
-		s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "expired")
-		if err != nil {
-			s.logger.Warn("Failed to send mint pairing expiration to browser", zap.Error(err), zap.String("channelID", active.channelID))
+		if !time.Now().Before(expiresAt) {
+			terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 		}
+		return
+	case <-expireTimer.C:
+		terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 	case decision := <-pending.decisionCh:
 		sent, err := s.completeDecision(ctx, active.channel, *request, topicID, approvalRequestID, decision)
 		terminalSent = sent
@@ -484,6 +487,18 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 		}
 	}
+}
+
+func (s *service) sendApprovalExpired(active *activePairing, request minter.MintRequest, approvalRequestID string) bool {
+	terminalCtx, cancel := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
+	defer cancel()
+	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: "approval_expired", Retryable: true})
+	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, "expired")
+	if err != nil {
+		s.logger.Warn("Failed to send mint pairing expiration to browser", zap.Error(err), zap.String("channelID", active.channelID))
+		return false
+	}
+	return true
 }
 
 func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel) (*minter.MintRequest, error) {
@@ -803,8 +818,12 @@ func relayerHTTPBaseString(endpoint string) string {
 	switch u.Scheme {
 	case "wss":
 		u.Scheme = "https"
+		u.Path = ""
+		u.RawPath = ""
 	case "ws":
 		u.Scheme = "http"
+		u.Path = ""
+		u.RawPath = ""
 	}
 	u.RawQuery = ""
 	u.Fragment = ""

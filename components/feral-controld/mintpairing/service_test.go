@@ -3,6 +3,7 @@ package mintpairing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -169,6 +170,76 @@ func TestRelayerSessionCreator_CreateEphemeralSession(t *testing.T) {
 	assert.Equal(t, float64(3600), seenRequest.Body["expiresInSeconds"])
 }
 
+func TestRelayerHTTPBaseString_NormalizesWebSocketEndpointToOrigin(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		want     string
+	}{
+		{
+			name:     "wss endpoint with path",
+			endpoint: "wss://relayer.example/ws",
+			want:     "https://relayer.example",
+		},
+		{
+			name:     "ws endpoint with path query and fragment",
+			endpoint: "ws://127.0.0.1:8080/ws?topic=abc#debug",
+			want:     "http://127.0.0.1:8080",
+		},
+		{
+			name:     "http path is preserved",
+			endpoint: "https://relayer.example/base/",
+			want:     "https://relayer.example/base",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, relayerHTTPBaseString(tt.endpoint))
+		})
+	}
+}
+
+func TestHandleStartPairingSession_ReturnsCommandErrorForBrokerStartFailure(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	s := newService(
+		Options{Enabled: true, BrokerBaseURL: "https://broker.example"},
+		&fakeBrokerStarter{err: errors.New("broker down")},
+		nil,
+		nil,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "broker_unavailable", true)
+}
+
+func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-123"}
+	s := newService(
+		Options{Enabled: true, BrokerBaseURL: "https://broker.example", IdleTTL: time.Minute},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		&fakeCDP{err: errors.New("cdp down")},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "display_unavailable", true)
+	assert.Equal(t, 1, ch.closeCount)
+}
+
 func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -233,6 +304,65 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.Equal(t, "already_accepted", result.(approvalResponse).Status)
 }
 
+func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode:   "PAIR-123",
+		expiresAt:     time.Now().Add(80 * time.Millisecond),
+		rejectionSent: make(chan struct{}, 1),
+		closed:        make(chan struct{}, 1),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+
+	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+
+	select {
+	case <-ch.rejectionSent:
+	case <-ch.closed:
+		t.Fatal("channel closed before terminal expiration rejection was sent")
+	case <-time.After(time.Second):
+		t.Fatal("expected approval expiration rejection")
+	}
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{"approval_expired"}, ch.rejectionReasons)
+	assert.Equal(t, 0, ch.closeCount, "terminal expiration must remain pollable for the browser")
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assert.Equal(t, "expired", outcome.Message.(map[string]any)["status"])
+}
+
 func newTestService() *service {
 	return newService(
 		Options{ApprovalTimeout: time.Minute, PollInterval: time.Millisecond},
@@ -256,26 +386,46 @@ func validDecisionArgs(approvalID, topicID, channelID, messageID string) map[str
 	}
 }
 
+func assertCommandError(t *testing.T, result any, code string, retryable bool) {
+	t.Helper()
+	resp, ok := result.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errPayload, ok := resp["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, code, errPayload["code"])
+	assert.Equal(t, retryable, errPayload["retryable"])
+}
+
 type fakeBrokerStarter struct {
 	channel         brokerChannel
+	err             error
 	receivedOptions minter.StartChannelOptions
 }
 
 func (f *fakeBrokerStarter) StartChannel(_ context.Context, opts minter.StartChannelOptions) (brokerChannel, error) {
 	f.receivedOptions = opts
-	return f.channel, nil
+	return f.channel, f.err
 }
 
 type fakeBrokerChannel struct {
-	mu           sync.Mutex
-	pairingCode  string
-	request      *minter.MintRequest
-	successCount int
-	closeCount   int
+	mu               sync.Mutex
+	pairingCode      string
+	expiresAt        time.Time
+	request          *minter.MintRequest
+	rejectionSent    chan struct{}
+	closed           chan struct{}
+	successCount     int
+	closeCount       int
+	rejectionReasons []string
 }
 
 func (f *fakeBrokerChannel) PairingDisplay() minter.PairingDisplay {
-	return minter.PairingDisplay{ChannelID: "ch_1", ShortCode: f.pairingCode, ExpiresAt: time.Now().Add(time.Minute)}
+	expiresAt := f.expiresAt
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().Add(time.Minute)
+	}
+	return minter.PairingDisplay{ChannelID: "ch_1", ShortCode: f.pairingCode, ExpiresAt: expiresAt}
 }
 
 func (f *fakeBrokerChannel) MinterPublicKeyJWK() minter.PublicJWK {
@@ -294,16 +444,38 @@ func (f *fakeBrokerChannel) PollMintRequest(context.Context, int64) (*minter.Min
 }
 
 func (f *fakeBrokerChannel) SendMintSuccess(context.Context, minter.MintRequest, minter.MintResult) (*minter.SendMessageResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.successCount++
 	return &minter.SendMessageResult{ChannelID: "ch_1", Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
 
-func (f *fakeBrokerChannel) SendMintRejection(context.Context, minter.MintRequest, minter.MintRejection) (*minter.SendMessageResult, error) {
+func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejectionReasons = append(f.rejectionReasons, rejection.Reason)
+	if f.rejectionSent != nil {
+		select {
+		case f.rejectionSent <- struct{}{}:
+		default:
+		}
+	}
 	return &minter.SendMessageResult{ChannelID: "ch_1", Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
 
 func (f *fakeBrokerChannel) Close(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.closeCount++
+	if f.closed != nil {
+		select {
+		case f.closed <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -341,6 +513,7 @@ func (f *fakeRelayer) Close()                               {}
 
 type fakeCDP struct {
 	lastURL string
+	err     error
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
@@ -348,6 +521,9 @@ func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) {
 	return nil, nil
 }
 func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	if method == "Page.navigate" {
 		f.lastURL, _ = params["url"].(string)
 	}

@@ -11,6 +11,7 @@ sync-feral-setupd:
 .PHONY: sync-feral-controld
 sync-feral-controld:
 	@$(SYNC_SCRIPT) ./feral-controld $(REMOTE_DIR)/feral-controld $(REMOTE_HOST)
+	@$(MAKE) sync-mint-pairing-ui
 
 .PHONY: sync-feral-sys-monitord
 sync-feral-sys-monitord:
@@ -32,3 +33,5 @@ sync-feral-watchdog:
 .PHONY: sync-all
 sync-all:
 	@$(SYNC_SCRIPT) . $(REMOTE_DIR)/ $(REMOTE_HOST)
+	@$(MAKE) sync-launcher-ui
+	@$(MAKE) sync-mint-pairing-ui
