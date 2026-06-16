@@ -30,6 +30,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
+	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -76,6 +77,7 @@ type app struct {
 	StatusPoller      status.Poller
 	Watchdog          watchdog.Watchdog
 	PlaylistRefresher playlist_refresher.Refresher
+	MintPairing       mintpairing.Service
 	Hub               hub.Hub
 }
 
@@ -123,6 +125,7 @@ func main() {
 		config.CDPConfig.Endpoint,
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
+		config.MintPairingConfig,
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
@@ -249,6 +252,11 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.PlaylistRefresher.Start()
 	defer app.PlaylistRefresher.Stop()
 
+	if app.MintPairing != nil {
+		app.MintPairing.Start(ctx)
+		defer app.MintPairing.Stop()
+	}
+
 	// Start StatusPoller - it will handle relayer connection status internally
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
@@ -348,6 +356,7 @@ func initializeApp(
 	cdpEndpoint string,
 	relayerEndpoint string,
 	relayerAPIKey string,
+	mintPairingConfig *config.MintPairingConfig,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
@@ -424,8 +433,12 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
+	// Mint Pairing
+	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
+	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
+
 	// Command handler
-	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)
+	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, json, logger)
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
@@ -462,6 +475,7 @@ func initializeApp(
 		StatusPoller:      poller,
 		Watchdog:          watchdog,
 		PlaylistRefresher: playlistRefresher,
+		MintPairing:       mintPairing,
 		Hub:               hub,
 	}
 }
@@ -490,6 +504,7 @@ func initializeTestApp(
 	oomRecoverer oomrecovery.Recoverer,
 	executor devicectl.Executor,
 	dynamicPlaylistRefresher playlist_refresher.Refresher,
+	mintPairing mintpairing.Service,
 	hub hub.Hub,
 ) *app {
 	return &app{
@@ -515,6 +530,7 @@ func initializeTestApp(
 		StatusPoller:      statusPoller,
 		Watchdog:          watchdog,
 		PlaylistRefresher: dynamicPlaylistRefresher,
+		MintPairing:       mintPairing,
 		Hub:               hub,
 	}
 }

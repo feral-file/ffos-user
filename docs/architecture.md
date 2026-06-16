@@ -16,6 +16,7 @@ Each service in `components/` has exactly one responsibility. That boundary must
 | `feral-controld` | Maintain the relayer connection and route remote commands to local handlers | Go |
 | `feral-setupd` | BLE provisioning, setup/recovery UI transitions, updater orchestration | Rust |
 | `launcher-ui` | Launch Chromium in kiosk mode at the correct URL and exit | Go |
+| `mint-pairing-ui` | Render the mint pairing QR code page when `feral-controld` starts a browser handoff pairing session | HTML/JS |
 | `player-wrapper-ui` | Wrap the media player process | Go |
 
 Rules for each boundary:
@@ -91,7 +92,7 @@ Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0
 The boundary between launcher/UI code and daemon logic:
 
 - **Daemons own all state, policy, and side effects.** Daemons decide what page to show, when to update, and what to do on errors.
-- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` or from the bundled local player at `http://127.0.0.1:8080/`. Daemons navigate by calling CDP, not by modifying files on disk at runtime.
+- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/`, `file:///opt/feral/ui/mint-pairing/`, or from the bundled local player at `http://127.0.0.1:8080/`. Daemons navigate by calling CDP, not by modifying files on disk at runtime.
 - **`launcher-ui` is a one-shot process starter.** It constructs a URL from command-line arguments (key=value pairs), launches Chromium with `cage` as the Wayland compositor, and waits. It contains no business logic and no daemon lifecycle. Arguments come from the systemd unit; they do not change at runtime.
 - **UI does not call daemons directly** except through the Hub WebSocket (when local control UI in Chromium sends commands to controld on port 1111). All other control flows originate in daemons and push into Chromium via CDP.
 - **`player-wrapper-ui`** follows the same pattern: thin process wrapper, no policy.

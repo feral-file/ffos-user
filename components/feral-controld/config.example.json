@@ -6,6 +6,13 @@
     "endpoint": "wss://example.com/ws",
     "apiKey": 5
   },
+  "mintPairing": {
+    "enabled": false,
+    "brokerBaseURL": "https://mint-pairing.example.com",
+    "idleTTLSeconds": 300,
+    "pollIntervalMillis": 500,
+    "approvalTimeoutSeconds": 300
+  },
   "sentry": {
     "dsn": "https://YOUR_SENTRY_DSN@o0.ingest.sentry.io/0",
     "debug": "false",
@@ -18,4 +25,4 @@
     "clientId": "YOUR_OPENPANEL_CLIENT_ID",
     "clientSecret": "YOUR_OPENPANEL_CLIENT_SECRET"
   }
-} 
+}

@@ -46,6 +46,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - `playlist-refresher`: polls every 5 minutes. If the current player command is `displayPlaylist`, it re-resolves the playlist via `dp1` (URL-based or dynamic queries) and re-sends it to CDP with `refresh: true`.
 - `dp1` processes DP1 playlist format (URL and dynamic queries). Uses `ff-indexer` for content resolution.
 - `ff-indexer` fetches Feral File content index via HTTP.
+- `mintpairing` owns controller-started browser-session mint pairing. It uses the temporary `ff-art-computer-handoff` Go minter library only for Mint Pairing Broker channels and E2EE browser messages; `feral-controld` remains responsible for displaying the pairing-code QR page via CDP, sending approval requests/outcomes over the relayer, and creating ephemeral browser sessions through `POST /api/ephemeral-sessions?topicID=...`.
 - `watchdog` is a **systemd keepalive notifier** only — it sends `sd_notify WATCHDOG=1` every 15 seconds. It does NOT make recovery decisions (that is `feral-watchdog`'s job).
 - `state` persists durable local state; treat it as a contract, not casual scratch storage.
 - `wrapper` exists to keep code testable around time, OS, exec, random, IO, and serialization.

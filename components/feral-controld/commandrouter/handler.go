@@ -10,6 +10,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -25,6 +26,7 @@ type handler struct {
 	dp1          dp1.DP1
 	json         wrapper.JSON
 	statusPoller status.Poller
+	mintPairing  mintpairing.Service
 	logger       *zap.Logger
 }
 
@@ -33,6 +35,7 @@ func New(
 	cdp cdp.CDP,
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
+	mintPairing mintpairing.Service,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
@@ -41,6 +44,7 @@ func New(
 		cdp:          cdp,
 		dp1:          dp1,
 		statusPoller: statusPoller,
+		mintPairing:  mintPairing,
 		json:         json,
 		logger:       logger,
 	}
@@ -56,6 +60,34 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 	var result interface{}
 	var err error
+
+	if commandType == commands.CMD_START_MINT_PAIRING_SESSION {
+		if h.mintPairing == nil {
+			return map[string]any{
+				"ok": false,
+				"error": map[string]any{
+					"code":      "disabled",
+					"message":   "mint pairing is not enabled",
+					"retryable": false,
+				},
+			}, nil
+		}
+		return h.mintPairing.HandleStartPairingSession(ctx, command.Arguments)
+	}
+
+	if commandType == commands.CMD_MINT_PAIRING_APPROVAL {
+		if h.mintPairing == nil {
+			return map[string]any{
+				"ok": false,
+				"error": map[string]any{
+					"code":      "not_found",
+					"message":   "mint pairing is not enabled",
+					"retryable": false,
+				},
+			}, nil
+		}
+		return h.mintPairing.HandleApprovalDecision(ctx, command.Arguments)
+	}
 
 	if commandType.DeviceCtlCommand() {
 		// Handle device control command

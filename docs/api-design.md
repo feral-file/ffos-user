@@ -138,6 +138,10 @@ Successful `setSleepSchedule`, `sleepNow`, and `wakeNow` responses include `{"ok
 
 The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional `supportBundleID` or `support_bundle_id`. Without a bundle id, `feral-controld` emits the original `upload_logs(user_id, api_key, title)` signal. With a bundle id, it emits additive `upload_logs_with_bundle(payload []byte)` where `payload` is JSON containing `user_id`, `api_key`, `title`, and `support_bundle_id`, so the old D-Bus signal payload shape stays unchanged and the new bundled upload payload can grow additively.
 
+The `startMintPairingSession` command is a controller-to-controld request to create one Mint Pairing Broker channel and display its pairing code on the dedicated local QR page via CDP. The command returns explicit `RPC` payloads with `ok`, `status`, `channelID`, `pairingCode`, and `expiresAt` on success; failures return `ok: false` with `error.code`. If a non-expired session is already active, it returns `already_started` and re-displays the same code. The broker short code is intentionally visible; raw browser session tokens are not.
+
+The `mintPairingApprovalDecision` command is a controller-to-controld approval response for browser-session mint pairing. It is handled inside `feral-controld`, not forwarded to Chromium. Success and validation failures both return explicit `RPC` payloads with `ok`, `status` or `error.code`, and `approvalRequestID` where available. Raw browser session tokens and DP1 playlist content must never appear in this command or in `mint_pairing_approval_request` / `mint_pairing_approval_outcome` relayer messages.
+
 **Relayer outbound notifications (`feral-controld`):** The device periodically pushes JSON notifications over the relayer WebSocket (and local hub clients) with an envelope that includes `notification_type` and a structured `message`. At minimum:
 
 - `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts.

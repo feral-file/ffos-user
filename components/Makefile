@@ -20,6 +20,10 @@ sync-feral-sys-monitord:
 sync-launcher-ui:
 	@$(SYNC_SCRIPT) ./launcher-ui /opt/feral/ui/launcher/ $(REMOTE_HOST)
 
+.PHONY: sync-mint-pairing-ui
+sync-mint-pairing-ui:
+	@$(SYNC_SCRIPT) ./mint-pairing-ui /opt/feral/ui/mint-pairing/ $(REMOTE_HOST)
+
 .PHONY: sync-feral-watchdog
 sync-feral-watchdog:
 	@$(SYNC_SCRIPT) ./feral-watchdog $(REMOTE_DIR)/feral-watchdog $(REMOTE_HOST)

@@ -1,8 +1,8 @@
 # feral-controld Inbound Controller Messages
 
 This document describes inbound messages from `ff-controller` clients to
-`feral-controld`, their current payloads, current response behavior, and the new
-mint-pairing approval messages planned for ephemeral browser-session minting.
+`feral-controld`, their current payloads, current response behavior, and
+mint-pairing messages for ephemeral browser-session minting.
 
 `ff-controller` clients can reach `feral-controld` through the remote
 `ff-relayer` WebSocket. Local hub clients use the same command envelope over
@@ -952,9 +952,9 @@ Current behavior: forwarded to Chromium/CDP unless the command is added to the
 device-control map. If Chromium rejects or CDP fails, command failure is logged
 without a standardized relayer error response.
 
-## Planned Mint-Pairing Inbound Messages
+## Mint-Pairing Inbound Messages
 
-The mint-pairing flow adds a new approval decision message from
+The mint-pairing flow adds an approval decision message from
 `ff-controller` to `feral-controld`. The surrounding flow is:
 
 1. Browser requester sends encrypted `mint_request` to `feral-controld` through
@@ -972,6 +972,81 @@ The mint-pairing flow adds a new approval decision message from
 
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
+
+Implementation note: `feral-controld` embeds the temporary Go minter client from
+`ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser
+requests, and encrypted browser results. Relayer approval dispatch and
+`POST /api/ephemeral-sessions?topicID=...` session creation are owned by
+`feral-controld`; the minter library does not know relayer API keys, approval
+transport, or token minting policy. Runtime support is opt-in through
+`mintPairing.enabled` in `feral-controld` config and starts only after a
+controller sends `startMintPairingSession`.
+
+### startMintPairingSession
+
+Purpose: create one Mint Pairing Broker channel, display the broker pairing
+code on the Art Computer QR screen, and wait for the browser requester to
+connect through the broker.
+
+Example:
+
+```json
+{
+  "messageID": "msg-start-mint-pairing-1",
+  "message": {
+    "command": "startMintPairingSession",
+    "request": {}
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-start-mint-pairing-1",
+  "message": {
+    "ok": true,
+    "status": "started",
+    "channelID": "ch_pQ9Yab...",
+    "pairingCode": "PAIR-123",
+    "expiresAt": "2026-06-16T03:05:00Z"
+  }
+}
+```
+
+If a non-expired pairing session is already active, `status` is
+`already_started` and `feral-controld` re-displays the same pairing code.
+
+Error response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-start-mint-pairing-1",
+  "message": {
+    "ok": false,
+    "error": {
+      "code": "topic_not_ready",
+      "message": "relayer topic is not ready",
+      "retryable": true
+    }
+  }
+}
+```
+
+Error cases:
+
+- `disabled`: `mintPairing.enabled` is false.
+- `invalid_config`: broker base URL is missing.
+- `topic_not_ready`: device has no current relayer topic ID.
+- `broker_response_invalid`: broker did not return a pairing code.
+
+On success, `feral-controld` navigates Chromium to the dedicated mint-pairing
+QR page and passes `pairing_code` in the page URL. The QR code encodes that
+pairing code and the same code is rendered below the QR code in large text for
+long-distance readability.
 
 ### Outbound Approval Request
 
@@ -1073,7 +1148,7 @@ Optional fields:
 - `decidedAt`
 - `controller`
 
-Planned success response:
+Success response:
 
 ```json
 {
@@ -1087,7 +1162,7 @@ Planned success response:
 }
 ```
 
-Planned duplicate success response for a replay of the same accepted decision:
+Duplicate success response for a replay of the same accepted decision:
 
 ```json
 {
@@ -1101,7 +1176,7 @@ Planned duplicate success response for a replay of the same accepted decision:
 }
 ```
 
-Planned error response:
+Error response:
 
 ```json
 {
@@ -1119,7 +1194,7 @@ Planned error response:
 }
 ```
 
-Planned error cases:
+Error cases:
 
 | Case | Detection | controld response to controller | Browser result |
 |---|---|---|---|

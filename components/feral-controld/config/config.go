@@ -28,12 +28,21 @@ type RelayerConfig struct {
 	APIKey   string `json:"apiKey"`
 }
 
+type MintPairingConfig struct {
+	Enabled                bool   `json:"enabled"`
+	BrokerBaseURL          string `json:"brokerBaseURL"`
+	IdleTTLSeconds         int    `json:"idleTTLSeconds"`
+	PollIntervalMillis     int    `json:"pollIntervalMillis"`
+	ApprovalTimeoutSeconds int    `json:"approvalTimeoutSeconds"`
+}
+
 // Configuration for all components
 type Config struct {
-	CDPConfig     *CDPConfig           `json:"cdp"`
-	RelayerConfig *RelayerConfig       `json:"relayer"`
-	SentryConfig  *logger.SentryConfig `json:"sentry"`
-	EnableHub     bool                 `json:"enableHub"`
+	CDPConfig         *CDPConfig           `json:"cdp"`
+	RelayerConfig     *RelayerConfig       `json:"relayer"`
+	MintPairingConfig *MintPairingConfig   `json:"mintPairing"`
+	SentryConfig      *logger.SentryConfig `json:"sentry"`
+	EnableHub         bool                 `json:"enableHub"`
 
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
@@ -190,9 +199,10 @@ func (m *defaultConfigManager) Get() *Config {
 
 	if m.config == nil {
 		m.config = &Config{
-			CDPConfig:     &CDPConfig{},
-			RelayerConfig: &RelayerConfig{},
-			SentryConfig:  &logger.SentryConfig{},
+			CDPConfig:         &CDPConfig{},
+			RelayerConfig:     &RelayerConfig{},
+			MintPairingConfig: &MintPairingConfig{},
+			SentryConfig:      &logger.SentryConfig{},
 		}
 	}
 	return m.config

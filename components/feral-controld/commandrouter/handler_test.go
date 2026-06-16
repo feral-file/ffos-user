@@ -44,7 +44,7 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -173,6 +173,42 @@ func TestCommandHandler_Process_ControldCommand_Error(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, execError, err)
 	assert.Nil(t, result)
+}
+
+func TestCommandHandler_Process_MintPairingApprovalDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
+		Arguments: map[string]interface{}{},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "not_found", errObj["code"])
+}
+
+func TestCommandHandler_Process_StartMintPairingSessionDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
+		Arguments: map[string]interface{}{},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "disabled", errObj["code"])
 }
 
 func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) {
