@@ -60,9 +60,27 @@ for relayer topic assignment:
 
 Current relayer error behavior is important: if command processing fails,
 `feral-controld` logs and returns an internal handler error. It does not
-currently send a standardized RPC error response over the relayer. New inbound
-message families that require controller-visible errors must define their own
-response shape.
+send a standardized RPC error response over the relayer for most failures, so
+new inbound message families that require controller-visible errors must define
+their own response shape.
+
+The one standardized exception is **command-storm rejection**. When the device
+sheds a command to protect itself from flooding (rate limit, concurrency
+budget, or relayer dispatch saturation — see feral-file/ffos-user#208), it
+sends an RPC response whose `message` body is:
+
+```json
+{
+  "error": "rate_limited",
+  "command": "displayPlaylist",
+  "message": "human-readable reason"
+}
+```
+
+The LAN-hub ingress reports the same condition as HTTP `429`. Controllers
+should treat this as "device busy", back off, and retry; the command was not
+applied. Control-plane messages (e.g. the `system`/topic-state message above)
+are never shed by command pressure.
 
 ## Shared Success Responses
 

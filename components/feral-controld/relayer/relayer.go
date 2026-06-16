@@ -441,34 +441,44 @@ func (r *relayer) background(ctx context.Context) {
 					continue
 				}
 
-				// Forward payload to handlers. One dispatch slot is reserved
-				// per handler; with the expected single registered handler
-				// (the mediator) that is one slot per message. If multiple
-				// handlers are ever registered, a saturated semaphore could
-				// dispatch a message to some handlers and shed it for others —
-				// revisit slot accounting (acquire per message) before relying
-				// on more than one handler.
+				// Forward payload to handlers. Command fan-out is bounded by a
+				// dispatch slot per handler so a command storm cannot spawn
+				// unbounded goroutines. Control-plane messages (topic/system
+				// state) are rare and must NOT be shed by command pressure, so
+				// they bypass the slot entirely.
+				//
+				// One slot is reserved per handler; with the expected single
+				// registered handler (the mediator) that is one slot per
+				// message. If multiple handlers are ever registered, revisit
+				// slot accounting before relying on more than one handler.
 				for _, handler := range r.handlers {
 					p := payload
 					h := handler
 
-					// Reserve a dispatch slot before spawning. When the
-					// fan-out is saturated (command storm), shed the message
-					// rather than spawning unbounded goroutines. Commands that
-					// get through are still rate limited in the command router.
-					select {
-					case r.dispatchSem <- struct{}{}:
-					default:
-						r.logger.Warn("Relayer dispatch saturated, shedding message",
-							zap.String("messageID", payload.MessageID),
-							zap.String("command", derefString(payload.Message.Command)),
-						)
-						continue
+					isControlPlane := payload.MessageID == MESSAGE_ID_SYSTEM
+					acquired := false
+					if !isControlPlane {
+						select {
+						case r.dispatchSem <- struct{}{}:
+							acquired = true
+						default:
+							// Saturated: shed this command, but reply legibly so
+							// the caller sees a rate-limit rejection instead of a
+							// silent timeout (feral-file/ffos-user#208).
+							r.logger.Warn("Relayer dispatch saturated, shedding command",
+								zap.String("messageID", payload.MessageID),
+								zap.String("command", derefString(payload.Message.Command)),
+							)
+							r.sendShedResponse(ctx, p)
+							continue
+						}
 					}
 
 					// Run the handler in a separate goroutine to avoid blocking the main thread
-					go func(ctx context.Context, payload Payload, handler Handler) {
-						defer func() { <-r.dispatchSem }()
+					go func(ctx context.Context, payload Payload, handler Handler, acquired bool) {
+						if acquired {
+							defer func() { <-r.dispatchSem }()
+						}
 						select {
 						case <-ctx.Done():
 							return
@@ -484,11 +494,38 @@ func (r *relayer) background(ctx context.Context) {
 							}
 							return
 						}
-					}(ctx, p, h)
+					}(ctx, p, h, acquired)
 				}
 			}
 		}
 	}()
+}
+
+// sendShedResponse replies to a command that was shed under dispatch
+// saturation with the same structured "rate_limited" RPC body the command
+// router uses, so callers see a legible rejection instead of a silent timeout.
+// Only RPC command messages carry a caller awaiting a response by messageID;
+// messages without one (or control-plane traffic) are skipped.
+func (r *relayer) sendShedResponse(ctx context.Context, payload Payload) {
+	if payload.MessageID == "" || payload.MessageID == MESSAGE_ID_SYSTEM {
+		return
+	}
+
+	resp := Response{
+		Type:      "RPC",
+		MessageID: payload.MessageID,
+		Message: map[string]any{
+			"error":   "rate_limited",
+			"command": derefString(payload.Message.Command),
+			"message": "device is shedding a command storm; retry shortly",
+		},
+	}
+	if err := r.Send(ctx, resp); err != nil {
+		r.logger.Warn("Failed to send shed rate-limited response",
+			zap.Error(err),
+			zap.String("messageID", payload.MessageID),
+		)
+	}
 }
 
 // Send sends a message to the Relayer server

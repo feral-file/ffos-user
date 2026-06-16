@@ -683,6 +683,37 @@ func (c *countingHandler) Process(_ context.Context, _ commands.Command) (interf
 	return nil, nil
 }
 
+// TestHandleCast_RejectsWhenAtCapacity verifies the LAN hub bounds concurrent
+// casts: once the in-flight budget is exhausted, further casts are rejected
+// with 429 before decoding or reaching the command handler, so a storm cannot
+// pile up unbounded HTTP goroutines (feral-file/ffos-user#208).
+func TestHandleCast_RejectsWhenAtCapacity(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	hubImpl := ts.hub.(*hub)
+
+	// Saturate the in-flight cast budget; nothing releases these in the test.
+	for i := 0; i < MAX_INFLIGHT_CASTS; i++ {
+		hubImpl.castSlots <- struct{}{}
+	}
+
+	req := httptest.NewRequest(
+		"POST",
+		"/api/cast",
+		strings.NewReader(`{"command":"displayPlaylist"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// No mockCmd.Process / mockJSON.NewDecoder expectations: the capacity check
+	// runs before either, so a satisfied gomock controller asserts they are
+	// never reached.
+	hubImpl.handleCast(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
 // TestHandleCast_StormProtection drives a burst of cast requests through the LAN
 // hub ingress wrapped with a real command-storm gate. Beyond the configured
 // burst the hub must answer 429 and the inner handler must never see the

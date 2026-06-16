@@ -1153,6 +1153,20 @@ func TestClient_ReceiveMessage_Success(t *testing.T) {
 		Return(0, pb, nil).
 		AnyTimes()
 
+	// This test drives the read loop in a tight loop (ReadMessage AnyTimes) with
+	// a handler that blocks on an unbuffered channel, so the dispatch semaphore
+	// saturates and excess commands are shed. Shed commands now receive a
+	// legible rate_limited response, so allow the relayer to serialize and write
+	// them (it does not affect the handler-routing assertions below).
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte("{}"), nil).
+		AnyTimes()
+	ts.mockConn.EXPECT().
+		WriteMessage(gomock.Any(), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
 	// Expect cleanup when connection closes
 	ts.mockConn.EXPECT().
 		WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), gomock.Any()).

@@ -424,10 +424,12 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
-	// Command handler, wrapped with command-storm protection so both the
-	// relayer and LAN-hub ingress paths share one set of rate/concurrency
-	// guards (see feral-file/ffos-user#208).
-	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)
+	// Command handler. The raw handler serves internal daemon lifecycle flows
+	// (e.g. OOM recovery) directly; external ingress (relayer + LAN hub) is
+	// wrapped with command-storm protection so both paths share one set of
+	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
+	// must never be shed by external client traffic, so it bypasses the gate.
+	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -437,13 +439,13 @@ func initializeApp(
 			gateCfg.MaxConcurrent = cs.MaxConcurrent
 		}
 	}
-	cmdHandler = commandrouter.NewGate(cmdHandler, gateCfg, logger)
+	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
 
-	// OOM Recoverer
-	oomRecoverer := oomrecovery.New(poller, cmdHandler, logger)
+	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
+	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)
 
 	// Mediator
 	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
