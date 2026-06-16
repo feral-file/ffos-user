@@ -214,7 +214,7 @@ make verify
 - Rust component: `cargo fmt -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo check`, and `cargo test` for `feral-setupd`.
 - Startup contract smoke test: `scripts/test-serve-feral-player.sh` validates the `serve-feral-player.sh` static bundle failure path and systemd notify readiness contract with temporary fakes.
 
-Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, `golangci-lint` v2.4.0, Rust 1.88.0 with `rustfmt` and `clippy`, and the system libraries needed by `feral-setupd` (`libdbus-1-dev` and `pkg-config` on Ubuntu).
+Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, Node.js for the mint-pairing QR page smoke test, `golangci-lint` v2.4.0, Rust 1.88.0 with `rustfmt` and `clippy`, and the system libraries needed by `feral-setupd` (`libdbus-1-dev` and `pkg-config` on Ubuntu).
 
 GitHub Actions are split by component and purpose:
 

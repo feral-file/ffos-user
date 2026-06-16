@@ -6,6 +6,11 @@ ui_dir="$repo_root/components/mint-pairing-ui"
 index_html="$ui_dir/index.html"
 qr_lib="$ui_dir/js/qrcode.min.js"
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "mint-pairing-ui: Node.js is required for QR page smoke tests; install it with brew install node or apt install nodejs." >&2
+  exit 1
+fi
+
 if [[ ! -s "$index_html" ]]; then
   echo "mint-pairing-ui: missing index.html" >&2
   exit 1

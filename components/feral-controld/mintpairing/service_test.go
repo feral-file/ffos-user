@@ -170,6 +170,49 @@ func TestRelayerSessionCreator_CreateEphemeralSession(t *testing.T) {
 	assert.Equal(t, float64(3600), seenRequest.Body["expiresInSeconds"])
 }
 
+func TestRelayerSessionCreator_AppliesControldOwnedSessionTTLPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested int
+		want      int
+	}{
+		{
+			name: "default when browser does not request ttl",
+			want: defaultSessionTTLSeconds,
+		},
+		{
+			name:      "clamps below minimum",
+			requested: minSessionTTLSeconds - 1,
+			want:      minSessionTTLSeconds,
+		},
+		{
+			name:      "clamps above maximum",
+			requested: maxSessionTTLSeconds + 1,
+			want:      maxSessionTTLSeconds,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"session":{"id":"session-1","expiresAt":"2030-01-01T00:00:00Z"},"token":"browser-token"}`))
+			}))
+			defer server.Close()
+
+			creator := NewRelayerSessionCreator(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON())
+			_, err := creator.CreateEphemeralSession(context.Background(), "topic-1", minter.MintRequest{
+				RequestedExpiresInSeconds: tt.requested,
+			})
+
+			require.NoError(t, err)
+			assert.Equal(t, float64(tt.want), body["expiresInSeconds"])
+		})
+	}
+}
+
 func TestRelayerHTTPBaseString_NormalizesWebSocketEndpointToOrigin(t *testing.T) {
 	tests := []struct {
 		name     string

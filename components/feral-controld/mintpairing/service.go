@@ -30,6 +30,8 @@ const (
 	defaultPollInterval       = 500 * time.Millisecond
 	defaultApprovalTimeout    = 5 * time.Minute
 	minSessionTTLSeconds      = 90
+	defaultSessionTTLSeconds  = 3600
+	maxSessionTTLSeconds      = 86400
 	maxApprovalRequestIDBytes = 16
 )
 
@@ -831,14 +833,11 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 	q.Set("topicID", topicID)
 	endpoint.RawQuery = q.Encode()
 
-	expiresInSeconds := request.RequestedExpiresInSeconds
 	body := map[string]any{
 		"browserName":      request.BrowserInfo.Name,
 		"browserUserAgent": request.BrowserInfo.UserAgent,
 		"label":            request.BrowserInfo.Label,
-	}
-	if expiresInSeconds >= minSessionTTLSeconds {
-		body["expiresInSeconds"] = expiresInSeconds
+		"expiresInSeconds": effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
 	}
 	raw, err := c.json.Marshal(body)
 	if err != nil {
@@ -884,6 +883,19 @@ func (c *RelayerSessionCreator) CreateEphemeralSession(ctx context.Context, topi
 		ExpiresAt:      decoded.Session.ExpiresAt,
 		RelayerBaseURL: c.baseURL,
 	}, nil
+}
+
+func effectiveSessionTTLSeconds(requested int) int {
+	if requested <= 0 {
+		return defaultSessionTTLSeconds
+	}
+	if requested < minSessionTTLSeconds {
+		return minSessionTTLSeconds
+	}
+	if requested > maxSessionTTLSeconds {
+		return maxSessionTTLSeconds
+	}
+	return requested
 }
 
 func relayerHTTPBaseString(endpoint string) string {
