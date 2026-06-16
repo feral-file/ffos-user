@@ -424,8 +424,20 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
-	// Command handler
+	// Command handler, wrapped with command-storm protection so both the
+	// relayer and LAN-hub ingress paths share one set of rate/concurrency
+	// guards (see feral-file/ffos-user#208).
 	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, json, logger)
+	gateCfg := commandrouter.DefaultGateConfig()
+	if cs := config.Get().CommandStorm; cs != nil {
+		if cs.Disabled {
+			gateCfg.Enabled = false
+		}
+		if cs.MaxConcurrent > 0 {
+			gateCfg.MaxConcurrent = cs.MaxConcurrent
+		}
+	}
+	cmdHandler = commandrouter.NewGate(cmdHandler, gateCfg, logger)
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)

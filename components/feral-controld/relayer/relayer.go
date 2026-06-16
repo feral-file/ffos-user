@@ -34,6 +34,13 @@ const (
 	MESSAGE_ID_SYSTEM = "system"
 	PING_INTERVAL     = 15 * time.Second
 	PONG_WAIT         = 3 * time.Second
+
+	// MAX_INFLIGHT_HANDLERS caps concurrent message-handler goroutines so a
+	// relayer command storm cannot spawn unbounded goroutines and exhaust
+	// device memory. Per-command rate limiting still happens downstream in the
+	// command router; this is a coarse crash-prevention backstop for the
+	// dispatch fan-out itself.
+	MAX_INFLIGHT_HANDLERS = 256
 )
 
 type Message struct {
@@ -119,6 +126,7 @@ type relayer struct {
 	done         chan struct{}
 	pingDoneChan chan struct{}
 	handlers     []Handler
+	dispatchSem  chan struct{}
 
 	// Logger
 	logger *zap.Logger
@@ -136,16 +144,17 @@ func New(
 	logger *zap.Logger,
 ) Relayer {
 	return &relayer{
-		endpoint:   endpoint,
-		apiKey:     apiKey,
-		dialer:     dialer,
-		randomizer: randomizer,
-		clock:      clock,
-		done:       make(chan struct{}),
-		os:         os,
-		json:       json,
-		logger:     logger,
-		handlers:   []Handler{},
+		endpoint:    endpoint,
+		apiKey:      apiKey,
+		dialer:      dialer,
+		randomizer:  randomizer,
+		clock:       clock,
+		done:        make(chan struct{}),
+		os:          os,
+		json:        json,
+		logger:      logger,
+		handlers:    []Handler{},
+		dispatchSem: make(chan struct{}, MAX_INFLIGHT_HANDLERS),
 	}
 }
 
@@ -432,13 +441,34 @@ func (r *relayer) background(ctx context.Context) {
 					continue
 				}
 
-				// Forward payload to handlers
+				// Forward payload to handlers. One dispatch slot is reserved
+				// per handler; with the expected single registered handler
+				// (the mediator) that is one slot per message. If multiple
+				// handlers are ever registered, a saturated semaphore could
+				// dispatch a message to some handlers and shed it for others —
+				// revisit slot accounting (acquire per message) before relying
+				// on more than one handler.
 				for _, handler := range r.handlers {
 					p := payload
 					h := handler
 
+					// Reserve a dispatch slot before spawning. When the
+					// fan-out is saturated (command storm), shed the message
+					// rather than spawning unbounded goroutines. Commands that
+					// get through are still rate limited in the command router.
+					select {
+					case r.dispatchSem <- struct{}{}:
+					default:
+						r.logger.Warn("Relayer dispatch saturated, shedding message",
+							zap.String("messageID", payload.MessageID),
+							zap.String("command", derefString(payload.Message.Command)),
+						)
+						continue
+					}
+
 					// Run the handler in a separate goroutine to avoid blocking the main thread
 					go func(ctx context.Context, payload Payload, handler Handler) {
+						defer func() { <-r.dispatchSem }()
 						select {
 						case <-ctx.Done():
 							return

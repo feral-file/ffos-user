@@ -133,6 +133,11 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.cmdHandler.Process(h.ctx, payload)
 	if err != nil {
+		if commandrouter.IsRateLimited(err) {
+			h.logger.Warn("Cast request rejected by storm protection", zap.Error(err))
+			http.Error(w, "Too many commands, slow down", http.StatusTooManyRequests)
+			return
+		}
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
 		return
