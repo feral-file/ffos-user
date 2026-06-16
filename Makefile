@@ -30,6 +30,7 @@ verify-feral-watchdog-lint:
 
 .PHONY: verify-feral-controld-test
 verify-feral-controld-test:
+	@./scripts/test-mint-pairing-ui.sh
 	@$(MAKE) verify-go-component-test GO_COMPONENT=feral-controld
 
 .PHONY: verify-feral-sys-monitord-test

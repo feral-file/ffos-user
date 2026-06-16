@@ -475,14 +475,27 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	select {
 	case <-ctx.Done():
 		if !time.Now().Before(expiresAt) {
+			if decision, ok := s.acceptedDecision(pending); ok {
+				terminalSent, err = s.completeDecisionWithTerminalContext(active.channel, *request, topicID, approvalRequestID, decision)
+				if err != nil {
+					s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
+				}
+				return
+			}
 			terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 		}
 		return
 	case <-expireTimer.C:
+		if decision, ok := s.acceptedDecision(pending); ok {
+			terminalSent, err = s.completeDecisionWithTerminalContext(active.channel, *request, topicID, approvalRequestID, decision)
+			if err != nil {
+				s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
+			}
+			return
+		}
 		terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 	case decision := <-pending.decisionCh:
-		sent, err := s.completeDecision(ctx, active.channel, *request, topicID, approvalRequestID, decision)
-		terminalSent = sent
+		terminalSent, err = s.completeDecisionWithTerminalContext(active.channel, *request, topicID, approvalRequestID, decision)
 		if err != nil {
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 		}
@@ -499,6 +512,21 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 		return false
 	}
 	return true
+}
+
+func (s *service) completeDecisionWithTerminalContext(channel brokerChannel, request minter.MintRequest, topicID string, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+	terminalCtx, cancel := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
+	defer cancel()
+	return s.completeDecision(terminalCtx, channel, request, topicID, approvalRequestID, decision)
+}
+
+func (s *service) acceptedDecision(pending *pendingApproval) (approvalDecisionRequest, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pending.accepted == nil {
+		return approvalDecisionRequest{}, false
+	}
+	return *pending.accepted, true
 }
 
 func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel) (*minter.MintRequest, error) {

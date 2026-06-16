@@ -363,6 +363,70 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	assert.Equal(t, "expired", outcome.Message.(map[string]any)["status"])
 }
 
+func TestWaitForBrowserAndApproval_AcceptedDecisionBeforeExpiryWinsAfterSessionDeadline(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode: "PAIR-123",
+		expiresAt:   time.Now().Add(300 * time.Millisecond),
+		successSent: make(chan struct{}, 1),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{delay: 220 * time.Millisecond},
+		relayerClient,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+
+	approval := <-relayerClient.sent
+	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
+
+	time.Sleep(220 * time.Millisecond)
+	result, err = s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1"))
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	select {
+	case <-ch.successSent:
+	case <-time.After(time.Second):
+		t.Fatal("expected accepted decision to produce browser success")
+	}
+
+	ch.mu.Lock()
+	assert.Equal(t, 1, ch.successCount)
+	assert.NotContains(t, ch.rejectionReasons, "approval_expired")
+	assert.Equal(t, 0, ch.closeCount, "terminal success must remain pollable for the browser")
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
+}
+
 func newTestService() *service {
 	return newService(
 		Options{ApprovalTimeout: time.Minute, PollInterval: time.Millisecond},
@@ -414,6 +478,7 @@ type fakeBrokerChannel struct {
 	expiresAt        time.Time
 	request          *minter.MintRequest
 	rejectionSent    chan struct{}
+	successSent      chan struct{}
 	closed           chan struct{}
 	successCount     int
 	closeCount       int
@@ -447,6 +512,12 @@ func (f *fakeBrokerChannel) SendMintSuccess(context.Context, minter.MintRequest,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.successCount++
+	if f.successSent != nil {
+		select {
+		case f.successSent <- struct{}{}:
+		default:
+		}
+	}
 	return &minter.SendMessageResult{ChannelID: "ch_1", Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
 
@@ -479,9 +550,20 @@ func (f *fakeBrokerChannel) Close(context.Context) error {
 	return nil
 }
 
-type fakeSessionCreator struct{}
+type fakeSessionCreator struct {
+	delay time.Duration
+}
 
-func (fakeSessionCreator) CreateEphemeralSession(context.Context, string, minter.MintRequest) (minter.MintResult, error) {
+func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest) (minter.MintResult, error) {
+	if f.delay > 0 {
+		timer := time.NewTimer(f.delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return minter.MintResult{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
 	return minter.MintResult{
 		SessionID: "session-1",
 		Token:     "browser-token",
