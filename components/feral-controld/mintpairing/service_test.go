@@ -393,6 +393,25 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	assert.Equal(t, "expired", outcome.Message.(map[string]any)["status"])
 }
 
+func TestWaitForMintRequest_AdvancesCursorPastIgnoredPollResult(t *testing.T) {
+	s := newTestService()
+	ch := &fakeBrokerChannel{
+		ignoredSeq: 4,
+		request: &minter.MintRequest{
+			ChannelID: "ch_1",
+			MessageID: "msg_1",
+			Seq:       5,
+		},
+	}
+
+	request, err := s.waitForMintRequest(context.Background(), ch)
+
+	require.NoError(t, err)
+	require.NotNil(t, request)
+	assert.Equal(t, int64(5), request.Seq)
+	assert.Equal(t, []int64{0, 4}, ch.pollAfterSeqs)
+}
+
 func TestWaitForBrowserAndApproval_AcceptedDecisionBeforeExpiryWinsAfterSessionDeadline(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -510,6 +529,8 @@ type fakeBrokerChannel struct {
 	rejectionSent    chan struct{}
 	successSent      chan struct{}
 	closed           chan struct{}
+	ignoredSeq       int64
+	pollAfterSeqs    []int64
 	successCount     int
 	closeCount       int
 	rejectionReasons []string
@@ -527,15 +548,21 @@ func (f *fakeBrokerChannel) MinterPublicKeyJWK() minter.PublicJWK {
 	return minter.PublicJWK{}
 }
 
-func (f *fakeBrokerChannel) PollMintRequest(context.Context, int64) (*minter.MintRequest, error) {
+func (f *fakeBrokerChannel) PollMintRequest(_ context.Context, afterSeq int64) (*minter.MintRequest, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.pollAfterSeqs = append(f.pollAfterSeqs, afterSeq)
+	if f.ignoredSeq > afterSeq {
+		nextSeq := f.ignoredSeq
+		f.ignoredSeq = 0
+		return nil, nextSeq, nil
+	}
 	if f.request == nil {
-		return nil, nil
+		return nil, afterSeq, nil
 	}
 	request := f.request
 	f.request = nil
-	return request, nil
+	return request, request.Seq, nil
 }
 
 func (f *fakeBrokerChannel) SendMintSuccess(context.Context, minter.MintRequest, minter.MintResult) (*minter.SendMessageResult, error) {

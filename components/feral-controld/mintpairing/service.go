@@ -103,10 +103,45 @@ type sessionCreator interface {
 type brokerChannel interface {
 	PairingDisplay() minter.PairingDisplay
 	MinterPublicKeyJWK() minter.PublicJWK
-	PollMintRequest(ctx context.Context, afterSeq int64) (*minter.MintRequest, error)
+	PollMintRequest(ctx context.Context, afterSeq int64) (*minter.MintRequest, int64, error)
 	SendMintSuccess(ctx context.Context, request minter.MintRequest, result minter.MintResult) (*minter.SendMessageResult, error)
 	SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error)
 	Close(ctx context.Context) error
+}
+
+type brokerChannelAdapter struct {
+	channel *minter.Channel
+}
+
+func (b brokerChannelAdapter) PairingDisplay() minter.PairingDisplay {
+	return b.channel.PairingDisplay()
+}
+
+func (b brokerChannelAdapter) MinterPublicKeyJWK() minter.PublicJWK {
+	return b.channel.MinterPublicKeyJWK()
+}
+
+func (b brokerChannelAdapter) PollMintRequest(ctx context.Context, afterSeq int64) (*minter.MintRequest, int64, error) {
+	request, err := b.channel.PollMintRequest(ctx, afterSeq)
+	if err != nil {
+		return nil, afterSeq, err
+	}
+	if request == nil {
+		return nil, afterSeq, nil
+	}
+	return request, maxInt64(afterSeq, request.Seq), nil
+}
+
+func (b brokerChannelAdapter) SendMintSuccess(ctx context.Context, request minter.MintRequest, result minter.MintResult) (*minter.SendMessageResult, error) {
+	return b.channel.SendMintSuccess(ctx, request, result)
+}
+
+func (b brokerChannelAdapter) SendMintRejection(ctx context.Context, request minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {
+	return b.channel.SendMintRejection(ctx, request, rejection)
+}
+
+func (b brokerChannelAdapter) Close(ctx context.Context) error {
+	return b.channel.Close(ctx)
 }
 
 type realBrokerStarter struct {
@@ -114,7 +149,11 @@ type realBrokerStarter struct {
 }
 
 func (b realBrokerStarter) StartChannel(ctx context.Context, opts minter.StartChannelOptions) (brokerChannel, error) {
-	return b.client.StartChannel(ctx, opts)
+	channel, err := b.client.StartChannel(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return brokerChannelAdapter{channel: channel}, nil
 }
 
 type pendingApproval struct {
@@ -533,10 +572,11 @@ func (s *service) acceptedDecision(pending *pendingApproval) (approvalDecisionRe
 func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel) (*minter.MintRequest, error) {
 	var afterSeq int64
 	for {
-		request, err := channel.PollMintRequest(ctx, afterSeq)
+		request, nextAfterSeq, err := channel.PollMintRequest(ctx, afterSeq)
 		if err != nil {
 			return nil, fmt.Errorf("poll mint request: %w", err)
 		}
+		afterSeq = maxInt64(afterSeq, nextAfterSeq)
 		if request != nil {
 			return request, nil
 		}
@@ -727,6 +767,13 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+func maxInt64(a int64, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func newApprovalRequestID() (string, error) {
