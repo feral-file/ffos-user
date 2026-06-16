@@ -240,6 +240,36 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testi
 	assert.Equal(t, 1, ch.closeCount)
 }
 
+func TestHandleStartPairingSession_ReturnsCommandErrorForActiveRedisplayFailure(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-123"}
+	s := newService(
+		Options{Enabled: true, BrokerBaseURL: "https://broker.example"},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		&fakeCDP{err: errors.New("cdp down")},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	active := &activePairing{
+		channel:     ch,
+		channelID:   "ch_1",
+		pairingCode: "PAIR-123",
+		expiresAt:   time.Now().Add(time.Minute),
+		cancel:      func() {},
+	}
+	s.active = active
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "display_unavailable", true)
+	assert.Equal(t, 0, ch.closeCount, "redisplay failure must keep the active broker session alive")
+	assert.Same(t, active, s.active)
+}
+
 func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"

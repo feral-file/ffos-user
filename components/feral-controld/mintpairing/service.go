@@ -263,6 +263,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	if active := s.currentActive(); active != nil {
 		if err := qrdisplay.ShowPairingCode(ctx, s.cdp, active.pairingCode); err != nil {
 			s.logger.Warn("Failed to redisplay active mint pairing code", zap.Error(err), zap.String("channelID", active.channelID))
+			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 		}
 		return startPairingResponse{
 			OK:          true,
