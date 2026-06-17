@@ -10,6 +10,7 @@ on:
       - 'components/feral-setupd/rustfmt.toml'
       - 'components/feral-setupd/clippy.toml'
       - 'Makefile'
+      - 'scripts/verify-setupd-docker.sh'
   pull_request:
     paths:
       - 'components/feral-setupd/src/**'
@@ -18,6 +19,7 @@ on:
       - 'components/feral-setupd/rustfmt.toml'
       - 'components/feral-setupd/clippy.toml'
       - 'Makefile'
+      - 'scripts/verify-setupd-docker.sh'
 
 permissions:
   contents: read
