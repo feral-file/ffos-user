@@ -5,7 +5,7 @@ pub const SENTRY_URL: &str =
     "https://a1c5bd8607e7493634a05015d17d6aff@o142150.ingest.us.sentry.io/4509869844135936";
 pub const CACHE_FILEPATH: &str = "/home/feralfile/.state/setupd";
 pub const LOG_FILEDIR: &str = "/home/feralfile/.logs";
-pub const LOG_UPLOAD_API: &str = "https://support.autonomy.io/v2/ff1/log-submissions";
+pub const LOG_UPLOAD_API: &str = "https://support-logs.feralfile.com/v2/ff1/log-submissions";
 pub const SSID_CACHE_TTL: u64 = 10 * 60 * 1000; // 10 minutes
 pub const WIFI_WEBAPP_DELAY: u64 = 3 * 1000; // 3 seconds
 pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
@@ -21,8 +21,25 @@ pub const UPDATER_UPSTREAM_CONFIG_URL_SUFFIX: &str = "/api/latest/";
 pub const UPDATER_PROCESS_LOG_FILE: &str = "/var/log/updaterd.log";
 pub const UPDATER_VERSION_CHECK_RETRIES: u32 = 3;
 pub const UPDATER_VERSION_CHECK_RETRY_DELAY: u64 = 2 * 1000; // 2 seconds between retries
+/// Per-attempt HTTP timeout so an unstable connection (stalled connect/TLS/read) fails fast
+/// with a classified network error instead of hanging the blocking/D-Bus check on the
+/// "Checking for updates..." screen until the OS socket timeout fires.
+pub const UPDATER_VERSION_CHECK_REQUEST_TIMEOUT: u64 = 10 * 1000; // 10 seconds per attempt
 pub const UPDATER_REMOTE_VERSION_REFRESH_INTERVAL: u64 = 60 * 60 * 1000; // 1 hour
-pub const UPDATER_FAILED_TO_CHECK_VERSION_MSG: &str = "FF1 needs to check for critical updates before playing art. If your network is stable and this persists, contact support@feralfile.com - your device may need hands-on help.";
+
+/// Shown on the TV between HTTP retry attempts while checking for updates.
+pub const VERSION_CHECK_PROGRESS_TV_MSG: &str = "Checking for updates...";
+
+/// Unclassified distributor/config failures; keep umbrella guidance for odd edge cases.
+pub const VERSION_CHECK_FAILED_UNKNOWN_MSG: &str = "Your Art Computer needs to check for critical updates before playing art. If your network is stable and this persists, contact support@feralfile.com - your device may need hands-on help.";
+
+pub const VERSION_CHECK_FAILED_NETWORK_MSG: &str = "We could not reach the update server. Your Wi-Fi may be unstable—move closer to the router, wait a moment, then try again from the app.";
+
+pub const VERSION_CHECK_FAILED_SERVER_MSG: &str = "The update service is temporarily unavailable. Please wait a few minutes and try again from the app.";
+
+pub const VERSION_CHECK_FAILED_CLIENT_MSG: &str = "The update server rejected this request (configuration issue). If this keeps happening, contact support@feralfile.com.";
+
+pub const VERSION_CHECK_FAILED_PARSE_MSG: &str = "We received an unexpected response from the update server. Please try again later or contact support@feralfile.com.";
 
 // Bluetooth configuration
 pub const SERVICE_UUID: Uuid = Uuid::from_u128(0xf7826da64fa24e988024bc5b71e0893e_u128);
@@ -54,18 +71,18 @@ pub const CDP_ID_START: u64 = 1_000_000;
 pub const WEBAPP_URL: &str = "http://127.0.0.1:8080/";
 pub const QRCODE_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=qr";
 pub const MSG_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=message&message=";
-pub const WELCOME_MSG: &str = "Welcome to the FF1";
+pub const WELCOME_MSG: &str = "Welcome to the Art Computer";
 pub const WIFI_CONNECTING_MSG_PREFIX: &str = "Connecting to ";
 pub const WIFI_FAILED_TO_CONNECT_MSG: &str =
     "Failed to connect to the wifi network, please try again.";
 pub const INTERNET_FAILED_TO_CONNECT_MSG: &str =
     "Failed to connect to the internet, please try again.";
-pub const UPDATING_MSG_PREFIX: &str = "Updating your FF1 to the version ";
+pub const UPDATING_MSG_PREFIX: &str = "Updating your Art Computer to the version ";
 pub const UPDATING_MSG_SUBTEXT: &str =
     "This process may take 5–10 minutes depending on your internet speed.";
 pub const SETUP_SUCCESSFULLY_MSG: &str = "Bringing art to your screen…";
 pub const FACTORY_RESET_MSG: &str = "Factory resetting…";
-pub const REFLASHING_REQUIRED_MSG: &str = "We're sorry—we've moved too far ahead for this version to catch up. Your FF1 is too far behind to auto-upgrade. Scan the code below for step-by-step reflashing instructions, or contact us for help. support@feralfile.com";
+pub const REFLASHING_REQUIRED_MSG: &str = "We're sorry—we've moved too far ahead for this version to catch up. Your Art Computer is too far behind to auto-upgrade. Scan the code below for step-by-step reflashing instructions, or contact us for help. support@feralfile.com";
 
 // D-Bus configuration
 pub const DBUS_CONTROLD_OBJECT: &str = "/com/feralfile/controld";

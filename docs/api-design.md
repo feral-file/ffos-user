@@ -180,14 +180,15 @@ The BLE command characteristic uses a binary encoding:
 **`device_info` string format** (returned by `get_info`):
 
 ```
-<device_id>|<topic_id>|<internet>|<branch>|<version>
+<device_id>|<topic_id>|<internet>|<branch>|<version>|<setup_phase>
 ```
 
 - `branch` is URL-safe encoded: `/` replaced with `%2F`.
-- `internet` is the string `"true"` or `"false"` (cached connectivity value).
+- `internet` is the string `"true"` or `"false"` (cached connectivity value; force-refreshed during `checking_version` and `updating` when mobile polls `get_info`).
 - `topic_id` may be empty string if not yet assigned.
+- `setup_phase` reflects current setup progress. Values: `idle`, `wifi_connecting`, `checking_version`, `updating`, `update_failed`, `pairing`, `ready`. Mobile apps poll this field to detect update failures and drive recovery UI. Older firmware omitting this field should be treated as `idle` by mobile clients.
 
-This format is a contract between `feral-setupd` and the mobile app. Do not add, remove, or reorder fields without a coordinated mobile-app release.
+This format is a contract between `feral-setupd` and the mobile app. The sixth field is an additive extension; do not remove or reorder existing fields without a coordinated mobile-app release.
 
 ---
 
@@ -261,9 +262,13 @@ The mobile app expects a BLE notification within a reasonable time after a write
 
 `feral-setupd` uses `UpdateExecution::Blocking` for flows started from D-Bus (which can wait) and `UpdateExecution::NonBlocking` for flows started from BLE (which must respond quickly to the mobile app).
 
+Because `handle_connect_wifi` / `handle_keep_wifi` await their callback before sending the BLE notification, the forced version refresh runs **on** the mobile response path. To keep that response within contract, `check_and_update_system` bounds the refresh by execution mode: `NonBlocking` (BLE) uses `RefreshRetries::Single` (one attempt, worst case ≈ one `UPDATER_VERSION_CHECK_REQUEST_TIMEOUT`), while `Blocking` (D-Bus/startup) uses `RefreshRetries::Full` (the full retry budget). The mandatory-update / reflash decision still runs from the single fetch result; only the slow retry loop is dropped for BLE. A failed `Single` fetch returns `VersionCheckFailed` quickly so the mobile app can retry.
+
 ### Updater version check
 
-`feral-setupd` retries the remote version check up to `UPDATER_VERSION_CHECK_RETRIES` (3) times with a 2-second delay between retries before treating the check as failed.
+`feral-setupd` retries the remote version check up to `UPDATER_VERSION_CHECK_RETRIES` (3) times with a 2-second delay between retries before treating the check as failed (the `RefreshRetries::Full` budget used by Blocking flows; BLE/`NonBlocking` flows use `RefreshRetries::Single` — see "BLE response" above). Each attempt is additionally capped by `UPDATER_VERSION_CHECK_REQUEST_TIMEOUT` (10s) so an unstable connection (stalled connect/TLS/read) fails fast with a classified network error instead of hanging on the “checking for updates” screen until the OS socket timeout.
+
+During `check_and_update_system`, each HTTP fetch attempt notifies a small progress channel so setup can navigate the TV to a short “checking for updates” line before the request runs. The function starts with a forced `refresh_remote_version`; if that live fetch fails it surfaces the classified copy and returns `VersionCheckFailed` instead of falling back to stale cached metadata (so an outage or a newly raised minimum version is not masked). When a later required/available comparison fails (the `is_update_required` / `is_update_available` error path), the TV message is likewise chosen from a coarse failure class (network vs HTTP 5xx vs HTTP 4xx vs parse/unexpected body vs unknown). BLE status code `6` (`BLE_ERR_CODE_VERSION_CHECK_FAILED`) is unchanged.
 
 ---
 
@@ -272,6 +277,8 @@ The mobile app expects a BLE notification within a reasonable time after a write
 1. The relayer `messageID == "system"` path is the canonical source of the device's `TopicID`. Do not add a second path that sets `TopicID` without going through this flow.
 2. `GetRelayerTopicID` on D-Bus blocks until the topic ID is available (up to 31 seconds). Callers must account for this latency. Do not convert it to an async signal without updating all callers.
 3. `sysmetrics` signal body is a JSON-encoded byte slice. Consumers unmarshal it into the metrics struct. Adding fields to the struct is safe; removing or renaming fields is a breaking change.
+   - `gpu.gpu_busy` is the driver-reported utilization field and should be preferred by app consumers when they need a direct busy percentage.
+   - `gpu.current_frequency / gpu.max_frequency` remains available as a clock-ratio fallback, but it is not a substitute for actual utilization.
 4. `connectivity_change` signal body is a single `bool`. It must stay a single `bool`. If more data is needed, add a new signal rather than replacing this one.
 5. BLE `get_info` returns exactly one string element (the `device_info` string). Do not add a second element without updating the mobile app.
 6. Hub WebSocket accepts exactly the same command envelope as the relayer. The Hub and relayer command paths share `commandrouter`. Do not diverge them without explicit justification.
