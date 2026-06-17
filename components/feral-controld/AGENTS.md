@@ -43,7 +43,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - `hub` exposes a local WebSocket server on `0.0.0.0:1111` (only when `enableHub` is true in config). Uses the same `commandrouter` as the relayer. Also serves Prometheus metrics at this address.
 - `mdns` advertises the device on the local network. mDNS starts/stops in response to connectivity changes from D-Bus.
 - `oom-recovery` (`OOMRecoverer`): on startup, compares `/var/lib/oom_state/chromium-oom-kill-count` against a handled-count file. If unhandled OOM kills exist, it polls (every 2s, up to 60 retries) until the webapp is responsive, then sends `CMD_DISPLAY_DEFAULT_PLAYLIST` to resume playback, then writes the handled-count. Suppresses player notifications during recovery.
-- `playlist-refresher`: polls every 5 minutes. If the current player command is `displayPlaylist`, it re-resolves the playlist via `dp1` (URL-based or dynamic queries) and re-sends it to CDP with `refresh: true`.
+- `playlist-refresher`: on a fixed interval (`PLAYLIST_REFRESH_INTERVAL`, currently one minute), re-reads player status from CDP. **URL-backed** playlists (`playerStatus.PlaylistURL`): calls `dp1.ProcessPlaylistURLConditional` with the stored **ETag** (`If-None-Match`); on **304** it does nothing further (no re-hydration that tick; see Known issues). On **200**, it compares the newly resolved playlist to the last snapshot (`visiblePlaylistChanged`); **viewer-visible** deltas → `CMD_DISPLAY_PLAYLIST` with `intent.action: now_display` (and `playlistUrl`) so ff-player restarts the program from the top; otherwise **`refresh: true`** only (soft swap). **Embedded** playlists with dynamic content (`playerStatus.Playlist`, no URL): runs `dp1.ProcessDynamicPlaylist` and sends `CMD_DISPLAY_PLAYLIST` with **`refresh: true`** only (no ETag / `now_display` split on that path).
 - `dp1` processes DP1 playlist format (URL and dynamic queries). Uses `ff-indexer` for content resolution.
 - `ff-indexer` fetches Feral File content index via HTTP.
 - `watchdog` is a **systemd keepalive notifier** only — it sends `sd_notify WATCHDOG=1` every 15 seconds. It does NOT make recovery decisions (that is `feral-watchdog`'s job).
@@ -64,6 +64,18 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - Connectivity, relayer readiness, and D-Bus events interact. Do not change one of those flows without checking the others.
 - State writes, relayer reconnection, and CDP updates should stay understandable in logs and comments.
 - If a new path changes command routing or topic/state persistence, document the invariant close to the code.
+
+## Known issues
+
+### URL playlist conditional fetch (`304`) vs `dynamicQuery` hydration
+
+The playlist refresher calls `dp1.ProcessPlaylistURLConditional` with `If-None-Match` (stored ETag from the last **200** response). When the origin answers **304 Not Modified**, the implementation returns early: there is no new playlist document body, so **`ProcessDynamicPlaylist` never runs** on that refresh tick.
+
+For playlists whose items come from **`dynamicQuery`** (or legacy dynamic queries), the **resolved item list can change** even when the **static** playlist JSON and its ETag are unchanged. In that situation the device keeps showing the last hydrated snapshot until a **200** with a new body (or a cleared/changed ETag) occurs.
+
+Relying on the outer playlist ETag to implicitly cover downstream dynamic data would be a **new publisher/origin contract**; it is **not** documented or enforced here. Until conditional-fetch behavior is redesigned (or origins guarantee that contract), treat this as an **accepted freshness gap** for URL-backed dynamic playlists.
+
+See: `dp1.ProcessPlaylistURLConditional`, `playlist-refresher.processPlaylistURLRefresh`.
 
 ## Verification for touched work
 - Format changed Go files with `gofmt -s -w <changed-go-files>`.

@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	PLAYLIST_REFRESH_INTERVAL      = 5 * time.Minute
+	PLAYLIST_REFRESH_INTERVAL      = 1 * time.Minute
 	PLAYER_STATUS_POLLING_INTERVAL = 5 * time.Second
 )
 
@@ -38,8 +38,20 @@ type refresher struct {
 	clock  wrapper.Clock
 	logger *zap.Logger
 
+	// playlistURLMu guards playlistURLState. Only the playlist-refresher goroutine mutates it;
+	// the mutex keeps future call-site additions safe.
+	playlistURLMu    sync.Mutex
+	playlistURLState map[string]*urlPlaylistRefreshState
+
 	done    chan struct{}
 	started bool
+}
+
+// urlPlaylistRefreshState holds the last successful URL refresh snapshot for conditional GET
+// (If-None-Match) and for visualized change detection between resolved playlists.
+type urlPlaylistRefreshState struct {
+	etag         string
+	lastPlaylist *dp1.Playlist
 }
 
 func New(
@@ -58,6 +70,8 @@ func New(
 		clock:        clock,
 		logger:       logger,
 		done:         make(chan struct{}),
+
+		playlistURLState: make(map[string]*urlPlaylistRefreshState),
 	}
 }
 
@@ -143,8 +157,7 @@ func (r *refresher) processPlayingPlaylist() error {
 		return nil
 	}
 
-	if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
-		r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
+	if !playerStatus.Ok {
 		return nil
 	}
 
@@ -152,13 +165,19 @@ func (r *refresher) processPlayingPlaylist() error {
 	var playlist *dp1.Playlist
 	switch {
 	case playerStatus.PlaylistURL != nil:
-		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
-		if err != nil {
+		// URL-backed playlists: use conditional GET (If-None-Match + ETag) so we skip work when the
+		// origin returns 304. When the document changes (new ETag or full 200 body), we compare
+		// "visualized" fields—playlist/item intermission notes and item identity (add/remove)—
+		// against the last resolved snapshot. If those differ, we issue a full displayPlaylist with
+		// now_display so ff-player restarts the cast from the updated program; if only non-visual
+		// fields changed, we keep the prior behavior (refresh:true) so CanvasService swaps items
+		// without replaying from the top.
+		if err := r.processPlaylistURLRefresh(*playerStatus.PlaylistURL); err != nil {
 			return err
 		}
+		return nil
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
-			r.logger.Debug("Playlist has no dynamic queries, skipping")
 			return nil
 		}
 
@@ -170,7 +189,7 @@ func (r *refresher) processPlayingPlaylist() error {
 		return errors.New("player status has no playlist URL or playlist")
 	}
 
-	// Send playlist to CDP
+	// Send playlist to CDP (embedded/dynamic playlist path only; URL path returns above).
 	command := commands.Command{
 		Type: commands.CMD_DISPLAY_PLAYLIST,
 		Arguments: map[string]interface{}{
@@ -182,6 +201,71 @@ func (r *refresher) processPlayingPlaylist() error {
 	if _, err := r.sendCDPRequest(command); err != nil {
 		return err
 	}
+
+	return nil
+}
+
+func (r *refresher) processPlaylistURLRefresh(playlistURL string) error {
+	r.playlistURLMu.Lock()
+	ifNoneMatch := ""
+	if st := r.playlistURLState[playlistURL]; st != nil {
+		ifNoneMatch = st.etag
+	}
+	r.playlistURLMu.Unlock()
+
+	res, err := r.dp1.ProcessPlaylistURLConditional(r.context, playlistURL, false, ifNoneMatch)
+	if err != nil {
+		return err
+	}
+	if res.NotModified {
+		// dp1 skipped fetch body and dynamic hydration; see feral-controld AGENTS.md known issue
+		// (dynamicQuery + ETag / 304).
+		return nil
+	}
+	playlist := res.Playlist
+	if playlist == nil {
+		return errors.New("dp1 returned empty playlist after URL fetch")
+	}
+
+	r.playlistURLMu.Lock()
+	prev := r.playlistURLState[playlistURL]
+	r.playlistURLMu.Unlock()
+
+	// First successful refresh for this URL: align the player cache without forcing a new "now"
+	// display session (same as historical refresh-only behavior).
+	var replay bool
+	if prev != nil {
+		replay = visiblePlaylistChanged(prev.lastPlaylist, playlist)
+	}
+
+	args := map[string]interface{}{
+		"dp1_call": playlist,
+	}
+	if replay {
+		args["playlistUrl"] = playlistURL
+		args["intent"] = map[string]interface{}{
+			// Matches ff-player DP1Action.NowDisplay — issues a new replay surface from index 0.
+			"action": "now_display",
+		}
+	} else {
+		args["refresh"] = true
+	}
+
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: args,
+	}
+
+	if _, err := r.sendCDPRequest(command); err != nil {
+		return err
+	}
+
+	r.playlistURLMu.Lock()
+	r.playlistURLState[playlistURL] = &urlPlaylistRefreshState{
+		etag:         res.ETag,
+		lastPlaylist: playlist,
+	}
+	r.playlistURLMu.Unlock()
 
 	return nil
 }

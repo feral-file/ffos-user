@@ -12,8 +12,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 
 	godbus "github.com/godbus/dbus/v5"
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )

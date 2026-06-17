@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -56,6 +58,18 @@ func (p *Playlist) HasDynamicContent() bool {
 	return p.DynamicQuery != nil || len(p.DynamicQueries) > 0
 }
 
+// PlaylistURLResult is the outcome of fetching a playlist document by URL, optionally with
+// If-None-Match revalidation (HTTP 304 Not Modified).
+type PlaylistURLResult struct {
+	// NotModified is true when the server responded with 304 and the body was not sent.
+	NotModified bool
+	// ETag is the ETag header from a 200 response (empty if the origin omitted it).
+	ETag string
+	// Playlist is the fully resolved playlist (including dynamic hydration when applicable).
+	// Nil when NotModified is true.
+	Playlist *Playlist
+}
+
 //go:generate mockgen -source=dp1.go -destination=../mocks/dp1.go -package=mocks -mock_names=DP1=MockDP1
 type DP1 interface {
 	// ProcessPlaylistURL processes a playlist from an URL.
@@ -63,6 +77,12 @@ type DP1 interface {
 	// If the playlist has dynamic queries, it will hand off to
 	// ProcessDynamicPlaylist with the minimal flag.
 	ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error)
+
+	// ProcessPlaylistURLConditional fetches a playlist by URL and supports conditional GET via
+	// If-None-Match. On 304 Not Modified, NotModified is true and Playlist is nil — dynamic
+	// hydration (ProcessDynamicPlaylist) is skipped on that path. See feral-controld AGENTS.md
+	// "Known issues" for the dynamicQuery / ETag freshness caveat.
+	ProcessPlaylistURLConditional(ctx context.Context, url string, minimal bool, ifNoneMatch string) (*PlaylistURLResult, error)
 
 	// ProcessDynamicPlaylist processes a dynamic playlist.
 	// If the playlist has dynamic queries, it will process them
@@ -97,16 +117,56 @@ func New(ffIndexer ffindexer.FFIndexer, httpClient wrapper.HTTPClient, json wrap
 func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing playlist from URL", zap.String("url", url))
 
-	playlist, err := d.fetchPlaylist(url)
+	if err := d.validateURL(url); err != nil {
+		d.logger.Error("Invalid playlist URL", zap.String("url", url), zap.Error(err))
+		return nil, fmt.Errorf("invalid playlist URL: %w", err)
+	}
+
+	res, err := d.ProcessPlaylistURLConditional(ctx, url, minimal, "")
 	if err != nil {
 		return nil, err
 	}
+	if res.NotModified {
+		return nil, fmt.Errorf("unexpected 304 without If-None-Match")
+	}
+	if res.Playlist == nil {
+		return nil, fmt.Errorf("empty playlist after fetch")
+	}
+	return res.Playlist, nil
+}
 
-	if playlist.HasDynamicContent() {
-		return d.ProcessDynamicPlaylist(ctx, playlist, minimal)
+func (d *dp1) ProcessPlaylistURLConditional(ctx context.Context, url string, minimal bool, ifNoneMatch string) (*PlaylistURLResult, error) {
+	d.logger.Info("Processing playlist from URL", zap.String("url", url))
+
+	if err := d.validateURL(url); err != nil {
+		d.logger.Error("Invalid playlist URL", zap.String("url", url), zap.Error(err))
+		return nil, fmt.Errorf("invalid playlist URL: %w", err)
 	}
 
-	return &playlist, nil
+	notModified, etag, playlist, err := d.fetchPlaylistHTTP(ctx, url, ifNoneMatch)
+	if err != nil {
+		return nil, err
+	}
+	if notModified {
+		// No document body: cannot re-run ProcessDynamicPlaylist. If the playlist uses
+		// dynamicQuery, hydrated items may be stale until the origin returns 200 again.
+		return &PlaylistURLResult{NotModified: true}, nil
+	}
+	if playlist == nil {
+		return nil, fmt.Errorf("internal: fetch returned no playlist without 304")
+	}
+
+	var out *Playlist
+	if playlist.HasDynamicContent() {
+		out, err = d.ProcessDynamicPlaylist(ctx, *playlist, minimal)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		out = playlist
+	}
+
+	return &PlaylistURLResult{NotModified: false, ETag: etag, Playlist: out}, nil
 }
 
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
@@ -136,6 +196,15 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
 	if playlist.DynamicQuery == nil {
 		return nil, fmt.Errorf("internal: dynamicQuery is nil")
+	}
+
+	// Validate dynamic query endpoint URL for security
+	if err := d.validateURL(playlist.DynamicQuery.Endpoint); err != nil {
+		d.logger.Error("Invalid dynamic query endpoint",
+			zap.String("playlist_id", playlist.ID),
+			zap.String("endpoint", playlist.DynamicQuery.Endpoint),
+			zap.Error(err))
+		return nil, fmt.Errorf("invalid dynamic query endpoint: %w", err)
 	}
 
 	client := d.httpClientAsHTTPClient()
@@ -235,32 +304,49 @@ func defaultDurationSeconds(playlist Playlist) float64 {
 	return duration
 }
 
-func (d *dp1) fetchPlaylist(url string) (Playlist, error) {
+// fetchPlaylistHTTP performs a GET (optionally conditional) and returns the parsed playlist on 200,
+// or notModified on 304. Caller must not send If-None-Match on the first fetch (empty string).
+func (d *dp1) fetchPlaylistHTTP(ctx context.Context, url, ifNoneMatch string) (notModified bool, etag string, playlist *Playlist, err error) {
 	d.logger.Info("Fetching playlist from URL", zap.String("url", url))
-	resp, err := d.httpClient.Get(url)
+
+	req, err := d.httpClient.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return Playlist{}, err
+		return false, "", nil, err
+	}
+	req = req.WithContext(ctx)
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
+	}
+
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		return false, "", nil, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Playlist{}, fmt.Errorf("fetch playlist failed: %s", resp.Status)
+	if resp.StatusCode == http.StatusNotModified {
+		return true, ifNoneMatch, nil, nil
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, "", nil, fmt.Errorf("fetch playlist failed: %s", resp.Status)
+	}
+
+	etag = resp.Header.Get("ETag")
 
 	bytes, err := d.io.ReadAll(resp.Body)
 	if err != nil {
-		return Playlist{}, err
+		return false, "", nil, err
 	}
 
-	var playlist Playlist
-	err = d.json.Unmarshal(bytes, &playlist)
-	if err != nil {
-		return Playlist{}, err
+	var pl Playlist
+	if err = d.json.Unmarshal(bytes, &pl); err != nil {
+		return false, "", nil, err
 	}
 
-	return playlist, nil
+	return false, etag, &pl, nil
 }
 
 func buildPlaylistItems(duration float64, tokens []ffindexer.Token) []dp1playlist.PlaylistItem {
@@ -316,6 +402,58 @@ func normalizeChain(blockchain string) string {
 		return "tezos"
 	}
 	return "other"
+}
+
+// validateURL validates playlist and dynamic query URLs for security.
+// In production mode: requires HTTPS, rejects localhost, private IPs, and empty hosts.
+// In debug mode: all validation is bypassed to allow local testing.
+func (d *dp1) validateURL(rawURL string) error {
+	// Debug mode bypasses all validation for local development and testing
+	if d.debug {
+		d.logger.Debug("URL validation bypassed in debug mode", zap.String("url", rawURL))
+		return nil
+	}
+
+	// Parse URL structure
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("malformed URL: %w", err)
+	}
+
+	// Require valid scheme
+	if parsed.Scheme == "" {
+		return fmt.Errorf("malformed URL: missing scheme")
+	}
+
+	// Require HTTPS in production to prevent MITM attacks and data interception
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("insecure scheme %q: HTTPS required in production", parsed.Scheme)
+	}
+
+	// Reject empty host
+	if parsed.Host == "" {
+		return fmt.Errorf("empty host")
+	}
+
+	// Extract hostname without port for IP and localhost checks
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return fmt.Errorf("invalid host")
+	}
+
+	// Reject localhost and loopback addresses to prevent SSRF against local services
+	if hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1" {
+		return fmt.Errorf("localhost access not allowed in production")
+	}
+
+	// Reject private IP ranges to prevent SSRF against internal network
+	if ip := net.ParseIP(hostname); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+			return fmt.Errorf("private IP address not allowed in production")
+		}
+	}
+
+	return nil
 }
 
 // httpClientTransport adapts wrapper.HTTPClient to http.RoundTripper for *http.Client used by dp1-go.

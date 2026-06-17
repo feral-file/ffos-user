@@ -1,22 +1,22 @@
 module github.com/feral-file/ffos-user/components/feral-controld
 
-go 1.23.5
+go 1.24.0
 
 require github.com/gorilla/websocket v1.5.3
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
-	github.com/display-protocol/dp1-go v0.2.2
+	github.com/display-protocol/dp1-go v0.3.0
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
 	github.com/feral-file/zapsentry v1.0.0
 	github.com/getsentry/sentry-go v0.33.0
 	github.com/godbus/dbus/v5 v5.1.0
-	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
+	go.uber.org/mock v0.6.0
 	go.uber.org/zap v1.27.0
 )
 
@@ -31,17 +31,18 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
-	golang.org/x/net v0.43.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
-	golang.org/x/text v0.28.0 // indirect
-	google.golang.org/protobuf v1.36.8 // indirect
+	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 require (
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/sync v0.16.0
+	golang.org/x/sync v0.18.0
 )
