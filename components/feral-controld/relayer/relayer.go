@@ -288,9 +288,18 @@ func (r *relayer) Connect(ctx context.Context) error {
 		return conn.SetReadDeadline(time.Time{})
 	})
 
+	// Initialize the ping shutdown channel under lock and capture it locally.
+	// The ping goroutine must not read r.pingDoneChan directly: Close() and
+	// reconnect() reassign the field under lock, and an unsynchronized read in
+	// the goroutine's select would race with those writes (and could observe a
+	// nil channel mid-reassignment). The local copy keeps the goroutine reading
+	// a stable channel for its lifetime.
+	r.Lock()
 	if r.pingDoneChan == nil {
 		r.pingDoneChan = make(chan struct{})
 	}
+	pingDone := r.pingDoneChan
+	r.Unlock()
 
 	// Start pinging
 	ticker := r.clock.NewTicker(PING_INTERVAL)
@@ -303,7 +312,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 			case <-r.done:
 				ticker.Stop()
 				return
-			case <-r.pingDoneChan:
+			case <-pingDone:
 				ticker.Stop()
 				return
 			case <-ticker.C():
