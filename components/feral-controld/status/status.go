@@ -219,7 +219,7 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	// Handle nil playerStatus (CDP returned nil result when player is not playing in case showing QR code)
 	if playerStatus == nil {
 		s.updateArtPlaybackMetrics(false, now)
-		s.logger.Info("Player status is nil, skipping notification")
+		s.logger.Debug("Player status is nil, skipping notification")
 		return
 	}
 
@@ -229,12 +229,12 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 	suppressed := s.suppressPlayerNotifications
 	s.RUnlock()
 	if suppressed {
-		s.logger.Info("Player notifications suppressed (OOM recovery), skipping")
+		s.logger.Debug("Player notifications suppressed (OOM recovery), skipping")
 		return
 	}
 
 	lightweightPlayerStatus := s.lightweightPlayerStatus(playerStatus)
-	s.logger.Info("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
+	s.logger.Debug("Sending lightweight player status", zap.Any("lightweightPlayerStatus_itemsLength", len(*lightweightPlayerStatus.Items)))
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_PLAYER_STATUS, lightweightPlayerStatus)
 }
@@ -256,7 +256,7 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 	}
 
 	relayerConnected := s.relayer.IsConnected()
-	s.logger.Info("Preparing notification delivery",
+	s.logger.Debug("Preparing notification delivery",
 		zap.String("notification_type", string(notificationType)),
 		zap.Bool("relayer_connected", relayerConnected),
 		zap.Bool("force_send", forceSend),
@@ -285,7 +285,7 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 				s.updateStatusHash(s.lastRelayerStatusHashes, notificationType, currentHash)
 			}
 		} else {
-			s.logger.Info("Relayer status unchanged, skipping relayer notification",
+			s.logger.Debug("Relayer status unchanged, skipping relayer notification",
 				zap.String("notification_type", string(notificationType)))
 		}
 	} else {
@@ -307,7 +307,7 @@ func (s *poller) sendNotification(ctx context.Context, notificationType relayer.
 			s.updateStatusHash(s.lastWSStatusHashes, notificationType, currentHash)
 		}
 	} else {
-		s.logger.Info("Websocket status unchanged, skipping websocket notification",
+		s.logger.Debug("Websocket status unchanged, skipping websocket notification",
 			zap.String("notification_type", string(notificationType)))
 	}
 }
@@ -390,13 +390,13 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 func (s *poller) pollDeviceStatus(ctx context.Context) {
 	// Check if relayer is connected before polling
 	if !s.relayer.IsConnected() {
-		s.logger.Info("Relayer not connected, skipping device status poll",
+		s.logger.Debug("Relayer not connected, skipping device status poll",
 			zap.Bool("relayer_connected", false),
 		)
 		return
 	}
 
-	s.logger.Info("Polling device status",
+	s.logger.Debug("Polling device status",
 		zap.Bool("relayer_connected", true),
 	)
 
@@ -419,11 +419,11 @@ const ddcPollTimeout = 15 * time.Second
 
 func (s *poller) pollDDCStatus(ctx context.Context) {
 	if !s.relayer.IsConnected() {
-		s.logger.Info("Relayer not connected, skipping DDC status poll")
+		s.logger.Debug("Relayer not connected, skipping DDC status poll")
 		return
 	}
 
-	s.logger.Info("Polling DDC panel status")
+	s.logger.Debug("Polling DDC panel status")
 
 	ddcCtx, cancel := context.WithTimeout(ctx, ddcPollTimeout)
 	defer cancel()

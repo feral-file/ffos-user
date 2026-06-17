@@ -5,7 +5,7 @@ pub const SENTRY_URL: &str =
     "https://a1c5bd8607e7493634a05015d17d6aff@o142150.ingest.us.sentry.io/4509869844135936";
 pub const CACHE_FILEPATH: &str = "/home/feralfile/.state/setupd";
 pub const LOG_FILEDIR: &str = "/home/feralfile/.logs";
-pub const LOG_UPLOAD_API: &str = "https://support.autonomy.io/v2/ff1/log-submissions";
+pub const LOG_UPLOAD_API: &str = "https://support-logs.feralfile.com/v2/ff1/log-submissions";
 pub const SSID_CACHE_TTL: u64 = 10 * 60 * 1000; // 10 minutes
 pub const WIFI_WEBAPP_DELAY: u64 = 3 * 1000; // 3 seconds
 pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
