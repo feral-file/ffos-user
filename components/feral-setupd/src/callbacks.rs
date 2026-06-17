@@ -24,10 +24,34 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::task;
 
+/// Re-latch the `UpdateFailed` state after a recovery retry that failed before confirming success.
+///
+/// Called on every early-exit path in a BLE/D-Bus recovery retry that started from `UpdateFailed`
+/// but bailed before the update was confirmed (wrong Wi-Fi password, no internet after connect,
+/// or a transient `VersionCheckFailed`). Without this, the latch cleared at retry entry is
+/// silently lost mid-session: mobile polling sees `idle` or `ready` instead of `update_failed`,
+/// the recovery screen is abandoned, and the unresolved mandatory update is invisible until the
+/// next reboot.
+///
+/// `PRE_FAILURE_PHASE` was already re-saved to the correct durable phase by the latch-clear
+/// block at retry entry, so this function only needs to restore `setup_phase = update_failed`
+/// in-memory and on disk. Persist failure is best-effort: the in-memory latch is set, so mobile
+/// still sees `update_failed` this session even if the disk write fails.
+fn relatch_update_failed(app_state: &Arc<AppState>, caller: &str) {
+    app_state.lifecycle.set(SetupPhase::UpdateFailed);
+    if let Err(e) = app_state.lifecycle.persist(&app_state.state_store) {
+        eprintln!("{caller}: Failed to re-latch UpdateFailed after retry failure: {e:#?}");
+    }
+}
+
 async fn internet_setup_successfully_cb(
     app_state: &Arc<AppState>,
     chromium: &Arc<Cdp>,
     guard: UpdateGuard,
+    // True when this callback is entered from a recovery retry that started in `UpdateFailed`.
+    // On VersionCheckFailed the latch must be restored so mobile still sees update_failed and
+    // the recovery screen stays intact — see relatch_update_failed.
+    relatch_on_failure: bool,
 ) -> Result<String, ble::BleStatus> {
     // Check and update system using Required mode (only mandatory updates)
     // Use NonBlocking execution since BLE flow needs to return quickly.
@@ -50,21 +74,32 @@ async fn internet_setup_successfully_cb(
             return Err(ble::BleStatus::DeviceUpdating);
         }
         Ok(UpdateCheckResult::VersionCheckFailed) => {
-            // Preserve the durable phase check_and_update_system already restored (Ready/Pairing);
-            // only collapse to Idle for non-durable phases. Forcing Idle here would demote a device
-            // that just recovered from update_failed via this BLE retry.
-            app_state
-                .lifecycle
-                .set(ble_terminal_reset_phase(app_state.lifecycle.get()));
+            if relatch_on_failure {
+                // Transient version-check failure during a recovery retry: restore UpdateFailed
+                // so mobile keeps seeing the failure state and the recovery screen stays intact.
+                relatch_update_failed(app_state, "BLE");
+            } else {
+                // Preserve the durable phase check_and_update_system already restored
+                // (Ready/Pairing); only collapse to Idle for non-durable phases. Forcing Idle
+                // here would demote a device that just recovered from update_failed via this
+                // BLE retry.
+                app_state
+                    .lifecycle
+                    .set(ble_terminal_reset_phase(app_state.lifecycle.get()));
+            }
             return Err(ble::BleStatus::VersionCheckFailed);
         }
         Ok(UpdateCheckResult::NoUpdateNeeded) => {} // Continue with normal flow
         Err(e) => {
             // This shouldn't happen with NonBlocking, but handle it anyway
             eprintln!("MAIN: Error during update check: {e:#?}");
-            app_state
-                .lifecycle
-                .set(ble_terminal_reset_phase(app_state.lifecycle.get()));
+            if relatch_on_failure {
+                relatch_update_failed(app_state, "BLE");
+            } else {
+                app_state
+                    .lifecycle
+                    .set(ble_terminal_reset_phase(app_state.lifecycle.get()));
+            }
             return Err(ble::BleStatus::VersionCheckFailed);
         }
     }
@@ -206,9 +241,15 @@ pub fn create_connect_wifi_cb(
                 }
             };
 
+            // Track whether we entered this retry from UpdateFailed so that any failure below
+            // can re-latch the state. The latch must be cleared now (before transient phases),
+            // but if the retry fails at any step the device must return to update_failed —
+            // otherwise mobile polling loses visibility of the unresolved failure mid-session.
+            let relatch_on_failure = app_state.lifecycle.get() == SetupPhase::UpdateFailed;
+
             // Clear and restore UpdateFailed phase on explicit WiFi retry.
             // Restore the pre-failure durable phase if tracked, otherwise use Idle.
-            if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+            if relatch_on_failure {
                 use crate::persistent_state::PRE_FAILURE_PHASE;
 
                 let restored_phase = if let Some(phase_str) =
@@ -276,7 +317,12 @@ pub fn create_connect_wifi_cb(
                     "MAIN: Failed to connect to wifi \"{ssid}\" in {:?} ms: {e: }",
                     start_time.elapsed().as_millis()
                 );
-                app_state.lifecycle.set(SetupPhase::Idle);
+                if relatch_on_failure {
+                    // Recovery retry: restore update_failed so mobile keeps seeing the failure.
+                    relatch_update_failed(&app_state, "BLE");
+                } else {
+                    app_state.lifecycle.set(SetupPhase::Idle);
+                }
                 // Tell user that the wifi connection failed
                 task::spawn(async move {
                     let _ =
@@ -306,7 +352,12 @@ pub fn create_connect_wifi_cb(
 
             // Return early if there is still no internet after waiting
             if !app_state.internet.is_online(true).await {
-                app_state.lifecycle.set(SetupPhase::Idle);
+                if relatch_on_failure {
+                    // Recovery retry: restore update_failed so mobile keeps seeing the failure.
+                    relatch_update_failed(&app_state, "BLE");
+                } else {
+                    app_state.lifecycle.set(SetupPhase::Idle);
+                }
                 task::spawn(async move {
                     let _ = show_message(
                         &chromium,
@@ -324,7 +375,7 @@ pub fn create_connect_wifi_cb(
             // setup-success path). Idle/Pairing devices are unchanged: a first-time Idle device
             // still flows to topic_id fetch -> Pairing below.
             app_state.lifecycle.set(phase_before_wifi_connect);
-            internet_setup_successfully_cb(&app_state, &chromium, guard).await
+            internet_setup_successfully_cb(&app_state, &chromium, guard, relatch_on_failure).await
         })
     })
 }
@@ -351,9 +402,13 @@ pub fn create_keep_wifi_cb(app_state: Arc<AppState>, chromium: Arc<Cdp>) -> ble:
                 return Err(ble::BleStatus::WifiRequired);
             }
 
+            // Track whether we entered this retry from UpdateFailed so that a transient
+            // VersionCheckFailed inside internet_setup_successfully_cb can re-latch.
+            let relatch_on_failure = app_state.lifecycle.get() == SetupPhase::UpdateFailed;
+
             // Clear and restore UpdateFailed phase on explicit keep_wifi retry.
             // Restore the pre-failure durable phase if tracked, otherwise use Idle.
-            if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+            if relatch_on_failure {
                 use crate::persistent_state::PRE_FAILURE_PHASE;
 
                 let restored_phase = if let Some(phase_str) =
@@ -398,7 +453,7 @@ pub fn create_keep_wifi_cb(app_state: Arc<AppState>, chromium: Arc<Cdp>) -> ble:
                 }
             }
 
-            internet_setup_successfully_cb(&app_state, &chromium, guard).await
+            internet_setup_successfully_cb(&app_state, &chromium, guard, relatch_on_failure).await
         })
     })
 }
@@ -522,9 +577,13 @@ async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
         return;
     }
 
+    // Track whether we entered from UpdateFailed so a transient VersionCheckFailed below
+    // can re-latch the state rather than silently leaving the device in a non-failure phase.
+    let relatch_on_failure = app_state.lifecycle.get() == SetupPhase::UpdateFailed;
+
     // Clear and restore UpdateFailed phase on explicit D-Bus manual retry.
     // Restore the pre-failure durable phase if tracked, otherwise use Idle.
-    if app_state.lifecycle.get() == SetupPhase::UpdateFailed {
+    if relatch_on_failure {
         use crate::persistent_state::PRE_FAILURE_PHASE;
 
         let restored_phase = if let Some(phase_str) = app_state.state_store.get(PRE_FAILURE_PHASE) {
@@ -560,6 +619,15 @@ async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
         guard,
     )
     .await;
+
+    // Re-latch UpdateFailed if this was a recovery retry and the version check failed
+    // transiently. The latch-clear block above already ran, so without this the device
+    // would leave update_failed mid-session while the mandatory update is still unresolved.
+    if relatch_on_failure {
+        if let Ok(UpdateCheckResult::VersionCheckFailed) = &result {
+            relatch_update_failed(app_state, "DBUS");
+        }
+    }
 
     match available_system_update_follow_up(&result) {
         AvailableSystemUpdateFollowUp::RestoreCurrentPage => {

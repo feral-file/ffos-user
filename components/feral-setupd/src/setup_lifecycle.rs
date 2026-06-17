@@ -455,6 +455,85 @@ mod tests {
         assert_eq!(lifecycle.get(), SetupPhase::Idle);
     }
 
+    /// Regression for P1 "clear-before-confirm": when a recovery retry from UpdateFailed fails
+    /// (wrong Wi-Fi password, no internet, or VersionCheckFailed), the latch must be restored so
+    /// mobile still sees update_failed mid-session. This test models relatch_update_failed: the
+    /// retry entry clears the latch and re-saves PRE_FAILURE_PHASE, then on failure the code sets
+    /// UpdateFailed and persists — disk must reflect update_failed for the next reboot.
+    #[test]
+    fn update_failed_recovery_retry_failure_re_latches_update_failed() {
+        let store = test_store();
+
+        // Device in UpdateFailed with Ready as pre-failure phase.
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic");
+        store.set(crate::persistent_state::SETUP_PHASE, "update_failed");
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "ready");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::UpdateFailed);
+
+        // --- Simulate retry entry (latch-clear block) ---
+        // Restore pre-failure phase and persist.
+        lifecycle.set(SetupPhase::Ready);
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "");
+        lifecycle.persist(&store).unwrap();
+        // Re-save PRE_FAILURE_PHASE for continuity (mirrors the re-save in callbacks).
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "ready");
+        store.save().unwrap();
+
+        // --- Simulate transient failure (wrong password / VersionCheckFailed) ---
+        // relatch_update_failed: set UpdateFailed and persist.
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        // Disk must reflect update_failed so the next reboot sees the failure state.
+        let lifecycle2 = SetupLifecycle::new();
+        lifecycle2.restore_from_store(&store);
+        assert_eq!(lifecycle2.get(), SetupPhase::UpdateFailed);
+
+        // PRE_FAILURE_PHASE must still be set so the next retry can restore Ready.
+        assert_eq!(
+            store.get(crate::persistent_state::PRE_FAILURE_PHASE),
+            Some("ready".to_string())
+        );
+    }
+
+    /// Regression for P1 "clear-before-confirm" with Pairing as pre-failure phase.
+    #[test]
+    fn update_failed_recovery_retry_failure_re_latches_with_pairing_pre_failure() {
+        let store = test_store();
+
+        store.set(crate::persistent_state::TOPIC_ID, "test-topic-pairing");
+        store.set(crate::persistent_state::SETUP_PHASE, "update_failed");
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "pairing");
+        store.save().unwrap();
+
+        let lifecycle = SetupLifecycle::new();
+        lifecycle.restore_from_store(&store);
+        assert_eq!(lifecycle.get(), SetupPhase::UpdateFailed);
+
+        // Retry entry: restore Pairing.
+        lifecycle.set(SetupPhase::Pairing);
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "");
+        lifecycle.persist(&store).unwrap();
+        store.set(crate::persistent_state::PRE_FAILURE_PHASE, "pairing");
+        store.save().unwrap();
+
+        // Failure: re-latch.
+        lifecycle.set(SetupPhase::UpdateFailed);
+        lifecycle.persist(&store).unwrap();
+
+        let lifecycle2 = SetupLifecycle::new();
+        lifecycle2.restore_from_store(&store);
+        assert_eq!(lifecycle2.get(), SetupPhase::UpdateFailed);
+        assert_eq!(
+            store.get(crate::persistent_state::PRE_FAILURE_PHASE),
+            Some("pairing".to_string())
+        );
+    }
+
     /// An empty topic_id is not usable, so an empty phase with a blank topic must not be promoted to
     /// Pairing (which would violate the topic_id invariant).
     #[test]
