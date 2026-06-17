@@ -110,6 +110,12 @@ All messages are JSON. The message envelope is:
 
 **Command routing logic (inside controld):**
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
+- If `command == "startMintPairingSession"` → handle inside `feral-controld`
+  as a commandrouter pre-CDP special case that creates or reuses the Mint
+  Pairing Broker session and displays the local QR page.
+- If `command == "mintPairingApprovalDecision"` → handle inside
+  `feral-controld` as a commandrouter pre-CDP special case that validates and
+  completes a pending browser-session approval request.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
 **Device-control relayer commands**

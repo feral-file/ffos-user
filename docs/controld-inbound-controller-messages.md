@@ -56,6 +56,8 @@ for relayer topic assignment:
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
   through CDP as `window.handleCDPRequest(...)`.
+- `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
+  `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
 - Any other non-device command is forwarded to Chromium through CDP.
@@ -1220,7 +1222,7 @@ Error cases:
 | Duplicate same decision | Same accepted decision delivered again | `ok: true`, `status: "already_accepted"` | No duplicate minting |
 | Conflicting duplicate decision | Different terminal decision after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
 | Controller rejects | Valid `decision: "reject"` | `ok: true`, `status: "accepted"` | Encrypted `mint_rejected` with controller reason or `rejected_by_user` |
-| Topic changes after approval | Current device topic no longer matches the approval request topic before relayer session creation or browser delivery | Optional outcome `topic_mismatch`; ACK remains accepted | Encrypted `mint_rejected` with `topic_mismatch` |
+| Topic changes after approval | Current device topic no longer matches the approval request topic before relayer session creation or browser delivery | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `topic_changed` |
 | Session creation fails after approval | `ff-relayer` ephemeral-session creation fails | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `session_create_failed` |
 | Broker response send fails | Encrypted browser response cannot be delivered | Optional outcome `failed`; ACK remains accepted | Browser times out or observes broker terminal state |
 
@@ -1264,7 +1266,6 @@ Allowed `status` values:
 - `failed`
 - `expired`
 - `cancelled`
-- `topic_mismatch`
 
 The outcome must not include the browser session token.
 
