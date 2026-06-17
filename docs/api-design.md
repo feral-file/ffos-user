@@ -276,6 +276,8 @@ During `check_and_update_system`, each HTTP fetch attempt notifies a small progr
 1. The relayer `messageID == "system"` path is the canonical source of the device's `TopicID`. Do not add a second path that sets `TopicID` without going through this flow.
 2. `GetRelayerTopicID` on D-Bus blocks until the topic ID is available (up to 31 seconds). Callers must account for this latency. Do not convert it to an async signal without updating all callers.
 3. `sysmetrics` signal body is a JSON-encoded byte slice. Consumers unmarshal it into the metrics struct. Adding fields to the struct is safe; removing or renaming fields is a breaking change.
+   - `gpu.gpu_busy` is the driver-reported utilization field and should be preferred by app consumers when they need a direct busy percentage.
+   - `gpu.current_frequency / gpu.max_frequency` remains available as a clock-ratio fallback, but it is not a substitute for actual utilization.
 4. `connectivity_change` signal body is a single `bool`. It must stay a single `bool`. If more data is needed, add a new signal rather than replacing this one.
 5. BLE `get_info` returns exactly one string element (the `device_info` string). Do not add a second element without updating the mobile app.
 6. Hub WebSocket accepts exactly the same command envelope as the relayer. The Hub and relayer command paths share `commandrouter`. Do not diverge them without explicit justification.

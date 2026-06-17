@@ -1,0 +1,216 @@
+package metric
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+var amdSclkMHzPattern = regexp.MustCompile(`(\d+(?:\.\d+)?)\s*Mhz`)
+
+type gpuDeviceCandidate struct {
+	devicePath string
+	bootVGA    bool
+}
+
+func hasGPUCharacteristics(cardPath, devicePath string) bool {
+	for _, marker := range []string{"gpu_busy_percent", "gt_busy_percent", "pp_dpm_sclk", "gt_max_freq_mhz"} {
+		if _, err := os.Stat(filepath.Join(devicePath, marker)); err == nil {
+			return true
+		}
+	}
+	if _, err := os.Stat(filepath.Join(cardPath, "gt_max_freq_mhz")); err == nil {
+		return true
+	}
+	return false
+}
+
+func isBootVGA(devicePath string) bool {
+	//nolint:gosec // G304: devicePath is discovered from /sys/class/drm and the filename is fixed.
+	data, err := os.ReadFile(filepath.Join(devicePath, "boot_vga"))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "1"
+}
+
+func pickGPUDevicePath(candidates []gpuDeviceCandidate) (string, bool) {
+	for _, candidate := range candidates {
+		if candidate.bootVGA {
+			return candidate.devicePath, true
+		}
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	return candidates[0].devicePath, true
+}
+
+// discoverGPUDevicePath returns /sys/class/drm/cardN/device for the primary GPU.
+func discoverGPUDevicePath() (string, error) {
+	return discoverGPUDevicePathFrom("/sys/class/drm")
+}
+
+func discoverGPUDevicePathFrom(drmPath string) (string, error) {
+	entries, err := os.ReadDir(drmPath)
+	if err != nil {
+		return "", err
+	}
+
+	var candidates []gpuDeviceCandidate
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "card") || strings.Contains(name, "-") {
+			continue
+		}
+
+		cardPath := filepath.Join(drmPath, name)
+		devicePath := filepath.Join(cardPath, "device")
+		info, err := os.Stat(devicePath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+
+		if !hasGPUCharacteristics(cardPath, devicePath) {
+			continue
+		}
+
+		candidates = append(candidates, gpuDeviceCandidate{
+			devicePath: devicePath,
+			bootVGA:    isBootVGA(devicePath),
+		})
+	}
+
+	if path, ok := pickGPUDevicePath(candidates); ok {
+		return path, nil
+	}
+
+	return "", fmt.Errorf("no GPU drm device path found")
+}
+
+func readSysfsPercent(path string) (float64, error) {
+	// Paths are built only from /sys/class/drm discovery plus fixed filenames.
+	//nolint:gosec // G304: sysfs path is not caller-controlled.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+
+	value, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return value, nil
+}
+
+// readGPUBusyPercent reads shader/engine busy % from amdgpu or i915 sysfs.
+func readGPUBusyPercent(devicePath string) (float64, error) {
+	for _, name := range []string{"gpu_busy_percent", "gt_busy_percent"} {
+		path := filepath.Join(devicePath, name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		return readSysfsPercent(path)
+	}
+	return 0, fmt.Errorf("no gpu busy sysfs file under %s", devicePath)
+}
+
+// readFirstExistingSysfsFloat probes multiple sysfs paths and returns the first readable value.
+// It keeps Intel card-level and device-level frequency files compatible across kernels.
+func readFirstExistingSysfsFloat(paths ...string) (float64, error) {
+	var missingErr error
+	for _, path := range paths {
+		//nolint:gosec // G304: paths are discovered sysfs locations plus fixed filenames.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				missingErr = err
+				continue
+			}
+			return 0, err
+		}
+
+		value, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s: %w", path, err)
+		}
+		return value, nil
+	}
+
+	if missingErr != nil {
+		return 0, missingErr
+	}
+	return 0, fmt.Errorf("no sysfs paths provided")
+}
+
+// parseAMDMaxSclkMHz returns the highest P-state MHz line from pp_dpm_sclk.
+func parseAMDMaxSclkMHz(ppDPM string) (float64, error) {
+	var maxMHz float64
+	found := false
+
+	for _, line := range strings.Split(ppDPM, "\n") {
+		match := amdSclkMHzPattern.FindStringSubmatch(line)
+		if len(match) < 2 {
+			continue
+		}
+		mhz, err := strconv.ParseFloat(match[1], 64)
+		if err != nil {
+			continue
+		}
+		if mhz > maxMHz {
+			maxMHz = mhz
+			found = true
+		}
+	}
+
+	if !found {
+		return 0, fmt.Errorf("no sclk P-state lines in pp_dpm_sclk")
+	}
+	return maxMHz, nil
+}
+
+func readAMDMaxSclkMHz(devicePath string) (float64, error) {
+	//nolint:gosec // G304: devicePath comes from discoverGPUDevicePath().
+	data, err := os.ReadFile(filepath.Join(devicePath, "pp_dpm_sclk"))
+	if err != nil {
+		return 0, err
+	}
+	return parseAMDMaxSclkMHz(string(data))
+}
+
+func maxEngineBusyPercent(engines map[string]struct {
+	Busy float64 `json:"busy"`
+}) (float64, bool) {
+	if len(engines) == 0 {
+		return 0, false
+	}
+
+	var maxBusy float64
+	for _, engine := range engines {
+		if engine.Busy > maxBusy {
+			maxBusy = engine.Busy
+		}
+	}
+	return maxBusy, true
+}
+
+// resolveGPUBusy prefers intel_gpu_top engine busy, then falls back to sysfs.
+func resolveGPUBusy(engineBusy float64, engineBusyFound bool, devicePath string) (float64, error) {
+	if engineBusyFound {
+		return engineBusy, nil
+	}
+	if devicePath == "" {
+		return 0, errBestEffortMetricUnavailable
+	}
+	return readGPUBusyPercent(devicePath)
+}
+
+func shouldSuppressIntelGPUUpdate(devicePath string, busyErr error) error {
+	if devicePath == "" && busyErr != nil {
+		return errBestEffortMetricUnavailable
+	}
+	return nil
+}
