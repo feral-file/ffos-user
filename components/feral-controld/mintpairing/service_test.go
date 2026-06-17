@@ -377,6 +377,71 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.Equal(t, "already_accepted", result.(approvalResponse).Status)
 }
 
+func TestHandleStartPairingSession_ApprovalRequestDisclosesEffectiveTTL(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested int
+		effective int
+	}{
+		{
+			name:      "defaulted ttl",
+			effective: defaultSessionTTLSeconds,
+		},
+		{
+			name:      "below minimum ttl",
+			requested: minSessionTTLSeconds - 1,
+			effective: minSessionTTLSeconds,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
+
+			ch := &fakeBrokerChannel{
+				pairingCode:   "PAIR-123",
+				rejectionSent: make(chan struct{}, 1),
+				request: &minter.MintRequest{
+					ChannelID:                 "ch_1",
+					MessageID:                 "msg_1",
+					Origin:                    "https://gallery.example",
+					BrowserInfo:               minter.BrowserInfo{Name: "Chrome"},
+					RequestedExpiresInSeconds: tt.requested,
+				},
+			}
+			relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+			s := newService(
+				Options{
+					Enabled:         true,
+					BrokerBaseURL:   "https://broker.example",
+					ApprovalTimeout: time.Minute,
+					PollInterval:    time.Millisecond,
+					RelayerBaseURL:  "https://relayer.example",
+				},
+				&fakeBrokerStarter{channel: ch},
+				fakeSessionCreator{},
+				relayerClient,
+				&fakeCDP{},
+				wrapper.NewJSON(),
+				zap.NewNop(),
+			).(*service)
+			s.Start(context.Background())
+			defer s.Stop()
+
+			result, err := s.HandleStartPairingSession(context.Background(), nil)
+			require.NoError(t, err)
+			assert.True(t, result.(startPairingResponse).OK)
+
+			approval := <-relayerClient.sent
+			require.Equal(t, "mint_pairing_approval_request", approval.Type)
+			approvalMessage := approval.Message.(map[string]any)
+			assert.Equal(t, tt.requested, approvalMessage["requestedExpiresInSeconds"])
+			assert.Equal(t, tt.effective, approvalMessage["effectiveExpiresInSeconds"])
+		})
+	}
+}
+
 func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"

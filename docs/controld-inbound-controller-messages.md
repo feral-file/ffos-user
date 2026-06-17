@@ -1075,6 +1075,7 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
       "label": "Living room laptop"
     },
     "requestedExpiresInSeconds": 86400,
+    "effectiveExpiresInSeconds": 86400,
     "requestedAt": "2026-06-16T03:00:00Z",
     "expiresAt": "2026-06-16T03:05:00Z",
     "challenge": {
@@ -1085,6 +1086,13 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
   }
 }
 ```
+
+`requestedExpiresInSeconds` is the browser-supplied session lifetime request.
+`effectiveExpiresInSeconds` is the actual session lifetime `feral-controld`
+will request from `ff-relayer` if the controller approves. `feral-controld`
+owns this policy: omitted or non-positive requests default to 3600 seconds,
+requests below 90 seconds are raised to 90 seconds, and requests above 86400
+seconds are capped at 86400 seconds.
 
 ### mintPairingApprovalDecision
 

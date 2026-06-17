@@ -646,6 +646,7 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 		"origin":                    request.Origin,
 		"browserInfo":               request.BrowserInfo,
 		"requestedExpiresInSeconds": request.RequestedExpiresInSeconds,
+		"effectiveExpiresInSeconds": effectiveSessionTTLSeconds(request.RequestedExpiresInSeconds),
 		"requestedAt":               time.Now().UTC().Format(time.RFC3339),
 		"expiresAt":                 expiresAt.UTC().Format(time.RFC3339),
 		"challenge": map[string]any{
