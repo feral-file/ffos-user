@@ -486,11 +486,12 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activePairing, topicID string) {
 	terminalSent := false
 	defer func() {
-		if s.releaseDisplayOwnership(active) {
-			s.restoreDefaultDisplay(active.channelID)
-		}
+		restoreDisplay := s.releaseDisplayOwnership(active)
 		if active.done != nil {
 			close(active.done)
+		}
+		if restoreDisplay {
+			go s.restoreDefaultDisplay(active.channelID)
 		}
 		if terminalSent {
 			// Terminal broker messages must remain pollable after controld sends

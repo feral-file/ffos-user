@@ -748,6 +748,66 @@ func TestStop_BudgetFitsControldForcedShutdown(t *testing.T) {
 	assert.Less(t, elapsed, 2*time.Second, "mint pairing Stop must fit under controld's forced shutdown guard")
 }
 
+func TestStop_DoesNotWaitForDisplayRestore(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode: "PAIR-123",
+		expiresAt:   time.Now().Add(time.Minute),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	cdpClient := &fakeCDP{
+		defaultNavigateStarted: make(chan struct{}, 1),
+		releaseDefaultNavigate: make(chan struct{}),
+	}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+
+	stopped := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Stop waited for best-effort display restoration")
+	}
+	select {
+	case <-cdpClient.defaultNavigateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected default display restoration attempt")
+	}
+	close(cdpClient.releaseDefaultNavigate)
+}
+
 func TestWaitForBrowserAndApproval_RestoresDisplayAfterSessionCreateFailure(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -1255,9 +1315,11 @@ func (f *fakeRelayer) RemoveRelayerMessage(relayer.Handler) {}
 func (f *fakeRelayer) Close()                               {}
 
 type fakeCDP struct {
-	mu      sync.Mutex
-	lastURL string
-	err     error
+	mu                     sync.Mutex
+	lastURL                string
+	err                    error
+	defaultNavigateStarted chan struct{}
+	releaseDefaultNavigate chan struct{}
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
@@ -1269,9 +1331,19 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 		return nil, f.err
 	}
 	if method == "Page.navigate" {
+		nextURL, _ := params["url"].(string)
 		f.mu.Lock()
-		f.lastURL, _ = params["url"].(string)
+		f.lastURL = nextURL
 		f.mu.Unlock()
+		if nextURL == "http://127.0.0.1:8080/" && f.releaseDefaultNavigate != nil {
+			if f.defaultNavigateStarted != nil {
+				select {
+				case f.defaultNavigateStarted <- struct{}{}:
+				default:
+				}
+			}
+			<-f.releaseDefaultNavigate
+		}
 	}
 	return map[string]interface{}{"ok": true}, nil
 }
