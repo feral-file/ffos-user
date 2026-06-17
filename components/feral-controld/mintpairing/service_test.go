@@ -354,8 +354,8 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.Equal(t, "started", startResp.Status)
 	assert.Equal(t, "PAIR-123", startResp.PairingCode)
 	assert.True(t, starter.receivedOptions.ShortCodeRequested)
-	require.Contains(t, cdpClient.lastURL, "pairing_code=")
-	assert.True(t, strings.Contains(cdpClient.lastURL, "PAIR-123"))
+	require.Contains(t, cdpClient.currentURL(), "pairing_code=")
+	assert.True(t, strings.Contains(cdpClient.currentURL(), "PAIR-123"))
 
 	approval := <-relayerClient.sent
 	require.Equal(t, "mint_pairing_approval_request", approval.Type)
@@ -371,10 +371,77 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
 	assert.Equal(t, 1, ch.successCount)
 	assert.Equal(t, 0, ch.closeCount, "terminal success must remain pollable for the browser")
+	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
 
 	result, err = s.HandleApprovalDecision(context.Background(), decisionArgs)
 	require.NoError(t, err)
 	assert.Equal(t, "already_accepted", result.(approvalResponse).Status)
+}
+
+func TestWaitForBrowserAndApproval_RestoresDisplayAfterControllerRejection(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode:   "PAIR-123",
+		rejectionSent: make(chan struct{}, 1),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+
+	approval := <-relayerClient.sent
+	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
+
+	decisionArgs := validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1")
+	decisionArgs["decision"] = "reject"
+	decisionArgs["reason"] = "controller_declined"
+	result, err = s.HandleApprovalDecision(context.Background(), decisionArgs)
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	select {
+	case <-ch.rejectionSent:
+	case <-time.After(time.Second):
+		t.Fatal("expected controller rejection")
+	}
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{"controller_declined"}, ch.rejectionReasons)
+	assert.Equal(t, 0, ch.closeCount, "terminal rejection must remain pollable for the browser")
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assert.Equal(t, "rejected", outcome.Message.(map[string]any)["status"])
+	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
 }
 
 func TestHandleStartPairingSession_ApprovalRequestDisclosesEffectiveTTL(t *testing.T) {
@@ -459,6 +526,7 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 		},
 	}
 	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	cdpClient := &fakeCDP{}
 	s := newService(
 		Options{
 			Enabled:         true,
@@ -470,7 +538,7 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 		&fakeBrokerStarter{channel: ch},
 		fakeSessionCreator{},
 		relayerClient,
-		&fakeCDP{},
+		cdpClient,
 		wrapper.NewJSON(),
 		zap.NewNop(),
 	).(*service)
@@ -499,6 +567,7 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	outcome := <-relayerClient.sent
 	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
 	assert.Equal(t, "expired", outcome.Message.(map[string]any)["status"])
+	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
 }
 
 func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
@@ -511,6 +580,59 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 		rejectionDelay: 50 * time.Millisecond,
 		rejectionSent:  make(chan struct{}, 1),
 		closed:         make(chan struct{}, 1),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+
+	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+
+	s.Stop()
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{approvalCancellationStatus}, ch.rejectionReasons)
+	assert.Equal(t, 0, ch.closeCount, "terminal cancellation must remain pollable for the browser")
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assert.Equal(t, approvalCancellationStatus, outcome.Message.(map[string]any)["status"])
+	assert.Equal(t, "http://127.0.0.1:8080/", cdpClient.currentURL())
+}
+
+func TestStop_BudgetFitsControldForcedShutdown(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode:    "PAIR-123",
+		expiresAt:      time.Now().Add(time.Minute),
+		rejectionDelay: terminalOperationTimeout + time.Second,
 		request: &minter.MintRequest{
 			ChannelID:   "ch_1",
 			MessageID:   "msg_1",
@@ -539,19 +661,75 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 	result, err := s.HandleStartPairingSession(context.Background(), nil)
 	require.NoError(t, err)
 	assert.True(t, result.(startPairingResponse).OK)
-
 	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
 
+	started := time.Now()
 	s.Stop()
+	elapsed := time.Since(started)
+
+	assert.Less(t, elapsed, 2*time.Second, "mint pairing Stop must fit under controld's forced shutdown guard")
+}
+
+func TestWaitForBrowserAndApproval_RestoresDisplayAfterSessionCreateFailure(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode:   "PAIR-123",
+		rejectionSent: make(chan struct{}, 1),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{err: errors.New("relayer down")},
+		relayerClient,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+
+	approval := <-relayerClient.sent
+	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
+
+	result, err = s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1"))
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	select {
+	case <-ch.rejectionSent:
+	case <-time.After(time.Second):
+		t.Fatal("expected session-create failure rejection")
+	}
 
 	ch.mu.Lock()
-	assert.Equal(t, []string{approvalCancellationStatus}, ch.rejectionReasons)
-	assert.Equal(t, 0, ch.closeCount, "terminal cancellation must remain pollable for the browser")
+	assert.Equal(t, []string{"session_create_failed"}, ch.rejectionReasons)
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
 	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
-	assert.Equal(t, approvalCancellationStatus, outcome.Message.(map[string]any)["status"])
+	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
 }
 
 func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
@@ -911,6 +1089,7 @@ type fakeSessionCreator struct {
 	delay   time.Duration
 	started chan struct{}
 	release chan struct{}
+	err     error
 }
 
 func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest) (minter.MintResult, error) {
@@ -935,6 +1114,9 @@ func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string
 			return minter.MintResult{}, ctx.Err()
 		case <-timer.C:
 		}
+	}
+	if f.err != nil {
+		return minter.MintResult{}, f.err
 	}
 	return minter.MintResult{
 		SessionID: "session-1",
@@ -966,6 +1148,7 @@ func (f *fakeRelayer) RemoveRelayerMessage(relayer.Handler) {}
 func (f *fakeRelayer) Close()                               {}
 
 type fakeCDP struct {
+	mu      sync.Mutex
 	lastURL string
 	err     error
 }
@@ -979,7 +1162,9 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 		return nil, f.err
 	}
 	if method == "Page.navigate" {
+		f.mu.Lock()
 		f.lastURL, _ = params["url"].(string)
+		f.mu.Unlock()
 	}
 	return map[string]interface{}{"ok": true}, nil
 }
@@ -990,3 +1175,21 @@ func (f *fakeCDP) Close()            {}
 func (f *fakeCDP) Initialized() bool { return true }
 
 var _ cdp.CDP = (*fakeCDP)(nil)
+
+func (f *fakeCDP) currentURL() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastURL
+}
+
+func assertEventuallyLastCDPURL(t *testing.T, cdpClient *fakeCDP, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if cdpClient.currentURL() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.Equal(t, want, cdpClient.currentURL())
+}

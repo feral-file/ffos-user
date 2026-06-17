@@ -1056,6 +1056,15 @@ QR page and passes `pairing_code` in the page URL. The QR code encodes that
 pairing code and the same code is rendered below the QR code in large text for
 long-distance readability.
 
+When the mint-pairing attempt reaches a terminal state, `feral-controld`
+restores Chromium to the bundled local player at `http://127.0.0.1:8080/`.
+This restore is attempted after success, controller rejection, approval expiry,
+controller/service cancellation, and terminal failure. During process shutdown,
+terminal broker/relayer delivery and display restoration are bounded so
+mint-pairing cleanup fits within `feral-controld`'s two-second forced-exit
+guard; if a terminal delivery exceeds that budget, it is logged and treated as
+best-effort.
+
 ### Outbound Approval Request
 
 This is included for context because it creates the pending inbound decision.

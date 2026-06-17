@@ -32,7 +32,10 @@ const (
 	minSessionTTLSeconds      = 90
 	defaultSessionTTLSeconds  = 3600
 	maxSessionTTLSeconds      = 86400
-	stopCleanupTimeout        = 5 * time.Second
+	terminalOperationTimeout  = 750 * time.Millisecond
+	displayRecoveryTimeout    = 500 * time.Millisecond
+	stopCleanupTimeout        = 1500 * time.Millisecond
+	channelCloseTimeout       = 500 * time.Millisecond
 	maxApprovalRequestIDBytes = 16
 
 	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
@@ -293,6 +296,8 @@ func (s *service) Stop() {
 	if activeDone == nil {
 		return
 	}
+	// main.go forces process exit after two seconds, so mint pairing shutdown
+	// must use a smaller cleanup budget than the process-level guard.
 	timer := time.NewTimer(stopCleanupTimeout)
 	defer timer.Stop()
 	select {
@@ -480,6 +485,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	terminalSent := false
 	defer func() {
 		s.clearActive(active)
+		s.restoreDefaultDisplay(active.channelID)
 		if active.done != nil {
 			close(active.done)
 		}
@@ -567,19 +573,21 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 }
 
 func (s *service) sendApprovalCancelled(active *activePairing, request minter.MintRequest, approvalRequestID string) bool {
-	terminalCtx, cancel := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
+	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
 	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: approvalCancellationStatus, Retryable: true})
 	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, approvalCancellationStatus)
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing cancellation to browser", zap.Error(err), zap.String("channelID", active.channelID))
-		return false
 	}
+	// Shutdown cancellation is best-effort: the broker channel has its own TTL,
+	// and spending another close timeout after a cancellation timeout can exceed
+	// controld's process-level forced-exit budget.
 	return true
 }
 
 func (s *service) sendApprovalExpired(active *activePairing, request minter.MintRequest, approvalRequestID string) bool {
-	terminalCtx, cancel := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
+	terminalCtx, cancel := context.WithTimeout(context.Background(), terminalOperationTimeout)
 	defer cancel()
 	_, err := active.channel.SendMintRejection(terminalCtx, request, minter.MintRejection{Reason: "approval_expired", Retryable: true})
 	s.sendApprovalOutcome(terminalCtx, approvalRequestID, request.ChannelID, request.MessageID, "expired")
@@ -755,10 +763,18 @@ func (s *service) clearActive(active *activePairing) {
 }
 
 func (s *service) closeChannel(channel brokerChannel) {
-	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	closeCtx, cancel := context.WithTimeout(context.Background(), channelCloseTimeout)
 	defer cancel()
 	if err := channel.Close(closeCtx); err != nil {
 		s.logger.Warn("Failed to close mint pairing channel", zap.Error(err))
+	}
+}
+
+func (s *service) restoreDefaultDisplay(channelID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), displayRecoveryTimeout)
+	defer cancel()
+	if err := qrdisplay.ShowDefaultDisplay(ctx, s.cdp); err != nil {
+		s.logger.Warn("Failed to restore default display after mint pairing", zap.Error(err), zap.String("channelID", channelID))
 	}
 }
 

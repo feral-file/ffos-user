@@ -10,6 +10,7 @@ import (
 )
 
 const pairingQRCodeURL = "file:///opt/feral/ui/mint-pairing/index.html"
+const defaultDisplayURL = "http://127.0.0.1:8080/"
 
 func ShowPairingCode(ctx context.Context, cdpClient cdp.CDP, pairingCode string) error {
 	if err := ctx.Err(); err != nil {
@@ -32,5 +33,17 @@ func ShowPairingCode(ctx context.Context, cdpClient cdp.CDP, pairingCode string)
 	u.RawQuery = q.Encode()
 
 	_, err = cdpClient.NoLogSend("Page.navigate", map[string]interface{}{"url": u.String()})
+	return err
+}
+
+func ShowDefaultDisplay(ctx context.Context, cdpClient cdp.CDP) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if cdpClient == nil {
+		return errors.New("cdp client is required")
+	}
+
+	_, err := cdpClient.NoLogSend("Page.navigate", map[string]interface{}{"url": defaultDisplayURL})
 	return err
 }
