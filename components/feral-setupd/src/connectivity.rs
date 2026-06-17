@@ -58,6 +58,37 @@ impl Connectivity {
         *self.inner.rx.borrow()
     }
 
+    /// Trigger a background refresh without blocking the caller.
+    ///
+    /// Returns the current cached value immediately. The fresh value will be
+    /// available on the next call to `is_online_cached()` or `is_online(false)`.
+    ///
+    /// This is safe to call from synchronous contexts (e.g., BLE callbacks) and
+    /// avoids blocking on D-Bus timeouts. Uses try_lock to prevent overlapping
+    /// forced refreshes during rapid polling; if a refresh is already in flight,
+    /// returns cached value and skips the redundant check.
+    pub fn trigger_refresh_async(&self) -> bool {
+        // Clone the Arc<Inner> to move into the spawned task
+        let inner = self.inner.clone();
+
+        tokio::spawn(async move {
+            // Non-blocking: if another refresh is in flight, skip this poll.
+            // Next poll will try again after the current refresh completes.
+            if let Ok(_guard) = inner.force_lock.try_lock() {
+                let fresh = dbus_utils::internet_availability(true);
+                let _ = inner.tx.send_if_modified(|old| {
+                    if *old != fresh {
+                        *old = fresh;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+        });
+        *self.inner.rx.borrow()
+    }
+
     /// Returns the cached value unless `force_refresh == true`.
     ///
     /// * When `force_refresh` is **false** (typical case) it is *zero-cost*.
