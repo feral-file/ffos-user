@@ -214,7 +214,7 @@ make verify
 - Rust component: `cargo fmt -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo check`, and `cargo test` for `feral-setupd`.
 - Startup contract smoke test: `scripts/test-serve-feral-player.sh` validates the `serve-feral-player.sh` static bundle failure path and systemd notify readiness contract with temporary fakes.
 
-Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, Node.js for the mint-pairing QR page smoke test, `golangci-lint` v2.4.0, Rust 1.88.0 with `rustfmt` and `clippy`, and the system libraries needed by `feral-setupd` (`libdbus-1-dev` and `pkg-config` on Ubuntu).
+Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, `golangci-lint` v2.4.0, Rust 1.88.0 with `rustfmt` and `clippy`, and the system libraries needed by `feral-setupd` (`libdbus-1-dev` and `pkg-config` on Ubuntu).
 
 GitHub Actions are split by component and purpose:
 
@@ -248,7 +248,7 @@ make -C components sync-feral-controld
 REMOTE_HOST=ff1-03vdu3x1.local REMOTE_KEY=~/.ssh/id_ed25519 make -C components sync-feral-controld
 ```
 
-`sync-mint-pairing-ui` syncs the dedicated mint-pairing QR page to
-`/opt/feral/ui/mint-pairing/`; `sync-all` runs that UI sync after syncing the
-source tree because `feral-controld` navigates Chromium to that static page
-when a controller starts a mint-pairing browser handoff.
+`sync-all` syncs the component source tree and the launcher UI. Mint-pairing
+handoff does not ship or sync a dedicated QR page from this repository:
+`feral-controld` keeps Chromium on the bundled player and drives the
+ff-player mint-pairing overlay through the `mintPairingDisplay` CDP command.
