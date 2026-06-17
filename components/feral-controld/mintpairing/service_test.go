@@ -354,13 +354,13 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.Equal(t, "started", startResp.Status)
 	assert.Equal(t, "PAIR-123", startResp.PairingCode)
 	assert.True(t, starter.receivedOptions.ShortCodeRequested)
-	require.Contains(t, cdpClient.currentURL(), "pairing_code=")
-	assert.True(t, strings.Contains(cdpClient.currentURL(), "PAIR-123"))
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-123", "")
 
 	approval := <-relayerClient.sent
-	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 	approvalMessage := approval.Message.(map[string]any)
 	approvalID := approvalMessage["approvalRequestID"].(string)
+	assertEventuallyDisplayObserved(t, cdpClient, "request_received", "", "Chrome")
 
 	decisionArgs := validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1")
 	result, err = s.HandleApprovalDecision(context.Background(), decisionArgs)
@@ -368,10 +368,11 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.Equal(t, "accepted", result.(approvalResponse).Status)
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, 1, ch.successCount)
 	assert.Equal(t, 0, ch.closeCount, "terminal success must remain pollable for the browser")
-	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
+	assertEventuallyDisplayObserved(t, cdpClient, "creating_token", "", "Chrome")
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
 
 	result, err = s.HandleApprovalDecision(context.Background(), decisionArgs)
 	require.NoError(t, err)
@@ -417,7 +418,7 @@ func TestWaitForBrowserAndApproval_RestoresDisplayAfterControllerRejection(t *te
 	assert.True(t, result.(startPairingResponse).OK)
 
 	approval := <-relayerClient.sent
-	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
 
 	decisionArgs := validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1")
@@ -439,9 +440,9 @@ func TestWaitForBrowserAndApproval_RestoresDisplayAfterControllerRejection(t *te
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "rejected", outcome.Message.(map[string]any)["status"])
-	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
 }
 
 func TestHandleStartPairingSession_ApprovalRequestDisclosesEffectiveTTL(t *testing.T) {
@@ -501,7 +502,7 @@ func TestHandleStartPairingSession_ApprovalRequestDisclosesEffectiveTTL(t *testi
 			assert.True(t, result.(startPairingResponse).OK)
 
 			approval := <-relayerClient.sent
-			require.Equal(t, "mint_pairing_approval_request", approval.Type)
+			assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 			approvalMessage := approval.Message.(map[string]any)
 			assert.Equal(t, tt.requested, approvalMessage["requestedExpiresInSeconds"])
 			assert.Equal(t, tt.effective, approvalMessage["effectiveExpiresInSeconds"])
@@ -549,7 +550,7 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	require.NoError(t, err)
 	assert.True(t, result.(startPairingResponse).OK)
 
-	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+	assertRelayerNotification(t, <-relayerClient.sent, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 
 	select {
 	case <-ch.rejectionSent:
@@ -565,9 +566,9 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "expired", outcome.Message.(map[string]any)["status"])
-	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
 }
 
 func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacementDisplay(t *testing.T) {
@@ -616,7 +617,7 @@ func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacemen
 	result, err := s.HandleStartPairingSession(context.Background(), nil)
 	require.NoError(t, err)
 	assert.True(t, result.(startPairingResponse).OK)
-	require.Contains(t, cdpClient.currentURL(), "PAIR-OLD")
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-OLD", "")
 
 	s.mu.Lock()
 	oldActive := s.active
@@ -635,7 +636,7 @@ func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacemen
 	assert.True(t, newStart.OK)
 	assert.Equal(t, "started", newStart.Status)
 	assert.Equal(t, "PAIR-NEW", newStart.PairingCode)
-	require.Contains(t, cdpClient.currentURL(), "PAIR-NEW")
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
 
 	close(releaseRejection)
 	select {
@@ -644,8 +645,7 @@ func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacemen
 		t.Fatal("expected old session cleanup to finish")
 	}
 
-	assert.Contains(t, cdpClient.currentURL(), "PAIR-NEW")
-	assert.NotEqual(t, "http://127.0.0.1:8080/", cdpClient.currentURL())
+	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-NEW", "")
 }
 
 func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
@@ -688,7 +688,7 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.(startPairingResponse).OK)
 
-	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+	assertRelayerNotification(t, <-relayerClient.sent, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 
 	s.Stop()
 
@@ -698,9 +698,9 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, approvalCancellationStatus, outcome.Message.(map[string]any)["status"])
-	assert.Equal(t, "http://127.0.0.1:8080/", cdpClient.currentURL())
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
 }
 
 func TestStop_BudgetFitsControldForcedShutdown(t *testing.T) {
@@ -739,7 +739,7 @@ func TestStop_BudgetFitsControldForcedShutdown(t *testing.T) {
 	result, err := s.HandleStartPairingSession(context.Background(), nil)
 	require.NoError(t, err)
 	assert.True(t, result.(startPairingResponse).OK)
-	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+	assertRelayerNotification(t, <-relayerClient.sent, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 
 	started := time.Now()
 	s.Stop()
@@ -787,7 +787,7 @@ func TestStop_DoesNotWaitForDisplayRestore(t *testing.T) {
 	result, err := s.HandleStartPairingSession(context.Background(), nil)
 	require.NoError(t, err)
 	assert.True(t, result.(startPairingResponse).OK)
-	require.Equal(t, "mint_pairing_approval_request", (<-relayerClient.sent).Type)
+	assertRelayerNotification(t, <-relayerClient.sent, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 
 	stopped := make(chan struct{})
 	go func() {
@@ -847,7 +847,7 @@ func TestWaitForBrowserAndApproval_RestoresDisplayAfterSessionCreateFailure(t *t
 	assert.True(t, result.(startPairingResponse).OK)
 
 	approval := <-relayerClient.sent
-	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
 
 	result, err = s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1"))
@@ -865,9 +865,9 @@ func TestWaitForBrowserAndApproval_RestoresDisplayAfterSessionCreateFailure(t *t
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
-	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
 }
 
 func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
@@ -908,7 +908,7 @@ func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
@@ -953,7 +953,7 @@ func TestWaitForBrowserAndApproval_RejectsIfTopicChangesAfterApproval(t *testing
 	assert.True(t, result.(startPairingResponse).OK)
 
 	approval := <-relayerClient.sent
-	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
 
 	result, err = s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1"))
@@ -982,7 +982,7 @@ func TestWaitForBrowserAndApproval_RejectsIfTopicChangesAfterApproval(t *testing
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
@@ -1044,7 +1044,7 @@ func TestWaitForBrowserAndApproval_AcceptedDecisionBeforeExpiryWinsAfterSessionD
 	assert.True(t, result.(startPairingResponse).OK)
 
 	approval := <-relayerClient.sent
-	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	assertRelayerNotification(t, approval, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST)
 	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
 
 	time.Sleep(220 * time.Millisecond)
@@ -1065,7 +1065,7 @@ func TestWaitForBrowserAndApproval_AcceptedDecisionBeforeExpiryWinsAfterSessionD
 	ch.mu.Unlock()
 
 	outcome := <-relayerClient.sent
-	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "completed", outcome.Message.(map[string]any)["status"])
 }
 
@@ -1316,7 +1316,7 @@ func (f *fakeRelayer) Close()                               {}
 
 type fakeCDP struct {
 	mu                     sync.Mutex
-	lastURL                string
+	displayRequests        []map[string]any
 	err                    error
 	defaultNavigateStarted chan struct{}
 	releaseDefaultNavigate chan struct{}
@@ -1330,12 +1330,17 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 	if f.err != nil {
 		return nil, f.err
 	}
-	if method == "Page.navigate" {
-		nextURL, _ := params["url"].(string)
+	if method == cdp.METHOD_EVALUATE {
+		request, ok := mintPairingDisplayRequest(params)
+		if !ok {
+			return map[string]interface{}{"ok": true}, nil
+		}
+
 		f.mu.Lock()
-		f.lastURL = nextURL
+		f.displayRequests = append(f.displayRequests, request)
 		f.mu.Unlock()
-		if nextURL == "http://127.0.0.1:8080/" && f.releaseDefaultNavigate != nil {
+
+		if request["state"] == "hidden" && f.releaseDefaultNavigate != nil {
 			if f.defaultNavigateStarted != nil {
 				select {
 				case f.defaultNavigateStarted <- struct{}{}:
@@ -1355,20 +1360,85 @@ func (f *fakeCDP) Initialized() bool { return true }
 
 var _ cdp.CDP = (*fakeCDP)(nil)
 
-func (f *fakeCDP) currentURL() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.lastURL
+func mintPairingDisplayRequest(params map[string]interface{}) (map[string]any, bool) {
+	expression, _ := params["expression"].(string)
+	const prefix = "window.handleCDPRequest("
+	if !strings.HasPrefix(expression, prefix) || !strings.HasSuffix(expression, ")") {
+		return nil, false
+	}
+
+	raw := strings.TrimSuffix(strings.TrimPrefix(expression, prefix), ")")
+	var payload struct {
+		Command string         `json:"command"`
+		Request map[string]any `json:"request"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil, false
+	}
+	if payload.Command != "mintPairingDisplay" || payload.Request == nil {
+		return nil, false
+	}
+	return payload.Request, true
 }
 
-func assertEventuallyLastCDPURL(t *testing.T, cdpClient *fakeCDP, want string) {
+func (f *fakeCDP) displayRequestsSnapshot() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	copied := make([]map[string]any, len(f.displayRequests))
+	copy(copied, f.displayRequests)
+	return copied
+}
+
+func assertRelayerNotification(t *testing.T, response relayer.Response, notificationType relayer.NotificationType) {
+	t.Helper()
+	assert.Equal(t, "notification", response.Type)
+	assert.Equal(t, string(notificationType), response.NotificationType)
+	assert.Equal(t, 10, response.PersistRecordCount)
+}
+
+func assertEventuallyDisplayObserved(t *testing.T, cdpClient *fakeCDP, state string, pairingCode string, browserName string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if cdpClient.currentURL() == want {
+		if displayObserved(cdpClient.displayRequestsSnapshot(), state, pairingCode, browserName) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.Equal(t, want, cdpClient.currentURL())
+	assert.Failf(t, "mint pairing display state not observed", "state=%q pairingCode=%q browserName=%q requests=%v", state, pairingCode, browserName, cdpClient.displayRequestsSnapshot())
+}
+
+func assertLastDisplay(t *testing.T, cdpClient *fakeCDP, state string, pairingCode string, browserName string) {
+	t.Helper()
+	requests := cdpClient.displayRequestsSnapshot()
+	require.NotEmpty(t, requests)
+	last := requests[len(requests)-1]
+	assertDisplayRequest(t, last, state, pairingCode, browserName)
+}
+
+func displayObserved(requests []map[string]any, state string, pairingCode string, browserName string) bool {
+	for _, request := range requests {
+		if requestMatchesDisplay(request, state, pairingCode, browserName) {
+			return true
+		}
+	}
+	return false
+}
+
+func assertDisplayRequest(t *testing.T, request map[string]any, state string, pairingCode string, browserName string) {
+	t.Helper()
+	assert.True(t, requestMatchesDisplay(request, state, pairingCode, browserName), "request=%v", request)
+}
+
+func requestMatchesDisplay(request map[string]any, state string, pairingCode string, browserName string) bool {
+	if request["state"] != state {
+		return false
+	}
+	if pairingCode != "" && request["pairingCode"] != pairingCode {
+		return false
+	}
+	if browserName != "" && request["browserName"] != browserName {
+		return false
+	}
+	return true
 }

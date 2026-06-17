@@ -1048,22 +1048,25 @@ Error cases:
 - `broker_unavailable`: broker channel creation failed before a pairing code
   was available.
 - `broker_response_invalid`: broker did not return a pairing code.
-- `display_unavailable`: Chromium/CDP did not accept the pairing QR page
-  navigation.
+- `display_unavailable`: Chromium/CDP did not accept the player overlay
+  display command.
 
-On success, `feral-controld` navigates Chromium to the dedicated mint-pairing
-QR page and passes `pairing_code` in the page URL. The QR code encodes that
-pairing code and the same code is rendered below the QR code in large text for
-long-distance readability.
+On success, `feral-controld` sends CDP command `mintPairingDisplay` to the
+bundled player with `state: "pairing_code"` and `pairingCode`. The player
+renders a QR overlay above active artwork playback and shows the same code in
+large text for long-distance readability. When a browser sends a mint request,
+`feral-controld` updates the overlay to `state: "request_received"` with the
+browser name. After an approve decision, it updates the overlay to
+`state: "creating_token"` before creating and returning the ephemeral token.
 
 When the mint-pairing attempt reaches a terminal state, `feral-controld`
-restores Chromium to the bundled local player at `http://127.0.0.1:8080/`.
-This restore is attempted after success, controller rejection, approval expiry,
-controller/service cancellation, and terminal failure. During process shutdown,
-terminal broker/relayer delivery and display restoration are bounded so
-mint-pairing cleanup fits within `feral-controld`'s two-second forced-exit
-guard; if a terminal delivery exceeds that budget, it is logged and treated as
-best-effort.
+hides the overlay with `state: "hidden"` so normal artwork playback remains on
+the same player page. This hide is attempted after success, controller
+rejection, approval expiry, controller/service cancellation, and terminal
+failure. During process shutdown, terminal broker/relayer delivery and display
+cleanup are bounded so mint-pairing cleanup fits within `feral-controld`'s
+two-second forced-exit guard; if a terminal delivery exceeds that budget, it is
+logged and treated as best-effort.
 
 ### Outbound Approval Request
 
@@ -1073,8 +1076,10 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 
 ```json
 {
-  "type": "mint_pairing_approval_request",
+  "type": "notification",
+  "notification_type": "mint_pairing_approval_request",
   "messageID": "mpa_01JZ6Y9M7S0H9G9ER4T52Q70W8",
+  "persist_record_count": 10,
   "message": {
     "v": 1,
     "topicID": "topic_ff1_abc123",
@@ -1255,8 +1260,10 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 
 ```json
 {
-  "type": "mint_pairing_approval_outcome",
+  "type": "notification",
+  "notification_type": "mint_pairing_approval_outcome",
   "messageID": "mpa_01JZ6Y9M7S0H9G9ER4T52Q70W8",
+  "persist_record_count": 10,
   "message": {
     "v": 1,
     "approvalRequestID": "mpa_01JZ6Y9M7S0H9G9ER4T52Q70W8",

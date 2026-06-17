@@ -2,41 +2,54 @@ package qrdisplay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"net/url"
 	"strings"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 )
 
-const pairingQRCodeURL = "file:///opt/feral/ui/mint-pairing/index.html"
-const defaultDisplayURL = "http://127.0.0.1:8080/"
+const mintPairingDisplayCommand = "mintPairingDisplay"
+
+const (
+	mintPairingDisplayPairingCode     = "pairing_code"
+	mintPairingDisplayRequestReceived = "request_received"
+	mintPairingDisplayCreatingToken   = "creating_token"
+	mintPairingDisplayHidden          = "hidden"
+)
 
 func ShowPairingCode(ctx context.Context, cdpClient cdp.CDP, pairingCode string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if cdpClient == nil {
-		return errors.New("cdp client is required")
-	}
 	pairingCode = strings.TrimSpace(pairingCode)
 	if pairingCode == "" {
 		return errors.New("pairing code is required")
 	}
+	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+		"state":       mintPairingDisplayPairingCode,
+		"pairingCode": pairingCode,
+	})
+}
 
-	u, err := url.Parse(pairingQRCodeURL)
-	if err != nil {
-		return err
-	}
-	q := u.Query()
-	q.Set("pairing_code", pairingCode)
-	u.RawQuery = q.Encode()
+func ShowRequestReceived(ctx context.Context, cdpClient cdp.CDP, browserName string) error {
+	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+		"state":       mintPairingDisplayRequestReceived,
+		"browserName": strings.TrimSpace(browserName),
+	})
+}
 
-	_, err = cdpClient.NoLogSend("Page.navigate", map[string]interface{}{"url": u.String()})
-	return err
+func ShowCreatingToken(ctx context.Context, cdpClient cdp.CDP, browserName string) error {
+	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+		"state":       mintPairingDisplayCreatingToken,
+		"browserName": strings.TrimSpace(browserName),
+	})
 }
 
 func ShowDefaultDisplay(ctx context.Context, cdpClient cdp.CDP) error {
+	return sendMintPairingDisplay(ctx, cdpClient, map[string]any{
+		"state": mintPairingDisplayHidden,
+	})
+}
+
+func sendMintPairingDisplay(ctx context.Context, cdpClient cdp.CDP, request map[string]any) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -44,6 +57,16 @@ func ShowDefaultDisplay(ctx context.Context, cdpClient cdp.CDP) error {
 		return errors.New("cdp client is required")
 	}
 
-	_, err := cdpClient.NoLogSend("Page.navigate", map[string]interface{}{"url": defaultDisplayURL})
+	payload, err := json.Marshal(map[string]any{
+		"command": mintPairingDisplayCommand,
+		"request": request,
+	})
+	if err != nil {
+		return err
+	}
+
+	_, err = cdpClient.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression": "window.handleCDPRequest(" + string(payload) + ")",
+	})
 	return err
 }

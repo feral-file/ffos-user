@@ -10,8 +10,6 @@ on:
       - 'components/feral-controld/go.mod'
       - 'components/feral-controld/go.sum'
       - 'components/feral-controld/config.example.json'
-      - 'components/mint-pairing-ui/**'
-      - 'scripts/test-mint-pairing-ui.sh'
   workflow_call:
     inputs:
       upload-coverage:

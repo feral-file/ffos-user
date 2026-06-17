@@ -170,6 +170,7 @@ type pendingApproval struct {
 	topicID           string
 	channelID         string
 	requestMessageID  string
+	browserName       string
 	expiresAt         time.Time
 	decisionCh        chan approvalDecisionRequest
 	accepted          *approvalDecisionRequest
@@ -524,11 +525,16 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		topicID:           topicID,
 		channelID:         request.ChannelID,
 		requestMessageID:  request.MessageID,
+		browserName:       browserDisplayName(request.BrowserInfo),
 		expiresAt:         expiresAt,
 		decisionCh:        make(chan approvalDecisionRequest, 1),
 	}
 	s.registerPending(pending)
 	defer s.unregisterPending(approvalRequestID)
+
+	if err := qrdisplay.ShowRequestReceived(ctx, s.cdp, pending.browserName); err != nil {
+		s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+	}
 
 	if err := s.sendApprovalRequest(ctx, approvalRequestID, topicID, *request, active.channel.MinterPublicKeyJWK(), expiresAt); err != nil {
 		_, sendErr := active.channel.SendMintRejection(ctx, *request, minter.MintRejection{Reason: "approval_unavailable", Retryable: true})
@@ -645,6 +651,10 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		return err == nil, err
 	}
 
+	if err := qrdisplay.ShowCreatingToken(ctx, s.cdp, browserDisplayName(request.BrowserInfo)); err != nil {
+		s.logger.Warn("Failed to display mint pairing token creation status", zap.Error(err), zap.String("channelID", request.ChannelID))
+	}
+
 	if !currentRelayerTopicMatches(topicID) {
 		return s.rejectTopicChanged(ctx, channel, request, topicID, approvalRequestID)
 	}
@@ -691,6 +701,15 @@ func currentRelayerTopicMatches(topicID string) bool {
 	return currentRelayerTopicID() == strings.TrimSpace(topicID)
 }
 
+func browserDisplayName(info minter.BrowserInfo) string {
+	for _, candidate := range []string{info.Name, info.Label} {
+		if value := strings.TrimSpace(candidate); value != "" {
+			return value
+		}
+	}
+	return "the browser"
+}
+
 func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time) error {
 	msg := map[string]any{
 		"v":                         1,
@@ -710,32 +729,34 @@ func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID str
 			"minterPublicKeyFingerprint":  fingerprintPublicJWK(minterPublicKey),
 		},
 	}
-	return s.relayer.Send(ctx, relayer.Response{
-		Type:      "mint_pairing_approval_request",
-		MessageID: approvalRequestID,
-		Message:   msg,
-	})
+	return s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST, approvalRequestID, msg, 10)
 }
 
 func (s *service) sendApprovalOutcome(ctx context.Context, approvalRequestID string, channelID string, requestMessageID string, status string) {
-	if s.relayer == nil {
-		return
-	}
-	err := s.relayer.Send(ctx, relayer.Response{
-		Type:      "mint_pairing_approval_outcome",
-		MessageID: approvalRequestID,
-		Message: map[string]any{
-			"v":                 1,
-			"approvalRequestID": approvalRequestID,
-			"channelID":         channelID,
-			"requestMessageID":  requestMessageID,
-			"status":            status,
-			"completedAt":       time.Now().UTC().Format(time.RFC3339),
-		},
-	})
+	err := s.sendMintPairingNotification(ctx, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME, approvalRequestID, map[string]any{
+		"v":                 1,
+		"approvalRequestID": approvalRequestID,
+		"channelID":         channelID,
+		"requestMessageID":  requestMessageID,
+		"status":            status,
+		"completedAt":       time.Now().UTC().Format(time.RFC3339),
+	}, 10)
 	if err != nil {
 		s.logger.Warn("Failed to send mint pairing approval outcome", zap.Error(err), zap.String("approvalRequestID", approvalRequestID))
 	}
+}
+
+func (s *service) sendMintPairingNotification(ctx context.Context, notificationType relayer.NotificationType, messageID string, message any, persistRecordCount int) error {
+	if s.relayer == nil {
+		return nil
+	}
+	return s.relayer.Send(ctx, relayer.Response{
+		Type:               "notification",
+		MessageID:          messageID,
+		NotificationType:   string(notificationType),
+		PersistRecordCount: persistRecordCount,
+		Message:            message,
+	})
 }
 
 func (s *service) registerPending(p *pendingApproval) {
