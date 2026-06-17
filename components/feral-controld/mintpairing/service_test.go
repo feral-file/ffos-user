@@ -570,6 +570,84 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	assertEventuallyLastCDPURL(t, cdpClient, "http://127.0.0.1:8080/")
 }
 
+func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacementDisplay(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	rejectionStarted := make(chan struct{}, 1)
+	releaseRejection := make(chan struct{})
+	oldChannel := &fakeBrokerChannel{
+		channelID:        "ch_old",
+		pairingCode:      "PAIR-OLD",
+		expiresAt:        time.Now().Add(80 * time.Millisecond),
+		rejectionStarted: rejectionStarted,
+		rejectionRelease: releaseRejection,
+		request: &minter.MintRequest{
+			ChannelID:   "ch_old",
+			MessageID:   "msg_old",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	newChannel := &fakeBrokerChannel{
+		channelID:   "ch_new",
+		pairingCode: "PAIR-NEW",
+		expiresAt:   time.Now().Add(time.Minute),
+	}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}},
+		fakeSessionCreator{},
+		&fakeRelayer{sent: make(chan relayer.Response, 4)},
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	require.Contains(t, cdpClient.currentURL(), "PAIR-OLD")
+
+	s.mu.Lock()
+	oldActive := s.active
+	s.mu.Unlock()
+	require.NotNil(t, oldActive)
+
+	select {
+	case <-rejectionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected old session to begin expiration cleanup")
+	}
+
+	result, err = s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	newStart := result.(startPairingResponse)
+	assert.True(t, newStart.OK)
+	assert.Equal(t, "started", newStart.Status)
+	assert.Equal(t, "PAIR-NEW", newStart.PairingCode)
+	require.Contains(t, cdpClient.currentURL(), "PAIR-NEW")
+
+	close(releaseRejection)
+	select {
+	case <-oldActive.done:
+	case <-time.After(time.Second):
+		t.Fatal("expected old session cleanup to finish")
+	}
+
+	assert.Contains(t, cdpClient.currentURL(), "PAIR-NEW")
+	assert.NotEqual(t, "http://127.0.0.1:8080/", cdpClient.currentURL())
+}
+
 func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -967,21 +1045,30 @@ func assertCommandError(t *testing.T, result any, code string, retryable bool) {
 
 type fakeBrokerStarter struct {
 	channel         brokerChannel
+	channels        []brokerChannel
 	err             error
 	receivedOptions minter.StartChannelOptions
 }
 
 func (f *fakeBrokerStarter) StartChannel(_ context.Context, opts minter.StartChannelOptions) (brokerChannel, error) {
 	f.receivedOptions = opts
+	if len(f.channels) > 0 {
+		channel := f.channels[0]
+		f.channels = f.channels[1:]
+		return channel, f.err
+	}
 	return f.channel, f.err
 }
 
 type fakeBrokerChannel struct {
 	mu               sync.Mutex
+	channelID        string
 	pairingCode      string
 	expiresAt        time.Time
 	request          *minter.MintRequest
 	rejectionSent    chan struct{}
+	rejectionStarted chan struct{}
+	rejectionRelease chan struct{}
 	successSent      chan struct{}
 	closed           chan struct{}
 	rejectionDelay   time.Duration
@@ -997,7 +1084,7 @@ func (f *fakeBrokerChannel) PairingDisplay() minter.PairingDisplay {
 	if expiresAt.IsZero() {
 		expiresAt = time.Now().Add(time.Minute)
 	}
-	return minter.PairingDisplay{ChannelID: "ch_1", ShortCode: f.pairingCode, ExpiresAt: expiresAt}
+	return minter.PairingDisplay{ChannelID: f.resolvedChannelID(), ShortCode: f.pairingCode, ExpiresAt: expiresAt}
 }
 
 func (f *fakeBrokerChannel) MinterPublicKeyJWK() minter.PublicJWK {
@@ -1031,12 +1118,25 @@ func (f *fakeBrokerChannel) SendMintSuccess(context.Context, minter.MintRequest,
 		default:
 		}
 	}
-	return &minter.SendMessageResult{ChannelID: "ch_1", Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
+	return &minter.SendMessageResult{ChannelID: f.resolvedChannelID(), Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
 
 func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.MintRequest, rejection minter.MintRejection) (*minter.SendMessageResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if f.rejectionStarted != nil {
+		select {
+		case f.rejectionStarted <- struct{}{}:
+		default:
+		}
+	}
+	if f.rejectionRelease != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-f.rejectionRelease:
+		}
 	}
 	if f.rejectionDelay > 0 {
 		timer := time.NewTimer(f.rejectionDelay)
@@ -1056,7 +1156,7 @@ func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.Mint
 		default:
 		}
 	}
-	return &minter.SendMessageResult{ChannelID: "ch_1", Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
+	return &minter.SendMessageResult{ChannelID: f.resolvedChannelID(), Seq: 1, ExpiresAt: time.Now().Add(time.Minute)}, nil
 }
 
 func (f *fakeBrokerChannel) Close(context.Context) error {
@@ -1070,6 +1170,13 @@ func (f *fakeBrokerChannel) Close(context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (f *fakeBrokerChannel) resolvedChannelID() string {
+	if f.channelID != "" {
+		return f.channelID
+	}
+	return "ch_1"
 }
 
 type recordingSessionCreator struct {

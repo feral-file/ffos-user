@@ -93,11 +93,12 @@ type service struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	startMu sync.Mutex
-	mu      sync.Mutex
-	active  *activePairing
-	pending map[string]*pendingApproval
-	doneMap map[string]completedApproval
+	startMu      sync.Mutex
+	mu           sync.Mutex
+	active       *activePairing
+	displayOwner *activePairing
+	pending      map[string]*pendingApproval
+	doneMap      map[string]completedApproval
 }
 
 type brokerStarter interface {
@@ -384,6 +385,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 
 	s.mu.Lock()
 	s.active = active
+	s.displayOwner = active
 	s.mu.Unlock()
 
 	go s.waitForBrowserAndApproval(sessionCtx, active, topicID)
@@ -484,8 +486,9 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activePairing, topicID string) {
 	terminalSent := false
 	defer func() {
-		s.clearActive(active)
-		s.restoreDefaultDisplay(active.channelID)
+		if s.releaseDisplayOwnership(active) {
+			s.restoreDefaultDisplay(active.channelID)
+		}
 		if active.done != nil {
 			close(active.done)
 		}
@@ -754,12 +757,17 @@ func (s *service) currentActive() *activePairing {
 	return s.active
 }
 
-func (s *service) clearActive(active *activePairing) {
+func (s *service) releaseDisplayOwnership(active *activePairing) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active == active {
 		s.active = nil
 	}
+	if s.displayOwner != active {
+		return false
+	}
+	s.displayOwner = nil
+	return true
 }
 
 func (s *service) closeChannel(channel brokerChannel) {
