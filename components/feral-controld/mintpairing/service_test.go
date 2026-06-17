@@ -506,10 +506,11 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 	state.GetState().Relayer.TopicID = "topic-1"
 
 	ch := &fakeBrokerChannel{
-		pairingCode:   "PAIR-123",
-		expiresAt:     time.Now().Add(time.Minute),
-		rejectionSent: make(chan struct{}, 1),
-		closed:        make(chan struct{}, 1),
+		pairingCode:    "PAIR-123",
+		expiresAt:      time.Now().Add(time.Minute),
+		rejectionDelay: 50 * time.Millisecond,
+		rejectionSent:  make(chan struct{}, 1),
+		closed:         make(chan struct{}, 1),
 		request: &minter.MintRequest{
 			ChannelID:   "ch_1",
 			MessageID:   "msg_1",
@@ -543,14 +544,6 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 
 	s.Stop()
 
-	select {
-	case <-ch.rejectionSent:
-	case <-ch.closed:
-		t.Fatal("channel closed before terminal cancellation rejection was sent")
-	case <-time.After(time.Second):
-		t.Fatal("expected approval cancellation rejection")
-	}
-
 	ch.mu.Lock()
 	assert.Equal(t, []string{approvalCancellationStatus}, ch.rejectionReasons)
 	assert.Equal(t, 0, ch.closeCount, "terminal cancellation must remain pollable for the browser")
@@ -559,6 +552,122 @@ func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
 	outcome := <-relayerClient.sent
 	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
 	assert.Equal(t, approvalCancellationStatus, outcome.Message.(map[string]any)["status"])
+}
+
+func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-2"
+
+	ch := &fakeBrokerChannel{rejectionSent: make(chan struct{}, 1)}
+	creator := &recordingSessionCreator{}
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		creator,
+		relayerClient,
+		nil,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	terminalSent, err := s.completeDecision(context.Background(), ch, minter.MintRequest{
+		ChannelID: "ch_1",
+		MessageID: "msg_1",
+	}, "topic-1", "mpa_1", approvalDecisionRequest{
+		ApprovalRequestID: "mpa_1",
+		TopicID:           "topic-1",
+		ChannelID:         "ch_1",
+		RequestMessageID:  "msg_1",
+		Decision:          "approve",
+	})
+
+	require.Error(t, err)
+	assert.True(t, terminalSent)
+	assert.Zero(t, creator.calls, "stale-topic approval must not mint a relayer session")
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{"topic_changed"}, ch.rejectionReasons)
+	assert.Equal(t, 0, ch.successCount)
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+}
+
+func TestWaitForBrowserAndApproval_RejectsIfTopicChangesAfterApproval(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode:   "PAIR-123",
+		rejectionSent: make(chan struct{}, 1),
+		successSent:   make(chan struct{}, 1),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	creatorStarted := make(chan struct{}, 1)
+	creatorRelease := make(chan struct{})
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 4)}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channel: ch},
+		fakeSessionCreator{started: creatorStarted, release: creatorRelease},
+		relayerClient,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+
+	approval := <-relayerClient.sent
+	require.Equal(t, "mint_pairing_approval_request", approval.Type)
+	approvalID := approval.Message.(map[string]any)["approvalRequestID"].(string)
+
+	result, err = s.HandleApprovalDecision(context.Background(), validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1"))
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", result.(approvalResponse).Status)
+
+	select {
+	case <-creatorStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected session creator to start")
+	}
+	state.GetState().Relayer.TopicID = "topic-2"
+	close(creatorRelease)
+
+	select {
+	case <-ch.rejectionSent:
+	case <-ch.successSent:
+		t.Fatal("stale-topic approval delivered browser success")
+	case <-time.After(time.Second):
+		t.Fatal("expected topic-changed rejection")
+	}
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{"topic_changed"}, ch.rejectionReasons)
+	assert.Equal(t, 0, ch.successCount)
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assert.Equal(t, "mint_pairing_approval_outcome", outcome.Type)
+	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
 }
 
 func TestWaitForMintRequest_AdvancesCursorPastIgnoredPollResult(t *testing.T) {
@@ -697,6 +806,7 @@ type fakeBrokerChannel struct {
 	rejectionSent    chan struct{}
 	successSent      chan struct{}
 	closed           chan struct{}
+	rejectionDelay   time.Duration
 	ignoredSeq       int64
 	pollAfterSeqs    []int64
 	successCount     int
@@ -750,6 +860,15 @@ func (f *fakeBrokerChannel) SendMintRejection(ctx context.Context, _ minter.Mint
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if f.rejectionDelay > 0 {
+		timer := time.NewTimer(f.rejectionDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rejectionReasons = append(f.rejectionReasons, rejection.Reason)
@@ -775,11 +894,39 @@ func (f *fakeBrokerChannel) Close(context.Context) error {
 	return nil
 }
 
+type recordingSessionCreator struct {
+	calls int
+}
+
+func (r *recordingSessionCreator) CreateEphemeralSession(context.Context, string, minter.MintRequest) (minter.MintResult, error) {
+	r.calls++
+	return minter.MintResult{
+		SessionID: "session-1",
+		Token:     "browser-token",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}, nil
+}
+
 type fakeSessionCreator struct {
-	delay time.Duration
+	delay   time.Duration
+	started chan struct{}
+	release chan struct{}
 }
 
 func (f fakeSessionCreator) CreateEphemeralSession(ctx context.Context, _ string, _ minter.MintRequest) (minter.MintResult, error) {
+	if f.started != nil {
+		select {
+		case f.started <- struct{}{}:
+		default:
+		}
+	}
+	if f.release != nil {
+		select {
+		case <-ctx.Done():
+			return minter.MintResult{}, ctx.Err()
+		case <-f.release:
+		}
+	}
 	if f.delay > 0 {
 		timer := time.NewTimer(f.delay)
 		defer timer.Stop()

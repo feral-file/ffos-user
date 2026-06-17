@@ -149,7 +149,7 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 
 ### Hub WebSocket protocol (port 1111)
 
-The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands.
+The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands, including pre-CDP mint-pairing commands. Because the hub binds to `0.0.0.0:1111` when enabled, it is a trusted-local-network control surface: deployments must only enable it on networks where local clients are trusted, or add an explicit command-level guard before exposing privileged commands differently from the relayer path.
 
 ### BLE GATT protocol (feral-setupd)
 

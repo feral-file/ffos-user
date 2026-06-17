@@ -32,6 +32,7 @@ const (
 	minSessionTTLSeconds      = 90
 	defaultSessionTTLSeconds  = 3600
 	maxSessionTTLSeconds      = 86400
+	stopCleanupTimeout        = 5 * time.Second
 	maxApprovalRequestIDBytes = 16
 
 	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
@@ -176,6 +177,7 @@ type activePairing struct {
 	pairingCode string
 	expiresAt   time.Time
 	cancel      context.CancelFunc
+	done        chan struct{}
 }
 
 type completedApproval struct {
@@ -276,15 +278,27 @@ func (s *service) Stop() {
 	s.mu.Lock()
 	cancel := s.cancel
 	active := s.active
+	var activeDone <-chan struct{}
 	s.cancel = nil
 	s.ctx = nil
 	if active != nil {
 		active.cancel()
+		activeDone = active.done
 		s.active = nil
 	}
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if activeDone == nil {
+		return
+	}
+	timer := time.NewTimer(stopCleanupTimeout)
+	defer timer.Stop()
+	select {
+	case <-activeDone:
+	case <-timer.C:
+		s.logger.Warn("Timed out waiting for mint pairing cleanup", zap.String("channelID", active.channelID))
 	}
 }
 
@@ -353,6 +367,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		pairingCode: pairingCode,
 		expiresAt:   expiresAt,
 		cancel:      sessionCancel,
+		done:        make(chan struct{}),
 	}
 
 	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, pairingCode); err != nil {
@@ -465,6 +480,9 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	terminalSent := false
 	defer func() {
 		s.clearActive(active)
+		if active.done != nil {
+			close(active.done)
+		}
 		if terminalSent {
 			// Terminal broker messages must remain pollable after controld sends
 			// them. The broker's TTL handles cleanup; explicit Close is only for
@@ -615,6 +633,10 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 		return err == nil, err
 	}
 
+	if !currentRelayerTopicMatches(topicID) {
+		return s.rejectTopicChanged(ctx, channel, request, topicID, approvalRequestID)
+	}
+
 	result, err := s.sessionCreator.CreateEphemeralSession(ctx, topicID, request)
 	if err != nil {
 		_, sendErr := channel.SendMintRejection(ctx, request, minter.MintRejection{Reason: "session_create_failed", Retryable: true})
@@ -623,6 +645,9 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 			return false, fmt.Errorf("create session and browser rejection failed: %w", errors.Join(err, sendErr))
 		}
 		return true, fmt.Errorf("create session: %w", err)
+	}
+	if !currentRelayerTopicMatches(topicID) {
+		return s.rejectTopicChanged(ctx, channel, request, topicID, approvalRequestID)
 	}
 	if result.RelayerBaseURL == "" {
 		result.RelayerBaseURL = s.opts.RelayerBaseURL
@@ -634,6 +659,24 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 	}
 	s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "completed")
 	return true, nil
+}
+
+func (s *service) rejectTopicChanged(ctx context.Context, channel brokerChannel, request minter.MintRequest, expectedTopicID string, approvalRequestID string) (bool, error) {
+	currentTopicID := currentRelayerTopicID()
+	_, err := channel.SendMintRejection(ctx, request, minter.MintRejection{Reason: "topic_changed", Retryable: true})
+	s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
+	if err != nil {
+		return false, fmt.Errorf("send topic-changed rejection: %w", err)
+	}
+	return true, fmt.Errorf("relayer topic changed before mint pairing session creation: expected %q, got %q", expectedTopicID, currentTopicID)
+}
+
+func currentRelayerTopicID() string {
+	return strings.TrimSpace(state.GetState().Relayer.TopicID)
+}
+
+func currentRelayerTopicMatches(topicID string) bool {
+	return currentRelayerTopicID() == strings.TrimSpace(topicID)
 }
 
 func (s *service) sendApprovalRequest(ctx context.Context, approvalRequestID string, topicID string, request minter.MintRequest, minterPublicKey minter.PublicJWK, expiresAt time.Time) error {

@@ -10,6 +10,7 @@ on:
       - 'components/Makefile'
       - 'components/feral-controld/go.mod'
       - 'components/feral-controld/go.sum'
+      - 'components/feral-controld/config.example.json'
       - 'components/mint-pairing-ui/**'
       - 'scripts/test-mint-pairing-ui.sh'
   pull_request:
@@ -20,6 +21,7 @@ on:
       - 'components/Makefile'
       - 'components/feral-controld/go.mod'
       - 'components/feral-controld/go.sum'
+      - 'components/feral-controld/config.example.json'
       - 'components/mint-pairing-ui/**'
       - 'scripts/test-mint-pairing-ui.sh'
 
