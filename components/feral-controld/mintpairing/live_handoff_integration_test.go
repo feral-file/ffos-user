@@ -455,7 +455,14 @@ func (c *liveNoopCDP) NoLogSend(method string, params map[string]interface{}) (i
 		return nil, fmt.Errorf("unexpected evaluation expression %q", expression)
 	}
 	c.expressions = append(c.expressions, expression)
-	return nil, nil
+	return map[string]any{
+		"result": map[string]any{
+			"result": map[string]any{
+				"type":  "string",
+				"value": `{"ok":true}`,
+			},
+		},
+	}, nil
 }
 
 var _ cdp.CDP = (*liveNoopCDP)(nil)

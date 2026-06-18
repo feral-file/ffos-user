@@ -1029,6 +1029,75 @@ func TestWaitForBrowserAndApproval_RestoresDisplayAfterSessionCreateFailure(t *t
 	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
 }
 
+func TestCompleteDecision_SendsSessionCreateFailureAfterContextCancellation(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{rejectionSent: make(chan struct{}, 1)}
+	creatorStarted := make(chan struct{}, 1)
+	relayerClient := &fakeRelayer{sent: make(chan relayer.Response, 1)}
+	s := newService(
+		Options{RelayerBaseURL: "https://relayer.example"},
+		nil,
+		fakeSessionCreator{
+			started: creatorStarted,
+			release: make(chan struct{}),
+		},
+		relayerClient,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		terminalSent bool
+		err          error
+	}, 1)
+	go func() {
+		terminalSent, err := s.completeDecision(ctx, ch, minter.MintRequest{
+			ChannelID:   "ch_1",
+			MessageID:   "msg_1",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		}, "topic-1", "mpa_1", approvalDecisionRequest{
+			ApprovalRequestID: "mpa_1",
+			TopicID:           "topic-1",
+			ChannelID:         "ch_1",
+			RequestMessageID:  "msg_1",
+			Decision:          "approve",
+		})
+		done <- struct {
+			terminalSent bool
+			err          error
+		}{terminalSent: terminalSent, err: err}
+	}()
+
+	select {
+	case <-creatorStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected session creator to start")
+	}
+	cancel()
+
+	select {
+	case <-ch.rejectionSent:
+	case <-time.After(time.Second):
+		t.Fatal("expected session-create failure rejection after context cancellation")
+	}
+
+	result := <-done
+	require.Error(t, result.err)
+	assert.True(t, result.terminalSent)
+
+	ch.mu.Lock()
+	assert.Equal(t, []string{"session_create_failed"}, ch.rejectionReasons)
+	ch.mu.Unlock()
+
+	outcome := <-relayerClient.sent
+	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
+	assert.Equal(t, "failed", outcome.Message.(map[string]any)["status"])
+}
+
 func TestCompleteDecision_RejectsStaleTopicBeforeCreatingSession(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-2"

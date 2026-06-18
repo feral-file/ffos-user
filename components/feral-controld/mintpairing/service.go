@@ -558,7 +558,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	case <-ctx.Done():
 		if !time.Now().Before(expiresAt) {
 			if decision, ok := s.acceptedDecision(pending); ok {
-				terminalSent, err = s.completeDecisionWithTerminalContext(active.channel, *request, topicID, approvalRequestID, decision)
+				terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, topicID, approvalRequestID, decision)
 				if err != nil {
 					s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 				}
@@ -571,7 +571,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		return
 	case <-expireTimer.C:
 		if decision, ok := s.acceptedDecision(pending); ok {
-			terminalSent, err = s.completeDecisionWithTerminalContext(active.channel, *request, topicID, approvalRequestID, decision)
+			terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, topicID, approvalRequestID, decision)
 			if err != nil {
 				s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 			}
@@ -579,7 +579,7 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 		}
 		terminalSent = s.sendApprovalExpired(active, *request, approvalRequestID)
 	case decision := <-pending.decisionCh:
-		terminalSent, err = s.completeDecisionWithTerminalContext(active.channel, *request, topicID, approvalRequestID, decision)
+		terminalSent, err = s.completeDecisionWithBoundedContexts(context.Background(), active.channel, *request, topicID, approvalRequestID, decision)
 		if err != nil {
 			s.logger.Warn("Failed to complete mint pairing decision", zap.Error(err), zap.String("channelID", active.channelID))
 		}
@@ -612,10 +612,8 @@ func (s *service) sendApprovalExpired(active *activePairing, request minter.Mint
 	return true
 }
 
-func (s *service) completeDecisionWithTerminalContext(channel brokerChannel, request minter.MintRequest, topicID string, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
-	terminalCtx, cancel := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
-	defer cancel()
-	return s.completeDecision(terminalCtx, channel, request, topicID, approvalRequestID, decision)
+func (s *service) completeDecisionWithBoundedContexts(parentCtx context.Context, channel brokerChannel, request minter.MintRequest, topicID string, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+	return s.completeDecision(parentCtx, channel, request, topicID, approvalRequestID, decision)
 }
 
 func (s *service) acceptedDecision(pending *pendingApproval) (approvalDecisionRequest, bool) {
@@ -645,13 +643,15 @@ func (s *service) waitForMintRequest(ctx context.Context, channel brokerChannel)
 }
 
 func (s *service) completeDecision(ctx context.Context, channel brokerChannel, request minter.MintRequest, topicID string, approvalRequestID string, decision approvalDecisionRequest) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if decision.Decision == "reject" {
 		reason := strings.TrimSpace(decision.Reason)
 		if reason == "" {
 			reason = "rejected_by_user"
 		}
-		_, err := channel.SendMintRejection(ctx, request, minter.MintRejection{Reason: reason, Retryable: decision.Retryable})
-		s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "rejected")
+		err := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, reason, decision.Retryable, "rejected")
 		return err == nil, err
 	}
 
@@ -660,41 +660,61 @@ func (s *service) completeDecision(ctx context.Context, channel brokerChannel, r
 	}
 
 	if !currentRelayerTopicMatches(topicID) {
-		return s.rejectTopicChanged(ctx, channel, request, topicID, approvalRequestID)
+		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
 	}
 
-	result, err := s.sessionCreator.CreateEphemeralSession(ctx, topicID, request)
+	sessionCtx, cancelSession := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
+	result, err := s.sessionCreator.CreateEphemeralSession(sessionCtx, topicID, request)
+	cancelSession()
 	if err != nil {
-		_, sendErr := channel.SendMintRejection(ctx, request, minter.MintRejection{Reason: "session_create_failed", Retryable: true})
-		s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
+		sendErr := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, "session_create_failed", true, "failed")
 		if sendErr != nil {
 			return false, fmt.Errorf("create session and browser rejection failed: %w", errors.Join(err, sendErr))
 		}
 		return true, fmt.Errorf("create session: %w", err)
 	}
 	if !currentRelayerTopicMatches(topicID) {
-		return s.rejectTopicChanged(ctx, channel, request, topicID, approvalRequestID)
+		return s.rejectTopicChanged(channel, request, topicID, approvalRequestID)
 	}
 	if result.RelayerBaseURL == "" {
 		result.RelayerBaseURL = s.opts.RelayerBaseURL
 	}
-	_, err = channel.SendMintSuccess(ctx, request, result)
+	successCtx, cancelSuccess := context.WithTimeout(context.Background(), wrapper.HTTPClientTimeout)
+	_, err = channel.SendMintSuccess(successCtx, request, result)
+	cancelSuccess()
 	if err != nil {
-		s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
+		outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
+		s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
+		cancelOutcome()
 		return false, fmt.Errorf("send mint success: %w", err)
 	}
-	s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "completed")
+	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, "completed")
+	cancelOutcome()
 	return true, nil
 }
 
-func (s *service) rejectTopicChanged(ctx context.Context, channel brokerChannel, request minter.MintRequest, expectedTopicID string, approvalRequestID string) (bool, error) {
+func (s *service) rejectTopicChanged(channel brokerChannel, request minter.MintRequest, expectedTopicID string, approvalRequestID string) (bool, error) {
 	currentTopicID := currentRelayerTopicID()
-	_, err := channel.SendMintRejection(ctx, request, minter.MintRejection{Reason: "topic_changed", Retryable: true})
-	s.sendApprovalOutcome(ctx, approvalRequestID, request.ChannelID, request.MessageID, "failed")
+	err := s.sendTerminalRejectionAndOutcome(channel, request, approvalRequestID, "topic_changed", true, "failed")
 	if err != nil {
 		return false, fmt.Errorf("send topic-changed rejection: %w", err)
 	}
 	return true, fmt.Errorf("relayer topic changed before mint pairing session creation: expected %q, got %q", expectedTopicID, currentTopicID)
+}
+
+func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request minter.MintRequest, approvalRequestID string, rejectionReason string, retryable bool, outcomeStatus string) error {
+	rejectionCtx, cancelRejection := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	_, err := channel.SendMintRejection(rejectionCtx, request, minter.MintRejection{Reason: rejectionReason, Retryable: retryable})
+	cancelRejection()
+
+	// Terminal broker delivery and controller outcome each get their own small
+	// budget so a canceled or exhausted session-creation context cannot hide
+	// the terminal state from both sides of the handoff.
+	outcomeCtx, cancelOutcome := context.WithTimeout(context.Background(), terminalOperationTimeout)
+	s.sendApprovalOutcome(outcomeCtx, approvalRequestID, request.ChannelID, request.MessageID, outcomeStatus)
+	cancelOutcome()
+	return err
 }
 
 func currentRelayerTopicID() string {

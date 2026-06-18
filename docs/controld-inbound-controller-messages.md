@@ -1058,6 +1058,10 @@ large text for long-distance readability. When a browser sends a mint request,
 `feral-controld` updates the overlay to `state: "request_received"` with the
 browser name. After an approve decision, it updates the overlay to
 `state: "creating_token"` before creating and returning the ephemeral token.
+The deployed player must accept `mintPairingDisplay` requests with states
+`pairing_code`, `request_received`, `creating_token`, and `hidden`, and must
+return an application response equivalent to `{"ok": true}` through
+`Runtime.evaluate` when it accepts the display update.
 
 When the mint-pairing attempt reaches a terminal state, `feral-controld`
 hides the overlay with `state: "hidden"` so normal artwork playback remains on
