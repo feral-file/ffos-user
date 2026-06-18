@@ -4,7 +4,7 @@
   },
   "relayer": {
     "endpoint": "wss://example.com/ws",
-    "apiKey": 5
+    "apiKey": "YOUR_RELAYER_API_KEY"
   },
   "mintPairing": {
     "enabled": false,
