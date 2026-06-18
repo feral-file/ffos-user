@@ -283,6 +283,27 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForDisplayFailure(t *testi
 	assert.Equal(t, 1, ch.closeCount)
 }
 
+func TestHandleStartPairingSession_ReturnsCommandErrorForApplicationDisplayFailure(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{pairingCode: "PAIR-123"}
+	s := newService(
+		Options{Enabled: true, BrokerBaseURL: "https://broker.example", IdleTTL: time.Minute},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		&fakeCDP{appResponse: map[string]any{"ok": false, "error": "overlay unavailable"}},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertCommandError(t, result, "display_unavailable", true)
+	assert.Equal(t, 1, ch.closeCount)
+}
+
 func TestHandleStartPairingSession_ReturnsCommandErrorForActiveRedisplayFailure(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -646,6 +667,144 @@ func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacemen
 	}
 
 	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+}
+
+func TestHandleStartPairingSession_RestartDuringDelayedTerminalHideLeavesNewDisplayLast(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{
+		channelID:   "ch_old",
+		pairingCode: "PAIR-OLD",
+		expiresAt:   time.Now().Add(80 * time.Millisecond),
+		request: &minter.MintRequest{
+			ChannelID:   "ch_old",
+			MessageID:   "msg_old",
+			Origin:      "https://gallery.example",
+			BrowserInfo: minter.BrowserInfo{Name: "Chrome"},
+		},
+	}
+	newChannel := &fakeBrokerChannel{
+		channelID:   "ch_new",
+		pairingCode: "PAIR-NEW",
+		expiresAt:   time.Now().Add(time.Minute),
+	}
+	cdpClient := &fakeCDP{
+		defaultNavigateStarted: make(chan struct{}, 1),
+		releaseDefaultNavigate: make(chan struct{}),
+	}
+	s := newService(
+		Options{
+			Enabled:         true,
+			BrokerBaseURL:   "https://broker.example",
+			ApprovalTimeout: time.Minute,
+			PollInterval:    time.Millisecond,
+			RelayerBaseURL:  "https://relayer.example",
+		},
+		&fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}},
+		fakeSessionCreator{},
+		&fakeRelayer{sent: make(chan relayer.Response, 4)},
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-OLD", "")
+
+	select {
+	case <-cdpClient.defaultNavigateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected old terminal cleanup to begin display hide")
+	}
+
+	started := make(chan struct {
+		response startPairingResponse
+		err      error
+	}, 1)
+	go func() {
+		result, err := s.HandleStartPairingSession(context.Background(), nil)
+		if err != nil {
+			started <- struct {
+				response startPairingResponse
+				err      error
+			}{err: err}
+			return
+		}
+		response, ok := result.(startPairingResponse)
+		if !ok {
+			started <- struct {
+				response startPairingResponse
+				err      error
+			}{err: errors.New("restart returned unexpected response type")}
+			return
+		}
+		started <- struct {
+			response startPairingResponse
+			err      error
+		}{response: response}
+	}()
+
+	select {
+	case <-started:
+		t.Fatal("restart completed before delayed hide was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(cdpClient.releaseDefaultNavigate)
+
+	var restartResult struct {
+		response startPairingResponse
+		err      error
+	}
+	select {
+	case restartResult = <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected restart to complete")
+	}
+	require.NoError(t, restartResult.err)
+	newStart := restartResult.response
+	assert.True(t, newStart.OK)
+	assert.Equal(t, "started", newStart.Status)
+	assert.Equal(t, "PAIR-NEW", newStart.PairingCode)
+	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+}
+
+func TestShowPairingCode_FailedReplacementDoesNotSuppressReleasedCleanup(t *testing.T) {
+	oldActive := &activePairing{channelID: "ch_old", pairingCode: "PAIR-OLD", displayGen: 1}
+	newActive := &activePairing{channelID: "ch_new", pairingCode: "PAIR-NEW"}
+	cdpClient := &fakeCDP{
+		appResponseForRequest: func(request map[string]any) any {
+			if request["state"] == "pairing_code" && request["pairingCode"] == "PAIR-NEW" {
+				return map[string]any{"ok": false, "error": "overlay unavailable"}
+			}
+			return map[string]any{"ok": true}
+		},
+	}
+	s := newService(
+		Options{},
+		nil,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.active = oldActive
+	s.displayOwner = oldActive
+	s.displayGeneration = oldActive.displayGen
+
+	displayGeneration, restoreDisplay := s.releaseDisplayOwnership(oldActive)
+	require.True(t, restoreDisplay)
+	require.Error(t, s.showPairingCode(context.Background(), newActive))
+
+	s.restoreDefaultDisplay(oldActive.channelID, displayGeneration)
+
+	assertLastDisplay(t, cdpClient, "hidden", "", "")
 }
 
 func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {
@@ -1318,6 +1477,8 @@ type fakeCDP struct {
 	mu                     sync.Mutex
 	displayRequests        []map[string]any
 	err                    error
+	appResponse            any
+	appResponseForRequest  func(map[string]any) any
 	defaultNavigateStarted chan struct{}
 	releaseDefaultNavigate chan struct{}
 }
@@ -1333,12 +1494,8 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 	if method == cdp.METHOD_EVALUATE {
 		request, ok := mintPairingDisplayRequest(params)
 		if !ok {
-			return map[string]interface{}{"ok": true}, nil
+			return f.mintPairingDisplayResponse(nil), nil
 		}
-
-		f.mu.Lock()
-		f.displayRequests = append(f.displayRequests, request)
-		f.mu.Unlock()
 
 		if request["state"] == "hidden" && f.releaseDefaultNavigate != nil {
 			if f.defaultNavigateStarted != nil {
@@ -1349,8 +1506,13 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 			}
 			<-f.releaseDefaultNavigate
 		}
+
+		f.mu.Lock()
+		f.displayRequests = append(f.displayRequests, request)
+		f.mu.Unlock()
+		return f.mintPairingDisplayResponse(request), nil
 	}
-	return map[string]interface{}{"ok": true}, nil
+	return f.mintPairingDisplayResponse(nil), nil
 }
 func (f *fakeCDP) PageNavigationURL(context.Context) (string, error) {
 	return "", nil
@@ -1359,6 +1521,16 @@ func (f *fakeCDP) Close()            {}
 func (f *fakeCDP) Initialized() bool { return true }
 
 var _ cdp.CDP = (*fakeCDP)(nil)
+
+func (f *fakeCDP) mintPairingDisplayResponse(request map[string]any) any {
+	if f.appResponseForRequest != nil {
+		return f.appResponseForRequest(request)
+	}
+	if f.appResponse != nil {
+		return f.appResponse
+	}
+	return map[string]any{"ok": true}
+}
 
 func mintPairingDisplayRequest(params map[string]interface{}) (map[string]any, bool) {
 	expression, _ := params["expression"].(string)

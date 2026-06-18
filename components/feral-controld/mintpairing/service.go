@@ -93,12 +93,16 @@ type service struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	startMu      sync.Mutex
-	mu           sync.Mutex
-	active       *activePairing
-	displayOwner *activePairing
-	pending      map[string]*pendingApproval
-	doneMap      map[string]completedApproval
+	startMu sync.Mutex
+	// displayMu serializes player overlay mutations so a delayed terminal hide
+	// cannot overtake a replacement pairing-code display.
+	displayMu         sync.Mutex
+	mu                sync.Mutex
+	active            *activePairing
+	displayOwner      *activePairing
+	displayGeneration uint64
+	pending           map[string]*pendingApproval
+	doneMap           map[string]completedApproval
 }
 
 type brokerStarter interface {
@@ -181,6 +185,7 @@ type activePairing struct {
 	channelID   string
 	pairingCode string
 	expiresAt   time.Time
+	displayGen  uint64
 	cancel      context.CancelFunc
 	done        chan struct{}
 }
@@ -325,7 +330,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	defer s.startMu.Unlock()
 
 	if active := s.currentActive(); active != nil {
-		if err := qrdisplay.ShowPairingCode(ctx, s.cdp, active.pairingCode); err != nil {
+		if err := s.showPairingCode(ctx, active); err != nil {
 			s.logger.Warn("Failed to redisplay active mint pairing code", zap.Error(err), zap.String("channelID", active.channelID))
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 		}
@@ -377,7 +382,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		done:        make(chan struct{}),
 	}
 
-	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, pairingCode); err != nil {
+	if err := s.showPairingCode(ctx, active); err != nil {
 		sessionCancel()
 		s.closeChannel(channel)
 		s.logger.Warn("Failed to display mint pairing QR code", zap.Error(err), zap.String("channelID", active.channelID))
@@ -386,7 +391,6 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 
 	s.mu.Lock()
 	s.active = active
-	s.displayOwner = active
 	s.mu.Unlock()
 
 	go s.waitForBrowserAndApproval(sessionCtx, active, topicID)
@@ -487,12 +491,12 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activePairing, topicID string) {
 	terminalSent := false
 	defer func() {
-		restoreDisplay := s.releaseDisplayOwnership(active)
+		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
 		if active.done != nil {
 			close(active.done)
 		}
 		if restoreDisplay {
-			go s.restoreDefaultDisplay(active.channelID)
+			go s.restoreDefaultDisplay(active.channelID, displayGeneration)
 		}
 		if terminalSent {
 			// Terminal broker messages must remain pollable after controld sends
@@ -779,17 +783,33 @@ func (s *service) currentActive() *activePairing {
 	return s.active
 }
 
-func (s *service) releaseDisplayOwnership(active *activePairing) bool {
+func (s *service) showPairingCode(ctx context.Context, active *activePairing) error {
+	s.displayMu.Lock()
+	defer s.displayMu.Unlock()
+
+	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, active.pairingCode); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.displayGeneration++
+	active.displayGen = s.displayGeneration
+	s.displayOwner = active
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *service) releaseDisplayOwnership(active *activePairing) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active == active {
 		s.active = nil
 	}
 	if s.displayOwner != active {
-		return false
+		return active.displayGen, false
 	}
 	s.displayOwner = nil
-	return true
+	return active.displayGen, true
 }
 
 func (s *service) closeChannel(channel brokerChannel) {
@@ -800,7 +820,20 @@ func (s *service) closeChannel(channel brokerChannel) {
 	}
 }
 
-func (s *service) restoreDefaultDisplay(channelID string) {
+func (s *service) restoreDefaultDisplay(channelID string, displayGeneration uint64) {
+	s.displayMu.Lock()
+	defer s.displayMu.Unlock()
+
+	// The ownership check must happen at send time. Cleanup runs in a detached
+	// goroutine, so a newer session can claim the overlay after the old session
+	// releases it but before the hidden command reaches Chromium.
+	s.mu.Lock()
+	stale := s.displayGeneration != displayGeneration || s.displayOwner != nil
+	s.mu.Unlock()
+	if stale {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), displayRecoveryTimeout)
 	defer cancel()
 	if err := qrdisplay.ShowDefaultDisplay(ctx, s.cdp); err != nil {
