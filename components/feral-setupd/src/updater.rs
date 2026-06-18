@@ -254,10 +254,13 @@ pub fn spawn_updater() -> Result<mpsc::Receiver<Result<String, anyhow::Error>>> 
     // 16‑item buffer is enough for human‑speed progress updates; adjust if needed.
     let (tx, rx) = mpsc::channel::<Result<String, anyhow::Error>>(16);
 
-    // Detach the async task; errors are logged.
+    // Detach the async task; errors are logged and sent to channel before closing.
     tokio::spawn(async move {
-        if let Err(e) = run_update_and_send(tx).await {
+        if let Err(e) = run_update_and_send(tx.clone()).await {
             eprintln!("updater error: {e:#?}");
+            // Send terminal error so receiver knows it failed instead of treating
+            // channel closure as success.
+            let _ = tx.send(Err(e)).await;
         }
     });
 
