@@ -941,7 +941,7 @@ func validatePlayerContractFile(path string) error {
 	if path == "" {
 		return nil
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
 	if err != nil {
 		return fmt.Errorf("read player contract: %w", err)
 	}
