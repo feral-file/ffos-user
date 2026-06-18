@@ -1020,8 +1020,11 @@ Success response:
 }
 ```
 
-If a non-expired pairing session is already active, `status` is
-`already_started` and `feral-controld` re-displays the same pairing code.
+If a non-expired pairing session is already active and still waiting for a
+browser request, `status` is `already_started` and `feral-controld` re-displays
+the same pairing code. If a browser request is already pending controller
+approval, `status` is `pending_approval`; `feral-controld` re-displays the
+request-received overlay instead of showing the QR/code again.
 
 Error response:
 
@@ -1043,7 +1046,8 @@ Error response:
 Error cases:
 
 - `disabled`: `mintPairing.enabled` is false.
-- `invalid_config`: broker base URL is missing.
+- `invalid_config`: broker base URL is missing, or mint pairing is enabled
+  without a valid player contract manifest.
 - `topic_not_ready`: device has no current relayer topic ID.
 - `broker_unavailable`: broker channel creation failed before a pairing code
   was available.
@@ -1061,13 +1065,15 @@ browser name. After an approve decision, it updates the overlay to
 The deployed player must accept `mintPairingDisplay` requests with states
 `pairing_code`, `request_received`, `creating_token`, and `hidden`, and must
 return an application response equivalent to `{"ok": true}` through
-`Runtime.evaluate` when it accepts the display update. Deployments that enable
-mint pairing should set `FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1` for
-`feral-player.service`; in that mode `/opt/feral/feral-player` must include
-`ffos-player-contract.json` declaring the `mintPairingDisplay` v1 contract, and
-the service validates that manifest before reporting readiness. Legacy/default
-player boot does not require the manifest so older static bundles can still
-start when mint pairing is disabled.
+`Runtime.evaluate` when it accepts the display update. When
+`mintPairing.enabled` is true, `feral-controld` validates
+`/opt/feral/feral-player/ffos-player-contract.json` before creating a broker
+channel or sending the first display command. Deployments that enable mint
+pairing should also set `FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1` for
+`feral-player.service`; in that mode the player service validates the same
+manifest before reporting readiness. Legacy/default player boot does not require
+the manifest so older static bundles can still start when mint pairing is
+disabled.
 
 When the mint-pairing attempt reaches a terminal state, `feral-controld`
 hides the overlay with `state: "hidden"` so normal artwork playback remains on

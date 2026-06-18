@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -37,17 +39,19 @@ const (
 	stopCleanupTimeout        = 1500 * time.Millisecond
 	channelCloseTimeout       = 500 * time.Millisecond
 	maxApprovalRequestIDBytes = 16
+	defaultPlayerContractPath = "/opt/feral/feral-player/ffos-player-contract.json"
 
 	approvalCancellationStatus = "cancelled" //nolint:misspell // Wire protocol status is documented with this spelling.
 )
 
 type Options struct {
-	Enabled         bool
-	BrokerBaseURL   string
-	IdleTTL         time.Duration
-	PollInterval    time.Duration
-	ApprovalTimeout time.Duration
-	RelayerBaseURL  string
+	Enabled            bool
+	BrokerBaseURL      string
+	IdleTTL            time.Duration
+	PollInterval       time.Duration
+	ApprovalTimeout    time.Duration
+	RelayerBaseURL     string
+	PlayerContractPath string
 }
 
 func OptionsFromConfig(cfg *config.MintPairingConfig, relayerEndpoint string) Options {
@@ -61,6 +65,9 @@ func OptionsFromConfig(cfg *config.MintPairingConfig, relayerEndpoint string) Op
 		return opts
 	}
 	opts.Enabled = cfg.Enabled
+	if opts.Enabled {
+		opts.PlayerContractPath = defaultPlayerContractPath
+	}
 	opts.BrokerBaseURL = strings.TrimSpace(cfg.BrokerBaseURL)
 	if cfg.IdleTTLSeconds > 0 {
 		opts.IdleTTL = time.Duration(cfg.IdleTTLSeconds) * time.Second
@@ -185,6 +192,8 @@ type activePairing struct {
 	channelID   string
 	pairingCode string
 	expiresAt   time.Time
+	phase       activePairingPhase
+	browserName string
 	displayGen  uint64
 	cancel      context.CancelFunc
 	done        chan struct{}
@@ -195,11 +204,18 @@ type completedApproval struct {
 	expiresAt time.Time
 }
 
+type activePairingPhase string
+
+const (
+	activePairingPhasePairingCode     activePairingPhase = "pairing_code"
+	activePairingPhasePendingApproval activePairingPhase = "pending_approval"
+)
+
 type startPairingResponse struct {
 	OK          bool   `json:"ok"`
 	Status      string `json:"status"`
 	ChannelID   string `json:"channelID"`
-	PairingCode string `json:"pairingCode"`
+	PairingCode string `json:"pairingCode,omitempty"`
 	ExpiresAt   string `json:"expiresAt,omitempty"`
 }
 
@@ -321,6 +337,10 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	if strings.TrimSpace(s.opts.BrokerBaseURL) == "" {
 		return commandError("invalid_config", "mint pairing broker base URL is not configured", false), nil
 	}
+	if err := validatePlayerContractFile(s.opts.PlayerContractPath); err != nil {
+		s.logger.Warn("Mint pairing player contract validation failed", zap.Error(err), zap.String("path", s.opts.PlayerContractPath))
+		return commandError("invalid_config", "mint pairing player contract is not valid", false), nil
+	}
 	topicID := strings.TrimSpace(state.GetState().Relayer.TopicID)
 	if topicID == "" {
 		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
@@ -329,7 +349,19 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
 
-	if active := s.currentActive(); active != nil {
+	if active, phase, browserName := s.currentActive(); active != nil {
+		if phase == activePairingPhasePendingApproval {
+			if err := s.showRequestReceived(ctx, active, browserName); err != nil {
+				s.logger.Warn("Failed to redisplay active mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
+				return commandError("display_unavailable", "failed to display mint pairing request status", true), nil
+			}
+			return startPairingResponse{
+				OK:        true,
+				Status:    "pending_approval",
+				ChannelID: active.channelID,
+				ExpiresAt: formatOptionalTime(active.expiresAt),
+			}, nil
+		}
 		if err := s.showPairingCode(ctx, active); err != nil {
 			s.logger.Warn("Failed to redisplay active mint pairing code", zap.Error(err), zap.String("channelID", active.channelID))
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
@@ -378,6 +410,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		channelID:   display.ChannelID,
 		pairingCode: pairingCode,
 		expiresAt:   expiresAt,
+		phase:       activePairingPhasePairingCode,
 		cancel:      sessionCancel,
 		done:        make(chan struct{}),
 	}
@@ -535,8 +568,9 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 	}
 	s.registerPending(pending)
 	defer s.unregisterPending(approvalRequestID)
+	s.setActivePendingApproval(active, pending.browserName)
 
-	if err := qrdisplay.ShowRequestReceived(ctx, s.cdp, pending.browserName); err != nil {
+	if err := s.showRequestReceived(ctx, active, pending.browserName); err != nil {
 		s.logger.Warn("Failed to display mint pairing request status", zap.Error(err), zap.String("channelID", active.channelID))
 	}
 
@@ -789,18 +823,28 @@ func (s *service) registerPending(p *pendingApproval) {
 	s.pending[p.approvalRequestID] = p
 }
 
-func (s *service) currentActive() *activePairing {
+func (s *service) currentActive() (*activePairing, activePairingPhase, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.active == nil {
-		return nil
+		return nil, "", ""
 	}
 	if !s.active.expiresAt.IsZero() && time.Now().After(s.active.expiresAt) {
 		s.active.cancel()
 		s.active = nil
-		return nil
+		return nil, "", ""
 	}
-	return s.active
+	return s.active, s.active.phase, s.active.browserName
+}
+
+func (s *service) setActivePendingApproval(active *activePairing, browserName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active != active {
+		return
+	}
+	active.phase = activePairingPhasePendingApproval
+	active.browserName = browserName
 }
 
 func (s *service) showPairingCode(ctx context.Context, active *activePairing) error {
@@ -808,6 +852,22 @@ func (s *service) showPairingCode(ctx context.Context, active *activePairing) er
 	defer s.displayMu.Unlock()
 
 	if err := qrdisplay.ShowPairingCode(ctx, s.cdp, active.pairingCode); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.displayGeneration++
+	active.displayGen = s.displayGeneration
+	s.displayOwner = active
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *service) showRequestReceived(ctx context.Context, active *activePairing, browserName string) error {
+	s.displayMu.Lock()
+	defer s.displayMu.Unlock()
+
+	if err := qrdisplay.ShowRequestReceived(ctx, s.cdp, browserName); err != nil {
 		return err
 	}
 
@@ -859,6 +919,59 @@ func (s *service) restoreDefaultDisplay(channelID string, displayGeneration uint
 	if err := qrdisplay.ShowDefaultDisplay(ctx, s.cdp); err != nil {
 		s.logger.Warn("Failed to restore default display after mint pairing", zap.Error(err), zap.String("channelID", channelID))
 	}
+}
+
+type playerContractManifest struct {
+	Contracts map[string]playerMintPairingDisplayContract `json:"contracts"`
+}
+
+type playerMintPairingDisplayContract struct {
+	Version          int                            `json:"version"`
+	RequestKey       string                         `json:"requestKey"`
+	States           []string                       `json:"states"`
+	AcceptedResponse playerContractAcceptedResponse `json:"acceptedResponse"`
+}
+
+type playerContractAcceptedResponse struct {
+	OK bool `json:"ok"`
+}
+
+func validatePlayerContractFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read player contract: %w", err)
+	}
+	var manifest playerContractManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return fmt.Errorf("decode player contract: %w", err)
+	}
+	contract, ok := manifest.Contracts["mintPairingDisplay"]
+	if !ok {
+		return errors.New("missing contracts.mintPairingDisplay")
+	}
+	if contract.Version != 1 {
+		return errors.New("contracts.mintPairingDisplay.version must be 1")
+	}
+	if contract.RequestKey != "request" {
+		return errors.New(`contracts.mintPairingDisplay.requestKey must be "request"`)
+	}
+	states := make(map[string]bool, len(contract.States))
+	for _, state := range contract.States {
+		states[state] = true
+	}
+	for _, required := range []string{"pairing_code", "request_received", "creating_token", "hidden"} {
+		if !states[required] {
+			return fmt.Errorf("contracts.mintPairingDisplay.states missing %q", required)
+		}
+	}
+	if !contract.AcceptedResponse.OK {
+		return errors.New("contracts.mintPairingDisplay.acceptedResponse.ok must be true")
+	}
+	return nil
 }
 
 func (s *service) unregisterPending(approvalRequestID string) {

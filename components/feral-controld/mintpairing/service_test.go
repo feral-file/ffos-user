@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -243,6 +246,109 @@ func TestRelayerHTTPBaseString_NormalizesWebSocketEndpointToOrigin(t *testing.T)
 	}
 }
 
+func TestOptionsFromConfig_SetsDefaultPlayerContractPathWhenEnabled(t *testing.T) {
+	opts := OptionsFromConfig(&config.MintPairingConfig{Enabled: true}, "")
+	assert.Equal(t, defaultPlayerContractPath, opts.PlayerContractPath)
+
+	opts = OptionsFromConfig(&config.MintPairingConfig{}, "")
+	assert.Empty(t, opts.PlayerContractPath)
+}
+
+func TestHandleStartPairingSession_ValidatesPlayerContractBeforeBrokerStart(t *testing.T) {
+	tests := []struct {
+		name     string
+		manifest string
+		missing  bool
+	}{
+		{
+			name:    "missing manifest",
+			missing: true,
+		},
+		{
+			name:     "malformed json",
+			manifest: `{`,
+		},
+		{
+			name:     "wrong contract path with loose token",
+			manifest: `{"contracts":{"other":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}},"loose":"mintPairingDisplay"}`,
+		},
+		{
+			name:     "missing state",
+			manifest: `{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token"],"acceptedResponse":{"ok":true}}}}`,
+		},
+		{
+			name:     "wrong accepted response",
+			manifest: `{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":false}}}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
+
+			contractPath := filepath.Join(t.TempDir(), "ffos-player-contract.json")
+			if !tt.missing {
+				require.NoError(t, os.WriteFile(contractPath, []byte(tt.manifest), 0o600))
+			}
+			starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-123"}}
+			cdpClient := &fakeCDP{}
+			s := newService(
+				Options{
+					Enabled:            true,
+					BrokerBaseURL:      "https://broker.example",
+					PlayerContractPath: contractPath,
+				},
+				starter,
+				nil,
+				nil,
+				cdpClient,
+				wrapper.NewJSON(),
+				zap.NewNop(),
+			).(*service)
+
+			result, err := s.HandleStartPairingSession(context.Background(), nil)
+			require.NoError(t, err)
+			assertCommandError(t, result, "invalid_config", false)
+			assert.Equal(t, 0, starter.startCount)
+			assert.Empty(t, cdpClient.displayRequestsSnapshot())
+		})
+	}
+}
+
+func TestHandleStartPairingSession_AcceptsValidPlayerContract(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	contractPath := writeValidPlayerContract(t)
+	starter := &fakeBrokerStarter{channel: &fakeBrokerChannel{pairingCode: "PAIR-123"}}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:            true,
+			BrokerBaseURL:      "https://broker.example",
+			IdleTTL:            time.Minute,
+			PlayerContractPath: contractPath,
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	resp := result.(startPairingResponse)
+	assert.True(t, resp.OK)
+	assert.Equal(t, "started", resp.Status)
+	assert.Equal(t, 1, starter.startCount)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-123", "")
+}
+
 func TestHandleStartPairingSession_ReturnsCommandErrorForBrokerStartFailure(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -382,6 +488,17 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	approvalMessage := approval.Message.(map[string]any)
 	approvalID := approvalMessage["approvalRequestID"].(string)
 	assertEventuallyDisplayObserved(t, cdpClient, "request_received", "", "Chrome")
+
+	result, err = s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	pendingResp := result.(startPairingResponse)
+	assert.True(t, pendingResp.OK)
+	assert.Equal(t, "pending_approval", pendingResp.Status)
+	assert.Empty(t, pendingResp.PairingCode)
+	assert.Equal(t, "ch_1", pendingResp.ChannelID)
+	assert.Equal(t, 1, starter.startCount)
+	assert.Equal(t, 1, countDisplayRequests(cdpClient, "pairing_code", "PAIR-123", ""))
+	assertLastDisplay(t, cdpClient, "request_received", "", "Chrome")
 
 	decisionArgs := validDecisionArgs(approvalID, "topic-1", "ch_1", "msg_1")
 	result, err = s.HandleApprovalDecision(context.Background(), decisionArgs)
@@ -1336,10 +1453,12 @@ type fakeBrokerStarter struct {
 	channels        []brokerChannel
 	err             error
 	receivedOptions minter.StartChannelOptions
+	startCount      int
 }
 
 func (f *fakeBrokerStarter) StartChannel(_ context.Context, opts minter.StartChannelOptions) (brokerChannel, error) {
 	f.receivedOptions = opts
+	f.startCount++
 	if len(f.channels) > 0 {
 		channel := f.channels[0]
 		f.channels = f.channels[1:]
@@ -1657,6 +1776,16 @@ func assertLastDisplay(t *testing.T, cdpClient *fakeCDP, state string, pairingCo
 	assertDisplayRequest(t, last, state, pairingCode, browserName)
 }
 
+func countDisplayRequests(cdpClient *fakeCDP, state string, pairingCode string, browserName string) int {
+	count := 0
+	for _, request := range cdpClient.displayRequestsSnapshot() {
+		if requestMatchesDisplay(request, state, pairingCode, browserName) {
+			count++
+		}
+	}
+	return count
+}
+
 func displayObserved(requests []map[string]any, state string, pairingCode string, browserName string) bool {
 	for _, request := range requests {
 		if requestMatchesDisplay(request, state, pairingCode, browserName) {
@@ -1682,4 +1811,11 @@ func requestMatchesDisplay(request map[string]any, state string, pairingCode str
 		return false
 	}
 	return true
+}
+
+func writeValidPlayerContract(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffos-player-contract.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}`), 0o600))
+	return path
 }
