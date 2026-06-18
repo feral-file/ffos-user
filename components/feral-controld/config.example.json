@@ -17,5 +17,9 @@
   "openpanel": {
     "clientId": "YOUR_OPENPANEL_CLIENT_ID",
     "clientSecret": "YOUR_OPENPANEL_CLIENT_SECRET"
+  },
+  "commandStorm": {
+    "disabled": false,
+    "maxConcurrent": 0
   }
 } 
