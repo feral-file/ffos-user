@@ -133,6 +133,20 @@ func (mr *MockWebSocketConnMockRecorder) SetReadDeadline(t interface{}) *gomock.
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetReadDeadline", reflect.TypeOf((*MockWebSocketConn)(nil).SetReadDeadline), t)
 }
 
+// SetWriteDeadline mocks base method.
+func (m *MockWebSocketConn) SetWriteDeadline(t time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetWriteDeadline", t)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetWriteDeadline indicates an expected call of SetWriteDeadline.
+func (mr *MockWebSocketConnMockRecorder) SetWriteDeadline(t interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetWriteDeadline", reflect.TypeOf((*MockWebSocketConn)(nil).SetWriteDeadline), t)
+}
+
 // WriteControl mocks base method.
 func (m *MockWebSocketConn) WriteControl(messageType int, data []byte, deadline time.Time) error {
 	m.ctrl.T.Helper()

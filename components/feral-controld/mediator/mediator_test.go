@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
@@ -786,5 +787,60 @@ func TestMediator_HandleRelayerMessage_ProcessCommand(t *testing.T) {
 				assert.NoError(t, err)
 			}
 		})
+	}
+}
+
+// TestMediator_HandleRelayerMessage_RateLimited verifies the relayer ingress
+// path reports command-storm rejections legibly: when the command router
+// rejects a command with a RateLimitedError, the mediator sends a structured
+// "rate_limited" RPC response back to the caller instead of dropping it
+// silently (feral-file/ffos-user#208).
+func TestMediator_HandleRelayerMessage_RateLimited(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := string(commands.CMD_DISPLAY_PLAYLIST)
+	args := map[string]interface{}{"url": "https://example/feed"}
+	payload := relayer.Payload{
+		MessageID: "msg-rate-limited",
+		Message: relayer.Message{
+			Command: &cmd,
+			Request: args,
+		},
+	}
+
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
+
+	ts.mockCommandHandler.EXPECT().
+		Process(gomock.Any(), commands.Command{Type: commands.Type(cmd), Arguments: args}).
+		Return(nil, &commandrouter.RateLimitedError{Command: commands.Type(cmd), Reason: "rate limit exceeded"}).
+		Times(1)
+
+	var sent relayer.Response
+	ts.mockRelayer.EXPECT().
+		Send(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, data interface{}) error {
+			sent = data.(relayer.Response)
+			return nil
+		}).
+		Times(1)
+
+	var capturedHandler relayer.Handler
+	ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
+	ts.mockRelayer.EXPECT().
+		OnRelayerMessage(gomock.Any()).
+		DoAndReturn(func(handler relayer.Handler) { capturedHandler = handler }).
+		Times(1)
+
+	ts.mediator.Start()
+	err := capturedHandler(ts.ctx, payload)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "RPC", sent.Type)
+	assert.Equal(t, "msg-rate-limited", sent.MessageID)
+	msg, ok := sent.Message.(map[string]any)
+	if assert.True(t, ok, "rate-limited response carries a structured body") {
+		assert.Equal(t, "rate_limited", msg["error"])
+		assert.Equal(t, cmd, msg["command"])
 	}
 }

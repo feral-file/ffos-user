@@ -34,6 +34,47 @@ const (
 	MESSAGE_ID_SYSTEM = "system"
 	PING_INTERVAL     = 15 * time.Second
 	PONG_WAIT         = 3 * time.Second
+
+	// WRITE_WAIT bounds how long any single websocket write may block. gorilla's
+	// WriteMessage/WriteJSON hold no internal timeout, so without a deadline a
+	// backpressured peer can park a write — and the connection mutex it holds —
+	// indefinitely, wedging ping(), Close(), reconnect, and any handler that is
+	// trying to reply (e.g. a storm of gate rejections). A deadline turns that
+	// unbounded stall into a bounded error that the read loop converts into a
+	// reconnect. The connection is single-writer (serialized by the mutex), so a
+	// per-write deadline is safe.
+	WRITE_WAIT = 5 * time.Second
+
+	// MAX_INFLIGHT_HANDLERS caps concurrent message-handler goroutines so a
+	// relayer command storm cannot spawn unbounded goroutines and exhaust
+	// device memory. Per-command rate limiting still happens downstream in the
+	// command router; this is a coarse crash-prevention backstop for the
+	// dispatch fan-out itself.
+	MAX_INFLIGHT_HANDLERS = 256
+
+	// MAX_INFLIGHT_SHED_RESPONSES caps the goroutines emitting "rate_limited"
+	// replies for shed commands. The replies are written off the read loop
+	// (Send takes the connection lock; its write is deadline-bounded but still
+	// holds the lock for up to WRITE_WAIT), so under the very storm we are
+	// shedding a slow/backpressured socket must not be able to wedge reads, pong
+	// handling, and pings behind one blocking write. When all slots are busy the
+	// reply is dropped: a best-effort courtesy reply is worth less than a
+	// responsive read loop, and a genuinely dead socket is torn down by the
+	// keepalive path instead.
+	MAX_INFLIGHT_SHED_RESPONSES = 16
+
+	// MAX_INFLIGHT_CONTROL_HANDLERS caps concurrent handler goroutines for
+	// control-plane (messageID == "system") traffic. That discriminator comes
+	// straight off the decoded inbound envelope, so it is attacker-controllable:
+	// a hostile or malformed relayer-side storm could label every payload as
+	// "system" to escape the command dispatch budget (dispatchSem) entirely,
+	// spawning unbounded goroutines and hammering the mediator's topic-state
+	// save path. Control-plane traffic keeps its own lane so command pressure
+	// never sheds it, but that lane MUST still be bounded. The bound is small
+	// because legitimate control-plane messages (topic-state updates) are rare;
+	// excess is dropped rather than queued, since system messages carry no
+	// caller awaiting a reply by messageID.
+	MAX_INFLIGHT_CONTROL_HANDLERS = 8
 )
 
 type Message struct {
@@ -119,6 +160,9 @@ type relayer struct {
 	done         chan struct{}
 	pingDoneChan chan struct{}
 	handlers     []Handler
+	dispatchSem  chan struct{}
+	controlSem   chan struct{}
+	shedSem      chan struct{}
 
 	// Logger
 	logger *zap.Logger
@@ -136,16 +180,19 @@ func New(
 	logger *zap.Logger,
 ) Relayer {
 	return &relayer{
-		endpoint:   endpoint,
-		apiKey:     apiKey,
-		dialer:     dialer,
-		randomizer: randomizer,
-		clock:      clock,
-		done:       make(chan struct{}),
-		os:         os,
-		json:       json,
-		logger:     logger,
-		handlers:   []Handler{},
+		endpoint:    endpoint,
+		apiKey:      apiKey,
+		dialer:      dialer,
+		randomizer:  randomizer,
+		clock:       clock,
+		done:        make(chan struct{}),
+		os:          os,
+		json:        json,
+		logger:      logger,
+		handlers:    []Handler{},
+		dispatchSem: make(chan struct{}, MAX_INFLIGHT_HANDLERS),
+		controlSem:  make(chan struct{}, MAX_INFLIGHT_CONTROL_HANDLERS),
+		shedSem:     make(chan struct{}, MAX_INFLIGHT_SHED_RESPONSES),
 	}
 }
 
@@ -441,33 +488,155 @@ func (r *relayer) background(ctx context.Context) {
 					continue
 				}
 
-				// Forward payload to handlers
-				for _, handler := range r.handlers {
-					p := payload
-					h := handler
-
-					// Run the handler in a separate goroutine to avoid blocking the main thread
-					go func(ctx context.Context, payload Payload, handler Handler) {
-						select {
-						case <-ctx.Done():
-							return
-						case <-r.done:
-							return
-						default:
-							if err := handler(ctx, payload); err != nil {
-								r.logger.Error("Failed to handle message",
-									zap.Error(err),
-									zap.String("messageID", payload.MessageID),
-									zap.String("command", derefString(payload.Message.Command)),
-								)
-							}
-							return
-						}
-					}(ctx, p, h)
-				}
+				r.dispatchMessage(ctx, payload)
 			}
 		}
 	}()
+}
+
+// dispatchMessage routes a single decoded payload to the registered handlers.
+//
+// Backpressure is accounted PER PAYLOAD, not per handler: one dispatch slot
+// covers the whole fan-out and a saturated command is shed exactly once. This
+// matters because more than one handler can be registered at a time — the
+// mediator is permanent, but dbus.GetRelayerTopicID temporarily registers a
+// control-plane listener. Per-handler accounting would otherwise shed the same
+// command once per listener (duplicate rate_limited replies for one messageID)
+// and make effective command capacity depend on how many listeners happen to
+// be installed.
+//
+// Control-plane messages (topic/system state) are rare and must NOT be shed by
+// command pressure, so they run in a separate, smaller bounded lane (controlSem)
+// instead of the command budget. The separate lane is itself capped because the
+// "system" discriminator is attacker-controllable; see MAX_INFLIGHT_CONTROL_HANDLERS.
+// Either way the handlers run off the read loop so a slow handler cannot stall reads.
+//
+// Extracted from the read loop so the saturation/shed path is unit-testable
+// without the full connection machinery.
+func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
+	// Snapshot handlers under the lock: OnRelayerMessage/RemoveRelayerMessage
+	// mutate the slice concurrently (e.g. the temporary D-Bus listener), so the
+	// read loop must not iterate it directly.
+	r.Lock()
+	handlers := append([]Handler(nil), r.handlers...)
+	r.Unlock()
+	if len(handlers) == 0 {
+		return
+	}
+
+	// Control-plane traffic runs in its own bounded lane so command pressure
+	// never sheds it — but the lane is still bounded, because messageID is
+	// attacker-controllable (it is read straight off the decoded envelope). A
+	// storm of payloads labeled "system" must not escape every budget and spawn
+	// unbounded goroutines / repeatedly hit the mediator's topic-state save path.
+	if payload.MessageID == MESSAGE_ID_SYSTEM {
+		select {
+		case r.controlSem <- struct{}{}:
+			go r.runHandlers(ctx, payload, handlers, r.controlSem)
+		default:
+			// Control lane saturated: drop. System messages carry no caller
+			// awaiting a reply by messageID (sendShedResponse skips them), so a
+			// legible rejection is neither expected nor possible — dropping is
+			// the correct backstop against a spoofed control-plane storm.
+			r.logger.Warn("Relayer control-plane lane saturated, dropping system message",
+				zap.String("topicID", derefString(payload.Message.TopicID)),
+			)
+		}
+		return
+	}
+
+	select {
+	case r.dispatchSem <- struct{}{}:
+		go r.runHandlers(ctx, payload, handlers, r.dispatchSem)
+	default:
+		// Saturated: shed this command once, but reply legibly so the caller
+		// sees a rate-limit rejection instead of a silent timeout
+		// (feral-file/ffos-user#208). The reply is emitted off the read loop
+		// (shedResponseAsync) so a blocked write cannot wedge it.
+		r.logger.Warn("Relayer dispatch saturated, shedding command",
+			zap.String("messageID", payload.MessageID),
+			zap.String("command", derefString(payload.Message.Command)),
+		)
+		r.shedResponseAsync(ctx, payload)
+	}
+}
+
+// runHandlers invokes every registered handler for one payload, off the read
+// loop. When sem is non-nil it owns a single slot in that semaphore (dispatchSem
+// for commands, controlSem for control-plane) for the whole fan-out and releases
+// it when all handlers return.
+func (r *relayer) runHandlers(ctx context.Context, payload Payload, handlers []Handler, sem chan struct{}) {
+	if sem != nil {
+		defer func() { <-sem }()
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-r.done:
+		return
+	default:
+	}
+	for _, handler := range handlers {
+		if err := handler(ctx, payload); err != nil {
+			r.logger.Error("Failed to handle message",
+				zap.Error(err),
+				zap.String("messageID", payload.MessageID),
+				zap.String("command", derefString(payload.Message.Command)),
+			)
+		}
+	}
+}
+
+// shedResponseAsync emits a shed "rate_limited" reply without blocking the
+// caller (the read loop). Send takes the connection lock and its write, though
+// now deadline-bounded, can still hold that lock for up to WRITE_WAIT, so
+// writing inline under a storm could stall reads, pong handling, and pings
+// behind one slow write. Hand the reply to a bounded set of writer goroutines
+// instead, and drop it when they are all busy: a dropped best-effort reply is
+// preferable to a wedged read loop, and a genuinely dead socket is detected and
+// reconnected by the keepalive path.
+// Writes stay serialized for gorilla's single-writer requirement because every
+// writer goroutine, like ping and Send, takes the connection lock.
+func (r *relayer) shedResponseAsync(ctx context.Context, payload Payload) {
+	select {
+	case r.shedSem <- struct{}{}:
+		go func(payload Payload) {
+			defer func() { <-r.shedSem }()
+			r.sendShedResponse(ctx, payload)
+		}(payload)
+	default:
+		r.logger.Warn("Relayer shed-response writers saturated, dropping rate-limited reply",
+			zap.String("messageID", payload.MessageID),
+			zap.String("command", derefString(payload.Message.Command)),
+		)
+	}
+}
+
+// sendShedResponse replies to a command that was shed under dispatch
+// saturation with the same structured "rate_limited" RPC body the command
+// router uses, so callers see a legible rejection instead of a silent timeout.
+// Only RPC command messages carry a caller awaiting a response by messageID;
+// messages without one (or control-plane traffic) are skipped.
+func (r *relayer) sendShedResponse(ctx context.Context, payload Payload) {
+	if payload.MessageID == "" || payload.MessageID == MESSAGE_ID_SYSTEM {
+		return
+	}
+
+	resp := Response{
+		Type:      "RPC",
+		MessageID: payload.MessageID,
+		Message: map[string]any{
+			"error":   "rate_limited",
+			"command": derefString(payload.Message.Command),
+			"message": "device is shedding a command storm; retry shortly",
+		},
+	}
+	if err := r.Send(ctx, resp); err != nil {
+		r.logger.Warn("Failed to send shed rate-limited response",
+			zap.Error(err),
+			zap.String("messageID", payload.MessageID),
+		)
+	}
 }
 
 // Send sends a message to the Relayer server
@@ -493,6 +662,14 @@ func (r *relayer) Send(ctx context.Context, data interface{}) error {
 		zap.Int("message_length", len(jsonData)),
 	)
 
+	// Bound the write so a backpressured peer cannot hold the connection mutex
+	// (and therefore block ping/Close/reconnect, or pin a caller's dispatch
+	// slot) indefinitely. A failed deadline set still lets the write proceed —
+	// it is only a best-effort safeguard, not a hard precondition.
+	if err := r.conn.SetWriteDeadline(r.clock.Now().Add(WRITE_WAIT)); err != nil {
+		r.logger.Warn("Failed to set write deadline before send", zap.Error(err))
+	}
+
 	return r.conn.WriteMessage(websocket.TextMessage, jsonData)
 }
 
@@ -515,6 +692,13 @@ func (r *relayer) ping() {
 
 	if err := r.conn.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
 		r.logger.Error("Failed to send transport ping", zap.Error(err))
+	}
+
+	// WriteControl takes its own deadline, but WriteJSON relies on the
+	// connection write deadline; bound it so a stuck application-ping write
+	// cannot hold the mutex (and starve Close/reconnect) indefinitely.
+	if err := r.conn.SetWriteDeadline(r.clock.Now().Add(WRITE_WAIT)); err != nil {
+		r.logger.Error("Failed to set write deadline before application ping", zap.Error(err))
 	}
 
 	if err := r.conn.WriteJSON(map[string]string{"type": "ping"}); err != nil {

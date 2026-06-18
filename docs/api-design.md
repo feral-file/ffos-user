@@ -211,7 +211,39 @@ Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The f
 
 ### Relayer errors
 
-There is no standardized error response envelope defined yet. When an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
+Most command failures are not standardized: when an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
+
+**Command-storm rejection (standardized).** Command-storm protection (see below) is the one path with a defined controller-visible error envelope. When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
+
+```json
+{
+  "error": "rate_limited",
+  "command": "displayPlaylist",
+  "message": "human-readable reason"
+}
+```
+
+The command-router rejection reply (rate limit / concurrency budget) is reliable. The relayer-side shed reply under **dispatch saturation** is **best-effort**: to avoid blocking its read loop under a sustained storm, the relayer drops the reply when its shed-response writers are all busy. Controllers must not rely on receiving it for that case and should fall back to a request timeout and retry.
+
+The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
+
+### Command-storm protection
+
+`feral-controld` protects the shared command path from flooding across both the relayer and LAN-hub ingress (see feral-file/ffos-user#208). High-cost or disruptive commands are rate-limited, deduped, and bounded by a global concurrency budget; internal lifecycle flows (e.g. OOM recovery) bypass the gate so client traffic cannot shed them.
+
+It is on by default with tuned defaults. The optional `commandStorm` config section tunes it:
+
+```json
+{
+  "commandStorm": {
+    "disabled": false,
+    "maxConcurrent": 16
+  }
+}
+```
+
+- `disabled` (default `false`) — turn the gate off entirely.
+- `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever.
 
 ### BLE error codes
 
