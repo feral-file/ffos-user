@@ -45,47 +45,6 @@ cat >"$root_dir/index.html" <<'EOF'
 <html><body>FF player static smoke test</body></html>
 EOF
 
-contract_output="$tmp_dir/missing-contract.log"
-if FF_PLAYER_STATIC_ROOT="$root_dir" \
-  bash "$script_under_test" >"$contract_output" 2>&1; then
-  fail "expected missing mint-pairing player contract to fail"
-fi
-assert_contains "$contract_output" "serve-feral-player: missing player contract manifest"
-
-cat >"$root_dir/ffos-player-contract.json" <<'EOF'
-{"contracts":{"other":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}},"loose":"mintPairingDisplay"}
-EOF
-wrong_path_output="$tmp_dir/wrong-contract-path.log"
-if FF_PLAYER_STATIC_ROOT="$root_dir" \
-  bash "$script_under_test" >"$wrong_path_output" 2>&1; then
-  fail "expected wrong-path mint-pairing player contract to fail"
-fi
-assert_contains "$wrong_path_output" "serve-feral-player: invalid player contract manifest"
-
-cat >"$root_dir/ffos-player-contract.json" <<'EOF'
-{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code"],"acceptedResponse":{"ok":true}}}}
-EOF
-missing_state_output="$tmp_dir/missing-state-contract.log"
-if FF_PLAYER_STATIC_ROOT="$root_dir" \
-  bash "$script_under_test" >"$missing_state_output" 2>&1; then
-  fail "expected missing-state mint-pairing player contract to fail"
-fi
-assert_contains "$missing_state_output" "serve-feral-player: invalid player contract manifest"
-
-cat >"$root_dir/ffos-player-contract.json" <<'EOF'
-{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":false}}}}
-EOF
-wrong_response_output="$tmp_dir/wrong-response-contract.log"
-if FF_PLAYER_STATIC_ROOT="$root_dir" \
-  bash "$script_under_test" >"$wrong_response_output" 2>&1; then
-  fail "expected wrong-response mint-pairing player contract to fail"
-fi
-assert_contains "$wrong_response_output" "serve-feral-player: invalid player contract manifest"
-
-cat >"$root_dir/ffos-player-contract.json" <<'EOF'
-{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}
-EOF
-
 cat >"$bin_dir/darkhttpd" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -149,16 +108,86 @@ EOF
 
 chmod +x "$bin_dir/darkhttpd" "$bin_dir/curl" "$bin_dir/systemd-notify"
 
-FF_PLAYER_STATIC_ROOT="$root_dir" \
-FF_PLAYER_STATIC_PORT="$port" \
-FF_PLAYER_READY_TIMEOUT_SECONDS=5 \
-FF_PLAYER_TEST_ROOT="$root_dir" \
-FF_PLAYER_TEST_PORT="$port" \
-FF_PLAYER_TEST_PID_FILE="$pid_file" \
-FF_PLAYER_TEST_NOTIFY_FILE="$notify_file" \
-FF_PLAYER_TEST_NOTIFY_ARGS="$notify_args" \
-PATH="$bin_dir:$PATH" \
-bash "$script_under_test" >"$output_file" 2>&1
+run_ready_server() {
+  rm -f "$pid_file" "$notify_file" "$notify_args" "$output_file"
+
+  FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_STATIC_PORT="$port" \
+  FF_PLAYER_READY_TIMEOUT_SECONDS=5 \
+  FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}" \
+  FF_PLAYER_TEST_ROOT="$root_dir" \
+  FF_PLAYER_TEST_PORT="$port" \
+  FF_PLAYER_TEST_PID_FILE="$pid_file" \
+  FF_PLAYER_TEST_NOTIFY_FILE="$notify_file" \
+  FF_PLAYER_TEST_NOTIFY_ARGS="$notify_args" \
+  PATH="$bin_dir:$PATH" \
+  "$@" >"$output_file" 2>&1
+
+  assert_contains "$notify_args" "--ready"
+  assert_contains "$notify_args" "feral-player static ready on http://127.0.0.1:${port}/"
+  [ -s "$pid_file" ] || fail "expected fake darkhttpd pid file to be written"
+}
+
+rm -f "$root_dir/ffos-player-contract.json"
+run_ready_server bash "$script_under_test"
+
+contract_output="$tmp_dir/missing-contract.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
+  bash "$script_under_test" >"$contract_output" 2>&1; then
+  fail "expected missing mint-pairing player contract to fail when validation is required"
+fi
+assert_contains "$contract_output" "serve-feral-player: missing player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}
+EOF
+missing_python_output="$tmp_dir/missing-python.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
+  PATH="$bin_dir" \
+  /bin/bash "$script_under_test" >"$missing_python_output" 2>&1; then
+  fail "expected required mint-pairing player contract validation to fail without python3"
+fi
+assert_contains "$missing_python_output" "serve-feral-player: required binary not found: python3"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"other":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}},"loose":"mintPairingDisplay"}
+EOF
+wrong_path_output="$tmp_dir/wrong-contract-path.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
+  bash "$script_under_test" >"$wrong_path_output" 2>&1; then
+  fail "expected wrong-path mint-pairing player contract to fail when validation is required"
+fi
+assert_contains "$wrong_path_output" "serve-feral-player: invalid player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code"],"acceptedResponse":{"ok":true}}}}
+EOF
+missing_state_output="$tmp_dir/missing-state-contract.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
+  bash "$script_under_test" >"$missing_state_output" 2>&1; then
+  fail "expected missing-state mint-pairing player contract to fail when validation is required"
+fi
+assert_contains "$missing_state_output" "serve-feral-player: invalid player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":false}}}}
+EOF
+wrong_response_output="$tmp_dir/wrong-response-contract.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
+  bash "$script_under_test" >"$wrong_response_output" 2>&1; then
+  fail "expected wrong-response mint-pairing player contract to fail when validation is required"
+fi
+assert_contains "$wrong_response_output" "serve-feral-player: invalid player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}
+EOF
+FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 run_ready_server bash "$script_under_test"
 
 assert_contains "$notify_args" "--ready"
 assert_contains "$notify_args" "feral-player static ready on http://127.0.0.1:${port}/"

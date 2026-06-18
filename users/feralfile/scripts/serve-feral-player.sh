@@ -7,6 +7,7 @@ readonly FF_PLAYER_URL="http://127.0.0.1:${FF_PLAYER_PORT}/"
 readonly FF_PLAYER_READY_TIMEOUT_SECONDS="${FF_PLAYER_READY_TIMEOUT_SECONDS:-30}"
 readonly FF_PLAYER_READY_POLL_SECONDS="${FF_PLAYER_READY_POLL_SECONDS:-1}"
 readonly FF_PLAYER_CONTRACT_FILE="${FF_PLAYER_ROOT}/ffos-player-contract.json"
+readonly FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}"
 
 require_binary() {
 	if ! command -v "$1" >/dev/null 2>&1; then
@@ -16,6 +17,10 @@ require_binary() {
 }
 
 validate_player_contract() {
+	if [[ "${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT}" != "1" ]]; then
+		return 0
+	fi
+
 	if [[ ! -f "${FF_PLAYER_CONTRACT_FILE}" ]]; then
 		echo "serve-feral-player: missing player contract manifest at ${FF_PLAYER_CONTRACT_FILE}" >&2
 		exit 1

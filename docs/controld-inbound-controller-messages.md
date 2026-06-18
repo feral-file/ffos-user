@@ -1061,10 +1061,13 @@ browser name. After an approve decision, it updates the overlay to
 The deployed player must accept `mintPairingDisplay` requests with states
 `pairing_code`, `request_received`, `creating_token`, and `hidden`, and must
 return an application response equivalent to `{"ok": true}` through
-`Runtime.evaluate` when it accepts the display update. The deployed
-`/opt/feral/feral-player` static tree must also include
-`ffos-player-contract.json` declaring the `mintPairingDisplay` v1 contract;
-`feral-player.service` validates that manifest before reporting readiness.
+`Runtime.evaluate` when it accepts the display update. Deployments that enable
+mint pairing should set `FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1` for
+`feral-player.service`; in that mode `/opt/feral/feral-player` must include
+`ffos-player-contract.json` declaring the `mintPairingDisplay` v1 contract, and
+the service validates that manifest before reporting readiness. Legacy/default
+player boot does not require the manifest so older static bundles can still
+start when mint pairing is disabled.
 
 When the mint-pairing attempt reaches a terminal state, `feral-controld`
 hides the overlay with `state: "hidden"` so normal artwork playback remains on
