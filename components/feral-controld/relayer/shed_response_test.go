@@ -107,6 +107,7 @@ func newShedRelayer(t *testing.T, conn wrapper.WebSocketConn, handlers ...Handle
 		logger:      zaptest.NewLogger(t),
 		done:        make(chan struct{}),
 		dispatchSem: make(chan struct{}, 1),
+		controlSem:  make(chan struct{}, MAX_INFLIGHT_CONTROL_HANDLERS),
 		shedSem:     make(chan struct{}, MAX_INFLIGHT_SHED_RESPONSES),
 		handlers:    handlers,
 	}
@@ -261,6 +262,112 @@ func TestDispatchMessage_ShedReplyDoesNotBlockReadLoop(t *testing.T) {
 
 	// Release the parked writer goroutine so the test leaves nothing wedged.
 	close(release)
+}
+
+// A storm of messageID == "system" payloads must NOT escape into unbounded
+// goroutines or repeated topic-state work. The "system" discriminator is read
+// straight off the decoded inbound envelope, so a hostile/malformed relayer can
+// spoof it to dodge the command dispatch budget (dispatchSem). The control-plane
+// lane (controlSem) bounds this: once its slots are full, further system
+// payloads are dropped rather than queued, so handler invocations — which is
+// where the mediator's topic-state save runs — can never exceed the lane
+// capacity for in-flight work, no matter how large the storm.
+func TestDispatchMessage_BoundsControlPlaneStorm(t *testing.T) {
+	const laneCap = 2
+	conn := &fakeShedConn{}
+
+	release := make(chan struct{})
+	var started, running atomic.Int32
+	r := newShedRelayer(t, conn, func(context.Context, Payload) error {
+		started.Add(1)
+		running.Add(1)
+		defer running.Add(-1)
+		<-release // hold the slot so the storm meets a saturated lane
+		return nil
+	})
+	// Shrink the control lane to a deterministic capacity for the assertions.
+	r.controlSem = make(chan struct{}, laneCap)
+
+	// Slot acquisition happens synchronously in dispatchMessage, so the first
+	// laneCap payloads take a slot (and block in the handler), and every payload
+	// after that meets a saturated lane and is dropped — never queued.
+	topicID := "topic-1"
+	const storm = 200
+	for i := 0; i < storm; i++ {
+		r.dispatchMessage(context.Background(), Payload{
+			MessageID: MESSAGE_ID_SYSTEM,
+			Message:   Message{TopicID: &topicID},
+		})
+	}
+
+	// Exactly the admitted handlers run; the bound is never exceeded.
+	require.Eventually(t, func() bool {
+		return started.Load() == int32(laneCap)
+	}, time.Second, 5*time.Millisecond, "control lane must admit exactly its capacity under a storm")
+
+	// Give any erroneously-spawned extra goroutines a chance to run before
+	// asserting the bound held.
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, int32(laneCap), started.Load(),
+		"a system-message storm must not run more handlers than the control lane capacity")
+	assert.LessOrEqual(t, running.Load(), int32(laneCap),
+		"in-flight control-plane handlers must never exceed the lane capacity")
+
+	// System messages carry no caller awaiting a reply by messageID, so the
+	// dropped storm must produce no responses on the wire.
+	assert.Zero(t, conn.writeCount(), "dropped system messages must not write any reply")
+
+	// Releasing the held slots drains the admitted handlers; the dropped payloads
+	// never run, so no further topic-state work occurs.
+	close(release)
+	require.Eventually(t, func() bool {
+		return running.Load() == 0
+	}, time.Second, 5*time.Millisecond, "admitted handlers must drain after release")
+	assert.Equal(t, int32(laneCap), started.Load(),
+		"dropped system messages must never execute handlers (no extra topic-state work)")
+}
+
+// A dropped control-plane payload must free nothing it never held and must leave
+// the lane usable: once in-flight system handlers finish, new system traffic is
+// admitted again. This proves the bound is a transient backpressure cap, not a
+// permanent wedge.
+func TestDispatchMessage_ControlLaneRecoversAfterDrain(t *testing.T) {
+	conn := &fakeShedConn{}
+	var started atomic.Int32
+	gate := make(chan struct{})
+	r := newShedRelayer(t, conn, func(context.Context, Payload) error {
+		started.Add(1)
+		<-gate
+		return nil
+	})
+	r.controlSem = make(chan struct{}, 1)
+
+	topicID := "topic-1"
+	sys := func() {
+		r.dispatchMessage(context.Background(), Payload{
+			MessageID: MESSAGE_ID_SYSTEM,
+			Message:   Message{TopicID: &topicID},
+		})
+	}
+
+	// First admitted and held; second dropped (lane saturated).
+	sys()
+	require.Eventually(t, func() bool { return started.Load() == 1 }, time.Second, 5*time.Millisecond)
+	sys()
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int32(1), started.Load(), "second system message must be dropped while the lane is full")
+
+	// Drain the first, then a fresh system message is admitted again.
+	close(gate)
+	require.Eventually(t, func() bool {
+		select {
+		case r.controlSem <- struct{}{}:
+			<-r.controlSem
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 5*time.Millisecond, "control lane must free its slot after the handler returns")
 }
 
 // Send must stamp a write deadline before writing so a backpressured peer

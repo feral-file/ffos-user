@@ -62,6 +62,19 @@ const (
 	// responsive read loop, and a genuinely dead socket is torn down by the
 	// keepalive path instead.
 	MAX_INFLIGHT_SHED_RESPONSES = 16
+
+	// MAX_INFLIGHT_CONTROL_HANDLERS caps concurrent handler goroutines for
+	// control-plane (messageID == "system") traffic. That discriminator comes
+	// straight off the decoded inbound envelope, so it is attacker-controllable:
+	// a hostile or malformed relayer-side storm could label every payload as
+	// "system" to escape the command dispatch budget (dispatchSem) entirely,
+	// spawning unbounded goroutines and hammering the mediator's topic-state
+	// save path. Control-plane traffic keeps its own lane so command pressure
+	// never sheds it, but that lane MUST still be bounded. The bound is small
+	// because legitimate control-plane messages (topic-state updates) are rare;
+	// excess is dropped rather than queued, since system messages carry no
+	// caller awaiting a reply by messageID.
+	MAX_INFLIGHT_CONTROL_HANDLERS = 8
 )
 
 type Message struct {
@@ -148,6 +161,7 @@ type relayer struct {
 	pingDoneChan chan struct{}
 	handlers     []Handler
 	dispatchSem  chan struct{}
+	controlSem   chan struct{}
 	shedSem      chan struct{}
 
 	// Logger
@@ -177,6 +191,7 @@ func New(
 		logger:      logger,
 		handlers:    []Handler{},
 		dispatchSem: make(chan struct{}, MAX_INFLIGHT_HANDLERS),
+		controlSem:  make(chan struct{}, MAX_INFLIGHT_CONTROL_HANDLERS),
 		shedSem:     make(chan struct{}, MAX_INFLIGHT_SHED_RESPONSES),
 	}
 }
@@ -491,8 +506,10 @@ func (r *relayer) background(ctx context.Context) {
 // be installed.
 //
 // Control-plane messages (topic/system state) are rare and must NOT be shed by
-// command pressure, so they bypass the dispatch budget entirely. Either way the
-// handlers run off the read loop so a slow handler cannot stall reads.
+// command pressure, so they run in a separate, smaller bounded lane (controlSem)
+// instead of the command budget. The separate lane is itself capped because the
+// "system" discriminator is attacker-controllable; see MAX_INFLIGHT_CONTROL_HANDLERS.
+// Either way the handlers run off the read loop so a slow handler cannot stall reads.
 //
 // Extracted from the read loop so the saturation/shed path is unit-testable
 // without the full connection machinery.
@@ -507,15 +524,30 @@ func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
 		return
 	}
 
-	// Control-plane traffic bypasses the command budget.
+	// Control-plane traffic runs in its own bounded lane so command pressure
+	// never sheds it — but the lane is still bounded, because messageID is
+	// attacker-controllable (it is read straight off the decoded envelope). A
+	// storm of payloads labeled "system" must not escape every budget and spawn
+	// unbounded goroutines / repeatedly hit the mediator's topic-state save path.
 	if payload.MessageID == MESSAGE_ID_SYSTEM {
-		go r.runHandlers(ctx, payload, handlers, false)
+		select {
+		case r.controlSem <- struct{}{}:
+			go r.runHandlers(ctx, payload, handlers, r.controlSem)
+		default:
+			// Control lane saturated: drop. System messages carry no caller
+			// awaiting a reply by messageID (sendShedResponse skips them), so a
+			// legible rejection is neither expected nor possible — dropping is
+			// the correct backstop against a spoofed control-plane storm.
+			r.logger.Warn("Relayer control-plane lane saturated, dropping system message",
+				zap.String("topicID", derefString(payload.Message.TopicID)),
+			)
+		}
 		return
 	}
 
 	select {
 	case r.dispatchSem <- struct{}{}:
-		go r.runHandlers(ctx, payload, handlers, true)
+		go r.runHandlers(ctx, payload, handlers, r.dispatchSem)
 	default:
 		// Saturated: shed this command once, but reply legibly so the caller
 		// sees a rate-limit rejection instead of a silent timeout
@@ -530,11 +562,12 @@ func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
 }
 
 // runHandlers invokes every registered handler for one payload, off the read
-// loop. When acquired is true it owns a single dispatch slot for the whole
-// fan-out and releases it when all handlers return.
-func (r *relayer) runHandlers(ctx context.Context, payload Payload, handlers []Handler, acquired bool) {
-	if acquired {
-		defer func() { <-r.dispatchSem }()
+// loop. When sem is non-nil it owns a single slot in that semaphore (dispatchSem
+// for commands, controlSem for control-plane) for the whole fan-out and releases
+// it when all handlers return.
+func (r *relayer) runHandlers(ctx context.Context, payload Payload, handlers []Handler, sem chan struct{}) {
+	if sem != nil {
+		defer func() { <-sem }()
 	}
 	select {
 	case <-ctx.Done():
