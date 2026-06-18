@@ -45,6 +45,47 @@ cat >"$root_dir/index.html" <<'EOF'
 <html><body>FF player static smoke test</body></html>
 EOF
 
+contract_output="$tmp_dir/missing-contract.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  bash "$script_under_test" >"$contract_output" 2>&1; then
+  fail "expected missing mint-pairing player contract to fail"
+fi
+assert_contains "$contract_output" "serve-feral-player: missing player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"other":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}},"loose":"mintPairingDisplay"}
+EOF
+wrong_path_output="$tmp_dir/wrong-contract-path.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  bash "$script_under_test" >"$wrong_path_output" 2>&1; then
+  fail "expected wrong-path mint-pairing player contract to fail"
+fi
+assert_contains "$wrong_path_output" "serve-feral-player: invalid player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code"],"acceptedResponse":{"ok":true}}}}
+EOF
+missing_state_output="$tmp_dir/missing-state-contract.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  bash "$script_under_test" >"$missing_state_output" 2>&1; then
+  fail "expected missing-state mint-pairing player contract to fail"
+fi
+assert_contains "$missing_state_output" "serve-feral-player: invalid player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":false}}}}
+EOF
+wrong_response_output="$tmp_dir/wrong-response-contract.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  bash "$script_under_test" >"$wrong_response_output" 2>&1; then
+  fail "expected wrong-response mint-pairing player contract to fail"
+fi
+assert_contains "$wrong_response_output" "serve-feral-player: invalid player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}
+EOF
+
 cat >"$bin_dir/darkhttpd" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

@@ -6,10 +6,48 @@ readonly FF_PLAYER_PORT="${FF_PLAYER_STATIC_PORT:-8080}"
 readonly FF_PLAYER_URL="http://127.0.0.1:${FF_PLAYER_PORT}/"
 readonly FF_PLAYER_READY_TIMEOUT_SECONDS="${FF_PLAYER_READY_TIMEOUT_SECONDS:-30}"
 readonly FF_PLAYER_READY_POLL_SECONDS="${FF_PLAYER_READY_POLL_SECONDS:-1}"
+readonly FF_PLAYER_CONTRACT_FILE="${FF_PLAYER_ROOT}/ffos-player-contract.json"
 
 require_binary() {
 	if ! command -v "$1" >/dev/null 2>&1; then
 		echo "serve-feral-player: required binary not found: $1" >&2
+		exit 1
+	fi
+}
+
+validate_player_contract() {
+	if [[ ! -f "${FF_PLAYER_CONTRACT_FILE}" ]]; then
+		echo "serve-feral-player: missing player contract manifest at ${FF_PLAYER_CONTRACT_FILE}" >&2
+		exit 1
+	fi
+
+	require_binary python3
+	if ! python3 - "${FF_PLAYER_CONTRACT_FILE}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+required_states = {"pairing_code", "request_received", "creating_token", "hidden"}
+
+with open(path, encoding="utf-8") as fh:
+    manifest = json.load(fh)
+
+contract = manifest.get("contracts", {}).get("mintPairingDisplay")
+if not isinstance(contract, dict):
+    raise SystemExit("missing contracts.mintPairingDisplay")
+if contract.get("version") != 1:
+    raise SystemExit("contracts.mintPairingDisplay.version must be 1")
+if contract.get("requestKey") != "request":
+    raise SystemExit('contracts.mintPairingDisplay.requestKey must be "request"')
+states = contract.get("states")
+if not isinstance(states, list) or not required_states.issubset(set(states)):
+    raise SystemExit("contracts.mintPairingDisplay.states missing required states")
+accepted = contract.get("acceptedResponse")
+if not isinstance(accepted, dict) or accepted.get("ok") is not True:
+    raise SystemExit("contracts.mintPairingDisplay.acceptedResponse.ok must be true")
+PY
+	then
+		echo "serve-feral-player: invalid player contract manifest at ${FF_PLAYER_CONTRACT_FILE}" >&2
 		exit 1
 	fi
 }
@@ -19,6 +57,8 @@ start_server() {
 		echo "serve-feral-player: missing static tree at ${FF_PLAYER_ROOT}" >&2
 		exit 1
 	fi
+
+	validate_player_contract
 
 	require_binary darkhttpd
 	require_binary curl
