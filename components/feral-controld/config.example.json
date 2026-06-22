@@ -14,10 +14,6 @@
     "release": "feral-controld@1.0.0",
     "repository": "organization/repository-name"
   },
-  "openpanel": {
-    "clientId": "YOUR_OPENPANEL_CLIENT_ID",
-    "clientSecret": "YOUR_OPENPANEL_CLIENT_SECRET"
-  },
   "commandStorm": {
     "disabled": false,
     "maxConcurrent": 0
