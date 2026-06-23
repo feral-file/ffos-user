@@ -85,6 +85,7 @@ type Service interface {
 	Start(ctx context.Context)
 	Stop()
 	HandleStartPairingSession(ctx context.Context, args map[string]any) (any, error)
+	HandleClosePairingSession(ctx context.Context, args map[string]any) (any, error)
 	HandleApprovalDecision(ctx context.Context, args map[string]any) (any, error)
 }
 
@@ -217,6 +218,12 @@ type startPairingResponse struct {
 	ChannelID   string `json:"channelID"`
 	PairingCode string `json:"pairingCode,omitempty"`
 	ExpiresAt   string `json:"expiresAt,omitempty"`
+}
+
+type closePairingResponse struct {
+	OK        bool   `json:"ok"`
+	Status    string `json:"status"`
+	ChannelID string `json:"channelID,omitempty"`
 }
 
 type approvalDecisionRequest struct {
@@ -448,6 +455,18 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	}, nil
 }
 
+func (s *service) HandleClosePairingSession(context.Context, map[string]any) (any, error) {
+	if s == nil || !s.opts.Enabled {
+		return commandError("disabled", "mint pairing is not enabled", false), nil
+	}
+	active := s.cancelActivePairing()
+	if active == nil {
+		return closePairingResponse{OK: true, Status: "not_started"}, nil
+	}
+	s.logger.Info("Closing active mint pairing session by request", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+	return closePairingResponse{OK: true, Status: "closed", ChannelID: active.channelID}, nil
+}
+
 func (s *service) HandleApprovalDecision(ctx context.Context, args map[string]any) (any, error) {
 	if s == nil {
 		return approvalError("", "not_found", "mint pairing is not enabled", false), nil
@@ -534,6 +553,7 @@ func (s *service) parseDecision(args map[string]any) (approvalDecisionRequest, e
 
 func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activePairing, topicID string) {
 	terminalSent := false
+	refreshAfterClose := false
 	defer func() {
 		displayGeneration, restoreDisplay := s.releaseDisplayOwnership(active)
 		if active.done != nil {
@@ -549,10 +569,18 @@ func (s *service) waitForBrowserAndApproval(ctx context.Context, active *activeP
 			return
 		}
 		s.closeChannel(active.channel)
+		if refreshAfterClose {
+			go s.refreshExpiredPairingCode()
+		}
 	}()
 
 	request, err := s.waitForMintRequest(ctx, active.channel)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && s.shouldRefreshExpiredPairing(active) {
+			refreshAfterClose = true
+			s.logger.Info("Mint pairing code expired; refreshing broker channel", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
+			return
+		}
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			s.logger.Warn("Mint pairing request wait failed", zap.Error(err), zap.String("channelID", active.channelID))
 		}
@@ -848,6 +876,42 @@ func (s *service) currentActive() (*activePairing, activePairingPhase, string) {
 	return s.active, s.active.phase, s.active.browserName
 }
 
+func (s *service) cancelActivePairing() *activePairing {
+	s.mu.Lock()
+	active := s.active
+	if active != nil {
+		s.active = nil
+		active.cancel()
+	}
+	s.mu.Unlock()
+	return active
+}
+
+func (s *service) shouldRefreshExpiredPairing(active *activePairing) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctx != nil && s.active == active && active.phase == activePairingPhasePairingCode
+}
+
+func (s *service) refreshExpiredPairingCode() {
+	s.mu.Lock()
+	runCtx := s.ctx
+	s.mu.Unlock()
+	if runCtx == nil || runCtx.Err() != nil {
+		return
+	}
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	if err != nil {
+		s.logger.Warn("Failed to refresh expired mint pairing code", zap.Error(err))
+		return
+	}
+	if response, ok := result.(startPairingResponse); ok && response.OK {
+		s.logger.Info("Refreshed expired mint pairing code", pairingDisplayLogFields(response.ChannelID, response.PairingCode, parseOptionalTime(response.ExpiresAt))...)
+		return
+	}
+	s.logger.Warn("Failed to refresh expired mint pairing code")
+}
+
 func (s *service) setActivePendingApproval(active *activePairing, browserName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1103,6 +1167,17 @@ func formatOptionalTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+func parseOptionalTime(value string) time.Time {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 type RelayerSessionCreator struct {

@@ -75,6 +75,20 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return h.mintPairing.HandleStartPairingSession(ctx, command.Arguments)
 	}
 
+	if commandType == commands.CMD_CLOSE_MINT_PAIRING_SESSION {
+		if h.mintPairing == nil {
+			return map[string]any{
+				"ok": false,
+				"error": map[string]any{
+					"code":      "disabled",
+					"message":   "mint pairing is not enabled",
+					"retryable": false,
+				},
+			}, nil
+		}
+		return h.mintPairing.HandleClosePairingSession(ctx, command.Arguments)
+	}
+
 	if commandType == commands.CMD_MINT_PAIRING_APPROVAL {
 		if h.mintPairing == nil {
 			return map[string]any{

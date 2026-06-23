@@ -440,6 +440,74 @@ func TestHandleStartPairingSession_ReturnsCommandErrorForActiveRedisplayFailure(
 	assert.Same(t, active, s.active)
 }
 
+func TestHandleClosePairingSession_CancelsActivePairingAndClosesChannel(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode: "PAIR-123",
+		expiresAt:   time.Now().Add(time.Minute),
+		closed:      make(chan struct{}, 1),
+	}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:       true,
+			BrokerBaseURL: "https://broker.example",
+			PollInterval:  time.Millisecond,
+		},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-123", "")
+
+	result, err = s.HandleClosePairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	resp := result.(closePairingResponse)
+	assert.True(t, resp.OK)
+	assert.Equal(t, "closed", resp.Status)
+	assert.Equal(t, "ch_1", resp.ChannelID)
+
+	select {
+	case <-ch.closed:
+	case <-time.After(time.Second):
+		t.Fatal("expected close command to close the broker channel")
+	}
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
+
+	s.mu.Lock()
+	assert.Nil(t, s.active)
+	s.mu.Unlock()
+}
+
+func TestHandleClosePairingSession_ReturnsNotStartedWithoutActivePairing(t *testing.T) {
+	s := newService(
+		Options{Enabled: true},
+		nil,
+		nil,
+		nil,
+		&fakeCDP{},
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+
+	result, err := s.HandleClosePairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	resp := result.(closePairingResponse)
+	assert.True(t, resp.OK)
+	assert.Equal(t, "not_started", resp.Status)
+}
+
 func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *testing.T) {
 	defer state.ResetForTesting()
 	state.GetState().Relayer.TopicID = "topic-1"
@@ -707,6 +775,65 @@ func TestWaitForBrowserAndApproval_SendsApprovalExpiredAfterSessionDeadline(t *t
 	assertRelayerNotification(t, outcome, relayer.NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME)
 	assert.Equal(t, "expired", outcome.Message.(map[string]any)["status"])
 	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
+}
+
+func TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	oldChannel := &fakeBrokerChannel{
+		channelID:   "ch_old",
+		pairingCode: "PAIR-OLD",
+		expiresAt:   time.Now().Add(80 * time.Millisecond),
+		closed:      make(chan struct{}, 1),
+	}
+	newChannel := &fakeBrokerChannel{
+		channelID:   "ch_new",
+		pairingCode: "PAIR-NEW",
+		expiresAt:   time.Now().Add(time.Minute),
+	}
+	starter := &fakeBrokerStarter{channels: []brokerChannel{oldChannel, newChannel}}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:       true,
+			BrokerBaseURL: "https://broker.example",
+			PollInterval:  time.Millisecond,
+		},
+		starter,
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-OLD", "")
+
+	select {
+	case <-oldChannel.closed:
+	case <-time.After(time.Second):
+		t.Fatal("expected expired pairing code channel to close")
+	}
+
+	require.Eventually(t, func() bool {
+		return starter.startCount == 2
+	}, time.Second, 10*time.Millisecond)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
+
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	require.NotNil(t, active)
+	assert.Equal(t, "ch_new", active.channelID)
+	assert.Equal(t, "PAIR-NEW", active.pairingCode)
+	assert.Equal(t, 1, oldChannel.closeCount)
+	assert.Equal(t, 0, newChannel.closeCount)
 }
 
 func TestHandleStartPairingSession_StaleExpiredCleanupDoesNotOverwriteReplacementDisplay(t *testing.T) {

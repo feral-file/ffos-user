@@ -233,6 +233,46 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	assert.Equal(t, 1, mintSvc.startCalls)
 }
 
+func TestCommandHandler_Process_CloseMintPairingSessionDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
+		Arguments: map[string]interface{}{},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "disabled", errObj["code"])
+}
+
+func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("closeMintPairingSession"), commands.CMD_CLOSE_MINT_PAIRING_SESSION)
+
+	args := map[string]any{"source": "controller"}
+	want := map[string]any{"ok": true, "status": "closed"}
+	mintSvc := &fakeMintPairingService{closeResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, mintSvc.closeArgs)
+	assert.Equal(t, 1, mintSvc.closeCalls)
+}
+
 func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -292,10 +332,13 @@ func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) 
 
 type fakeMintPairingService struct {
 	startCalls     int
+	closeCalls     int
 	approvalCalls  int
 	startArgs      map[string]any
+	closeArgs      map[string]any
 	approvalArgs   map[string]any
 	startResult    any
+	closeResult    any
 	approvalResult any
 }
 
@@ -307,6 +350,12 @@ func (f *fakeMintPairingService) HandleStartPairingSession(_ context.Context, ar
 	f.startCalls++
 	f.startArgs = args
 	return f.startResult, nil
+}
+
+func (f *fakeMintPairingService) HandleClosePairingSession(_ context.Context, args map[string]any) (any, error) {
+	f.closeCalls++
+	f.closeArgs = args
+	return f.closeResult, nil
 }
 
 func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args map[string]any) (any, error) {

@@ -84,6 +84,7 @@ const (
 	CMD_WAKE_NOW                   Type = "wakeNow"
 	CMD_SET_SLEEP_MODE             Type = "setSleepMode"
 	CMD_START_MINT_PAIRING_SESSION Type = "startMintPairingSession"
+	CMD_CLOSE_MINT_PAIRING_SESSION Type = "closeMintPairingSession"
 	CMD_MINT_PAIRING_APPROVAL      Type = "mintPairingApprovalDecision"
 	// CMD_DDC_PANEL_CONTROL drives the attached panel over DDC via ddcutil (brightness, contrast,
 	// speaker volume, mute, and power). One JSON command type; request body selects the operation.
