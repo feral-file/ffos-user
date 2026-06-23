@@ -363,7 +363,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 			}, nil
 		}
 		if err := s.showPairingCode(ctx, active); err != nil {
-			s.logger.Warn("Failed to redisplay active mint pairing code", zap.Error(err), zap.String("channelID", active.channelID))
+			s.logger.Warn("Failed to redisplay active mint pairing code", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
 			return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 		}
 		return startPairingResponse{
@@ -384,6 +384,12 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 
 	displayCtx, cancelDisplay := context.WithTimeout(ctx, wrapper.HTTPClientTimeout)
 	defer cancelDisplay()
+	s.logger.Info(
+		"Starting mint pairing broker channel",
+		zap.String("brokerBaseURL", s.opts.BrokerBaseURL),
+		zap.Duration("idleTTL", s.opts.IdleTTL),
+		zap.Bool("shortCodeRequested", true),
+	)
 	channel, err := s.broker.StartChannel(displayCtx, minter.StartChannelOptions{
 		BrokerBaseURL:      s.opts.BrokerBaseURL,
 		IdleTTL:            s.opts.IdleTTL,
@@ -397,6 +403,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	display := channel.PairingDisplay()
 	pairingCode := strings.TrimSpace(display.ShortCode)
 	if pairingCode == "" {
+		s.logger.Warn("Mint pairing broker response missing pairing code", zap.String("channelID", display.ChannelID), zap.Time("expiresAt", display.ExpiresAt))
 		s.closeChannel(channel)
 		return commandError("broker_response_invalid", "broker did not return a pairing code", true), nil
 	}
@@ -414,13 +421,15 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		cancel:      sessionCancel,
 		done:        make(chan struct{}),
 	}
+	s.logger.Info("Mint pairing broker channel started", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
 	if err := s.showPairingCode(ctx, active); err != nil {
 		sessionCancel()
 		s.closeChannel(channel)
-		s.logger.Warn("Failed to display mint pairing QR code", zap.Error(err), zap.String("channelID", active.channelID))
+		s.logger.Warn("Failed to display mint pairing QR code; closed broker channel", append(pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt), zap.Error(err))...)
 		return commandError("display_unavailable", "failed to display mint pairing QR code", true), nil
 	}
+	s.logger.Info("Displayed mint pairing code", pairingDisplayLogFields(active.channelID, active.pairingCode, active.expiresAt)...)
 
 	s.mu.Lock()
 	s.active = active
@@ -1024,6 +1033,29 @@ func commandError(code string, message string, retryable bool) map[string]any {
 			"retryable": retryable,
 		},
 	}
+}
+
+func pairingDisplayLogFields(channelID string, pairingCode string, expiresAt time.Time) []zap.Field {
+	fields := []zap.Field{
+		zap.String("channelID", channelID),
+		zap.String("pairingCodeEdge", logEdge(pairingCode)),
+		zap.Int("pairingCodeLength", len(strings.TrimSpace(pairingCode))),
+	}
+	if !expiresAt.IsZero() {
+		fields = append(fields, zap.Time("expiresAt", expiresAt))
+	}
+	return fields
+}
+
+func logEdge(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 3 {
+		return value
+	}
+	return value[:3] + "..." + value[len(value)-3:]
 }
 
 func sameDecision(a approvalDecisionRequest, b approvalDecisionRequest) bool {
