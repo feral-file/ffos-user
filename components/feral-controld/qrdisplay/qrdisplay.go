@@ -102,6 +102,9 @@ func normalizeEvaluationResult(result any) (map[string]any, error) {
 	if _, hasOK := resultMap["ok"]; hasOK {
 		return resultMap, nil
 	}
+	if message, ok := resultMap["message"]; ok {
+		return normalizeEvaluationResult(message)
+	}
 	if value, ok := resultMap["value"]; ok {
 		if raw, ok := value.(string); ok {
 			var decoded map[string]any

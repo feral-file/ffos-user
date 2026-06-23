@@ -426,7 +426,9 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	s.active = active
 	s.mu.Unlock()
 
-	go s.waitForBrowserAndApproval(sessionCtx, active, topicID)
+	// The broker approval session must outlive the initiating RPC. sessionCtx is
+	// still bounded by service shutdown and the broker pairing expiry.
+	go s.waitForBrowserAndApproval(sessionCtx, active, topicID) //nolint:gosec
 
 	return startPairingResponse{
 		OK:          true,

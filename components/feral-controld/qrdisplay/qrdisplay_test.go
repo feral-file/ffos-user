@@ -66,6 +66,16 @@ func TestShowPairingCode_RequiresApplicationOK(t *testing.T) {
 	assert.Contains(t, err.Error(), "rejected request")
 }
 
+func TestShowPairingCode_AcceptsMessageWrappedApplicationOK(t *testing.T) {
+	result := map[string]any{
+		"message": map[string]any{"ok": true},
+	}
+
+	err := ShowPairingCode(context.Background(), &fakeCDP{result: result}, "PAIR-123")
+
+	require.NoError(t, err)
+}
+
 func TestMintPairingDisplayCommands_EmitPlayerContractStates(t *testing.T) {
 	tests := []struct {
 		name      string
