@@ -4,7 +4,14 @@
   },
   "relayer": {
     "endpoint": "wss://example.com/ws",
-    "apiKey": 5
+    "apiKey": "YOUR_RELAYER_API_KEY"
+  },
+  "mintPairing": {
+    "enabled": false,
+    "brokerBaseURL": "https://mint-pairing.example.com",
+    "idleTTLSeconds": 300,
+    "pollIntervalMillis": 500,
+    "approvalTimeoutSeconds": 300
   },
   "sentry": {
     "dsn": "https://YOUR_SENTRY_DSN@o0.ingest.sentry.io/0",
@@ -18,4 +25,4 @@
     "disabled": false,
     "maxConcurrent": 0
   }
-} 
+}

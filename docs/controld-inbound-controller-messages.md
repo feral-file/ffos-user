@@ -1,13 +1,15 @@
 # feral-controld Inbound Controller Messages
 
 This document describes inbound messages from `ff-controller` clients to
-`feral-controld`, their current payloads, current response behavior, and the new
-mint-pairing approval messages planned for ephemeral browser-session minting.
+`feral-controld`, their current payloads, current response behavior, and
+mint-pairing messages for ephemeral browser-session minting.
 
 `ff-controller` clients can reach `feral-controld` through the remote
 `ff-relayer` WebSocket. Local hub clients use the same command envelope over
 `POST /api/cast` on port `1111`, but this document focuses on the
-controller-to-controld contract.
+controller-to-controld contract. When enabled, the local hub is a
+trusted-local-network control surface and routes through the same
+`commandrouter` as relayer commands, including mint-pairing commands.
 
 ## Current Message Envelope
 
@@ -54,6 +56,8 @@ for relayer topic assignment:
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
   through CDP as `window.handleCDPRequest(...)`.
+- `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
+  `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
 - Any other non-device command is forwarded to Chromium through CDP.
@@ -977,9 +981,9 @@ Current behavior: forwarded to Chromium/CDP unless the command is added to the
 device-control map. If Chromium rejects or CDP fails, command failure is logged
 without a standardized relayer error response.
 
-## Planned Mint-Pairing Inbound Messages
+## Mint-Pairing Inbound Messages
 
-The mint-pairing flow adds a new approval decision message from
+The mint-pairing flow adds an approval decision message from
 `ff-controller` to `feral-controld`. The surrounding flow is:
 
 1. Browser requester sends encrypted `mint_request` to `feral-controld` through
@@ -998,6 +1002,113 @@ The mint-pairing flow adds a new approval decision message from
 `ff-controller` must not receive raw browser session tokens or DP1 playlist
 content.
 
+Implementation note: `feral-controld` embeds the temporary Go minter client from
+`ff-art-computer-handoff` for Mint Pairing Broker channels, encrypted browser
+requests, and encrypted browser results. Relayer approval dispatch and
+`POST /api/ephemeral-sessions?topicID=...` session creation are owned by
+`feral-controld`; the minter library does not know relayer API keys, approval
+transport, or token minting policy. Runtime support is opt-in through
+`mintPairing.enabled` in `feral-controld` config and starts only after a
+controller sends `startMintPairingSession`.
+
+### startMintPairingSession
+
+Purpose: create one Mint Pairing Broker channel, display the broker pairing
+code on the Art Computer QR screen, and wait for the browser requester to
+connect through the broker.
+
+Example:
+
+```json
+{
+  "messageID": "msg-start-mint-pairing-1",
+  "message": {
+    "command": "startMintPairingSession",
+    "request": {}
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-start-mint-pairing-1",
+  "message": {
+    "ok": true,
+    "status": "started",
+    "channelID": "ch_pQ9Yab...",
+    "pairingCode": "PAIR-123",
+    "expiresAt": "2026-06-16T03:05:00Z"
+  }
+}
+```
+
+If a non-expired pairing session is already active and still waiting for a
+browser request, `status` is `already_started` and `feral-controld` re-displays
+the same pairing code. If a browser request is already pending controller
+approval, `status` is `pending_approval`; `feral-controld` re-displays the
+request-received overlay instead of showing the QR/code again.
+
+Error response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-start-mint-pairing-1",
+  "message": {
+    "ok": false,
+    "error": {
+      "code": "topic_not_ready",
+      "message": "relayer topic is not ready",
+      "retryable": true
+    }
+  }
+}
+```
+
+Error cases:
+
+- `disabled`: `mintPairing.enabled` is false.
+- `invalid_config`: broker base URL is missing, or mint pairing is enabled
+  without a valid player contract manifest.
+- `topic_not_ready`: device has no current relayer topic ID.
+- `broker_unavailable`: broker channel creation failed before a pairing code
+  was available.
+- `broker_response_invalid`: broker did not return a pairing code.
+- `display_unavailable`: Chromium/CDP did not accept the player overlay
+  display command.
+
+On success, `feral-controld` sends CDP command `mintPairingDisplay` to the
+bundled player with `state: "pairing_code"` and `pairingCode`. The player
+renders a QR overlay above active artwork playback and shows the same code in
+large text for long-distance readability. When a browser sends a mint request,
+`feral-controld` updates the overlay to `state: "request_received"` with the
+browser name. After an approve decision, it updates the overlay to
+`state: "creating_token"` before creating and returning the ephemeral token.
+The deployed player must accept `mintPairingDisplay` requests with states
+`pairing_code`, `request_received`, `creating_token`, and `hidden`, and must
+return an application response equivalent to `{"ok": true}` through
+`Runtime.evaluate` when it accepts the display update. When
+`mintPairing.enabled` is true, `feral-controld` validates
+`/opt/feral/feral-player/ffos-player-contract.json` before creating a broker
+channel or sending the first display command. Deployments that enable mint
+pairing should also set `FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1` for
+`feral-player.service`; in that mode the player service validates the same
+manifest before reporting readiness. Legacy/default player boot does not require
+the manifest so older static bundles can still start when mint pairing is
+disabled.
+
+When the mint-pairing attempt reaches a terminal state, `feral-controld`
+hides the overlay with `state: "hidden"` so normal artwork playback remains on
+the same player page. This hide is attempted after success, controller
+rejection, approval expiry, controller/service cancellation, and terminal
+failure. During process shutdown, terminal broker/relayer delivery and display
+cleanup are bounded so mint-pairing cleanup fits within `feral-controld`'s
+two-second forced-exit guard; if a terminal delivery exceeds that budget, it is
+logged and treated as best-effort.
+
 ### Outbound Approval Request
 
 This is included for context because it creates the pending inbound decision.
@@ -1006,8 +1117,10 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 
 ```json
 {
-  "type": "mint_pairing_approval_request",
+  "type": "notification",
+  "notification_type": "mint_pairing_approval_request",
   "messageID": "mpa_01JZ6Y9M7S0H9G9ER4T52Q70W8",
+  "persist_record_count": 10,
   "message": {
     "v": 1,
     "topicID": "topic_ff1_abc123",
@@ -1021,6 +1134,7 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
       "label": "Living room laptop"
     },
     "requestedExpiresInSeconds": 86400,
+    "effectiveExpiresInSeconds": 86400,
     "requestedAt": "2026-06-16T03:00:00Z",
     "expiresAt": "2026-06-16T03:05:00Z",
     "challenge": {
@@ -1031,6 +1145,13 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
   }
 }
 ```
+
+`requestedExpiresInSeconds` is the browser-supplied session lifetime request.
+`effectiveExpiresInSeconds` is the actual session lifetime `feral-controld`
+will request from `ff-relayer` if the controller approves. `feral-controld`
+owns this policy: omitted or non-positive requests default to 3600 seconds,
+requests below 90 seconds are raised to 90 seconds, and requests above 86400
+seconds are capped at 86400 seconds.
 
 ### mintPairingApprovalDecision
 
@@ -1098,7 +1219,7 @@ Optional fields:
 - `decidedAt`
 - `controller`
 
-Planned success response:
+Success response:
 
 ```json
 {
@@ -1112,7 +1233,7 @@ Planned success response:
 }
 ```
 
-Planned duplicate success response for a replay of the same accepted decision:
+Duplicate success response for a replay of the same accepted decision:
 
 ```json
 {
@@ -1126,7 +1247,7 @@ Planned duplicate success response for a replay of the same accepted decision:
 }
 ```
 
-Planned error response:
+Error response:
 
 ```json
 {
@@ -1144,7 +1265,7 @@ Planned error response:
 }
 ```
 
-Planned error cases:
+Error cases:
 
 | Case | Detection | controld response to controller | Browser result |
 |---|---|---|---|
@@ -1156,6 +1277,7 @@ Planned error cases:
 | Duplicate same decision | Same accepted decision delivered again | `ok: true`, `status: "already_accepted"` | No duplicate minting |
 | Conflicting duplicate decision | Different terminal decision after one was accepted | `ok: false`, `already_decided`, `retryable: false` | No change |
 | Controller rejects | Valid `decision: "reject"` | `ok: true`, `status: "accepted"` | Encrypted `mint_rejected` with controller reason or `rejected_by_user` |
+| Topic changes after approval | Current device topic no longer matches the approval request topic before relayer session creation or browser delivery | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `topic_changed` |
 | Session creation fails after approval | `ff-relayer` ephemeral-session creation fails | Optional outcome `failed`; ACK remains accepted | Encrypted `mint_rejected` with `session_create_failed` |
 | Broker response send fails | Encrypted browser response cannot be delivered | Optional outcome `failed`; ACK remains accepted | Browser times out or observes broker terminal state |
 
@@ -1179,8 +1301,10 @@ Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`.
 
 ```json
 {
-  "type": "mint_pairing_approval_outcome",
+  "type": "notification",
+  "notification_type": "mint_pairing_approval_outcome",
   "messageID": "mpa_01JZ6Y9M7S0H9G9ER4T52Q70W8",
+  "persist_record_count": 10,
   "message": {
     "v": 1,
     "approvalRequestID": "mpa_01JZ6Y9M7S0H9G9ER4T52Q70W8",

@@ -7,15 +7,19 @@ on:
       - 'components/feral-controld/**/*.go'
       - '.golangci.yml'
       - 'Makefile'
+      - 'components/Makefile'
       - 'components/feral-controld/go.mod'
       - 'components/feral-controld/go.sum'
+      - 'components/feral-controld/config.example.json'
   pull_request:
     paths:
       - 'components/feral-controld/**/*.go'
       - '.golangci.yml'
       - 'Makefile'
+      - 'components/Makefile'
       - 'components/feral-controld/go.mod'
       - 'components/feral-controld/go.sum'
+      - 'components/feral-controld/config.example.json'
 
 permissions:
   contents: read
@@ -35,7 +39,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23.5'
+          go-version: '1.26.0'
           cache: true
           cache-dependency-path: components/feral-controld/go.sum
 

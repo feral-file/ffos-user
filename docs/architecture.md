@@ -91,7 +91,8 @@ Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0
 The boundary between launcher/UI code and daemon logic:
 
 - **Daemons own all state, policy, and side effects.** Daemons decide what page to show, when to update, and what to do on errors.
-- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` or from the bundled local player at `http://127.0.0.1:8080/`. Daemons navigate by calling CDP, not by modifying files on disk at runtime.
+- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` or from the bundled local player at `http://127.0.0.1:8080/`. Daemons navigate or execute JavaScript by calling CDP, not by modifying files on disk at runtime.
+- **Mint pairing display belongs to the player UI.** `feral-controld` owns broker/session state and drives the bundled player through the `mintPairingDisplay` CDP command. The player renders a transient overlay above active artwork playback; `ffos-user` does not ship a separate mint-pairing QR page.
 - **`launcher-ui` is a one-shot process starter.** It constructs a URL from command-line arguments (key=value pairs), launches Chromium with `cage` as the Wayland compositor, and waits. It contains no business logic and no daemon lifecycle. Arguments come from the systemd unit; they do not change at runtime.
 - **UI does not call daemons directly** except through the Hub WebSocket (when local control UI in Chromium sends commands to controld on port 1111). All other control flows originate in daemons and push into Chromium via CDP.
 - **`player-wrapper-ui`** follows the same pattern: thin process wrapper, no policy.

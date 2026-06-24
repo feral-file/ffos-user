@@ -84,9 +84,11 @@ type Message struct {
 }
 
 type Response struct {
-	Type      string `json:"type"`
-	MessageID string `json:"messageID"`
-	Message   any    `json:"message"`
+	Type               string `json:"type"`
+	MessageID          string `json:"messageID,omitempty"`
+	NotificationType   string `json:"notification_type,omitempty"`
+	PersistRecordCount int    `json:"persist_record_count,omitempty"`
+	Message            any    `json:"message"`
 }
 
 type Payload struct {
@@ -126,9 +128,11 @@ func (e BusyError) Error() string {
 type NotificationType string
 
 const (
-	NOTIFICATION_TYPE_PLAYER_STATUS NotificationType = "player_status"
-	NOTIFICATION_TYPE_DEVICE_STATUS NotificationType = "device_status"
-	NOTIFICATION_TYPE_DDC_STATUS    NotificationType = "ddc_status"
+	NOTIFICATION_TYPE_PLAYER_STATUS                 NotificationType = "player_status"
+	NOTIFICATION_TYPE_DEVICE_STATUS                 NotificationType = "device_status"
+	NOTIFICATION_TYPE_DDC_STATUS                    NotificationType = "ddc_status"
+	NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_REQUEST NotificationType = "mint_pairing_approval_request"
+	NOTIFICATION_TYPE_MINT_PAIRING_APPROVAL_OUTCOME NotificationType = "mint_pairing_approval_outcome"
 )
 
 //go:generate mockgen -source=relayer.go -destination=../mocks/relayer.go -package=mocks -mock_names=Relayer=MockRelayer

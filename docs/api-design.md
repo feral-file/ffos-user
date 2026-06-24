@@ -110,6 +110,13 @@ All messages are JSON. The message envelope is:
 
 **Command routing logic (inside controld):**
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
+- If `command == "startMintPairingSession"` → handle inside `feral-controld`
+  as a commandrouter pre-CDP special case that creates or reuses the Mint
+  Pairing Broker session and drives the player overlay through
+  `mintPairingDisplay`.
+- If `command == "mintPairingApprovalDecision"` → handle inside
+  `feral-controld` as a commandrouter pre-CDP special case that validates and
+  completes a pending browser-session approval request.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
 **Device-control relayer commands**
@@ -138,14 +145,20 @@ Successful `setSleepSchedule`, `sleepNow`, and `wakeNow` responses include `{"ok
 
 The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional `supportBundleID` or `support_bundle_id`. Without a bundle id, `feral-controld` emits the original `upload_logs(user_id, api_key, title)` signal. With a bundle id, it emits additive `upload_logs_with_bundle(payload []byte)` where `payload` is JSON containing `user_id`, `api_key`, `title`, and `support_bundle_id`, so the old D-Bus signal payload shape stays unchanged and the new bundled upload payload can grow additively.
 
-**Relayer outbound notifications (`feral-controld`):** The device periodically pushes JSON notifications over the relayer WebSocket (and local hub clients) with an envelope that includes `notification_type` and a structured `message`. At minimum:
+The `startMintPairingSession` command is a controller-to-controld request to create one Mint Pairing Broker channel and display its pairing code through the player overlay via CDP command `mintPairingDisplay`. The command returns explicit `RPC` payloads with `ok`, `status`, `channelID`, `pairingCode`, and `expiresAt` on success; failures return `ok: false` with `error.code`. If a non-expired session is already active, it returns `already_started` and re-displays the same code. The broker short code is intentionally visible; raw browser session tokens are not. Any terminal pairing state hides the overlay so the bundled local player continues normal artwork playback. Shutdown cleanup is bounded within `feral-controld`'s process-level forced-exit window, so late terminal delivery is explicitly best-effort once that internal budget is exhausted.
+
+The `mintPairingApprovalDecision` command is a controller-to-controld approval response for browser-session mint pairing. It is handled inside `feral-controld`, not forwarded to Chromium. Success and validation failures both return explicit `RPC` payloads with `ok`, `status` or `error.code`, and `approvalRequestID` where available. Raw browser session tokens and DP1 playlist content must never appear in this command or in `mint_pairing_approval_request` / `mint_pairing_approval_outcome` relayer messages.
+
+**Outbound notifications (`feral-controld`):** The device periodically pushes status notifications over the relayer WebSocket and local hub clients with an envelope that includes `notification_type` and a structured `message`. Mint-pairing approval notifications are relayer-only because the controller/mobile approval UI is reached through the relayer topic, not through the trusted-local hub socket. At minimum:
 
 - `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts.
 - `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, best-effort `displayURL`, and optional `sleepSchedule`). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead. When present, `sleepSchedule` follows the same **sleep vs. DDC** eventual-consistency rules as the `setSleepSchedule` / `sleepNow` / `wakeNow` contract above.
+- `mint_pairing_approval_request` — browser-session mint request details sent to controller/mobile approval UI, including browser information and the E2EE challenge.
+- `mint_pairing_approval_outcome` — terminal mint-pairing result used to clear controller/mobile approval UI.
 
 ### Hub WebSocket protocol (port 1111)
 
-The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands.
+The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands, including pre-CDP mint-pairing commands. Because the hub binds to `0.0.0.0:1111` when enabled, it is a trusted-local-network control surface: deployments must only enable it on networks where local clients are trusted, or add an explicit command-level guard before exposing privileged commands differently from the relayer path.
 
 ### BLE GATT protocol (feral-setupd)
 

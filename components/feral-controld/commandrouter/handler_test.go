@@ -44,7 +44,7 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -175,6 +175,126 @@ func TestCommandHandler_Process_ControldCommand_Error(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+func TestCommandHandler_Process_MintPairingApprovalDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
+		Arguments: map[string]interface{}{},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "not_found", errObj["code"])
+}
+
+func TestCommandHandler_Process_StartMintPairingSessionDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
+		Arguments: map[string]interface{}{},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "disabled", errObj["code"])
+}
+
+func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("startMintPairingSession"), commands.CMD_START_MINT_PAIRING_SESSION)
+
+	args := map[string]any{"source": "controller"}
+	want := map[string]any{"ok": true, "status": "started"}
+	mintSvc := &fakeMintPairingService{startResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, mintSvc.startArgs)
+	assert.Equal(t, 1, mintSvc.startCalls)
+}
+
+func TestCommandHandler_Process_CloseMintPairingSessionDisabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
+		Arguments: map[string]interface{}{},
+	})
+
+	assert.NoError(t, err)
+	resp, ok := result.(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, false, resp["ok"])
+	errObj, ok := resp["error"].(map[string]any)
+	assert.True(t, ok)
+	assert.Equal(t, "disabled", errObj["code"])
+}
+
+func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("closeMintPairingSession"), commands.CMD_CLOSE_MINT_PAIRING_SESSION)
+
+	args := map[string]any{"source": "controller"}
+	want := map[string]any{"ok": true, "status": "closed"}
+	mintSvc := &fakeMintPairingService{closeResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, mintSvc.closeArgs)
+	assert.Equal(t, 1, mintSvc.closeCalls)
+}
+
+func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("mintPairingApprovalDecision"), commands.CMD_MINT_PAIRING_APPROVAL)
+
+	args := map[string]any{"approvalRequestID": "mpa_1", "decision": "approve"}
+	want := map[string]any{"ok": true, "status": "accepted"}
+	mintSvc := &fakeMintPairingService{approvalResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, mintSvc.approvalArgs)
+	assert.Equal(t, 1, mintSvc.approvalCalls)
+}
+
 func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -208,6 +328,40 @@ func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) 
 			assert.Equal(t, devicectl.CmdOK, result)
 		})
 	}
+}
+
+type fakeMintPairingService struct {
+	startCalls     int
+	closeCalls     int
+	approvalCalls  int
+	startArgs      map[string]any
+	closeArgs      map[string]any
+	approvalArgs   map[string]any
+	startResult    any
+	closeResult    any
+	approvalResult any
+}
+
+func (f *fakeMintPairingService) Start(context.Context) {}
+
+func (f *fakeMintPairingService) Stop() {}
+
+func (f *fakeMintPairingService) HandleStartPairingSession(_ context.Context, args map[string]any) (any, error) {
+	f.startCalls++
+	f.startArgs = args
+	return f.startResult, nil
+}
+
+func (f *fakeMintPairingService) HandleClosePairingSession(_ context.Context, args map[string]any) (any, error) {
+	f.closeCalls++
+	f.closeArgs = args
+	return f.closeResult, nil
+}
+
+func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args map[string]any) (any, error) {
+	f.approvalCalls++
+	f.approvalArgs = args
+	return f.approvalResult, nil
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
