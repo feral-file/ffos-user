@@ -437,14 +437,28 @@ func initializeApp(
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
 
-	// Command handler
-	cmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, json, logger)
+	// Command handler. The raw handler serves internal daemon lifecycle flows
+	// (e.g. OOM recovery) directly; external ingress (relayer + LAN hub) is
+	// wrapped with command-storm protection so both paths share one set of
+	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
+	// must never be shed by external client traffic, so it bypasses the gate.
+	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, json, logger)
+	gateCfg := commandrouter.DefaultGateConfig()
+	if cs := config.Get().CommandStorm; cs != nil {
+		if cs.Disabled {
+			gateCfg.Enabled = false
+		}
+		if cs.MaxConcurrent > 0 {
+			gateCfg.MaxConcurrent = cs.MaxConcurrent
+		}
+	}
+	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
 
-	// OOM Recoverer
-	oomRecoverer := oomrecovery.New(poller, cmdHandler, logger)
+	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
+	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)
 
 	// Mediator
 	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)

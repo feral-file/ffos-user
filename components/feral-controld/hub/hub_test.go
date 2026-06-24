@@ -3,9 +3,11 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -667,4 +670,93 @@ func TestRespondJSON_Success(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+}
+
+// countingHandler is a real inner Handler that counts how many commands reach
+// it, used to prove the storm gate sheds excess before they hit the device.
+type countingHandler struct {
+	calls atomic.Int64
+}
+
+func (c *countingHandler) Process(_ context.Context, _ commands.Command) (interface{}, error) {
+	c.calls.Add(1)
+	return nil, nil
+}
+
+// TestHandleCast_RejectsWhenAtCapacity verifies the LAN hub bounds concurrent
+// casts: once the in-flight budget is exhausted, further casts are rejected
+// with 429 before decoding or reaching the command handler, so a storm cannot
+// pile up unbounded HTTP goroutines (feral-file/ffos-user#208).
+func TestHandleCast_RejectsWhenAtCapacity(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	hubImpl := ts.hub.(*hub)
+
+	// Saturate the in-flight cast budget; nothing releases these in the test.
+	for i := 0; i < MAX_INFLIGHT_CASTS; i++ {
+		hubImpl.castSlots <- struct{}{}
+	}
+
+	req := httptest.NewRequest(
+		"POST",
+		"/api/cast",
+		strings.NewReader(`{"command":"displayPlaylist"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// No mockCmd.Process / mockJSON.NewDecoder expectations: the capacity check
+	// runs before either, so a satisfied gomock controller asserts they are
+	// never reached.
+	hubImpl.handleCast(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
+// TestHandleCast_StormProtection drives a burst of cast requests through the LAN
+// hub ingress wrapped with a real command-storm gate. Beyond the configured
+// burst the hub must answer 429 and the inner handler must never see the
+// excess (feral-file/ffos-user#208).
+func TestHandleCast_StormProtection(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	stub := &countingHandler{}
+	gateCfg := commandrouter.GateConfig{
+		Enabled:       true,
+		MaxConcurrent: 16,
+		// Unlisted command type falls to Default: a tight burst of 2.
+		Default: commandrouter.Policy{Rate: 1, Burst: 2, Weight: 1},
+	}
+	gated := commandrouter.NewGate(stub, gateCfg, logger)
+
+	h := New(ctx, mockWS, gated, mockServer, wrapper.NewJSON(), logger).(*hub)
+
+	const total = 5
+	var accepted, limited int
+	for i := 0; i < total; i++ {
+		body := fmt.Sprintf(`{"command":"stormtest","request":{"i":%d}}`, i)
+		req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		h.handleCast(w, req)
+
+		if w.Code == http.StatusTooManyRequests {
+			limited++
+		} else {
+			accepted++
+		}
+	}
+
+	assert.Equal(t, 2, accepted, "only the burst of 2 is accepted")
+	assert.Equal(t, total-2, limited, "the rest are rejected with 429")
+	assert.Equal(t, int64(2), stub.calls.Load(), "shed commands never reach the inner handler")
 }

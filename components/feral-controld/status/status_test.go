@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 )
@@ -73,6 +74,31 @@ func (f *fakeWS) SendAll(payload any) error {
 }
 
 func (f *fakeWS) Close() {}
+
+type fakeCDP struct {
+	pageNavigationURL      string
+	pageNavigationURLError error
+	noLogSendCalls         int
+	noLogSendResult        any
+	noLogSendErr           error
+}
+
+func (f *fakeCDP) Init(context.Context) error { return nil }
+
+func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
+
+func (f *fakeCDP) NoLogSend(string, map[string]interface{}) (interface{}, error) {
+	f.noLogSendCalls++
+	return f.noLogSendResult, f.noLogSendErr
+}
+
+func (f *fakeCDP) PageNavigationURL(context.Context) (string, error) {
+	return f.pageNavigationURL, f.pageNavigationURLError
+}
+
+func (f *fakeCDP) Close() {}
+
+func (f *fakeCDP) Initialized() bool { return true }
 
 type fakeDeviceStatus struct {
 	status *DeviceStatusResponse
@@ -182,6 +208,106 @@ func TestPollDeviceStatus_SendsDeviceStatus(t *testing.T) {
 	}
 	if message.ScreenRotation != "landscape" {
 		t.Fatalf("expected screenRotation to be preserved, got %+v", message.ScreenRotation)
+	}
+}
+
+func TestPollPlayerStatus_SkipsWhenNotOnPlayerPage(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: "file:///opt/feral/ui/launcher/index.html?step=qr",
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockWS.sendAllCalls != 0 {
+		t.Fatalf("expected no websocket send while launcher is shown, got %d", mockWS.sendAllCalls)
+	}
+	if mockRelayer.sendCalls != 0 {
+		t.Fatalf("expected no relayer send while launcher is shown, got %d", mockRelayer.sendCalls)
+	}
+}
+
+func TestPollPlayerStatus_SkipsWhenNotOnPlayerPageAdvancesPlaybackMetrics(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: "file:///opt/feral/ui/launcher/index.html?step=qr",
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                       mockCDP,
+		relayer:                   mockRelayer,
+		ws:                        mockWS,
+		logger:                    zap.NewNop(),
+		lastPlaybackSampleAt:      time.Now().Add(-2 * time.Second),
+		lastIsPlaying:             true,
+		playbackSampleInitialized: true,
+		lastRelayerStatusHashes:   make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:        make(map[relayer.NotificationType]string),
+	}
+
+	before := counterValue(artPlaybackDurationSecondsTotal)
+	p.pollPlayerStatus(context.Background())
+	after := counterValue(artPlaybackDurationSecondsTotal)
+
+	if after <= before {
+		t.Fatalf("expected playback duration counter to advance when skipping launcher page, before=%v after=%v", before, after)
+	}
+}
+
+func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURLError: errors.New("target unavailable"),
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockCDP.noLogSendCalls != 1 {
+		t.Fatalf("expected checkStatus to run when page URL cannot be read, got %d calls", mockCDP.noLogSendCalls)
+	}
+}
+
+func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockCDP.noLogSendCalls != 1 {
+		t.Fatalf("expected one checkStatus call on the player page, got %d", mockCDP.noLogSendCalls)
 	}
 }
 

@@ -1,0 +1,194 @@
+package metric
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestParseAMDMaxSclkMHz(t *testing.T) {
+	t.Parallel()
+
+	const sample = `0: 200Mhz
+1: 700Mhz
+2: 2200Mhz *
+`
+
+	maxMHz, err := parseAMDMaxSclkMHz(sample)
+	if err != nil {
+		t.Fatalf("parseAMDMaxSclkMHz() error = %v", err)
+	}
+	if maxMHz != 2200 {
+		t.Fatalf("parseAMDMaxSclkMHz() = %v, want 2200", maxMHz)
+	}
+}
+
+func TestMaxEngineBusyPercent(t *testing.T) {
+	t.Parallel()
+
+	busy, ok := maxEngineBusyPercent(map[string]struct {
+		Busy float64 `json:"busy"`
+	}{
+		"Render/3D": {Busy: 12.5},
+		"Video":     {Busy: 3.0},
+	})
+	if !ok || busy != 12.5 {
+		t.Fatalf("maxEngineBusyPercent() = (%v, %v), want (12.5, true)", busy, ok)
+	}
+}
+
+func TestResolveGPUBusy(t *testing.T) {
+	t.Parallel()
+
+	busy, err := resolveGPUBusy(12.5, true, "")
+	if err != nil || busy != 12.5 {
+		t.Fatalf("engine busy prefer = (%v, %v), want (12.5, nil)", busy, err)
+	}
+
+	busy, err = resolveGPUBusy(0, false, "")
+	if !errors.Is(err, errBestEffortMetricUnavailable) || busy != 0 {
+		t.Fatalf("missing device path = (%v, %v), want (0, unavailable)", busy, err)
+	}
+}
+
+func TestMaxEngineBusyPercent_PreservesZero(t *testing.T) {
+	t.Parallel()
+
+	busy, ok := maxEngineBusyPercent(map[string]struct {
+		Busy float64 `json:"busy"`
+	}{
+		"Render/3D": {Busy: 0},
+		"Video":     {Busy: 0},
+	})
+	if !ok {
+		t.Fatal("expected busy data to be marked present")
+	}
+	if busy != 0 {
+		t.Fatalf("maxEngineBusyPercent() = %v, want 0", busy)
+	}
+}
+
+func TestPickGPUDevicePathPrefersBootVGA(t *testing.T) {
+	t.Parallel()
+
+	path, ok := pickGPUDevicePath([]gpuDeviceCandidate{
+		{devicePath: "/sys/class/drm/card1/device", bootVGA: false},
+		{devicePath: "/sys/class/drm/card0/device", bootVGA: true},
+	})
+	if !ok {
+		t.Fatal("expected a GPU device path to be selected")
+	}
+	if path != "/sys/class/drm/card0/device" {
+		t.Fatalf("pickGPUDevicePath() = %q, want boot VGA adapter", path)
+	}
+}
+
+func TestPickGPUDevicePathFallsBackToFirstCandidate(t *testing.T) {
+	t.Parallel()
+
+	path, ok := pickGPUDevicePath([]gpuDeviceCandidate{
+		{devicePath: "/sys/class/drm/card2/device"},
+		{devicePath: "/sys/class/drm/card3/device"},
+	})
+	if !ok {
+		t.Fatal("expected a GPU device path to be selected")
+	}
+	if path != "/sys/class/drm/card2/device" {
+		t.Fatalf("pickGPUDevicePath() = %q, want first candidate", path)
+	}
+}
+
+func TestDiscoverGPUDevicePathAcceptsCardLevelIntelMaxFrequency(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cardPath := filepath.Join(root, "card0")
+	devicePath := filepath.Join(cardPath, "device")
+
+	if err := os.MkdirAll(devicePath, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cardPath, "gt_max_freq_mhz"), []byte("2200\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	path, err := discoverGPUDevicePathFrom(root)
+	if err != nil {
+		t.Fatalf("discoverGPUDevicePathFrom() error = %v", err)
+	}
+	if path != devicePath {
+		t.Fatalf("discoverGPUDevicePathFrom() = %q, want %q", path, devicePath)
+	}
+}
+
+func TestShouldSuppressIntelGPUUpdate(t *testing.T) {
+	t.Parallel()
+
+	if err := shouldSuppressIntelGPUUpdate("/sys/class/drm/card0/device", nil); err != nil {
+		t.Fatalf("shouldSuppressIntelGPUUpdate() = %v, want nil when device path exists", err)
+	}
+
+	if err := shouldSuppressIntelGPUUpdate("", nil); err != nil {
+		t.Fatalf("shouldSuppressIntelGPUUpdate() = %v, want nil when busy metric already succeeded", err)
+	}
+
+	if err := shouldSuppressIntelGPUUpdate("", errBestEffortMetricUnavailable); !errors.Is(err, errBestEffortMetricUnavailable) {
+		t.Fatalf("shouldSuppressIntelGPUUpdate() = %v, want unavailable", err)
+	}
+}
+
+func TestReadFirstExistingSysfsFloatPrefersDevicePath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cardPath := filepath.Join(root, "card0")
+	devicePath := filepath.Join(cardPath, "device")
+
+	if err := os.MkdirAll(devicePath, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(devicePath, "gt_max_freq_mhz"), []byte("2100\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cardPath, "gt_max_freq_mhz"), []byte("2200\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	maxMHz, err := readFirstExistingSysfsFloat(
+		filepath.Join(devicePath, "gt_max_freq_mhz"),
+		filepath.Join(cardPath, "gt_max_freq_mhz"),
+	)
+	if err != nil {
+		t.Fatalf("readFirstExistingSysfsFloat() error = %v", err)
+	}
+	if maxMHz != 2100 {
+		t.Fatalf("readFirstExistingSysfsFloat() = %v, want 2100", maxMHz)
+	}
+}
+
+func TestReadFirstExistingSysfsFloatFallsBackToCardPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cardPath := filepath.Join(root, "card0")
+	devicePath := filepath.Join(cardPath, "device")
+
+	if err := os.MkdirAll(cardPath, 0o700); err != nil {
+		t.Fatalf("os.MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cardPath, "gt_max_freq_mhz"), []byte("2200\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	maxMHz, err := readFirstExistingSysfsFloat(
+		filepath.Join(devicePath, "gt_max_freq_mhz"),
+		filepath.Join(cardPath, "gt_max_freq_mhz"),
+	)
+	if err != nil {
+		t.Fatalf("readFirstExistingSysfsFloat() error = %v", err)
+	}
+	if maxMHz != 2200 {
+		t.Fatalf("readFirstExistingSysfsFloat() = %v, want 2200", maxMHz)
+	}
+}

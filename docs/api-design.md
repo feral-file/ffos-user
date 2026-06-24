@@ -193,14 +193,15 @@ The BLE command characteristic uses a binary encoding:
 **`device_info` string format** (returned by `get_info`):
 
 ```
-<device_id>|<topic_id>|<internet>|<branch>|<version>
+<device_id>|<topic_id>|<internet>|<branch>|<version>|<setup_phase>
 ```
 
 - `branch` is URL-safe encoded: `/` replaced with `%2F`.
-- `internet` is the string `"true"` or `"false"` (cached connectivity value).
+- `internet` is the string `"true"` or `"false"` (cached connectivity value; force-refreshed during `checking_version` and `updating` when mobile polls `get_info`).
 - `topic_id` may be empty string if not yet assigned.
+- `setup_phase` reflects current setup progress. Values: `idle`, `wifi_connecting`, `checking_version`, `updating`, `update_failed`, `pairing`, `ready`. Mobile apps poll this field to detect update failures and drive recovery UI. Older firmware omitting this field should be treated as `idle` by mobile clients.
 
-This format is a contract between `feral-setupd` and the mobile app. Do not add, remove, or reorder fields without a coordinated mobile-app release.
+This format is a contract between `feral-setupd` and the mobile app. The sixth field is an additive extension; do not remove or reorder existing fields without a coordinated mobile-app release.
 
 ---
 
@@ -223,7 +224,39 @@ Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The f
 
 ### Relayer errors
 
-There is no standardized error response envelope defined yet. When an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
+Most command failures are not standardized: when an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
+
+**Command-storm rejection (standardized).** Command-storm protection (see below) is the one path with a defined controller-visible error envelope. When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
+
+```json
+{
+  "error": "rate_limited",
+  "command": "displayPlaylist",
+  "message": "human-readable reason"
+}
+```
+
+The command-router rejection reply (rate limit / concurrency budget) is reliable. The relayer-side shed reply under **dispatch saturation** is **best-effort**: to avoid blocking its read loop under a sustained storm, the relayer drops the reply when its shed-response writers are all busy. Controllers must not rely on receiving it for that case and should fall back to a request timeout and retry.
+
+The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
+
+### Command-storm protection
+
+`feral-controld` protects the shared command path from flooding across both the relayer and LAN-hub ingress (see feral-file/ffos-user#208). High-cost or disruptive commands are rate-limited, deduped, and bounded by a global concurrency budget; internal lifecycle flows (e.g. OOM recovery) bypass the gate so client traffic cannot shed them.
+
+It is on by default with tuned defaults. The optional `commandStorm` config section tunes it:
+
+```json
+{
+  "commandStorm": {
+    "disabled": false,
+    "maxConcurrent": 16
+  }
+}
+```
+
+- `disabled` (default `false`) — turn the gate off entirely.
+- `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever.
 
 ### BLE error codes
 
@@ -289,6 +322,8 @@ During `check_and_update_system`, each HTTP fetch attempt notifies a small progr
 1. The relayer `messageID == "system"` path is the canonical source of the device's `TopicID`. Do not add a second path that sets `TopicID` without going through this flow.
 2. `GetRelayerTopicID` on D-Bus blocks until the topic ID is available (up to 31 seconds). Callers must account for this latency. Do not convert it to an async signal without updating all callers.
 3. `sysmetrics` signal body is a JSON-encoded byte slice. Consumers unmarshal it into the metrics struct. Adding fields to the struct is safe; removing or renaming fields is a breaking change.
+   - `gpu.gpu_busy` is the driver-reported utilization field and should be preferred by app consumers when they need a direct busy percentage.
+   - `gpu.current_frequency / gpu.max_frequency` remains available as a clock-ratio fallback, but it is not a substitute for actual utilization.
 4. `connectivity_change` signal body is a single `bool`. It must stay a single `bool`. If more data is needed, add a new signal rather than replacing this one.
 5. BLE `get_info` returns exactly one string element (the `device_info` string). Do not add a second element without updating the mobile app.
 6. Hub WebSocket accepts exactly the same command envelope as the relayer. The Hub and relayer command paths share `commandrouter`. Do not diverge them without explicit justification.

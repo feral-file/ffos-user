@@ -37,10 +37,13 @@ Use this rule for all Rust service work.
 
 ## Testing and quality
 - Run verification only in the touched crate.
-- Run `cargo fmt --all -- --check`.
-- Run `cargo check --all-targets --all-features`.
-- Run `cargo clippy --all-targets --all-features -- -D warnings`.
-- Run `cargo test --all-targets --all-features`.
+- For `feral-setupd`, use `./scripts/verify-setupd-docker.sh` to run all checks (fmt, clippy, check, test) in a Docker environment matching CI.
+- The Docker script ensures D-Bus and OpenSSL dependencies are available and uses the exact Rust version from CI (1.88.0).
+- For other Rust components, run individual commands:
+  - `cargo fmt --all -- --check`
+  - `cargo check --all-targets --all-features`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
 - Prefer focused unit tests for parsing, state logic, and error handling.
 - Add integration-style coverage when behavior crosses async boundaries, filesystem boundaries, or service contracts.
 

@@ -112,7 +112,7 @@ Each service owns its own state files exclusively. No service should read or wri
 |---|---|---|
 | `feral-controld` | `/home/feralfile/.state/controld.state` | Relayer topic ID, connected device (ID, name, platform) |
 | `feral-controld` | `/home/feralfile/.state/screen-orientation` | Last committed screen orientation value |
-| `feral-setupd` | `/home/feralfile/.state/setupd` | Setup flags: `paired`, `topic_id`, `connected` |
+| `feral-setupd` | `/home/feralfile/.state/setupd` | Setup state: `setup_phase` (durable recovery state), `pre_failure_phase` (phase to restore after OTA recovery), `topic_id` (relayer topic), `connected` (first-internet flag). Legacy `paired` flag migrated to `setup_phase=ready` on upgrade. |
 | updater scripts | `/home/feralfile/ff1-config.json` | Device branch, current version, update channel URLs (read-only at runtime by services) |
 | system | `/etc/hostname` | Device hostname (read-only at runtime; used by `controld` for mDNS identity) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-count` | Chromium OOM kill count (read by `controld` OOM recoverer) |
@@ -121,7 +121,7 @@ Each service owns its own state files exclusively. No service should read or wri
 
 Rules:
 - State writes must be atomic. Use write-to-temp-then-rename (`FILE.tmp` → `FILE`).
-- State files are human-readable JSON. Add fields additively; never rename or remove fields without a migration path.
+- State files are human-readable text. Most use JSON, but `feral-setupd`'s `setupd` file uses a flat `key=value` line format (one key per line). Add fields additively; never rename or remove fields without a migration path.
 - State is not a message bus. Services that need to react to changes in another service's state must use D-Bus signals, not file polling.
 - `ff1-config.json` is read-only at runtime for all services. Only updater scripts write it. It does not control the local player URL.
 - SSH authorized keys (`/home/feralfile/.ssh/authorized_keys`) are managed by `feral-controld` on behalf of the `sshAccess` command.
