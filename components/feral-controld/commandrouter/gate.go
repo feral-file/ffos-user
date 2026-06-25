@@ -75,6 +75,10 @@ func DefaultGateConfig() GateConfig {
 	// sleep/wake bursts to the latest state, so the gate only needs a loose
 	// flood cap here rather than the disruptive 1-per-5s limit.
 	userAction := Policy{Rate: 2, Burst: 5, Weight: 1}
+	// relayerSessionWrite covers low-cost but state-changing relayer session
+	// management calls. Keep it explicit so these pre-CDP commands do not share
+	// the catch-all budget for arbitrary Chromium-forwarded command names.
+	relayerSessionWrite := Policy{Rate: 2, Burst: 5, Weight: 1}
 
 	policies := map[commands.Type]Policy{
 		// Disruptive / system-level: tightly limited, deduped.
@@ -101,9 +105,13 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_DDC_PANEL_CONTROL: slowWrite,
 
 		// Cheap queries: deduped so a poll storm collapses to one execution.
-		commands.CMD_DEVICE_STATUS:    query,
-		commands.CMD_PROFILE:          query,
-		commands.CMD_DDC_PANEL_STATUS: query,
+		commands.CMD_DEVICE_STATUS:           query,
+		commands.CMD_PROFILE:                 query,
+		commands.CMD_DDC_PANEL_STATUS:        query,
+		commands.CMD_LIST_EPHEMERAL_SESSIONS: query,
+
+		// Relayer session writes: bounded, explicit pre-CDP command handling.
+		commands.CMD_REVOKE_EPHEMERAL_SESSION: relayerSessionWrite,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,

@@ -298,6 +298,16 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	query := cfg.Policies[commands.CMD_DEVICE_STATUS]
 	assert.Greater(t, cast.Weight, query.Weight)
 
+	// Ephemeral session management commands are controld-owned pre-CDP paths,
+	// not arbitrary Chromium-forwarded commands on the catch-all default.
+	listSessions, ok := cfg.Policies[commands.CMD_LIST_EPHEMERAL_SESSIONS]
+	require.True(t, ok)
+	assert.Equal(t, query, listSessions)
+	revokeSession, ok := cfg.Policies[commands.CMD_REVOKE_EPHEMERAL_SESSION]
+	require.True(t, ok)
+	assert.NotEqual(t, cfg.Default, revokeSession)
+	assert.Less(t, revokeSession.Rate, cfg.Default.Rate)
+
 	// Input gestures share one limiter group.
 	assert.Equal(t, inputGroup, cfg.Policies[commands.CMD_MOUSE_DRAG_EVENT].Group)
 	assert.Equal(t, inputGroup, cfg.Policies[commands.CMD_ZOOM_GESTURE].Group)

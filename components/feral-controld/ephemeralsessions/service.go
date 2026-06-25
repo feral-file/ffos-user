@@ -167,6 +167,13 @@ func (s *service) HandleRevokeSession(ctx context.Context, args map[string]any) 
 		s.logger.Warn("Failed to decode relayer ephemeral session revoke response", zap.Error(err))
 		return commandError(errRelayer, "failed to decode relayer response", true), nil
 	}
+	if decoded.Session.ID == "" || decoded.Session.ID != sessionID {
+		s.logger.Warn("Relayer ephemeral session revoke response did not confirm requested session",
+			zap.String("requestedSessionID", sessionID),
+			zap.String("responseSessionID", decoded.Session.ID),
+		)
+		return commandError(errRelayer, "relayer response did not confirm revoked session", true), nil
+	}
 	return revokeResponse{OK: true, Status: "revoked", Session: decoded.Session}, nil
 }
 

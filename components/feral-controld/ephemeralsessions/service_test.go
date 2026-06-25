@@ -117,6 +117,45 @@ func TestService_HandleRevokeSession(t *testing.T) {
 	assert.NotContains(t, string(raw), "raw-token")
 }
 
+func TestService_HandleRevokeSession_RejectsInvalidSuccessBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing session",
+			body: `{"ok":true}`,
+		},
+		{
+			name: "empty session id",
+			body: `{"session":{"id":"","status":"revoked"}}`,
+		},
+		{
+			name: "mismatched session id",
+			body: `{"session":{"id":"session-2","status":"revoked"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer state.ResetForTesting()
+			state.GetState().Relayer.TopicID = "topic-1"
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			svc := New(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON(), zap.NewNop())
+			result, err := svc.HandleRevokeSession(context.Background(), map[string]any{"sessionID": "session-1"})
+
+			require.NoError(t, err)
+			resp := assertErrorCode(t, result, errRelayer)
+			assert.True(t, resp.Error.Retryable)
+		})
+	}
+}
+
 func TestService_ValidationErrors(t *testing.T) {
 	tests := []struct {
 		name string

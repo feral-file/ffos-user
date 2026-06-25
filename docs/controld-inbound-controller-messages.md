@@ -9,7 +9,8 @@ mint-pairing messages for ephemeral browser-session minting.
 `POST /api/cast` on port `1111`, but this document focuses on the
 controller-to-controld contract. When enabled, the local hub is a
 trusted-local-network control surface and routes through the same
-`commandrouter` as relayer commands, including mint-pairing commands.
+`commandrouter` as relayer commands, including mint-pairing and ephemeral
+session management commands.
 
 ## Current Message Envelope
 
@@ -56,7 +57,8 @@ for relayer topic assignment:
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
   through CDP as `window.handleCDPRequest(...)`.
-- `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
+- `startMintPairingSession`, `mintPairingApprovalDecision`,
+  `listEphemeralSessions`, and `revokeEphemeralSession` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
@@ -980,6 +982,178 @@ Unknown command:
 Current behavior: forwarded to Chromium/CDP unless the command is added to the
 device-control map. If Chromium rejects or CDP fails, command failure is logged
 without a standardized relayer error response.
+
+## Ephemeral Session Management Inbound Messages
+
+`listEphemeralSessions` and `revokeEphemeralSession` are controld-owned
+pre-CDP commandrouter paths. They are not forwarded to Chromium because browser
+session token material must remain outside the player/browser process and must
+not be exposed to controller clients.
+
+The trusted LAN hub may use these commands when the hub is enabled. This follows
+the same local trust boundary as other hub commands: the hub binds on
+`0.0.0.0:1111` and should only be enabled on trusted local networks, or guarded
+before exposing privileged commands differently from the relayer path.
+
+### listEphemeralSessions
+
+Purpose: list revokable browser sessions for the current device relayer topic.
+`feral-controld` calls `GET /api/ephemeral-sessions?topicID=<topic>` on the
+configured relayer HTTP base URL using the configured relayer API key.
+
+Request:
+
+```json
+{
+  "messageID": "msg-list-ephemeral-sessions-1",
+  "message": {
+    "command": "listEphemeralSessions",
+    "request": {}
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-list-ephemeral-sessions-1",
+  "message": {
+    "ok": true,
+    "sessions": [
+      {
+        "id": "session-1",
+        "status": "active",
+        "createdAt": "2026-05-15T00:00:00.000Z",
+        "expiresAt": "2026-06-14T00:00:00.000Z",
+        "revokedAt": null,
+        "createdIp": "203.0.113.10",
+        "createdUserAgent": "Feral File Mobile",
+        "browserUserAgent": "Mozilla/5.0 ...",
+        "browserName": "Chrome",
+        "label": "objkt on Chrome",
+        "lastUsedAt": null,
+        "lastUsedIp": null,
+        "lastUsedUserAgent": null
+      }
+    ]
+  }
+}
+```
+
+Error response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-list-ephemeral-sessions-1",
+  "message": {
+    "ok": false,
+    "error": {
+      "code": "not_ready",
+      "message": "relayer topic is not ready",
+      "retryable": true
+    }
+  }
+}
+```
+
+Error cases:
+
+| Case | Detection | Response |
+|---|---|---|
+| Malformed request | `request` contains any fields | `invalid_request`, `retryable: false` |
+| Topic unavailable | current relayer topic is empty | `not_ready`, `retryable: true` |
+| Relayer unauthorized | relayer returns HTTP 401 | `unauthorized`, `retryable: false` |
+| Other relayer failure | relayer is unreachable, returns another non-2xx status, or returns an undecodable body | `relayer_error`, `retryable: true` |
+
+### revokeEphemeralSession
+
+Purpose: revoke one browser session for the current device relayer topic.
+`feral-controld` calls
+`DELETE /api/ephemeral-sessions/{sessionID}?topicID=<topic>` on the configured
+relayer HTTP base URL using the configured relayer API key.
+
+Request:
+
+```json
+{
+  "messageID": "msg-revoke-ephemeral-session-1",
+  "message": {
+    "command": "revokeEphemeralSession",
+    "request": {
+      "sessionID": "session-1"
+    }
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-revoke-ephemeral-session-1",
+  "message": {
+    "ok": true,
+    "status": "revoked",
+    "session": {
+      "id": "session-1",
+      "status": "revoked",
+      "createdAt": "2026-05-15T00:00:00.000Z",
+      "expiresAt": "2026-06-14T00:00:00.000Z",
+      "revokedAt": "2026-05-16T00:00:00.000Z",
+      "createdIp": "203.0.113.10",
+      "createdUserAgent": "Feral File Mobile",
+      "browserUserAgent": "Mozilla/5.0 ...",
+      "browserName": "Chrome",
+      "label": "objkt on Chrome",
+      "lastUsedAt": null,
+      "lastUsedIp": null,
+      "lastUsedUserAgent": null
+    }
+  }
+}
+```
+
+`feral-controld` only treats a 2xx relayer response as success when the decoded
+`session.id` is non-empty and exactly matches the requested `sessionID`.
+Missing, empty, or mismatched confirmation is a retryable `relayer_error`.
+
+Error response:
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-revoke-ephemeral-session-1",
+  "message": {
+    "ok": false,
+    "error": {
+      "code": "not_found",
+      "message": "ephemeral session not found",
+      "retryable": false
+    }
+  }
+}
+```
+
+Error cases:
+
+| Case | Detection | Response |
+|---|---|---|
+| Malformed request | `sessionID` is missing, blank, or not a string | `invalid_request`, `retryable: false` |
+| Topic unavailable | current relayer topic is empty | `not_ready`, `retryable: true` |
+| Relayer unauthorized | relayer returns HTTP 401 | `unauthorized`, `retryable: false` |
+| Session not found | relayer returns HTTP 404 | `not_found`, `retryable: false` |
+| Relayer confirmation invalid | relayer returns 2xx but omits `session`, omits `session.id`, or returns a different `session.id` | `relayer_error`, `retryable: true` |
+| Other relayer failure | relayer is unreachable, returns another non-2xx status, or returns an undecodable body | `relayer_error`, `retryable: true` |
+
+Token non-disclosure invariant: responses for both commands are metadata-only.
+They must not include raw ephemeral session tokens, token hashes, relayer API
+keys, or encrypted mint payloads. If the relayer response contains extra token
+fields, `feral-controld` drops them by decoding and re-encoding only the
+documented metadata fields.
 
 ## Mint-Pairing Inbound Messages
 
