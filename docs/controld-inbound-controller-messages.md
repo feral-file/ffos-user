@@ -1118,8 +1118,10 @@ Success response:
 ```
 
 `feral-controld` only treats a 2xx relayer response as success when the decoded
-`session.id` is non-empty and exactly matches the requested `sessionID`.
-Missing, empty, or mismatched confirmation is a retryable `relayer_error`.
+`session.id` is non-empty and exactly matches the requested `sessionID`,
+`session.status` is `revoked`, and `session.revokedAt` is present and non-empty.
+Missing, incomplete, non-revoked, or mismatched confirmation is a retryable
+`relayer_error`.
 
 Error response:
 
@@ -1142,11 +1144,11 @@ Error cases:
 
 | Case | Detection | Response |
 |---|---|---|
-| Malformed request | `sessionID` is missing, blank, or not a string | `invalid_request`, `retryable: false` |
+| Malformed request | `request` is not exactly `{"sessionID":"<id>"}`, including missing, blank, non-string, or extra fields | `invalid_request`, `retryable: false` |
 | Topic unavailable | current relayer topic is empty | `not_ready`, `retryable: true` |
 | Relayer unauthorized | relayer returns HTTP 401 | `unauthorized`, `retryable: false` |
 | Session not found | relayer returns HTTP 404 | `not_found`, `retryable: false` |
-| Relayer confirmation invalid | relayer returns 2xx but omits `session`, omits `session.id`, or returns a different `session.id` | `relayer_error`, `retryable: true` |
+| Relayer confirmation invalid | relayer returns 2xx but omits `session`, omits `session.id`, returns a different `session.id`, returns a status other than `revoked`, or omits/empties `session.revokedAt` | `relayer_error`, `retryable: true` |
 | Other relayer failure | relayer is unreachable, returns another non-2xx status, or returns an undecodable body | `relayer_error`, `retryable: true` |
 
 Token non-disclosure invariant: responses for both commands are metadata-only.

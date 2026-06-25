@@ -128,11 +128,23 @@ func TestService_HandleRevokeSession_RejectsInvalidSuccessBody(t *testing.T) {
 		},
 		{
 			name: "empty session id",
-			body: `{"session":{"id":"","status":"revoked"}}`,
+			body: `{"session":{"id":"","status":"revoked","revokedAt":"2026-05-16T00:00:00.000Z"}}`,
 		},
 		{
 			name: "mismatched session id",
-			body: `{"session":{"id":"session-2","status":"revoked"}}`,
+			body: `{"session":{"id":"session-2","status":"revoked","revokedAt":"2026-05-16T00:00:00.000Z"}}`,
+		},
+		{
+			name: "matching session id with active status",
+			body: `{"session":{"id":"session-1","status":"active","revokedAt":"2026-05-16T00:00:00.000Z"}}`,
+		},
+		{
+			name: "matching session id with revoked status but missing revokedAt",
+			body: `{"session":{"id":"session-1","status":"revoked"}}`,
+		},
+		{
+			name: "matching session id with revoked status but empty revokedAt",
+			body: `{"session":{"id":"session-1","status":"revoked","revokedAt":" "}}`,
 		},
 	}
 
@@ -154,6 +166,28 @@ func TestService_HandleRevokeSession_RejectsInvalidSuccessBody(t *testing.T) {
 			assert.True(t, resp.Error.Retryable)
 		})
 	}
+}
+
+func TestService_HandleRevokeSession_RejectsExtraRequestFieldsBeforeRelayerCall(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	svc := New(server.URL, "", wrapper.NewHTTPClient(), wrapper.NewJSON(), zap.NewNop())
+	result, err := svc.HandleRevokeSession(context.Background(), map[string]any{
+		"sessionID": "session-1",
+		"extra":     true,
+	})
+
+	require.NoError(t, err)
+	assertErrorCode(t, result, errInvalidRequest)
+	assert.Zero(t, requests)
 }
 
 func TestService_ValidationErrors(t *testing.T) {

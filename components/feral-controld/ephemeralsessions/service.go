@@ -130,6 +130,9 @@ func (s *service) HandleListSessions(ctx context.Context, args map[string]any) (
 }
 
 func (s *service) HandleRevokeSession(ctx context.Context, args map[string]any) (any, error) {
+	if len(args) != 1 {
+		return commandError(errInvalidRequest, "revokeEphemeralSession request must contain exactly sessionID", false), nil
+	}
 	sessionID, ok := stringArg(args, "sessionID")
 	if !ok {
 		return commandError(errInvalidRequest, "revokeEphemeralSession requires sessionID", false), nil
@@ -167,14 +170,23 @@ func (s *service) HandleRevokeSession(ctx context.Context, args map[string]any) 
 		s.logger.Warn("Failed to decode relayer ephemeral session revoke response", zap.Error(err))
 		return commandError(errRelayer, "failed to decode relayer response", true), nil
 	}
-	if decoded.Session.ID == "" || decoded.Session.ID != sessionID {
+	if !confirmedRevocation(decoded.Session, sessionID) {
 		s.logger.Warn("Relayer ephemeral session revoke response did not confirm requested session",
 			zap.String("requestedSessionID", sessionID),
 			zap.String("responseSessionID", decoded.Session.ID),
+			zap.String("responseStatus", decoded.Session.Status),
 		)
 		return commandError(errRelayer, "relayer response did not confirm revoked session", true), nil
 	}
 	return revokeResponse{OK: true, Status: "revoked", Session: decoded.Session}, nil
+}
+
+func confirmedRevocation(session Session, sessionID string) bool {
+	return session.ID != "" &&
+		session.ID == sessionID &&
+		session.Status == "revoked" &&
+		session.RevokedAt != nil &&
+		strings.TrimSpace(*session.RevokedAt) != ""
 }
 
 func (s *service) endpoint(path string, topicID string) (string, error) {
