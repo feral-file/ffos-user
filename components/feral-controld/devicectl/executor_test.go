@@ -4566,10 +4566,11 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Use channels to enforce ordering: read -> save -> read
-	readFirst := make(chan bool, 1)
-	saveComplete := make(chan bool, 1)
-	readSecond := make(chan bool, 1)
+	// Use channels to enforce ordering: read -> save -> read. saveComplete is
+	// closed so both readers observe the save instead of racing to consume one signal.
+	readFirst := make(chan struct{})
+	saveComplete := make(chan struct{})
+	readSecond := make(chan struct{})
 
 	var firstResult, secondResult interface{}
 	var firstErr, secondErr error
@@ -4587,7 +4588,7 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 		}
 
 		firstResult, firstErr = ts.executor.Execute(ts.ctx, cmd)
-		readFirst <- true
+		close(readFirst)
 
 		// Wait for save to complete before continuing
 		<-saveComplete
@@ -4602,7 +4603,7 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 		testMetrics := []byte(`{"cpu": 85.5, "memory": 60.2, "disk": 45.0}`)
 		ts.executor.SaveLastSysMetrics(testMetrics)
 
-		saveComplete <- true
+		close(saveComplete)
 	}()
 
 	// Third goroutine: Read (should get saved data)
@@ -4635,7 +4636,7 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 		}
 
 		secondResult, secondErr = ts.executor.Execute(ts.ctx, cmd)
-		readSecond <- true
+		close(readSecond)
 	}()
 
 	// Wait for all goroutines to complete
