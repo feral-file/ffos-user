@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/qrdisplay"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/relayerapi"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -56,7 +57,7 @@ type Options struct {
 
 func OptionsFromConfig(cfg *config.MintPairingConfig, relayerEndpoint string) Options {
 	opts := Options{
-		RelayerBaseURL:  relayerHTTPBaseString(relayerEndpoint),
+		RelayerBaseURL:  relayerapi.HTTPBaseString(relayerEndpoint),
 		IdleTTL:         defaultIdleTTL,
 		PollInterval:    defaultPollInterval,
 		ApprovalTimeout: defaultApprovalTimeout,
@@ -1277,24 +1278,4 @@ func effectiveSessionTTLSeconds(requested int) int {
 		return maxSessionTTLSeconds
 	}
 	return requested
-}
-
-func relayerHTTPBaseString(endpoint string) string {
-	u, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil {
-		return ""
-	}
-	switch u.Scheme {
-	case "wss":
-		u.Scheme = "https"
-		u.Path = ""
-		u.RawPath = ""
-	case "ws":
-		u.Scheme = "http"
-		u.Path = ""
-		u.RawPath = ""
-	}
-	u.RawQuery = ""
-	u.Fragment = ""
-	return strings.TrimRight(u.String(), "/")
 }

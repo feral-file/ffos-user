@@ -44,7 +44,7 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -220,7 +220,7 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "started"}
 	mintSvc := &fakeMintPairingService{startResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
@@ -260,7 +260,7 @@ func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "closed"}
 	mintSvc := &fakeMintPairingService{closeResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
@@ -282,7 +282,7 @@ func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testin
 	args := map[string]any{"approvalRequestID": "mpa_1", "decision": "approve"}
 	want := map[string]any{"ok": true, "status": "accepted"}
 	mintSvc := &fakeMintPairingService{approvalResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
@@ -293,6 +293,52 @@ func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testin
 	assert.Equal(t, want, result)
 	assert.Equal(t, args, mintSvc.approvalArgs)
 	assert.Equal(t, 1, mintSvc.approvalCalls)
+}
+
+func TestCommandHandler_Process_ListEphemeralSessionsRoutesToSessionService(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("listEphemeralSessions"), commands.CMD_LIST_EPHEMERAL_SESSIONS)
+	assert.False(t, commands.CMD_LIST_EPHEMERAL_SESSIONS.DeviceCtlCommand())
+
+	args := map[string]any{}
+	want := map[string]any{"ok": true, "sessions": []any{}}
+	sessionSvc := &fakeEphemeralSessionService{listResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, sessionSvc, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_LIST_EPHEMERAL_SESSIONS,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, sessionSvc.listArgs)
+	assert.Equal(t, 1, sessionSvc.listCalls)
+}
+
+func TestCommandHandler_Process_RevokeEphemeralSessionRoutesToSessionService(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.Equal(t, commands.Type("revokeEphemeralSession"), commands.CMD_REVOKE_EPHEMERAL_SESSION)
+	assert.False(t, commands.CMD_REVOKE_EPHEMERAL_SESSION.DeviceCtlCommand())
+
+	args := map[string]any{"sessionID": "session-1"}
+	want := map[string]any{"ok": true, "status": "revoked"}
+	sessionSvc := &fakeEphemeralSessionService{revokeResult: want}
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, sessionSvc, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_REVOKE_EPHEMERAL_SESSION,
+		Arguments: args,
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, want, result)
+	assert.Equal(t, args, sessionSvc.revokeArgs)
+	assert.Equal(t, 1, sessionSvc.revokeCalls)
 }
 
 func TestCommandHandler_Process_NewGestureCommandsRouteToExecutor(t *testing.T) {
@@ -362,6 +408,27 @@ func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args 
 	f.approvalCalls++
 	f.approvalArgs = args
 	return f.approvalResult, nil
+}
+
+type fakeEphemeralSessionService struct {
+	listCalls    int
+	revokeCalls  int
+	listArgs     map[string]any
+	revokeArgs   map[string]any
+	listResult   any
+	revokeResult any
+}
+
+func (f *fakeEphemeralSessionService) HandleListSessions(_ context.Context, args map[string]any) (any, error) {
+	f.listCalls++
+	f.listArgs = args
+	return f.listResult, nil
+}
+
+func (f *fakeEphemeralSessionService) HandleRevokeSession(_ context.Context, args map[string]any) (any, error) {
+	f.revokeCalls++
+	f.revokeArgs = args
+	return f.revokeResult, nil
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
