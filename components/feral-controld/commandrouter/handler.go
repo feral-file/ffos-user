@@ -10,6 +10,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/ephemeralsessions"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -27,6 +28,7 @@ type handler struct {
 	json         wrapper.JSON
 	statusPoller status.Poller
 	mintPairing  mintpairing.Service
+	sessions     ephemeralsessions.Service
 	logger       *zap.Logger
 }
 
@@ -36,6 +38,7 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	mintPairing mintpairing.Service,
+	sessions ephemeralsessions.Service,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
@@ -45,6 +48,7 @@ func New(
 		dp1:          dp1,
 		statusPoller: statusPoller,
 		mintPairing:  mintPairing,
+		sessions:     sessions,
 		json:         json,
 		logger:       logger,
 	}
@@ -101,6 +105,34 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}, nil
 		}
 		return h.mintPairing.HandleApprovalDecision(ctx, command.Arguments)
+	}
+
+	if commandType == commands.CMD_LIST_EPHEMERAL_SESSIONS {
+		if h.sessions == nil {
+			return map[string]any{
+				"ok": false,
+				"error": map[string]any{
+					"code":      "not_ready",
+					"message":   "ephemeral session management is not configured",
+					"retryable": true,
+				},
+			}, nil
+		}
+		return h.sessions.HandleListSessions(ctx, command.Arguments)
+	}
+
+	if commandType == commands.CMD_REVOKE_EPHEMERAL_SESSION {
+		if h.sessions == nil {
+			return map[string]any{
+				"ok": false,
+				"error": map[string]any{
+					"code":      "not_ready",
+					"message":   "ephemeral session management is not configured",
+					"retryable": true,
+				},
+			}, nil
+		}
+		return h.sessions.HandleRevokeSession(ctx, command.Arguments)
 	}
 
 	if commandType.DeviceCtlCommand() {

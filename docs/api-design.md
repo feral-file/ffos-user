@@ -117,6 +117,12 @@ All messages are JSON. The message envelope is:
 - If `command == "mintPairingApprovalDecision"` → handle inside
   `feral-controld` as a commandrouter pre-CDP special case that validates and
   completes a pending browser-session approval request.
+- If `command == "listEphemeralSessions"` → handle inside `feral-controld`
+  as a commandrouter pre-CDP special case that lists browser cast sessions from
+  the relayer for the device topic.
+- If `command == "revokeEphemeralSession"` → handle inside `feral-controld`
+  as a commandrouter pre-CDP special case that revokes one browser cast session
+  from the relayer for the device topic.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
 **Device-control relayer commands**
@@ -148,6 +154,35 @@ The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional 
 The `startMintPairingSession` command is a controller-to-controld request to create one Mint Pairing Broker channel and display its pairing code through the player overlay via CDP command `mintPairingDisplay`. The command returns explicit `RPC` payloads with `ok`, `status`, `channelID`, `pairingCode`, and `expiresAt` on success; failures return `ok: false` with `error.code`. If a non-expired session is already active, it returns `already_started` and re-displays the same code. The broker short code is intentionally visible; raw browser session tokens are not. Any terminal pairing state hides the overlay so the bundled local player continues normal artwork playback. Shutdown cleanup is bounded within `feral-controld`'s process-level forced-exit window, so late terminal delivery is explicitly best-effort once that internal budget is exhausted.
 
 The `mintPairingApprovalDecision` command is a controller-to-controld approval response for browser-session mint pairing. It is handled inside `feral-controld`, not forwarded to Chromium. Success and validation failures both return explicit `RPC` payloads with `ok`, `status` or `error.code`, and `approvalRequestID` where available. Raw browser session tokens and DP1 playlist content must never appear in this command or in `mint_pairing_approval_request` / `mint_pairing_approval_outcome` relayer messages.
+
+The `listEphemeralSessions` command is a controller-to-controld request to list revokable browser cast sessions for the current relayer topic. It is handled inside `feral-controld`, not forwarded to Chromium. The request body is empty. `feral-controld` calls `GET /api/ephemeral-sessions?topicID=<topic>` on the configured relayer HTTP base URL using the configured relayer API key. Success returns an explicit `RPC` payload:
+
+```json
+{
+  "ok": true,
+  "sessions": [
+    {
+      "id": "session-id",
+      "status": "active",
+      "createdAt": "2026-05-15T00:00:00.000Z",
+      "expiresAt": "2026-06-14T00:00:00.000Z",
+      "revokedAt": null,
+      "createdIp": "203.0.113.10",
+      "createdUserAgent": "Feral File Mobile",
+      "browserUserAgent": "Mozilla/5.0 ...",
+      "browserName": "Chrome",
+      "label": "objkt on Chrome",
+      "lastUsedAt": null,
+      "lastUsedIp": null,
+      "lastUsedUserAgent": null
+    }
+  ]
+}
+```
+
+The `revokeEphemeralSession` command is a controller-to-controld request to revoke one browser cast session for the current relayer topic. It is handled inside `feral-controld`, not forwarded to Chromium. The request body is `{"sessionID": "<id>"}`. `feral-controld` calls `DELETE /api/ephemeral-sessions/{sessionID}?topicID=<topic>` on the configured relayer HTTP base URL using the configured relayer API key. Success returns `{"ok": true, "status": "revoked", "session": { ... }}` where `session` uses the same session metadata shape as `listEphemeralSessions`.
+
+Both commands return `{"ok": false, "error": {"code": "...", "message": "...", "retryable": true|false}}` for validation, missing-topic, relayer, or upstream HTTP failures. Use `invalid_request` for malformed controller input, `not_ready` when the device does not yet have a relayer topic, `not_found` for relayer 404 revocation responses, `unauthorized` for relayer 401 responses, and `relayer_error` for other relayer failures. These commands must never return raw ephemeral session tokens or token hashes; relayer list responses are metadata-only and token material remains confined to the relayer KV records.
 
 **Outbound notifications (`feral-controld`):** The device periodically pushes status notifications over the relayer WebSocket and local hub clients with an envelope that includes `notification_type` and a structured `message`. Mint-pairing approval notifications are relayer-only because the controller/mobile approval UI is reached through the relayer topic, not through the trusted-local hub socket. At minimum:
 

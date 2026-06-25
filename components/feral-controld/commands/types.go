@@ -86,6 +86,8 @@ const (
 	CMD_START_MINT_PAIRING_SESSION Type = "startMintPairingSession"
 	CMD_CLOSE_MINT_PAIRING_SESSION Type = "closeMintPairingSession"
 	CMD_MINT_PAIRING_APPROVAL      Type = "mintPairingApprovalDecision"
+	CMD_LIST_EPHEMERAL_SESSIONS    Type = "listEphemeralSessions"
+	CMD_REVOKE_EPHEMERAL_SESSION   Type = "revokeEphemeralSession"
 	// CMD_DDC_PANEL_CONTROL drives the attached panel over DDC via ddcutil (brightness, contrast,
 	// speaker volume, mute, and power). One JSON command type; request body selects the operation.
 	CMD_DDC_PANEL_CONTROL Type = "ddcPanelControl"
