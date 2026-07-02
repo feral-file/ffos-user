@@ -58,6 +58,27 @@ func (e *executor) startSleepScheduleLoop(ctx context.Context) {
 	go e.runSleepScheduleLoop(ctx)
 }
 
+// sleepScheduleMaxTick caps how long the loop sleeps before re-evaluating, even
+// when the next scheduled transition is hours away. Capping the wait means:
+//
+//   - A transition whose first apply failed (e.g. the player page was not yet
+//     ready at boot, or Chromium was mid-restart) is retried within one tick
+//     instead of being dropped until the next schedule boundary hours later.
+//   - Wall-clock jumps (RTC-less boot, NTP correction, DST) are absorbed: the
+//     loop re-reads the clock and timezone every tick, so an armed monotonic
+//     timer can no longer fire the transition at the wrong civil time.
+//
+// applySleepTransitionIfChanged de-dups a healthy, unchanged state so the extra
+// ticks stay cheap (a file read + timezone read, no player round-trip).
+const sleepScheduleMaxTick = 60 * time.Second
+
+// panelRetryMax bounds how many consecutive best-effort panel (DDC) alignment
+// attempts the loop makes for a single target state before giving up until the
+// next real transition. It keeps transient ddcutil failures self-healing (a few
+// capped-tick retries) without hammering ddcutil forever on devices whose panel
+// cannot do DDC power control.
+const panelRetryMax = 3
+
 func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 	for {
 		e.sleepScheduleFileMu.Lock()
@@ -65,7 +86,7 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 		if err != nil {
 			e.sleepScheduleFileMu.Unlock()
 			e.logger.Error("Failed to load sleep schedule", zap.Error(err))
-			if !e.waitForSleepScheduleSignal(ctx, 30*time.Second) {
+			if !e.waitForSleepScheduleSignal(ctx, sleepScheduleMaxTick) {
 				return
 			}
 			continue
@@ -81,27 +102,35 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 		e.sleepScheduleFileMu.Unlock()
 
 		status, _ := sleepschedule.EffectiveStatus(now, normalized)
-		if err := e.applySleepTransition(ctx, status.CurrentState, "schedule-loop"); err != nil {
+		if err := e.applySleepTransitionIfChanged(ctx, status.CurrentState, "schedule-loop"); err != nil {
 			e.logger.Error("Failed to apply sleep schedule transition",
 				zap.Error(err),
 				zap.String("state", string(status.CurrentState)))
+			// The failed apply leaves sleepApplyOK false, so the next capped tick
+			// retries rather than waiting until the next schedule boundary.
 		}
 
-		if status.NextTransitionAt == nil {
-			if !e.waitForSleepScheduleSignal(ctx, 0) {
-				return
-			}
-			continue
-		}
-
-		waitFor := time.Until(*status.NextTransitionAt)
-		if waitFor < 0 {
-			waitFor = 0
-		}
-		if !e.waitForSleepScheduleSignal(ctx, waitFor) {
+		if !e.waitForSleepScheduleSignal(ctx, sleepScheduleTickWait(status.NextTransitionAt)) {
 			return
 		}
 	}
+}
+
+// sleepScheduleTickWait returns how long the loop should wait before the next
+// re-evaluation: the time until the next transition, floored so a due/past
+// transition re-checks promptly (0 is reserved by waitForSleepScheduleSignal as
+// the "wait for a signal only" sentinel) and capped at sleepScheduleMaxTick.
+func sleepScheduleTickWait(next *time.Time) time.Duration {
+	waitFor := sleepScheduleMaxTick
+	if next != nil {
+		if d := time.Until(*next); d < waitFor {
+			waitFor = d
+		}
+	}
+	if waitFor < time.Second {
+		waitFor = time.Second
+	}
+	return waitFor
 }
 
 func (e *executor) waitForSleepScheduleSignal(ctx context.Context, waitFor time.Duration) bool {
@@ -109,6 +138,11 @@ func (e *executor) waitForSleepScheduleSignal(ctx context.Context, waitFor time.
 		return false
 	}
 
+	// waitFor == 0 means "block until a wake signal (or cancellation)". The loop
+	// no longer passes 0 — sleepScheduleTickWait floors at 1s so a past-due
+	// transition re-checks promptly instead of blocking forever. This branch is
+	// kept only as a defensive sentinel for any future caller that opts into
+	// signal-only waiting; do not funnel a clamped negative duration through it.
 	if waitFor == 0 {
 		select {
 		case <-ctx.Done():
@@ -260,7 +294,21 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 	//     consistency across hardware vs. player.
 	//
 	//   • Shutdown does not wait for queued or in-flight DDC alignment.
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	return e.applySleepTransitionLocked(ctx, state, reason)
+}
+
+// applySleepTransitionLocked performs the transition assuming e.sleepApplyMu is
+// already held. Holding the lock across the player send and the tracker write is
+// what makes the tracker a faithful record of the player's last commanded state
+// even when a manual override and a schedule tick race.
+func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepschedule.State, reason string) error {
 	if err := e.applyPlayerSleepMode(ctx, state == sleepschedule.StateSleeping); err != nil {
+		// Record the attempted state as not-applied so the schedule loop retries
+		// on its next tick instead of assuming the state took effect.
+		s := state
+		e.sleepAppliedState, e.sleepApplyOK = &s, false
 		return err
 	}
 
@@ -270,7 +318,65 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 		e.statusPoller.ForceRefresh()
 	}
 
+	s := state
+	e.sleepAppliedState, e.sleepApplyOK = &s, true
 	return nil
+}
+
+// applySleepTransitionIfChanged drives a transition only when it is not already
+// aligned. It is the schedule loop's entry point: manual overrides
+// (sleepNow/wakeNow/setSleepSchedule) call applySleepTransition directly so an
+// explicit user action always re-drives the player.
+//
+// Two legs are tracked independently:
+//   - Player (CDP) not at the desired state -> full re-drive.
+//   - Player already aligned but the best-effort panel (DDC) leg fell behind
+//     (a transient ddcutil failure) -> re-enqueue only the panel alignment,
+//     without a redundant player round-trip. The align worker's coalescing keeps
+//     this cheap and a newer transition always supersedes it.
+func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state sleepschedule.State, reason string) error {
+	e.sleepApplyMu.Lock()
+	playerAligned := e.sleepApplyOK && e.sleepAppliedState != nil && *e.sleepAppliedState == state
+	panelAligned := e.panelDDC == nil ||
+		(e.sleepPanelState != nil && *e.sleepPanelState == state &&
+			(e.sleepPanelOK || e.sleepPanelFailStreak >= panelRetryMax))
+
+	if playerAligned && panelAligned {
+		e.sleepApplyMu.Unlock()
+		return nil
+	}
+	if playerAligned && !panelAligned {
+		e.sleepApplyMu.Unlock()
+		// Player is already in the desired state; only nudge the panel. Enqueue is
+		// non-blocking and best-effort — do it outside the lock.
+		e.applyFfpPowerStateAsync(state, reason)
+		return nil
+	}
+
+	defer e.sleepApplyMu.Unlock()
+	return e.applySleepTransitionLocked(ctx, state, reason)
+}
+
+// recordPanelApply stores the state the async FFP power worker last drove the
+// panel to and whether it succeeded. ok=false (or a state mismatch vs. desired)
+// makes the next applySleepTransitionIfChanged re-enqueue the panel alignment.
+func (e *executor) recordPanelApply(state sleepschedule.State, ok bool) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+
+	switch {
+	case ok:
+		e.sleepPanelFailStreak = 0
+	case e.sleepPanelState != nil && *e.sleepPanelState == state:
+		// Consecutive failure for the same target state.
+		e.sleepPanelFailStreak++
+	default:
+		// First failure for a new target state.
+		e.sleepPanelFailStreak = 1
+	}
+
+	s := state
+	e.sleepPanelState, e.sleepPanelOK = &s, ok
 }
 
 // applyFfpPowerStateAsync enqueues best-effort panel power alignment; it never blocks
@@ -318,13 +424,17 @@ func (e *executor) runSleepPowerAlignWorker() {
 		// does not abort DDC mid-flight; alignment remains best-effort with bounded
 		// wall time only (see ffpSleepPowerControlTimeout).
 		ddcCtx, cancel := context.WithTimeout(context.Background(), ffpSleepPowerControlTimeout)
-		if err := e.applyFfpPowerState(ddcCtx, job.state); err != nil {
+		err := e.applyFfpPowerState(ddcCtx, job.state)
+		cancel()
+		if err != nil {
 			e.logger.Warn("Failed to align FFP power with sleep state (best effort)",
 				zap.Error(err),
 				zap.String("state", string(job.state)),
 				zap.String("reason", job.reason))
 		}
-		cancel()
+		// Record the outcome either way: on success the loop stops re-enqueuing this
+		// state; on failure the mismatch makes the next tick retry the panel leg.
+		e.recordPanelApply(job.state, err == nil)
 	}
 }
 

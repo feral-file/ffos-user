@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -101,6 +102,30 @@ type executor struct {
 	// sleepScheduleFileMu: serialize sleep-schedule.json Load/Save (loop + commands).
 	// Do not hold across waits, applySleepTransition, or wakeSleepScheduleLoop.
 	sleepScheduleFileMu sync.Mutex
+
+	// sleepApplyMu serializes the whole apply — player CDP send, FFP DDC enqueue,
+	// and the tracker writes below — so a manual override and a schedule tick can
+	// never interleave and leave the player in one state while the tracker records
+	// the other. It also guards every tracker field, so the last completed apply
+	// deterministically owns both the player command and the recorded state.
+	sleepApplyMu sync.Mutex
+	// Player (CDP) leg: sleepAppliedState/sleepApplyOK is the last state the
+	// synchronous player leg reached. ok=false (or a state mismatch) forces the
+	// next applySleepTransitionIfChanged to re-drive the player.
+	sleepAppliedState *sleepschedule.State
+	sleepApplyOK      bool
+	// Panel (FFP DDC) leg: sleepPanelState/sleepPanelOK is the last state the async
+	// panel-power worker reached. It lets the loop re-enqueue a best-effort DDC
+	// alignment when a transient ddcutil failure left the panel behind, without
+	// re-driving the player. Written by the align worker under sleepApplyMu.
+	sleepPanelState *sleepschedule.State
+	sleepPanelOK    bool
+	// sleepPanelFailStreak counts consecutive worker failures for the current
+	// sleepPanelState. Once it reaches panelRetryMax the loop stops re-enqueuing
+	// the panel alignment in steady state, so a panel that cannot do DDC power
+	// (e.g. an older display lacking VCP 0xD6) is not hammered with ddcutil every
+	// tick. A genuine state change resets the streak and retries fresh.
+	sleepPanelFailStreak int
 }
 
 func New(
