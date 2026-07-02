@@ -336,24 +336,29 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 //     this cheap and a newer transition always supersedes it.
 func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state sleepschedule.State, reason string) error {
 	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+
 	playerAligned := e.sleepApplyOK && e.sleepAppliedState != nil && *e.sleepAppliedState == state
 	panelAligned := e.panelDDC == nil ||
 		(e.sleepPanelState != nil && *e.sleepPanelState == state &&
 			(e.sleepPanelOK || e.sleepPanelFailStreak >= panelRetryMax))
 
 	if playerAligned && panelAligned {
-		e.sleepApplyMu.Unlock()
 		return nil
 	}
 	if playerAligned && !panelAligned {
-		e.sleepApplyMu.Unlock()
-		// Player is already in the desired state; only nudge the panel. Enqueue is
-		// non-blocking and best-effort — do it outside the lock.
+		// Player is already in the desired state; only nudge the panel. The enqueue
+		// is non-blocking, but it must happen under sleepApplyMu — the same lock
+		// hold that observed the state — like the full-transition path does. If the
+		// lock were released first, a stale tick could observe the old state, lose
+		// the lock to a manual transition that enqueues the new panel state, and
+		// then enqueue its stale state afterwards; the coalescing worker applies
+		// the last enqueued job, so the stale panel command would supersede the
+		// manual one.
 		e.applyFfpPowerStateAsync(state, reason)
 		return nil
 	}
 
-	defer e.sleepApplyMu.Unlock()
 	return e.applySleepTransitionLocked(ctx, state, reason)
 }
 

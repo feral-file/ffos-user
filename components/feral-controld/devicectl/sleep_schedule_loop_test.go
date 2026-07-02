@@ -20,10 +20,13 @@ import (
 
 // flakyPanelDDC fails its first failN ApplyControl calls, then succeeds,
 // recording every successful power value. Used to prove the loop retries a
-// transient panel (DDC) failure without re-driving the player.
+// transient panel (DDC) failure without re-driving the player. An optional
+// delay widens the worker's in-flight window so concurrent enqueues coalesce.
 type flakyPanelDDC struct {
+	failN int
+	delay time.Duration
+
 	mu       sync.Mutex
-	failN    int
 	attempts int
 	powers   []string
 }
@@ -33,6 +36,13 @@ func (f *flakyPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus,
 }
 
 func (f *flakyPanelDDC) ApplyControl(ctx context.Context, action ddc.DdcPanelAction, value json.RawMessage) error {
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempts++
@@ -149,7 +159,10 @@ func TestApplySleepTransitionIfChanged_RetriesPanelWithoutRedrivingPlayer(t *tes
 // TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree hammers the manual
 // (applySleepTransition) and loop (applySleepTransitionIfChanged) entry points
 // concurrently to confirm the shared apply/tracker path is serialized and free of
-// data races and deadlocks. Run under -race.
+// data races and deadlocks (run under -race), and that the serialization contract
+// holds: panel enqueues are ordered with state decisions, so once the align
+// worker drains, the last DDC power applied matches the last player-commanded
+// state — no stale panel-only retry may supersede a newer transition.
 func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -160,9 +173,10 @@ func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 		AnyTimes().
 		Return(map[string]any{"result": map[string]any{}}, nil)
 
+	panel := &flakyPanelDDC{delay: 200 * time.Microsecond}
 	e := &executor{
 		cdp:      mockCDP,
-		panelDDC: &tinyDelayPanelDDC{},
+		panelDDC: panel,
 		logger:   zaptest.NewLogger(t),
 	}
 
@@ -194,6 +208,140 @@ func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("concurrent sleep transitions deadlocked")
+	}
+
+	// No more state decisions happen past this point, so the last enqueued panel
+	// job must carry the final player-commanded state. Wait for the worker to
+	// drain, then check the last power actually applied.
+	e.sleepApplyMu.Lock()
+	require.NotNil(t, e.sleepAppliedState)
+	finalState := *e.sleepAppliedState
+	e.sleepApplyMu.Unlock()
+
+	require.Eventually(t, func() bool {
+		e.sleepApplyMu.Lock()
+		defer e.sleepApplyMu.Unlock()
+		return e.sleepPanelOK && e.sleepPanelState != nil && *e.sleepPanelState == finalState
+	}, 5*time.Second, 10*time.Millisecond, "panel should settle on the last commanded state")
+
+	wantPower := `"on"`
+	if finalState == sleepschedule.StateSleeping {
+		wantPower = `"standby"`
+	}
+	powers := panel.appliedPowers()
+	require.NotEmpty(t, powers)
+	require.Equal(t, wantPower, powers[len(powers)-1],
+		"last DDC power command must match the last commanded sleep state")
+}
+
+// scriptedPanelDDC blocks each ApplyControl until the test feeds it an outcome
+// through release, so a test can hold the align worker mid-flight and interleave
+// transitions at exact points. Successful applies record their power value.
+type scriptedPanelDDC struct {
+	entered chan struct{}
+	release chan error
+
+	mu     sync.Mutex
+	powers []string
+}
+
+func (s *scriptedPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
+	return &ddc.DdcPanelStatus{}, nil
+}
+
+func (s *scriptedPanelDDC) ApplyControl(ctx context.Context, action ddc.DdcPanelAction, value json.RawMessage) error {
+	s.entered <- struct{}{}
+	if err := <-s.release; err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.powers = append(s.powers, string(value))
+	return nil
+}
+
+func (s *scriptedPanelDDC) appliedPowers() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.powers))
+	copy(out, s.powers)
+	return out
+}
+
+// TestApplySleepTransitionIfChanged_ManualSupersedesStalePanelRetry drives the
+// exact interleaving where the loop's panel-only retry races a newer manual
+// transition: the player is asleep with the panel leg behind, a schedule tick
+// re-enqueues the stale standby and the worker picks it up, and while that
+// attempt is still in flight a manual wake applies awake and enqueues panel
+// "on". The manual command must be what the panel ultimately receives — the
+// stale retry must not supersede it.
+func TestApplySleepTransitionIfChanged_ManualSupersedesStalePanelRetry(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	// Exactly two player round-trips: the initial sleep and the manual wake. The
+	// panel-only retry must not re-drive the player.
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(map[string]any{"result": map[string]any{}}, nil).
+		Times(2)
+
+	panel := &scriptedPanelDDC{entered: make(chan struct{}), release: make(chan error)}
+	e := &executor{
+		cdp:      mockCDP,
+		panelDDC: panel,
+		logger:   zaptest.NewLogger(t),
+	}
+	ctx := context.Background()
+
+	waitEntered := func(msg string) {
+		t.Helper()
+		select {
+		case <-panel.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal(msg)
+		}
+	}
+
+	// Initial transition: player goes to sleep; the panel standby attempt fails,
+	// leaving the panel leg behind so the next tick takes the panel-only branch.
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateSleeping, "manual-sleep"))
+	waitEntered("expected the initial panel standby attempt")
+	panel.release <- errors.New("ddcutil transient failure")
+	require.Eventually(t, func() bool {
+		e.sleepApplyMu.Lock()
+		defer e.sleepApplyMu.Unlock()
+		return e.sleepPanelState != nil && *e.sleepPanelState == sleepschedule.StateSleeping && !e.sleepPanelOK
+	}, 2*time.Second, 5*time.Millisecond, "panel failure should be recorded")
+
+	// Schedule tick: player already aligned, panel behind -> panel-only retry.
+	// The worker picks the stale standby up and blocks mid-flight.
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "schedule-loop"))
+	waitEntered("expected the stale panel standby retry")
+
+	// Manual wake lands while the stale standby retry is still in flight: the
+	// player is driven awake and panel "on" is enqueued behind the retry.
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateAwake, "manual-wake"))
+
+	// Finish the stale retry (failing); the worker must then apply the newer
+	// manual "on" rather than any re-coalesced standby.
+	panel.release <- errors.New("ddcutil transient failure")
+	waitEntered("expected the manual panel on attempt after the stale retry")
+	panel.release <- nil
+
+	require.Eventually(t, func() bool {
+		p := panel.appliedPowers()
+		return len(p) == 1 && p[0] == `"on"`
+	}, 2*time.Second, 5*time.Millisecond, "the manual wake's panel command must win")
+
+	// Both legs are now aligned to awake: a further tick must not enqueue another
+	// panel attempt or player round-trip.
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateAwake, "tick"))
+	select {
+	case <-panel.entered:
+		t.Fatal("no further panel attempt expected once both legs are aligned")
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
