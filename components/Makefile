@@ -28,3 +28,4 @@ sync-feral-watchdog:
 .PHONY: sync-all
 sync-all:
 	@$(SYNC_SCRIPT) . $(REMOTE_DIR)/ $(REMOTE_HOST)
+	@$(MAKE) sync-launcher-ui

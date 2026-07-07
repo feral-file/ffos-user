@@ -1,12 +1,13 @@
 module github.com/feral-file/ffos-user/components/feral-controld
 
-go 1.23.5
+go 1.26
 
 require github.com/gorilla/websocket v1.5.3
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/display-protocol/dp1-go v0.2.2
+	github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260616080701-abdaf42db208
 	github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7
 	github.com/feral-file/zapsentry v1.0.0
 	github.com/getsentry/sentry-go v0.33.0
