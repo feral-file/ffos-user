@@ -400,11 +400,14 @@ impl Ble {
     /// Called when a central disconnects and when the adapter reappears. Retries with capped
     /// exponential backoff until recovery succeeds or the service is stopped.
     ///
-    /// Dedup can drop a trigger that races an in-flight recovery; convergence still holds
-    /// because (a) the in-flight retry loop runs until a full recovery succeeds, (b) an
+    /// Dedup can drop a trigger that races an in-flight recovery. In practice this converges
+    /// because (a) an in-flight retry loop runs until a full recovery succeeds, (b) an
     /// `AdapterRemoved` always clears the notifier before the `Forced` trigger fires, so a
-    /// concurrent recovery cannot skip on stale liveness, and (c) the disconnect monitor
-    /// keeps ticking and re-triggers on a cleared notifier slot.
+    /// concurrent recovery cannot skip on stale liveness, and (c) while a central is
+    /// involved, its disconnect monitor keeps ticking and re-triggers on the cleared slot.
+    /// This is defense in depth, not a proof: a `Forced` trigger landing in the instants
+    /// between a finished recovery releasing `inner` and it clearing `recovery_in_flight`
+    /// is dropped, which is acceptable because that recovery just re-registered the stack.
     fn spawn_recovery(self: &Arc<Self>, reason: &str, kind: RecoveryKind) {
         if self.recovery_in_flight.swap(true, Ordering::AcqRel) {
             println!("BLE: Recovery already in flight; ignoring trigger ({reason})");

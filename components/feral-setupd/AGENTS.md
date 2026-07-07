@@ -105,9 +105,10 @@ Invariants to preserve when touching this code:
   live notifier proves the service table is being served; tearing it down would
   kill an in-flight setup session). `Forced` recovery never honors that signal:
   after a bluetoothd restart, `StopNotify` can never arrive, so a retained
-  notifier claims "subscribed" forever — `AdapterRemoved` also invalidates the
-  notifier slot for the same reason (see `should_skip_recovery`). Both kinds
-  no-op after `stop()`.
+  notifier claims "subscribed" forever (gating predicate:
+  `should_skip_recovery`) — the watchdog's `AdapterRemoved` handler also
+  invalidates the notifier slot for the same reason. Both kinds no-op after
+  `stop()`.
 - Recovery retries forever with capped exponential backoff (`recovery_backoff`,
   1 s → 30 s cap) and is deduplicated via `recovery_in_flight`; a transiently
   failing BlueZ must never permanently kill the pairing surface.
