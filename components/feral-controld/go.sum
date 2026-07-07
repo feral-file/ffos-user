@@ -14,6 +14,8 @@ github.com/display-protocol/dp1-go v0.2.2 h1:S0cJUIYaFlQVhvq/ryX3iAus8gfCNNJ1/70
 github.com/display-protocol/dp1-go v0.2.2/go.mod h1:DN2jdTtTHIOSCTuXcxFO81KzxohbopnitWJQDAW1eGo=
 github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=
 github.com/dlclark/regexp2 v1.11.0/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
+github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260616080701-abdaf42db208 h1:ygPY2TH+4FoNttRD4wWtNErEJ0apbd3m1rKOIgJqOrc=
+github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260616080701-abdaf42db208/go.mod h1:DFe4RDBxlyeXtf2oC133+FIUkbixzfeX8/b24JJQQjo=
 github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7 h1:/INaxTD9dwqT1BvY5aED+QIRs+jWER4TSiSfJFCg0OU=
 github.com/feral-file/godbus v0.0.6-0.20250530032926-fc5a2d7c32a7/go.mod h1:fJiQvR6JLa2TKwwzOoxKg+/qfjM2MeWxpjFhrleOEMA=
 github.com/feral-file/zapsentry v1.0.0 h1:2cX1SbJNpIc7ldagxauVrl+dyJZzrMMo6hEgQrZ6iF8=

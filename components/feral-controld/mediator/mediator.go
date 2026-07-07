@@ -222,6 +222,24 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 		}
 		result, err := m.cmdHandler.Process(ctx, command)
 		if err != nil {
+			if commandrouter.IsRateLimited(err) {
+				// Report a legible rejection back to the caller rather than
+				// dropping the command silently (feral-file/ffos-user#208).
+				m.logger.Warn("Command rejected by storm protection",
+					zap.String("command", commandType.String()),
+					zap.Error(err),
+				)
+				resp := relayer.Response{
+					Type:      "RPC",
+					MessageID: payload.MessageID,
+					Message: map[string]any{
+						"error":   "rate_limited",
+						"command": commandType.String(),
+						"message": err.Error(),
+					},
+				}
+				return m.relayer.Send(ctx, resp)
+			}
 			m.logger.Error("Failed to process command", zap.Error(err))
 			return err
 		}

@@ -132,6 +132,7 @@ func setup(t *testing.T) *testSetup {
 		ts.mockOOMRecoverer,
 		ts.mockExecutor,
 		ts.mockRefresher,
+		nil,
 		ts.mockHub,
 	)
 	ts.app = app
@@ -705,6 +706,7 @@ func TestInitializeApp(t *testing.T) {
 		"http://localhost:9222",
 		"wss://test.relay.com",
 		"test-api-key",
+		nil,
 		"com.feralfile.test",
 		nil,
 	)
@@ -792,6 +794,7 @@ func TestInitializeTestApp(t *testing.T) {
 		mockOOMRecoverer,
 		mockExecutor,
 		mockRefresher,
+		nil,
 		mockHub,
 	)
 

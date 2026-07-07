@@ -22,6 +22,7 @@ type WebSocketConn interface {
 	WriteControl(messageType int, data []byte, deadline time.Time) error
 	SetPongHandler(h func(appData string) error)
 	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
 	Close() error
 }
 
@@ -67,6 +68,10 @@ func (c *webSocketConn) SetPongHandler(h func(appData string) error) {
 
 func (c *webSocketConn) SetReadDeadline(t time.Time) error {
 	return c.conn.SetReadDeadline(t)
+}
+
+func (c *webSocketConn) SetWriteDeadline(t time.Time) error {
+	return c.conn.SetWriteDeadline(t)
 }
 
 func (c *webSocketConn) Close() error {

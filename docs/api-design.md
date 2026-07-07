@@ -110,6 +110,13 @@ All messages are JSON. The message envelope is:
 
 **Command routing logic (inside controld):**
 - If `Command.DeviceCtlCommand()` returns true → route to the device executor (`devicectl`).
+- If `command == "startMintPairingSession"` → handle inside `feral-controld`
+  as a commandrouter pre-CDP special case that creates or reuses the Mint
+  Pairing Broker session and drives the player overlay through
+  `mintPairingDisplay`.
+- If `command == "mintPairingApprovalDecision"` → handle inside
+  `feral-controld` as a commandrouter pre-CDP special case that validates and
+  completes a pending browser-session approval request.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
 **Device-control relayer commands**
@@ -138,14 +145,20 @@ Successful `setSleepSchedule`, `sleepNow`, and `wakeNow` responses include `{"ok
 
 The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional `supportBundleID` or `support_bundle_id`. Without a bundle id, `feral-controld` emits the original `upload_logs(user_id, api_key, title)` signal. With a bundle id, it emits additive `upload_logs_with_bundle(payload []byte)` where `payload` is JSON containing `user_id`, `api_key`, `title`, and `support_bundle_id`, so the old D-Bus signal payload shape stays unchanged and the new bundled upload payload can grow additively.
 
-**Relayer outbound notifications (`feral-controld`):** The device periodically pushes JSON notifications over the relayer WebSocket (and local hub clients) with an envelope that includes `notification_type` and a structured `message`. At minimum:
+The `startMintPairingSession` command is a controller-to-controld request to create one Mint Pairing Broker channel and display its pairing code through the player overlay via CDP command `mintPairingDisplay`. The command returns explicit `RPC` payloads with `ok`, `status`, `channelID`, `pairingCode`, and `expiresAt` on success; failures return `ok: false` with `error.code`. If a non-expired session is already active, it returns `already_started` and re-displays the same code. The broker short code is intentionally visible; raw browser session tokens are not. Any terminal pairing state hides the overlay so the bundled local player continues normal artwork playback. Shutdown cleanup is bounded within `feral-controld`'s process-level forced-exit window, so late terminal delivery is explicitly best-effort once that internal budget is exhausted.
+
+The `mintPairingApprovalDecision` command is a controller-to-controld approval response for browser-session mint pairing. It is handled inside `feral-controld`, not forwarded to Chromium. Success and validation failures both return explicit `RPC` payloads with `ok`, `status` or `error.code`, and `approvalRequestID` where available. Raw browser session tokens and DP1 playlist content must never appear in this command or in `mint_pairing_approval_request` / `mint_pairing_approval_outcome` relayer messages.
+
+**Outbound notifications (`feral-controld`):** The device periodically pushes status notifications over the relayer WebSocket and local hub clients with an envelope that includes `notification_type` and a structured `message`. Mint-pairing approval notifications are relayer-only because the controller/mobile approval UI is reached through the relayer topic, not through the trusted-local hub socket. At minimum:
 
 - `player_status` — playback/UI state from Chromium via CDP `checkStatus` (cast command, playlist, pause, etc.). This is not a substitute for hardware or OS-level facts.
 - `device_status` — device-oriented fields assembled by `status.DeviceStatus.GetStatus` (screen rotation, Wi‑Fi name, installed/latest version, volume, feature toggles, MAC info, best-effort `displayURL`, and optional `sleepSchedule`). The `displayURL` field is the top-level URL of the sole Chromium **page** debug target (DevTools `/json`), when exactly one such target exists; it is omitted when the URL cannot be resolved. Consumers that previously read a Chrome document URL from player payloads should use `device_status.message.displayURL` instead. When present, `sleepSchedule` follows the same **sleep vs. DDC** eventual-consistency rules as the `setSleepSchedule` / `sleepNow` / `wakeNow` contract above.
+- `mint_pairing_approval_request` — browser-session mint request details sent to controller/mobile approval UI, including browser information and the E2EE challenge.
+- `mint_pairing_approval_outcome` — terminal mint-pairing result used to clear controller/mobile approval UI.
 
 ### Hub WebSocket protocol (port 1111)
 
-The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands.
+The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands, including pre-CDP mint-pairing commands. Because the hub binds to `0.0.0.0:1111` when enabled, it is a trusted-local-network control surface: deployments must only enable it on networks where local clients are trusted, or add an explicit command-level guard before exposing privileged commands differently from the relayer path.
 
 ### BLE GATT protocol (feral-setupd)
 
@@ -211,7 +224,39 @@ Use `dbus.NewError(message, []interface{}{})` for all D-Bus method errors. The f
 
 ### Relayer errors
 
-There is no standardized error response envelope defined yet. When an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
+Most command failures are not standardized: when an executor command fails, `controld` logs the error and does not send an explicit error response to the relayer unless the command protocol requires a reply. When adding new commands that need error responses, document the response shape in code comments near the command handler.
+
+**Command-storm rejection (standardized).** Command-storm protection (see below) is the one path with a defined controller-visible error envelope. When the command router rejects a command (rate limit or concurrency budget) or the relayer sheds a command under dispatch saturation, the controller receives an RPC response whose `message` body is:
+
+```json
+{
+  "error": "rate_limited",
+  "command": "displayPlaylist",
+  "message": "human-readable reason"
+}
+```
+
+The command-router rejection reply (rate limit / concurrency budget) is reliable. The relayer-side shed reply under **dispatch saturation** is **best-effort**: to avoid blocking its read loop under a sustained storm, the relayer drops the reply when its shed-response writers are all busy. Controllers must not rely on receiving it for that case and should fall back to a request timeout and retry.
+
+The LAN-hub ingress reports the same condition with HTTP `429 Too Many Requests`. Controllers should treat both as "device busy" and back off; the command was not applied.
+
+### Command-storm protection
+
+`feral-controld` protects the shared command path from flooding across both the relayer and LAN-hub ingress (see feral-file/ffos-user#208). High-cost or disruptive commands are rate-limited, deduped, and bounded by a global concurrency budget; internal lifecycle flows (e.g. OOM recovery) bypass the gate so client traffic cannot shed them.
+
+It is on by default with tuned defaults. The optional `commandStorm` config section tunes it:
+
+```json
+{
+  "commandStorm": {
+    "disabled": false,
+    "maxConcurrent": 16
+  }
+}
+```
+
+- `disabled` (default `false`) — turn the gate off entirely.
+- `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever.
 
 ### BLE error codes
 

@@ -24,6 +24,12 @@ const (
 	READ_TIMEOUT        = 30 * time.Second
 	WRITE_TIMEOUT       = 30 * time.Second
 	IDLE_TIMEOUT        = 60 * time.Second
+
+	// MAX_INFLIGHT_CASTS caps concurrent /api/cast handlers so a LAN command
+	// storm (including floods of byte-identical commands that the command
+	// router dedupes downstream) cannot pile up unbounded HTTP goroutines.
+	// Excess requests are rejected with 429 rather than blocking.
+	MAX_INFLIGHT_CASTS = 64
 )
 
 //go:generate mockgen -source=hub.go -destination=../mocks/hub.go -package=mocks -mock_names=Hub=MockHub
@@ -39,6 +45,7 @@ type hub struct {
 	wsHandler  ws.WS
 	cmdHandler commandrouter.Handler
 	json       wrapper.JSON
+	castSlots  chan struct{}
 }
 
 func New(
@@ -67,6 +74,7 @@ func New(
 		json:       json,
 		server:     server,
 		logger:     logger,
+		castSlots:  make(chan struct{}, MAX_INFLIGHT_CASTS),
 	}
 	h.routes()
 	return h
@@ -116,6 +124,16 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound concurrent in-flight casts so a LAN storm cannot exhaust goroutines.
+	select {
+	case h.castSlots <- struct{}{}:
+		defer func() { <-h.castSlots }()
+	default:
+		h.logger.Warn("Cast rejected: hub at capacity")
+		http.Error(w, "Too many concurrent commands, slow down", http.StatusTooManyRequests)
+		return
+	}
+
 	var payload commands.Command
 	if err := h.json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		h.logger.Error("Failed to decode cast payload", zap.Error(err))
@@ -133,6 +151,11 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.cmdHandler.Process(h.ctx, payload)
 	if err != nil {
+		if commandrouter.IsRateLimited(err) {
+			h.logger.Warn("Cast request rejected by storm protection", zap.Error(err))
+			http.Error(w, "Too many commands, slow down", http.StatusTooManyRequests)
+			return
+		}
 		h.logger.Error("Failed to process cast request", zap.Error(err))
 		http.Error(w, "Failed to process cast request", http.StatusInternalServerError)
 		return
