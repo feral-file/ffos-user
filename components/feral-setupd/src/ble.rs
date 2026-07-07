@@ -105,6 +105,27 @@ fn recovery_backoff(attempt: u32) -> Duration {
     CAP.min(Duration::from_secs(secs))
 }
 
+/// How a GATT recovery trigger treats an apparently subscribed central.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum RecoveryKind {
+    /// Disconnect-monitor trigger: skip if a central is (still) subscribed, since a live
+    /// subscription proves the service table is being served and tearing it down would kill
+    /// that central's in-flight setup session.
+    BestEffort,
+    /// Adapter-watchdog trigger: never skip. A re-added adapter has lost our registrations
+    /// with certainty, and after a bluetoothd restart BlueZ can no longer deliver StopNotify,
+    /// so a retained notifier keeps claiming "subscribed" forever. Honoring that stale
+    /// liveness signal would gate out the one recovery that can fix the empty-service-table
+    /// wedge (ff-app #556).
+    Forced,
+}
+
+/// Pure decision: whether a recovery trigger should be skipped because a central appears
+/// subscribed. Factored out so the gating logic is unit-testable without a BlueZ session.
+fn should_skip_recovery(kind: RecoveryKind, central_subscribed: bool) -> bool {
+    kind == RecoveryKind::BestEffort && central_subscribed
+}
+
 /// Long-lived materials for (re)building the command characteristic and re-registering the
 /// GATT application.
 ///
@@ -326,7 +347,10 @@ impl Ble {
                 }
             };
             // Drop our session clone: the stream stays alive through the session stored in
-            // `Inner` and ends when `stop()` drops it, cleanly terminating this task.
+            // `Inner` and ends when `stop()` drops it, cleanly terminating this task. If
+            // bluer ever kept the subscription alive past that, the worst case is one idle
+            // task parked on next() until process exit — it re-checks `advertised` before
+            // acting on any event, so it can never trigger recovery after stop().
             drop(session);
             let mut events = Box::pin(events);
 
@@ -344,10 +368,21 @@ impl Ble {
                             "BLE: Adapter {name} removed \
                              (bluetoothd restart or controller reset)"
                         );
+                        // The adapter's death killed every connection, but a dead bluetoothd
+                        // can no longer deliver StopNotify, so a retained notifier would
+                        // keep reporting "subscribed" forever. Invalidate it now so neither
+                        // the AdapterAdded recovery below nor the disconnect monitor is
+                        // gated by that stale liveness signal.
+                        if let Some(runtime) = ble.runtime().await {
+                            runtime.notifier.lock().await.take();
+                        }
                     }
                     SessionEvent::AdapterAdded(name) if name == adapter_name => {
                         println!("BLE: Adapter {name} re-added; scheduling GATT recovery");
-                        ble.spawn_recovery("adapter re-added");
+                        // Forced: the re-added adapter has lost our registrations with
+                        // certainty, so the "central is subscribed" skip must not apply
+                        // (see should_skip_recovery for the stale-liveness hazard).
+                        ble.spawn_recovery("adapter re-added", RecoveryKind::Forced);
                     }
                     _ => {}
                 }
@@ -356,11 +391,21 @@ impl Ble {
         });
     }
 
+    async fn runtime(&self) -> Option<Arc<GattRuntime>> {
+        self.inner.lock().await.runtime.clone()
+    }
+
     /// Triggers an asynchronous full GATT-stack recovery (deduplicated across triggers).
     ///
     /// Called when a central disconnects and when the adapter reappears. Retries with capped
     /// exponential backoff until recovery succeeds or the service is stopped.
-    fn spawn_recovery(self: &Arc<Self>, reason: &str) {
+    ///
+    /// Dedup can drop a trigger that races an in-flight recovery; convergence still holds
+    /// because (a) the in-flight retry loop runs until a full recovery succeeds, (b) an
+    /// `AdapterRemoved` always clears the notifier before the `Forced` trigger fires, so a
+    /// concurrent recovery cannot skip on stale liveness, and (c) the disconnect monitor
+    /// keeps ticking and re-triggers on a cleared notifier slot.
+    fn spawn_recovery(self: &Arc<Self>, reason: &str, kind: RecoveryKind) {
         if self.recovery_in_flight.swap(true, Ordering::AcqRel) {
             println!("BLE: Recovery already in flight; ignoring trigger ({reason})");
             return;
@@ -371,7 +416,7 @@ impl Ble {
             let mut attempt: u32 = 0;
             loop {
                 attempt += 1;
-                match ble.recover_gatt_stack(&reason).await {
+                match ble.recover_gatt_stack(&reason, kind).await {
                     Ok(()) => break,
                     Err(e) => {
                         eprintln!("BLE: GATT recovery attempt {attempt} failed ({reason}): {e:#}");
@@ -394,8 +439,13 @@ impl Ble {
     /// resurrects a connectable device with an EMPTY service table: centrals connect
     /// instantly, discover zero services, and stay wedged until power cycle (ff-app #556).
     /// Dropping and re-registering both is cheap, idempotent from BlueZ's point of view, and
-    /// only runs while no central is subscribed.
-    async fn recover_gatt_stack(self: &Arc<Self>, reason: &str) -> Result<()> {
+    /// (for `BestEffort` triggers) only runs while no central is subscribed.
+    ///
+    /// Holds the `inner` mutex for the full duration (a few seconds of D-Bus round-trips and
+    /// settle delays). This is intentional: it serializes recovery against `start()`/`stop()`
+    /// and concurrent recoveries; callers of `is_advertised`/`get_device_id` simply block
+    /// briefly.
+    async fn recover_gatt_stack(self: &Arc<Self>, reason: &str, kind: RecoveryKind) -> Result<()> {
         let ble_handle = Arc::downgrade(self);
         let mut inner = self.inner.lock().await;
 
@@ -409,19 +459,21 @@ impl Ble {
             return Ok(());
         };
 
-        // A live subscribed central proves the service table is being served (its subscribe
-        // required a successful discovery), so there is nothing to recover — and tearing the
-        // registration down would kill that central's in-flight setup session.
         {
             let mut guard = runtime.notifier.lock().await;
-            if let Some(notifier) = guard.as_mut() {
-                if !notifier.is_stopped() {
-                    println!(
-                        "BLE: Skipping GATT recovery ({reason}) - a central is connected \
-                         and subscribed"
-                    );
-                    return Ok(());
-                }
+            let central_subscribed = guard.as_ref().is_some_and(|n| !n.is_stopped());
+            if should_skip_recovery(kind, central_subscribed) {
+                println!(
+                    "BLE: Skipping GATT recovery ({reason}) - a central is connected \
+                     and subscribed"
+                );
+                return Ok(());
+            }
+            // A forced recovery is about to tear the registration down regardless; any
+            // retained notifier is unusable by definition, so drop it to keep late replies
+            // from targeting a dead session.
+            if kind == RecoveryKind::Forced {
+                guard.take();
             }
         }
 
@@ -549,7 +601,11 @@ impl Ble {
                 let ble_handle = ble_handle.clone();
 
                 async move {
-                    // Cancel any existing disconnect monitor from previous connection
+                    // Cancel any existing disconnect monitor from previous connection.
+                    // Cancellation is cooperative, so an old monitor may overlap the new one
+                    // for up to a tick; that is harmless because a spurious recovery trigger
+                    // is deduplicated and skips itself once it sees the new central
+                    // subscribed (see should_skip_recovery).
                     {
                         let mut old_token = cancel_storage.lock().await;
                         if let Some(token) = old_token.take() {
@@ -754,7 +810,7 @@ impl Ble {
                         // central has already connected and subscribed.
                         if let Some(ble) = ble_handle.upgrade() {
                             println!("BLE: Scheduling GATT stack recovery...");
-                            ble.spawn_recovery("central disconnected");
+                            ble.spawn_recovery("central disconnected", RecoveryKind::BestEffort);
                         } else {
                             println!("BLE: Ble instance dropped, cannot recover GATT stack");
                         }
@@ -1031,6 +1087,19 @@ mod tests {
         assert_eq!(recovery_backoff(100), Duration::from_secs(30));
         // Defensive: attempt 0 (should not happen) must not underflow.
         assert_eq!(recovery_backoff(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn recovery_gating_skips_only_best_effort_with_live_central() {
+        // Disconnect-triggered recovery must not tear down a session a new central is using.
+        assert!(should_skip_recovery(RecoveryKind::BestEffort, true));
+        assert!(!should_skip_recovery(RecoveryKind::BestEffort, false));
+        // Adapter-re-added recovery must run even if a retained notifier still claims a
+        // central is subscribed: after a bluetoothd restart StopNotify can never arrive, so
+        // that signal is stale and honoring it would leave the empty-service-table wedge in
+        // place (ff-app #556).
+        assert!(!should_skip_recovery(RecoveryKind::Forced, true));
+        assert!(!should_skip_recovery(RecoveryKind::Forced, false));
     }
 
     #[test]

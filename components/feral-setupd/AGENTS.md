@@ -97,12 +97,17 @@ Invariants to preserve when touching this code:
 - `GattRuntime` retains the BLE callbacks and the shared notifier/monitor slots
   for the daemon's whole lifetime so the command characteristic can be rebuilt
   at any point, not just at startup.
-- Recovery triggers: (1) the per-connection disconnect monitor, (2) the adapter
-  watchdog (`spawn_adapter_watchdog`), which listens for `AdapterRemoved` /
-  `AdapterAdded` session events (bluetoothd restart, controller re-enumeration).
-- Recovery no-ops while a central is connected AND subscribed (a live notifier
-  proves the service table is being served; tearing it down would kill an
-  in-flight setup session). It also no-ops after `stop()`.
+- Recovery triggers: (1) the per-connection disconnect monitor (`BestEffort`),
+  (2) the adapter watchdog (`spawn_adapter_watchdog`), which listens for
+  `AdapterRemoved` / `AdapterAdded` session events (bluetoothd restart,
+  controller re-enumeration) and triggers a `Forced` recovery.
+- `BestEffort` recovery no-ops while a central is connected AND subscribed (a
+  live notifier proves the service table is being served; tearing it down would
+  kill an in-flight setup session). `Forced` recovery never honors that signal:
+  after a bluetoothd restart, `StopNotify` can never arrive, so a retained
+  notifier claims "subscribed" forever — `AdapterRemoved` also invalidates the
+  notifier slot for the same reason (see `should_skip_recovery`). Both kinds
+  no-op after `stop()`.
 - Recovery retries forever with capped exponential backoff (`recovery_backoff`,
   1 s → 30 s cap) and is deduplicated via `recovery_in_flight`; a transiently
   failing BlueZ must never permanently kill the pairing surface.
