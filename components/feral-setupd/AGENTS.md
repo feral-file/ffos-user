@@ -72,6 +72,43 @@ The codebase is organized into focused modules:
 Commands are defined as string constants in `src/constant.rs`, and the handler
 dispatch lives in `BleCommand::from_str` + the `match` inside the write handler.
 
+Slow commands (`scan_wifi`, `connect_wifi`, `keep_wifi`, `factory_reset`) are
+spawned from the write handler so the ATT write is acknowledged immediately.
+BlueZ delivers `WriteValue` over D-Bus and fails the central's write on its
+method timeout (~25 s), while nmcli + connectivity wait + version check can run
+longer. The mobile contract is unaffected: results are still delivered via the
+`reply_id` notification (the pattern `send_log` always used).
+
+### BLE GATT stack resilience (`src/ble.rs`)
+
+BlueZ silently forgets every registration a client made (GATT application AND
+advertisement) when `bluetoothd` restarts or the Bluetooth controller
+resets/re-enumerates. Historically only the advertisement was re-registered
+after a central disconnected, which resurrected a connectable device with an
+EMPTY service table — the mobile app connected instantly but discovered zero
+services until a power cycle (ff-app #556, observed right after failed setup
+attempts, plausibly because Wi-Fi switching on a shared Wi-Fi/BT chip can reset
+the controller).
+
+Invariants to preserve when touching this code:
+
+- Recovery is FULL-stack: `recover_gatt_stack` drops and re-registers both the
+  GATT application and the advertisement. Never re-register only one of them.
+- `GattRuntime` retains the BLE callbacks and the shared notifier/monitor slots
+  for the daemon's whole lifetime so the command characteristic can be rebuilt
+  at any point, not just at startup.
+- Recovery triggers: (1) the per-connection disconnect monitor, (2) the adapter
+  watchdog (`spawn_adapter_watchdog`), which listens for `AdapterRemoved` /
+  `AdapterAdded` session events (bluetoothd restart, controller re-enumeration).
+- Recovery no-ops while a central is connected AND subscribed (a live notifier
+  proves the service table is being served; tearing it down would kill an
+  in-flight setup session). It also no-ops after `stop()`.
+- Recovery retries forever with capped exponential backoff (`recovery_backoff`,
+  1 s → 30 s cap) and is deduplicated via `recovery_in_flight`; a transiently
+  failing BlueZ must never permanently kill the pairing surface.
+- `stop()` cancels the active disconnect monitor through the shared
+  `monitor_cancel` slot before tearing resources down.
+
 ### UI control (`src/cdp.rs`)
 
 `Cdp` is a minimal CDP client used to navigate the local launcher UI:

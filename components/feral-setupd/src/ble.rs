@@ -3,7 +3,7 @@ use crate::encoding;
 use crate::system;
 use crate::wifi_utils::SSIDsCacher;
 use bluer::{
-    Adapter, Session,
+    Adapter, Session, SessionEvent,
     adv::Advertisement,
     adv::AdvertisementHandle,
     gatt::local::{
@@ -12,10 +12,11 @@ use bluer::{
         CharacteristicWriteMethod, ReqError, Service,
     },
 };
-use futures_util::future::FutureExt;
+use futures_util::{future::FutureExt, stream::StreamExt};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -90,6 +91,71 @@ pub struct BleCallbacks {
     pub get_info: GetInfoCallback,
 }
 
+/// Delay between dropping BlueZ registrations and re-registering, so BlueZ finishes the
+/// asynchronous teardown first (controllers with a single advertising slot reject a second
+/// instance while the old one is still being unregistered).
+const RECOVERY_SETTLE_DELAY: Duration = Duration::from_millis(500);
+
+/// Capped exponential backoff between GATT recovery attempts: 1 s, 2 s, 4 s, ... up to 30 s.
+/// Recovery retries forever (until `stop()`); a transiently failing BlueZ must never
+/// permanently kill the pairing surface, because only a power cycle would revive it.
+fn recovery_backoff(attempt: u32) -> Duration {
+    const CAP: Duration = Duration::from_secs(30);
+    let secs = 1u64 << attempt.saturating_sub(1).min(5);
+    CAP.min(Duration::from_secs(secs))
+}
+
+/// Long-lived materials for (re)building the command characteristic and re-registering the
+/// GATT application.
+///
+/// BlueZ forgets every registration a client made when bluetoothd restarts or the Bluetooth
+/// controller resets/re-enumerates. The callbacks and shared per-connection state are
+/// therefore retained for the daemon's whole lifetime so the application can be re-registered
+/// at any point — not just at startup. Without this, only the advertisement could be
+/// re-created after such an event, leaving the device connectable but with an empty GATT
+/// service table until power cycle (ff-app #556).
+struct GattRuntime {
+    /// Reply channel to the currently subscribed central (replaced on every new subscribe,
+    /// cleared when the disconnect monitor observes the session stopped).
+    notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
+    /// Cancellation token of the active disconnect monitor.
+    monitor_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    bt_connected: Arc<BTConnectedCallback>,
+    bt_disconnected: Arc<BTDisconnectedCallback>,
+    factory_reset: Arc<FactoryResetCallback>,
+    submit_logs: Arc<SubmitLogsCallback>,
+    connect_wifi: Arc<ConnectWifiCallback>,
+    keep_wifi: Arc<KeepWifiCallback>,
+    get_info: Arc<GetInfoCallback>,
+    ssids_cacher: Arc<SSIDsCacher>,
+}
+
+impl GattRuntime {
+    fn new(callbacks: BleCallbacks, ssids_cacher: Arc<SSIDsCacher>) -> Self {
+        let BleCallbacks {
+            bt_connected,
+            bt_disconnected,
+            factory_reset,
+            submit_logs,
+            connect_wifi,
+            keep_wifi,
+            get_info,
+        } = callbacks;
+        Self {
+            notifier: Arc::new(Mutex::new(None)),
+            monitor_cancel: Arc::new(Mutex::new(None)),
+            bt_connected: Arc::new(bt_connected),
+            bt_disconnected: Arc::new(bt_disconnected),
+            factory_reset: Arc::new(factory_reset),
+            submit_logs: Arc::new(submit_logs),
+            connect_wifi: Arc::new(connect_wifi),
+            keep_wifi: Arc::new(keep_wifi),
+            get_info: Arc::new(get_info),
+            ssids_cacher,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     device_id: String,
@@ -98,12 +164,13 @@ struct Inner {
     adapter: Option<Adapter>,
     adv_handle: Option<AdvertisementHandle>,
     app_handle: Option<ApplicationHandle>,
-    // Cancellation token for disconnect monitor
-    disconnect_monitor_cancel: Option<CancellationToken>,
+    runtime: Option<Arc<GattRuntime>>,
 }
 
 pub struct Ble {
     inner: Mutex<Inner>,
+    /// Deduplicates concurrent recovery triggers (disconnect monitor + adapter watchdog).
+    recovery_in_flight: AtomicBool,
 }
 
 impl Ble {
@@ -114,6 +181,7 @@ impl Ble {
                 device_id,
                 ..Default::default()
             }),
+            recovery_in_flight: AtomicBool::new(false),
         }
     }
 
@@ -138,12 +206,13 @@ impl Ble {
             inner.device_id
         );
 
-        // Group into a GATT service and register it
-        let app_handle = self
-            .register_gatt_application(&adapter, ble_handle, callbacks, ssids_cacher)
-            .await?;
+        let runtime = Arc::new(GattRuntime::new(callbacks, ssids_cacher));
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Group into a GATT service and register it
+        let app_handle =
+            Self::register_gatt_application(&adapter, ble_handle.clone(), &runtime).await?;
+
+        tokio::time::sleep(RECOVERY_SETTLE_DELAY).await;
 
         println!("BLE: GATT app registered; ready to receive commands");
 
@@ -152,39 +221,51 @@ impl Ble {
         let adv_handle = adapter.advertise(adv).await?;
         println!("BLE: Advertising GATT service {}", constant::SERVICE_UUID);
 
-        inner.session = Some(session);
+        let adapter_name = adapter.name().to_string();
+        inner.session = Some(session.clone());
         inner.adapter = Some(adapter);
         inner.adv_handle = Some(adv_handle);
         inner.app_handle = Some(app_handle);
+        inner.runtime = Some(runtime);
         inner.advertised = true;
+        drop(inner);
+
+        // Watch for the adapter disappearing/reappearing (bluetoothd restart or controller
+        // re-enumeration). Both wipe our BlueZ registrations, so a re-added adapter must
+        // trigger a full GATT re-registration or the device would keep advertising an empty
+        // service table.
+        self.spawn_adapter_watchdog(session, adapter_name);
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<()> {
-        let (adv, app, adapter, session, cancel_token) = {
+        let (adv, app, adapter, session, runtime) = {
             let mut inner = self.inner.lock().await;
             if !inner.advertised {
                 return Ok(());
             }
             inner.advertised = false;
-
-            // Cancel the disconnect monitor if it exists
-            if let Some(token) = inner.disconnect_monitor_cancel.take() {
-                println!("BLE: Cancelling disconnect monitor");
-                token.cancel();
-            }
-
             (
                 inner.adv_handle.take(),
                 inner.app_handle.take(),
                 inner.adapter.take(),
                 inner.session.take(),
-                inner.disconnect_monitor_cancel.take(),
+                inner.runtime.take(),
             )
         };
 
+        // Cancel the active disconnect monitor (if any) so it cannot trigger a recovery
+        // mid-shutdown. The token lives in the runtime's shared storage — the same slot the
+        // notify handler fills on every new connection.
+        if let Some(runtime) = &runtime {
+            if let Some(token) = runtime.monitor_cancel.lock().await.take() {
+                println!("BLE: Cancelling disconnect monitor");
+                token.cancel();
+            }
+        }
+
         // Wait a moment for the monitor to acknowledge cancellation
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Disconnect all devices (to make sure BlueZ doesn't block adv unregistration)
         if let Some(adapter) = adapter {
@@ -204,64 +285,182 @@ impl Ble {
             drop(adapter);
 
             // Give more time for BlueZ to clean up (increased from 1s to 2s)
-            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+            tokio::time::sleep(Duration::from_millis(2000)).await;
         }
 
-        // Finally drop the session
+        // Finally drop the session and callback runtime
         drop(session);
-        drop(cancel_token);
+        drop(runtime);
         println!("BLE: All resources cleaned up");
         Ok(())
     }
 
-    /// Restarts advertising after a disconnection
-    /// This is called automatically when a device disconnects to ensure immediate re-advertising
-    pub async fn restart_advertising(&self) -> Result<()> {
+    pub async fn get_device_id(&self) -> String {
+        let st = self.inner.lock().await;
+        st.device_id.clone()
+    }
+
+    async fn is_advertised(&self) -> bool {
+        self.inner.lock().await.advertised
+    }
+
+    // --- GATT stack recovery ---
+
+    /// Watches BlueZ adapter lifecycle events for the adapter we registered on.
+    ///
+    /// A bluetoothd restart or a controller reset/re-enumeration surfaces as
+    /// `AdapterRemoved` + `AdapterAdded` and silently wipes both our GATT application and
+    /// advertisement registrations. Re-registering on `AdapterAdded` makes the pairing
+    /// surface self-healing instead of requiring a power cycle.
+    fn spawn_adapter_watchdog(self: &Arc<Self>, session: Session, adapter_name: String) {
+        let ble_weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let events = match session.events().await {
+                Ok(events) => events,
+                Err(e) => {
+                    eprintln!(
+                        "BLE: Failed to subscribe to adapter events; \
+                         no automatic recovery after bluetoothd restarts: {e}"
+                    );
+                    return;
+                }
+            };
+            // Drop our session clone: the stream stays alive through the session stored in
+            // `Inner` and ends when `stop()` drops it, cleanly terminating this task.
+            drop(session);
+            let mut events = Box::pin(events);
+
+            while let Some(event) = events.next().await {
+                let Some(ble) = ble_weak.upgrade() else {
+                    return;
+                };
+                if !ble.is_advertised().await {
+                    println!("BLE: Adapter watchdog exiting - service stopped");
+                    return;
+                }
+                match event {
+                    SessionEvent::AdapterRemoved(name) if name == adapter_name => {
+                        eprintln!(
+                            "BLE: Adapter {name} removed \
+                             (bluetoothd restart or controller reset)"
+                        );
+                    }
+                    SessionEvent::AdapterAdded(name) if name == adapter_name => {
+                        println!("BLE: Adapter {name} re-added; scheduling GATT recovery");
+                        ble.spawn_recovery("adapter re-added");
+                    }
+                    _ => {}
+                }
+            }
+            println!("BLE: Adapter event stream ended; watchdog stopped");
+        });
+    }
+
+    /// Triggers an asynchronous full GATT-stack recovery (deduplicated across triggers).
+    ///
+    /// Called when a central disconnects and when the adapter reappears. Retries with capped
+    /// exponential backoff until recovery succeeds or the service is stopped.
+    fn spawn_recovery(self: &Arc<Self>, reason: &str) {
+        if self.recovery_in_flight.swap(true, Ordering::AcqRel) {
+            println!("BLE: Recovery already in flight; ignoring trigger ({reason})");
+            return;
+        }
+        let ble = self.clone();
+        let reason = reason.to_string();
+        tokio::spawn(async move {
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                match ble.recover_gatt_stack(&reason).await {
+                    Ok(()) => break,
+                    Err(e) => {
+                        eprintln!("BLE: GATT recovery attempt {attempt} failed ({reason}): {e:#}");
+                        if !ble.is_advertised().await {
+                            break;
+                        }
+                        tokio::time::sleep(recovery_backoff(attempt)).await;
+                    }
+                }
+            }
+            ble.recovery_in_flight.store(false, Ordering::Release);
+        });
+    }
+
+    /// Re-registers the FULL GATT stack: application (service table) AND advertisement.
+    ///
+    /// This deliberately replaces the previous advertisement-only restart. If BlueZ lost our
+    /// registrations while a central was connected (bluetoothd restart, controller reset
+    /// while nmcli switches Wi-Fi networks during setup), restarting only the advertisement
+    /// resurrects a connectable device with an EMPTY service table: centrals connect
+    /// instantly, discover zero services, and stay wedged until power cycle (ff-app #556).
+    /// Dropping and re-registering both is cheap, idempotent from BlueZ's point of view, and
+    /// only runs while no central is subscribed.
+    async fn recover_gatt_stack(self: &Arc<Self>, reason: &str) -> Result<()> {
+        let ble_handle = Arc::downgrade(self);
         let mut inner = self.inner.lock().await;
 
-        // If stop() has been called, advertised will be false, so we should not restart
+        // If stop() has been called, advertised will be false, so we should not recover
         if !inner.advertised {
-            println!("BLE: Not restarting advertising - service has been stopped");
+            println!("BLE: Skipping GATT recovery ({reason}) - service has been stopped");
             return Ok(());
         }
-
-        println!("BLE: Connection lost, immediately restarting advertising...");
-
-        // Check if adapter exists before proceeding
-        if inner.adapter.is_none() {
-            eprintln!("BLE: Cannot restart advertising - adapter not available");
+        let Some(runtime) = inner.runtime.clone() else {
+            println!("BLE: Skipping GATT recovery ({reason}) - runtime not available");
             return Ok(());
+        };
+
+        // A live subscribed central proves the service table is being served (its subscribe
+        // required a successful discovery), so there is nothing to recover — and tearing the
+        // registration down would kill that central's in-flight setup session.
+        {
+            let mut guard = runtime.notifier.lock().await;
+            if let Some(notifier) = guard.as_mut() {
+                if !notifier.is_stopped() {
+                    println!(
+                        "BLE: Skipping GATT recovery ({reason}) - a central is connected \
+                         and subscribed"
+                    );
+                    return Ok(());
+                }
+            }
         }
 
-        // 1. Force disconnect all devices before restarting advertising
-        // This is especially important for iOS devices which may leave connections in a "hanging" state
-        println!("BLE: Forcefully disconnecting all devices before restart...");
-        if let Some(adapter) = inner.adapter.as_ref() {
-            Self::force_disconnect_all_devices(adapter).await;
+        let Some(adapter) = inner.adapter.clone() else {
+            anyhow::bail!("adapter not available");
+        };
+
+        println!("BLE: Recovering GATT stack ({reason})...");
+
+        // Re-assert power: a re-initialized adapter may come back unpowered.
+        if let Err(e) = adapter.set_powered(true).await {
+            eprintln!("BLE: Failed to power adapter during recovery: {e}");
         }
 
-        // 2. Drop the old advertisement handle
-        if let Some(old_handle) = inner.adv_handle.take() {
-            drop(old_handle);
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        }
+        // Force disconnect stale connections before restarting. This is especially important
+        // for iOS devices which may leave connections in a "hanging" state that would block
+        // advertising registration.
+        Self::force_disconnect_all_devices(&adapter).await;
 
-        // 3. Create a new advertisement with the same configuration
+        // Drop BOTH registrations. If BlueZ still has them this unregisters cleanly; if
+        // BlueZ already lost them the background unregister calls fail harmlessly. Either
+        // way we can then register from scratch.
+        drop(inner.app_handle.take());
+        drop(inner.adv_handle.take());
+
+        // bluer unregisters asynchronously; give BlueZ a moment so re-registration does not
+        // race the teardown.
+        tokio::time::sleep(RECOVERY_SETTLE_DELAY).await;
+
+        let app_handle = Self::register_gatt_application(&adapter, ble_handle, &runtime).await?;
+        // Store immediately: if advertising below fails, the registered app survives and the
+        // retry loop drops + re-registers it on the next attempt.
+        inner.app_handle = Some(app_handle);
+        println!("BLE: GATT app re-registered");
+
         let adv = Self::build_advertisement(&inner.device_id);
-
-        // 4. Register the new advertisement
-        // Get adapter reference again for advertising
-        let adapter = inner.adapter.as_ref().unwrap();
-        match adapter.advertise(adv).await {
-            Ok(handle) => {
-                inner.adv_handle = Some(handle);
-                println!("BLE: Advertising restarted successfully");
-            }
-            Err(e) => {
-                eprintln!("BLE: Failed to restart advertising: {e}");
-                return Err(e.into());
-            }
-        }
+        let adv_handle = adapter.advertise(adv).await?;
+        inner.adv_handle = Some(adv_handle);
+        println!("BLE: GATT stack recovered; advertising restarted ({reason})");
         Ok(())
     }
 
@@ -295,70 +494,30 @@ impl Ble {
         }
         // Give BlueZ time to process disconnections
         println!("BLE: Waiting for BlueZ to process disconnections...");
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-
-    pub async fn get_device_id(&self) -> String {
-        let st = self.inner.lock().await;
-        st.device_id.clone()
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     // --- Internal helpers ---
 
-    async fn create_cmd_char(
-        &self,
-        ble_handle: Weak<Self>,
-        callbacks: BleCallbacks,
-        ssids_cacher: Arc<SSIDsCacher>,
-    ) -> Characteristic {
-        let BleCallbacks {
-            bt_connected,
-            bt_disconnected,
-            factory_reset,
-            submit_logs,
-            connect_wifi,
-            keep_wifi,
-            get_info,
-        } = callbacks;
-
-        // Shared storage for the notifier handle
-        let notifier: Arc<Mutex<Option<CharacteristicNotifier>>> = Arc::new(Mutex::new(None));
-        let notifier_for_write = notifier.clone();
-        let notifier_for_notify = notifier.clone();
-        let notifier_for_monitor = notifier.clone();
-
-        // Shared storage for the current disconnect monitor cancellation token
-        let cancel_token_storage: Arc<Mutex<Option<CancellationToken>>> =
-            Arc::new(Mutex::new(None));
-        let cancel_token_for_notify = cancel_token_storage.clone();
-
-        let bt_connected_callback = Arc::new(bt_connected);
-        let bt_disconnected_callback = Arc::new(bt_disconnected);
-        let factory_reset_callback = Arc::new(factory_reset);
-        let submit_logs_callback = Arc::new(submit_logs);
-        let connect_wifi_callback = Arc::new(connect_wifi);
-        let keep_wifi_callback = Arc::new(keep_wifi);
-        let get_info_callback = Arc::new(get_info);
-
+    fn build_cmd_char(me: Weak<Self>, runtime: &Arc<GattRuntime>) -> Characteristic {
         Characteristic {
             uuid: constant::CMD_CHAR_UUID,
             // Enable notifications on this characteristic
             notify: Some(Self::make_cmd_notify_handler(
-                ble_handle,
-                notifier_for_notify,
-                notifier_for_monitor,
-                cancel_token_for_notify,
-                bt_connected_callback,
-                bt_disconnected_callback,
+                me,
+                runtime.notifier.clone(),
+                runtime.monitor_cancel.clone(),
+                runtime.bt_connected.clone(),
+                runtime.bt_disconnected.clone(),
             )),
             write: Some(Self::make_cmd_write_handler(
-                notifier_for_write,
-                connect_wifi_callback,
-                factory_reset_callback,
-                submit_logs_callback,
-                keep_wifi_callback,
-                get_info_callback,
-                ssids_cacher,
+                runtime.notifier.clone(),
+                runtime.connect_wifi.clone(),
+                runtime.factory_reset.clone(),
+                runtime.submit_logs.clone(),
+                runtime.keep_wifi.clone(),
+                runtime.get_info.clone(),
+                runtime.ssids_cacher.clone(),
             )),
             ..Default::default()
         }
@@ -370,12 +529,12 @@ impl Ble {
     /// - Stores the latest notifier handle for future replies.
     /// - Cancels any existing disconnect monitor when a new device connects.
     /// - Starts a fresh disconnect monitor tied to the new connection.
-    /// - Invokes the "BT connected" callback once the connection is ready.
+    /// - Kicks off the "BT connected" callback in the background (CDP navigation must not
+    ///   delay the StartNotify D-Bus reply, or BlueZ fails the central's subscribe).
     fn make_cmd_notify_handler(
         ble_handle: Weak<Self>,
-        notifier_for_notify: Arc<Mutex<Option<CharacteristicNotifier>>>,
-        notifier_for_monitor: Arc<Mutex<Option<CharacteristicNotifier>>>,
-        cancel_token_for_notify: Arc<Mutex<Option<CancellationToken>>>,
+        notifier: Arc<Mutex<Option<CharacteristicNotifier>>>,
+        cancel_storage: Arc<Mutex<Option<CancellationToken>>>,
         bt_connected_callback: Arc<BTConnectedCallback>,
         bt_disconnected_callback: Arc<BTDisconnectedCallback>,
     ) -> CharacteristicNotify {
@@ -383,12 +542,11 @@ impl Ble {
             notify: true,
             method: CharacteristicNotifyMethod::Fun(Box::new(move |new_notifier| {
                 println!("BLE: a device is connected");
-                let handle = notifier_for_notify.clone();
-                let monitor_handle = notifier_for_monitor.clone();
+                let notifier = notifier.clone();
                 let bt_connected_callback = bt_connected_callback.clone();
                 let bt_disconnected_callback = bt_disconnected_callback.clone();
-                let cancel_storage = cancel_token_for_notify.clone();
-                let ble_handle_for_monitor = ble_handle.clone();
+                let cancel_storage = cancel_storage.clone();
+                let ble_handle = ble_handle.clone();
 
                 async move {
                     // Cancel any existing disconnect monitor from previous connection
@@ -398,13 +556,13 @@ impl Ble {
                             println!("BLE: Cancelling previous disconnect monitor");
                             token.cancel();
                             // Give the old monitor a moment to stop
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
 
                     // Replace the old notifier with the new one
                     {
-                        let mut old_notifier = handle.lock().await;
+                        let mut old_notifier = notifier.lock().await;
                         if old_notifier.is_some() {
                             println!("BLE: Replacing previous notifier");
                         }
@@ -416,17 +574,20 @@ impl Ble {
                     *cancel_storage.lock().await = Some(cancel_token.clone());
 
                     // Start new disconnect monitor
-                    let disconnect_monitor = Self::start_disconnect_monitor(
-                        ble_handle_for_monitor,
-                        monitor_handle.clone(),
-                        bt_disconnected_callback.clone(),
+                    tokio::spawn(Self::start_disconnect_monitor(
+                        ble_handle,
+                        notifier.clone(),
+                        bt_disconnected_callback,
                         cancel_token,
-                    );
-                    tokio::spawn(disconnect_monitor);
+                    ));
 
-                    if let Some(cb) = bt_connected_callback.as_ref() {
-                        cb().await;
-                    }
+                    // Run the connected callback in the background: it navigates the TV via
+                    // CDP and a slow or wedged Chromium must not block the subscribe path.
+                    tokio::spawn(async move {
+                        if let Some(cb) = bt_connected_callback.as_ref() {
+                            cb().await;
+                        }
+                    });
                 }
                 .boxed()
             })),
@@ -441,6 +602,13 @@ impl Ble {
     /// - Decodes the command name, reply ID, and parameters.
     /// - Dispatches to the appropriate handler (`scan_wifi`, `connect_wifi`, etc.).
     /// - Logs malformed or unknown commands but always returns a graceful `Ok(())`.
+    ///
+    /// Slow commands (Wi-Fi scan/connect/keep, factory reset) are spawned so the ATT write
+    /// is acknowledged immediately: BlueZ delivers WriteValue over D-Bus and fails the
+    /// central's write on its method timeout (~25 s), while nmcli + the connectivity wait +
+    /// the version check can run far longer. The mobile app never waited on the write
+    /// acknowledgement anyway — results are delivered via the `reply_id` notification
+    /// (the same pattern `send_log` already used).
     fn make_cmd_write_handler(
         notifier_for_write: Arc<Mutex<Option<CharacteristicNotifier>>>,
         connect_wifi_callback: Arc<ConnectWifiCallback>,
@@ -488,22 +656,45 @@ impl Ble {
 
                     match cmd {
                         BleCommand::ScanWifi => {
-                            handle_scan_wifi(notifier, reply_id, ssids_cacher).await
+                            tokio::spawn(async move {
+                                let _ = handle_scan_wifi(notifier, reply_id, ssids_cacher).await;
+                            });
+                            Ok(())
                         }
                         BleCommand::ConnectWifi => {
-                            handle_connect_wifi(notifier, reply_id, params, connect_wifi_callback)
-                                .await
+                            tokio::spawn(async move {
+                                let _ = handle_connect_wifi(
+                                    notifier,
+                                    reply_id,
+                                    params,
+                                    connect_wifi_callback,
+                                )
+                                .await;
+                            });
+                            Ok(())
                         }
                         BleCommand::KeepWifi => {
-                            handle_keep_wifi(notifier, reply_id, keep_wifi_callback).await
+                            tokio::spawn(async move {
+                                let _ =
+                                    handle_keep_wifi(notifier, reply_id, keep_wifi_callback).await;
+                            });
+                            Ok(())
+                        }
+                        BleCommand::FactoryReset => {
+                            tokio::spawn(async move {
+                                let _ = handle_factory_reset(
+                                    notifier,
+                                    reply_id,
+                                    factory_reset_callback,
+                                )
+                                .await;
+                            });
+                            Ok(())
                         }
                         BleCommand::GetInfo => {
                             handle_get_info(notifier, reply_id, get_info_callback).await
                         }
                         BleCommand::SetTime => handle_set_time(notifier, reply_id, params).await,
-                        BleCommand::FactoryReset => {
-                            handle_factory_reset(notifier, reply_id, factory_reset_callback).await
-                        }
                         BleCommand::SendLogs => {
                             handle_submit_logs(notifier, reply_id, params, submit_logs_callback)
                                 .await
@@ -528,7 +719,7 @@ impl Ble {
     ) {
         println!("BLE: Starting disconnect monitor for connected device");
 
-        let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut check_interval = tokio::time::interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
@@ -539,27 +730,33 @@ impl Ble {
                 _ = check_interval.tick() => {
                     let is_disconnected = {
                         let mut guard = notifier.lock().await;
-                        if let Some(notifier) = guard.as_mut() {
-                            notifier.is_stopped()
-                        } else {
-                            true
+                        match guard.as_mut() {
+                            Some(notifier) if notifier.is_stopped() => {
+                                // Clear the dead reply channel so late replies are skipped
+                                // instead of erroring against a torn-down session. A new
+                                // connection installs its own notifier before this monitor
+                                // is replaced, and the re-check under the lock ensures we
+                                // never clear a live one.
+                                *guard = None;
+                                true
+                            }
+                            Some(_) => false,
+                            None => true,
                         }
                     };
 
                     if is_disconnected {
                         println!("BLE: Device disconnected (session stopped)");
 
-                        // Step 1: Immediately restart advertising (most important change)
-                        // This happens before UI callback to minimize downtime
+                        // Step 1: Recover the full GATT stack (application + advertisement)
+                        // in the background. See recover_gatt_stack for why re-registering
+                        // only the advertisement is not enough. The recovery no-ops if a new
+                        // central has already connected and subscribed.
                         if let Some(ble) = ble_handle.upgrade() {
-                            println!("BLE: Triggering automatic advertising restart...");
-                            // Spawn in background to avoid blocking the callback
-                            let restart_result = ble.restart_advertising().await;
-                            if let Err(e) = restart_result {
-                                eprintln!("BLE: Auto-restart advertising failed: {e}");
-                            }
+                            println!("BLE: Scheduling GATT stack recovery...");
+                            ble.spawn_recovery("central disconnected");
                         } else {
-                            println!("BLE: Ble instance dropped, cannot restart advertising");
+                            println!("BLE: Ble instance dropped, cannot recover GATT stack");
                         }
 
                         // Step 2: Notify UI to update (e.g., show QR code)
@@ -576,16 +773,14 @@ impl Ble {
     }
 
     async fn register_gatt_application(
-        &self,
         adapter: &Adapter,
         me: Weak<Self>,
-        callbacks: BleCallbacks,
-        ssids_cacher: Arc<SSIDsCacher>,
+        runtime: &Arc<GattRuntime>,
     ) -> Result<ApplicationHandle> {
         let svc = Service {
             uuid: constant::SERVICE_UUID,
             primary: true,
-            characteristics: vec![self.create_cmd_char(me, callbacks, ssids_cacher).await],
+            characteristics: vec![Self::build_cmd_char(me, runtime)],
             ..Default::default()
         };
 
@@ -603,8 +798,8 @@ impl Ble {
             service_uuids: vec![constant::SERVICE_UUID].into_iter().collect(),
             discoverable: Some(true),
             local_name: Some(device_id.to_string()),
-            min_interval: Some(std::time::Duration::from_millis(20)),
-            max_interval: Some(std::time::Duration::from_millis(100)),
+            min_interval: Some(Duration::from_millis(20)),
+            max_interval: Some(Duration::from_millis(100)),
             ..Default::default()
         }
     }
@@ -818,5 +1013,74 @@ async fn notify_central(
         eprintln!("BLE: Notifier not yet available; skipping reply");
         // Return Ok here as this is not a critical error - the device might not be ready yet
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_backoff_grows_exponentially_and_caps() {
+        assert_eq!(recovery_backoff(1), Duration::from_secs(1));
+        assert_eq!(recovery_backoff(2), Duration::from_secs(2));
+        assert_eq!(recovery_backoff(3), Duration::from_secs(4));
+        assert_eq!(recovery_backoff(5), Duration::from_secs(16));
+        // Attempt 6 would be 32 s; capped at 30 s and stays there forever.
+        assert_eq!(recovery_backoff(6), Duration::from_secs(30));
+        assert_eq!(recovery_backoff(100), Duration::from_secs(30));
+        // Defensive: attempt 0 (should not happen) must not underflow.
+        assert_eq!(recovery_backoff(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn ble_status_codes_match_mobile_protocol() {
+        // These codes are a wire contract with the mobile app; they must never drift.
+        assert_eq!(BleStatus::Success.code(), 0);
+        assert_eq!(BleStatus::WrongWifiPassword.code(), 1);
+        assert_eq!(BleStatus::NoInternet.code(), 2);
+        assert_eq!(BleStatus::ServerUnreachable.code(), 3);
+        assert_eq!(BleStatus::WifiRequired.code(), 4);
+        assert_eq!(BleStatus::DeviceUpdating.code(), 5);
+        assert_eq!(BleStatus::VersionCheckFailed.code(), 6);
+        assert_eq!(BleStatus::InvalidParams.code(), 7);
+        assert_eq!(BleStatus::VersionTooOld.code(), 10);
+        assert_eq!(BleStatus::UnknownError.code(), 255);
+    }
+
+    #[test]
+    fn ble_command_parses_all_known_commands() {
+        assert!(matches!(
+            BleCommand::from_str(constant::CMD_SCAN_WIFI),
+            BleCommand::ScanWifi
+        ));
+        assert!(matches!(
+            BleCommand::from_str(constant::CMD_CONNECT_WIFI),
+            BleCommand::ConnectWifi
+        ));
+        assert!(matches!(
+            BleCommand::from_str(constant::CMD_KEEP_WIFI),
+            BleCommand::KeepWifi
+        ));
+        assert!(matches!(
+            BleCommand::from_str(constant::CMD_GET_INFO),
+            BleCommand::GetInfo
+        ));
+        assert!(matches!(
+            BleCommand::from_str(constant::CMD_SET_TIME),
+            BleCommand::SetTime
+        ));
+        assert!(matches!(
+            BleCommand::from_str(constant::CMD_FACTORY_RESET),
+            BleCommand::FactoryReset
+        ));
+        assert!(matches!(
+            BleCommand::from_str(constant::CMD_SEND_LOGS),
+            BleCommand::SendLogs
+        ));
+        assert!(matches!(
+            BleCommand::from_str("bogus"),
+            BleCommand::Unknown(_)
+        ));
     }
 }
