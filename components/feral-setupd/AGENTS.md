@@ -46,7 +46,11 @@ The codebase is organized into focused modules:
 1. **Initialize state**:
    - Create BLE service (`Ble::new()`), build `AppState` (device id, branch,
      version, `PersistentState`, `Connectivity`, etc.).
-   - Connect to the local Chrome instance via CDP (`Cdp::connect`).
+   - Build the reconnecting CDP handle (`init_cdp` → `CdpHandle`) with a
+     best-effort initial connect, and spawn the background reconnect loop
+     (`spawn_cdp_reconnect_loop`). A failed CDP connect is **never fatal**: a
+     headless device may have no Chromium at boot, and BLE/D-Bus/OTA must run
+     with zero CDP (see "CDP resilience" below).
 2. **Start BLE**:
    - Register GATT app + start advertising with a command characteristic.
    - Provide callback closures (`BleCallbacks`) for each supported BLE command.
@@ -117,12 +121,44 @@ Invariants to preserve when touching this code:
 
 ### UI control (`src/cdp.rs`)
 
-`Cdp` is a minimal CDP client used to navigate the local launcher UI:
+`Cdp` is a minimal, low-level CDP client used to navigate the local launcher UI:
 - QR code page (includes `device_info` query params)
 - Message pages (errors, update prompts, etc.)
 - Web app page after successful setup/pairing
 
 The web app target is fixed to the bundled local player at `http://127.0.0.1:8080/`. Do not reintroduce `webapp_url` overrides from `ff1-config.json`; readiness belongs to `feral-player.service`.
+
+### CDP resilience (`src/cdp.rs`, `src/startup.rs`, `src/ui.rs`)
+
+`feral-setupd` starts unconditionally at boot (its unit is no longer gated on
+`chromium-ready.target` and no longer `PartOf` it), so the CDP endpoint at
+`CDP_URL` may be **absent at startup**, appear later (monitor plugged in), and
+disappear/reappear whenever the kiosk restarts. All CDP work therefore goes
+through `CdpHandle`, a reconnecting front over `Cdp`:
+
+- **Never fatal on CDP.** `init_cdp` returns a handle even if the first connect
+  fails; `run()` no longer `?`-propagates a CDP error. `CdpHandle::navigate`
+  is infallible by contract (drops silently when disconnected) — the whole UI
+  layer and every BLE/D-Bus reply rely on this. `show_webapp`'s
+  `get_current_url` fast-path must **not** propagate failure (it did — old Fatal
+  path 2); a failure is treated as "not on webapp" and falls through to a
+  best-effort navigate.
+- **Lazy connect + reconnect.** `spawn_cdp_reconnect_loop` retries connecting on
+  `CDP_RECONNECT_INTERVAL` while disconnected. A transport-dead error
+  (`Error::is_transport_dead`: socket/HTTP failures, not command timeouts —
+  Chromium often renders without replying) drops the cached connection so the
+  loop rebuilds it. Chromium restarts mint a new page target (new ws URL), so
+  reconnect always re-reads `/json`; the loop also proactively drops a silently
+  stale socket via `connection_is_current` (HTTP-only ws-URL compare) every
+  `CDP_LIVENESS_CHECK_INTERVAL`.
+- **UI resync on (re)connect.** On every successful (re)connect the loop calls
+  `ui::resync_canonical_page`, which maps `app_state.page` + phase through
+  `restore_page_target` and re-shows the canonical surface — otherwise a kiosk
+  that (re)started after setupd would sit on the launcher logo forever. It only
+  repaints (never runs flow logic), is skipped while `update_in_progress` (the
+  updater owns the screen), and re-asserts the failure surface for a latched
+  `UpdateFailed` (whose canonical `SystemUpgrade` page `restore_page_target`
+  would otherwise route to QR).
 
 ### Connectivity (`src/connectivity.rs`, `src/dbus_utils.rs`)
 

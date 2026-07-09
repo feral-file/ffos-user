@@ -68,6 +68,19 @@ pub const BLE_ERR_CODE_UNKNOWN_ERROR: u8 = 255;
 // Chrome configuration
 pub const CDP_URL: &str = "http://127.0.0.1:9222/json";
 pub const CDP_ID_START: u64 = 1_000_000;
+/// How often the reconnect loop retries connecting while Chromium is absent. Short so a monitor
+/// plugged in (or a kiosk restart) is picked up within a couple of seconds without busy-spinning.
+pub const CDP_RECONNECT_INTERVAL: u64 = 3 * 1000; // 3 seconds
+/// How often the reconnect loop re-verifies a live connection against the current Chromium page
+/// target (HTTP-only). Detects a kiosk restart that left the socket silently stale.
+pub const CDP_LIVENESS_CHECK_INTERVAL: u64 = 5 * 1000; // 5 seconds
+/// Upper bound on a single liveness probe's `/json` fetch. reqwest has no default timeout, and a
+/// wedged Chromium must not stall the reconnect loop indefinitely.
+pub const CDP_LIVENESS_PROBE_TIMEOUT: u64 = 3 * 1000; // 3 seconds
+/// Consecutive failed liveness probes required before the cached connection is declared stale.
+/// One probe can blip transiently while the socket is healthy; dropping on a single failure
+/// would trigger a resync repaint (visible page reload) in the monitor-present steady state.
+pub const CDP_LIVENESS_STALE_PROBES: u32 = 2;
 pub const WEBAPP_URL: &str = "http://127.0.0.1:8080/";
 pub const QRCODE_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=qr";
 pub const MSG_URL_PREFIX: &str = "file:///opt/feral/ui/launcher/index.html?step=message&message=";

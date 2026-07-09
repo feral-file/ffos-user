@@ -23,7 +23,8 @@ use anyhow::Result;
 use ble::Ble;
 use dbus_handlers::{setup_dbus_listeners, wait_for_controld};
 use startup::{
-    init_app_state, init_cdp, start_ble, startup_with_internet, startup_without_internet,
+    init_app_state, init_cdp, spawn_cdp_reconnect_loop, start_ble, startup_with_internet,
+    startup_without_internet,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -71,7 +72,10 @@ async fn run() -> Result<()> {
     // Initialize state
     let ble_service = Arc::new(Ble::new());
     let app_state = init_app_state(&ble_service).await?;
-    let chrome = init_cdp().await?;
+    // Never fatal on a headless device: CDP may be absent at boot and appear later. init_cdp does a
+    // best-effort connect; the reconnect loop keeps it live and resyncs the UI on (re)connect.
+    let chrome = init_cdp().await;
+    spawn_cdp_reconnect_loop(chrome.clone(), app_state.clone());
 
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());

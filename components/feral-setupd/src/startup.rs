@@ -3,7 +3,7 @@
 use crate::app_state::{AppState, Page, unix_s};
 use crate::ble::{Ble, BleCallbacks};
 use crate::callbacks;
-use crate::cdp::Cdp;
+use crate::cdp::CdpHandle;
 use crate::cfg;
 use crate::connectivity::Connectivity;
 use crate::constant;
@@ -54,17 +54,88 @@ pub async fn init_app_state(ble_service: &Arc<Ble>) -> Result<Arc<AppState>> {
     Ok(app_state)
 }
 
-pub async fn init_cdp() -> Result<Arc<Cdp>> {
-    let chrome = Cdp::connect(constant::CDP_URL)
-        .await
-        .context("connecting to CDP")?;
-    Ok(Arc::new(chrome))
+/// Build the reconnecting CDP handle, attempting one best-effort connect up front.
+///
+/// A headless device may have no Chromium at boot (no monitor → no kiosk → no CDP), so a failed
+/// connect must NOT abort startup — this daemon now boots unconditionally and drives BLE/D-Bus/OTA
+/// with zero CDP. When Chromium IS present the up-front connect makes the first `show_*` paint land
+/// exactly as before; when it is absent, `spawn_cdp_reconnect_loop` keeps retrying and resyncs the
+/// UI once a browser appears. This is why `run()` no longer `?`-propagates a CDP failure (that was
+/// the fatal path that killed a headless boot).
+pub async fn init_cdp() -> Arc<CdpHandle> {
+    let chrome = Arc::new(CdpHandle::new(constant::CDP_URL));
+    if let Err(e) = chrome.connect().await {
+        eprintln!("MAIN: initial CDP connect failed, will retry in background: {e:#?}");
+    }
+    chrome
+}
+
+/// Background loop that keeps the CDP handle connected and repaints the canonical UI on (re)connect.
+///
+/// Runs for the daemon's lifetime. Two states:
+/// - Connected: periodically verify the connection still matches the live Chromium page
+///   (`connection_is_current`, HTTP-only). A kiosk restart mints a new page target, so the cached
+///   socket goes stale silently; after consecutive failed probes we drop it and fall through to
+///   reconnect (single-probe blips are debounced to avoid repainting a healthy kiosk).
+/// - Disconnected: retry `connect()` on a short interval. On success, resync the UI so the freshly
+///   (re)started kiosk shows the surface the daemon believes it is on, instead of the launcher logo.
+///
+/// The up-front connect in `init_cdp` means a browser present at boot is already connected here, so
+/// the initial paint is owned by the normal startup flow and this loop only monitors — it does not
+/// double-paint. Resync is skipped while an OTA owns the device (see `resync_canonical_page`).
+pub fn spawn_cdp_reconnect_loop(chrome: Arc<CdpHandle>, app_state: Arc<AppState>) {
+    tokio::spawn(async move {
+        // Consecutive failed liveness probes. The probe is an HTTP round-trip that can blip
+        // transiently while the socket is perfectly healthy; declaring staleness on a single
+        // failure would disconnect + resync, visibly reloading the kiosk page in steady state.
+        let mut stale_probes: u32 = 0;
+        loop {
+            if chrome.is_connected().await {
+                if chrome.connection_is_current().await {
+                    stale_probes = 0;
+                    tokio::time::sleep(Duration::from_millis(
+                        constant::CDP_LIVENESS_CHECK_INTERVAL,
+                    ))
+                    .await;
+                    continue;
+                }
+                stale_probes += 1;
+                if stale_probes < constant::CDP_LIVENESS_STALE_PROBES {
+                    tokio::time::sleep(Duration::from_millis(
+                        constant::CDP_LIVENESS_CHECK_INTERVAL,
+                    ))
+                    .await;
+                    continue;
+                }
+                // Stale or dead browser target: drop so the reconnect below rebinds to the new one.
+                println!(
+                    "MAIN: CDP connection no longer current after {stale_probes} probes, reconnecting"
+                );
+                stale_probes = 0;
+                chrome.disconnect().await;
+            }
+
+            match chrome.connect().await {
+                Ok(()) => {
+                    // Fresh connection, fresh probe history: a count carried over from before a
+                    // navigate-triggered drop must not let a single post-reconnect blip repaint.
+                    stale_probes = 0;
+                    println!("MAIN: CDP (re)connected, resyncing canonical UI");
+                    crate::ui::resync_canonical_page(&app_state, &chrome).await;
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(constant::CDP_RECONNECT_INTERVAL))
+                        .await;
+                }
+            }
+        }
+    });
 }
 
 pub async fn start_ble(
     ble_service: &Arc<Ble>,
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     ssids_cacher: &Arc<SSIDsCacher>,
 ) -> Result<()> {
     let ble_callbacks = BleCallbacks {
@@ -104,7 +175,7 @@ pub fn startup_requires_update_failed_recovery(phase: SetupPhase) -> bool {
 /// surface keeps the online and offline startup branches identical if the message changes.
 pub async fn show_update_failed_recovery(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
 ) -> Result<()> {
     println!("MAIN: UpdateFailed phase restored; showing recovered failure message");
     println!("MAIN: Waiting for explicit BLE/D-Bus retry");
@@ -132,7 +203,7 @@ pub async fn show_update_failed_recovery(
 ///   BLE setup path remains in control.
 pub async fn startup_without_internet(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     ssids_cacher: &Arc<SSIDsCacher>,
     used_to_connect: Option<&String>,
 ) -> Result<()> {
@@ -208,7 +279,7 @@ pub async fn startup_without_internet(
 ///   subsequent boots where connectivity is available immediately.
 pub async fn startup_with_internet(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     used_to_connect: Option<&String>,
 ) -> Result<()> {
     if used_to_connect.is_none() {
@@ -239,7 +310,10 @@ pub async fn startup_with_internet(
 /// - Any early return from this function (for example, when an update is required or
 ///   the device is too old) is intentional and means the usual "show art or QR" flow
 ///   should not continue.
-pub async fn on_startup_with_internet(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
+pub async fn on_startup_with_internet(
+    app_state: Arc<AppState>,
+    chrome: Arc<CdpHandle>,
+) -> Result<()> {
     // If UpdateFailed phase is set, skip automatic update check on startup.
     // Show the failure message (different from fresh failure) since this is reboot recovery.
     // Mobile app will see update_failed via device_info polling and can trigger explicit retry.
