@@ -92,12 +92,30 @@ func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 }
 
-// When chromium-ready.target is down, an inactive feral-controld/feral-setupd
-// is the expected teardown window and is logged at Info; feral-player and
-// feral-sys-monitord are not gated, so their inactive state stays an Error.
-func TestSystemdMonitor_InactiveServiceLogLevel_TargetDown(t *testing.T) {
+// After decoupling from chromium-ready.target, an inactive feral-setupd or
+// feral-controld is a genuine fault: it must be reported as a failure
+// (per-service metric + incident notification), not the old Info-level
+// "expected teardown". The target state is no longer consulted.
+func TestSystemdMonitor_InactiveSetupdControld_ReportedAsFailure(t *testing.T) {
+	monitor, collector := newTestSystemdMonitor(t)
+	ctx := context.Background()
+
+	setServiceStates(t, "active", "active", "active", "active")
+	requireNoError(t, monitor.check(ctx))
+
+	setServiceStates(t, "active", "inactive", "inactive", "active")
+	requireNoError(t, monitor.check(ctx))
+
+	metrics := collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-setupd.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
+	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
+}
+
+// Every monitored service is now expected to be up, so any inactive reading is
+// logged at Error regardless of service or target state.
+func TestSystemdMonitor_InactiveServiceLogLevels(t *testing.T) {
 	installFakeSystemctl(t)
-	t.Setenv("FF_TEST_CHROMIUM_READY_STATE", "inactive")
 
 	core, logs := observer.New(zapcore.DebugLevel)
 	logger := zap.New(core)
@@ -107,31 +125,30 @@ func TestSystemdMonitor_InactiveServiceLogLevel_TargetDown(t *testing.T) {
 	requireNoError(t, monitor.check(context.Background()))
 
 	assertInactiveLogLevels(t, logs, map[string]zapcore.Level{
-		"feral-controld.service":     zapcore.InfoLevel,
-		"feral-setupd.service":       zapcore.InfoLevel,
+		"feral-controld.service":     zapcore.ErrorLevel,
+		"feral-setupd.service":       zapcore.ErrorLevel,
 		"feral-player.service":       zapcore.ErrorLevel,
 		"feral-sys-monitord.service": zapcore.ErrorLevel,
 	})
 }
 
-// When chromium-ready.target is active, feral-controld/feral-setupd must be
-// running; an inactive reading there is a genuine fault and is logged at Error.
-func TestSystemdMonitor_InactiveServiceLogLevel_TargetActive(t *testing.T) {
-	installFakeSystemctl(t)
-	t.Setenv("FF_TEST_CHROMIUM_READY_STATE", "active")
+// feral-player and feral-sys-monitord keep their prior inactive handling: an
+// inactive reading is logged (Error) but is NOT escalated to a failure metric.
+// This locks the intended asymmetry against setupd/controld.
+func TestSystemdMonitor_InactivePlayerSysMonitord_NoFailureMetric(t *testing.T) {
+	monitor, collector := newTestSystemdMonitor(t)
+	ctx := context.Background()
 
-	core, logs := observer.New(zapcore.DebugLevel)
-	logger := zap.New(core)
-	monitor := NewSystemdMonitor(nil, logger, NewCommandHandler(logger, nil), nil)
+	setServiceStates(t, "active", "active", "active", "active")
+	requireNoError(t, monitor.check(ctx))
 
-	// Only controld/setupd inactive; player/sys-monitord stay active.
-	setServiceStates(t, "active", "inactive", "inactive", "active")
-	requireNoError(t, monitor.check(context.Background()))
+	setServiceStates(t, "inactive", "active", "active", "inactive")
+	requireNoError(t, monitor.check(ctx))
 
-	assertInactiveLogLevels(t, logs, map[string]zapcore.Level{
-		"feral-controld.service": zapcore.ErrorLevel,
-		"feral-setupd.service":   zapcore.ErrorLevel,
-	})
+	metrics := collector.Metrics()
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 0)
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-sys-monitord.service"} 1`, 0)
+	assertMetricCount(t, metrics, "service_failed_incident 1", 0)
 }
 
 // assertInactiveLogLevels checks that every "Systemd: Service is inactive" log

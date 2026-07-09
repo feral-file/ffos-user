@@ -34,6 +34,15 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
   healthy devices.
 - Recovery action: `systemctl --user restart chromium-kiosk.service`.
 - If 3 restarts occur within 5 minutes, triggers a system reboot.
+- **Headless devices are exempt.** On a device with no monitor, the kiosk
+  intentionally waits for a display before launching Chromium, so a missing
+  `/json/version` is expected, not a failure. While any
+  `/sys/class/drm/card*-*/status` reads a **known** disconnected display, the
+  monitor suppresses all escalation (no kiosk restart, no restart-history
+  accumulation, no reboot). Detection **fails open**: an unreadable or absent
+  sysfs layout counts as "connected" so escalation is never silently disabled.
+  When a display is (re)connected, the startup grace is re-armed from scratch
+  before escalation resumes.
 
 ## Resource Monitoring (RAM, GPU, DISK)
 
