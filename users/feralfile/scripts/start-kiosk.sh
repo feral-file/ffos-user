@@ -24,10 +24,55 @@ fi
 # GlobalMediaControls: Hide media control UI
 DISABLE_FEATURES="TranslateUI,InterestFeedContentSuggestions,CalculateNativeWinOcclusion,GlobalMediaControls"
 
+# Block until a display is physically connected before launching cage/Chromium.
+# On a headless boot there is no output for wlr-randr to configure and cage would
+# exit immediately; with chromium-kiosk.service Restart=always that turns into a
+# relaunch storm (and cdp-ready-check would also fire a restart on its 90s
+# timeout). sysfs DRM status is readable without a running compositor, unlike
+# wlr-randr, so it is the correct probe here and matches the source
+# display-restore.sh watches. A monitor may be attached later on any connector,
+# so we wait indefinitely rather than time out.
+wait_for_display() {
+    local announced=0
+    while true; do
+        if grep -qxF connected /sys/class/drm/card*-*/status 2>/dev/null; then
+            echo "$(date '+%F %T') [INFO] Display connected, starting kiosk"
+            return
+        fi
+        # Log the transition into the waiting state once, not on every poll, to
+        # keep the log readable during long headless periods.
+        if [ "$announced" -eq 0 ]; then
+            echo "$(date '+%F %T') [INFO] No display connected, waiting for one to be attached..."
+            announced=1
+        fi
+        sleep 3
+    done
+}
+
+wait_for_display
+
+# A display is present: from here the CDP readiness probe and cage/Chromium can
+# make real progress, so start the probe now (starting it earlier under headless
+# would just time out and restart the unit for no reason).
 /home/feralfile/scripts/cdp-ready-check.sh &
 
-# Start cage with bash, which will wait, rotate the screen, and start Chromium
-exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && exec /usr/bin/chromium \
+# Start cage with bash, which auto-detects the active output, applies the saved
+# rotation best-effort, and starts Chromium.
+exec cage -- /bin/bash -c "
+    # Detect the first enabled output the same way display-restore.sh does; the
+    # connector is not fixed (HDMI-A-1 was a wrong assumption on non-HDMI setups).
+    OUTPUT=\$(wlr-randr 2>/dev/null | awk '
+        /^(HDMI|DP|eDP|DVI|VGA|DSI|LVDS)/ { current_output = \$1 }
+        /Enabled: yes/ { print current_output; exit }
+    ')
+    # Rotation is best-effort: it must never gate the browser launch. The old
+    # code joined this with '&&', so any wlr-randr error left the kiosk with no
+    # Chromium and Restart=always looping. Detection or transform failure now
+    # falls through to launch Chromium unrotated.
+    if [ -n \"\$OUTPUT\" ]; then
+        wlr-randr --output \"\$OUTPUT\" --transform $ROTATION || true
+    fi
+    exec /usr/bin/chromium \
     --kiosk \
     --ozone-platform=wayland \
     --enable-features=$FEATURES \
