@@ -168,8 +168,9 @@ func TestApp_Run_Success(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP initialization and close
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP now connects in the background and never gates startup: run() calls
+				// Start (fire-and-forget) and Close on shutdown.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -231,8 +232,9 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock logger manager set global topic ID
 				ts.mockLoggerManager.EXPECT().SetGlobalTopicID("test-topic-123")
 
-				// Mock CDP initialization and close
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP now connects in the background and never gates startup: run() calls
+				// Start (fire-and-forget) and Close on shutdown.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -294,8 +296,9 @@ func TestApp_Run_Success(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP initialization and close
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP now connects in the background and never gates startup: run() calls
+				// Start (fire-and-forget) and Close on shutdown.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -367,23 +370,6 @@ func TestApp_Run_Errors(t *testing.T) {
 			wantErr: "failed to load state file",
 		},
 		{
-			name: "CDP init failure",
-			setupFunc: func(ts *testSetup) {
-				// Mock state load ok
-				ts.mockStateManager.EXPECT().
-					Load(ts.logger).
-					Return(&state.State{
-						Relayer: &state.RelayerState{TopicID: ""},
-					}, nil)
-
-				// Mock CDP init failure
-				ts.mockCDP.EXPECT().
-					Init(gomock.Any()).
-					Return(errors.New("CDP connection failed"))
-			},
-			wantErr: "CDP connection failed",
-		},
-		{
 			name: "DBus start failure",
 			setupFunc: func(ts *testSetup) {
 				// Mock state load ok
@@ -393,9 +379,7 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
-				ts.mockCDP.EXPECT().Close()
+				// CDP.Start runs after DBus.Start, so a DBus failure returns before it.
 
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
@@ -418,9 +402,7 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
-				ts.mockCDP.EXPECT().Close()
+				// CDP.Start runs after DBus.Export, so an Export failure returns before it.
 
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
@@ -447,9 +429,8 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: "test-topic"},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
-				ts.mockCDP.EXPECT().Close()
+				// CDP.Start runs after the relayer connect, so a connect failure returns
+				// before it.
 
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
@@ -486,8 +467,8 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP connects in the background; run() reaches Start + Close here.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -544,8 +525,8 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP connects in the background; run() reaches Start + Close here.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop

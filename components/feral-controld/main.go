@@ -174,13 +174,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		logger.SetGlobalTopicID(s.Relayer.TopicID)
 	}
 
-	// Initialize CDP client
-	err = app.CDP.Init(ctx)
-	if err != nil {
-		return err
-	}
-	defer app.CDP.Close()
-
 	// Start watchdog
 	app.Watchdog.Start(ctx)
 	defer app.Watchdog.Stop()
@@ -260,6 +253,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Start StatusPoller - it will handle relayer connection status internally
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
+
+	// Begin establishing CDP in the background. On a headless device Chromium's DevTools
+	// endpoint (127.0.0.1:9222) may be absent at boot and appear later (monitor plugged in)
+	// or drop and return (kiosk restart), so CDP must never gate daemon readiness. The
+	// supervisor retries until connected and reconnects on drops; each (re)connect forces a
+	// status re-poll so the web app re-syncs to the state a fresh boot would produce. READY
+	// (below) may now precede CDP-connected — that is intended.
+	app.CDP.Start(ctx, app.StatusPoller.ForceRefresh)
+	defer app.CDP.Close()
 
 	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)
 

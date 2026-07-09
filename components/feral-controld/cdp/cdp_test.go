@@ -2242,15 +2242,26 @@ func TestClient_Close_Success(t *testing.T) {
 	assert.False(t, ts.client.Initialized(), "expected client to remain not initialized")
 }
 
+// TestClient_Close_Terminal: Close is the client's terminal stop signal (it also stops the
+// Start supervisor), so closing an uninitialized client keeps it uninitialized and rejects
+// any later Init — a connection must never be establishable past shutdown.
+func TestClient_Close_Terminal(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.client.Close()
+	assert.False(t, ts.client.Initialized(), "expected client to remain not initialized")
+
+	err := ts.client.Init(ts.ctx)
+	assert.ErrorIs(t, err, cdp.ErrClientClosed, "Init after Close must be rejected")
+	assert.False(t, ts.client.Initialized(), "expected closed client to stay uninitialized")
+}
+
 func TestClient_Close_Error(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Test 1: Close not initialized client (should be no-op)
-	ts.client.Close()
-	assert.False(t, ts.client.Initialized(), "expected client to remain not initialized")
-
-	// Test 2: Close with error during conn.Close()
+	// Close with error during conn.Close()
 	// First initialize the client
 	responseBody := "fake response body"
 	responseBodyBytes := []byte(responseBody)

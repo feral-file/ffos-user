@@ -81,9 +81,14 @@ type fakeCDP struct {
 	noLogSendCalls         int
 	noLogSendResult        any
 	noLogSendErr           error
+	// notInitialized inverts Initialized() so the zero value reports a connected client
+	// (the common case for these tests); set it to exercise the CDP-absent skip path.
+	notInitialized bool
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
+
+func (f *fakeCDP) Start(context.Context, func()) {}
 
 func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
 
@@ -98,7 +103,7 @@ func (f *fakeCDP) PageNavigationURL(context.Context) (string, error) {
 
 func (f *fakeCDP) Close() {}
 
-func (f *fakeCDP) Initialized() bool { return true }
+func (f *fakeCDP) Initialized() bool { return !f.notInitialized }
 
 type fakeDeviceStatus struct {
 	status *DeviceStatusResponse
@@ -285,6 +290,38 @@ func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
 
 	if mockCDP.noLogSendCalls != 1 {
 		t.Fatalf("expected checkStatus to run when page URL cannot be read, got %d calls", mockCDP.noLogSendCalls)
+	}
+}
+
+func TestPollPlayerStatus_SkipsWhenCDPNotConnected(t *testing.T) {
+	// Headless / mid-reconnect: CDP reports not connected. The poll must skip entirely
+	// (no checkStatus send, no error notification) so logs and Sentry are not flooded.
+	mockCDP := &fakeCDP{
+		notInitialized:    true,
+		pageNavigationURL: constants.WEBAPP_URL,
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockCDP.noLogSendCalls != 0 {
+		t.Fatalf("expected no checkStatus send while CDP is disconnected, got %d", mockCDP.noLogSendCalls)
+	}
+	if mockWS.sendAllCalls != 0 {
+		t.Fatalf("expected no websocket notification while CDP is disconnected, got %d", mockWS.sendAllCalls)
+	}
+	if mockRelayer.sendCalls != 0 {
+		t.Fatalf("expected no relayer notification while CDP is disconnected, got %d", mockRelayer.sendCalls)
 	}
 }
 

@@ -200,6 +200,17 @@ func (s *poller) ForceRefresh() {
 }
 
 func (s *poller) pollPlayerStatus(ctx context.Context) {
+	// While CDP is intentionally absent (headless boot with no monitor, or mid-reconnect
+	// after a kiosk/Chromium restart) every checkStatus send would fail at Error level and
+	// emit a player-status error notification each interval, flooding logs and Sentry. Skip
+	// the poll entirely in that state, but keep playback-duration accounting moving with a
+	// "not playing" sample so metrics do not freeze while disconnected.
+	if !s.cdp.Initialized() {
+		s.updateArtPlaybackMetrics(false, time.Now())
+		s.logger.Debug("Skipping player status poll: CDP not connected")
+		return
+	}
+
 	pageURL, err := s.cdp.PageNavigationURL(ctx)
 	if err != nil {
 		s.logger.Debug("Failed to read page URL before player status poll", zap.Error(err))

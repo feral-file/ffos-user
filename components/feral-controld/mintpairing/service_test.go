@@ -1799,6 +1799,8 @@ type fakeCDP struct {
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
+
+func (f *fakeCDP) Start(context.Context, func()) {}
 func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) {
 	return nil, nil
 }
