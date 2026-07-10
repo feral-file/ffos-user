@@ -57,21 +57,29 @@ wait_for_display
 /home/feralfile/scripts/cdp-ready-check.sh &
 
 # Start cage with bash, which auto-detects the active output, applies the saved
-# rotation best-effort, and starts Chromium.
+# rotation, and starts Chromium.
 exec cage -- /bin/bash -c "
-    # Detect the first enabled output the same way display-restore.sh does; the
-    # connector is not fixed (HDMI-A-1 was a wrong assumption on non-HDMI setups).
-    OUTPUT=\$(wlr-randr 2>/dev/null | awk '
-        /^(HDMI|DP|eDP|DVI|VGA|DSI|LVDS)/ { current_output = \$1 }
-        /Enabled: yes/ { print current_output; exit }
-    ')
-    # Rotation is best-effort: it must never gate the browser launch. The old
-    # code joined this with '&&', so any wlr-randr error left the kiosk with no
-    # Chromium and Restart=always looping. Detection or transform failure now
-    # falls through to launch Chromium unrotated.
-    if [ -n \"\$OUTPUT\" ]; then
-        wlr-randr --output \"\$OUTPUT\" --transform $ROTATION || true
-    fi
+    # Rotation must never gate the browser launch: the old code joined it with
+    # '&&', so any wlr-randr error left the kiosk with no Chromium and
+    # Restart=always looping. But it also must not give up on the first error —
+    # display-restore.sh only reapplies rotation on a DRM change event, so a
+    # transient failure here would otherwise leave the panel unrotated until a
+    # hotplug or reboot. Retry a few times (re-detecting the output, which may
+    # still be settling right after cage starts), then launch either way.
+    for attempt in 1 2 3; do
+        # Detect the first enabled output the same way display-restore.sh does;
+        # the connector is not fixed (HDMI-A-1 was a wrong assumption on
+        # non-HDMI setups).
+        OUTPUT=\$(wlr-randr 2>/dev/null | awk '
+            /^(HDMI|DP|eDP|DVI|VGA|DSI|LVDS)/ { current_output = \$1 }
+            /Enabled: yes/ { print current_output; exit }
+        ')
+        if [ -n \"\$OUTPUT\" ] && wlr-randr --output \"\$OUTPUT\" --transform $ROTATION; then
+            break
+        fi
+        echo \"\$(date '+%F %T') [WARN] rotation attempt \$attempt failed (output: \${OUTPUT:-none})\"
+        sleep 1
+    done
     exec /usr/bin/chromium \
     --kiosk \
     --ozone-platform=wayland \
