@@ -91,20 +91,20 @@ pub fn spawn_cdp_reconnect_loop(chrome: Arc<CdpHandle>, app_state: Arc<AppState>
         let mut stale_probes: u32 = 0;
         loop {
             if chrome.is_connected().await {
+                // A navigate that timed out on the cached socket is a corroborating staleness
+                // signal (a kiosk restart can leave the socket writable but the target dead):
+                // the suspect wake below cuts the sleep short so we probe right away, and a
+                // suspect + failed probe skips the blip debounce. A suspect whose probe passes
+                // was just Chromium rendering without replying — the flag is dropped.
+                let nav_suspect = chrome.take_navigate_suspect();
                 if chrome.connection_is_current().await {
                     stale_probes = 0;
-                    tokio::time::sleep(Duration::from_millis(
-                        constant::CDP_LIVENESS_CHECK_INTERVAL,
-                    ))
-                    .await;
+                    liveness_sleep(&chrome).await;
                     continue;
                 }
                 stale_probes += 1;
-                if stale_probes < constant::CDP_LIVENESS_STALE_PROBES {
-                    tokio::time::sleep(Duration::from_millis(
-                        constant::CDP_LIVENESS_CHECK_INTERVAL,
-                    ))
-                    .await;
+                if !nav_suspect && stale_probes < constant::CDP_LIVENESS_STALE_PROBES {
+                    liveness_sleep(&chrome).await;
                     continue;
                 }
                 // Stale or dead browser target: drop so the reconnect below rebinds to the new one.
@@ -130,6 +130,15 @@ pub fn spawn_cdp_reconnect_loop(chrome: Arc<CdpHandle>, app_state: Arc<AppState>
             }
         }
     });
+}
+
+/// Sleep out one liveness interval, waking early if a navigate raises the zombie-socket suspect
+/// flag so the loop probes immediately instead of leaving navigations silently dropped.
+async fn liveness_sleep(chrome: &CdpHandle) {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(constant::CDP_LIVENESS_CHECK_INTERVAL)) => {}
+        _ = chrome.navigate_suspect_raised() => {}
+    }
 }
 
 pub async fn start_ble(

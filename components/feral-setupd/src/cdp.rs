@@ -8,7 +8,8 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 
 use futures_util::{SinkExt, StreamExt}; // for .send() and .next()
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::Notify;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -237,6 +238,15 @@ impl Cdp {
 pub struct CdpHandle {
     cdp_url: String,
     conn: Mutex<Option<Arc<Cdp>>>,
+    /// Raised when a navigate times out on a cached socket. A kiosk restart can leave the old TCP
+    /// socket writable but bound to a dead page target, and a timeout is the only symptom the
+    /// navigate path sees (it is deliberately not transport-dead — Chromium often renders without
+    /// replying). The reconnect loop consumes this as a corroborating staleness signal: probe
+    /// immediately instead of sleeping out the liveness interval, and skip the blip debounce when
+    /// the probe agrees. Without it, a zombie socket silently eats navigations for up to
+    /// `CDP_LIVENESS_STALE_PROBES` × `CDP_LIVENESS_CHECK_INTERVAL`.
+    nav_suspect: AtomicBool,
+    nav_suspect_wake: Notify,
 }
 
 impl CdpHandle {
@@ -246,7 +256,26 @@ impl CdpHandle {
         Self {
             cdp_url: cdp_url.to_string(),
             conn: Mutex::new(None),
+            nav_suspect: AtomicBool::new(false),
+            nav_suspect_wake: Notify::new(),
         }
+    }
+
+    /// Record a navigate timeout on a live socket and wake the liveness loop.
+    fn mark_navigate_suspect(&self) {
+        self.nav_suspect.store(true, Ordering::Relaxed);
+        self.nav_suspect_wake.notify_one();
+    }
+
+    /// Consume the suspect flag: true at most once per raise.
+    pub fn take_navigate_suspect(&self) -> bool {
+        self.nav_suspect.swap(false, Ordering::Relaxed)
+    }
+
+    /// Resolves when a navigate raises the suspect flag (or immediately if one already has since
+    /// the last wait) — lets the liveness loop cut its sleep short rather than poll the flag.
+    pub async fn navigate_suspect_raised(&self) {
+        self.nav_suspect_wake.notified().await;
     }
 
     /// Attempt a single connect, caching the connection on success. Idempotent: a success replaces
@@ -326,6 +355,9 @@ impl CdpHandle {
                 self.drop_if_current(&cdp).await;
             } else {
                 eprintln!("CDP: ignoring navigate error: {e}");
+                if matches!(e, Error::Timeout(_)) {
+                    self.mark_navigate_suspect();
+                }
             }
         }
         Ok(())
@@ -376,9 +408,23 @@ mod tests {
     async fn new_handle_starts_disconnected() {
         let handle = CdpHandle::new("http://127.0.0.1:9222/json");
         assert!(!handle.is_connected().await);
-        // No browser: navigate is a silent no-op, never an error.
+        // No browser: navigate is a silent no-op, never an error — and a dropped
+        // navigation is not a zombie-socket symptom, so it must not raise suspicion.
         assert!(handle.navigate("file:///whatever").await.is_ok());
+        assert!(!handle.take_navigate_suspect());
         // Nothing to compare against: not current.
         assert!(!handle.connection_is_current().await);
+    }
+
+    #[tokio::test]
+    async fn navigate_suspect_flag_wakes_and_is_consumed_once() {
+        let handle = CdpHandle::new("http://127.0.0.1:9222/json");
+        assert!(!handle.take_navigate_suspect());
+        handle.mark_navigate_suspect();
+        // The stored wake permit must resolve even though the wait registered after the raise
+        // (the liveness loop is usually mid-probe or mid-sleep when a navigate times out).
+        handle.navigate_suspect_raised().await;
+        assert!(handle.take_navigate_suspect());
+        assert!(!handle.take_navigate_suspect());
     }
 }
