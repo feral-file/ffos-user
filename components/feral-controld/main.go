@@ -257,10 +257,18 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Begin establishing CDP in the background. On a headless device Chromium's DevTools
 	// endpoint (127.0.0.1:9222) may be absent at boot and appear later (monitor plugged in)
 	// or drop and return (kiosk restart), so CDP must never gate daemon readiness. The
-	// supervisor retries until connected and reconnects on drops; each (re)connect forces a
-	// status re-poll so the web app re-syncs to the state a fresh boot would produce. READY
-	// (below) may now precede CDP-connected — that is intended.
-	app.CDP.Start(ctx, app.StatusPoller.ForceRefresh)
+	// supervisor retries until connected and reconnects on drops. READY (below) may now
+	// precede CDP-connected — that is intended.
+	//
+	// On every (re)connect the player web app has just (re)loaded with default (awake)
+	// state, so any player-side state controld drove before the restart no longer holds:
+	// invalidate the sleep tracker's player leg so the schedule loop re-drives it (the old
+	// PartOf=chromium-ready.target design got this for free by restarting controld), then
+	// force a status re-poll so upstream re-syncs to what a fresh boot would produce.
+	app.CDP.Start(ctx, func() {
+		devicectl.InvalidatePlayerSleepState(app.Executor, app.Logger)
+		app.StatusPoller.ForceRefresh()
+	})
 	defer app.CDP.Close()
 
 	devicectl.StartSleepScheduleLoop(ctx, app.Executor, app.Logger)

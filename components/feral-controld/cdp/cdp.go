@@ -477,6 +477,13 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	}
 
 	c.mu.Lock()
+	// Re-check under the re-acquired lock: between the ID allocation above and here,
+	// a failed send on another goroutine can have woken the connect loop, whose
+	// teardownConn nils c.conn. Writing through the stale copy would panic.
+	if c.conn == nil {
+		c.mu.Unlock()
+		return nil, ErrCDPConnectionNotInitialized
+	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.mu.Unlock()
 		// A write failure means the socket is dead (Chromium gone/restarting). Wake the

@@ -348,6 +348,50 @@ func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 	}
 }
 
+func TestPollRound_ClearsDedupHashesWhenCDPReconnects(t *testing.T) {
+	fCDP := &fakeCDP{notInitialized: true}
+	p := &poller{
+		cdp:     fCDP,
+		relayer: &fakeRelayer{}, // never connected: device/DDC polls skip themselves
+		ws:      &fakeWS{},
+		logger:  zap.NewNop(),
+		lastRelayerStatusHashes: map[relayer.NotificationType]string{
+			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
+		},
+		lastWSStatusHashes: map[relayer.NotificationType]string{
+			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
+		},
+	}
+	ctx := context.Background()
+
+	// CDP still down: the caches describe the last state actually pushed and must
+	// survive so the down-window itself does not force re-sends.
+	p.pollRound(ctx)
+	if len(p.lastRelayerStatusHashes) != 1 || len(p.lastWSStatusHashes) != 1 {
+		t.Fatalf("expected dedup hashes to survive while CDP stays down, got %d/%d entries",
+			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
+	}
+
+	// CDP (re)connects: a restarted Chromium reloaded the web app from defaults, so
+	// "unchanged since last push" no longer proves clients have the state — both
+	// caches must be dropped for one fresh push (the old PartOf= design got this by
+	// restarting controld).
+	fCDP.notInitialized = false
+	p.pollRound(ctx)
+	if len(p.lastRelayerStatusHashes) != 0 || len(p.lastWSStatusHashes) != 0 {
+		t.Fatalf("expected dedup hashes cleared on CDP reconnect, got %d/%d entries",
+			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
+	}
+
+	// Steady state after the reconnect tick: no further clearing churn.
+	p.lastWSStatusHashes[relayer.NOTIFICATION_TYPE_PLAYER_STATUS] = "fresh"
+	p.pollRound(ctx)
+	if len(p.lastWSStatusHashes) != 1 {
+		t.Fatalf("expected dedup hashes kept while CDP stays connected, got %d entries",
+			len(p.lastWSStatusHashes))
+	}
+}
+
 // fakePanelDDC captures the context for deadline inspection.
 type fakePanelDDC struct {
 	collectCtx chan context.Context

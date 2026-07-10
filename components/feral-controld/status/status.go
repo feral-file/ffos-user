@@ -86,6 +86,13 @@ type poller struct {
 	lastPlaybackSampleAt      time.Time
 	lastIsPlaying             bool
 	playbackSampleInitialized bool
+
+	// Whether CDP was initialized at the previous poll round. Only touched on the
+	// Start goroutine. Used to catch the disconnected→connected transition: a
+	// restarted Chromium reloads the web app from defaults, so status deduped
+	// against pre-restart hashes must be pushed fresh (the old
+	// PartOf=chromium-ready.target design reset these maps by restarting controld).
+	cdpWasInitialized bool
 }
 
 func NewPoller(
@@ -151,9 +158,7 @@ func (s *poller) Start(ctx context.Context) {
 	defer statusTicker.Stop()
 
 	// Poll immediately on start
-	s.pollPlayerStatus(ctx)
-	s.pollDeviceStatus(ctx)
-	s.pollDDCStatus(ctx)
+	s.pollRound(ctx)
 
 	for {
 		select {
@@ -164,16 +169,30 @@ func (s *poller) Start(ctx context.Context) {
 			s.logger.Info("Status polling stopped")
 			return
 		case <-statusTicker.C:
-			s.pollPlayerStatus(ctx)
-			s.pollDeviceStatus(ctx)
-			s.pollDDCStatus(ctx)
+			s.pollRound(ctx)
 		case <-s.refreshChan:
 			s.logger.Info("Force refreshing status due to CDP command")
-			s.pollPlayerStatus(ctx)
-			s.pollDeviceStatus(ctx)
-			s.pollDDCStatus(ctx)
+			s.pollRound(ctx)
 		}
 	}
+}
+
+// pollRound runs one full poll pass. Before polling it drops the dedup hashes
+// whenever CDP has just (re)connected: the restarted Chromium's web app reloaded
+// from defaults, so "unchanged since last push" no longer implies the client has
+// the state — everything must go out fresh once.
+func (s *poller) pollRound(ctx context.Context) {
+	cdpInitialized := s.cdp.Initialized()
+	if cdpInitialized && !s.cdpWasInitialized {
+		s.logger.Info("CDP (re)connected, clearing status dedup caches for a fresh push")
+		clear(s.lastRelayerStatusHashes)
+		clear(s.lastWSStatusHashes)
+	}
+	s.cdpWasInitialized = cdpInitialized
+
+	s.pollPlayerStatus(ctx)
+	s.pollDeviceStatus(ctx)
+	s.pollDDCStatus(ctx)
 }
 
 func (s *poller) Stop() {
