@@ -133,6 +133,130 @@ func TestNextOccurrence_NextDayUsesCalendarAdvance_NotRaw86400s(t *testing.T) {
 	assert.Equal(t, time.Hour, legacy.Sub(got), "calendar next is one hour earlier than +24h at this Paris spring edge")
 }
 
+func TestNormalizeDays(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      []string
+		want    []string
+		wantErr bool
+	}{
+		{name: "nil means every day", in: nil, want: nil},
+		{name: "subset canonical order", in: []string{"fri", "mon"}, want: []string{"mon", "fri"}},
+		{name: "dedupes and normalizes case", in: []string{"Mon", " MON ", "tue"}, want: []string{"mon", "tue"}},
+		{name: "all seven collapses to nil", in: []string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}, want: nil},
+		{name: "empty list rejected", in: []string{}, wantErr: true},
+		{name: "invalid token rejected", in: []string{"mon", "funday"}, wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormalizeDays(tc.in)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// 2026-07-10 is a Friday; days below use a Mon-Fri work week so the panel
+// must sleep from Friday's sleep time straight through to Monday's wake time.
+func TestEffectiveStatus_WeekendOff_FridayNightSleepsThroughWeekend(t *testing.T) {
+	now := time.Date(2026, 7, 10, 23, 15, 0, 0, time.Local)
+	status, changed := EffectiveStatus(now, &Record{
+		Enabled:   true,
+		SleepTime: "22:00",
+		WakeTime:  "07:00",
+		Days:      []string{"mon", "tue", "wed", "thu", "fri"},
+	})
+
+	require.NotNil(t, status)
+	assert.False(t, changed)
+	assert.Equal(t, StateSleeping, status.CurrentState)
+	assert.Equal(t, []string{"mon", "tue", "wed", "thu", "fri"}, status.Days)
+	require.NotNil(t, status.NextTransitionAt)
+	assert.Equal(t, time.Date(2026, 7, 13, 7, 0, 0, 0, time.Local), *status.NextTransitionAt)
+}
+
+func TestEffectiveStatus_WeekendOff_SaturdayDaytimeSleeping(t *testing.T) {
+	now := time.Date(2026, 7, 11, 14, 0, 0, 0, time.Local)
+	status, _ := EffectiveStatus(now, &Record{
+		Enabled:   true,
+		SleepTime: "22:00",
+		WakeTime:  "07:00",
+		Days:      []string{"mon", "tue", "wed", "thu", "fri"},
+	})
+
+	require.NotNil(t, status)
+	assert.Equal(t, StateSleeping, status.CurrentState)
+	require.NotNil(t, status.NextTransitionAt)
+	assert.Equal(t, time.Date(2026, 7, 13, 7, 0, 0, 0, time.Local), *status.NextTransitionAt)
+}
+
+func TestEffectiveStatus_WeekendOff_FridayDaytimeAwakeUntilSleepTime(t *testing.T) {
+	now := time.Date(2026, 7, 10, 14, 0, 0, 0, time.Local)
+	status, _ := EffectiveStatus(now, &Record{
+		Enabled:   true,
+		SleepTime: "22:00",
+		WakeTime:  "07:00",
+		Days:      []string{"mon", "tue", "wed", "thu", "fri"},
+	})
+
+	require.NotNil(t, status)
+	assert.Equal(t, StateAwake, status.CurrentState)
+	require.NotNil(t, status.NextTransitionAt)
+	assert.Equal(t, time.Date(2026, 7, 10, 22, 0, 0, 0, time.Local), *status.NextTransitionAt)
+}
+
+// With an after-midnight sleep time the awake window normally crosses the day
+// boundary; an inactive day still sleeps from its own midnight, so Friday's
+// open-ended evening ends at Saturday 00:00, not at Saturday's sleep time.
+func TestEffectiveStatus_InactiveDayWithOvernightWindow_SleepsFromMidnight(t *testing.T) {
+	now := time.Date(2026, 7, 10, 23, 0, 0, 0, time.Local)
+	status, _ := EffectiveStatus(now, &Record{
+		Enabled:   true,
+		SleepTime: "01:00",
+		WakeTime:  "09:00",
+		Days:      []string{"sun", "mon", "tue", "wed", "thu", "fri"},
+	})
+
+	require.NotNil(t, status)
+	assert.Equal(t, StateAwake, status.CurrentState)
+	require.NotNil(t, status.NextTransitionAt)
+	assert.Equal(t, time.Date(2026, 7, 11, 0, 0, 0, 0, time.Local), *status.NextTransitionAt)
+}
+
+// Manual overrides stay day-blind: waking the panel on an inactive Saturday
+// lasts until that evening's clock sleep time, after which the day-aware
+// natural state (sleeping) takes back over — not until Monday.
+func TestManualWake_OnInactiveDay_ExpiresAtNextClockSleepTime(t *testing.T) {
+	now := time.Date(2026, 7, 11, 14, 0, 0, 0, time.Local)
+	record, err := ManualWake(&Record{
+		Enabled:   true,
+		SleepTime: "22:00",
+		WakeTime:  "07:00",
+		Days:      []string{"mon", "tue", "wed", "thu", "fri"},
+	}, now)
+
+	require.NoError(t, err)
+	require.NotNil(t, record.OverrideState)
+	assert.Equal(t, StateAwake, *record.OverrideState)
+	require.NotNil(t, record.OverrideUntil)
+	assert.Equal(t, time.Date(2026, 7, 11, 22, 0, 0, 0, time.Local), *record.OverrideUntil)
+}
+
+func TestValidate_RejectsInvalidDaysWhenEnabled(t *testing.T) {
+	err := Validate(&Record{
+		Enabled:   true,
+		SleepTime: "22:00",
+		WakeTime:  "07:00",
+		Days:      []string{"someday"},
+	})
+	require.Error(t, err)
+}
+
 func TestManualWake_UsesNextSleepBoundary(t *testing.T) {
 	now := time.Date(2026, 5, 5, 23, 30, 0, 0, time.Local)
 	record, err := ManualWake(&Record{

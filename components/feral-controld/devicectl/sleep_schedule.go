@@ -33,6 +33,11 @@ type sleepScheduleCommand struct {
 	Enabled   bool   `json:"enabled"`
 	SleepTime string `json:"sleepTime"`
 	WakeTime  string `json:"wakeTime"`
+	// Days is optional on the wire: nil (absent, or JSON null) preserves the
+	// record's current days, mirroring the empty-string behavior of the time
+	// fields, so pre-days apps toggling enabled cannot clobber a days
+	// selection made by a newer app. An explicit empty array is rejected.
+	Days []string `json:"days"`
 }
 
 func StartSleepScheduleLoop(ctx context.Context, exec Executor, logger *zap.Logger) {
@@ -201,6 +206,14 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 	}
 	if cmd.WakeTime != "" {
 		record.WakeTime = cmd.WakeTime
+	}
+	if cmd.Days != nil {
+		days, err := sleepschedule.NormalizeDays(cmd.Days)
+		if err != nil {
+			e.sleepScheduleFileMu.Unlock()
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
+		record.Days = days
 	}
 
 	// Recomputing the schedule should always drop any stale manual override.

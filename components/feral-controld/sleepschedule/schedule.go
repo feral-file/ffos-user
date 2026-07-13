@@ -5,6 +5,7 @@ import (
 	"log"
 	stdsys "os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,9 +27,14 @@ const (
 )
 
 type Record struct {
-	Enabled       bool       `json:"enabled"`
-	SleepTime     string     `json:"sleepTime,omitempty"`
-	WakeTime      string     `json:"wakeTime,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	SleepTime string `json:"sleepTime,omitempty"`
+	WakeTime  string `json:"wakeTime,omitempty"`
+	// Days lists the active weekdays as lowercase tokens ("sun".."sat") in
+	// canonical Sun..Sat order. nil/absent means every day — the pre-days wire
+	// and record shape — so records written by old apps keep today's behavior.
+	// The panel sleeps for the whole of any unselected day.
+	Days          []string   `json:"days,omitempty"`
 	OverrideState *State     `json:"overrideState,omitempty"`
 	OverrideUntil *time.Time `json:"overrideUntil,omitempty"`
 }
@@ -37,10 +43,72 @@ type Status struct {
 	Enabled          bool       `json:"enabled"`
 	SleepTime        string     `json:"sleepTime,omitempty"`
 	WakeTime         string     `json:"wakeTime,omitempty"`
+	Days             []string   `json:"days,omitempty"`
 	CurrentState     State      `json:"currentState"`
 	OverrideState    *State     `json:"overrideState,omitempty"`
 	OverrideUntil    *time.Time `json:"overrideUntil,omitempty"`
 	NextTransitionAt *time.Time `json:"nextTransitionAt,omitempty"`
+}
+
+// dayTokens are the wire/persisted weekday identifiers, indexed by
+// time.Weekday (Sunday = 0).
+var dayTokens = [7]string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}
+
+// NormalizeDays validates and canonicalizes an active-days list: tokens are
+// case/whitespace-insensitive, deduped, and ordered Sun..Sat. nil stays nil
+// ("every day"). A list covering all seven days also collapses to nil so a
+// fully-selected schedule persists and reports in the legacy every-day shape.
+// A non-nil list selecting nothing is an error: "never awake" is not a valid
+// schedule (use enabled=false or sleepNow instead).
+func NormalizeDays(days []string) ([]string, error) {
+	if days == nil {
+		return nil, nil
+	}
+
+	var selected [7]bool
+	for _, raw := range days {
+		token := strings.ToLower(strings.TrimSpace(raw))
+		found := false
+		for i, t := range dayTokens {
+			if t == token {
+				selected[i] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("invalid day %q: want one of sun,mon,tue,wed,thu,fri,sat", raw)
+		}
+	}
+
+	normalized := make([]string, 0, 7)
+	for i, on := range selected {
+		if on {
+			normalized = append(normalized, dayTokens[i])
+		}
+	}
+	if len(normalized) == 0 {
+		return nil, fmt.Errorf("days must include at least one day")
+	}
+	if len(normalized) == 7 {
+		return nil, nil
+	}
+	return normalized, nil
+}
+
+// dayActive reports whether t's weekday is an active schedule day. nil/empty
+// means every day (legacy records, old apps).
+func dayActive(days []string, t time.Time) bool {
+	if len(days) == 0 {
+		return true
+	}
+	token := dayTokens[t.Weekday()]
+	for _, d := range days {
+		if d == token {
+			return true
+		}
+	}
+	return false
 }
 
 type ClockTime struct {
@@ -172,6 +240,9 @@ func Validate(record *Record) error {
 	if sleepTime == wakeTime {
 		return fmt.Errorf("sleepTime and wakeTime must be different")
 	}
+	if _, err := NormalizeDays(record.Days); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -232,6 +303,7 @@ func EffectiveStatus(now time.Time, record *Record) (*Status, bool) {
 		Enabled:       record.Enabled,
 		SleepTime:     record.SleepTime,
 		WakeTime:      record.WakeTime,
+		Days:          record.Days,
 		OverrideState: record.OverrideState,
 		OverrideUntil: record.OverrideUntil,
 		CurrentState:  StateAwake,
@@ -256,13 +328,13 @@ func EffectiveStatus(now time.Time, record *Record) (*Status, bool) {
 		return status, changed
 	}
 
-	if isSleepingAt(now, sleepTime, wakeTime) {
+	if scheduleStateAt(now, sleepTime, wakeTime, record.Days) == StateSleeping {
 		status.CurrentState = StateSleeping
-		status.NextTransitionAt = timePtr(nextOccurrence(now, wakeTime))
+		status.NextTransitionAt = nextTransitionTo(now, sleepTime, wakeTime, record.Days, StateAwake)
 		return status, changed
 	}
 
-	status.NextTransitionAt = timePtr(nextOccurrence(now, sleepTime))
+	status.NextTransitionAt = nextTransitionTo(now, sleepTime, wakeTime, record.Days, StateSleeping)
 	return status, changed
 }
 
@@ -303,6 +375,12 @@ func applyOverride(record *Record, now time.Time, state State) (*Record, error) 
 	// devicectl clears Override* on every setSleepSchedule save so re-enabling
 	// (or changing hours) cannot inherit a stale sleepNow/wakeNow from while off.
 
+	// OverrideUntil is deliberately day-blind: it expires at the next clock
+	// occurrence of the opposite boundary, ignoring Days. A wakeNow on an
+	// inactive Saturday therefore lasts until that evening's sleep time — not
+	// until Monday — and when it expires the day-aware natural state takes
+	// back over (a sleepNow that expires on an inactive day just keeps
+	// sleeping). This preserves the pre-days "until tonight's boundary" feel.
 	if record.Enabled {
 		sleepTime, err := ParseClockTime(record.SleepTime)
 		if err != nil {
@@ -337,6 +415,54 @@ func nextOccurrence(now time.Time, clockTime ClockTime) time.Time {
 	// slot (see sleepschedule tests: Europe/Paris spring 2025).
 	noonNext := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, loc).AddDate(0, 0, 1)
 	return clockTime.OnDay(noonNext)
+}
+
+// scheduleStateAt is the natural (override-free) schedule state at t: an
+// unselected day sleeps for its entire civil day; on selected days the
+// sleep/wake window rule applies unchanged.
+func scheduleStateAt(t time.Time, sleepTime, wakeTime ClockTime, days []string) State {
+	if !dayActive(days, t) {
+		return StateSleeping
+	}
+	if isSleepingAt(t, sleepTime, wakeTime) {
+		return StateSleeping
+	}
+	return StateAwake
+}
+
+// nextTransitionTo returns the first instant after now when the natural
+// schedule state flips into target, or nil when no flip occurs in the scan
+// horizon. Rather than composing per-day window arithmetic with the
+// active-days rule analytically, it walks the only instants the state can
+// change — each day's midnight, sleep time, and wake time — and evaluates
+// scheduleStateAt there. Midnight is a boundary because an unselected day
+// starts sleeping at 00:00 regardless of the window. Nine occurrences of each
+// boundary (~8 days) cover the worst case of a single active day per week.
+// Boundary instants come from nextOccurrence so day-advance stays DST-safe.
+func nextTransitionTo(now time.Time, sleepTime, wakeTime ClockTime, days []string, target State) *time.Time {
+	const horizonDays = 9
+	candidates := make([]time.Time, 0, 3*horizonDays)
+	for _, ct := range []ClockTime{{}, sleepTime, wakeTime} {
+		c := now
+		for i := 0; i < horizonDays; i++ {
+			c = nextOccurrence(c, ct)
+			candidates = append(candidates, c)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Before(candidates[j]) })
+
+	state := scheduleStateAt(now, sleepTime, wakeTime, days)
+	for _, candidate := range candidates {
+		s := scheduleStateAt(candidate, sleepTime, wakeTime, days)
+		if s == state {
+			continue
+		}
+		state = s
+		if s == target {
+			return timePtr(candidate)
+		}
+	}
+	return nil
 }
 
 func isSleepingAt(now time.Time, sleepTime, wakeTime ClockTime) bool {
