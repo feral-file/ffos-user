@@ -119,13 +119,29 @@ impl Cdp {
         Ok(())
     }
 
+    /// Fetch and parse the CDP `/json` target list, bounded by [`constant::CDP_HTTP_FETCH_TIMEOUT`].
+    ///
+    /// Every HTTP touch of the DevTools endpoint funnels through here: `reqwest::get` has no
+    /// default timeout, and a wedged Chromium that accepts TCP but never responds must not hang
+    /// callers — `init_cdp` awaits discovery before BLE starts, and `show_webapp` reads the
+    /// current URL while holding the page lock. A timeout surfaces as [`Error::Timeout`], which
+    /// is deliberately NOT transport-dead (the socket, if any, may still be fine; the liveness
+    /// loop owns staleness decisions).
+    async fn fetch_json_targets(cdp_url: &str) -> Result<Vec<Target>> {
+        timeout(
+            Duration::from_millis(constant::CDP_HTTP_FETCH_TIMEOUT),
+            async { Ok::<_, Error>(reqwest::get(cdp_url).await?.json::<Vec<Target>>().await?) },
+        )
+        .await?
+    }
+
     /// Read the current page URL straight from the CDP HTTP `/json` endpoint.
     ///
     /// Associated (not `&self`) so [`CdpHandle`] can query the browser without holding a live
     /// socket — the endpoint is served by Chromium itself, independent of any WebSocket state.
     async fn fetch_current_url(cdp_url: &str) -> Result<String> {
-        let targets: Vec<Target> = reqwest::get(cdp_url).await?.json().await?;
-        targets
+        Self::fetch_json_targets(cdp_url)
+            .await?
             .into_iter()
             .find_map(|t| {
                 if t.r#type.as_deref() == Some("page") {
@@ -193,11 +209,11 @@ impl Cdp {
         .await?
     }
 
-    /// Fetch the WebSocket debug URL from the CDP HTTP endpoint.
+    /// Fetch the WebSocket debug URL from the CDP HTTP endpoint (bounded, see
+    /// [`Self::fetch_json_targets`]).
     async fn get_ws_url(cdp_url: &str) -> Result<String> {
-        let targets: Vec<Target> = reqwest::get(cdp_url).await?.json().await?;
-
-        targets
+        Self::fetch_json_targets(cdp_url)
+            .await?
             .into_iter()
             .find_map(|t| {
                 if t.r#type.as_deref() == Some("page") {
@@ -209,9 +225,16 @@ impl Cdp {
             .ok_or_else(|| Error::Chromium("No WebSocket URL found".into()))
     }
 
-    /// Establish an asynchronous WebSocket connection to the CDP.
+    /// Establish an asynchronous WebSocket connection to the CDP. Bounded by
+    /// [`constant::CDP_WS_CONNECT_TIMEOUT`]: a wedged endpoint that accepts TCP but never
+    /// completes the upgrade must not hang `Cdp::connect` (and with it `init_cdp`, which runs
+    /// before BLE starts).
     async fn connect_ws(ws_url: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
-        let (socket, _response) = connect_async(ws_url).await?;
+        let (socket, _response) = timeout(
+            Duration::from_millis(constant::CDP_WS_CONNECT_TIMEOUT),
+            connect_async(ws_url),
+        )
+        .await??;
         Ok(socket)
     }
 }
@@ -414,6 +437,65 @@ mod tests {
         assert!(!handle.take_navigate_suspect());
         // Nothing to compare against: not current.
         assert!(!handle.connection_is_current().await);
+    }
+
+    /// Bind a listener that accepts TCP connections and never responds — the "wedged
+    /// DevTools endpoint" from the PR #218 review: TCP up, HTTP/WS dead.
+    async fn spawn_wedged_endpoint() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                // Hold the socket open without ever writing, so the client's only way
+                // out is its own timeout.
+                held.push(sock);
+            }
+        });
+        addr
+    }
+
+    /// PR #218 review regression: every CDP HTTP fetch and the WS dial must carry a hard
+    /// timeout. Unbounded, a wedged endpoint would hang `init_cdp` before BLE starts and
+    /// stall `show_webapp` while it holds the page lock.
+    #[tokio::test]
+    async fn http_and_ws_operations_are_bounded_against_wedged_endpoint() {
+        let addr = spawn_wedged_endpoint().await;
+        let http_url = format!("http://{addr}/json");
+        let ws_url = format!("ws://{addr}/devtools/page/1");
+
+        // Generous margin over the 3s caps: the point is "returns, promptly", not exact timing.
+        let bound = Duration::from_secs(8);
+
+        let start = tokio::time::Instant::now();
+        assert!(Cdp::get_ws_url(&http_url).await.is_err());
+        assert!(start.elapsed() < bound, "get_ws_url must be bounded");
+
+        let start = tokio::time::Instant::now();
+        assert!(Cdp::fetch_current_url(&http_url).await.is_err());
+        assert!(start.elapsed() < bound, "fetch_current_url must be bounded");
+
+        let start = tokio::time::Instant::now();
+        assert!(Cdp::connect_ws(&ws_url).await.is_err());
+        assert!(start.elapsed() < bound, "connect_ws must be bounded");
+    }
+
+    /// The full best-effort connect (what `init_cdp` awaits before BLE starts) must also be
+    /// bounded end-to-end against a wedged endpoint, and the handle must stay usable
+    /// (disconnected, navigations dropped) afterwards.
+    #[tokio::test]
+    async fn handle_connect_is_bounded_against_wedged_endpoint() {
+        let addr = spawn_wedged_endpoint().await;
+        let handle = CdpHandle::new(&format!("http://{addr}/json"));
+
+        let start = tokio::time::Instant::now();
+        assert!(handle.connect().await.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "CdpHandle::connect must be bounded"
+        );
+        assert!(!handle.is_connected().await);
+        assert!(handle.navigate("file:///whatever").await.is_ok());
     }
 
     #[tokio::test]

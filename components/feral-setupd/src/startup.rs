@@ -62,6 +62,11 @@ pub async fn init_app_state(ble_service: &Arc<Ble>) -> Result<Arc<AppState>> {
 /// exactly as before; when it is absent, `spawn_cdp_reconnect_loop` keeps retrying and resyncs the
 /// UI once a browser appears. This is why `run()` no longer `?`-propagates a CDP failure (that was
 /// the fatal path that killed a headless boot).
+///
+/// Awaiting the connect here is safe only because every CDP HTTP fetch and the WS dial carry hard
+/// timeouts (`CDP_HTTP_FETCH_TIMEOUT` / `CDP_WS_CONNECT_TIMEOUT`): a wedged DevTools endpoint that
+/// accepts TCP but never responds fails this connect in bounded time instead of hanging startup
+/// before `start_ble`.
 pub async fn init_cdp() -> Arc<CdpHandle> {
     let chrome = Arc::new(CdpHandle::new(constant::CDP_URL));
     if let Err(e) = chrome.connect().await {

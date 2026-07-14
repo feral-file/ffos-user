@@ -77,6 +77,15 @@ pub const CDP_LIVENESS_CHECK_INTERVAL: u64 = 5 * 1000; // 5 seconds
 /// Upper bound on a single liveness probe's `/json` fetch. reqwest has no default timeout, and a
 /// wedged Chromium must not stall the reconnect loop indefinitely.
 pub const CDP_LIVENESS_PROBE_TIMEOUT: u64 = 3 * 1000; // 3 seconds
+/// Hard cap on every CDP HTTP `/json` fetch (websocket-URL discovery and current-URL reads).
+/// `reqwest::get` has no default timeout, so a wedged DevTools endpoint that accepts TCP but
+/// never responds would otherwise hang whatever awaits the fetch: `init_cdp`'s best-effort
+/// connect runs before BLE starts, and `show_webapp` reads the current URL while holding the
+/// page lock. Matches the liveness probe cap — the same endpoint, the same wedge mode.
+pub const CDP_HTTP_FETCH_TIMEOUT: u64 = 3 * 1000; // 3 seconds
+/// Hard cap on the CDP websocket dial, for the same reason as `CDP_HTTP_FETCH_TIMEOUT`:
+/// `connect_async` alone would wait on a wedged endpoint indefinitely.
+pub const CDP_WS_CONNECT_TIMEOUT: u64 = 3 * 1000; // 3 seconds
 /// Consecutive failed liveness probes required before the cached connection is declared stale.
 /// One probe can blip transiently while the socket is healthy; dropping on a single failure
 /// would trigger a resync repaint (visible page reload) in the monitor-present steady state.

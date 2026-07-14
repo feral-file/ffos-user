@@ -143,6 +143,13 @@ through `CdpHandle`, a reconnecting front over `Cdp`:
   `get_current_url` fast-path must **not** propagate failure (it did — old Fatal
   path 2); a failure is treated as "not on webapp" and falls through to a
   best-effort navigate.
+- **Every CDP I/O is hard-timeout-bounded.** All HTTP `/json` fetches funnel
+  through `fetch_json_targets` (`CDP_HTTP_FETCH_TIMEOUT`), the WS dial through
+  `connect_ws` (`CDP_WS_CONNECT_TIMEOUT`), and commands through `send_cmd`'s 3 s
+  reply timeout. Never add a raw `reqwest::get`/`connect_async` on a CDP path: a
+  wedged DevTools endpoint that accepts TCP but never responds would hang
+  `init_cdp` before `start_ble` and stall `show_webapp` while it holds the page
+  lock (PR #218 review).
 - **Lazy connect + reconnect.** `spawn_cdp_reconnect_loop` retries connecting on
   `CDP_RECONNECT_INTERVAL` while disconnected. A transport-dead error
   (`Error::is_transport_dead`: socket/HTTP failures, not command timeouts —
