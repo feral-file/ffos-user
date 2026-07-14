@@ -31,6 +31,8 @@ type testSetup struct {
 	mockIO     *mocks.MockIO
 	mockJSON   *mocks.MockJSON
 	mockHTTP   *mocks.MockHTTPClient
+	mockClock  *mocks.MockClock
+	tickChan   chan time.Time
 	client     cdp.CDP
 }
 
@@ -46,7 +48,16 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockHTTPClient := mocks.NewMockHTTPClient(ctrl)
 
-	client := cdp.New("http://localhost:9222", mockDialer, mockIO, mockJSON, mockHTTPClient, logger)
+	// Reconnect supervisor ticker: tests drive ticks through tickChan; most
+	// tests never tick, so the supervisor just parks on the channel.
+	mockClock := mocks.NewMockClock(ctrl)
+	mockTicker := mocks.NewMockTicker(ctrl)
+	tickChan := make(chan time.Time)
+	mockTicker.EXPECT().C().Return(tickChan).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	client := cdp.New("http://localhost:9222", mockDialer, mockIO, mockJSON, mockHTTPClient, mockClock, logger)
 
 	return &testSetup{
 		ctrl:       ctrl,
@@ -56,6 +67,8 @@ func setup(t *testing.T) *testSetup {
 		mockIO:     mockIO,
 		mockJSON:   mockJSON,
 		mockHTTP:   mockHTTPClient,
+		mockClock:  mockClock,
+		tickChan:   tickChan,
 		client:     client,
 	}
 }
@@ -2312,4 +2325,176 @@ func TestClient_Close_Error(t *testing.T) {
 	// Close the client (should handle the error gracefully)
 	ts.client.Close()
 	assert.False(t, ts.client.Initialized(), "expected client to not be initialized after close despite error")
+}
+
+// expectDiscoveryAndDial arms one full target-discovery + dial cycle returning
+// the given connection. Used by reconnect tests where discovery runs more than
+// once over the client's lifetime.
+func expectDiscoveryAndDial(ts *testSetup, conn *mocks.MockWebSocketConn) {
+	const wsURL = "ws://localhost:9222/devtools/page/123"
+	responseBody := fmt.Sprintf(`[{"type":"page","title":"Test Page","webSocketDebuggerUrl":"%s"}]`, wsURL)
+	responseBodyBytes := []byte(responseBody)
+	mockResponse := &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(responseBody)),
+	}
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		Return(mockResponse, nil).
+		Times(1)
+
+	ts.mockIO.EXPECT().
+		ReadAll(mockResponse.Body).
+		Return(responseBodyBytes, nil).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(responseBodyBytes, gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			targets := v.(*[]struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			})
+			*targets = []struct {
+				Type                 string `json:"type"`
+				Title                string `json:"title"`
+				WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+			}{
+				{
+					Type:                 "page",
+					Title:                "Test Page",
+					WebSocketDebuggerURL: wsURL,
+				},
+			}
+			return nil
+		}).
+		Times(1)
+
+	ts.mockDialer.EXPECT().
+		DialContext(gomock.Any(), wsURL, nil).
+		Return(conn, nil, nil).
+		Times(1)
+}
+
+// breakConnection arms a Send whose write fails, killing the connection.
+func breakConnection(t *testing.T, ts *testSetup) {
+	t.Helper()
+
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{}`), nil).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.TextMessage, gomock.Any()).
+		Return(fmt.Errorf("broken pipe")).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		Close().
+		Return(nil).
+		AnyTimes()
+
+	_, err := ts.client.Send(cdp.METHOD_EVALUATE, map[string]interface{}{"expression": "1"})
+	require.Error(t, err, "expected send over broken connection to fail")
+}
+
+func TestClient_Send_WriteErrorTearsDownConnection(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	expectDiscoveryAndDial(ts, ts.mockConn)
+	require.NoError(t, ts.client.Init(ts.ctx))
+
+	breakConnection(t, ts)
+
+	// The dead socket must be discarded so the supervisor can redial ...
+	assert.False(t, ts.client.Initialized(), "expected connection to be torn down after write error")
+
+	// ... and subsequent sends fail fast instead of writing to the dead socket.
+	_, err := ts.client.Send(cdp.METHOD_EVALUATE, map[string]interface{}{"expression": "1"})
+	assert.ErrorIs(t, err, cdp.ErrCDPConnectionNotInitialized)
+
+	ts.client.Close()
+}
+
+func TestClient_Send_ReadErrorTearsDownConnection(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	expectDiscoveryAndDial(ts, ts.mockConn)
+	require.NoError(t, ts.client.Init(ts.ctx))
+
+	ts.mockJSON.EXPECT().
+		Marshal(gomock.Any()).
+		Return([]byte(`{}`), nil).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		WriteMessage(websocket.TextMessage, gomock.Any()).
+		Return(nil).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		Return(0, nil, fmt.Errorf("connection reset")).
+		Times(1)
+
+	ts.mockConn.EXPECT().
+		Close().
+		Return(nil).
+		AnyTimes()
+
+	_, err := ts.client.Send(cdp.METHOD_EVALUATE, map[string]interface{}{"expression": "1"})
+	assert.Error(t, err)
+	assert.False(t, ts.client.Initialized(), "expected connection to be torn down after read error")
+
+	ts.client.Close()
+}
+
+func TestClient_ReconnectsAfterConnectionLoss(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	expectDiscoveryAndDial(ts, ts.mockConn)
+	require.NoError(t, ts.client.Init(ts.ctx))
+
+	breakConnection(t, ts)
+	require.False(t, ts.client.Initialized())
+
+	// Next supervisor tick rediscovers the (new) page target and redials.
+	mockConn2 := mocks.NewMockWebSocketConn(ts.ctrl)
+	mockConn2.EXPECT().Close().Return(nil).AnyTimes()
+	expectDiscoveryAndDial(ts, mockConn2)
+
+	ts.tickChan <- time.Now()
+
+	assert.Eventually(t, ts.client.Initialized, time.Second, 10*time.Millisecond,
+		"expected supervisor to re-establish the connection after a tick")
+
+	ts.client.Close()
+}
+
+func TestClient_CloseStopsReconnectSupervisor(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	expectDiscoveryAndDial(ts, ts.mockConn)
+	require.NoError(t, ts.client.Init(ts.ctx))
+
+	ts.mockConn.EXPECT().Close().Return(nil).AnyTimes()
+
+	breakConnection(t, ts)
+	ts.client.Close()
+
+	// The supervisor must exit on Close even while disconnected: nobody
+	// should be consuming ticks anymore (a redial here would also trip the
+	// strict mocks, since no discovery expectations are armed).
+	select {
+	case ts.tickChan <- time.Now():
+		assert.Fail(t, "supervisor still consuming ticks after Close")
+	case <-time.After(200 * time.Millisecond):
+	}
 }

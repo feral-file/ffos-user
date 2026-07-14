@@ -381,7 +381,7 @@ func initializeApp(
 
 	// Components
 	// CDP
-	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, logger)
+	cdp := cdp.New(cdpEndpoint, webSocketDialer, io, json, httpClient, clock, logger)
 
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
