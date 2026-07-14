@@ -16,14 +16,11 @@ type gpuDeviceCandidate struct {
 	bootVGA    bool
 }
 
-func hasGPUCharacteristics(cardPath, devicePath string) bool {
-	for _, marker := range []string{"gpu_busy_percent", "gt_busy_percent", "pp_dpm_sclk", "gt_max_freq_mhz"} {
+func hasGPUCharacteristics(devicePath string) bool {
+	for _, marker := range []string{"gpu_busy_percent", "pp_dpm_sclk"} {
 		if _, err := os.Stat(filepath.Join(devicePath, marker)); err == nil {
 			return true
 		}
-	}
-	if _, err := os.Stat(filepath.Join(cardPath, "gt_max_freq_mhz")); err == nil {
-		return true
 	}
 	return false
 }
@@ -74,7 +71,7 @@ func discoverGPUDevicePathFrom(drmPath string) (string, error) {
 			continue
 		}
 
-		if !hasGPUCharacteristics(cardPath, devicePath) {
+		if !hasGPUCharacteristics(devicePath) {
 			continue
 		}
 
@@ -106,44 +103,13 @@ func readSysfsPercent(path string) (float64, error) {
 	return value, nil
 }
 
-// readGPUBusyPercent reads shader/engine busy % from amdgpu or i915 sysfs.
+// readGPUBusyPercent reads shader/engine busy % from amdgpu sysfs.
 func readGPUBusyPercent(devicePath string) (float64, error) {
-	for _, name := range []string{"gpu_busy_percent", "gt_busy_percent"} {
-		path := filepath.Join(devicePath, name)
-		if _, err := os.Stat(path); err != nil {
-			continue
-		}
-		return readSysfsPercent(path)
+	path := filepath.Join(devicePath, "gpu_busy_percent")
+	if _, err := os.Stat(path); err != nil {
+		return 0, fmt.Errorf("no gpu busy sysfs file under %s", devicePath)
 	}
-	return 0, fmt.Errorf("no gpu busy sysfs file under %s", devicePath)
-}
-
-// readFirstExistingSysfsFloat probes multiple sysfs paths and returns the first readable value.
-// It keeps Intel card-level and device-level frequency files compatible across kernels.
-func readFirstExistingSysfsFloat(paths ...string) (float64, error) {
-	var missingErr error
-	for _, path := range paths {
-		//nolint:gosec // G304: paths are discovered sysfs locations plus fixed filenames.
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				missingErr = err
-				continue
-			}
-			return 0, err
-		}
-
-		value, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
-		if err != nil {
-			return 0, fmt.Errorf("parse %s: %w", path, err)
-		}
-		return value, nil
-	}
-
-	if missingErr != nil {
-		return 0, missingErr
-	}
-	return 0, fmt.Errorf("no sysfs paths provided")
+	return readSysfsPercent(path)
 }
 
 // parseAMDMaxSclkMHz returns the highest P-state MHz line from pp_dpm_sclk.
@@ -181,36 +147,3 @@ func readAMDMaxSclkMHz(devicePath string) (float64, error) {
 	return parseAMDMaxSclkMHz(string(data))
 }
 
-func maxEngineBusyPercent(engines map[string]struct {
-	Busy float64 `json:"busy"`
-}) (float64, bool) {
-	if len(engines) == 0 {
-		return 0, false
-	}
-
-	var maxBusy float64
-	for _, engine := range engines {
-		if engine.Busy > maxBusy {
-			maxBusy = engine.Busy
-		}
-	}
-	return maxBusy, true
-}
-
-// resolveGPUBusy prefers intel_gpu_top engine busy, then falls back to sysfs.
-func resolveGPUBusy(engineBusy float64, engineBusyFound bool, devicePath string) (float64, error) {
-	if engineBusyFound {
-		return engineBusy, nil
-	}
-	if devicePath == "" {
-		return 0, errBestEffortMetricUnavailable
-	}
-	return readGPUBusyPercent(devicePath)
-}
-
-func shouldSuppressIntelGPUUpdate(devicePath string, busyErr error) error {
-	if devicePath == "" && busyErr != nil {
-		return errBestEffortMetricUnavailable
-	}
-	return nil
-}

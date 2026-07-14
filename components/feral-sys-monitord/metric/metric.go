@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,14 +16,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
-)
-
-// SystemType represents the type of system
-type SystemType int
-
-const (
-	SystemTypeIntel SystemType = iota
-	SystemTypeAMD
 )
 
 // Prometheus metrics
@@ -63,8 +54,7 @@ type GPUMetrics struct {
 	CurrentFrequency   float64 `json:"current_frequency"`
 	CurrentTemperature float64 `json:"current_temperature"`
 	MaxTemperature     float64 `json:"max_temperature"`
-	// GPUBusy is shader/engine utilization % from the driver (amdgpu gpu_busy_percent
-	// or i915 gt_busy_percent / intel_gpu_top engines).
+	// GPUBusy is shader/engine utilization % from the amdgpu driver (gpu_busy_percent).
 	GPUBusy float64 `json:"gpu_busy"`
 }
 
@@ -127,7 +117,6 @@ type SysResMonitor struct {
 	lastMetrics *SysMetrics
 	handlers    []MonitorHandler
 	doneChan    chan struct{}
-	systemType  SystemType
 }
 
 func NewSysResMonitor(ctx context.Context, logger *zap.Logger) *SysResMonitor {
@@ -137,7 +126,6 @@ func NewSysResMonitor(ctx context.Context, logger *zap.Logger) *SysResMonitor {
 		handlers:    []MonitorHandler{},
 		doneChan:    make(chan struct{}),
 		lastMetrics: &SysMetrics{},
-		systemType:  detectCPUType(),
 	}
 }
 
@@ -155,7 +143,7 @@ func (p *SysResMonitor) Start() {
 func (p *SysResMonitor) run() {
 	p.logger.Info("SysResMonitor started in the background")
 
-	go p.tick(p.ctx, 2*time.Second, p.monitorCPUFrequency, p.monitorGPUFreq, p.monitorMemory, p.monitorDisk)
+	go p.tick(p.ctx, 2*time.Second, p.monitorCPUFrequency, p.monitorAMDGPUFreq, p.monitorMemory, p.monitorDisk)
 	go p.tick(p.ctx, 4*time.Second, p.monitorCPUTemperature)
 	go p.tick(p.ctx, 30*time.Second, p.monitorUptime)
 	go p.tick(p.ctx, 60*time.Second, p.monitorScreen)
@@ -200,31 +188,6 @@ func (p *SysResMonitor) tick(ctx context.Context, interval time.Duration, fns ..
 			mf(fns...)
 		}
 	}
-}
-
-func detectCPUType() SystemType {
-	file, err := os.Open("/proc/cpuinfo")
-	if err != nil {
-		return SystemTypeIntel
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close file: %v\n", err)
-		}
-	}()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.ToLower(scanner.Text())
-		if strings.Contains(line, "vendor_id") {
-			if strings.Contains(line, "genuineintel") {
-				return SystemTypeIntel
-			} else if strings.Contains(line, "authenticamd") {
-				return SystemTypeAMD
-			}
-		}
-	}
-	return SystemTypeIntel
 }
 
 func (p *SysResMonitor) monitorCPUFrequency(_ context.Context) error {
@@ -280,78 +243,13 @@ func (p *SysResMonitor) monitorCPUFrequency(_ context.Context) error {
 }
 
 func (p *SysResMonitor) monitorCPUTemperature(ctx context.Context) error {
-	switch p.systemType {
-	case SystemTypeIntel:
-		if err := p.monitorIntelTemperature(ctx); err != nil {
-			return err
-		}
-	case SystemTypeAMD:
-		if err := p.monitorAMDCPUTemperature(ctx); err != nil {
-			return err
-		}
-		if err := p.monitorAMDGPUTemperature(ctx); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unsupported system type")
-	}
-	CPUTemperatureCelsius.Set(p.lastMetrics.CPU.CurrentTemperature)
-	return nil
-}
-
-func (p *SysResMonitor) monitorIntelTemperature(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "sensors", "-u")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
-	if err != nil {
-		p.logger.Error("Failed to get CPU temperature", zap.String("stderr", stderr.String()), zap.Error(err))
+	if err := p.monitorAMDCPUTemperature(ctx); err != nil {
 		return err
 	}
-
-	// Parse the output
-	lines := strings.Split(string(output), "\n")
-	var inPackage bool
-	for _, line := range lines {
-		if strings.HasPrefix(line, "Package id 0:") {
-			inPackage = true
-			continue
-		}
-		if inPackage && line == "" {
-			inPackage = false
-		}
-		if inPackage && strings.Contains(line, "temp1_input:") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				p.logger.Error("Failed to parse current CPU temperature", zap.String("line", line))
-				continue
-			}
-			current, err := strconv.ParseFloat(fields[1], 64)
-			if err != nil {
-				return err
-			}
-			p.Lock()
-			p.lastMetrics.CPU.CurrentTemperature = current
-			p.lastMetrics.GPU.CurrentTemperature = current
-			p.Unlock()
-		}
-		if inPackage && strings.Contains(line, "temp1_max:") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				p.logger.Error("Failed to parse max CPU temperature", zap.String("line", line))
-				continue
-			}
-			max, err := strconv.ParseFloat(fields[1], 64)
-			if err != nil {
-				return err
-			}
-			p.Lock()
-			p.lastMetrics.CPU.MaxTemperature = max
-			p.lastMetrics.GPU.MaxTemperature = max
-			p.Unlock()
-		}
+	if err := p.monitorAMDGPUTemperature(ctx); err != nil {
+		return err
 	}
-
+	CPUTemperatureCelsius.Set(p.lastMetrics.CPU.CurrentTemperature)
 	return nil
 }
 
@@ -398,9 +296,9 @@ func (p *SysResMonitor) monitorAMDCPUTemperature(ctx context.Context) error {
 		}
 
 		// AMD typically doesn't expose max temperature via sensors
-		// Set a typical safe maximum for AMD Ryzen™ 7 5825U
+		// Set the Tjmax for the FF1 SoC (AMD Ryzen™ 7 7735U)
 		p.Lock()
-		p.lastMetrics.CPU.MaxTemperature = 95.0 // AMD Ryzen™ 7 5825U Max Temp
+		p.lastMetrics.CPU.MaxTemperature = 95.0
 		p.Unlock()
 	}
 
@@ -443,104 +341,13 @@ func (p *SysResMonitor) monitorAMDGPUTemperature(ctx context.Context) error {
 			}
 			p.Lock()
 			p.lastMetrics.GPU.CurrentTemperature = temp
-			p.lastMetrics.GPU.MaxTemperature = 95.0 // AMD Ryzen™ 7 5825U Max Temp
+			p.lastMetrics.GPU.MaxTemperature = 95.0 // Tjmax for the FF1 SoC (AMD Ryzen™ 7 7735U)
 			p.Unlock()
 		}
 	}
 
 	return nil
 }
-func (p *SysResMonitor) monitorGPUFreq(ctx context.Context) error {
-	switch p.systemType {
-	case SystemTypeIntel:
-		return p.monitorIntelGPUFreq(ctx)
-	case SystemTypeAMD:
-		return p.monitorAMDGPUFreq(ctx)
-	default:
-		return fmt.Errorf("unsupported system type")
-	}
-}
-
-func (p *SysResMonitor) monitorIntelGPUFreq(ctx context.Context) error {
-	// Get the current frequency
-	cmd := exec.CommandContext(ctx, "timeout", "1s", "sudo", "intel_gpu_top", "-J", "-s", "1000")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 124 {
-		if err != nil {
-			p.logger.Error("Failed to get Intel GPU frequency", zap.String("stderr", stderr.String()), zap.Error(err))
-		}
-		return err
-	}
-
-	outputString := string(output)
-	if strings.HasPrefix(outputString, "[") && !strings.HasSuffix(outputString, "]") {
-		outputString = outputString + "]"
-	}
-
-	var result []struct {
-		Frequency struct {
-			Actual float64 `json:"actual"`
-		} `json:"frequency"`
-		Engines map[string]struct {
-			Busy float64 `json:"busy"`
-		} `json:"engines"`
-	}
-	err = json.Unmarshal([]byte(outputString), &result)
-	if err != nil {
-		return err
-	}
-	if len(result) == 0 {
-		return fmt.Errorf("no GPU frequency found")
-	}
-
-	current := result[0].Frequency.Actual
-	engineBusy, engineBusyFound := maxEngineBusyPercent(result[0].Engines)
-
-	devicePath, deviceErr := discoverGPUDevicePath()
-	gpuBusy, busyErr := resolveGPUBusy(engineBusy, engineBusyFound, devicePath)
-
-	p.Lock()
-	p.lastMetrics.GPU.CurrentFrequency = current
-	if busyErr == nil {
-		p.lastMetrics.GPU.GPUBusy = gpuBusy
-	}
-	p.Unlock()
-
-	if busyErr != nil {
-		p.logger.Debug("GPU busy metric unavailable on Intel path",
-			zap.Error(busyErr),
-			zap.Error(deviceErr),
-		)
-	}
-
-	if err := shouldSuppressIntelGPUUpdate(devicePath, busyErr); err != nil {
-		return err
-	}
-
-	if devicePath == "" {
-		return nil
-	}
-
-	cardPath := filepath.Dir(devicePath)
-	// Probe both device-level and card-level Intel frequency files.
-	max, err := readFirstExistingSysfsFloat(
-		filepath.Join(devicePath, "gt_max_freq_mhz"),
-		filepath.Join(cardPath, "gt_max_freq_mhz"),
-	)
-	if err != nil {
-		p.logger.Error("Failed to get Intel GPU max frequency", zap.Error(err))
-		return err
-	}
-	p.Lock()
-	p.lastMetrics.GPU.MaxFrequency = max
-	p.Unlock()
-
-	return nil
-}
-
 func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "sensors", "-u")
 	var stderr bytes.Buffer
@@ -586,9 +393,11 @@ func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 	devicePath, deviceErr := discoverGPUDevicePath()
 	var maxMHz float64
 	var maxErr error
-	gpuBusy, busyErr := resolveGPUBusy(0, false, devicePath)
+	var gpuBusy float64
+	busyErr := error(errBestEffortMetricUnavailable)
 	if deviceErr == nil {
 		maxMHz, maxErr = readAMDMaxSclkMHz(devicePath)
+		gpuBusy, busyErr = readGPUBusyPercent(devicePath)
 	} else {
 		maxErr = deviceErr
 	}

@@ -108,7 +108,11 @@ func (p *SysEventWatcher) Start() {
 }
 
 func (p *SysEventWatcher) monitorHangingGPU(ctx context.Context, resultChan chan<- bool, errChan chan<- error) {
-	cmd := exec.CommandContext(ctx, "sudo", "journalctl", "--lines=0", "-f", "-k", "-g", "i915")
+	// amdgpu reports hangs as ring timeouts ("*ERROR* ring ... timeout") followed
+	// by "GPU reset begin!", and reports successful recovery as
+	// "GPU reset(N) succeeded!". Follow the kernel journal for those markers to
+	// drive the hang/recover events consumed by the kiosk watchdog.
+	cmd := exec.CommandContext(ctx, "sudo", "journalctl", "--lines=0", "-f", "-k", "-g", "amdgpu")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -138,9 +142,10 @@ func (p *SysEventWatcher) monitorHangingGPU(ctx context.Context, resultChan chan
 			return
 		case <-ticker.C:
 			line := sc.Text()
-			if strings.Contains(line, "GPU HANG") {
+			if strings.Contains(line, "GPU reset begin") ||
+				(strings.Contains(line, "*ERROR* ring") && strings.Contains(line, "timeout")) {
 				resultChan <- true
-			} else if strings.Contains(line, "GUC: submission enabled") {
+			} else if strings.Contains(line, "GPU reset") && strings.Contains(line, "succeeded") {
 				resultChan <- false
 			}
 		}
