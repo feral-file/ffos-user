@@ -32,11 +32,37 @@ DISABLE_FEATURES="TranslateUI,InterestFeedContentSuggestions,CalculateNativeWinO
 # wlr-randr, so it is the correct probe here and matches the source
 # display-restore.sh watches. A monitor may be attached later on any connector,
 # so we wait indefinitely rather than time out.
+#
+# Waiting is only safe while the state is POSITIVELY known: every connector
+# readable and every one reading exactly "disconnected". Anything else — no
+# readable connectors, or a readable value the kernel could not resolve (DRM
+# reports "unknown" for unprobeable connectors, which may well have a display
+# attached) — must fall through to cage and its pre-existing Restart=always
+# recovery, mirroring the watchdog's fail-open display gate. Otherwise an
+# unknown-state box could sit in this loop forever with a working monitor and
+# no recovery path.
 wait_for_display() {
-    local announced=0
+    local announced=0 f status saw_status all_disconnected
     while true; do
-        if grep -qxF connected /sys/class/drm/card*-*/status 2>/dev/null; then
-            echo "$(date '+%F %T') [INFO] Display connected, starting kiosk"
+        saw_status=0
+        all_disconnected=1
+        for f in /sys/class/drm/card*-*/status; do
+            status=$(cat "$f" 2>/dev/null) || continue
+            saw_status=1
+            case "$status" in
+                connected)
+                    echo "$(date '+%F %T') [INFO] Display connected, starting kiosk"
+                    return
+                    ;;
+                disconnected) ;;
+                *)
+                    # e.g. "unknown": not a positive no-display reading.
+                    all_disconnected=0
+                    ;;
+            esac
+        done
+        if [ "$saw_status" -eq 0 ] || [ "$all_disconnected" -eq 0 ]; then
+            echo "$(date '+%F %T') [INFO] Display state not positively disconnected, starting kiosk (fail open)"
             return
         fi
         # Log the transition into the waiting state once, not on every poll, to
