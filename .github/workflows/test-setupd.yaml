@@ -11,10 +11,10 @@ on:
       - 'Makefile'
       - 'scripts/verify-setupd-docker.sh'
       - 'scripts/test-serve-feral-player.sh'
-      - 'users/feralfile/scripts/serve-feral-player.sh'
-      - 'users/feralfile/systemd-services/feral-player.service'
-      - 'users/feralfile/systemd-services/chromium-kiosk.service'
-      - 'users/feralfile/systemd-services/feral-setupd.service'
+      - 'scripts/test-headless-startup-contract.sh'
+      - 'users/feralfile/scripts/**'
+      - 'users/feralfile/.start-services.sh'
+      - 'users/feralfile/systemd-services/**'
   workflow_call:
     inputs:
       upload-coverage:
