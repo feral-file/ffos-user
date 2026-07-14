@@ -55,7 +55,13 @@ The codebase is organized into focused modules:
    - Register GATT app + start advertising with a command characteristic.
    - Provide callback closures (`BleCallbacks`) for each supported BLE command.
 3. **Wait for other services**:
-   - Wait until `controld` is reachable (D‑Bus) before proceeding.
+   - Wait (bounded) until `controld` is reachable (D‑Bus). A timeout is **not
+     fatal**: BLE is already advertising, and exiting here would kill the one
+     recovery path exactly when controld is crash-looping. Every later controld
+     interaction is fallible per-call; the startup pairing-topic fetch
+     self-heals via `spawn_pairing_topic_retry_loop` (retries until a topic is
+     persisted, then repaints the QR only if the stale-topic QR is still on
+     screen — see `try_allocate_pairing_topic`).
    - Register D‑Bus listeners for UI switching/other events.
 4. **Decide initial UI**:
    - Check internet status (using `Connectivity`).

@@ -12,6 +12,10 @@ pub const INITIAL_INTERNET_CHECK_TIMEOUT: u64 = 5 * 1000; // 5 seconds
 pub const AGGRESSIVE_INTERNET_CHECK_INTERVAL: u64 = 2 * 1000; // 2 seconds
 pub const RELAXED_INTERNET_CHECK_INTERVAL: u64 = 10 * 1000; // 10 seconds
 pub const WAIT_FOR_CONTROLD_TIMEOUT: u64 = 30 * 1000; // 30 seconds
+/// Cadence of the background pairing-topic retry after a failed startup allocation
+/// (controld away at boot). Each attempt is a bounded D-Bus call; 10s keeps the QR's
+/// empty-topic window short once controld appears without hammering the bus.
+pub const PAIRING_TOPIC_RETRY_INTERVAL: u64 = 10 * 1000; // 10 seconds
 pub const WIFI_INTERNET_WAIT_TIMEOUT: u64 = 6 * 1000; // 6 seconds to wait for internet after WiFi connects
 pub const WIFI_INTERNET_CHECK_INTERVAL: u64 = 1000; // 1 second between checks
 
