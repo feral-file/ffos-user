@@ -81,8 +81,18 @@ async fn run() -> Result<()> {
     let ssids_cacher = Arc::new(SSIDsCacher::new());
     start_ble(&ble_service, &app_state, &chrome, &ssids_cacher).await?;
 
-    // Wait for controld D-Bus connection before proceeding
-    wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await?;
+    // Wait for controld D-Bus before proceeding, but never exit on timeout: BLE advertising is
+    // already up above, and exiting here would take down the one recovery path (phone-driven
+    // provisioning) exactly when controld is crash-looping and the user needs it most. Everything
+    // downstream that talks to controld (get_relayer_info, connectivity queries) is fallible
+    // per-call and simply degrades until controld appears.
+    if let Err(e) =
+        wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await
+    {
+        eprintln!("MAIN: controld not reachable, continuing without it (BLE stays up): {e:#?}");
+        let error: &dyn std::error::Error = e.as_ref();
+        sentry::capture_error(error);
+    }
 
     // Spawn background task to refresh remote version info every hour
     updater::spawn_remote_version_refresher();
