@@ -33,6 +33,7 @@ exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && 
     --enable-features=$FEATURES \
     --ignore-gpu-blocklist \
     --enable-gpu-rasterization \
+    --enable-unsafe-webgpu \
     --remote-debugging-port=9222 \
     --no-first-run \
     --disable-sync \
