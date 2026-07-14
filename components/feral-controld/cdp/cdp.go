@@ -91,6 +91,9 @@ type cdp struct {
 	// retryInterval paces the connect loop's retry/reconnect cadence. Defaults to
 	// connectRetryInterval; overridable in tests to keep the state machine fast.
 	retryInterval time.Duration
+	// sendTimeout bounds one send's write+read while holding c.mu. Defaults to
+	// sendRequestTimeout; overridable in tests to exercise the wedged-socket path fast.
+	sendTimeout time.Duration
 
 	// Logger
 	logger *zap.Logger
@@ -115,6 +118,7 @@ func New(
 		doneChan:      make(chan struct{}),
 		reconnectCh:   make(chan struct{}, 1),
 		retryInterval: connectRetryInterval,
+		sendTimeout:   sendRequestTimeout,
 		logger:        logger,
 	}
 }
@@ -125,6 +129,16 @@ func New(
 // cadence: short enough to reconnect promptly once a display appears, long enough not to
 // hammer /json or flood logs while the box is intentionally headless.
 const connectRetryInterval = 5 * time.Second
+
+// sendRequestTimeout bounds the write+read round-trip a single send performs while
+// holding c.mu. The hold MUST stay bounded: a kiosk restart can leave the socket
+// writable but never-replying, and an unbounded ReadMessage would then wedge the send
+// goroutine on the mutex forever — reconnect never signals (it needs a send failure),
+// and Initialized/Close/teardownConn all deadlock behind the same lock. Generous
+// relative to real CDP replies (evaluate calls answer in milliseconds) so it only
+// fires on a genuinely dead target, where poisoning the conn is what we want: the
+// deadline error signals the connect loop to tear down and re-dial.
+const sendRequestTimeout = 15 * time.Second
 
 // Initialized returns true if the CDP connection is initialized
 func (c *cdp) Initialized() bool {
@@ -264,7 +278,7 @@ func (c *cdp) Start(ctx context.Context, onConnect func()) {
 	go c.connectLoop(ctx)
 }
 
-// connectLoop establishes and re-establishes the CDP connection until ctx is cancelled.
+// connectLoop establishes and re-establishes the CDP connection until ctx is canceled.
 // It retries while Chromium is absent (headless boot), and reconnects after a drop
 // (kiosk/Chromium restart). Because the client is synchronous request/response, a dropped
 // socket only surfaces as a Send write/read error, which signals reconnectCh; the loop then
@@ -484,6 +498,16 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		c.mu.Unlock()
 		return nil, ErrCDPConnectionNotInitialized
 	}
+	// One deadline covers the whole write+read round-trip so the c.mu hold is bounded
+	// (see sendRequestTimeout). A socket that is writable but never replies — the
+	// post-kiosk-restart zombie — must surface as an error here, because a send failure
+	// is the only signal that wakes the connect loop to tear down and re-dial.
+	deadline := time.Now().Add(c.sendTimeout)
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		c.mu.Unlock()
+		c.signalDrop()
+		return nil, fmt.Errorf("failed to set CDP write deadline: %w", err)
+	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.mu.Unlock()
 		// A write failure means the socket is dead (Chromium gone/restarting). Wake the
@@ -493,7 +517,14 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		return nil, fmt.Errorf("CDP write error: %w", err)
 	}
 
-	// Wait for response
+	// Wait for response. An expired read deadline poisons the gorilla conn (all later
+	// reads fail), which is intended: the drop signal below has the connect loop replace
+	// the connection entirely.
+	if err := c.conn.SetReadDeadline(deadline); err != nil {
+		c.mu.Unlock()
+		c.signalDrop()
+		return nil, fmt.Errorf("failed to set CDP read deadline: %w", err)
+	}
 	_, response, err := c.conn.ReadMessage()
 	if err != nil {
 		c.mu.Unlock()

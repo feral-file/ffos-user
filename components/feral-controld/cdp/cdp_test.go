@@ -48,6 +48,13 @@ func setup(t *testing.T) *testSetup {
 
 	client := cdp.New("http://localhost:9222", mockDialer, mockIO, mockJSON, mockHTTPClient, logger)
 
+	// Every send bounds its write+read round-trip with deadlines so the internal mutex
+	// hold stays finite (the wedged-socket behavior itself is pinned by the internal
+	// TestSend_WedgedSocketUnblocksAndSignalsDrop against a real websocket). The mock
+	// just accepts them; individual tests assert on the write/read calls themselves.
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).AnyTimes()
+	mockConn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).AnyTimes()
+
 	return &testSetup{
 		ctrl:       ctrl,
 		ctx:        ctx,
