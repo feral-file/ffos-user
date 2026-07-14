@@ -213,10 +213,27 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		app.Logger.Info("Connecting relayer during startup")
 		err = app.Relayer.Connect(ctx)
 		if err != nil {
-			app.Logger.Error("Failed initial relayer connection", zap.Error(err))
-			return err
+			// Never fatal: returning here would exit before SdNotifyReady and before our
+			// D-Bus interface has been up long enough for setupd's wait_for_controld, so a
+			// relayer outage would crash-loop this daemon AND take BLE provisioning down
+			// with it — the exact coupling the unconditional-start model exists to remove
+			// (.start-services.sh starts us --no-block precisely because pre-READY failure
+			// can happen). Retry in the background instead; the mediator's
+			// connectivity-restored handler and the GetRelayerInfo D-Bus path also
+			// re-attempt the connection, and RetryableConnect tolerates racing them
+			// (ErrAlreadyConnected is success).
+			app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
+			go func() {
+				if retryErr := app.Relayer.RetryableConnect(ctx); retryErr != nil {
+					app.Logger.Error("Background relayer connection retry gave up", zap.Error(retryErr))
+				}
+			}()
+		} else {
+			app.Logger.Info("Initial relayer connection established")
 		}
-		app.Logger.Info("Initial relayer connection established")
+		// Close regardless of whether the *initial* connect succeeded: the background
+		// retry (or a later mediator/D-Bus reconnect) may have established the
+		// connection by shutdown time, and Close is a no-op on a nil conn.
 		defer app.Relayer.Close()
 	} else {
 		app.Logger.Info("Skipping initial relayer connection",
