@@ -44,12 +44,15 @@ func TestSend_WedgedSocketUnblocksAndSignalsDrop(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	var srvConns sync.WaitGroup
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Add BEFORE Upgrade writes the 101: the client's dial returns as soon as
+		// it reads that response, so an Add placed later races the test's deferred
+		// Wait when this goroutine is scheduled late.
+		srvConns.Add(1)
+		defer srvConns.Done()
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		srvConns.Add(1)
-		defer srvConns.Done()
 		defer func() { _ = conn.Close() }()
 		// Swallow client messages without ever replying: writable, silent.
 		for {
