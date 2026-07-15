@@ -36,13 +36,14 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
 - If 3 restarts occur within 5 minutes, triggers a system reboot.
 - **Headless devices are exempt.** On a device with no monitor, the kiosk
   intentionally waits for a display before launching Chromium, so a missing
-  `/json/version` is expected, not a failure. While any
-  `/sys/class/drm/card*-*/status` reads a **known** disconnected display, the
-  monitor suppresses all escalation (no kiosk restart, no restart-history
-  accumulation, no reboot). Detection **fails open**: an unreadable or absent
-  sysfs layout counts as "connected" so escalation is never silently disabled.
-  When a display is (re)connected, the startup grace is re-armed from scratch
-  before escalation resumes.
+  `/json/version` is expected, not a failure. Escalation is suppressed (no
+  kiosk restart, no restart-history accumulation, no reboot) only while
+  **every** `/sys/class/drm/card*-*/status` connector positively reads
+  `disconnected`. Detection **fails open**: any `connected` reading, an
+  unreadable status file, an absent sysfs layout, or a value the kernel could
+  not resolve (DRM `unknown`) counts as "display connected" so escalation is
+  never silently disabled. When a display is (re)connected, the startup grace
+  is re-armed from scratch before escalation resumes.
 
 ## Resource Monitoring (RAM, GPU, DISK)
 
