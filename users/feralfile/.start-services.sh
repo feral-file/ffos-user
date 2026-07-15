@@ -43,6 +43,17 @@ systemctl --user start "feral-sys-monitord.service"
 systemctl --user start "feral-vmagent.service"
 systemctl --user start "display-restore.service"
 systemctl --user start "feral-player.service"
+# Start the daemons directly rather than relying on chromium-ready.target to pull
+# them in. They are CDP-optional with self-reconnect, so they must run whether or
+# not a display/Chromium ever comes up (e.g. a headless boot). Order is controld
+# then setupd because setupd waits on controld itself.
+# --no-block: controld is Type=notify and can exit before READY on a bad boot
+# (e.g. relayer handshake failure on a warm reboot). A blocking start would then
+# fail and, under set -e, abort this script before chromium-kiosk/feral-watchdog
+# ever start. Restart=always recovers the daemons on their own; the rest of boot
+# must never hinge on them reaching READY.
+systemctl --user start --no-block "feral-controld.service"
+systemctl --user start --no-block "feral-setupd.service"
 systemctl --user start "chromium-kiosk.service"
 systemctl --user start "ota-update-success-check.service"
 

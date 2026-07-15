@@ -1,6 +1,5 @@
 [Unit]
 Description=Feral File Setup Service
-PartOf=chromium-ready.target
 After=system-ready.target feral-player.service feral-controld.service
 StartLimitBurst=5
 StartLimitIntervalSec=600
@@ -15,3 +14,9 @@ RestartSec=5s
 TimeoutStopSec=5s
 StandardOutput=append:/home/feralfile/.logs/setupd.log
 StandardError=append:/home/feralfile/.logs/setupd.log
+
+# Activation is the explicit start in .start-services.sh — units in this dir are
+# bind-mounted, never `systemctl --user enable`d, so [Install] alone starts
+# nothing. Kept for consistency with the other units here.
+[Install]
+WantedBy=default.target

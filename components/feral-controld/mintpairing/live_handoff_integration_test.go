@@ -436,6 +436,7 @@ type liveNoopCDP struct {
 }
 
 func (c *liveNoopCDP) Init(context.Context) error                               { return nil }
+func (c *liveNoopCDP) Start(context.Context, func())                            {}
 func (c *liveNoopCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
 func (c *liveNoopCDP) PageNavigationURL(context.Context) (string, error) {
 	return "", errors.New("not implemented")

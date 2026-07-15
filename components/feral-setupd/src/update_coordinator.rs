@@ -1,7 +1,7 @@
 //! Update orchestration, retry logic, and phase management for system updates.
 
 use crate::app_state::{AppState, Page};
-use crate::cdp::Cdp;
+use crate::cdp::CdpHandle;
 use crate::constant;
 use crate::phase_logic::phase_after_inflight_check;
 use crate::setup_lifecycle::SetupPhase;
@@ -203,7 +203,7 @@ impl Drop for UpdateGuard {
     }
 }
 
-pub async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
+pub async fn update(app_state: Arc<AppState>, chrome: Arc<CdpHandle>) -> Result<()> {
     app_state.lifecycle.set(SetupPhase::Updating);
 
     let latest_version = updater::latest_version().await.unwrap_or_else(|e| {
@@ -277,7 +277,7 @@ pub async fn update(app_state: Arc<AppState>, chrome: Arc<Cdp>) -> Result<()> {
 
 async fn attempt_update(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     base_msg: &str,
 ) -> Result<(), UpdateAttemptError> {
     let mut rx = updater::spawn_updater().map_err(|e| UpdateAttemptError {
@@ -324,7 +324,7 @@ async fn attempt_update(
 /// Uses fresh failure message since this is called immediately after update failure.
 pub async fn handle_permanent_update_failure(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     error: &anyhow::Error,
 ) {
     eprintln!("MAIN: Permanent update failure: {error:#?}");
@@ -479,7 +479,7 @@ pub fn restore_page_target(page: &Page, phase: SetupPhase) -> RestorePageTarget 
 /// * `Err` if a critical error occurred during the check (only possible with `Blocking` execution)
 pub async fn check_and_update_system(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     mode: UpdateMode,
     execution: UpdateExecution,
     guard: UpdateGuard,

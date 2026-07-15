@@ -129,10 +129,17 @@ func TestSend_Success(t *testing.T) {
 		Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(ts.mockConn, nil)
 
-	// Mock connection methods for background goroutine
+	// Mock connection methods for background goroutine. ReadMessage must BLOCK
+	// until the test ends: an instant error lets the background goroutine race
+	// Send to closeConn and flakily remove the connection first ("not found").
+	readRelease := make(chan struct{})
+	defer close(readRelease)
 	ts.mockConn.EXPECT().
 		ReadMessage().
-		Return(0, nil, errors.New("connection closed")).
+		DoAndReturn(func() (int, []byte, error) {
+			<-readRelease
+			return 0, nil, errors.New("connection closed")
+		}).
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
@@ -164,6 +171,11 @@ func TestSend_Success(t *testing.T) {
 	// Test Send
 	err = ts.ws.Send(connID, message)
 	assert.NoError(t, err)
+
+	// Remove the connection while the mocks are still valid: the deferred
+	// readRelease close wakes the background goroutine concurrently with
+	// ctrl.Finish, and its closeConn must find nothing left to touch.
+	ts.ws.Close()
 }
 
 func TestSend_ConnectionNotFound(t *testing.T) {
@@ -190,10 +202,17 @@ func TestSend_WriteError(t *testing.T) {
 		Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(ts.mockConn, nil)
 
-	// Mock connection methods for background goroutine
+	// Mock connection methods for background goroutine. ReadMessage must BLOCK
+	// until the test ends: an instant error lets the background goroutine race
+	// Send to closeConn and flakily remove the connection first ("not found").
+	readRelease := make(chan struct{})
+	defer close(readRelease)
 	ts.mockConn.EXPECT().
 		ReadMessage().
-		Return(0, nil, errors.New("connection closed")).
+		DoAndReturn(func() (int, []byte, error) {
+			<-readRelease
+			return 0, nil, errors.New("connection closed")
+		}).
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
@@ -227,6 +246,11 @@ func TestSend_WriteError(t *testing.T) {
 	err = ts.ws.Send(connID, message)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to send message")
+
+	// Remove the connection while the mocks are still valid: the deferred
+	// readRelease close wakes the background goroutine concurrently with
+	// ctrl.Finish, and its closeConn must find nothing left to touch.
+	ts.ws.Close()
 }
 
 func TestSendAll_Success(t *testing.T) {
@@ -984,8 +1008,13 @@ func TestConcurrentCloseAndSend(t *testing.T) {
 
 	wg.Wait()
 
-	// Mock WriteJSON for some connections (before close)
-	for i := range numConnections / 2 {
+	// Mock WriteJSON for ALL connections: this test deliberately races Send
+	// against Close, so any conn may still be in the map when a send lands. An
+	// unmocked WriteJSON here is worse than a failure — gomock's unexpected-call
+	// Fatalf runs Goexit while Send holds the conn mutex (the unlock is not
+	// deferred), which leaves closeConn deadlocked behind it holding ws.mu and
+	// hangs the whole test binary until the 10m timeout.
+	for i := range numConnections {
 		mockConns[i].EXPECT().
 			WriteJSON(gomock.Any()).
 			Return(nil).
