@@ -348,6 +348,7 @@ func (p *SysResMonitor) monitorAMDGPUTemperature(ctx context.Context) error {
 
 	return nil
 }
+
 func (p *SysResMonitor) monitorAMDGPUFreq(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "sensors", "-u")
 	var stderr bytes.Buffer

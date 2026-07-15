@@ -146,4 +146,3 @@ func readAMDMaxSclkMHz(devicePath string) (float64, error) {
 	}
 	return parseAMDMaxSclkMHz(string(data))
 }
-

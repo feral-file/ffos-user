@@ -107,11 +107,25 @@ func (p *SysEventWatcher) Start() {
 	}()
 }
 
+// classifyAMDGPUJournalLine maps an amdgpu kernel journal line to a GPU event.
+// amdgpu reports hangs as ring timeouts ("*ERROR* ring ... timeout") followed
+// by "GPU reset begin!", and reports successful recovery as
+// "GPU reset(N) succeeded!". Lines without those markers return ok=false.
+func classifyAMDGPUJournalLine(line string) (event Event, ok bool) {
+	if strings.Contains(line, "GPU reset begin") ||
+		(strings.Contains(line, "*ERROR* ring") && strings.Contains(line, "timeout")) {
+		return EVENT_GPU_HANGING, true
+	}
+	if strings.Contains(line, "GPU reset") && strings.Contains(line, "succeeded") {
+		return EVENT_GPU_RECOVER, true
+	}
+	return "", false
+}
+
 func (p *SysEventWatcher) monitorHangingGPU(ctx context.Context, resultChan chan<- bool, errChan chan<- error) {
-	// amdgpu reports hangs as ring timeouts ("*ERROR* ring ... timeout") followed
-	// by "GPU reset begin!", and reports successful recovery as
-	// "GPU reset(N) succeeded!". Follow the kernel journal for those markers to
-	// drive the hang/recover events consumed by the kiosk watchdog.
+	// Follow the kernel journal for the amdgpu hang/recover markers (see
+	// classifyAMDGPUJournalLine) to drive the events consumed by the kiosk
+	// watchdog.
 	cmd := exec.CommandContext(ctx, "sudo", "journalctl", "--lines=0", "-f", "-k", "-g", "amdgpu")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -141,13 +155,11 @@ func (p *SysEventWatcher) monitorHangingGPU(ctx context.Context, resultChan chan
 		case <-p.doneChan:
 			return
 		case <-ticker.C:
-			line := sc.Text()
-			if strings.Contains(line, "GPU reset begin") ||
-				(strings.Contains(line, "*ERROR* ring") && strings.Contains(line, "timeout")) {
-				resultChan <- true
-			} else if strings.Contains(line, "GPU reset") && strings.Contains(line, "succeeded") {
-				resultChan <- false
+			event, ok := classifyAMDGPUJournalLine(sc.Text())
+			if !ok {
+				continue
 			}
+			resultChan <- event == EVENT_GPU_HANGING
 		}
 	}
 }
