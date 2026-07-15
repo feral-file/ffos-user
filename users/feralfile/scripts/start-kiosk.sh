@@ -6,16 +6,7 @@ if [ -f /home/feralfile/.state/screen-orientation ]; then
     ROTATION=$(cat /home/feralfile/.state/screen-orientation)
 fi
 
-export WLR_DRM_FORMATS="XR24/I915_FORMAT_MOD_Y_TILED;XR24/I915_FORMAT_MOD_Yf_TILED"
-
-# Detect SOC vendor
-VENDOR=$(cat /proc/cpuinfo | grep -m1 vendor_id | awk '{print $3}')
-if [ "$VENDOR" = "GenuineIntel" ]; then
-    FEATURES="UseOzonePlatform,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
-else
-    # Default to AMD
-    FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,DiskCacheBackendExperiment:backend/blockfile"
-fi
+FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,DiskCacheBackendExperiment:backend/blockfile"
 
 # Features to disable for kiosk mode
 # TranslateUI: Disable translate prompt
