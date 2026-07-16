@@ -253,6 +253,21 @@ type scriptedPanelDDC struct {
 
 	mu     sync.Mutex
 	powers []string
+	gen    uint64
+}
+
+// Generation shadows the stub so tests can simulate a display change (plug/
+// swap), which must invalidate BOTH panel verdicts (success and capped fail).
+func (s *scriptedPanelDDC) Generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
+func (s *scriptedPanelDDC) bumpGeneration() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gen++
 }
 
 func (s *scriptedPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
@@ -615,4 +630,73 @@ func TestApplySleepTransitionIfChanged_PanelRetryRearmsOnDisplayChange(t *testin
 		defer e.sleepApplyMu.Unlock()
 		return e.sleepPanelFailStreak == 2
 	}, 2*time.Second, 5*time.Millisecond, "second same-generation failure should reach streak 2")
+}
+
+// TestApplySleepTransitionIfChanged_PanelSuccessRearmsOnDisplayChange pins the
+// success-side mirror of the generation guard: a "panel already aligned"
+// verdict earned against the OLD display must not stick to a hot-swapped NEW
+// one. A monitor swapped in mid sleep-window boots awake; the next tick must
+// re-drive it to the scheduled power state instead of trusting the stale
+// success until the morning boundary.
+func TestApplySleepTransitionIfChanged_PanelSuccessRearmsOnDisplayChange(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	// Exactly one player round-trip: the panel-only re-drive after the display
+	// change must not touch the player.
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(map[string]any{"result": map[string]any{}}, nil).
+		Times(1)
+
+	panel := &scriptedPanelDDC{entered: make(chan struct{}), release: make(chan error)}
+	e := &executor{
+		cdp:      mockCDP,
+		panelDDC: panel,
+		logger:   zaptest.NewLogger(t),
+	}
+	ctx := context.Background()
+
+	waitEntered := func(msg string) {
+		t.Helper()
+		select {
+		case <-panel.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal(msg)
+		}
+	}
+	waitRecorded := func(wantOK bool, msg string) {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			e.sleepApplyMu.Lock()
+			defer e.sleepApplyMu.Unlock()
+			return e.sleepPanelOK == wantOK && e.sleepPanelState != nil &&
+				*e.sleepPanelState == sleepschedule.StateSleeping
+		}, 2*time.Second, 5*time.Millisecond, msg)
+	}
+
+	// Initial transition: player and panel both reach Sleeping successfully.
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick"))
+	waitEntered("expected the initial panel standby attempt")
+	panel.release <- nil
+	waitRecorded(true, "panel success should be recorded")
+
+	// Stable display: aligned tick is a no-op for the panel.
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-aligned"))
+	select {
+	case <-panel.entered:
+		t.Fatal("aligned panel must not be re-driven while the display is unchanged")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Display swapped mid sleep-window: the stale success verdict must not
+	// hold; the very next tick re-drives the panel (and only the panel).
+	panel.bumpGeneration()
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-new-display"))
+	waitEntered("display change must invalidate the stale panel success verdict")
+	panel.release <- nil
+	waitRecorded(true, "new display's panel success should be recorded")
 }

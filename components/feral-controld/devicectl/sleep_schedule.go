@@ -378,14 +378,17 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 	defer e.sleepApplyMu.Unlock()
 
 	playerAligned := e.sleepApplyOK && e.sleepAppliedState != nil && *e.sleepAppliedState == state
-	// The capped give-up (sleepPanelFailStreak >= panelRetryMax) only holds for
-	// the display generation it was earned against: Generation() bumps when the
-	// DRM fingerprint changes, so a newly plugged/swapped panel gets fresh
-	// attempts instead of inheriting the old panel's failure verdict.
+	// BOTH panel verdicts — the success ("panel already aligned") and the
+	// capped give-up (sleepPanelFailStreak >= panelRetryMax) — only hold for
+	// the display generation they were earned against: Generation() bumps when
+	// the DRM fingerprint changes, so a newly plugged/swapped panel is
+	// re-driven to the scheduled power state (a swapped-in monitor boots
+	// awake even mid sleep-window) and gets a fresh retry budget instead of
+	// inheriting the old panel's failure verdict.
 	panelAligned := e.panelDDC == nil ||
 		(e.sleepPanelState != nil && *e.sleepPanelState == state &&
-			(e.sleepPanelOK ||
-				(e.sleepPanelFailStreak >= panelRetryMax && e.sleepPanelGen == e.panelDDC.Generation())))
+			e.sleepPanelGen == e.panelDDC.Generation() &&
+			(e.sleepPanelOK || e.sleepPanelFailStreak >= panelRetryMax))
 
 	if playerAligned && panelAligned {
 		return nil
