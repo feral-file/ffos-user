@@ -19,6 +19,7 @@ import (
 
 var (
 	ErrAlreadyInitialized          = errors.New("already initialized")
+	ErrClientClosed                = errors.New("CDP client is closed")
 	ErrCDPConnectionNotInitialized = errors.New("CDP connection is not initialized")
 	ErrNoPageTargetFound           = errors.New("no page target found in Chromium instance")
 	ErrMultiplePageTargetsFound    = errors.New("multiple page targets found in Chromium instance")
@@ -51,7 +52,14 @@ const (
 
 //go:generate mockgen -source=cdp.go -destination=../mocks/cdp.go -package=mocks -mock_names=CDP=MockCDP
 type CDP interface {
+	// Init performs a single blocking connect attempt. It is the low-level primitive
+	// exercised by the discovery/dial unit tests; production startup uses Start.
 	Init(ctx context.Context) error
+	// Start launches the background connect/reconnect supervisor and returns immediately.
+	// CDP availability must never gate daemon startup on a headless device, so callers
+	// invoke this instead of Init and do not treat CDP absence as fatal. onConnect (may be
+	// nil) runs after every successful (re)connect so callers can re-sync page state.
+	Start(ctx context.Context, onConnect func())
 	Send(method string, params map[string]interface{}) (interface{}, error)
 	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
 	PageNavigationURL(ctx context.Context) (string, error)
@@ -74,6 +82,19 @@ type cdp struct {
 	endpoint string
 	doneChan chan struct{}
 
+	// reconnectCh signals the background connect loop that the active connection died and
+	// must be re-established. It is buffered (depth 1) so concurrent Send failures collapse
+	// into a single reconnect and never block the send path.
+	reconnectCh chan struct{}
+	// onConnect runs after every successful (re)connect from the connect loop. Set by Start.
+	onConnect func()
+	// retryInterval paces the connect loop's retry/reconnect cadence. Defaults to
+	// connectRetryInterval; overridable in tests to keep the state machine fast.
+	retryInterval time.Duration
+	// sendTimeout bounds one send's write+read while holding c.mu. Defaults to
+	// sendRequestTimeout; overridable in tests to exercise the wedged-socket path fast.
+	sendTimeout time.Duration
+
 	// Logger
 	logger *zap.Logger
 }
@@ -88,16 +109,36 @@ func New(
 	logger *zap.Logger,
 ) CDP {
 	return &cdp{
-		dialer:     dialer,
-		io:         io,
-		json:       json,
-		httpClient: httpClient,
-		endpoint:   endpoint,
-		reqID:      0,
-		doneChan:   make(chan struct{}),
-		logger:     logger,
+		dialer:        dialer,
+		io:            io,
+		json:          json,
+		httpClient:    httpClient,
+		endpoint:      endpoint,
+		reqID:         0,
+		doneChan:      make(chan struct{}),
+		reconnectCh:   make(chan struct{}, 1),
+		retryInterval: connectRetryInterval,
+		sendTimeout:   sendRequestTimeout,
+		logger:        logger,
 	}
 }
+
+// connectRetryInterval paces the background connect loop. A headless device may leave
+// Chromium's DevTools endpoint (127.0.0.1:9222) absent for minutes or hours (no monitor)
+// and it can drop and return across kiosk restarts, so we retry at a steady, modest
+// cadence: short enough to reconnect promptly once a display appears, long enough not to
+// hammer /json or flood logs while the box is intentionally headless.
+const connectRetryInterval = 5 * time.Second
+
+// sendRequestTimeout bounds the write+read round-trip a single send performs while
+// holding c.mu. The hold MUST stay bounded: a kiosk restart can leave the socket
+// writable but never-replying, and an unbounded ReadMessage would then wedge the send
+// goroutine on the mutex forever — reconnect never signals (it needs a send failure),
+// and Initialized/Close/teardownConn all deadlock behind the same lock. Generous
+// relative to real CDP replies (evaluate calls answer in milliseconds) so it only
+// fires on a genuinely dead target, where poisoning the conn is what we want: the
+// deadline error signals the connect loop to tear down and re-dial.
+const sendRequestTimeout = 15 * time.Second
 
 // Initialized returns true if the CDP connection is initialized
 func (c *cdp) Initialized() bool {
@@ -106,7 +147,10 @@ func (c *cdp) Initialized() bool {
 	return c.conn != nil
 }
 
-// Init fetches WS endpoint and dials Chromium
+// Init fetches WS endpoint and dials Chromium in a single blocking attempt. It is the
+// low-level primitive: production startup uses Start (background supervisor) instead so
+// CDP absence never gates the daemon. Init owns a watcher goroutine that closes the
+// connection on ctx cancellation.
 func (c *cdp) Init(ctx context.Context) error {
 	c.logger.Info("Initializing CDP", zap.String("endpoint", c.endpoint))
 
@@ -114,90 +158,31 @@ func (c *cdp) Init(ctx context.Context) error {
 		return err
 	}
 
-	// Ensure the relayer is not connected
+	// Hold c.mu across discovery+dial so concurrent Init callers cannot each open a second
+	// connection (see TestClient_Init_Async).
 	c.mu.Lock()
+	// Close is terminal (it is the stop signal for the connect supervisor), so a closed
+	// client must not be re-initializable — its watcher would exit instantly and the
+	// connection would leak past shutdown.
+	select {
+	case <-c.doneChan:
+		c.mu.Unlock()
+		return ErrClientClosed
+	default:
+	}
 	if c.conn != nil {
 		c.mu.Unlock()
 		return ErrAlreadyInitialized
 	}
-
-	// Fetch JSON with websocket debugger URL. Use a request bound to ctx (plus a cap) so
-	// this step respects cancellation; raw http.Get ignores the request context and can
-	// block for the shared client's default timeout.
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, initDebugTargetsFetchTimeout)
-	defer fetchCancel()
-	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, c.endpoint+"/json", nil)
+	conn, err := c.dialPageTarget(ctx)
 	if err != nil {
 		c.mu.Unlock()
-		return fmt.Errorf("failed to build debug targets request: %w", err)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		c.mu.Unlock()
-		return fmt.Errorf("failed to fetch debug targets: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			c.logger.Warn("Failed to close response body", zap.Error(err))
-		}
-	}()
-
-	body, err := c.io.ReadAll(resp.Body)
-	if err != nil {
-		c.mu.Unlock()
-		return fmt.Errorf("failed to read targets: %w", err)
-	}
-
-	var targets []struct {
-		Type                 string `json:"type"`
-		Title                string `json:"title"`
-		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-	}
-	if err := c.json.Unmarshal(body, &targets); err != nil {
-		c.mu.Unlock()
-		return fmt.Errorf("invalid targets format: %w", err)
-	}
-	c.logger.Info("Fetched CDP targets", zap.Int("target_count", len(targets)))
-
-	// Collect all page targets
-	var pageTargets []struct {
-		Type                 string `json:"type"`
-		Title                string `json:"title"`
-		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-	}
-
-	for _, t := range targets {
-		if t.Type == "page" {
-			pageTargets = append(pageTargets, t)
-		}
-	}
-	c.logger.Info("Filtered CDP page targets", zap.Int("page_target_count", len(pageTargets)))
-
-	if len(pageTargets) == 0 {
-		c.mu.Unlock()
-		c.logger.Error("No CDP page targets available")
-		return ErrNoPageTargetFound
-	}
-
-	if len(pageTargets) > 1 {
-		c.mu.Unlock()
-		c.logger.Error("Multiple CDP page targets available", zap.Int("page_target_count", len(pageTargets)))
-		return ErrMultiplePageTargetsFound
-	}
-
-	// Connect to the single page target
-	target := pageTargets[0]
-	c.logger.Info("Selected CDP page target", zap.String("websocket_debugger_url", target.WebSocketDebuggerURL))
-	conn, _, err := c.dialer.DialContext(ctx, target.WebSocketDebuggerURL, nil)
-	if err != nil {
-		c.mu.Unlock()
-		c.logger.Error("CDP dial failed", zap.String("websocket_debugger_url", target.WebSocketDebuggerURL), zap.Error(err))
-		return fmt.Errorf("cdp dial error: %w", err)
+		return err
 	}
 	c.conn = conn
 	c.mu.Unlock()
 
-	c.logger.Info("Connected to CDP", zap.String("url", target.WebSocketDebuggerURL))
+	c.logger.Info("Connected to CDP")
 
 	// Start goroutine to handle context cancellation
 	go func() {
@@ -213,6 +198,194 @@ func (c *cdp) Init(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// dialPageTarget performs one CDP discovery+dial attempt: fetch /json, require exactly one
+// page target (the single kiosk page), and dial its websocket debugger URL. It touches no
+// shared connection state and does not hold c.mu, so callers own storing the returned conn.
+// Discovery failures are logged at debug because on a headless device the endpoint is
+// expected to be absent and the connect loop retries on an interval — higher log levels
+// here would flood logs/Sentry. The ws debugger URL changes across Chromium restarts, so
+// this re-fetches /json on every call rather than caching a target.
+func (c *cdp) dialPageTarget(ctx context.Context) (wrapper.WebSocketConn, error) {
+	// Bind the /json fetch to ctx (plus a cap) so it respects cancellation; raw http.Get
+	// ignores the request context and can block for the shared client's default timeout.
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, initDebugTargetsFetchTimeout)
+	defer fetchCancel()
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, c.endpoint+"/json", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build debug targets request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch debug targets: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			c.logger.Warn("Failed to close response body", zap.Error(err))
+		}
+	}()
+
+	body, err := c.io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read targets: %w", err)
+	}
+
+	var targets []struct {
+		Type                 string `json:"type"`
+		Title                string `json:"title"`
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := c.json.Unmarshal(body, &targets); err != nil {
+		return nil, fmt.Errorf("invalid targets format: %w", err)
+	}
+
+	var pageTargets []struct {
+		Type                 string `json:"type"`
+		Title                string `json:"title"`
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	for _, t := range targets {
+		if t.Type == "page" {
+			pageTargets = append(pageTargets, t)
+		}
+	}
+	c.logger.Debug("Filtered CDP page targets",
+		zap.Int("target_count", len(targets)),
+		zap.Int("page_target_count", len(pageTargets)))
+
+	if len(pageTargets) == 0 {
+		return nil, ErrNoPageTargetFound
+	}
+	if len(pageTargets) > 1 {
+		return nil, ErrMultiplePageTargetsFound
+	}
+
+	target := pageTargets[0]
+	conn, _, err := c.dialer.DialContext(ctx, target.WebSocketDebuggerURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cdp dial error: %w", err)
+	}
+	c.logger.Debug("Connected to CDP", zap.String("websocket_debugger_url", target.WebSocketDebuggerURL))
+	return conn, nil
+}
+
+// Start launches the background connect/reconnect supervisor. It returns immediately so
+// CDP availability never gates daemon startup (DBus, relayer, systemd READY). The loop owns
+// the connection for the process lifetime and exits only on ctx cancellation.
+func (c *cdp) Start(ctx context.Context, onConnect func()) {
+	c.onConnect = onConnect
+	go c.connectLoop(ctx)
+}
+
+// connectLoop establishes and re-establishes the CDP connection until ctx is canceled.
+// It retries while Chromium is absent (headless boot), and reconnects after a drop
+// (kiosk/Chromium restart). Because the client is synchronous request/response, a dropped
+// socket only surfaces as a Send write/read error, which signals reconnectCh; the loop then
+// tears down and re-dials. The loop is the sole owner of teardown-on-drop so the send path
+// stays lock-simple.
+func (c *cdp) connectLoop(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		// Stop before dialing when Close already happened — avoids a pointless dial whose
+		// result would be discarded by the shutdown check below anyway.
+		select {
+		case <-c.doneChan:
+			return
+		default:
+		}
+
+		conn, err := c.dialPageTarget(ctx)
+		if err != nil {
+			// Absence is the expected steady state on a headless device; keep at debug so
+			// it does not flood logs/Sentry while intentionally without a display.
+			c.logger.Debug("CDP not connected, will retry", zap.Error(err))
+			if !c.sleep(ctx, c.retryInterval) {
+				return
+			}
+			continue
+		}
+
+		// Close closes doneChan while holding c.mu, so checking it under the same lock
+		// makes "cache the fresh conn" and "shutdown already happened" mutually exclusive:
+		// a Close that raced the dial wins, and we must not cache the connection or fire
+		// onConnect after shutdown.
+		c.mu.Lock()
+		select {
+		case <-c.doneChan:
+			c.mu.Unlock()
+			if closeErr := conn.Close(); closeErr != nil {
+				c.logger.Warn("Failed to close CDP connection after shutdown race", zap.Error(closeErr))
+			}
+			return
+		default:
+			c.conn = conn
+		}
+		c.mu.Unlock()
+		c.logger.Info("CDP connected")
+
+		// Re-sync web-app-facing state after every (re)connect so the daemon converges to
+		// the state a fresh boot would produce (Chromium reloads its page across restarts).
+		if c.onConnect != nil {
+			c.onConnect()
+		}
+
+		select {
+		case <-ctx.Done():
+			c.teardownConn()
+			return
+		case <-c.doneChan:
+			// Close() already tore the connection down; just stop supervising.
+			return
+		case <-c.reconnectCh:
+			c.logger.Info("CDP connection dropped, reconnecting")
+			c.teardownConn()
+			if !c.sleep(ctx, c.retryInterval) {
+				return
+			}
+		}
+	}
+}
+
+// sleep waits for d, ctx cancellation, or Close. Returns false when the wait was
+// interrupted so callers exit the connect loop promptly on shutdown.
+func (c *cdp) sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-c.doneChan:
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// teardownConn closes and clears the active connection. Idempotent so it is safe to call
+// from both the connect loop and Close during shutdown.
+func (c *cdp) teardownConn() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil {
+		return
+	}
+	if err := c.conn.Close(); err != nil {
+		c.logger.Warn("Failed to close CDP connection", zap.Error(err))
+	}
+	c.conn = nil
+}
+
+// signalDrop wakes the connect loop to re-establish the connection after a failed
+// write/read. Non-blocking: the buffered reconnectCh collapses concurrent failures into a
+// single reconnect. A no-op when Start was never called (e.g. the Init-only unit tests).
+func (c *cdp) signalDrop() {
+	select {
+	case c.reconnectCh <- struct{}{}:
+	default:
+	}
 }
 
 // initDebugTargetsFetchTimeout matches the shared HTTP client round-trip limit so
@@ -318,17 +491,44 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 	}
 
 	c.mu.Lock()
+	// Re-check under the re-acquired lock: between the ID allocation above and here,
+	// a failed send on another goroutine can have woken the connect loop, whose
+	// teardownConn nils c.conn. Writing through the stale copy would panic.
+	if c.conn == nil {
+		c.mu.Unlock()
+		return nil, ErrCDPConnectionNotInitialized
+	}
+	// One deadline covers the whole write+read round-trip so the c.mu hold is bounded
+	// (see sendRequestTimeout). A socket that is writable but never replies — the
+	// post-kiosk-restart zombie — must surface as an error here, because a send failure
+	// is the only signal that wakes the connect loop to tear down and re-dial.
+	deadline := time.Now().Add(c.sendTimeout)
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		c.mu.Unlock()
+		c.signalDrop()
+		return nil, fmt.Errorf("failed to set CDP write deadline: %w", err)
+	}
 	if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		c.mu.Unlock()
+		// A write failure means the socket is dead (Chromium gone/restarting). Wake the
+		// connect loop to tear down and re-establish so later sends fail clean rather than
+		// hammering a dead conn.
+		c.signalDrop()
 		return nil, fmt.Errorf("CDP write error: %w", err)
 	}
 
 	// Wait for the matching response id. Chromium can emit console / event
 	// notifications on the same websocket before the command result arrives, so
 	// keep reading until we receive the evaluate response for this request.
+	if err := c.conn.SetReadDeadline(deadline); err != nil {
+		c.mu.Unlock()
+		c.signalDrop()
+		return nil, fmt.Errorf("failed to set CDP read deadline: %w", err)
+	}
 	_, response, err := c.readResponse(reqID)
 	if err != nil {
 		c.mu.Unlock()
+		c.signalDrop()
 		return nil, err
 	}
 	c.mu.Unlock()
@@ -442,13 +642,9 @@ func (c *cdp) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.conn == nil {
-		// Already closed
-		return
-	}
-
-	c.logger.Info("Closing CDP connection")
-
+	// doneChan is the stop signal for the connect supervisor, so it must close even
+	// when no connection was ever established (the headless steady state) — otherwise
+	// the loop keeps dialing, and could cache a connection, after Close.
 	select {
 	case <-c.doneChan:
 		// Already closed
@@ -456,6 +652,12 @@ func (c *cdp) Close() {
 	default:
 		close(c.doneChan)
 	}
+
+	if c.conn == nil {
+		return
+	}
+
+	c.logger.Info("Closing CDP connection")
 
 	err := c.conn.Close()
 	if err != nil {

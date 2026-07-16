@@ -1,21 +1,19 @@
 #!/bin/bash
 
-# Read saved rotation
+# Read saved rotation. The state file may exist but be empty or corrupt; an
+# invalid --transform value makes wlr-randr fail, which short-circuits the &&
+# chain below and Chromium never starts. Only accept the values wlr-randr
+# supports (same whitelist as display-restore.sh), otherwise fall back.
 ROTATION="normal"
 if [ -f /home/feralfile/.state/screen-orientation ]; then
     ROTATION=$(cat /home/feralfile/.state/screen-orientation)
 fi
+case "$ROTATION" in
+    normal|90|180|270) ;;
+    *) ROTATION="normal" ;;
+esac
 
-export WLR_DRM_FORMATS="XR24/I915_FORMAT_MOD_Y_TILED;XR24/I915_FORMAT_MOD_Yf_TILED"
-
-# Detect SOC vendor
-VENDOR=$(cat /proc/cpuinfo | grep -m1 vendor_id | awk '{print $3}')
-if [ "$VENDOR" = "GenuineIntel" ]; then
-    FEATURES="UseOzonePlatform,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
-else
-    # Default to AMD
-    FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,DiskCacheBackendExperiment:backend/blockfile"
-fi
+FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,DiskCacheBackendExperiment:backend/blockfile"
 
 # Features to disable for kiosk mode
 # TranslateUI: Disable translate prompt
@@ -24,10 +22,91 @@ fi
 # GlobalMediaControls: Hide media control UI
 DISABLE_FEATURES="TranslateUI,InterestFeedContentSuggestions,CalculateNativeWinOcclusion,GlobalMediaControls"
 
+# Block until a display is physically connected before launching cage/Chromium.
+# On a headless boot there is no output for wlr-randr to configure and cage would
+# exit immediately; with chromium-kiosk.service Restart=always that turns into a
+# relaunch storm (and cdp-ready-check would also fire a restart on its 90s
+# timeout). sysfs DRM status is readable without a running compositor, unlike
+# wlr-randr, so it is the correct probe here and matches the source
+# display-restore.sh watches. A monitor may be attached later on any connector,
+# so we wait indefinitely rather than time out.
+#
+# The wait holds until some connector positively reads "connected". An
+# "unknown" reading must NOT fail open: FF1's amdgpu persistently reports it on
+# connectors with nothing attached, so the earlier "wait only while everything
+# reads disconnected" gate never engaged on real headless hardware — every boot
+# fell open into cage/Chromium with zero outputs, where CDP can never come up,
+# and cdp-ready-check's 90s timeout + Restart=always produced a permanent
+# restart storm (observed in the field as sustained high CPU temperature).
+# Waiting on "unknown" is safe because attaching a real monitor raises HPD and
+# flips that connector to "connected", which the poll below observes; there is
+# no display that stays "unknown" while in use on this hardware.
+#
+# The only fail-open left is NO readable connector status at all: on an
+# environment without DRM sysfs the wait could never resolve, so fall through
+# to cage and its Restart=always recovery, mirroring the watchdog display gate.
+wait_for_display() {
+    local announced=0 f status saw_status conn readings
+    while true; do
+        saw_status=0
+        readings=""
+        for f in /sys/class/drm/card*-*/status; do
+            status=$(cat "$f" 2>/dev/null) || continue
+            saw_status=1
+            conn=${f%/status}
+            readings="$readings ${conn##*/}=$status"
+            if [ "$status" = "connected" ]; then
+                echo "$(date '+%F %T') [INFO] Display connected, starting kiosk"
+                return
+            fi
+        done
+        if [ "$saw_status" -eq 0 ]; then
+            echo "$(date '+%F %T') [INFO] No readable DRM connector status, starting kiosk (fail open)"
+            return
+        fi
+        # Log the transition into the waiting state once, not on every poll, to
+        # keep the log readable during long headless periods. The per-connector
+        # readings make a headless-vs-gate misfire diagnosable from this one line.
+        if [ "$announced" -eq 0 ]; then
+            echo "$(date '+%F %T') [INFO] No display connected (${readings# }), waiting for one to be attached..."
+            announced=1
+        fi
+        sleep 3
+    done
+}
+
+wait_for_display
+
+# A display is present: from here the CDP readiness probe and cage/Chromium can
+# make real progress, so start the probe now (starting it earlier under headless
+# would just time out and restart the unit for no reason).
 /home/feralfile/scripts/cdp-ready-check.sh &
 
-# Start cage with bash, which will wait, rotate the screen, and start Chromium
-exec cage -- /bin/bash -c "wlr-randr --output HDMI-A-1 --transform $ROTATION && exec /usr/bin/chromium \
+# Start cage with bash, which auto-detects the active output, applies the saved
+# rotation, and starts Chromium.
+exec cage -- /bin/bash -c "
+    # Rotation must never gate the browser launch: the old code joined it with
+    # '&&', so any wlr-randr error left the kiosk with no Chromium and
+    # Restart=always looping. But it also must not give up on the first error —
+    # display-restore.sh only reapplies rotation on a DRM change event, so a
+    # transient failure here would otherwise leave the panel unrotated until a
+    # hotplug or reboot. Retry a few times (re-detecting the output, which may
+    # still be settling right after cage starts), then launch either way.
+    for attempt in 1 2 3; do
+        # Detect the first enabled output the same way display-restore.sh does;
+        # the connector is not fixed (HDMI-A-1 was a wrong assumption on
+        # non-HDMI setups).
+        OUTPUT=\$(wlr-randr 2>/dev/null | awk '
+            /^(HDMI|DP|eDP|DVI|VGA|DSI|LVDS)/ { current_output = \$1 }
+            /Enabled: yes/ { print current_output; exit }
+        ')
+        if [ -n \"\$OUTPUT\" ] && wlr-randr --output \"\$OUTPUT\" --transform $ROTATION; then
+            break
+        fi
+        echo \"\$(date '+%F %T') [WARN] rotation attempt \$attempt failed (output: \${OUTPUT:-none})\"
+        sleep 1
+    done
+    exec /usr/bin/chromium \
     --kiosk \
     --ozone-platform=wayland \
     --enable-features=$FEATURES \

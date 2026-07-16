@@ -82,9 +82,14 @@ type fakeCDP struct {
 	noLogSendCalls         int
 	noLogSendResult        any
 	noLogSendErr           error
+	// notInitialized inverts Initialized() so the zero value reports a connected client
+	// (the common case for these tests); set it to exercise the CDP-absent skip path.
+	notInitialized bool
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
+
+func (f *fakeCDP) Start(context.Context, func()) {}
 
 func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
 
@@ -99,7 +104,7 @@ func (f *fakeCDP) PageNavigationURL(context.Context) (string, error) {
 
 func (f *fakeCDP) Close() {}
 
-func (f *fakeCDP) Initialized() bool { return true }
+func (f *fakeCDP) Initialized() bool { return !f.notInitialized }
 
 type fakeDeviceStatus struct {
 	status *DeviceStatusResponse
@@ -291,6 +296,38 @@ func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
 	}
 }
 
+func TestPollPlayerStatus_SkipsWhenCDPNotConnected(t *testing.T) {
+	// Headless / mid-reconnect: CDP reports not connected. The poll must skip entirely
+	// (no checkStatus send, no error notification) so logs and Sentry are not flooded.
+	mockCDP := &fakeCDP{
+		notInitialized:    true,
+		pageNavigationURL: constants.WEBAPP_URL,
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockCDP.noLogSendCalls != 0 {
+		t.Fatalf("expected no checkStatus send while CDP is disconnected, got %d", mockCDP.noLogSendCalls)
+	}
+	if mockWS.sendAllCalls != 0 {
+		t.Fatalf("expected no websocket notification while CDP is disconnected, got %d", mockWS.sendAllCalls)
+	}
+	if mockRelayer.sendCalls != 0 {
+		t.Fatalf("expected no relayer notification while CDP is disconnected, got %d", mockRelayer.sendCalls)
+	}
+}
+
 func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 	mockCDP := &fakeCDP{
 		pageNavigationURL: constants.WEBAPP_URL,
@@ -360,6 +397,50 @@ func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
 	}
 	if message.Index == nil || *message.Index != 1 {
 		t.Fatalf("expected index to survive polling, got %+v", message.Index)
+	}
+}
+
+func TestPollRound_ClearsDedupHashesWhenCDPReconnects(t *testing.T) {
+	fCDP := &fakeCDP{notInitialized: true}
+	p := &poller{
+		cdp:     fCDP,
+		relayer: &fakeRelayer{}, // never connected: device/DDC polls skip themselves
+		ws:      &fakeWS{},
+		logger:  zap.NewNop(),
+		lastRelayerStatusHashes: map[relayer.NotificationType]string{
+			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
+		},
+		lastWSStatusHashes: map[relayer.NotificationType]string{
+			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
+		},
+	}
+	ctx := context.Background()
+
+	// CDP still down: the caches describe the last state actually pushed and must
+	// survive so the down-window itself does not force re-sends.
+	p.pollRound(ctx)
+	if len(p.lastRelayerStatusHashes) != 1 || len(p.lastWSStatusHashes) != 1 {
+		t.Fatalf("expected dedup hashes to survive while CDP stays down, got %d/%d entries",
+			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
+	}
+
+	// CDP (re)connects: a restarted Chromium reloaded the web app from defaults, so
+	// "unchanged since last push" no longer proves clients have the state — both
+	// caches must be dropped for one fresh push (the old PartOf= design got this by
+	// restarting controld).
+	fCDP.notInitialized = false
+	p.pollRound(ctx)
+	if len(p.lastRelayerStatusHashes) != 0 || len(p.lastWSStatusHashes) != 0 {
+		t.Fatalf("expected dedup hashes cleared on CDP reconnect, got %d/%d entries",
+			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
+	}
+
+	// Steady state after the reconnect tick: no further clearing churn.
+	p.lastWSStatusHashes[relayer.NOTIFICATION_TYPE_PLAYER_STATUS] = "fresh"
+	p.pollRound(ctx)
+	if len(p.lastWSStatusHashes) != 1 {
+		t.Fatalf("expected dedup hashes kept while CDP stays connected, got %d entries",
+			len(p.lastWSStatusHashes))
 	}
 }
 

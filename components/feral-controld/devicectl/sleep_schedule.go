@@ -33,6 +33,11 @@ type sleepScheduleCommand struct {
 	Enabled   bool   `json:"enabled"`
 	SleepTime string `json:"sleepTime"`
 	WakeTime  string `json:"wakeTime"`
+	// Days is optional on the wire: nil (absent, or JSON null) preserves the
+	// record's current days, mirroring the empty-string behavior of the time
+	// fields, so pre-days apps toggling enabled cannot clobber a days
+	// selection made by a newer app. An explicit empty array is rejected.
+	Days []string `json:"days"`
 }
 
 func StartSleepScheduleLoop(ctx context.Context, exec Executor, logger *zap.Logger) {
@@ -179,6 +184,32 @@ func (e *executor) wakeSleepScheduleLoop() {
 	}
 }
 
+// InvalidatePlayerSleepState marks the player (CDP) sleep leg as not applied and
+// wakes the schedule loop so it re-drives the player. Called on every CDP
+// (re)connect: controld now outlives Chromium, and a restarted kiosk reloads the
+// player web app awake — a tracker still recording "sleeping" would make
+// applySleepTransitionIfChanged skip the re-drive until the next schedule
+// boundary, leaving the display playing all night. The panel (DDC) leg is
+// deliberately left alone: panel hardware power state survives a browser
+// restart, so re-driving it would be wrong, not just redundant.
+func InvalidatePlayerSleepState(exec Executor, logger *zap.Logger) {
+	inv, ok := exec.(interface{ invalidatePlayerSleepState() })
+	if !ok {
+		logger.Warn("Executor does not support player sleep-state invalidation")
+		return
+	}
+	inv.invalidatePlayerSleepState()
+}
+
+func (e *executor) invalidatePlayerSleepState() {
+	e.sleepApplyMu.Lock()
+	e.sleepAppliedState, e.sleepApplyOK = nil, false
+	e.sleepApplyMu.Unlock()
+	// Safe before the loop starts (nil wake channel is a no-op) — the loop's first
+	// iteration evaluates the schedule from scratch anyway.
+	e.wakeSleepScheduleLoop()
+}
+
 func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface{}, error) {
 	var cmd sleepScheduleCommand
 	if err := e.json.Unmarshal(args, &cmd); err != nil {
@@ -201,6 +232,14 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 	}
 	if cmd.WakeTime != "" {
 		record.WakeTime = cmd.WakeTime
+	}
+	if cmd.Days != nil {
+		days, err := sleepschedule.NormalizeDays(cmd.Days)
+		if err != nil {
+			e.sleepScheduleFileMu.Unlock()
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
+		record.Days = days
 	}
 
 	// Recomputing the schedule should always drop any stale manual override.

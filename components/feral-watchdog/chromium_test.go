@@ -22,6 +22,10 @@ func TestChromiumMonitorFirstFailureUsesStartupGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	// Pin a connected display so these escalation invariants are exercised for
+	// the reason under test (grace/hang), not accidentally suppressed by the
+	// host's real DRM state on a Linux CI box.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
 	if err := monitor.check(context.Background()); err == nil {
 		t.Fatal("expected health check to fail against closed endpoint")
@@ -43,6 +47,10 @@ func TestChromiumMonitorColdBootGraceSuppressesManyFailures(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	// Pin a connected display so these escalation invariants are exercised for
+	// the reason under test (grace/hang), not accidentally suppressed by the
+	// host's real DRM state on a Linux CI box.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
 	for i := 0; i < 10; i++ {
 		if err := monitor.check(context.Background()); err == nil {
@@ -64,6 +72,10 @@ func TestChromiumMonitorColdBootGraceExpiryTriggersRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	// Pin a connected display so these escalation invariants are exercised for
+	// the reason under test (grace/hang), not accidentally suppressed by the
+	// host's real DRM state on a Linux CI box.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
 	// Push monitorStart far enough into the past that the next failed check
 	// must escalate. CHROMIUM_STARTUP_GRACE is 90s; -120s leaves no doubt.
@@ -91,6 +103,10 @@ func TestChromiumMonitorPostRestartReentersStartupGrace(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	// Pin a connected display so these escalation invariants are exercised for
+	// the reason under test (grace/hang), not accidentally suppressed by the
+	// host's real DRM state on a Linux CI box.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
 	// Drive the monitor into the post-connect hang path: pretend it
 	// connected long enough ago that the hang threshold has lapsed.
@@ -137,6 +153,10 @@ func TestChromiumMonitorPostConnectHangTriggersRestart(t *testing.T) {
 	countFile := installCountingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	// Pin a connected display so these escalation invariants are exercised for
+	// the reason under test (grace/hang), not accidentally suppressed by the
+	// host's real DRM state on a Linux CI box.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
 	monitor.mu.Lock()
 	monitor.hasEverConnected = true
@@ -161,6 +181,10 @@ func TestChromiumMonitorActivatingKioskDefersRestart(t *testing.T) {
 	countFile := installActivatingSystemctl(t)
 	endpoint := closedLocalHTTPEndpoint(t)
 	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	// Pin a connected display so these escalation invariants are exercised for
+	// the reason under test (grace/hang), not accidentally suppressed by the
+	// host's real DRM state on a Linux CI box.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
 
 	// Force the post-connect hang path so we are eligible to escalate.
 	monitor.mu.Lock()
@@ -273,4 +297,202 @@ func readRestartCount(t *testing.T, path string) string {
 		t.Fatalf("failed to read restart count: %v", err)
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// drmRootWithStatuses builds a fake /sys/class/drm layout: one directory per
+// connector, each holding a `status` file with the given value ("connected" or
+// "disconnected"). It returns the root, suitable for ChromiumMonitor.drmSysfsRoot.
+func drmRootWithStatuses(t *testing.T, statuses map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for connector, status := range statuses {
+		dir := filepath.Join(root, connector)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("failed to create connector dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status+"\n"), 0o600); err != nil {
+			t.Fatalf("failed to write connector status: %v", err)
+		}
+	}
+	return root
+}
+
+// connectedDRMRoot is the common fixture: a single connector reporting connected.
+func connectedDRMRoot(t *testing.T) string {
+	t.Helper()
+	return drmRootWithStatuses(t, map[string]string{"card0-HDMI-A-1": "connected"})
+}
+
+// disconnectedDRMRoot is the headless fixture: a single connector reporting
+// disconnected, i.e. a KNOWN-disconnected display.
+func disconnectedDRMRoot(t *testing.T) string {
+	t.Helper()
+	return drmRootWithStatuses(t, map[string]string{"card0-HDMI-A-1": "disconnected"})
+}
+
+// installCountingSystemctlWithReboot extends installCountingSystemctl with a
+// stub `sudo` that records `systemctl reboot` invocations, so reboot-path tests
+// can assert no real reboot was attempted (rebootSystem shells `sudo systemctl
+// reboot` unstubbed otherwise). Returns (restartCountFile, rebootCountFile).
+func installCountingSystemctlWithReboot(t *testing.T) (string, string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	restartFile := filepath.Join(dir, "restart-count")
+	rebootFile := filepath.Join(dir, "reboot-count")
+	for _, f := range []string{restartFile, rebootFile} {
+		if err := os.WriteFile(f, []byte("0\n"), 0o600); err != nil {
+			t.Fatalf("failed to seed counter %s: %v", f, err)
+		}
+	}
+
+	systemctlScript := `#!/bin/sh
+count_file="` + restartFile + `"
+if [ "$1" = "--user" ] && [ "$2" = "restart" ] && [ "$3" = "chromium-kiosk.service" ]; then
+  count="$(cat "$count_file")"
+  count=$((count + 1))
+  printf "%s\n" "$count" > "$count_file"
+  exit 0
+fi
+if [ "$1" = "--user" ] && [ "$2" = "is-active" ] && [ "$3" = "chromium-kiosk.service" ]; then
+  printf "inactive\n"
+  exit 3
+fi
+exit 0
+`
+	// #nosec G306 -- test helper script must be executable.
+	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(systemctlScript), 0o755); err != nil {
+		t.Fatalf("failed to create fake systemctl: %v", err)
+	}
+
+	sudoScript := `#!/bin/sh
+reboot_file="` + rebootFile + `"
+if [ "$1" = "systemctl" ] && [ "$2" = "reboot" ]; then
+  count="$(cat "$reboot_file")"
+  count=$((count + 1))
+  printf "%s\n" "$count" > "$reboot_file"
+  exit 0
+fi
+exit 0
+`
+	// #nosec G306 -- test helper script must be executable.
+	if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(sudoScript), 0o755); err != nil {
+		t.Fatalf("failed to create fake sudo: %v", err)
+	}
+
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return restartFile, rebootFile
+}
+
+// TestChromiumMonitorHeadlessSuppressesEscalation pins the core headless
+// invariant: with a KNOWN-disconnected display and a dead CDP endpoint, even
+// with the startup grace long expired AND the reboot budget one restart away
+// from tripping, the monitor must issue zero kiosk restarts and zero reboots.
+func TestChromiumMonitorHeadlessSuppressesEscalation(t *testing.T) {
+	restartFile, rebootFile := installCountingSystemctlWithReboot(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
+
+	// Worst case: grace expired and two restarts already banked in-window, so a
+	// single further restart would trip the 3-in-5-minutes reboot. If display
+	// gating regressed this would both restart and reboot.
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.restartHistory = []time.Time{time.Now(), time.Now()}
+	monitor.mu.Unlock()
+
+	for i := 0; i < 5; i++ {
+		if err := monitor.check(context.Background()); err == nil {
+			t.Fatalf("check %d: expected failure against closed endpoint", i)
+		}
+	}
+
+	if got := readRestartCount(t, restartFile); got != "0" {
+		t.Fatalf("headless device must not restart kiosk, got %s", got)
+	}
+	if got := readRestartCount(t, rebootFile); got != "0" {
+		t.Fatalf("headless device must not reboot, got %s", got)
+	}
+}
+
+// TestChromiumMonitorUnknownDisplayFailsOpen pins the fail-open invariant: an
+// empty sysfs directory (no connectors exposed) is an UNKNOWN display state and
+// must preserve normal escalation — startup-grace expiry still restarts.
+func TestChromiumMonitorUnknownDisplayFailsOpen(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+	monitor.drmSysfsRoot = t.TempDir() // empty -> glob matches nothing -> fail open
+
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + 30*time.Second))
+	monitor.mu.Unlock()
+
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("expected failure against closed endpoint")
+	}
+
+	if got := readRestartCount(t, countFile); got != "1" {
+		t.Fatalf("unknown display state must preserve escalation (fail open), got %s", got)
+	}
+}
+
+// TestChromiumMonitorDisplayReconnectReanchorsGrace pins the reconnect path: a
+// device that was headless (grace long expired, escalation suppressed) must,
+// when a display reappears, be granted a FRESH startup-grace window rather than
+// an instant restart, and only escalate once that fresh grace itself expires.
+func TestChromiumMonitorDisplayReconnectReanchorsGrace(t *testing.T) {
+	countFile := installCountingSystemctl(t)
+	endpoint := closedLocalHTTPEndpoint(t)
+	monitor := NewChromiumMonitor(endpoint, zap.NewNop(), NewCommandHandler(zap.NewNop(), nil))
+
+	// Phase 1 — headless with grace already expired: no restart, latch headless.
+	monitor.drmSysfsRoot = disconnectedDRMRoot(t)
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + time.Minute))
+	monitor.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		if err := monitor.check(context.Background()); err == nil {
+			t.Fatalf("phase1 check %d: expected failure against closed endpoint", i)
+		}
+	}
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("headless phase must not restart, got %s", got)
+	}
+
+	// Phase 2 — display reappears: first failing check re-anchors grace, does
+	// NOT restart despite the ancient monitorStart from the headless phase.
+	monitor.drmSysfsRoot = connectedDRMRoot(t)
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("phase2: expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, countFile); got != "0" {
+		t.Fatalf("reconnect must grant fresh grace, not an instant restart, got %s", got)
+	}
+	monitor.mu.Lock()
+	sinceStart := time.Since(monitor.monitorStart)
+	hasEver := monitor.hasEverConnected
+	headless := monitor.headless
+	monitor.mu.Unlock()
+	if sinceStart > CHROMIUM_STARTUP_GRACE {
+		t.Fatalf("expected monitorStart re-anchored within grace, elapsed %v", sinceStart)
+	}
+	if hasEver {
+		t.Fatal("expected pre-connect mode after reconnect")
+	}
+	if headless {
+		t.Fatal("expected headless latch cleared after reconnect")
+	}
+
+	// Phase 3 — let the fresh grace expire: escalation resumes normally.
+	monitor.mu.Lock()
+	monitor.monitorStart = time.Now().Add(-(CHROMIUM_STARTUP_GRACE + 30*time.Second))
+	monitor.mu.Unlock()
+	if err := monitor.check(context.Background()); err == nil {
+		t.Fatal("phase3: expected failure against closed endpoint")
+	}
+	if got := readRestartCount(t, countFile); got != "1" {
+		t.Fatalf("escalation must resume after fresh grace expires, got %s", got)
+	}
 }

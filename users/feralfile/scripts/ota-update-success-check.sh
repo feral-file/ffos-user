@@ -22,7 +22,10 @@ VMAGENT_IMPORT_API="http://0.0.0.0:9431/api/v1/import/prometheus"
 FILE_TO_DELETE="/etc/FF_OS_OTA_AUTO_TEST"
 
 CONFIG_FILE="/home/feralfile/ff1-config.json"
-VERSION=$(jq -r '.version' "$CONFIG_FILE" 2>/dev/null)
+# .version may be missing (jq yields "null") or the config unreadable (empty
+# string); either would emit a misleading metric label, so default to "unknown".
+VERSION=$(jq -r '.version // "unknown"' "$CONFIG_FILE" 2>/dev/null)
+VERSION=${VERSION:-unknown}
 
 # Trap: always delete the flag file on exit
 cleanup() {

@@ -26,6 +26,11 @@ This file defines the repository-wide principles for coding agents. The detailed
 - API and protocol direction: `docs/api-design.md`
 - Both docs are filled. Read them before making cross-service changes or adding new interfaces.
 
+## Release guardrail: two shipping rails
+- Component **binaries** ship via the pacman package rail (`feral-service-update.sh`); systemd **unit files and user session scripts** (`users/feralfile/**`) ship ONLY via the full-image rsync rail (`feral-system-update.sh`, in the `ffos` repo).
+- A change that touches BOTH rails (e.g. a daemon behavior change paired with unit/script edits, like the headless startup rework) MUST be released as a full-image version bump, never as a package-only bump. A package-only release would run new binaries under old units/scripts, leaving the fix silently inert or broken on fielded devices.
+- The cross-rail startup invariants (unconditional daemon start, `chromium-ready.target` decoupling, kiosk display-wait fail-open) are pinned by `scripts/test-headless-startup-contract.sh`, which runs in the setupd test workflow and triggers on `users/feralfile/**` changes.
+
 ## Required workflow for substantial work
 1. Read this file.
 2. Read `PLANS.md` if the work is large, vague, or architectural.

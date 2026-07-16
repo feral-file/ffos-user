@@ -168,8 +168,9 @@ func TestApp_Run_Success(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP initialization and close
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP now connects in the background and never gates startup: run() calls
+				// Start (fire-and-forget) and Close on shutdown.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -231,8 +232,9 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock logger manager set global topic ID
 				ts.mockLoggerManager.EXPECT().SetGlobalTopicID("test-topic-123")
 
-				// Mock CDP initialization and close
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP now connects in the background and never gates startup: run() calls
+				// Start (fire-and-forget) and Close on shutdown.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -294,8 +296,9 @@ func TestApp_Run_Success(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP initialization and close
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP now connects in the background and never gates startup: run() calls
+				// Start (fire-and-forget) and Close on shutdown.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -367,23 +370,6 @@ func TestApp_Run_Errors(t *testing.T) {
 			wantErr: "failed to load state file",
 		},
 		{
-			name: "CDP init failure",
-			setupFunc: func(ts *testSetup) {
-				// Mock state load ok
-				ts.mockStateManager.EXPECT().
-					Load(ts.logger).
-					Return(&state.State{
-						Relayer: &state.RelayerState{TopicID: ""},
-					}, nil)
-
-				// Mock CDP init failure
-				ts.mockCDP.EXPECT().
-					Init(gomock.Any()).
-					Return(errors.New("CDP connection failed"))
-			},
-			wantErr: "CDP connection failed",
-		},
-		{
 			name: "DBus start failure",
 			setupFunc: func(ts *testSetup) {
 				// Mock state load ok
@@ -393,9 +379,7 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
-				ts.mockCDP.EXPECT().Close()
+				// CDP.Start runs after DBus.Start, so a DBus failure returns before it.
 
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
@@ -418,9 +402,7 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
-				ts.mockCDP.EXPECT().Close()
+				// CDP.Start runs after DBus.Export, so an Export failure returns before it.
 
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
@@ -438,18 +420,20 @@ func TestApp_Run_Errors(t *testing.T) {
 			wantErr: "failed to export interface",
 		},
 		{
-			name: "relayer second connect failure when connected",
+			// PR #218 review regression: a failed initial relayer connection must NOT
+			// abort run(). Aborting here happens before SdNotifyReady and before setupd's
+			// wait_for_controld can see our D-Bus interface, so a relayer outage would
+			// crash-loop controld and take BLE provisioning down with it. The new contract:
+			// log, hand the connection to a background RetryableConnect, and proceed all
+			// the way to READY.
+			name: "relayer initial connect failure continues to READY",
 			setupFunc: func(ts *testSetup) {
-				// Mock state load ok
+				// Mock state load ok - relayer ready (topic present)
 				ts.mockStateManager.EXPECT().
 					Load(ts.logger).
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: "test-topic"},
 					}, nil)
-
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
-				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
@@ -469,12 +453,53 @@ func TestApp_Run_Errors(t *testing.T) {
 					Call(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), true).
 					Return([]interface{}{true}, nil)
 
-				// Mock Relayer connect failure
+				// Initial relayer connect fails...
 				ts.mockRelayer.EXPECT().
 					Connect(gomock.Any()).
-					Return(errors.New("second relayer connection failed"))
+					Return(errors.New("initial relayer connection failed"))
+				// ...which must fall back to a background retry. Block until run()'s ctx
+				// ends and return nil so the retry goroutine performs no mock or logger
+				// calls after the test completes.
+				ts.mockRelayer.EXPECT().
+					RetryableConnect(gomock.Any()).
+					DoAndReturn(func(ctx context.Context) error {
+						<-ctx.Done()
+						return nil
+					}).
+					AnyTimes()
+				// The connection is closed on shutdown even though the initial connect
+				// failed (the background retry may have established it by then).
+				ts.mockRelayer.EXPECT().Close()
+
+				// run() must proceed past the relayer failure to the full startup sequence.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+				ts.mockCDP.EXPECT().Close()
+
+				// Mock Hub start and stop
+				ts.mockHub.EXPECT().Start()
+				ts.mockHub.EXPECT().Stop().Return(nil)
+
+				// Mock OS ReadFile for mDNS device info
+				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+
+				// Mock Mediator InitializeMDNS
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
+				// Mock StatusPoller start and stop
+				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+				ts.mockStatusPoller.EXPECT().Stop()
+
+				// Mock Refresher start and stop
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+
+				// READY must still be reached — this is the point of the regression.
+				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+
+				// Mock OOM recoverer
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
 			},
-			wantErr: "second relayer connection failed",
+			wantErr: "",
 		},
 		{
 			name: "daemon notify failure",
@@ -486,8 +511,8 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP connects in the background; run() reaches Start + Close here.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop
@@ -544,8 +569,8 @@ func TestApp_Run_Errors(t *testing.T) {
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
 
-				// Mock CDP init ok
-				ts.mockCDP.EXPECT().Init(gomock.Any()).Return(nil)
+				// CDP connects in the background; run() reaches Start + Close here.
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
 
 				// Mock Watchdog start and stop

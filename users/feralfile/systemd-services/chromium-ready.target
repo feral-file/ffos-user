@@ -1,3 +1,8 @@
 [Unit]
 Description=Chromium successfully launched and cdp is up
-Wants=feral-controld.service feral-setupd.service
+# Pure "CDP is up" signal only. cdp-ready-check.sh starts this target once
+# Chromium's debugging endpoint is reachable, and chromium-kiosk.service stops it
+# on exit. It intentionally pulls in no services: feral-controld/feral-setupd are
+# now CDP-optional with self-reconnect and are started explicitly by
+# .start-services.sh (units are never enabled, so [Install] alone starts nothing);
+# their lifecycle must not be coupled to Chromium readiness.

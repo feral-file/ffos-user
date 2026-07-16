@@ -310,7 +310,7 @@ func TestHandleStartPairingSession_ValidatesPlayerContractBeforeBrokerStart(t *t
 			result, err := s.HandleStartPairingSession(context.Background(), nil)
 			require.NoError(t, err)
 			assertCommandError(t, result, "invalid_config", false)
-			assert.Equal(t, 0, starter.startCount)
+			assert.Equal(t, 0, starter.StartCount())
 			assert.Empty(t, cdpClient.displayRequestsSnapshot())
 		})
 	}
@@ -345,7 +345,7 @@ func TestHandleStartPairingSession_AcceptsValidPlayerContract(t *testing.T) {
 	resp := result.(startPairingResponse)
 	assert.True(t, resp.OK)
 	assert.Equal(t, "started", resp.Status)
-	assert.Equal(t, 1, starter.startCount)
+	assert.Equal(t, 1, starter.StartCount())
 	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-123", "")
 }
 
@@ -548,7 +548,7 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.True(t, startResp.OK)
 	assert.Equal(t, "started", startResp.Status)
 	assert.Equal(t, "PAIR-123", startResp.PairingCode)
-	assert.True(t, starter.receivedOptions.ShortCodeRequested)
+	assert.True(t, starter.ReceivedOptions().ShortCodeRequested)
 	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-123", "")
 
 	approval := <-relayerClient.sent
@@ -564,7 +564,7 @@ func TestHandleStartPairingSession_DisplaysCodeAndCachesTerminalDecision(t *test
 	assert.Equal(t, "pending_approval", pendingResp.Status)
 	assert.Empty(t, pendingResp.PairingCode)
 	assert.Equal(t, "ch_1", pendingResp.ChannelID)
-	assert.Equal(t, 1, starter.startCount)
+	assert.Equal(t, 1, starter.StartCount())
 	assert.Equal(t, 1, countDisplayRequests(cdpClient, "pairing_code", "PAIR-123", ""))
 	assertLastDisplay(t, cdpClient, "request_received", "", "Chrome")
 
@@ -822,7 +822,7 @@ func TestWaitForBrowserAndApproval_RefreshesCodeAfterPairingExpiryBeforeJoin(t *
 	}
 
 	require.Eventually(t, func() bool {
-		return starter.startCount == 2
+		return starter.StartCount() == 2
 	}, time.Second, 10*time.Millisecond)
 	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-NEW", "")
 
@@ -1576,6 +1576,10 @@ func assertCommandError(t *testing.T, result any, code string, retryable bool) {
 }
 
 type fakeBrokerStarter struct {
+	// mu guards every field: StartChannel runs on service-owned goroutines (e.g.
+	// the pairing-code refresh timer) while tests poll the counters with
+	// assert.Eventually, so unsynchronized access is a real data race.
+	mu              sync.Mutex
 	channel         brokerChannel
 	channels        []brokerChannel
 	err             error
@@ -1584,6 +1588,8 @@ type fakeBrokerStarter struct {
 }
 
 func (f *fakeBrokerStarter) StartChannel(_ context.Context, opts minter.StartChannelOptions) (brokerChannel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.receivedOptions = opts
 	f.startCount++
 	if len(f.channels) > 0 {
@@ -1592,6 +1598,18 @@ func (f *fakeBrokerStarter) StartChannel(_ context.Context, opts minter.StartCha
 		return channel, f.err
 	}
 	return f.channel, f.err
+}
+
+func (f *fakeBrokerStarter) StartCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.startCount
+}
+
+func (f *fakeBrokerStarter) ReceivedOptions() minter.StartChannelOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.receivedOptions
 }
 
 type fakeBrokerChannel struct {
@@ -1799,6 +1817,8 @@ type fakeCDP struct {
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
+
+func (f *fakeCDP) Start(context.Context, func()) {}
 func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) {
 	return nil, nil
 }
