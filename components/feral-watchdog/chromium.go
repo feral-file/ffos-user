@@ -52,11 +52,13 @@ const (
 // restartChromium intentionally transitions back to the pre-connect mode so
 // the next check cycle does not pile a fresh restart onto an in-progress one.
 //
-// Display gating overrides both modes: while the display is KNOWN-disconnected
-// (headless), Chromium legitimately does not run and every failed check is
-// expected, so escalation is suppressed entirely (no restart, no reboot-budget
-// accumulation). Detection FAILS OPEN — an unknown display state preserves all
-// escalation — and a reconnect re-anchors the pre-connect grace window.
+// Display gating overrides both modes: while no DRM connector reads
+// "connected" (headless — including amdgpu's persistent "unknown" readings on
+// empty connectors), Chromium legitimately does not run and every failed check
+// is expected, so escalation is suppressed entirely (no restart, no
+// reboot-budget accumulation). Detection FAILS OPEN only when no connector
+// status is readable at all, and a reconnect re-anchors the pre-connect grace
+// window.
 type ChromiumMonitor struct {
 	mu                 sync.Mutex
 	cdpEndpoint        string
@@ -71,7 +73,7 @@ type ChromiumMonitor struct {
 	// drmSysfsRoot is the sysfs root consulted for display-attach state. It is a
 	// field (not the constant directly) so tests can inject a fixture directory.
 	drmSysfsRoot string
-	// headless latches "we last observed a KNOWN-disconnected display". It is
+	// headless latches "we last observed no connected display". It is
 	// how a reconnect is detected: on a headless device Chromium legitimately
 	// does not run, so escalation is suppressed while headless, and the first
 	// check after a display reappears re-anchors the startup-grace window so a
@@ -196,8 +198,8 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
 	// Display gating comes first. On a headless device the kiosk deliberately
 	// waits for a display before launching Chromium, so /json/version is
-	// legitimately absent and is NOT a Chromium failure. While the display is
-	// KNOWN-disconnected we skip the entire escalation path: no kiosk restart
+	// legitimately absent and is NOT a Chromium failure. While no connector
+	// reads "connected" we skip the entire escalation path: no kiosk restart
 	// and — critically — no restartHistory accumulation, so a device that sits
 	// headless for hours cannot later trip the 3-restarts-in-5-minutes reboot
 	// budget. The read is done outside m.mu because it touches the filesystem.

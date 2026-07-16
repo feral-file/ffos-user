@@ -16,14 +16,23 @@ const defaultDRMSysfsRoot = "/sys/class/drm"
 // "connected", using the same signal as display-restore.sh. The sysfs root is a
 // parameter so tests can point it at a fixture directory.
 //
-// FAIL OPEN is the load-bearing invariant here: suppressing Chromium hang
-// escalation is only safe when every connector positively reads
-// "disconnected". Anything else — no connectors exposed, an unreadable status
-// file, or a readable value the kernel could not resolve (DRM reports
-// "unknown" for unprobeable connectors) — leaves the overall state not
-// positively known, so we return true ("display connected") and preserve all
-// existing failure detection. A hardware/CI environment whose sysfs layout or
-// status vocabulary differs must never silently disable the watchdog.
+// A display counts as connected ONLY on a positive "connected" reading. An
+// earlier revision failed open on any "unknown" reading, but FF1's amdgpu
+// persistently reports "unknown" on connectors with nothing attached, so on
+// real headless hardware the headless suppression never engaged: the watchdog
+// kept escalating "Chromium never came up" through kiosk restarts into the
+// 3-restarts-in-5-minutes reboot budget, compounding the kiosk-side restart
+// storm (start-kiosk.sh's display wait failed open the same way). Treating
+// "unknown" as no-display is safe because attaching a real monitor raises HPD
+// and flips its connector to "connected" before Chromium could possibly be
+// expected up.
+//
+// FAIL OPEN remains only for the case where no connector status is readable at
+// all (no DRM sysfs, or every status file unreadable): there we return true so
+// a hardware/CI environment whose sysfs layout differs never silently disables
+// the watchdog. This must stay in lockstep with wait_for_display in
+// users/feralfile/scripts/start-kiosk.sh — if the two gates diverge, one side
+// suppresses while the other escalates and headless devices restart-loop.
 func isDisplayConnected(sysfsRoot string) bool {
 	matches, err := filepath.Glob(filepath.Join(sysfsRoot, "card*-*", "status"))
 	if err != nil || len(matches) == 0 {
@@ -31,26 +40,22 @@ func isDisplayConnected(sysfsRoot string) bool {
 		return true
 	}
 
-	allKnownDisconnected := true
+	sawReadable := false
 	for _, statusFile := range matches {
 		data, err := os.ReadFile(statusFile) // #nosec G304 -- path comes from a fixed sysfs glob.
 		if err != nil {
-			// This connector's state is unknown; a later connector may still read
-			// "connected", so keep scanning instead of returning immediately.
-			allKnownDisconnected = false
+			// Skip, but only fail open if NOTHING ends up readable: a later
+			// connector may still give a positive reading either way.
 			continue
 		}
-		switch strings.TrimSpace(string(data)) {
-		case "connected":
+		sawReadable = true
+		if strings.TrimSpace(string(data)) == "connected" {
 			return true
-		case "disconnected":
-			// Positively known-absent; keep scanning the remaining connectors.
-		default:
-			// Readable but not a positive reading (e.g. DRM "unknown") -> the
-			// overall state cannot be declared known-disconnected.
-			allKnownDisconnected = false
 		}
 	}
 
-	return !allKnownDisconnected
+	// Readable statuses existed and none read "connected" -> headless
+	// ("disconnected" and "unknown" alike). No readable status at all -> the
+	// environment is unknown, fail open.
+	return !sawReadable
 }

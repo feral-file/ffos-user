@@ -11,8 +11,11 @@
 #      .start-services.sh and never tied to chromium-ready.target.
 #   3. chromium-ready.target stays a pure signal owned by cdp-ready-check.sh.
 #   4. start-kiosk.sh keeps the rotation retry and its wait_for_display gate
-#      blocks ONLY on positively disconnected DRM connectors — unknown or
-#      unreadable status must fail open (mirrors the watchdog display gate).
+#      waits until some DRM connector reads "connected" — "unknown" counts as
+#      no-display (FF1's amdgpu reports it persistently on empty connectors;
+#      failing open on it caused the headless Chromium restart storm) and only
+#      a sysfs with no readable status at all fails open (mirrors the watchdog
+#      display gate; the two predicates must not diverge).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,10 +96,10 @@ sed -n '/^wait_for_display() {/,/^}/p' "$kiosk_script" | \
 grep -q 'wait_for_display() {' "$fn_file" || fail "could not extract wait_for_display"
 
 # Runs wait_for_display and asserts it returns promptly with the expected log
-# line. A regression toward the old strict-connected gate HANGS on these inputs
-# rather than erroring, so the run is bounded by a kill watchdog — otherwise a
-# regression would stall CI instead of failing it. (No `timeout(1)` — keep the
-# harness runnable on macOS dev machines too.)
+# line. A regression that makes these inputs wait HANGS rather than erroring,
+# so the run is bounded by a kill watchdog — otherwise a regression would stall
+# CI instead of failing it. (No `timeout(1)` — keep the harness runnable on
+# macOS dev machines too.)
 expect_proceed() {
   local case_name="$1"
   local expected="$2"
@@ -108,7 +111,7 @@ expect_proceed() {
     if [ "$waited" -ge 10 ]; then
       kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
-      fail "$case_name: wait_for_display still waiting after ${waited}s (must fail open)"
+      fail "$case_name: wait_for_display still waiting after ${waited}s (must proceed)"
     fi
     sleep 1
     waited=$((waited + 1))
@@ -122,27 +125,39 @@ expect_proceed() {
   esac
 }
 
+# Starts wait_for_display and requires it to STILL be waiting after a short
+# window. A regression toward any fail-open on these inputs returns promptly,
+# which is exactly the headless restart storm this gate exists to prevent.
+expect_waiting() {
+  local case_name="$1"
+  bash -c "source '$fn_file'; wait_for_display" >/dev/null 2>&1 &
+  local pid=$!
+  sleep 2
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "$case_name: wait_for_display returned instead of waiting"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 echo connected > "$drm_root/card0-HDMI-A-1/status"
 echo disconnected > "$drm_root/card1-DP-1/status"
 expect_proceed "connected connector" "Display connected"
 
+# FF1's amdgpu reads "unknown" on empty connectors; failing open here launched
+# cage/Chromium with zero outputs on every headless boot (CDP timeout restart
+# storm, sustained high CPU temperature). "unknown" must hold the wait.
 echo unknown > "$drm_root/card0-HDMI-A-1/status"
-expect_proceed "readable unknown fails open" "fail open"
+expect_waiting "unknown alongside disconnected waits"
 
-rm "$drm_root/card0-HDMI-A-1/status" "$drm_root/card1-DP-1/status"
-expect_proceed "no readable status fails open" "fail open"
-
-# Only a positively known state — every connector readable and disconnected —
-# may hold the wait. Give it a short window and require it to still be waiting.
 echo disconnected > "$drm_root/card0-HDMI-A-1/status"
 echo disconnected > "$drm_root/card1-DP-1/status"
-bash -c "source '$fn_file'; wait_for_display" >/dev/null 2>&1 &
-wait_pid=$!
-sleep 2
-if ! kill -0 "$wait_pid" 2>/dev/null; then
-  fail "all-disconnected: wait_for_display returned instead of waiting"
-fi
-kill "$wait_pid" 2>/dev/null || true
-wait "$wait_pid" 2>/dev/null || true
+expect_waiting "all-disconnected waits"
+
+# No readable status at all is the ONLY remaining fail-open: without DRM sysfs
+# the wait could never resolve, so the kiosk must fall through to cage and its
+# Restart=always recovery.
+rm "$drm_root/card0-HDMI-A-1/status" "$drm_root/card1-DP-1/status"
+expect_proceed "no readable status fails open" "fail open"
 
 echo "test-headless-startup-contract: OK"

@@ -37,13 +37,16 @@ The CDP Monitor is responsible for monitoring the health of the Chromium browser
 - **Headless devices are exempt.** On a device with no monitor, the kiosk
   intentionally waits for a display before launching Chromium, so a missing
   `/json/version` is expected, not a failure. Escalation is suppressed (no
-  kiosk restart, no restart-history accumulation, no reboot) only while
-  **every** `/sys/class/drm/card*-*/status` connector positively reads
-  `disconnected`. Detection **fails open**: any `connected` reading, an
-  unreadable status file, an absent sysfs layout, or a value the kernel could
-  not resolve (DRM `unknown`) counts as "display connected" so escalation is
-  never silently disabled. When a display is (re)connected, the startup grace
-  is re-armed from scratch before escalation resumes.
+  kiosk restart, no restart-history accumulation, no reboot) while no
+  `/sys/class/drm/card*-*/status` connector reads `connected`. A `disconnected`
+  or `unknown` reading both count as no-display: FF1's amdgpu persistently
+  reports `unknown` on empty connectors, and treating that as "connected" kept
+  escalation live on genuinely headless devices (restart storm; see
+  start-kiosk.sh's matching display wait). Detection **fails open** only when
+  no connector status is readable at all (absent or unrecognized sysfs
+  layout), so escalation is never silently disabled on unknown environments.
+  When a display is (re)connected, the startup grace is re-armed from scratch
+  before escalation resumes.
 
 ## Resource Monitoring (RAM, GPU, DISK)
 
