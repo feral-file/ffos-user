@@ -378,9 +378,14 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 	defer e.sleepApplyMu.Unlock()
 
 	playerAligned := e.sleepApplyOK && e.sleepAppliedState != nil && *e.sleepAppliedState == state
+	// The capped give-up (sleepPanelFailStreak >= panelRetryMax) only holds for
+	// the display generation it was earned against: Generation() bumps when the
+	// DRM fingerprint changes, so a newly plugged/swapped panel gets fresh
+	// attempts instead of inheriting the old panel's failure verdict.
 	panelAligned := e.panelDDC == nil ||
 		(e.sleepPanelState != nil && *e.sleepPanelState == state &&
-			(e.sleepPanelOK || e.sleepPanelFailStreak >= panelRetryMax))
+			(e.sleepPanelOK ||
+				(e.sleepPanelFailStreak >= panelRetryMax && e.sleepPanelGen == e.panelDDC.Generation())))
 
 	if playerAligned && panelAligned {
 		return nil
@@ -421,8 +426,18 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 // panel to and whether it succeeded. ok=false (or a state mismatch vs. desired)
 // makes the next applySleepTransitionIfChanged re-enqueue the panel alignment.
 func (e *executor) recordPanelApply(state sleepschedule.State, ok bool) {
+	// Snapshot the display generation before taking sleepApplyMu: Generation()
+	// reads sysfs and takes the ddc tracker's (leaf) lock, so there is no need
+	// to do that work inside this critical section.
+	gen := uint64(0)
+	if e.panelDDC != nil {
+		gen = e.panelDDC.Generation()
+	}
+
 	e.sleepApplyMu.Lock()
 	defer e.sleepApplyMu.Unlock()
+
+	e.sleepPanelGen = gen
 
 	switch {
 	case ok:

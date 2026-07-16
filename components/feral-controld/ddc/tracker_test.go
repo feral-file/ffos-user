@@ -27,11 +27,11 @@ type scriptedCmd struct {
 	err error
 }
 
-func (c scriptedCmd) String() string                 { return "scripted" }
-func (c scriptedCmd) Run() error                     { return c.err }
-func (c scriptedCmd) Start() error                   { return c.err }
-func (c scriptedCmd) Wait() error                    { return c.err }
-func (c scriptedCmd) Output() ([]byte, error)        { return c.out, c.err }
+func (c scriptedCmd) String() string                  { return "scripted" }
+func (c scriptedCmd) Run() error                      { return c.err }
+func (c scriptedCmd) Start() error                    { return c.err }
+func (c scriptedCmd) Wait() error                     { return c.err }
+func (c scriptedCmd) Output() ([]byte, error)         { return c.out, c.err }
 func (c scriptedCmd) CombinedOutput() ([]byte, error) { return c.out, c.err }
 
 func (e *scriptedExec) CommandContext(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
@@ -111,30 +111,60 @@ func newTrackedPanel(reply func([]string) ([]byte, error), fingerprint *string) 
 	return p, exec, clock
 }
 
+// pollRound mimics the status poller's flow: only collect when ShouldPoll
+// allows it. Returns whether the round actually collected.
+func pollRound(t *testing.T, p *panelDdc) bool {
+	t.Helper()
+	if !p.ShouldPoll() {
+		return false
+	}
+	_, err := p.CollectStatus(context.Background())
+	require.NoError(t, err, "CollectStatus must never hard-error; failures ride the Errors map")
+	return true
+}
+
 // TestTracker_DemotesAfterConsecutiveNoDdcFailures pins the core promise: a
 // connected display without DDC/CI stops costing ddcutil subprocesses after
-// ddcProbeFailThreshold failing rounds, until the reprobe window.
+// ddcProbeFailThreshold failing poll rounds, until the reprobe window.
 func TestTracker_DemotesAfterConsecutiveNoDdcFailures(t *testing.T) {
+	t.Parallel()
+	fp := "fp-tv"
+	p, exec, _ := newTrackedPanel(replyNoDdc, &fp)
+
+	for i := 0; i < ddcProbeFailThreshold; i++ {
+		require.True(t, pollRound(t, p), "round %d must still poll", i)
+	}
+	spentOnProbing := exec.callCount()
+	require.Greater(t, spentOnProbing, 0)
+
+	// Demoted: subsequent poll rounds are gated and subprocess-free.
+	for i := 0; i < 5; i++ {
+		require.False(t, pollRound(t, p), "gated round %d must not poll", i)
+	}
+	assert.Equal(t, spentOnProbing, exec.callCount(), "gated rounds must be subprocess-free")
+}
+
+// TestTracker_ExplicitCollectBypassesGate pins the command-path contract: a
+// cloud ddcPanelStatus request is explicit intent, so CollectStatus itself is
+// never gated and always returns a status object — only ShouldPoll suppresses
+// the background poll.
+func TestTracker_ExplicitCollectBypassesGate(t *testing.T) {
 	t.Parallel()
 	fp := "fp-tv"
 	p, exec, _ := newTrackedPanel(replyNoDdc, &fp)
 	ctx := context.Background()
 
 	for i := 0; i < ddcProbeFailThreshold; i++ {
-		st, err := p.CollectStatus(ctx)
-		require.NoError(t, err, "round %d: failing rounds still report field errors, not a hard error", i)
-		require.NotNil(t, st.Errors)
+		require.True(t, pollRound(t, p))
 	}
-	spentOnProbing := exec.callCount()
-	require.Greater(t, spentOnProbing, 0)
+	require.False(t, p.ShouldPoll(), "background polling must be suspended")
+	gated := exec.callCount()
 
-	// Demoted: gated rounds must not spawn ANY subprocess.
-	for i := 0; i < 5; i++ {
-		st, err := p.CollectStatus(ctx)
-		require.ErrorIs(t, err, ErrUnavailable)
-		require.Nil(t, st)
-	}
-	assert.Equal(t, spentOnProbing, exec.callCount(), "gated CollectStatus must be subprocess-free")
+	st, err := p.CollectStatus(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, st, "explicit request must get the pre-tracker wire shape")
+	require.NotEmpty(t, st.Errors)
+	require.Greater(t, exec.callCount(), gated, "explicit request must really probe")
 }
 
 // TestTracker_ReprobesAfterInterval proves "unsupported" is a lease, not a
@@ -151,56 +181,78 @@ func TestTracker_ReprobesAfterInterval(t *testing.T) {
 		return replyHealthy(argv)
 	}
 	p, _, clock := newTrackedPanel(reply, &fp)
-	ctx := context.Background()
 
 	for i := 0; i < ddcProbeFailThreshold; i++ {
-		_, err := p.CollectStatus(ctx)
-		require.NoError(t, err)
+		require.True(t, pollRound(t, p))
 	}
-	_, err := p.CollectStatus(ctx)
-	require.ErrorIs(t, err, ErrUnavailable)
+	require.False(t, pollRound(t, p))
 
 	// User enables DDC/CI in the OSD; nothing observable via DRM.
 	broken = false
-	_, err = p.CollectStatus(ctx)
-	require.ErrorIs(t, err, ErrUnavailable, "before the reprobe window the verdict holds")
+	require.False(t, pollRound(t, p), "before the reprobe window the verdict holds")
 
 	clock.advance(ddcReprobeInterval + time.Second)
-	st, err := p.CollectStatus(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, st.Brightness, "reprobe must run for real and succeed")
+	require.True(t, pollRound(t, p), "reprobe window must reopen polling")
 
-	// And a success fully rehabilitates: subsequent rounds poll normally.
-	st, err = p.CollectStatus(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, st.Brightness)
+	// The successful reprobe fully rehabilitates: polling continues normally.
+	require.True(t, pollRound(t, p))
 }
 
 // TestTracker_FailedReprobeArmsNextWindow proves a failing reprobe does not
-// reopen continuous polling: one shot per window.
+// reopen continuous polling — one shot per window — REGARDLESS of whether the
+// reprobe failure carries the hard signature or a generic error. The generic
+// case is the regression guard: an unarmed nextProbeAt in the past would
+// silently resurrect the every-5s ddcutil flood.
 func TestTracker_FailedReprobeArmsNextWindow(t *testing.T) {
 	t.Parallel()
-	fp := "fp-tv"
-	p, exec, clock := newTrackedPanel(replyNoDdc, &fp)
-	ctx := context.Background()
 
-	for i := 0; i < ddcProbeFailThreshold; i++ {
-		_, err := p.CollectStatus(ctx)
-		require.NoError(t, err)
+	cases := []struct {
+		name  string
+		reply func([]string) ([]byte, error)
+	}{
+		{name: "hard signature reprobe failure", reply: replyNoDdc},
+		{name: "generic reprobe failure", reply: func(argv []string) ([]byte, error) {
+			return []byte("i2c transaction failed"), errExit1
+		}},
 	}
 
-	clock.advance(ddcReprobeInterval + time.Second)
-	_, err := p.CollectStatus(ctx)
-	require.NoError(t, err, "the scheduled reprobe itself runs")
-	after := exec.callCount()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fp := "fp-tv"
+			demoteReply := replyNoDdc
+			useDemote := true
+			reply := func(argv []string) ([]byte, error) {
+				if useDemote {
+					return demoteReply(argv)
+				}
+				return tc.reply(argv)
+			}
+			p, exec, clock := newTrackedPanel(reply, &fp)
 
-	_, err = p.CollectStatus(ctx)
-	require.ErrorIs(t, err, ErrUnavailable, "right after a failed reprobe the gate closes again")
-	assert.Equal(t, after, exec.callCount())
+			for i := 0; i < ddcProbeFailThreshold; i++ {
+				require.True(t, pollRound(t, p))
+			}
+			require.False(t, pollRound(t, p), "demoted: gate closed")
+
+			useDemote = false
+			clock.advance(ddcReprobeInterval + time.Second)
+			require.True(t, pollRound(t, p), "the scheduled reprobe itself runs")
+			after := exec.callCount()
+
+			require.False(t, pollRound(t, p), "a failed reprobe must close the gate again")
+			require.False(t, pollRound(t, p))
+			assert.Equal(t, after, exec.callCount(), "post-reprobe rounds must be subprocess-free")
+
+			clock.advance(ddcReprobeInterval + time.Second)
+			require.True(t, pollRound(t, p), "the NEXT window must open again")
+		})
+	}
 }
 
 // TestTracker_FingerprintChangeResetsImmediately proves plugging in a
-// different display re-initializes at once — no waiting for the slow window.
+// different display re-initializes at once — no waiting for the slow window —
+// and bumps the generation consumers key their own give-up state on.
 func TestTracker_FingerprintChangeResetsImmediately(t *testing.T) {
 	t.Parallel()
 	fp := "fp-old-tv"
@@ -214,17 +266,20 @@ func TestTracker_FingerprintChangeResetsImmediately(t *testing.T) {
 	p, _, _ := newTrackedPanel(reply, &fp)
 	ctx := context.Background()
 
+	genBefore := p.Generation()
 	for i := 0; i < ddcProbeFailThreshold; i++ {
-		_, err := p.CollectStatus(ctx)
-		require.NoError(t, err)
+		require.True(t, pollRound(t, p))
 	}
-	_, err := p.CollectStatus(ctx)
-	require.ErrorIs(t, err, ErrUnavailable)
+	require.False(t, pollRound(t, p))
+	require.Equal(t, genBefore, p.Generation(), "no display change: generation stable")
 
 	// Swap in a DDC-capable monitor: connector status/EDID change the
-	// fingerprint, and the very next round must probe again.
+	// fingerprint; the very next round must poll again.
 	fp = "fp-new-monitor"
 	healthy = true
+	require.Greater(t, p.Generation(), genBefore, "display change must bump the generation")
+	require.True(t, pollRound(t, p), "display change must reopen polling immediately")
+
 	st, err := p.CollectStatus(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, st.Brightness)
@@ -240,15 +295,29 @@ func TestTracker_GenericFailuresNeverDemote(t *testing.T) {
 		return []byte("i2c transaction failed"), errExit1
 	}
 	p, exec, _ := newTrackedPanel(reply, &fp)
-	ctx := context.Background()
 
 	for i := 0; i < ddcProbeFailThreshold*3; i++ {
-		st, err := p.CollectStatus(ctx)
-		require.NoError(t, err)
-		require.NotNil(t, st.Errors)
+		require.True(t, pollRound(t, p), "generic failures must never close the gate")
 	}
-	// Every round actually ran ddcutil — nothing was gated.
 	assert.Greater(t, exec.callCount(), ddcProbeFailThreshold*3)
+}
+
+// TestTracker_DisplayNotFoundIsNotADemotionSignature pins the taxonomy split
+// with the recovery layer: execDdcutilWithDisplayRecovery treats "display not
+// found" as transient and retries it, so the tracker must not demote on it —
+// otherwise a brief HPD blip or DP link retrain would suspend polling on a
+// genuinely DDC-capable monitor for a whole reprobe interval.
+func TestTracker_DisplayNotFoundIsNotADemotionSignature(t *testing.T) {
+	t.Parallel()
+	fp := "fp-blip"
+	reply := func(argv []string) ([]byte, error) {
+		return []byte("Display not found\n"), errExit1
+	}
+	p, _, _ := newTrackedPanel(reply, &fp)
+
+	for i := 0; i < ddcProbeFailThreshold*3; i++ {
+		require.True(t, pollRound(t, p), "'display not found' must stay retryable, not demote")
+	}
 }
 
 // TestTracker_SuccessResetsHardFailStreak: hard failures must be consecutive
@@ -264,25 +333,19 @@ func TestTracker_SuccessResetsHardFailStreak(t *testing.T) {
 		return replyHealthy(argv)
 	}
 	p, _, _ := newTrackedPanel(reply, &fp)
-	ctx := context.Background()
 
 	for i := 0; i < ddcProbeFailThreshold-1; i++ {
-		_, err := p.CollectStatus(ctx)
-		require.NoError(t, err)
+		require.True(t, pollRound(t, p))
 	}
 	broken = false
-	_, err := p.CollectStatus(ctx)
-	require.NoError(t, err)
+	require.True(t, pollRound(t, p))
 	broken = true
 	for i := 0; i < ddcProbeFailThreshold-1; i++ {
-		_, err := p.CollectStatus(ctx)
-		require.NoError(t, err)
+		require.True(t, pollRound(t, p))
 	}
 
 	// (threshold-1) fails + success + (threshold-1) fails: still not demoted.
-	st, err := p.CollectStatus(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, st)
+	require.True(t, pollRound(t, p))
 }
 
 // TestTracker_ApplyControlBypassesGateAndPromotes pins the two safety
@@ -306,11 +369,9 @@ func TestTracker_ApplyControlBypassesGateAndPromotes(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < ddcProbeFailThreshold; i++ {
-		_, err := p.CollectStatus(ctx)
-		require.NoError(t, err)
+		require.True(t, pollRound(t, p))
 	}
-	_, err := p.CollectStatus(ctx)
-	require.ErrorIs(t, err, ErrUnavailable)
+	require.False(t, pollRound(t, p))
 	gatedCalls := exec.callCount()
 
 	// The panel wakes up (e.g. DDC was dead in standby). A user drags the
@@ -320,9 +381,7 @@ func TestTracker_ApplyControlBypassesGateAndPromotes(t *testing.T) {
 	require.Greater(t, exec.callCount(), gatedCalls, "ApplyControl must not be gated")
 
 	// Its success reopens status polling immediately.
-	st, err := p.CollectStatus(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, st.Brightness)
+	require.True(t, pollRound(t, p))
 }
 
 // TestTracker_ApplyControlHardFailureCountsTowardDemotion: the sleep panel
@@ -341,7 +400,6 @@ func TestTracker_ApplyControlHardFailureCountsTowardDemotion(t *testing.T) {
 	}
 
 	before := exec.callCount()
-	_, err := p.CollectStatus(ctx)
-	require.ErrorIs(t, err, ErrUnavailable)
+	require.False(t, p.ShouldPoll(), "control-path hard failures must demote background polling")
 	assert.Equal(t, before, exec.callCount())
 }

@@ -398,6 +398,8 @@ type fakePanelDDC struct {
 	collectCtx chan context.Context
 	status     *ddc.DdcPanelStatus
 	err        error
+	// noPoll simulates the availability tracker's "unsupported" verdict.
+	noPoll bool
 }
 
 func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
@@ -410,6 +412,9 @@ func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, 
 func (f *fakePanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.RawMessage) error {
 	return nil
 }
+
+func (f *fakePanelDDC) ShouldPoll() bool   { return !f.noPoll }
+func (f *fakePanelDDC) Generation() uint64 { return 0 }
 
 func TestPollDDCStatus_ContextCarriesTimeout(t *testing.T) {
 	ctxCh := make(chan context.Context, 1)
@@ -499,6 +504,9 @@ func (b *blockingPanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, jso
 	return nil
 }
 
+func (b *blockingPanelDDC) ShouldPoll() bool   { return true }
+func (b *blockingPanelDDC) Generation() uint64 { return 0 }
+
 // TestPollDDCStatus_SkipsWhenNoDisplayConnected pins the headless gate: with no
 // DRM connector connected, ddcutil can never find a display, so the 5s poll
 // must not shell out to ddcutil at all (previously an info+warn+error log
@@ -527,6 +535,16 @@ func TestPollDDCStatus_SkipsWhenNoDisplayConnected(t *testing.T) {
 	case <-ctxCh:
 		t.Fatal("CollectStatus must not run while no display is connected")
 	default:
+	}
+
+	// The skip still pushes a one-shot "panel unreadable" status so consumers
+	// drop any cached panel values; repeats are collapsed by the hash dedup.
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected exactly one unavailable-status notification, got %d", fRelayer.sendCalls)
+	}
+	p.pollDDCStatus(context.Background())
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected dedup to suppress the repeat notification, got %d sends", fRelayer.sendCalls)
 	}
 }
 
@@ -568,18 +586,21 @@ func TestPollDDCStatus_PollsAgainOnceDisplayConnects(t *testing.T) {
 	}
 }
 
-// TestPollDDCStatus_UnavailableIsQuietSkip pins the poller's contract with the
-// ddc availability tracker: ErrUnavailable means "display has no DDC/CI" and
-// must produce no notification and no Error-level log (the pre-tracker code
-// would have error-logged every 5s round forever).
-func TestPollDDCStatus_UnavailableIsQuietSkip(t *testing.T) {
+// TestPollDDCStatus_UnsupportedIsQuietSkipWithOneNotification pins the
+// poller's contract with the ddc availability tracker: ShouldPoll()==false
+// means "display has no DDC/CI" — no CollectStatus call, no Error-level log
+// (the pre-tracker code error-logged every 5s round forever), and exactly one
+// dedup-collapsed "panel unreadable" notification so consumers drop cached
+// panel values instead of showing them stale forever.
+func TestPollDDCStatus_UnsupportedIsQuietSkipWithOneNotification(t *testing.T) {
 	core, observed := observer.New(zap.ErrorLevel)
 
+	ctxCh := make(chan context.Context, 1)
 	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
 	p := &poller{
 		relayer:                 fRelayer,
 		ws:                      &fakeWS{},
-		panelDDC:                &fakePanelDDC{err: ddc.ErrUnavailable},
+		panelDDC:                &fakePanelDDC{collectCtx: ctxCh, noPoll: true},
 		displayConnected:        func() bool { return true },
 		logger:                  zap.New(core),
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
@@ -587,9 +608,15 @@ func TestPollDDCStatus_UnavailableIsQuietSkip(t *testing.T) {
 	}
 
 	p.pollDDCStatus(context.Background())
+	p.pollDDCStatus(context.Background())
 
-	if fRelayer.sendCalls != 0 {
-		t.Fatalf("expected no DDC notification, got %d sends", fRelayer.sendCalls)
+	select {
+	case <-ctxCh:
+		t.Fatal("CollectStatus must not run while the tracker says unsupported")
+	default:
+	}
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected exactly one unavailable-status notification (dedup collapses repeats), got %d", fRelayer.sendCalls)
 	}
 	if n := observed.Len(); n != 0 {
 		t.Fatalf("expected no Error-level logs for an unsupported display, got %d: %v",

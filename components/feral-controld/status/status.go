@@ -5,7 +5,6 @@ import (
 	//nolint:gosec
 	"crypto/md5"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -488,8 +487,24 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	// the next 5s round resumes polling. Cloud-initiated DDC commands still go
 	// through the executor and report their own errors, so this only quiets the
 	// background poll. A nil check keeps hand-constructed pollers (tests) safe.
+	//
+	// Both skip paths still push a one-shot "panel unreadable" DDC status (the
+	// hash dedup in sendNotification collapses repeats): consumers that cached
+	// the last real panel status (e.g. a brightness slider in the app) would
+	// otherwise show stale values forever, because pre-gate code kept emitting
+	// an Errors-carrying status when the panel became unreadable.
 	if s.displayConnected != nil && !s.displayConnected() {
 		s.logger.Debug("Skipping DDC status poll: no display connected")
+		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusNoDisplay())
+		return
+	}
+
+	// The availability tracker judged the display DDC/CI-incapable; it
+	// re-probes on display changes and on a slow interval. Not a fault — stay
+	// quiet instead of logging every 5s round.
+	if !s.panelDDC.ShouldPoll() {
+		s.logger.Debug("Skipping DDC status poll: display does not support DDC/CI")
+		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusUnsupported())
 		return
 	}
 
@@ -499,17 +514,23 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	defer cancel()
 
 	ddcStatus, err := s.panelDDC.CollectStatus(ddcCtx)
-	if errors.Is(err, ddc.ErrUnavailable) {
-		// The attached display was determined not to speak DDC/CI; the ddc
-		// tracker re-probes on display changes and on a slow interval. Not a
-		// fault — stay quiet instead of logging every 5s round.
-		s.logger.Debug("Skipping DDC status poll: display does not support DDC/CI")
-		return
-	}
 	if err != nil {
 		s.logger.Error("Failed to get DDC panel status", zap.Error(err))
 		return
 	}
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatus)
+}
+
+// ddcStatusNoDisplay / ddcStatusUnsupported are the poll-skip notifications:
+// same DdcPanelStatus shape (Errors map) the pre-tracker code produced when
+// ddcutil could not read the panel, so wire consumers need no new handling.
+// Fresh values per call — sendNotification marshals asynchronously to two
+// channels and must never share mutable state.
+func ddcStatusNoDisplay() *ddc.DdcPanelStatus {
+	return &ddc.DdcPanelStatus{Errors: map[string]string{"panel": "no display connected"}}
+}
+
+func ddcStatusUnsupported() *ddc.DdcPanelStatus {
+	return &ddc.DdcPanelStatus{Errors: map[string]string{"panel": "display does not support DDC/CI"}}
 }

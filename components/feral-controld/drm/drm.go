@@ -90,10 +90,16 @@ func Fingerprint(sysfsRoot string) string {
 
 		// EDID identifies the concrete panel, so swapping monitor A for
 		// monitor B changes the fingerprint even if both read "connected".
+		// Only read it for connected connectors: the others have no useful
+		// EDID, and skipping them halves the per-tick sysfs reads. A swap
+		// that never shows a non-connected sample still changes the EDID on
+		// the connected connector, so detection is not weakened.
 		edid := "-"
-		if data, err := os.ReadFile(filepath.Join(dir, "edid")); err == nil && len(data) > 0 { // #nosec G304 -- fixed sysfs layout.
-			sum := sha256.Sum256(data)
-			edid = hex.EncodeToString(sum[:8])
+		if status == "connected" {
+			if data, err := os.ReadFile(filepath.Join(dir, "edid")); err == nil && len(data) > 0 { // #nosec G304 -- fixed sysfs layout.
+				sum := sha256.Sum256(data)
+				edid = hex.EncodeToString(sum[:8])
+			}
 		}
 
 		fmt.Fprintf(&b, "%s=%s:%s;", filepath.Base(dir), status, edid)

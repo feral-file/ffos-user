@@ -16,20 +16,34 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// ErrUnavailable is returned by CollectStatus while the attached display has
-// been determined not to speak DDC/CI (see the availability tracker below).
-// Callers should treat it as "nothing to report", not as a fault: the tracker
-// re-probes automatically on display changes and on a slow interval.
-var ErrUnavailable = errors.New("no DDC/CI capable display available")
-
 // -----------------------------------------------------------------------------
 // PanelDDC interface – shared by the status poller and the command executor.
 // -----------------------------------------------------------------------------
 
+// PanelDDC's gating contract: CollectStatus and ApplyControl are ALWAYS real
+// attempts — an explicit request (cloud command, sleep transition) is real
+// intent and keeps its pre-tracker semantics (CollectStatus always returns a
+// status object, with per-field Errors on failure). Only the periodic status
+// poller is expected to consult ShouldPoll first, so a display that does not
+// speak DDC/CI stops costing ddcutil subprocesses every 5s without changing
+// any command-facing behavior.
+//
 //go:generate mockgen -source=ddc.go -destination=../mocks/ddc.go -package=mocks -mock_names=PanelDDC=MockPanelDDC
 type PanelDDC interface {
 	CollectStatus(ctx context.Context) (*DdcPanelStatus, error)
 	ApplyControl(ctx context.Context, action DdcPanelAction, value json.RawMessage) error
+	// ShouldPoll reports whether a background status poll is currently worth
+	// running. False while the availability tracker judges the display
+	// DDC/CI-incapable and the next reprobe window has not arrived. Also
+	// refreshes the display fingerprint, so a plugged/swapped display
+	// re-opens polling on the very next tick.
+	ShouldPoll() bool
+	// Generation identifies the attached-display generation; it increments
+	// whenever the DRM fingerprint changes (plug, unplug, swap). Consumers
+	// that cache their own per-display give-up state (e.g. the sleep panel
+	// leg's retry cap) compare generations so a display change re-arms them.
+	// Calling it also refreshes the fingerprint.
+	Generation() uint64
 }
 
 // New returns a PanelDDC that drives the default ddcutil display.
@@ -465,16 +479,6 @@ func (p *panelDdc) detectMonitorModel(ctx context.Context) (string, error) {
 // ddcutil runner: detect + retry, setvcp, getvcp, full status
 // -----------------------------------------------------------------------------
 
-// ddcAvailability is the DDC/CI capability verdict for the current display
-// generation (see panelDdc.fingerprint).
-type ddcAvailability int
-
-const (
-	ddcAvailUnknown ddcAvailability = iota
-	ddcAvailSupported
-	ddcAvailUnsupported
-)
-
 // ddcProbeFailThreshold is how many CONSECUTIVE hard "no DDC/CI display"
 // failures it takes to mark the panel unsupported. Three attempts spaced by
 // the 5s status poll (~15s window) absorb the common case of DDC coming
@@ -506,21 +510,22 @@ type panelDdc struct {
 	//
 	// Demotion to unsupported requires ddcProbeFailThreshold CONSECUTIVE
 	// failures carrying the hard "no DDC/CI display" signature; generic
-	// errors (I2C timeouts, ERR VCPs) never demote. ANY success promotes to
-	// supported. ApplyControl is never gated — a user-initiated control or a
-	// sleep transition is real intent and always gets a real attempt; its
-	// outcome feeds the same tracker, which is also what makes a panel whose
-	// DDC dies in standby self-heal: the wake-up setvcp that succeeds
-	// promotes the tracker back (and a sleeping panel's failures can never
-	// permanently wedge the state, because CollectStatus re-probes anyway).
+	// errors (I2C timeouts, ERR VCPs) never demote. ANY success promotes.
+	// Neither CollectStatus nor ApplyControl is gated — explicit requests
+	// always get a real attempt; their outcomes feed the tracker, which is
+	// also what makes a panel whose DDC dies in standby self-heal: the
+	// wake-up setvcp that succeeds promotes the tracker back. Only ShouldPoll
+	// consults the verdict, so suppression is strictly a background-poll
+	// concern.
 	//
 	// mu is never held across a ddcutil subprocess: lock to decide, unlock
 	// to run, lock to record. Concurrent probes are harmless.
 	mu          sync.Mutex
-	avail       ddcAvailability
+	unsupported bool
 	failStreak  int
 	nextProbeAt time.Time
 	fingerprint string
+	generation  uint64
 }
 
 // refreshFingerprintLocked resets the tracker when the attached-display
@@ -534,21 +539,40 @@ func (p *panelDdc) refreshFingerprintLocked(fp string) {
 			zap.String("fingerprint", fp))
 	}
 	p.fingerprint = fp
-	p.avail = ddcAvailUnknown
+	p.generation++
+	p.unsupported = false
 	p.failStreak = 0
 	p.nextProbeAt = time.Time{}
 }
 
-// gateCollect decides whether CollectStatus may run. true means the panel is
-// currently judged unsupported and the reprobe window has not arrived — the
-// caller must return ErrUnavailable without spawning any subprocess.
-func (p *panelDdc) gateCollect() bool {
+// syncFingerprint refreshes the display fingerprint outside any other lock
+// hold. Every public entry point calls it so a display change is noticed no
+// matter which path touches the panel first.
+func (p *panelDdc) syncFingerprint() {
+	fp := p.fingerprintFn()
+	p.mu.Lock()
+	p.refreshFingerprintLocked(fp)
+	p.mu.Unlock()
+}
+
+// ShouldPoll implements the poller's gate; see the interface contract.
+func (p *panelDdc) ShouldPoll() bool {
 	fp := p.fingerprintFn()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refreshFingerprintLocked(fp)
 
-	return p.avail == ddcAvailUnsupported && p.clock.Now().Before(p.nextProbeAt)
+	return !p.unsupported || !p.clock.Now().Before(p.nextProbeAt)
+}
+
+// Generation implements the display-generation probe; see the interface
+// contract.
+func (p *panelDdc) Generation() uint64 {
+	fp := p.fingerprintFn()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshFingerprintLocked(fp)
+	return p.generation
 }
 
 // recordOutcome feeds one ddcutil result back into the tracker. hardFail is
@@ -559,32 +583,34 @@ func (p *panelDdc) recordOutcome(success, hardFail bool) {
 
 	switch {
 	case success:
-		if p.avail == ddcAvailUnsupported {
+		if p.unsupported {
 			p.logger.Info("DDC panel is responding again; resuming status polls")
 		}
-		p.avail = ddcAvailSupported
+		p.unsupported = false
 		p.failStreak = 0
 		p.nextProbeAt = time.Time{}
+	case p.unsupported:
+		// Any failed attempt while unsupported — hard OR generic — arms the
+		// next reprobe window. Without this, a reprobe that failed with a
+		// non-hard error would leave nextProbeAt in the past and reopen
+		// continuous polling, resurrecting the exact flood the verdict
+		// suppresses. The verdict itself only ever lifts on a success.
+		p.nextProbeAt = p.clock.Now().Add(ddcReprobeInterval)
 	case hardFail:
 		p.failStreak++
-		if p.avail == ddcAvailUnsupported {
-			// A scheduled reprobe failed: keep the verdict, arm the next window.
-			p.nextProbeAt = p.clock.Now().Add(ddcReprobeInterval)
-			return
-		}
 		p.logger.Info("DDC probe found no DDC/CI capable display",
 			zap.Int("consecutive_failures", p.failStreak),
 			zap.Int("threshold", ddcProbeFailThreshold))
 		if p.failStreak >= ddcProbeFailThreshold {
-			p.avail = ddcAvailUnsupported
+			p.unsupported = true
 			p.nextProbeAt = p.clock.Now().Add(ddcReprobeInterval)
 			p.logger.Info("Marking DDC panel unavailable; suspending status polls",
 				zap.Duration("reprobe_interval", ddcReprobeInterval))
 		}
 	}
-	// Generic failures (no hard signature): leave the state alone. They are
-	// transient I2C/panel conditions and must neither demote nor break the
-	// consecutive-hard-failure accounting into false resets.
+	// Generic failures while not (yet) unsupported: leave the state alone.
+	// They are transient I2C/panel conditions and must neither demote nor
+	// break the consecutive-hard-failure accounting into false resets.
 }
 
 // ApplyControl runs setvcp for the resolved action/value pair.
@@ -600,10 +626,7 @@ func (p *panelDdc) ApplyControl(ctx context.Context, action DdcPanelAction, valu
 		return err
 	}
 
-	fp := p.fingerprintFn()
-	p.mu.Lock()
-	p.refreshFingerprintLocked(fp)
-	p.mu.Unlock()
+	p.syncFingerprint()
 
 	p.logger.Info("ddcutil setvcp",
 		zap.String("action", string(action)),
@@ -622,16 +645,13 @@ func (p *panelDdc) ApplyControl(ctx context.Context, action DdcPanelAction, valu
 
 // CollectStatus queries brightness, contrast, volume, mute, and power VCPs.
 //
-// While the availability tracker judges the display unsupported, it returns
-// ErrUnavailable without spawning any subprocess; the poller treats that as
-// "nothing to report". The collection flow itself (detect, then the VCP batch
-// with the recovery retry) is unchanged from the pre-tracker behavior — the
-// tracker only observes its outcome, so a failing round still costs a few
-// subprocesses but only ddcProbeFailThreshold rounds ever run per verdict.
+// Never gated: it always runs the pre-tracker collection flow (detect, then
+// the VCP batch with the recovery retry) and always returns a status object,
+// with per-field Errors on failure — the wire contract cloud commands have
+// always seen. The availability tracker only observes the outcome; background
+// suppression happens in the poller via ShouldPoll.
 func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
-	if p.gateCollect() {
-		return nil, ErrUnavailable
-	}
+	p.syncFingerprint()
 
 	panelStatus := &DdcPanelStatus{}
 	errs := map[string]string{}
@@ -821,24 +841,29 @@ func ddcutilOutputHasVcpBriefLine(out []byte) bool {
 	return false
 }
 
-func ddcutilOutputImpliesDisplayNotFound(out []byte, err error) bool {
+// ddcutilCombinedText lowercases ddcutil's output plus, when present, an
+// error string that may embed it (e.g. setVCP's wrapped error), for
+// signature matching.
+func ddcutilCombinedText(out []byte, err error) string {
 	s := strings.ToLower(string(out))
 	if err != nil {
 		s += " " + strings.ToLower(err.Error())
 	}
-	return strings.Contains(s, "display not found")
+	return s
+}
+
+func ddcutilOutputImpliesDisplayNotFound(out []byte, err error) bool {
+	return strings.Contains(ddcutilCombinedText(out, err), "display not found")
 }
 
 // ddcutilOutputImpliesNoDdcDisplay reports whether ddcutil's output (or an
 // error string that embeds it, e.g. from setVCP) carries the definitive
 // "there is no DDC/CI capable display here" signature. Only this signature
 // may demote the availability tracker; generic I2C errors and timeouts must
-// not.
+// not. Deliberately EXCLUDES "display not found": execDdcutilWithDisplayRecovery
+// classifies that string as transient and worth a recovery retry (brief HPD
+// blip, DP link retrain), and the tracker must not treat as fatal what the
+// retry layer treats as recoverable.
 func ddcutilOutputImpliesNoDdcDisplay(out []byte, err error) bool {
-	s := strings.ToLower(string(out))
-	if err != nil {
-		s += " " + strings.ToLower(err.Error())
-	}
-	return strings.Contains(s, "no displays implementing ddc/ci") ||
-		strings.Contains(s, "display not found")
+	return strings.Contains(ddcutilCombinedText(out, err), "no displays implementing ddc/ci")
 }

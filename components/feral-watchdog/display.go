@@ -31,8 +31,10 @@ const defaultDRMSysfsRoot = "/sys/class/drm"
 // all (no DRM sysfs, or every status file unreadable): there we return true so
 // a hardware/CI environment whose sysfs layout differs never silently disables
 // the watchdog. This must stay in lockstep with wait_for_display in
-// users/feralfile/scripts/start-kiosk.sh — if the two gates diverge, one side
-// suppresses while the other escalates and headless devices restart-loop.
+// users/feralfile/scripts/start-kiosk.sh AND with DisplayConnected in
+// components/feral-controld/drm/drm.go (controld is a separate Go module, so
+// it carries its own copy) — if the gates diverge, one side suppresses while
+// another escalates and headless devices restart-loop or flood ddcutil.
 func isDisplayConnected(sysfsRoot string) bool {
 	matches, err := filepath.Glob(filepath.Join(sysfsRoot, "card*-*", "status"))
 	if err != nil || len(matches) == 0 {

@@ -23,6 +23,7 @@ import (
 // transient panel (DDC) failure without re-driving the player. An optional
 // delay widens the worker's in-flight window so concurrent enqueues coalesce.
 type flakyPanelDDC struct {
+	panelDDCTrackerStub
 	failN int
 	delay time.Duration
 
@@ -246,6 +247,7 @@ func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 // through release, so a test can hold the align worker mid-flight and interleave
 // transitions at exact points. Successful applies record their power value.
 type scriptedPanelDDC struct {
+	panelDDCTrackerStub
 	entered chan struct{}
 	release chan error
 
@@ -345,6 +347,15 @@ func TestApplySleepTransitionIfChanged_ManualSupersedesStalePanelRetry(t *testin
 		return len(p) == 1 && p[0] == `"on"`
 	}, 2*time.Second, 5*time.Millisecond, "the manual wake's panel command must win")
 
+	// The worker records the outcome AFTER ApplyControl returns; wait for the
+	// tracker write to land before asserting the aligned tick is a no-op, or
+	// the tick can race the recording and legitimately re-enqueue.
+	require.Eventually(t, func() bool {
+		e.sleepApplyMu.Lock()
+		defer e.sleepApplyMu.Unlock()
+		return e.sleepPanelOK && e.sleepPanelState != nil && *e.sleepPanelState == sleepschedule.StateAwake
+	}, 2*time.Second, 5*time.Millisecond, "panel success should be recorded")
+
 	// Both legs are now aligned to awake: a further tick must not enqueue another
 	// panel attempt or player round-trip.
 	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateAwake, "tick"))
@@ -358,11 +369,27 @@ func TestApplySleepTransitionIfChanged_ManualSupersedesStalePanelRetry(t *testin
 // blockingFailPanelDDC always fails, and blocks each ApplyControl until the test
 // releases it, so the test can step the async align worker one attempt at a time.
 type blockingFailPanelDDC struct {
+	panelDDCTrackerStub
 	entered chan struct{}
 	release chan struct{}
 
 	mu       sync.Mutex
 	attempts int
+	gen      uint64
+}
+
+// Generation shadows the stub so tests can simulate a display change (plug/
+// swap), which must re-arm the panel leg's capped retry give-up.
+func (b *blockingFailPanelDDC) Generation() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.gen
+}
+
+func (b *blockingFailPanelDDC) bumpGeneration() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gen++
 }
 
 func (b *blockingFailPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
@@ -499,4 +526,76 @@ func TestApplySleepTransitionIfChanged_DefersQuietlyWhileCDPDown(t *testing.T) {
 
 	// And it is now aligned: no further round-trip (asserted by Times(1) above).
 	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-4"))
+}
+
+// TestApplySleepTransitionIfChanged_PanelRetryRearmsOnDisplayChange proves the
+// capped panel give-up is scoped to one display generation: swapping in a new
+// display (Generation() bump, driven in production by the DRM fingerprint)
+// must re-open the panel leg immediately instead of waiting for the next
+// schedule boundary.
+func TestApplySleepTransitionIfChanged_PanelRetryRearmsOnDisplayChange(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(map[string]any{"result": map[string]any{}}, nil).
+		Times(1)
+
+	panel := &blockingFailPanelDDC{entered: make(chan struct{}), release: make(chan struct{})}
+	e := &executor{
+		cdp:      mockCDP,
+		panelDDC: panel,
+		logger:   zaptest.NewLogger(t),
+	}
+	ctx := context.Background()
+
+	drive := func(wantStreak int) {
+		select {
+		case <-panel.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected a panel ApplyControl attempt for streak %d", wantStreak)
+		}
+		panel.release <- struct{}{}
+		require.Eventually(t, func() bool {
+			e.sleepApplyMu.Lock()
+			defer e.sleepApplyMu.Unlock()
+			return e.sleepPanelFailStreak == wantStreak
+		}, 2*time.Second, 5*time.Millisecond, "fail streak should reach %d", wantStreak)
+	}
+
+	// Exhaust the retry budget against the ORIGINAL display.
+	for s := 1; s <= panelRetryMax; s++ {
+		require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick"))
+		drive(s)
+	}
+
+	// Capped: a further tick must not enqueue another attempt.
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-capped"))
+	select {
+	case <-panel.entered:
+		t.Fatal("capped panel leg must not retry while the display is unchanged")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// A different display appears: the very next tick must retry the panel leg.
+	panel.bumpGeneration()
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-new-display"))
+	select {
+	case <-panel.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("display change must re-arm the capped panel retry")
+	}
+	panel.release <- struct{}{}
+	// Wait for the worker to finish recording (and logging) the attempt before
+	// the test returns, so the async goroutine cannot write to the zaptest
+	// logger after test completion.
+	require.Eventually(t, func() bool {
+		e.sleepApplyMu.Lock()
+		defer e.sleepApplyMu.Unlock()
+		return e.sleepPanelFailStreak == panelRetryMax+1
+	}, 2*time.Second, 5*time.Millisecond, "re-armed attempt should be recorded")
 }

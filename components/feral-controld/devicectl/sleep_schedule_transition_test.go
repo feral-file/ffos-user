@@ -17,9 +17,18 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 )
 
+// panelDDCTrackerStub supplies default implementations of the PanelDDC
+// tracker probes (ShouldPoll/Generation) for test fakes that don't exercise
+// them: always pollable, single display generation.
+type panelDDCTrackerStub struct{}
+
+func (panelDDCTrackerStub) ShouldPoll() bool   { return true }
+func (panelDDCTrackerStub) Generation() uint64 { return 0 }
+
 // slowBlockingPanelDDC blocks in ApplyControl until unblock is closed, so tests
 // can prove sleep transitions do not wait on DDC.
 type slowBlockingPanelDDC struct {
+	panelDDCTrackerStub
 	applyStarted chan struct{}
 	unblock      chan struct{}
 }
@@ -114,6 +123,7 @@ func TestInvalidatePlayerSleepState_UnsupportedExecutorIsNoOp(t *testing.T) {
 // stagedPanelDDC waits on release before each ApplyControl so tests can interleave
 // sleep transitions and observe serialized DDC order.
 type stagedPanelDDC struct {
+	panelDDCTrackerStub
 	release chan struct{}
 
 	mu      sync.Mutex
@@ -185,6 +195,7 @@ func TestApplySleepTransition_SerializesRapidFfpPowerChanges(t *testing.T) {
 
 // tinyDelayPanelDDC adds a short delay so concurrent enqueue races the worker.
 type tinyDelayPanelDDC struct {
+	panelDDCTrackerStub
 	delay time.Duration
 }
 
