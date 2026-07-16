@@ -1,10 +1,17 @@
 #!/bin/bash
 
-# Read saved rotation
+# Read saved rotation. The state file may exist but be empty or corrupt; an
+# invalid --transform value makes wlr-randr fail, which short-circuits the &&
+# chain below and Chromium never starts. Only accept the values wlr-randr
+# supports (same whitelist as display-restore.sh), otherwise fall back.
 ROTATION="normal"
 if [ -f /home/feralfile/.state/screen-orientation ]; then
     ROTATION=$(cat /home/feralfile/.state/screen-orientation)
 fi
+case "$ROTATION" in
+    normal|90|180|270) ;;
+    *) ROTATION="normal" ;;
+esac
 
 FEATURES="UseOzonePlatform,VaapiVideoDecoder,VaapiIgnoreDriverChecks,Vulkan,DefaultANGLEVulkan,VulkanFromANGLE,DiskCacheBackendExperiment:backend/blockfile"
 
