@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Contract test for the headless startup path (PR #218).
+# Contract test for the headless startup path (PR #218; display-wait predicate
+# revised 2026-07: "unknown" now counts as no-display, see invariant 4).
 #
 # The headless boot fix spans files that no cargo/go test reads: user session
 # scripts and systemd user units. These ship ONLY via the full-image rsync rail
@@ -154,10 +155,20 @@ echo disconnected > "$drm_root/card0-HDMI-A-1/status"
 echo disconnected > "$drm_root/card1-DP-1/status"
 expect_waiting "all-disconnected waits"
 
+# Parity with the watchdog unit test (display_test.go "unreadable connector
+# alongside readable disconnected"): one unreadable connector next to a
+# readable "disconnected" one must also hold the wait — readable statuses
+# exist and none reads "connected". status-as-directory makes cat fail the
+# same way the Go fixture does.
+rm "$drm_root/card0-HDMI-A-1/status"
+mkdir "$drm_root/card0-HDMI-A-1/status"
+expect_waiting "unreadable alongside disconnected waits"
+
 # No readable status at all is the ONLY remaining fail-open: without DRM sysfs
 # the wait could never resolve, so the kiosk must fall through to cage and its
 # Restart=always recovery.
-rm "$drm_root/card0-HDMI-A-1/status" "$drm_root/card1-DP-1/status"
+rmdir "$drm_root/card0-HDMI-A-1/status"
+rm "$drm_root/card1-DP-1/status"
 expect_proceed "no readable status fails open" "fail open"
 
 echo "test-headless-startup-contract: OK"
