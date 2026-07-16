@@ -31,42 +31,44 @@ DISABLE_FEATURES="TranslateUI,InterestFeedContentSuggestions,CalculateNativeWinO
 # display-restore.sh watches. A monitor may be attached later on any connector,
 # so we wait indefinitely rather than time out.
 #
-# Waiting is only safe while the state is POSITIVELY known: every connector
-# readable and every one reading exactly "disconnected". Anything else — no
-# readable connectors, or a readable value the kernel could not resolve (DRM
-# reports "unknown" for unprobeable connectors, which may well have a display
-# attached) — must fall through to cage and its pre-existing Restart=always
-# recovery, mirroring the watchdog's fail-open display gate. Otherwise an
-# unknown-state box could sit in this loop forever with a working monitor and
-# no recovery path.
+# The wait holds until some connector positively reads "connected". An
+# "unknown" reading must NOT fail open: FF1's amdgpu persistently reports it on
+# connectors with nothing attached, so the earlier "wait only while everything
+# reads disconnected" gate never engaged on real headless hardware — every boot
+# fell open into cage/Chromium with zero outputs, where CDP can never come up,
+# and cdp-ready-check's 90s timeout + Restart=always produced a permanent
+# restart storm (observed in the field as sustained high CPU temperature).
+# Waiting on "unknown" is safe because attaching a real monitor raises HPD and
+# flips that connector to "connected", which the poll below observes; there is
+# no display that stays "unknown" while in use on this hardware.
+#
+# The only fail-open left is NO readable connector status at all: on an
+# environment without DRM sysfs the wait could never resolve, so fall through
+# to cage and its Restart=always recovery, mirroring the watchdog display gate.
 wait_for_display() {
-    local announced=0 f status saw_status all_disconnected
+    local announced=0 f status saw_status conn readings
     while true; do
         saw_status=0
-        all_disconnected=1
+        readings=""
         for f in /sys/class/drm/card*-*/status; do
             status=$(cat "$f" 2>/dev/null) || continue
             saw_status=1
-            case "$status" in
-                connected)
-                    echo "$(date '+%F %T') [INFO] Display connected, starting kiosk"
-                    return
-                    ;;
-                disconnected) ;;
-                *)
-                    # e.g. "unknown": not a positive no-display reading.
-                    all_disconnected=0
-                    ;;
-            esac
+            conn=${f%/status}
+            readings="$readings ${conn##*/}=$status"
+            if [ "$status" = "connected" ]; then
+                echo "$(date '+%F %T') [INFO] Display connected, starting kiosk"
+                return
+            fi
         done
-        if [ "$saw_status" -eq 0 ] || [ "$all_disconnected" -eq 0 ]; then
-            echo "$(date '+%F %T') [INFO] Display state not positively disconnected, starting kiosk (fail open)"
+        if [ "$saw_status" -eq 0 ]; then
+            echo "$(date '+%F %T') [INFO] No readable DRM connector status, starting kiosk (fail open)"
             return
         fi
         # Log the transition into the waiting state once, not on every poll, to
-        # keep the log readable during long headless periods.
+        # keep the log readable during long headless periods. The per-connector
+        # readings make a headless-vs-gate misfire diagnosable from this one line.
         if [ "$announced" -eq 0 ]; then
-            echo "$(date '+%F %T') [INFO] No display connected, waiting for one to be attached..."
+            echo "$(date '+%F %T') [INFO] No display connected (${readings# }), waiting for one to be attached..."
             announced=1
         fi
         sleep 3
