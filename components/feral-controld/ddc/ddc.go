@@ -479,8 +479,9 @@ func (p *panelDdc) detectMonitorModel(ctx context.Context) (string, error) {
 // ddcutil runner: detect + retry, setvcp, getvcp, full status
 // -----------------------------------------------------------------------------
 
-// ddcProbeFailThreshold is how many CONSECUTIVE hard "no DDC/CI display"
-// failures it takes to mark the panel unsupported. Three attempts spaced by
+// ddcProbeFailThreshold is how many hard "no DDC/CI display" failures
+// (without an intervening success — generic errors neither count nor reset)
+// it takes to mark the panel unsupported. Three attempts spaced by
 // the 5s status poll (~15s window) absorb the common case of DDC coming
 // alive a few seconds after hotplug/power-on, so a slow-waking panel is not
 // misjudged.
@@ -508,9 +509,11 @@ type panelDdc struct {
 	// (common on TVs, or monitors with DDC/CI disabled in the OSD), while
 	// still recovering automatically when the display situation changes.
 	//
-	// Demotion to unsupported requires ddcProbeFailThreshold CONSECUTIVE
-	// failures carrying the hard "no DDC/CI display" signature; generic
-	// errors (I2C timeouts, ERR VCPs) never demote. ANY success promotes.
+	// Demotion to unsupported requires ddcProbeFailThreshold hard-signature
+	// failures with no intervening success. Generic errors (I2C timeouts,
+	// ERR VCPs) neither count toward the streak nor reset it: they must not
+	// push a healthy panel toward demotion, and equally must not rescue a
+	// DDC-less panel from it. ANY success promotes.
 	// Neither CollectStatus nor ApplyControl is gated — explicit requests
 	// always get a real attempt; their outcomes feed the tracker, which is
 	// also what makes a panel whose DDC dies in standby self-heal: the
@@ -864,6 +867,12 @@ func ddcutilOutputImpliesDisplayNotFound(out []byte, err error) bool {
 // classifies that string as transient and worth a recovery retry (brief HPD
 // blip, DP link retrain), and the tracker must not treat as fatal what the
 // retry layer treats as recoverable.
+//
+// Signature provenance: observed verbatim from ddcutil on FF1 field hardware
+// ("No displays implementing DDC/CI found", headless-device logs, 2026-07).
+// If a ddcutil upgrade rewords it, the failure mode is fail-OPEN: demotion
+// stops matching and polling continues (with its logging), rather than a
+// healthy panel being wrongly suppressed.
 func ddcutilOutputImpliesNoDdcDisplay(out []byte, err error) bool {
 	return strings.Contains(ddcutilCombinedText(out, err), "no displays implementing ddc/ci")
 }

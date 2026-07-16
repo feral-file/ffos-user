@@ -425,25 +425,28 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 // recordPanelApply stores the state the async FFP power worker last drove the
 // panel to and whether it succeeded. ok=false (or a state mismatch vs. desired)
 // makes the next applySleepTransitionIfChanged re-enqueue the panel alignment.
-func (e *executor) recordPanelApply(state sleepschedule.State, ok bool) {
-	// Snapshot the display generation before taking sleepApplyMu: Generation()
-	// reads sysfs and takes the ddc tracker's (leaf) lock, so there is no need
-	// to do that work inside this critical section.
-	gen := uint64(0)
-	if e.panelDDC != nil {
-		gen = e.panelDDC.Generation()
-	}
-
+//
+// gen is the display generation the attempt ran against, captured by the
+// worker BEFORE the apply. A failure observed on a generation different from
+// the recorded one belongs to a NEW display and restarts the streak at 1 —
+// the fresh panel must get the full panelRetryMax budget (its DDC often needs
+// a few attempts right after hotplug), not inherit the old panel's exhausted
+// verdict.
+func (e *executor) recordPanelApply(state sleepschedule.State, ok bool, gen uint64) {
 	e.sleepApplyMu.Lock()
 	defer e.sleepApplyMu.Unlock()
 
+	sameDisplay := gen == e.sleepPanelGen
 	e.sleepPanelGen = gen
 
 	switch {
 	case ok:
 		e.sleepPanelFailStreak = 0
+	case !sameDisplay:
+		// First failure observed on a new display generation.
+		e.sleepPanelFailStreak = 1
 	case e.sleepPanelState != nil && *e.sleepPanelState == state:
-		// Consecutive failure for the same target state.
+		// Consecutive failure for the same target state on the same display.
 		e.sleepPanelFailStreak++
 	default:
 		// First failure for a new target state.
@@ -452,6 +455,14 @@ func (e *executor) recordPanelApply(state sleepschedule.State, ok bool) {
 
 	s := state
 	e.sleepPanelState, e.sleepPanelOK = &s, ok
+}
+
+// panelGeneration reads the current display generation (0 without a panel).
+func (e *executor) panelGeneration() uint64 {
+	if e.panelDDC == nil {
+		return 0
+	}
+	return e.panelDDC.Generation()
 }
 
 // applyFfpPowerStateAsync enqueues best-effort panel power alignment; it never blocks
@@ -495,6 +506,12 @@ func (e *executor) runSleepPowerAlignWorker() {
 	for {
 		job := <-e.sleepPowerAlignCh
 		job = e.drainCoalescedSleepPowerAlignJobs(job)
+		// Stamp the attempt with the display generation it actually runs
+		// against, captured BEFORE the (possibly multi-second) DDC round-trip:
+		// a hotplug landing mid-apply must not attribute the OLD display's
+		// failure to the NEW generation, which would silently consume the new
+		// display's fresh retry budget.
+		gen := e.panelGeneration()
 		// Detached from the relayer/schedule ctx so a canceled HTTP/WebSocket request
 		// does not abort DDC mid-flight; alignment remains best-effort with bounded
 		// wall time only (see ffpSleepPowerControlTimeout).
@@ -509,7 +526,7 @@ func (e *executor) runSleepPowerAlignWorker() {
 		}
 		// Record the outcome either way: on success the loop stops re-enqueuing this
 		// state; on failure the mismatch makes the next tick retry the panel leg.
-		e.recordPanelApply(job.state, err == nil)
+		e.recordPanelApply(job.state, err == nil, gen)
 	}
 }
 

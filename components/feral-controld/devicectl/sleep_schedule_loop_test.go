@@ -590,12 +590,29 @@ func TestApplySleepTransitionIfChanged_PanelRetryRearmsOnDisplayChange(t *testin
 		t.Fatal("display change must re-arm the capped panel retry")
 	}
 	panel.release <- struct{}{}
-	// Wait for the worker to finish recording (and logging) the attempt before
-	// the test returns, so the async goroutine cannot write to the zaptest
-	// logger after test completion.
+	// The failure happened on a NEW generation: the streak must restart at 1 —
+	// the new display gets the full retry budget, not the old panel's
+	// exhausted verdict. (Waiting here also keeps the async worker from
+	// logging to the zaptest logger after test completion.)
 	require.Eventually(t, func() bool {
 		e.sleepApplyMu.Lock()
 		defer e.sleepApplyMu.Unlock()
-		return e.sleepPanelFailStreak == panelRetryMax+1
-	}, 2*time.Second, 5*time.Millisecond, "re-armed attempt should be recorded")
+		return e.sleepPanelFailStreak == 1
+	}, 2*time.Second, 5*time.Millisecond, "new-generation failure should restart the streak at 1")
+
+	// And because the budget is fresh, the next tick must retry AGAIN — a
+	// slow-waking new panel gets its 2nd/3rd attempts (pre-fix it was
+	// abandoned after one).
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-new-display-2"))
+	select {
+	case <-panel.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fresh budget must allow a second attempt on the new display")
+	}
+	panel.release <- struct{}{}
+	require.Eventually(t, func() bool {
+		e.sleepApplyMu.Lock()
+		defer e.sleepApplyMu.Unlock()
+		return e.sleepPanelFailStreak == 2
+	}, 2*time.Second, 5*time.Millisecond, "second same-generation failure should reach streak 2")
 }
