@@ -81,6 +81,8 @@ func TestApplySleepTransition_DoesNotBlockOnFfpPowerDDC(t *testing.T) {
 func TestInvalidatePlayerSleepState_ForcesRedriveAfterCDPReconnect(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	// Exactly two player round-trips: the initial drive and the post-invalidation
 	// re-drive. The aligned tick in between must not send.
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).Times(2)

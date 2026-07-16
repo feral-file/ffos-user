@@ -18,6 +18,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/drm"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -87,6 +88,13 @@ type poller struct {
 	lastIsPlaying             bool
 	playbackSampleInitialized bool
 
+	// displayConnected reports whether a physical display is attached (DRM
+	// connector status). Consulted before each DDC poll: with no display,
+	// ddcutil can never succeed, and every 5s round would spawn three ddcutil
+	// subprocesses and log an info+warn+error triplet — a permanent log flood
+	// on headless devices. Field (not a direct call) so tests can stub it.
+	displayConnected func() bool
+
 	// Whether CDP was initialized at the previous poll round. Only touched on the
 	// Start goroutine. Used to catch the disconnected→connected transition: a
 	// restarted Chromium reloads the web app from defaults, so status deduped
@@ -116,6 +124,7 @@ func NewPoller(
 		refreshChan:             make(chan struct{}, 10), // Buffered channel to prevent blocking
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+		displayConnected:        func() bool { return drm.DisplayConnected(drm.DefaultSysfsRoot) },
 	}
 }
 
@@ -469,6 +478,17 @@ const ddcPollTimeout = 15 * time.Second
 func (s *poller) pollDDCStatus(ctx context.Context) {
 	if !s.relayer.IsConnected() {
 		s.logger.Debug("Relayer not connected, skipping DDC status poll")
+		return
+	}
+
+	// Headless: no DRM connector is connected, so ddcutil cannot find a display
+	// and CollectStatus would fail (with recovery retries) every round. Skip the
+	// poll; plugging a monitor in flips the connector to "connected" via HPD and
+	// the next 5s round resumes polling. Cloud-initiated DDC commands still go
+	// through the executor and report their own errors, so this only quiets the
+	// background poll. A nil check keeps hand-constructed pollers (tests) safe.
+	if s.displayConnected != nil && !s.displayConnected() {
+		s.logger.Debug("Skipping DDC status poll: no display connected")
 		return
 	}
 

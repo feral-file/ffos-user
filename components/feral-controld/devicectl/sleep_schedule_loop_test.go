@@ -69,6 +69,8 @@ func TestApplySleepTransitionIfChanged_SkipsUnchangedHealthyState(t *testing.T) 
 	defer ctrl.Finish()
 
 	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	// Exactly one player round-trip despite three IfChanged calls for the same state.
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -95,6 +97,8 @@ func TestApplySleepTransitionIfChanged_RetriesAfterFailure(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	gomock.InOrder(
 		// First tick: player not ready -> failure.
 		mockCDP.EXPECT().
@@ -130,6 +134,8 @@ func TestApplySleepTransitionIfChanged_RetriesPanelWithoutRedrivingPlayer(t *tes
 	defer ctrl.Finish()
 
 	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	// The player is driven exactly once: the initial full transition. Panel retries
 	// must not trigger any further player round-trip.
 	mockCDP.EXPECT().
@@ -168,6 +174,8 @@ func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		AnyTimes().
@@ -280,6 +288,8 @@ func TestApplySleepTransitionIfChanged_ManualSupersedesStalePanelRetry(t *testin
 	defer ctrl.Finish()
 
 	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	// Exactly two player round-trips: the initial sleep and the manual wake. The
 	// panel-only retry must not re-drive the player.
 	mockCDP.EXPECT().
@@ -383,6 +393,8 @@ func TestApplySleepTransitionIfChanged_PanelRetryIsBounded(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		Return(map[string]any{"result": map[string]any{}}, nil).
@@ -447,4 +459,44 @@ func TestSleepScheduleTickWait(t *testing.T) {
 	got := sleepScheduleTickWait(&near)
 	require.Greater(t, got, time.Second)
 	require.LessOrEqual(t, got, 10*time.Second)
+}
+
+// TestApplySleepTransitionIfChanged_DefersQuietlyWhileCDPDown pins the headless
+// log-flood fix: while CDP is not connected (headless boot with no monitor, or
+// a kiosk restart in progress) the loop's entry point must not attempt the
+// player send at all — previously every capped tick failed with "CDP connection
+// is not initialized" at Error level, forever. Once CDP connects, the very next
+// tick drives the pending transition.
+func TestApplySleepTransitionIfChanged_DefersQuietlyWhileCDPDown(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	connected := false
+	mockCDP.EXPECT().Initialized().DoAndReturn(func() bool { return connected }).AnyTimes()
+	// Exactly one player round-trip: the tick after CDP comes up. The two
+	// CDP-down ticks must not send.
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(map[string]any{"result": map[string]any{}}, nil).
+		Times(1)
+
+	e := &executor{
+		cdp:      mockCDP,
+		panelDDC: &tinyDelayPanelDDC{},
+		logger:   zaptest.NewLogger(t),
+	}
+
+	ctx := context.Background()
+	// CDP down: deferred without error, and the tracker must not record the
+	// state as applied.
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-1"))
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-2"))
+
+	// CDP connects: the next tick performs the full transition.
+	connected = true
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-3"))
+
+	// And it is now aligned: no further round-trip (asserted by Times(1) above).
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "tick-4"))
 }

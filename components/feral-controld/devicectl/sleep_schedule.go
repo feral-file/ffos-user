@@ -398,6 +398,22 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 		return nil
 	}
 
+	// The player leg needs a full re-drive but CDP is down (headless boot with
+	// no monitor, or a kiosk/Chromium restart in progress). Attempting the send
+	// would fail with "CDP connection is not initialized" on every capped tick —
+	// an Error-level log flood that runs forever on headless devices. Defer
+	// quietly instead: the CDP (re)connect callback calls
+	// InvalidatePlayerSleepState, which wakes this loop, so the transition is
+	// re-driven the moment the player becomes reachable. Manual overrides
+	// (sleepNow/wakeNow/setSleepSchedule) go through applySleepTransition and
+	// still surface the CDP error to their caller.
+	if e.cdp != nil && !e.cdp.Initialized() {
+		e.logger.Debug("Deferring sleep schedule transition: CDP not connected",
+			zap.String("state", string(state)),
+			zap.String("reason", reason))
+		return nil
+	}
+
 	return e.applySleepTransitionLocked(ctx, state, reason)
 }
 

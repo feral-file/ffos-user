@@ -497,3 +497,72 @@ func (b *blockingPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStat
 func (b *blockingPanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.RawMessage) error {
 	return nil
 }
+
+// TestPollDDCStatus_SkipsWhenNoDisplayConnected pins the headless gate: with no
+// DRM connector connected, ddcutil can never find a display, so the 5s poll
+// must not shell out to ddcutil at all (previously an info+warn+error log
+// triplet every round, forever, on headless devices).
+func TestPollDDCStatus_SkipsWhenNoDisplayConnected(t *testing.T) {
+	ctxCh := make(chan context.Context, 1)
+	fakeDDC := &fakePanelDDC{
+		collectCtx: ctxCh,
+		status:     &ddc.DdcPanelStatus{},
+	}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return false },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+
+	select {
+	case <-ctxCh:
+		t.Fatal("CollectStatus must not run while no display is connected")
+	default:
+	}
+}
+
+// TestPollDDCStatus_PollsAgainOnceDisplayConnects proves the gate is evaluated
+// per round: plugging a monitor in (connector flips to "connected") resumes DDC
+// polling on the next tick with no restart required.
+func TestPollDDCStatus_PollsAgainOnceDisplayConnects(t *testing.T) {
+	ctxCh := make(chan context.Context, 1)
+	fakeDDC := &fakePanelDDC{
+		collectCtx: ctxCh,
+		status:     &ddc.DdcPanelStatus{},
+	}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true, true}}
+
+	connected := false
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return connected },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+	select {
+	case <-ctxCh:
+		t.Fatal("CollectStatus must not run while no display is connected")
+	default:
+	}
+
+	connected = true
+	p.pollDDCStatus(context.Background())
+	select {
+	case <-ctxCh:
+	default:
+		t.Fatal("CollectStatus should run once a display is connected")
+	}
+}
