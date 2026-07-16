@@ -5,6 +5,7 @@ import (
 	//nolint:gosec
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -498,6 +499,13 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	defer cancel()
 
 	ddcStatus, err := s.panelDDC.CollectStatus(ddcCtx)
+	if errors.Is(err, ddc.ErrUnavailable) {
+		// The attached display was determined not to speak DDC/CI; the ddc
+		// tracker re-probes on display changes and on a slow interval. Not a
+		// fault — stay quiet instead of logging every 5s round.
+		s.logger.Debug("Skipping DDC status poll: display does not support DDC/CI")
+		return
+	}
 	if err != nil {
 		s.logger.Error("Failed to get DDC panel status", zap.Error(err))
 		return

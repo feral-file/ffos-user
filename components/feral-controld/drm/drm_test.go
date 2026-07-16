@@ -121,3 +121,70 @@ func TestDisplayConnectedFailsOpen(t *testing.T) {
 		}
 	})
 }
+
+func writeConnector(t *testing.T, root, name, status string, edid []byte) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir connector: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status+"\n"), 0o600); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+	if edid != nil {
+		if err := os.WriteFile(filepath.Join(dir, "edid"), edid, 0o600); err != nil {
+			t.Fatalf("write edid: %v", err)
+		}
+	}
+}
+
+func TestFingerprint_StableForSameTopology(t *testing.T) {
+	root := t.TempDir()
+	writeConnector(t, root, "card0-HDMI-A-1", "connected", []byte{0x00, 0xFF, 0x01})
+	writeConnector(t, root, "card0-DP-1", "disconnected", nil)
+
+	first := Fingerprint(root)
+	second := Fingerprint(root)
+	if first == "" {
+		t.Fatal("expected non-empty fingerprint for populated topology")
+	}
+	if first != second {
+		t.Fatalf("fingerprint not stable: %q vs %q", first, second)
+	}
+}
+
+func TestFingerprint_ChangesOnStatusFlip(t *testing.T) {
+	root := t.TempDir()
+	writeConnector(t, root, "card0-HDMI-A-1", "unknown", nil)
+	before := Fingerprint(root)
+
+	// Hotplug: HPD flips the connector.
+	writeConnector(t, root, "card0-HDMI-A-1", "connected", []byte{0x00, 0xFF, 0x01})
+	after := Fingerprint(root)
+	if before == after {
+		t.Fatal("fingerprint must change when a connector status flips")
+	}
+}
+
+func TestFingerprint_ChangesOnEdidSwap(t *testing.T) {
+	root := t.TempDir()
+	writeConnector(t, root, "card0-HDMI-A-1", "connected", []byte{0x00, 0xFF, 0x01})
+	before := Fingerprint(root)
+
+	// Same connector, same status, but a DIFFERENT panel behind it.
+	writeConnector(t, root, "card0-HDMI-A-1", "connected", []byte{0x00, 0xFF, 0x02})
+	after := Fingerprint(root)
+	if before == after {
+		t.Fatal("fingerprint must change when the EDID (panel identity) changes")
+	}
+}
+
+func TestFingerprint_EmptyTopologyIsStableEmpty(t *testing.T) {
+	if got := Fingerprint(t.TempDir()); got != "" {
+		t.Fatalf("empty root should fingerprint as \"\", got %q", got)
+	}
+	missing := filepath.Join(t.TempDir(), "nope")
+	if got := Fingerprint(missing); got != "" {
+		t.Fatalf("missing root should fingerprint as \"\", got %q", got)
+	}
+}

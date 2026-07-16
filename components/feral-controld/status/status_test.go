@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
@@ -564,5 +565,34 @@ func TestPollDDCStatus_PollsAgainOnceDisplayConnects(t *testing.T) {
 	case <-ctxCh:
 	default:
 		t.Fatal("CollectStatus should run once a display is connected")
+	}
+}
+
+// TestPollDDCStatus_UnavailableIsQuietSkip pins the poller's contract with the
+// ddc availability tracker: ErrUnavailable means "display has no DDC/CI" and
+// must produce no notification and no Error-level log (the pre-tracker code
+// would have error-logged every 5s round forever).
+func TestPollDDCStatus_UnavailableIsQuietSkip(t *testing.T) {
+	core, observed := observer.New(zap.ErrorLevel)
+
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                &fakePanelDDC{err: ddc.ErrUnavailable},
+		displayConnected:        func() bool { return true },
+		logger:                  zap.New(core),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+
+	if fRelayer.sendCalls != 0 {
+		t.Fatalf("expected no DDC notification, got %d sends", fRelayer.sendCalls)
+	}
+	if n := observed.Len(); n != 0 {
+		t.Fatalf("expected no Error-level logs for an unsupported display, got %d: %v",
+			n, observed.All())
 	}
 }

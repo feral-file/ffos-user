@@ -4,8 +4,12 @@
 package drm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -56,4 +60,43 @@ func DisplayConnected(sysfsRoot string) bool {
 	// ("disconnected" and "unknown" alike). No readable status at all -> the
 	// environment is unknown, fail open.
 	return !sawReadable
+}
+
+// Fingerprint returns a stable identity string for the currently attached
+// display topology: every DRM connector's status plus a short hash of its
+// EDID. It changes when a display is plugged, unplugged, or swapped for a
+// different panel, and stays stable across DPMS/standby (connector status
+// does not change there). Cheap enough to call on every poll tick — a
+// handful of small sysfs reads.
+//
+// Callers compare successive values only; the string itself is opaque. An
+// environment with no connectors (or an unreadable sysfs) yields "", which is
+// simply another stable value — it still flips when connectors appear.
+func Fingerprint(sysfsRoot string) string {
+	matches, err := filepath.Glob(filepath.Join(sysfsRoot, "card*-*", "status"))
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	sort.Strings(matches)
+
+	var b strings.Builder
+	for _, statusFile := range matches {
+		dir := filepath.Dir(statusFile)
+
+		status := "unreadable"
+		if data, err := os.ReadFile(statusFile); err == nil { // #nosec G304 -- path comes from a fixed sysfs glob.
+			status = strings.TrimSpace(string(data))
+		}
+
+		// EDID identifies the concrete panel, so swapping monitor A for
+		// monitor B changes the fingerprint even if both read "connected".
+		edid := "-"
+		if data, err := os.ReadFile(filepath.Join(dir, "edid")); err == nil && len(data) > 0 { // #nosec G304 -- fixed sysfs layout.
+			sum := sha256.Sum256(data)
+			edid = hex.EncodeToString(sum[:8])
+		}
+
+		fmt.Fprintf(&b, "%s=%s:%s;", filepath.Base(dir), status, edid)
+	}
+	return b.String()
 }

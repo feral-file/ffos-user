@@ -420,7 +420,7 @@ func initializeApp(
 	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io, cdp)
 
 	// DDC panel
-	ddcPanel := ddc.New(exec, logger)
+	ddcPanel := ddc.New(exec, clock, logger)
 
 	// Websocket handler
 	wsUpgrader := wrapper.NewWebsocketUpgrader(&websocket.Upgrader{

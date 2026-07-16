@@ -68,7 +68,9 @@ func setup(t *testing.T) *testSetup {
 
 	// Use a real panelDDC backed by mockExec so that DDC executor tests can
 	// keep mocking ddcutil subprocess calls through mockExec.CommandContext.
-	panelDDC := ddc.New(mockExec, logger)
+	// The availability tracker only consults the clock on demotion/reprobe,
+	// which no single-test scenario reaches, so the bare MockClock is safe.
+	panelDDC := ddc.New(mockExec, mockClock, logger)
 
 	// Create executor with mocks
 	executor := devicectl.New(
