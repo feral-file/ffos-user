@@ -1,0 +1,17 @@
+[Unit]
+Description=Ensure FF1 captive portal hotspot is off after boot
+After=NetworkManager.service network-online.target
+Before=chromium-kiosk.service feral-captive-portal.service
+ConditionPathExists=/run/user/1000/bus
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="CAPTIVE_PORTAL_INSTALL_ROOT=/opt/feral/captive-portal"
+EnvironmentFile=-/home/feralfile/.config/feral-captive-portal.env
+ExecStart=/opt/feral/captive-portal/scripts/captive-portal-boot-cleanup.sh
+StandardOutput=append:/home/feralfile/.logs/feral-captive-portal.log
+StandardError=append:/home/feralfile/.logs/feral-captive-portal.log
+
+[Install]
+WantedBy=default.target

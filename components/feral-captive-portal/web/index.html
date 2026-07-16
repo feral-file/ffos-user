@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FF1 Wi-Fi Setup</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow">Feral File Art Computer</p>
+      <h1>Connect to Wi-Fi</h1>
+      <p class="lede">
+        Choose your network and enter the password. This device will join that network and
+        leave setup hotspot mode when the connection succeeds.
+      </p>
+      <p class="device" id="deviceLabel">Device: …</p>
+      <p class="device" id="hotspotPasswordLabel">Hotspot password: …</p>
+    </header>
+
+    <section class="panel" id="networkPanel">
+      <div class="panel-head">
+        <h2>Available networks</h2>
+        <button type="button" class="ghost" id="refreshBtn">Refresh</button>
+      </div>
+      <p class="hint" id="scanHint">Scanning nearby networks…</p>
+      <ul class="network-list" id="networkList" hidden></ul>
+    </section>
+
+    <section class="panel" id="passwordPanel" hidden>
+      <h2 id="selectedTitle">Network</h2>
+      <form id="connectForm">
+        <label for="passwordInput">Password</label>
+        <input
+          id="passwordInput"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          placeholder="Enter Wi-Fi password"
+        />
+        <div class="actions">
+          <button type="button" class="ghost" id="backBtn">Back</button>
+          <button type="submit" class="primary" id="connectBtn">Connect</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel status" id="statusPanel" hidden>
+      <div class="status-body" id="statusBody" hidden>
+        <div class="spinner" id="statusSpinner" hidden></div>
+        <p id="statusMessage"></p>
+        <p class="hint" id="statusHint" hidden></p>
+        <button type="button" class="primary" id="retryBtn" hidden>Try again</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

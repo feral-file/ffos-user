@@ -323,11 +323,13 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		return nil, fmt.Errorf("CDP write error: %w", err)
 	}
 
-	// Wait for response
-	_, response, err := c.conn.ReadMessage()
+	// Wait for the matching response id. Chromium can emit console / event
+	// notifications on the same websocket before the command result arrives, so
+	// keep reading until we receive the evaluate response for this request.
+	_, response, err := c.readResponse(reqID)
 	if err != nil {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("failed to read CDP response: %w", err)
+		return nil, err
 	}
 	c.mu.Unlock()
 
@@ -398,6 +400,36 @@ func (c *cdp) send(method string, params map[string]interface{}) (interface{}, e
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("CDP response type mismatch: %s", result.Type)
+	}
+}
+
+func (c *cdp) readResponse(expectedID int) (int, []byte, error) {
+	for {
+		messageType, response, err := c.conn.ReadMessage()
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to read CDP response: %w", err)
+		}
+
+		var envelope struct {
+			ID     int    `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := c.json.Unmarshal(response, &envelope); err != nil {
+			return 0, nil, fmt.Errorf("failed to parse CDP response: %w", err)
+		}
+
+		if envelope.ID != expectedID {
+			c.logger.Debug(
+				"Ignoring interleaved CDP frame",
+				zap.Int("expected_id", expectedID),
+				zap.Int("frame_id", envelope.ID),
+				zap.String("method", envelope.Method),
+				zap.Int("message_type", messageType),
+			)
+			continue
+		}
+
+		return messageType, response, nil
 	}
 }
 
