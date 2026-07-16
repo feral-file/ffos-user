@@ -403,3 +403,166 @@ func TestTracker_ApplyControlHardFailureCountsTowardDemotion(t *testing.T) {
 	require.False(t, p.ShouldPoll(), "control-path hard failures must demote background polling")
 	assert.Equal(t, before, exec.callCount())
 }
+
+// --- Recovery-futility learning ---------------------------------------------
+
+func isDetectArgv(argv []string) bool {
+	return len(argv) >= 2 && argv[1] == "detect"
+}
+
+// isRecoveryPokeArgv matches the fixed `getvcp 60 --brief` rescue read.
+func isRecoveryPokeArgv(argv []string) bool {
+	for _, a := range argv {
+		if a == "60" {
+			return true
+		}
+	}
+	return false
+}
+
+const partialVcpOutput = "VCP 10 C 50 100\n"
+
+// replyPartialSupport mimics the field case: detect works, every getvcp
+// batch exits non-zero yet still emits a usable VCP line for the codes that
+// work, and the recovery poke succeeds without changing anything.
+func replyPartialSupport(argv []string) ([]byte, error) {
+	if isDetectArgv(argv) {
+		return []byte("Monitor: ACME : PartialPanel\n"), nil
+	}
+	if isRecoveryPokeArgv(argv) {
+		return []byte("VCP 60 SNC x0f\n"), nil
+	}
+	return []byte(partialVcpOutput), errExit1
+}
+
+// TestTracker_PartialSupportKeepsValuesFlowingAndDropsRecovery pins the two
+// promises for partially-DDC-capable displays: the readable VCPs keep
+// updating on EVERY poll round (no demotion, ShouldPoll stays true), and
+// after ddcRecoveryFutileThreshold futile recoveries each round costs a
+// single getvcp instead of getvcp+poke+retry.
+func TestTracker_PartialSupportKeepsValuesFlowingAndDropsRecovery(t *testing.T) {
+	t.Parallel()
+	fp := "fp-partial"
+	p, exec, _ := newTrackedPanel(replyPartialSupport, &fp)
+	ctx := context.Background()
+
+	// Futility-learning rounds: detect + batch + poke + retry = 4 subprocesses.
+	for i := 0; i < ddcRecoveryFutileThreshold; i++ {
+		before := exec.callCount()
+		st, err := p.CollectStatus(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, st.Brightness, "round %d: readable VCPs must parse", i)
+		require.Equal(t, 4, exec.callCount()-before,
+			"round %d: recovery still attempted while learning", i)
+	}
+
+	// Futile: single-shot rounds (detect + batch = 2 subprocesses), values
+	// still flowing, polling never suspended.
+	for i := 0; i < 5; i++ {
+		require.True(t, p.ShouldPoll(), "partial support must never demote")
+		before := exec.callCount()
+		st, err := p.CollectStatus(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, st.Brightness)
+		require.Equal(t, 50, *st.Brightness)
+		require.Equal(t, 2, exec.callCount()-before,
+			"futile round %d: no recovery poke, no retry", i)
+	}
+}
+
+// TestTracker_RecoveryRescueKeepsRecoveryEnabled: when the recovery poke
+// genuinely fixes the read (a real transient), futility must not engage.
+func TestTracker_RecoveryRescueKeepsRecoveryEnabled(t *testing.T) {
+	t.Parallel()
+	fp := "fp-transient"
+	failNext := true
+	reply := func(argv []string) ([]byte, error) {
+		if isDetectArgv(argv) {
+			return []byte("Monitor: ACME : FlakyPanel\n"), nil
+		}
+		if isRecoveryPokeArgv(argv) {
+			failNext = false // the poke "wakes" the panel
+			return []byte("VCP 60 SNC x0f\n"), nil
+		}
+		if failNext {
+			return []byte("i2c transaction failed"), errExit1
+		}
+		failNext = true // next round's initial read fails again
+		return []byte(healthyVcpOutput), nil
+	}
+	p, exec, _ := newTrackedPanel(reply, &fp)
+	ctx := context.Background()
+
+	for i := 0; i < ddcRecoveryFutileThreshold*2; i++ {
+		before := exec.callCount()
+		st, err := p.CollectStatus(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, st.Brightness, "rescued round %d must parse", i)
+		require.Equal(t, 4, exec.callCount()-before,
+			"round %d: rescuing recovery must stay enabled", i)
+	}
+}
+
+// TestTracker_CleanReadReenablesRecovery: a clean initial read after futility
+// proves the wedge cleared, so a later failure gets the rescue again.
+func TestTracker_CleanReadReenablesRecovery(t *testing.T) {
+	t.Parallel()
+	fp := "fp-healing"
+	mode := "partial"
+	reply := func(argv []string) ([]byte, error) {
+		if isDetectArgv(argv) {
+			return []byte("Monitor: ACME : HealingPanel\n"), nil
+		}
+		if isRecoveryPokeArgv(argv) {
+			return []byte("VCP 60 SNC x0f\n"), nil
+		}
+		if mode == "clean" {
+			return []byte(healthyVcpOutput), nil
+		}
+		return []byte(partialVcpOutput), errExit1
+	}
+	p, exec, _ := newTrackedPanel(reply, &fp)
+	ctx := context.Background()
+
+	for i := 0; i < ddcRecoveryFutileThreshold; i++ {
+		_, err := p.CollectStatus(ctx)
+		require.NoError(t, err)
+	}
+	before := exec.callCount()
+	_, err := p.CollectStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, exec.callCount()-before, "futile mode engaged")
+
+	// The panel heals: one clean round re-arms the recovery path.
+	mode = "clean"
+	_, err = p.CollectStatus(ctx)
+	require.NoError(t, err)
+
+	mode = "partial"
+	before = exec.callCount()
+	_, err = p.CollectStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 4, exec.callCount()-before,
+		"recovery must be re-enabled after a clean read")
+}
+
+// TestTracker_DisplayChangeReenablesRecovery: futility is a per-generation
+// verdict; a swapped display starts with recovery available again.
+func TestTracker_DisplayChangeReenablesRecovery(t *testing.T) {
+	t.Parallel()
+	fp := "fp-old"
+	p, exec, _ := newTrackedPanel(replyPartialSupport, &fp)
+	ctx := context.Background()
+
+	for i := 0; i < ddcRecoveryFutileThreshold+1; i++ {
+		_, err := p.CollectStatus(ctx)
+		require.NoError(t, err)
+	}
+
+	fp = "fp-new"
+	before := exec.callCount()
+	_, err := p.CollectStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 4, exec.callCount()-before,
+		"new display generation must get the recovery path back")
+}

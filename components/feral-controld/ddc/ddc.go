@@ -487,6 +487,16 @@ func (p *panelDdc) detectMonitorModel(ctx context.Context) (string, error) {
 // misjudged.
 const ddcProbeFailThreshold = 3
 
+// ddcRecoveryFutileThreshold stops the recovery-and-retry path for the
+// current display generation after this many CONSECUTIVE poll rounds where
+// recovery was attempted and did NOT rescue the read. The recovery exists for
+// transient bus/display conditions; a display that ALWAYS needs it and never
+// benefits (e.g. partial DDC support that returns non-zero exit with usable
+// VCP lines) would otherwise cost 3 ddcutil subprocesses plus an Info log
+// every 5s round, forever. A clean initial read (or a display change)
+// re-enables recovery.
+const ddcRecoveryFutileThreshold = 3
+
 // ddcReprobeInterval bounds how long an "unsupported" verdict is trusted
 // without re-checking. A display's DDC/CI can start working with NO hotplug
 // event at all (the user toggles DDC/CI in the monitor's OSD menu), so a
@@ -511,9 +521,11 @@ type panelDdc struct {
 	//
 	// Demotion to unsupported requires ddcProbeFailThreshold hard-signature
 	// failures with no intervening success. Generic errors (I2C timeouts,
-	// ERR VCPs) neither count toward the streak nor reset it: they must not
-	// push a healthy panel toward demotion, and equally must not rescue a
-	// DDC-less panel from it. ANY success promotes.
+	// ERR VCPs, partial reads) NEVER demote — a display that keeps serving
+	// even one readable VCP must keep its 5s status updates flowing, and a
+	// display wedged in a generic-failure state (e.g. DDC dead in standby)
+	// must not earn a verdict that would blank status after it wakes. The
+	// recovery-futility mechanism below keeps such displays cheap instead.
 	// Neither CollectStatus nor ApplyControl is gated — explicit requests
 	// always get a real attempt; their outcomes feed the tracker, which is
 	// also what makes a panel whose DDC dies in standby self-heal: the
@@ -529,6 +541,12 @@ type panelDdc struct {
 	nextProbeAt time.Time
 	fingerprint string
 	generation  uint64
+	// Recovery-futility tracking (see ddcRecoveryFutileThreshold): once
+	// recoveryFutile is set, poll-path getvcp runs single-shot until a clean
+	// initial read or a display change re-enables recovery. setVCP (explicit
+	// intent) always keeps its recovery path.
+	recoveryFutileStreak int
+	recoveryFutile       bool
 }
 
 // refreshFingerprintLocked resets the tracker when the attached-display
@@ -546,6 +564,8 @@ func (p *panelDdc) refreshFingerprintLocked(fp string) {
 	p.unsupported = false
 	p.failStreak = 0
 	p.nextProbeAt = time.Time{}
+	p.recoveryFutileStreak = 0
+	p.recoveryFutile = false
 }
 
 // syncFingerprint refreshes the display fingerprint outside any other lock
@@ -614,6 +634,8 @@ func (p *panelDdc) recordOutcome(success, hardFail bool) {
 	// Generic failures while not (yet) unsupported: leave the state alone.
 	// They are transient I2C/panel conditions and must neither demote nor
 	// break the consecutive-hard-failure accounting into false resets.
+	// Persistently-generic displays are handled by recovery futility, not
+	// by demotion (their readable VCPs must keep updating every poll).
 }
 
 // ApplyControl runs setvcp for the resolved action/value pair.
@@ -750,11 +772,52 @@ func (p *panelDdc) CollectStatus(ctx context.Context) (*DdcPanelStatus, error) {
 	return panelStatus, nil
 }
 
+// ddcutilGetvcpNeedsRescue reports whether a getvcp --brief outcome is the
+// kind the recovery path retries: an error, a display-not-found hint, or
+// output without a single VCP line.
+func ddcutilGetvcpNeedsRescue(out []byte, err error) bool {
+	return err != nil ||
+		ddcutilOutputImpliesDisplayNotFound(out, err) ||
+		!ddcutilOutputHasVcpBriefLine(out)
+}
+
+// getVCPBriefBatch reads the poll VCPs with recovery-futility learning.
+//
+// Some displays ALWAYS need the recovery path and never benefit from it —
+// field case: partial DDC support where every getvcp exits non-zero yet
+// still emits usable VCP lines for the codes that do work. Pre-learning that
+// cost 3 ddcutil subprocesses plus an Info log every 5s round, forever.
+// After ddcRecoveryFutileThreshold consecutive futile recoveries the poll
+// path goes single-shot at Debug; the readable VCPs keep flowing every round
+// because the partial output still parses. A clean initial read or a display
+// change (fingerprint reset) re-enables recovery for genuine transients.
+// setVCP keeps its recovery path unconditionally (explicit intent).
 func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]byte, error) {
 	args := make([]string, 0, 4+len(vcpCodes))
 	args = append(args, "--noverify", "getvcp", "--brief")
 	args = append(args, vcpCodes...)
-	out, err := p.execDdcutilWithDisplayRecovery(ctx, append([]string{"ddcutil"}, args...)...)
+	argv := append([]string{"ddcutil"}, args...)
+	run := func() ([]byte, error) {
+		return p.exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+	}
+
+	out, err := run()
+	if !ddcutilGetvcpNeedsRescue(out, err) {
+		p.noteCleanInitialRead()
+		return out, nil
+	}
+
+	if p.recoverySuppressed() {
+		p.logger.Debug("ddcutil getvcp needs rescue; recovery suppressed as futile for this display",
+			zap.Strings("ddcutil_argv", argv))
+	} else {
+		p.logger.Info("ddcutil reported error or missing VCP output; running recovery and retrying once",
+			zap.Strings("ddcutil_argv", argv))
+		p.runDdcRecoveryPoke(ctx)
+		out, err = run()
+		p.noteRecoveryAttempt(!ddcutilGetvcpNeedsRescue(out, err))
+	}
+
 	// Some panels return non-zero when one VCP reports ERR but still emit usable
 	// VCP lines for others. In that case we want to keep parsing instead of
 	// failing the whole batch, as long as we see at least one VCP brief line.
@@ -762,6 +825,44 @@ func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]b
 		return out, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return out, nil
+}
+
+// recoverySuppressed reports whether the poll path should skip recovery.
+func (p *panelDdc) recoverySuppressed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.recoveryFutile
+}
+
+// noteCleanInitialRead re-enables recovery: the display answered without
+// help, so a future failure is transient-shaped again and worth a rescue.
+func (p *panelDdc) noteCleanInitialRead() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.recoveryFutile {
+		p.logger.Info("DDC reads are clean again; re-enabling the recovery path")
+	}
+	p.recoveryFutile = false
+	p.recoveryFutileStreak = 0
+}
+
+// noteRecoveryAttempt records whether a recovery round actually rescued the
+// read, and suppresses future recoveries once it has been consecutively
+// futile ddcRecoveryFutileThreshold times.
+func (p *panelDdc) noteRecoveryAttempt(rescued bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rescued {
+		p.recoveryFutileStreak = 0
+		return
+	}
+	p.recoveryFutileStreak++
+	if !p.recoveryFutile && p.recoveryFutileStreak >= ddcRecoveryFutileThreshold {
+		p.recoveryFutile = true
+		p.logger.Info("DDC recovery has not helped; switching to single-shot reads for this display",
+			zap.Int("futile_recoveries", p.recoveryFutileStreak),
+			zap.String("re_enabled_by", "a clean read or a display change"))
+	}
 }
 
 func (p *panelDdc) setVCP(ctx context.Context, vcpCode, value string) error {
@@ -772,8 +873,27 @@ func (p *panelDdc) setVCP(ctx context.Context, vcpCode, value string) error {
 	return nil
 }
 
+// runDdcRecoveryPoke issues the `getvcp 60` read whose side effect wakes
+// some panels' DDC out of a transient wedge; its own failure is only logged.
+func (p *panelDdc) runDdcRecoveryPoke(ctx context.Context) {
+	recoverOut, recoverErr := p.exec.CommandContext(
+		ctx,
+		"ddcutil",
+		"--noverify",
+		"getvcp",
+		"60",
+		"--brief",
+	).CombinedOutput()
+	if recoverErr != nil {
+		p.logger.Warn("ddcutil getvcp 60 as recovery after ddcutil error",
+			zap.Error(recoverErr),
+			zap.String("output", strings.TrimSpace(string(recoverOut))))
+	}
+}
+
 // execDdcutilWithDisplayRecovery runs ddcutil; on any error (or missing VCP lines
-// for `getvcp --brief`), runs getvcp 60 once and retries.
+// for `getvcp --brief`), runs getvcp 60 once and retries. Used by setVCP —
+// explicit intent always keeps the recovery path (no futility suppression).
 func (p *panelDdc) execDdcutilWithDisplayRecovery(ctx context.Context, argv ...string) ([]byte, error) {
 	if len(argv) < 1 {
 		return nil, fmt.Errorf("ddcutil: missing command name")
@@ -798,19 +918,7 @@ func (p *panelDdc) execDdcutilWithDisplayRecovery(ctx context.Context, argv ...s
 	p.logger.Info("ddcutil reported error or missing VCP output; running recovery and retrying once",
 		zap.Strings("ddcutil_argv", argv))
 
-	recoverOut, recoverErr := p.exec.CommandContext(
-		ctx,
-		"ddcutil",
-		"--noverify",
-		"getvcp",
-		"60",
-		"--brief",
-	).CombinedOutput()
-	if recoverErr != nil {
-		p.logger.Warn("ddcutil getvcp 60 as recovery after ddcutil error",
-			zap.Error(recoverErr),
-			zap.String("output", strings.TrimSpace(string(recoverOut))))
-	}
+	p.runDdcRecoveryPoke(ctx)
 
 	return run()
 }
