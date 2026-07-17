@@ -165,20 +165,29 @@ impl Cdp {
         });
         // Because we lock the socket, there can be only one command at a time.
         let mut sock = self.socket.lock().await;
-        sock.send(Message::Text(body.to_string().into())).await?;
-        println!("CDP: Sent command: {body}");
 
         let timeout_duration = Duration::from_secs(3);
-
-        // Wait for the response with the same ID.
-        // Or if the command is Page.navigate, wait for the response with corresponding event.
         println!(
-            "CDP: Waiting for response for {} with timeout {}s",
+            "CDP: Sending {} with timeout {}s",
             method,
             timeout_duration.as_secs()
         );
 
+        // The whole exchange — the send AND the response wait — sits under one
+        // hard timeout. The send must not be exempt: an established socket can
+        // stop making progress (peer backpressure, a kiosk restart mid-write)
+        // and `send` has no internal timeout, so an unbounded send would hold
+        // the socket mutex indefinitely and wedge every later CDP caller —
+        // breaking the invariant the fetch/dial timeouts already enforce (every
+        // CDP I/O is hard-timeout-bounded). A timeout here is deliberately not
+        // transport-dead on its own; navigate marks it suspect, and the
+        // liveness loop probes and replaces a truly dead socket.
         timeout(timeout_duration, async {
+            sock.send(Message::Text(body.to_string().into())).await?;
+            println!("CDP: Sent command: {body}");
+
+            // Wait for the response with the same ID.
+            // Or if the command is Page.navigate, wait for the response with corresponding event.
             // Keep getting messages until we get the right response.
             while let Some(msg) = sock.next().await {
                 let msg = match msg {
@@ -496,6 +505,57 @@ mod tests {
         );
         assert!(!handle.is_connected().await);
         assert!(handle.navigate("file:///whatever").await.is_ok());
+    }
+
+    /// Complete a real WebSocket handshake, then never read from the socket, so a
+    /// client's writes stop making progress once the kernel buffers fill.
+    async fn spawn_deaf_ws_endpoint() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                // The handshake completes so the client holds an ESTABLISHED
+                // WebSocket; the connection is then parked unread forever.
+                if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                    held.push(ws);
+                }
+            }
+        });
+        addr
+    }
+
+    /// PR #226 review regression: the ESTABLISHED-socket write path must be hard-
+    /// timeout-bounded too, not just the HTTP fetch and the WS dial. The send used
+    /// to sit outside the 3s timeout, so a backpressured/stalled CDP socket wedged
+    /// send_cmd — and the socket mutex it holds — forever.
+    #[tokio::test]
+    async fn send_cmd_write_is_bounded_against_deaf_socket() {
+        let addr = spawn_deaf_ws_endpoint().await;
+        let ws_url = format!("ws://{addr}/devtools/page/1");
+        let socket = Cdp::connect_ws(&ws_url)
+            .await
+            .expect("handshake against the deaf endpoint must complete");
+        let cdp = Cdp {
+            ws_url,
+            socket: Arc::new(Mutex::new(socket)),
+            current_id: AtomicU64::new(1),
+        };
+
+        // Large enough that the write cannot complete into the kernel/socket
+        // buffers while the peer never reads: the send itself must be the thing
+        // that hits the timeout, not the response wait.
+        let blob = "x".repeat(32 * 1024 * 1024);
+
+        let start = tokio::time::Instant::now();
+        let res = timeout(
+            Duration::from_secs(8),
+            cdp.send_cmd("Test.wedgedWrite", json!({ "blob": blob })),
+        )
+        .await
+        .expect("send_cmd must return on its own well before the outer bound");
+        assert!(res.is_err(), "a wedged write must surface an error");
+        assert!(start.elapsed() < Duration::from_secs(8));
     }
 
     #[tokio::test]
