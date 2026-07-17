@@ -21,6 +21,12 @@ const (
 	PLAYER_STATUS_POLLING_INTERVAL = 5 * time.Second
 )
 
+// errCDPNotReady marks a refresh pass skipped because CDP is not connected. On a
+// headless boot (no monitor) Chromium never starts, so CDP can stay absent for
+// hours; that is an expected state, not a failure, and must not surface as
+// Error-level log spam every retry interval.
+var errCDPNotReady = errors.New("CDP not connected")
+
 //go:generate mockgen -source=refresher.go -destination=../mocks/refresher.go -package=mocks -mock_names=Refresher=MockRefresher
 type Refresher interface {
 	Start()
@@ -82,7 +88,7 @@ func (r *refresher) background() {
 	// Process playing playlist until it succeeds
 	for {
 		if err := r.processPlayingPlaylist(); err != nil {
-			r.logger.Error("Failed to process playing playlist", zap.Error(err))
+			r.logProcessFailure(err)
 			r.clock.Sleep(PLAYER_STATUS_POLLING_INTERVAL)
 			continue
 		}
@@ -96,7 +102,7 @@ func (r *refresher) background() {
 		select {
 		case <-ticker.C():
 			if err := r.processPlayingPlaylist(); err != nil {
-				r.logger.Error("Failed to process playing playlist", zap.Error(err))
+				r.logProcessFailure(err)
 			}
 		case <-r.done:
 			ticker.Stop()
@@ -131,8 +137,28 @@ func (r *refresher) Stop() {
 	r.logger.Info("Refresher stopped")
 }
 
+// logProcessFailure logs one failed refresh pass. CDP absence stays at Debug:
+// it is the normal headless/mid-reconnect state, and both retry loops would
+// otherwise emit an Error every interval for hours on a monitor-less device.
+func (r *refresher) logProcessFailure(err error) {
+	if errors.Is(err, errCDPNotReady) || errors.Is(err, cdp.ErrCDPConnectionNotInitialized) {
+		r.logger.Debug("Skipping playlist refresh: CDP not connected")
+		return
+	}
+	r.logger.Error("Failed to process playing playlist", zap.Error(err))
+}
+
 // processPlayingPlaylist processes the playing playlist and sends it to CDP
 func (r *refresher) processPlayingPlaylist() error {
+	// FetchPlayerStatus and the final Send both need a live CDP connection; bail
+	// out before them while it is absent so headless boots do not poll Chromium
+	// that intentionally is not running. The connection can still drop between
+	// this check and the sends, which is why logProcessFailure also matches
+	// cdp.ErrCDPConnectionNotInitialized.
+	if !r.cdp.Initialized() {
+		return errCDPNotReady
+	}
+
 	// Get player status
 	playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
 	if err != nil {

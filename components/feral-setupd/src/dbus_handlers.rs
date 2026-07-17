@@ -2,7 +2,7 @@
 
 use crate::app_state::AppState;
 use crate::callbacks;
-use crate::cdp::Cdp;
+use crate::cdp::CdpHandle;
 use crate::constant;
 use crate::dbus_utils;
 use anyhow::Result;
@@ -12,7 +12,7 @@ use tokio::time::{self, Duration};
 
 pub async fn setup_dbus_listeners(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
 ) -> Result<Arc<AtomicBool>> {
     // Listen for QRCode switch signal
     let qrcode_switch_cb = callbacks::create_qrcode_switch_cb(app_state.clone(), chrome.clone());

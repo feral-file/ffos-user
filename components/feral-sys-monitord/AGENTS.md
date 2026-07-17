@@ -30,7 +30,7 @@ This service should stay focused on observation and publication. It should not g
 - `main.go` wires logger, config, watchdog, connectivity, DBus, monitor, event watcher, mediator, and Prometheus server.
 - `metric/` owns resource collection. `SysMetrics` payload fields: `cpu`, `gpu`, `memory`, `screen`, `disk`, `uptime`, `timestamp`. This is the shape JSON-encoded into every `sysmetrics` D-Bus signal body.
 - `Connectivity` owns internet-status tracking. Checks connectivity by TCP-dialing `8.8.8.8:443` `8.8.4.4:443` with a 5 s timeout each.
-- `SysEventWatcher` owns system event observation. It currently emits exactly **two** events: `gpu_hanging` and `gpu_recover`. These are detected by tailing `journalctl -f -k -g i915`, matching "GPU HANG" for `gpu_hanging` and "GUC: submission enabled" for `gpu_recover`.
+- `SysEventWatcher` owns system event observation. It currently emits exactly **two** events: `gpu_hanging` and `gpu_recover`. These are detected by tailing `journalctl -f -k -g amdgpu`, matching "GPU reset begin" or a "*ERROR* ring ... timeout" line for `gpu_hanging` and "GPU reset ... succeeded" for `gpu_recover` (see `classifyAMDGPUJournalLine` in `event.go`).
 - `Mediator` turns monitor outputs into D-Bus signals. It subscribes to `SysResMonitor`, `Connectivity`, and `SysEventWatcher` callbacks and publishes three D-Bus signals on `com.feralfile.sysmonitord` / `/com/feralfile/sysmonitord`:
   - `sysmetrics` — emitted on every metrics collection cycle; body is JSON-encoded `SysMetrics`.
   - `connectivity_change` — emitted when online/offline state changes; body is a single `bool`.

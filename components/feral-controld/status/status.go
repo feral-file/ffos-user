@@ -18,6 +18,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/drm"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -86,6 +87,20 @@ type poller struct {
 	lastPlaybackSampleAt      time.Time
 	lastIsPlaying             bool
 	playbackSampleInitialized bool
+
+	// displayConnected reports whether a physical display is attached (DRM
+	// connector status). Consulted before each DDC poll: with no display,
+	// ddcutil can never succeed, and every 5s round would spawn three ddcutil
+	// subprocesses and log an info+warn+error triplet — a permanent log flood
+	// on headless devices. Field (not a direct call) so tests can stub it.
+	displayConnected func() bool
+
+	// Whether CDP was initialized at the previous poll round. Only touched on the
+	// Start goroutine. Used to catch the disconnected→connected transition: a
+	// restarted Chromium reloads the web app from defaults, so status deduped
+	// against pre-restart hashes must be pushed fresh (the old
+	// PartOf=chromium-ready.target design reset these maps by restarting controld).
+	cdpWasInitialized bool
 }
 
 func NewPoller(
@@ -109,6 +124,7 @@ func NewPoller(
 		refreshChan:             make(chan struct{}, 10), // Buffered channel to prevent blocking
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+		displayConnected:        func() bool { return drm.DisplayConnected(drm.DefaultSysfsRoot) },
 	}
 }
 
@@ -151,9 +167,7 @@ func (s *poller) Start(ctx context.Context) {
 	defer statusTicker.Stop()
 
 	// Poll immediately on start
-	s.pollPlayerStatus(ctx)
-	s.pollDeviceStatus(ctx)
-	s.pollDDCStatus(ctx)
+	s.pollRound(ctx)
 
 	for {
 		select {
@@ -164,16 +178,30 @@ func (s *poller) Start(ctx context.Context) {
 			s.logger.Info("Status polling stopped")
 			return
 		case <-statusTicker.C:
-			s.pollPlayerStatus(ctx)
-			s.pollDeviceStatus(ctx)
-			s.pollDDCStatus(ctx)
+			s.pollRound(ctx)
 		case <-s.refreshChan:
 			s.logger.Info("Force refreshing status due to CDP command")
-			s.pollPlayerStatus(ctx)
-			s.pollDeviceStatus(ctx)
-			s.pollDDCStatus(ctx)
+			s.pollRound(ctx)
 		}
 	}
+}
+
+// pollRound runs one full poll pass. Before polling it drops the dedup hashes
+// whenever CDP has just (re)connected: the restarted Chromium's web app reloaded
+// from defaults, so "unchanged since last push" no longer implies the client has
+// the state — everything must go out fresh once.
+func (s *poller) pollRound(ctx context.Context) {
+	cdpInitialized := s.cdp.Initialized()
+	if cdpInitialized && !s.cdpWasInitialized {
+		s.logger.Info("CDP (re)connected, clearing status dedup caches for a fresh push")
+		clear(s.lastRelayerStatusHashes)
+		clear(s.lastWSStatusHashes)
+	}
+	s.cdpWasInitialized = cdpInitialized
+
+	s.pollPlayerStatus(ctx)
+	s.pollDeviceStatus(ctx)
+	s.pollDDCStatus(ctx)
 }
 
 func (s *poller) Stop() {
@@ -200,6 +228,17 @@ func (s *poller) ForceRefresh() {
 }
 
 func (s *poller) pollPlayerStatus(ctx context.Context) {
+	// While CDP is intentionally absent (headless boot with no monitor, or mid-reconnect
+	// after a kiosk/Chromium restart) every checkStatus send would fail at Error level and
+	// emit a player-status error notification each interval, flooding logs and Sentry. Skip
+	// the poll entirely in that state, but keep playback-duration accounting moving with a
+	// "not playing" sample so metrics do not freeze while disconnected.
+	if !s.cdp.Initialized() {
+		s.updateArtPlaybackMetrics(false, time.Now())
+		s.logger.Debug("Skipping player status poll: CDP not connected")
+		return
+	}
+
 	pageURL, err := s.cdp.PageNavigationURL(ctx)
 	if err != nil {
 		s.logger.Debug("Failed to read page URL before player status poll", zap.Error(err))
@@ -442,6 +481,46 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 		return
 	}
 
+	// Refresh the tracker's display fingerprint every round, BEFORE the
+	// no-display gate below can skip out. ShouldPoll's side effect is the
+	// poller's only per-tick fingerprint observation; if it only ran while a
+	// display is connected, an unplugged/powered-off period would be invisible
+	// to the tracker (the poller stops looking exactly while the topology is
+	// different), and verdicts latched around power-off (unsupported,
+	// recovery-futile) would survive an off→on cycle whose end state
+	// fingerprints identically to the start. Observing the "off" topology
+	// resets the tracker, so the monitor's return starts a fresh display
+	// generation — which also re-arms Generation()-keyed consumers like the
+	// sleep panel leg's retry cap.
+	shouldPoll := s.panelDDC != nil && s.panelDDC.ShouldPoll()
+
+	// Headless: no DRM connector is connected, so ddcutil cannot find a display
+	// and CollectStatus would fail (with recovery retries) every round. Skip the
+	// poll; plugging a monitor in flips the connector to "connected" via HPD and
+	// the next 5s round resumes polling. Cloud-initiated DDC commands still go
+	// through the executor and report their own errors, so this only quiets the
+	// background poll. A nil check keeps hand-constructed pollers (tests) safe.
+	//
+	// Both skip paths still push a one-shot "panel unreadable" DDC status (the
+	// hash dedup in sendNotification collapses repeats): consumers that cached
+	// the last real panel status (e.g. a brightness slider in the app) would
+	// otherwise show stale values forever, because pre-gate code kept emitting
+	// an Errors-carrying status when the panel became unreadable.
+	if s.displayConnected != nil && !s.displayConnected() {
+		s.logger.Debug("Skipping DDC status poll: no display connected")
+		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusNoDisplay())
+		return
+	}
+
+	// The availability tracker judged the display DDC/CI-incapable; it
+	// re-probes on display changes and on a slow interval. Not a fault — stay
+	// quiet instead of logging every 5s round.
+	if !shouldPoll {
+		s.logger.Debug("Skipping DDC status poll: display does not support DDC/CI")
+		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusUnsupported())
+		return
+	}
+
 	s.logger.Debug("Polling DDC panel status")
 
 	ddcCtx, cancel := context.WithTimeout(ctx, ddcPollTimeout)
@@ -454,4 +533,17 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	}
 
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatus)
+}
+
+// ddcStatusNoDisplay / ddcStatusUnsupported are the poll-skip notifications:
+// same DdcPanelStatus shape (Errors map) the pre-tracker code produced when
+// ddcutil could not read the panel, so wire consumers need no new handling.
+// Fresh values per call — sendNotification marshals asynchronously to two
+// channels and must never share mutable state.
+func ddcStatusNoDisplay() *ddc.DdcPanelStatus {
+	return &ddc.DdcPanelStatus{Errors: map[string]string{"panel": "no display connected"}}
+}
+
+func ddcStatusUnsupported() *ddc.DdcPanelStatus {
+	return &ddc.DdcPanelStatus{Errors: map[string]string{"panel": "display does not support DDC/CI"}}
 }

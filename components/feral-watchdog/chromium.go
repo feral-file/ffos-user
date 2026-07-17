@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,12 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// errChromiumHeadless tags a failed health check that happened while no
+// display is connected. Headless devices deliberately do not run Chromium
+// (the kiosk waits for a display), so these failures are expected and the
+// monitor loop logs them at debug instead of warning every check interval.
+var errChromiumHeadless = errors.New("chromium down while headless (expected)")
 
 const (
 	// Chromium configuration
@@ -51,6 +58,14 @@ const (
 //
 // restartChromium intentionally transitions back to the pre-connect mode so
 // the next check cycle does not pile a fresh restart onto an in-progress one.
+//
+// Display gating overrides both modes: while no DRM connector reads
+// "connected" (headless — including amdgpu's persistent "unknown" readings on
+// empty connectors), Chromium legitimately does not run and every failed check
+// is expected, so escalation is suppressed entirely (no restart, no
+// reboot-budget accumulation). Detection FAILS OPEN only when no connector
+// status is readable at all, and a reconnect re-anchors the pre-connect grace
+// window.
 type ChromiumMonitor struct {
 	mu                 sync.Mutex
 	cdpEndpoint        string
@@ -61,6 +76,16 @@ type ChromiumMonitor struct {
 	monitorStart       time.Time
 	lastSuccessfulResp time.Time
 	commandHandler     *CommandHandler
+
+	// drmSysfsRoot is the sysfs root consulted for display-attach state. It is a
+	// field (not the constant directly) so tests can inject a fixture directory.
+	drmSysfsRoot string
+	// headless latches "we last observed no connected display". It is
+	// how a reconnect is detected: on a headless device Chromium legitimately
+	// does not run, so escalation is suppressed while headless, and the first
+	// check after a display reappears re-anchors the startup-grace window so a
+	// just-plugged monitor gets the full grace instead of an instant restart.
+	headless bool
 }
 
 // NewChromiumMonitor creates a new Chromium monitor instance.
@@ -82,6 +107,7 @@ func NewChromiumMonitor(cdpEndpoint string, logger *zap.Logger, commandHandler *
 		hasEverConnected: false,
 		monitorStart:     time.Now(),
 		commandHandler:   commandHandler,
+		drmSysfsRoot:     defaultDRMSysfsRoot,
 	}
 }
 
@@ -102,7 +128,13 @@ func (m *ChromiumMonitor) Start(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := m.check(ctx); err != nil {
-				m.logger.Warn("Chromium: Health check failed", zap.Error(err))
+				if errors.Is(err, errChromiumHeadless) {
+					// Expected while no display is attached; the headless
+					// transition itself is logged once in checkHangState.
+					m.logger.Debug("Chromium: Health check failed while headless", zap.Error(err))
+				} else {
+					m.logger.Warn("Chromium: Health check failed", zap.Error(err))
+				}
 			}
 		}
 	}
@@ -131,7 +163,9 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 
 	// Check for response and connection errors
 	if err != nil {
-		m.checkHangState(ctx)
+		if m.checkHangState(ctx) {
+			return fmt.Errorf("%w: chromium request failed: %w", errChromiumHeadless, err)
+		}
 		return fmt.Errorf("chromium request failed: %w", err)
 	}
 	defer func() {
@@ -140,7 +174,9 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		m.checkHangState(ctx)
+		if m.checkHangState(ctx) {
+			return fmt.Errorf("%w: chromium returned non-200 status: %d", errChromiumHeadless, resp.StatusCode)
+		}
 		return fmt.Errorf("chromium returned non-200 status: %d", resp.StatusCode)
 	}
 
@@ -157,6 +193,10 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	m.mu.Lock()
 	m.lastSuccessfulResp = time.Now()
 	m.hasEverConnected = true
+	// A 200 proves a display is attached and Chromium is up. Clear the headless
+	// latch so a later genuine hang is escalated normally rather than being
+	// mistaken for a display reconnect and granted a fresh grace window.
+	m.headless = false
 	m.mu.Unlock()
 
 	return nil
@@ -167,17 +207,57 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 // so the cost of false positives is high: any spurious restart will be
 // repeated on the next 5-second tick.
 //
+// It reports whether the failure happened while headless (no connected
+// display), so the caller can tag it as expected rather than warn-worthy.
+//
 // The decision splits on hasEverConnected. Pre-connect, we wait through
 // CHROMIUM_STARTUP_GRACE; post-connect, the shorter CHROMIUM_HANG_THRESHOLD
 // applies. Both branches additionally consult the chromium-kiosk.service
 // activating state so we don't pile a fresh restart onto a restart that
 // systemd or someone else (OTA, user) is already running.
-func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
+func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
+	// Display gating comes first. On a headless device the kiosk deliberately
+	// waits for a display before launching Chromium, so /json/version is
+	// legitimately absent and is NOT a Chromium failure. While no connector
+	// reads "connected" we skip the entire escalation path: no kiosk restart
+	// and — critically — no restartHistory accumulation, so a device that sits
+	// headless for hours cannot later trip the 3-restarts-in-5-minutes reboot
+	// budget. The read is done outside m.mu because it touches the filesystem.
+	displayConnected := isDisplayConnected(m.drmSysfsRoot)
+
 	m.mu.Lock()
+	if !displayConnected {
+		// Latch headless so the first check after a reconnect re-anchors grace.
+		// Log the transition once instead of warning every check interval.
+		enteredHeadless := !m.headless
+		m.headless = true
+		m.mu.Unlock()
+		if enteredHeadless {
+			m.logger.Info("Chromium: No display connected; suppressing health-check escalation until a display reconnects")
+		}
+		return true
+	}
+	reconnected := m.headless
+	if m.headless {
+		// Display (re)appeared after a headless period. Escalation resumes, but
+		// with a FRESH pre-connect grace window: a just-plugged monitor must get
+		// the full CHROMIUM_STARTUP_GRACE for Chromium to cold-start, not an
+		// instant restart driven by the stale monitorStart from before it was
+		// unplugged.
+		m.headless = false
+		m.hasEverConnected = false
+		m.monitorStart = time.Now()
+		m.lastSuccessfulResp = time.Time{}
+	}
 	hasEverConnected := m.hasEverConnected
 	timeSinceLast := time.Since(m.lastSuccessfulResp)
 	timeSinceStart := time.Since(m.monitorStart)
 	m.mu.Unlock()
+
+	if reconnected {
+		m.logger.Info("Chromium: Display reconnected; resuming health-check escalation with a fresh startup grace",
+			zap.Duration("startup_grace", CHROMIUM_STARTUP_GRACE))
+	}
 
 	var (
 		shouldRestart bool
@@ -227,6 +307,7 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
 	m.mu.Lock()
 	m.restartChromium(ctx)
 	m.mu.Unlock()
+	return false
 }
 
 // restartChromium issues a kiosk restart (or, if we've burned through the

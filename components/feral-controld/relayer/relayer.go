@@ -335,7 +335,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 
 	// Set pong handler
 	conn.SetPongHandler(func(_ string) error {
-		r.logger.Info("Received pong from relayer")
+		r.logger.Debug("Received pong from relayer")
 		return conn.SetReadDeadline(time.Time{})
 	})
 
@@ -367,7 +367,6 @@ func (r *relayer) Connect(ctx context.Context) error {
 				ticker.Stop()
 				return
 			case <-ticker.C():
-				r.logger.Info("Relayer ping ticker fired")
 				r.ping()
 			}
 		}
@@ -473,6 +472,17 @@ func (r *relayer) background(ctx context.Context) {
 					continue
 				}
 
+				// Application pong is the relayer keepalive response: refresh the
+				// deadline, then stop before command handlers see the control frame.
+				// Keepalive success is routine — only failures deserve loud logs.
+				if payload.Type == "pong" {
+					r.logger.Debug("Received application pong from relayer")
+					if err := conn.SetReadDeadline(time.Time{}); err != nil {
+						r.logger.Error("Failed to clear read deadline after pong", zap.Error(err))
+					}
+					continue
+				}
+
 				r.logger.Info("Received message",
 					zap.ByteString("message", logMsg),
 					zap.String("type", payload.Type),
@@ -481,16 +491,6 @@ func (r *relayer) background(ctx context.Context) {
 					zap.String("topicID", derefString(payload.Message.TopicID)),
 					zap.Int("message_length", len(msg)),
 				)
-
-				// Application pong is the relayer keepalive response: refresh the
-				// deadline, then stop before command handlers see the control frame.
-				if payload.Type == "pong" {
-					r.logger.Info("Received application pong from relayer")
-					if err := conn.SetReadDeadline(time.Time{}); err != nil {
-						r.logger.Error("Failed to clear read deadline after pong", zap.Error(err))
-					}
-					continue
-				}
 
 				r.dispatchMessage(ctx, payload)
 			}
@@ -687,7 +687,7 @@ func (r *relayer) ping() {
 		return
 	}
 
-	r.logger.Info("Sending relayer ping")
+	r.logger.Debug("Sending relayer ping")
 	deadline := r.clock.Now().Add(PONG_WAIT)
 
 	if err := r.conn.SetReadDeadline(deadline); err != nil {

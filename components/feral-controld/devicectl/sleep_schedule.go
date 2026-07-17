@@ -33,6 +33,11 @@ type sleepScheduleCommand struct {
 	Enabled   bool   `json:"enabled"`
 	SleepTime string `json:"sleepTime"`
 	WakeTime  string `json:"wakeTime"`
+	// Days is optional on the wire: nil (absent, or JSON null) preserves the
+	// record's current days, mirroring the empty-string behavior of the time
+	// fields, so pre-days apps toggling enabled cannot clobber a days
+	// selection made by a newer app. An explicit empty array is rejected.
+	Days []string `json:"days"`
 }
 
 func StartSleepScheduleLoop(ctx context.Context, exec Executor, logger *zap.Logger) {
@@ -179,6 +184,32 @@ func (e *executor) wakeSleepScheduleLoop() {
 	}
 }
 
+// InvalidatePlayerSleepState marks the player (CDP) sleep leg as not applied and
+// wakes the schedule loop so it re-drives the player. Called on every CDP
+// (re)connect: controld now outlives Chromium, and a restarted kiosk reloads the
+// player web app awake — a tracker still recording "sleeping" would make
+// applySleepTransitionIfChanged skip the re-drive until the next schedule
+// boundary, leaving the display playing all night. The panel (DDC) leg is
+// deliberately left alone: panel hardware power state survives a browser
+// restart, so re-driving it would be wrong, not just redundant.
+func InvalidatePlayerSleepState(exec Executor, logger *zap.Logger) {
+	inv, ok := exec.(interface{ invalidatePlayerSleepState() })
+	if !ok {
+		logger.Warn("Executor does not support player sleep-state invalidation")
+		return
+	}
+	inv.invalidatePlayerSleepState()
+}
+
+func (e *executor) invalidatePlayerSleepState() {
+	e.sleepApplyMu.Lock()
+	e.sleepAppliedState, e.sleepApplyOK = nil, false
+	e.sleepApplyMu.Unlock()
+	// Safe before the loop starts (nil wake channel is a no-op) — the loop's first
+	// iteration evaluates the schedule from scratch anyway.
+	e.wakeSleepScheduleLoop()
+}
+
 func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface{}, error) {
 	var cmd sleepScheduleCommand
 	if err := e.json.Unmarshal(args, &cmd); err != nil {
@@ -201,6 +232,14 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 	}
 	if cmd.WakeTime != "" {
 		record.WakeTime = cmd.WakeTime
+	}
+	if cmd.Days != nil {
+		days, err := sleepschedule.NormalizeDays(cmd.Days)
+		if err != nil {
+			e.sleepScheduleFileMu.Unlock()
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
+		record.Days = days
 	}
 
 	// Recomputing the schedule should always drop any stale manual override.
@@ -339,8 +378,16 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 	defer e.sleepApplyMu.Unlock()
 
 	playerAligned := e.sleepApplyOK && e.sleepAppliedState != nil && *e.sleepAppliedState == state
+	// BOTH panel verdicts — the success ("panel already aligned") and the
+	// capped give-up (sleepPanelFailStreak >= panelRetryMax) — only hold for
+	// the display generation they were earned against: Generation() bumps when
+	// the DRM fingerprint changes, so a newly plugged/swapped panel is
+	// re-driven to the scheduled power state (a swapped-in monitor boots
+	// awake even mid sleep-window) and gets a fresh retry budget instead of
+	// inheriting the old panel's failure verdict.
 	panelAligned := e.panelDDC == nil ||
 		(e.sleepPanelState != nil && *e.sleepPanelState == state &&
+			e.sleepPanelGen == e.panelDDC.Generation() &&
 			(e.sleepPanelOK || e.sleepPanelFailStreak >= panelRetryMax))
 
 	if playerAligned && panelAligned {
@@ -359,21 +406,50 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 		return nil
 	}
 
+	// The player leg needs a full re-drive but CDP is down (headless boot with
+	// no monitor, or a kiosk/Chromium restart in progress). Attempting the send
+	// would fail with "CDP connection is not initialized" on every capped tick —
+	// an Error-level log flood that runs forever on headless devices. Defer
+	// quietly instead: the CDP (re)connect callback calls
+	// InvalidatePlayerSleepState, which wakes this loop, so the transition is
+	// re-driven the moment the player becomes reachable. Manual overrides
+	// (sleepNow/wakeNow/setSleepSchedule) go through applySleepTransition and
+	// still surface the CDP error to their caller.
+	if e.cdp != nil && !e.cdp.Initialized() {
+		e.logger.Debug("Deferring sleep schedule transition: CDP not connected",
+			zap.String("state", string(state)),
+			zap.String("reason", reason))
+		return nil
+	}
+
 	return e.applySleepTransitionLocked(ctx, state, reason)
 }
 
 // recordPanelApply stores the state the async FFP power worker last drove the
 // panel to and whether it succeeded. ok=false (or a state mismatch vs. desired)
 // makes the next applySleepTransitionIfChanged re-enqueue the panel alignment.
-func (e *executor) recordPanelApply(state sleepschedule.State, ok bool) {
+//
+// gen is the display generation the attempt ran against, captured by the
+// worker BEFORE the apply. A failure observed on a generation different from
+// the recorded one belongs to a NEW display and restarts the streak at 1 —
+// the fresh panel must get the full panelRetryMax budget (its DDC often needs
+// a few attempts right after hotplug), not inherit the old panel's exhausted
+// verdict.
+func (e *executor) recordPanelApply(state sleepschedule.State, ok bool, gen uint64) {
 	e.sleepApplyMu.Lock()
 	defer e.sleepApplyMu.Unlock()
+
+	sameDisplay := gen == e.sleepPanelGen
+	e.sleepPanelGen = gen
 
 	switch {
 	case ok:
 		e.sleepPanelFailStreak = 0
+	case !sameDisplay:
+		// First failure observed on a new display generation.
+		e.sleepPanelFailStreak = 1
 	case e.sleepPanelState != nil && *e.sleepPanelState == state:
-		// Consecutive failure for the same target state.
+		// Consecutive failure for the same target state on the same display.
 		e.sleepPanelFailStreak++
 	default:
 		// First failure for a new target state.
@@ -382,6 +458,14 @@ func (e *executor) recordPanelApply(state sleepschedule.State, ok bool) {
 
 	s := state
 	e.sleepPanelState, e.sleepPanelOK = &s, ok
+}
+
+// panelGeneration reads the current display generation (0 without a panel).
+func (e *executor) panelGeneration() uint64 {
+	if e.panelDDC == nil {
+		return 0
+	}
+	return e.panelDDC.Generation()
 }
 
 // applyFfpPowerStateAsync enqueues best-effort panel power alignment; it never blocks
@@ -425,6 +509,12 @@ func (e *executor) runSleepPowerAlignWorker() {
 	for {
 		job := <-e.sleepPowerAlignCh
 		job = e.drainCoalescedSleepPowerAlignJobs(job)
+		// Stamp the attempt with the display generation it actually runs
+		// against, captured BEFORE the (possibly multi-second) DDC round-trip:
+		// a hotplug landing mid-apply must not attribute the OLD display's
+		// failure to the NEW generation, which would silently consume the new
+		// display's fresh retry budget.
+		gen := e.panelGeneration()
 		// Detached from the relayer/schedule ctx so a canceled HTTP/WebSocket request
 		// does not abort DDC mid-flight; alignment remains best-effort with bounded
 		// wall time only (see ffpSleepPowerControlTimeout).
@@ -439,7 +529,7 @@ func (e *executor) runSleepPowerAlignWorker() {
 		}
 		// Record the outcome either way: on success the loop stops re-enqueuing this
 		// state; on failure the mismatch makes the next tick retry the panel leg.
-		e.recordPanelApply(job.state, err == nil)
+		e.recordPanelApply(job.state, err == nil, gen)
 	}
 }
 

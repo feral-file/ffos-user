@@ -104,6 +104,18 @@ func (mr *MockCDPMockRecorder) PageNavigationURL(ctx interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PageNavigationURL", reflect.TypeOf((*MockCDP)(nil).PageNavigationURL), ctx)
 }
 
+// Start mocks base method.
+func (m *MockCDP) Start(ctx context.Context, onConnect func()) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Start", ctx, onConnect)
+}
+
+// Start indicates an expected call of Start.
+func (mr *MockCDPMockRecorder) Start(ctx, onConnect interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockCDP)(nil).Start), ctx, onConnect)
+}
+
 // Send mocks base method.
 func (m *MockCDP) Send(method string, params map[string]interface{}) (interface{}, error) {
 	m.ctrl.T.Helper()

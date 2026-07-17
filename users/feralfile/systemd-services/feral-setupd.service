@@ -1,7 +1,12 @@
 [Unit]
 Description=Feral File Setup Service
-PartOf=chromium-ready.target
-After=system-ready.target feral-player.service feral-controld.service
+# Deliberately NOT ordered after feral-player.service or feral-controld.service:
+# setupd is the BLE/WiFi-provisioning recovery path and must come up even when
+# player or controld are failing or slow (an After= on them delays the start
+# job even when the start itself is --no-block). setupd starts BLE first and
+# waits for controld itself, bounded and non-fatally (src/main.rs), so it needs
+# no unit-level ordering on either. Pinned by test-headless-startup-contract.sh.
+After=system-ready.target
 StartLimitBurst=5
 StartLimitIntervalSec=600
 
@@ -15,3 +20,9 @@ RestartSec=5s
 TimeoutStopSec=5s
 StandardOutput=append:/home/feralfile/.logs/setupd.log
 StandardError=append:/home/feralfile/.logs/setupd.log
+
+# Activation is the explicit start in .start-services.sh — units in this dir are
+# bind-mounted, never `systemctl --user enable`d, so [Install] alone starts
+# nothing. Kept for consistency with the other units here.
+[Install]
+WantedBy=default.target

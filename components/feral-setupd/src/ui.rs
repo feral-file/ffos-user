@@ -1,14 +1,18 @@
 //! UI navigation functions for Chrome DevTools Protocol (CDP) interactions.
 
 use crate::app_state::{AppState, Page, unix_s};
-use crate::cdp::Cdp;
+use crate::cdp::CdpHandle;
 use crate::constant;
 use crate::setup_lifecycle::SetupPhase;
 use crate::startup;
-use crate::update_coordinator::{UpdateCheckResult, UpdateExecution};
+use crate::update_coordinator::{
+    RestorePageTarget, UPDATE_FAILED_RECOVERED_MSG, UpdateCheckResult, UpdateExecution,
+    restore_page_target,
+};
 use crate::updater;
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::{
     sync::mpsc,
     task,
@@ -29,7 +33,7 @@ fn build_qrcode_url(app_state: &Arc<AppState>) -> String {
     )
 }
 
-pub async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
+pub async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<CdpHandle>) -> Result<()> {
     // Normal QR navigation resets non-failure transient phases to idle (WifiConnecting,
     // CheckingVersion, Updating), while preserving UpdateFailed, Pairing, and Ready phases.
     // This ensures the device returns to a clean setup state when showing QR outside of
@@ -57,7 +61,7 @@ pub async fn show_qrcode(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result
 
 pub async fn show_reflashing_qrcode(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     flashing_guide_url: &str,
     current_version: &str,
     latest_version: &str,
@@ -86,21 +90,36 @@ pub async fn show_reflashing_qrcode(
     Ok(())
 }
 
-pub async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result<()> {
+pub async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<CdpHandle>) -> Result<()> {
     let mut page = app_state.page.lock().await;
 
     let webapp_url = constant::WEBAPP_URL;
 
     // The static player is now a readiness-gated local service. We trust systemd
     // for readiness and only keep the fast-path when Chromium is already on it.
-    let current_url = chrome.get_current_url().await?;
-    if current_url.starts_with(webapp_url) {
-        *page = Page::WebApp(unix_s());
-        return Ok(());
+    //
+    // A get_current_url failure must NOT propagate: on a headless boot there is no CDP at all, and
+    // this runs on the startup path (startup_with_internet -> show_webapp), so a `?` here would kill
+    // the daemon before BLE/D-Bus ever come up. Treat any failure as "not on the webapp" and fall
+    // through to a best-effort navigate (itself infallible when disconnected — the reconnect loop
+    // repaints once a browser appears).
+    match chrome.get_current_url().await {
+        Ok(current_url) if current_url.starts_with(webapp_url) => {
+            *page = Page::WebApp(unix_s());
+            return Ok(());
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("MAIN: get_current_url failed, assuming not on webapp: {e:#?}");
+        }
     }
 
-    // This is to avoid Err Network Changed from Chrome
-    time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
+    // This is to avoid Err Network Changed from Chrome. Only worth paying when a browser is
+    // actually connected — when disconnected the navigate below is a dropped no-op, and the
+    // delay would just slow down a headless startup for nothing.
+    if chrome.is_connected().await {
+        time::sleep(Duration::from_millis(constant::WIFI_WEBAPP_DELAY)).await;
+    }
     chrome
         .navigate(webapp_url)
         .await
@@ -112,7 +131,7 @@ pub async fn show_webapp(app_state: &Arc<AppState>, chrome: &Arc<Cdp>) -> Result
 }
 
 pub async fn show_message(
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     app_state: &Arc<AppState>,
     message: &str,
 ) -> Result<()> {
@@ -135,7 +154,7 @@ pub async fn show_message(
 /// navigation can no longer overwrite the page state set by a newer (possibly concurrent)
 /// transition — so the no-update restore guard reads a truthful page identity and cannot be
 /// tricked into clobbering a page another operation navigated to during the check.
-pub async fn navigate_transient_message(chrome: &Arc<Cdp>, message: &str) -> Result<()> {
+pub async fn navigate_transient_message(chrome: &Arc<CdpHandle>, message: &str) -> Result<()> {
     let encoded = urlencoding::encode(message);
     let message_url = format!("{}{}", constant::MSG_URL_PREFIX, encoded);
     chrome
@@ -147,7 +166,7 @@ pub async fn navigate_transient_message(chrome: &Arc<Cdp>, message: &str) -> Res
 }
 
 pub async fn show_system_upgrade(
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     app_state: &Arc<AppState>,
     message: &str,
 ) -> Result<()> {
@@ -163,7 +182,7 @@ pub async fn show_system_upgrade(
     Ok(())
 }
 
-pub async fn show_factory_reset(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) -> Result<()> {
+pub async fn show_factory_reset(chrome: &Arc<CdpHandle>, app_state: &Arc<AppState>) -> Result<()> {
     let message_url = format!(
         "{}{}",
         constant::MSG_URL_PREFIX,
@@ -180,9 +199,53 @@ pub async fn show_factory_reset(chrome: &Arc<Cdp>, app_state: &Arc<AppState>) ->
     Ok(())
 }
 
+/// Re-show the canonical UI surface after the CDP handle (re)connects to Chromium.
+///
+/// setupd now boots before the kiosk and survives kiosk restarts, so navigations issued while CDP
+/// was absent never reached the browser, and a freshly (re)started kiosk shows only its launcher
+/// logo. On every (re)connect the reconnect loop calls this to repaint the page the daemon believes
+/// it is on. This ONLY repaints — phase transitions, topic fetch, and update checks stay owned by
+/// their normal callers.
+///
+/// Skipped while an OTA owns the device (`update_in_progress`): the updater is actively driving its
+/// own progress screens through this same handle, and the canonical page/phase mid-update are
+/// transient (SystemUpgrade / Updating), so a restore_page_target repaint would fight it (and could
+/// even paint QR for a mid-update phase). The updater's next progress line — or the post-update
+/// reboot — repaints the correct surface.
+///
+/// A latched `UpdateFailed` is handled explicitly: its canonical page is `SystemUpgrade`, which
+/// `restore_page_target` intentionally treats as a *stale* failure screen (routing to QR/webapp by
+/// phase) for the post-retry D-Bus path where the latch is already cleared. Here the latch is still
+/// set, so we must re-assert the failure surface instead — otherwise a reconnect would bounce a
+/// failed device to QR while it still reports `update_failed`.
+pub async fn resync_canonical_page(app_state: &Arc<AppState>, chrome: &Arc<CdpHandle>) {
+    if app_state.update_in_progress.load(Ordering::Acquire) {
+        println!("MAIN: CDP resync skipped, update in progress");
+        return;
+    }
+
+    let phase = app_state.lifecycle.get();
+    if phase == SetupPhase::UpdateFailed {
+        let _ = show_system_upgrade(chrome, app_state, UPDATE_FAILED_RECOVERED_MSG).await;
+        return;
+    }
+
+    let current_page = { app_state.page.lock().await.clone() };
+    let result = match restore_page_target(&current_page, phase) {
+        RestorePageTarget::Webapp => show_webapp(app_state, chrome).await,
+        RestorePageTarget::Qrcode => show_qrcode(app_state, chrome).await,
+        RestorePageTarget::Message(msg) => show_message(chrome, app_state, &msg).await,
+        RestorePageTarget::FactoryReset => show_factory_reset(chrome, app_state).await,
+        RestorePageTarget::NoChange => Ok(()),
+    };
+    if let Err(e) = result {
+        eprintln!("MAIN: CDP resync failed to repaint canonical page: {e:#?}");
+    }
+}
+
 pub async fn show_version_check_failure(
     app_state: &Arc<AppState>,
-    chrome: &Arc<Cdp>,
+    chrome: &Arc<CdpHandle>,
     execution: UpdateExecution,
     ve: updater::VersionFetchError,
 ) -> Result<UpdateCheckResult> {
@@ -225,7 +288,7 @@ impl VersionCheckProgress {
 
     // No `app_state`: progress navigations are transient and must NOT record the canonical
     // page (see `navigate_transient_message`), so the receiver task only needs the CDP handle.
-    pub fn start(execution: UpdateExecution, chrome: Arc<Cdp>) -> Self {
+    pub fn start(execution: UpdateExecution, chrome: Arc<CdpHandle>) -> Self {
         if !Self::uses_tv_progress(execution) {
             return Self {
                 tx: None,
@@ -271,7 +334,6 @@ impl VersionCheckProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update_coordinator::{RestorePageTarget, restore_page_target};
 
     /// Regression for PR #206 review 4475472053: after a manual D-Bus no-update check, the
     /// transient "Checking for updates..." progress screen must be cleared by re-showing the real
