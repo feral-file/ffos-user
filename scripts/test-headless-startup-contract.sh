@@ -66,6 +66,38 @@ assert_contains "$units_dir/feral-setupd.service" "Restart=always"
 assert_not_contains "$units_dir/feral-setupd.service" "chromium-ready.target"
 assert_not_contains "$units_dir/feral-controld.service" "chromium-ready.target"
 
+# setupd must start independently of player/controld in BOTH coupling
+# dimensions, or BLE recovery silently re-gates on the very services whose
+# failure it exists to recover from:
+#   - unit ordering: an After=feral-player/feral-controld delays setupd's start
+#     job even when the systemctl start itself is --no-block (a Type=notify
+#     controld or a hung player start job holds it back);
+#   - script ordering: .start-services.sh runs under set -e, so any BLOCKING
+#     service start placed before the --no-block daemon starts can fail and
+#     abort the script before setupd ever starts.
+# Only dependency directives count as coupling — comments may (and do) name the
+# services while documenting exactly this contract.
+if grep -E '^(After|Before|Requires|Wants|BindsTo|PartOf|Requisite)=' "$units_dir/feral-setupd.service" | \
+   grep -Eq 'feral-(controld|player)\.service'; then
+  fail "feral-setupd.service must not declare a dependency on feral-controld/feral-player"
+fi
+
+daemon_start_line() {
+  grep -nF -- "systemctl --user start --no-block \"$1\"" "$start_services" | head -1 | cut -d: -f1
+}
+setupd_line="$(daemon_start_line feral-setupd.service)"
+controld_line="$(daemon_start_line feral-controld.service)"
+[ -n "$setupd_line" ] && [ -n "$controld_line" ] || fail "missing --no-block daemon starts in $start_services"
+# First blocking `systemctl --user start "..."` (quoted form; system-ready.target
+# is unquoted and the backward-compat block only stops/disables).
+first_blocking_line="$(grep -n 'systemctl --user start "' "$start_services" | grep -v -- --no-block | head -1 | cut -d: -f1)"
+if [ -n "$first_blocking_line" ]; then
+  [ "$setupd_line" -lt "$first_blocking_line" ] || \
+    fail "setupd --no-block start (line $setupd_line) must precede the first blocking service start (line $first_blocking_line): a failed blocking start aborts the script under set -e before BLE recovery starts"
+  [ "$controld_line" -lt "$first_blocking_line" ] || \
+    fail "controld --no-block start (line $controld_line) must precede the first blocking service start (line $first_blocking_line)"
+fi
+
 # --- 3. chromium-ready.target stays a pure signal -----------------------------
 
 [ -f "$units_dir/chromium-ready.target" ] || fail "chromium-ready.target unit missing"

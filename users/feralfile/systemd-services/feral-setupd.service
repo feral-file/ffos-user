@@ -1,6 +1,12 @@
 [Unit]
 Description=Feral File Setup Service
-After=system-ready.target feral-player.service feral-controld.service
+# Deliberately NOT ordered after feral-player.service or feral-controld.service:
+# setupd is the BLE/WiFi-provisioning recovery path and must come up even when
+# player or controld are failing or slow (an After= on them delays the start
+# job even when the start itself is --no-block). setupd starts BLE first and
+# waits for controld itself, bounded and non-fatally (src/main.rs), so it needs
+# no unit-level ordering on either. Pinned by test-headless-startup-contract.sh.
+After=system-ready.target
 StartLimitBurst=5
 StartLimitIntervalSec=600
 
