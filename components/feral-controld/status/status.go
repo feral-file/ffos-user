@@ -481,6 +481,19 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 		return
 	}
 
+	// Refresh the tracker's display fingerprint every round, BEFORE the
+	// no-display gate below can skip out. ShouldPoll's side effect is the
+	// poller's only per-tick fingerprint observation; if it only ran while a
+	// display is connected, an unplugged/powered-off period would be invisible
+	// to the tracker (the poller stops looking exactly while the topology is
+	// different), and verdicts latched around power-off (unsupported,
+	// recovery-futile) would survive an off→on cycle whose end state
+	// fingerprints identically to the start. Observing the "off" topology
+	// resets the tracker, so the monitor's return starts a fresh display
+	// generation — which also re-arms Generation()-keyed consumers like the
+	// sleep panel leg's retry cap.
+	shouldPoll := s.panelDDC != nil && s.panelDDC.ShouldPoll()
+
 	// Headless: no DRM connector is connected, so ddcutil cannot find a display
 	// and CollectStatus would fail (with recovery retries) every round. Skip the
 	// poll; plugging a monitor in flips the connector to "connected" via HPD and
@@ -502,7 +515,7 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 	// The availability tracker judged the display DDC/CI-incapable; it
 	// re-probes on display changes and on a slow interval. Not a fault — stay
 	// quiet instead of logging every 5s round.
-	if !s.panelDDC.ShouldPoll() {
+	if !shouldPoll {
 		s.logger.Debug("Skipping DDC status poll: display does not support DDC/CI")
 		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusUnsupported())
 		return

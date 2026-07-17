@@ -493,17 +493,31 @@ const ddcProbeFailThreshold = 3
 // transient bus/display conditions; a display that ALWAYS needs it and never
 // benefits (e.g. partial DDC support that returns non-zero exit with usable
 // VCP lines) would otherwise cost 3 ddcutil subprocesses plus an Info log
-// every 5s round, forever. A clean initial read (or a display change)
-// re-enables recovery.
+// every 5s round, forever. A clean initial read, a rescuing recovery, or a
+// display change re-enables recovery. Suppression only applies while failed
+// reads still yield usable VCP lines (see getVCPBriefBatch): a totally-failed
+// read is a different situation than the one the verdict was learned from and
+// always gets the rescue attempt.
 const ddcRecoveryFutileThreshold = 3
 
 // ddcReprobeInterval bounds how long an "unsupported" verdict is trusted
-// without re-checking. A display's DDC/CI can start working with NO hotplug
-// event at all (the user toggles DDC/CI in the monitor's OSD menu), so a
-// purely event-driven reset would miss it; a slow periodic probe is the
-// backstop. Display changes (plug/unplug/swap) reset immediately via the
-// DRM fingerprint instead.
+// without re-checking, for a display generation that has NEVER answered a
+// DDC read. A display's DDC/CI can start working with NO hotplug event at
+// all (the user toggles DDC/CI in the monitor's OSD menu), so a purely
+// event-driven reset would miss it; a slow periodic probe is the backstop.
+// Display changes (plug/unplug/swap) reset immediately via the DRM
+// fingerprint instead.
 const ddcReprobeInterval = 10 * time.Minute
+
+// ddcReprobeIntervalProven is the much shorter lease for a display generation
+// that HAS answered DDC reads before. A hard "no DDC/CI" from such a panel is
+// almost never a capability change — the dominant field case is the monitor
+// manually powered off while its DRM connector keeps reading "connected"
+// (cached EDID, no fingerprint change). The verdict must therefore be
+// re-checked on a human timescale so the panel is picked up within ~half a
+// minute of being powered back on, not up to ten minutes later. Cost while
+// the monitor stays off: one probe (a few ddcutil subprocesses) per interval.
+const ddcReprobeIntervalProven = 30 * time.Second
 
 type panelDdc struct {
 	exec   wrapper.Exec
@@ -541,6 +555,13 @@ type panelDdc struct {
 	nextProbeAt time.Time
 	fingerprint string
 	generation  uint64
+	// everSucceeded remembers whether THIS display generation has ever
+	// answered a DDC read/write. It selects the reprobe lease when the
+	// tracker demotes: a proven panel gets ddcReprobeIntervalProven (its
+	// hard failures are almost always "monitor powered off", a temporary
+	// state), an unproven one the slow ddcReprobeInterval (genuinely
+	// DDC-less TVs must stay cheap).
+	everSucceeded bool
 	// Recovery-futility tracking (see ddcRecoveryFutileThreshold): once
 	// recoveryFutile is set, poll-path getvcp runs single-shot until a clean
 	// initial read or a display change re-enables recovery. setVCP (explicit
@@ -564,6 +585,7 @@ func (p *panelDdc) refreshFingerprintLocked(fp string) {
 	p.unsupported = false
 	p.failStreak = 0
 	p.nextProbeAt = time.Time{}
+	p.everSucceeded = false
 	p.recoveryFutileStreak = 0
 	p.recoveryFutile = false
 }
@@ -612,13 +634,14 @@ func (p *panelDdc) recordOutcome(success, hardFail bool) {
 		p.unsupported = false
 		p.failStreak = 0
 		p.nextProbeAt = time.Time{}
+		p.everSucceeded = true
 	case p.unsupported:
 		// Any failed attempt while unsupported — hard OR generic — arms the
 		// next reprobe window. Without this, a reprobe that failed with a
 		// non-hard error would leave nextProbeAt in the past and reopen
 		// continuous polling, resurrecting the exact flood the verdict
 		// suppresses. The verdict itself only ever lifts on a success.
-		p.nextProbeAt = p.clock.Now().Add(ddcReprobeInterval)
+		p.nextProbeAt = p.clock.Now().Add(p.reprobeDelayLocked())
 	case hardFail:
 		p.failStreak++
 		p.logger.Info("DDC probe found no DDC/CI capable display",
@@ -626,9 +649,10 @@ func (p *panelDdc) recordOutcome(success, hardFail bool) {
 			zap.Int("threshold", ddcProbeFailThreshold))
 		if p.failStreak >= ddcProbeFailThreshold {
 			p.unsupported = true
-			p.nextProbeAt = p.clock.Now().Add(ddcReprobeInterval)
+			p.nextProbeAt = p.clock.Now().Add(p.reprobeDelayLocked())
 			p.logger.Info("Marking DDC panel unavailable; suspending status polls",
-				zap.Duration("reprobe_interval", ddcReprobeInterval))
+				zap.Duration("reprobe_interval", p.reprobeDelayLocked()),
+				zap.Bool("panel_proven_before", p.everSucceeded))
 		}
 	}
 	// Generic failures while not (yet) unsupported: leave the state alone.
@@ -636,6 +660,18 @@ func (p *panelDdc) recordOutcome(success, hardFail bool) {
 	// break the consecutive-hard-failure accounting into false resets.
 	// Persistently-generic displays are handled by recovery futility, not
 	// by demotion (their readable VCPs must keep updating every poll).
+}
+
+// reprobeDelayLocked selects the "unsupported" reprobe lease for the current
+// display generation: short for a panel that has already proven it speaks
+// DDC/CI (its hard failures are near-certainly a monitor power-off, which
+// must be picked back up quickly), slow for one that never has (genuinely
+// DDC-less displays must stay cheap). Requires p.mu held.
+func (p *panelDdc) reprobeDelayLocked() time.Duration {
+	if p.everSucceeded {
+		return ddcReprobeIntervalProven
+	}
+	return ddcReprobeInterval
 }
 
 // ApplyControl runs setvcp for the resolved action/value pair.
@@ -789,8 +825,10 @@ func ddcutilGetvcpNeedsRescue(out []byte, err error) bool {
 // cost 3 ddcutil subprocesses plus an Info log every 5s round, forever.
 // After ddcRecoveryFutileThreshold consecutive futile recoveries the poll
 // path goes single-shot at Debug; the readable VCPs keep flowing every round
-// because the partial output still parses. A clean initial read or a display
-// change (fingerprint reset) re-enables recovery for genuine transients.
+// because the partial output still parses. A clean initial read, a rescuing
+// recovery, or a display change (fingerprint reset) re-enables recovery for
+// genuine transients, and suppression never applies to totally-failed reads
+// (no VCP lines) — those always get the rescue attempt.
 // setVCP keeps its recovery path unconditionally (explicit intent).
 func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]byte, error) {
 	args := make([]string, 0, 4+len(vcpCodes))
@@ -807,7 +845,15 @@ func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]b
 		return out, nil
 	}
 
-	if p.recoverySuppressed() {
+	// Futility suppression only holds while the failed initial read still
+	// yields at least one usable VCP line — the partial-support shape the
+	// verdict was learned from, where the read is already parseable and
+	// recovery adds nothing. A read with NO VCP lines is a different
+	// situation (field case: monitor power-cycled with a stable DRM
+	// fingerprint, its DDC asleep until the wake poke), and skipping the
+	// rescue there deadlocks status forever: the clean initial read that
+	// would lift the latch may be impossible without the poke.
+	if p.recoverySuppressed() && ddcutilOutputHasVcpBriefLine(out) {
 		p.logger.Debug("ddcutil getvcp needs rescue; recovery suppressed as futile for this display",
 			zap.Strings("ddcutil_argv", argv))
 	} else {
@@ -848,11 +894,18 @@ func (p *panelDdc) noteCleanInitialRead() {
 
 // noteRecoveryAttempt records whether a recovery round actually rescued the
 // read, and suppresses future recoveries once it has been consecutively
-// futile ddcRecoveryFutileThreshold times.
+// futile ddcRecoveryFutileThreshold times. A rescue also lifts an existing
+// futility verdict: recovery demonstrably helps this display again (e.g. the
+// wake poke after a monitor power cycle), so the learned give-up no longer
+// describes it.
 func (p *panelDdc) noteRecoveryAttempt(rescued bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if rescued {
+		if p.recoveryFutile {
+			p.logger.Info("DDC recovery rescued a failing read; re-enabling the recovery path")
+		}
+		p.recoveryFutile = false
 		p.recoveryFutileStreak = 0
 		return
 	}
@@ -861,7 +914,7 @@ func (p *panelDdc) noteRecoveryAttempt(rescued bool) {
 		p.recoveryFutile = true
 		p.logger.Info("DDC recovery has not helped; switching to single-shot reads for this display",
 			zap.Int("futile_recoveries", p.recoveryFutileStreak),
-			zap.String("re_enabled_by", "a clean read or a display change"))
+			zap.String("re_enabled_by", "a clean read, a rescuing recovery, or a display change"))
 	}
 }
 

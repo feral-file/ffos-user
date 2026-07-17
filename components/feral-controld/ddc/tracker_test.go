@@ -250,6 +250,78 @@ func TestTracker_FailedReprobeArmsNextWindow(t *testing.T) {
 	}
 }
 
+// TestTracker_ProvenPanelPowerOffReprobesQuickly pins the fast-lease promise:
+// a display generation that has already answered DDC reads gets the SHORT
+// reprobe lease when it later demotes. The dominant field case is a monitor
+// manually powered off (connector still "connected", hard "no DDC/CI" from
+// every probe): once it is powered back on, status must resume within
+// ~ddcReprobeIntervalProven, not up to ten minutes later.
+func TestTracker_ProvenPanelPowerOffReprobesQuickly(t *testing.T) {
+	t.Parallel()
+	fp := "fp-proven-panel"
+	mode := "awake"
+	reply := func(argv []string) ([]byte, error) {
+		if isRecoveryPokeArgv(argv) {
+			if mode == "off" {
+				return []byte(noDdcOutput), errExit1
+			}
+			if mode == "asleep" {
+				mode = "awake" // the poke wakes the panel's DDC
+			}
+			return []byte("VCP 60 SNC x0f\n"), nil
+		}
+		if isDetectArgv(argv) {
+			if mode == "awake" {
+				return []byte("Monitor: ACME : FieldPanel\n"), nil
+			}
+			return []byte(noDdcOutput), errExit1
+		}
+		if mode == "awake" {
+			return []byte(healthyVcpOutput), nil
+		}
+		return []byte(noDdcOutput), errExit1
+	}
+	p, _, clock := newTrackedPanel(reply, &fp)
+
+	// The panel proves itself with a healthy round.
+	require.True(t, pollRound(t, p))
+
+	// Monitor manually powered off: hard failures demote after the threshold.
+	mode = "off"
+	for i := 0; i < ddcProbeFailThreshold; i++ {
+		require.True(t, pollRound(t, p))
+	}
+	require.False(t, pollRound(t, p), "hard failures must close the gate")
+
+	// Monitor powered back on (poke-needy, fingerprint unchanged): the PROVEN
+	// lease must reopen the gate quickly and the rescue must rehabilitate.
+	mode = "asleep"
+	clock.advance(ddcReprobeIntervalProven + time.Second)
+	require.True(t, pollRound(t, p), "proven panel must reprobe on the short lease")
+	require.True(t, pollRound(t, p), "a rescued reprobe must reopen polling")
+}
+
+// TestTracker_UnprovenPanelKeepsSlowReprobe pins the flip side: a display
+// generation that has NEVER answered DDC (a genuinely DDC-less TV) must NOT
+// inherit the short lease — it stays on the slow interval so the verdict
+// keeps it cheap.
+func TestTracker_UnprovenPanelKeepsSlowReprobe(t *testing.T) {
+	t.Parallel()
+	fp := "fp-tv"
+	p, _, clock := newTrackedPanel(replyNoDdc, &fp)
+
+	for i := 0; i < ddcProbeFailThreshold; i++ {
+		require.True(t, pollRound(t, p))
+	}
+	require.False(t, pollRound(t, p))
+
+	clock.advance(ddcReprobeIntervalProven + time.Second)
+	require.False(t, pollRound(t, p), "unproven panel must not get the short lease")
+
+	clock.advance(ddcReprobeInterval)
+	require.True(t, pollRound(t, p), "the slow window must still reopen")
+}
+
 // TestTracker_FingerprintChangeResetsImmediately proves plugging in a
 // different display re-initializes at once — no waiting for the slow window —
 // and bumps the generation consumers key their own give-up state on.
@@ -544,6 +616,116 @@ func TestTracker_CleanReadReenablesRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 4, exec.callCount()-before,
 		"recovery must be re-enabled after a clean read")
+}
+
+// TestTracker_PowerCycleRecoversDespiteFutileLatch pins the field regression:
+// a monitor manually powered off (DRM connector still "connected", so the
+// fingerprint never changes) makes every recovery futile and latches the
+// verdict. When the monitor comes back needing the getvcp-60 wake poke, the
+// latch must not suppress the rescue — a totally-failed read (no VCP lines)
+// is not the partial-support shape futility was learned from, and without the
+// poke the "clean initial read" escape hatch is unreachable, deadlocking
+// ddc_status forever.
+func TestTracker_PowerCycleRecoversDespiteFutileLatch(t *testing.T) {
+	t.Parallel()
+	fp := "fp-stable-across-power-cycle"
+	// off: monitor powered off, all DDC traffic fails (generic, so the poll
+	//      gate never closes). asleep: monitor back on, DDC answers only
+	//      after the wake poke. awake: fully up.
+	mode := "off"
+	reply := func(argv []string) ([]byte, error) {
+		if isRecoveryPokeArgv(argv) {
+			if mode == "off" {
+				return []byte("Display not found\n"), errExit1
+			}
+			if mode == "asleep" {
+				mode = "awake" // the poke wakes the panel's DDC
+			}
+			return []byte("VCP 60 SNC x0f\n"), nil
+		}
+		if isDetectArgv(argv) {
+			if mode == "awake" {
+				return []byte("Monitor: ACME : FieldPanel\n"), nil
+			}
+			return []byte("Display not found\n"), errExit1
+		}
+		if mode == "awake" {
+			return []byte(healthyVcpOutput), nil
+		}
+		return []byte("Display not found\n"), errExit1
+	}
+	p, exec, _ := newTrackedPanel(reply, &fp)
+	ctx := context.Background()
+
+	// Off period: enough rounds to latch futility.
+	for i := 0; i < ddcRecoveryFutileThreshold+2; i++ {
+		require.True(t, pollRound(t, p), "generic failures must keep the gate open")
+	}
+	p.mu.Lock()
+	futile := p.recoveryFutile
+	p.mu.Unlock()
+	require.True(t, futile, "futility must latch while the monitor is off")
+
+	// Monitor powered back on; same fingerprint; DDC needs the wake poke.
+	mode = "asleep"
+	before := exec.callCount()
+	st, err := p.CollectStatus(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, st.Brightness, "power-cycled panel must recover via the rescue poke")
+	require.Equal(t, 50, *st.Brightness)
+	require.Equal(t, 4, exec.callCount()-before,
+		"totally-failed read must bypass futility suppression: detect + batch + poke + retry")
+
+	p.mu.Lock()
+	futile = p.recoveryFutile
+	p.mu.Unlock()
+	require.False(t, futile, "a rescuing recovery must lift the futility latch")
+}
+
+// TestTracker_PowerCycleReprobeRecoversDespiteFutileLatch is the hard-signature
+// variant: the off period demotes the tracker (unsupported) AND latches
+// futility. The scheduled reprobe after the monitor returns must still get the
+// rescue poke, or every reprobe fails single-shot and the verdict never lifts.
+func TestTracker_PowerCycleReprobeRecoversDespiteFutileLatch(t *testing.T) {
+	t.Parallel()
+	fp := "fp-stable-across-power-cycle"
+	mode := "off"
+	reply := func(argv []string) ([]byte, error) {
+		if isRecoveryPokeArgv(argv) {
+			if mode == "off" {
+				return []byte(noDdcOutput), errExit1
+			}
+			if mode == "asleep" {
+				mode = "awake"
+			}
+			return []byte("VCP 60 SNC x0f\n"), nil
+		}
+		if isDetectArgv(argv) {
+			if mode == "awake" {
+				return []byte("Monitor: ACME : FieldPanel\n"), nil
+			}
+			return []byte(noDdcOutput), errExit1
+		}
+		if mode == "awake" {
+			return []byte(healthyVcpOutput), nil
+		}
+		return []byte(noDdcOutput), errExit1
+	}
+	p, _, clock := newTrackedPanel(reply, &fp)
+
+	// Off period: hard signature demotes after the threshold (and the futile
+	// recoveries along the way latch suppression).
+	for i := 0; i < ddcProbeFailThreshold; i++ {
+		require.True(t, pollRound(t, p))
+	}
+	require.False(t, pollRound(t, p), "hard failures must close the gate")
+
+	// Monitor back on (same fingerprint, poke-needy); the next reprobe window
+	// must rescue and fully rehabilitate.
+	mode = "asleep"
+	clock.advance(ddcReprobeInterval + time.Second)
+	require.True(t, pollRound(t, p), "the scheduled reprobe must run")
+	require.True(t, pollRound(t, p), "a rescued reprobe must reopen polling")
 }
 
 // TestTracker_DisplayChangeReenablesRecovery: futility is a per-generation

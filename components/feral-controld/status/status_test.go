@@ -400,6 +400,10 @@ type fakePanelDDC struct {
 	err        error
 	// noPoll simulates the availability tracker's "unsupported" verdict.
 	noPoll bool
+	// shouldPollCalls counts ShouldPoll invocations; the real implementation
+	// refreshes the display fingerprint as a side effect, so the poller must
+	// call it every round even when the no-display gate skips the poll.
+	shouldPollCalls int
 }
 
 func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
@@ -413,7 +417,10 @@ func (f *fakePanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.Ra
 	return nil
 }
 
-func (f *fakePanelDDC) ShouldPoll() bool   { return !f.noPoll }
+func (f *fakePanelDDC) ShouldPoll() bool {
+	f.shouldPollCalls++
+	return !f.noPoll
+}
 func (f *fakePanelDDC) Generation() uint64 { return 0 }
 
 func TestPollDDCStatus_ContextCarriesTimeout(t *testing.T) {
@@ -545,6 +552,34 @@ func TestPollDDCStatus_SkipsWhenNoDisplayConnected(t *testing.T) {
 	p.pollDDCStatus(context.Background())
 	if fRelayer.sendCalls != 1 {
 		t.Fatalf("expected dedup to suppress the repeat notification, got %d sends", fRelayer.sendCalls)
+	}
+}
+
+// TestPollDDCStatus_NoDisplaySkipStillObservesFingerprint pins the tracker's
+// visibility into off periods: ShouldPoll (whose side effect is the per-tick
+// display-fingerprint refresh) must run even on rounds the no-display gate
+// skips. Otherwise a monitor powered off and back on with an unchanged end
+// fingerprint is invisible to the tracker, and verdicts latched around
+// power-off (unsupported, recovery-futile) survive the power cycle and kill
+// ddc_status forever.
+func TestPollDDCStatus_NoDisplaySkipStillObservesFingerprint(t *testing.T) {
+	fakeDDC := &fakePanelDDC{status: &ddc.DdcPanelStatus{}}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return false },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+
+	if fakeDDC.shouldPollCalls != 1 {
+		t.Fatalf("ShouldPoll must run on no-display rounds to refresh the fingerprint, got %d calls", fakeDDC.shouldPollCalls)
 	}
 }
 
