@@ -164,7 +164,7 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 	// Check for response and connection errors
 	if err != nil {
 		if m.checkHangState(ctx) {
-			return fmt.Errorf("%w: chromium request failed: %v", errChromiumHeadless, err)
+			return fmt.Errorf("%w: chromium request failed: %w", errChromiumHeadless, err)
 		}
 		return fmt.Errorf("chromium request failed: %w", err)
 	}

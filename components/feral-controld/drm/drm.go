@@ -84,7 +84,8 @@ func Fingerprint(sysfsRoot string) string {
 		dir := filepath.Dir(statusFile)
 
 		status := "unreadable"
-		if data, err := os.ReadFile(statusFile); err == nil { // #nosec G304 -- path comes from a fixed sysfs glob.
+		// #nosec G304 -- path comes from a fixed sysfs glob.
+		if data, err := os.ReadFile(statusFile); err == nil {
 			status = strings.TrimSpace(string(data))
 		}
 
@@ -96,7 +97,8 @@ func Fingerprint(sysfsRoot string) string {
 		// the connected connector, so detection is not weakened.
 		edid := "-"
 		if status == "connected" {
-			if data, err := os.ReadFile(filepath.Join(dir, "edid")); err == nil && len(data) > 0 { // #nosec G304 -- fixed sysfs layout.
+			// #nosec G304 -- fixed sysfs layout.
+			if data, err := os.ReadFile(filepath.Join(dir, "edid")); err == nil && len(data) > 0 {
 				sum := sha256.Sum256(data)
 				edid = hex.EncodeToString(sum[:8])
 			}
