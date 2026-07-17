@@ -1,7 +1,7 @@
 # Release-rail evidence ledger
 
 Consumed by `scripts/check-release-rail.sh`, which runs in the
-release-guardrail workflow on every PR into `staging`/`main`. A release whose
+release-guardrail workflow on every PR into `staging`/`release`. A release whose
 diff touches BOTH shipping rails — component binaries (`components/**`, pacman
 package rail) AND user units/session scripts (`users/**`, full-image rsync
 rail built in the `ffos` repo) — must add an entry here declaring the
