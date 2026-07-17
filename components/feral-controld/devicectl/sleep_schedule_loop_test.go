@@ -227,16 +227,31 @@ func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 	finalState := *e.sleepAppliedState
 	e.sleepApplyMu.Unlock()
 
-	require.Eventually(t, func() bool {
-		e.sleepApplyMu.Lock()
-		defer e.sleepApplyMu.Unlock()
-		return e.sleepPanelOK && e.sleepPanelState != nil && *e.sleepPanelState == finalState
-	}, 5*time.Second, 10*time.Millisecond, "panel should settle on the last commanded state")
-
 	wantPower := `"on"`
 	if finalState == sleepschedule.StateSleeping {
 		wantPower = `"standby"`
 	}
+
+	// Settling must be judged against the worker's actual progress, not the
+	// bookkeeping alone: an intermediate record can coincidentally equal
+	// finalState (applies going …, on, standby, on) while older jobs are still
+	// queued or in flight, and a poll landing in that window used to satisfy
+	// the bookkeeping check and then read the stale trailing power (flaked in
+	// CI). Requiring the queue empty rules out queued stale work, and any
+	// in-flight job while the queue is empty is necessarily the final state
+	// itself: every enqueue finished before this wait began, so a non-final
+	// in-flight job always has its superseding job parked in the channel.
+	require.Eventually(t, func() bool {
+		e.sleepApplyMu.Lock()
+		settled := e.sleepPanelOK && e.sleepPanelState != nil && *e.sleepPanelState == finalState
+		e.sleepApplyMu.Unlock()
+		if !settled || len(e.sleepPowerAlignCh) != 0 {
+			return false
+		}
+		powers := panel.appliedPowers()
+		return len(powers) > 0 && powers[len(powers)-1] == wantPower
+	}, 5*time.Second, 10*time.Millisecond, "panel should settle on the last commanded state")
+
 	powers := panel.appliedPowers()
 	require.NotEmpty(t, powers)
 	require.Equal(t, wantPower, powers[len(powers)-1],
