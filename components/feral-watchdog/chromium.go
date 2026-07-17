@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,12 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// errChromiumHeadless tags a failed health check that happened while no
+// display is connected. Headless devices deliberately do not run Chromium
+// (the kiosk waits for a display), so these failures are expected and the
+// monitor loop logs them at debug instead of warning every check interval.
+var errChromiumHeadless = errors.New("chromium down while headless (expected)")
 
 const (
 	// Chromium configuration
@@ -121,7 +128,13 @@ func (m *ChromiumMonitor) Start(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := m.check(ctx); err != nil {
-				m.logger.Warn("Chromium: Health check failed", zap.Error(err))
+				if errors.Is(err, errChromiumHeadless) {
+					// Expected while no display is attached; the headless
+					// transition itself is logged once in checkHangState.
+					m.logger.Debug("Chromium: Health check failed while headless", zap.Error(err))
+				} else {
+					m.logger.Warn("Chromium: Health check failed", zap.Error(err))
+				}
 			}
 		}
 	}
@@ -150,7 +163,9 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 
 	// Check for response and connection errors
 	if err != nil {
-		m.checkHangState(ctx)
+		if m.checkHangState(ctx) {
+			return fmt.Errorf("%w: chromium request failed: %v", errChromiumHeadless, err)
+		}
 		return fmt.Errorf("chromium request failed: %w", err)
 	}
 	defer func() {
@@ -159,7 +174,9 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		m.checkHangState(ctx)
+		if m.checkHangState(ctx) {
+			return fmt.Errorf("%w: chromium returned non-200 status: %d", errChromiumHeadless, resp.StatusCode)
+		}
 		return fmt.Errorf("chromium returned non-200 status: %d", resp.StatusCode)
 	}
 
@@ -190,12 +207,15 @@ func (m *ChromiumMonitor) check(ctx context.Context) error {
 // so the cost of false positives is high: any spurious restart will be
 // repeated on the next 5-second tick.
 //
+// It reports whether the failure happened while headless (no connected
+// display), so the caller can tag it as expected rather than warn-worthy.
+//
 // The decision splits on hasEverConnected. Pre-connect, we wait through
 // CHROMIUM_STARTUP_GRACE; post-connect, the shorter CHROMIUM_HANG_THRESHOLD
 // applies. Both branches additionally consult the chromium-kiosk.service
 // activating state so we don't pile a fresh restart onto a restart that
 // systemd or someone else (OTA, user) is already running.
-func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
+func (m *ChromiumMonitor) checkHangState(ctx context.Context) (headless bool) {
 	// Display gating comes first. On a headless device the kiosk deliberately
 	// waits for a display before launching Chromium, so /json/version is
 	// legitimately absent and is NOT a Chromium failure. While no connector
@@ -208,10 +228,16 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
 	m.mu.Lock()
 	if !displayConnected {
 		// Latch headless so the first check after a reconnect re-anchors grace.
+		// Log the transition once instead of warning every check interval.
+		enteredHeadless := !m.headless
 		m.headless = true
 		m.mu.Unlock()
-		return
+		if enteredHeadless {
+			m.logger.Info("Chromium: No display connected; suppressing health-check escalation until a display reconnects")
+		}
+		return true
 	}
+	reconnected := m.headless
 	if m.headless {
 		// Display (re)appeared after a headless period. Escalation resumes, but
 		// with a FRESH pre-connect grace window: a just-plugged monitor must get
@@ -227,6 +253,11 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
 	timeSinceLast := time.Since(m.lastSuccessfulResp)
 	timeSinceStart := time.Since(m.monitorStart)
 	m.mu.Unlock()
+
+	if reconnected {
+		m.logger.Info("Chromium: Display reconnected; resuming health-check escalation with a fresh startup grace",
+			zap.Duration("startup_grace", CHROMIUM_STARTUP_GRACE))
+	}
 
 	var (
 		shouldRestart bool
@@ -276,6 +307,7 @@ func (m *ChromiumMonitor) checkHangState(ctx context.Context) {
 	m.mu.Lock()
 	m.restartChromium(ctx)
 	m.mu.Unlock()
+	return false
 }
 
 // restartChromium issues a kiosk restart (or, if we've burned through the
