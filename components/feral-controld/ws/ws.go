@@ -16,6 +16,18 @@ import (
 
 const BUFFER_SIZE = 1024
 
+// sendWriteWait bounds how long any single WriteJSON call in Send/SendAll
+// may block. Mirrors relayer.WRITE_WAIT/cdp.go's write-deadline pattern:
+// without this, a stalled or backpressured local hub client's TCP buffer
+// filling up could block gorilla's WriteJSON indefinitely, and every
+// caller of Send/SendAll runs synchronously on whatever goroutine
+// triggered the notification (see offlinecache.Notifier.OnItemStateChanged,
+// called from Service's single worker goroutine) — an unbounded block
+// here would silently stall unrelated work well beyond just this one
+// slow connection. A failed SetWriteDeadline call still lets the write
+// proceed; it is only a best-effort safeguard, not a hard precondition.
+const sendWriteWait = 5 * time.Second
+
 //go:generate mockgen -source=ws.go -destination=../mocks/ws.go -package=mocks -mock_names=WS=MockWS
 type WS interface {
 	// NewConnection upgrades an HTTP connection to websocket and tracks it
@@ -145,6 +157,9 @@ func (ws *ws) Send(connID string, message any) error {
 
 	// Lock the connection's mutex to serialize writes
 	wrapped.mu.Lock()
+	if deadlineErr := wrapped.conn.SetWriteDeadline(ws.clock.Now().Add(sendWriteWait)); deadlineErr != nil {
+		ws.logger.Warn("Failed to set write deadline before send", zap.String("connID", connID), zap.Error(deadlineErr))
+	}
 	err := wrapped.conn.WriteJSON(message)
 	wrapped.mu.Unlock()
 
@@ -187,6 +202,9 @@ func (ws *ws) SendAll(message any) error {
 	for connID, wrapped := range connections {
 		// Lock the connection's mutex to serialize writes
 		wrapped.mu.Lock()
+		if deadlineErr := wrapped.conn.SetWriteDeadline(ws.clock.Now().Add(sendWriteWait)); deadlineErr != nil {
+			ws.logger.Warn("Failed to set write deadline before broadcast", zap.String("connID", connID), zap.Error(deadlineErr))
+		}
 		err := wrapped.conn.WriteJSON(message)
 		wrapped.mu.Unlock()
 

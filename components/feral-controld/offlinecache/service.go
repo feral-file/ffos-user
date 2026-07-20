@@ -110,6 +110,14 @@ type Service interface {
 	// software-classified item it contains. total counts all items in the
 	// playlist; queued counts only those actually enqueued.
 	//
+	// sourceURL, if non-empty, is recorded so a later displayPlaylist
+	// command for the same URL can still find and replay this exact
+	// playlist from cache when live DP-1 resolution fails (e.g. no
+	// network) — see CachedPlaylistForURL and commandrouter's
+	// displayPlaylist branch. Pass "" for an inline dp1_call download,
+	// which has no source URL to index by and is simply not
+	// URL-recoverable later (only ID-recoverable, same as before).
+	//
 	// Callers should be aware that playlistRaw is not guaranteed to be
 	// byte-identical to whatever a publisher originally served: the
 	// commandrouter caller resolves the playlist through dp1.DP1 first
@@ -121,12 +129,20 @@ type Service interface {
 	// against a JCS-canonicalized form (dp1-go's sign package), not raw
 	// bytes, so this does not affect signature validity — see
 	// docs/offline-artwork-capture.md.
-	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage) (queued, total int, err error)
+	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (queued, total int, err error)
 	ClearItem(itemID string) error
 	ClearPlaylist(playlistID string) error
 	// Status reports on itemIDs, or on every item this process knows about
 	// (on-disk + in-flight) when itemIDs is empty.
 	Status(itemIDs []string) (StatusSnapshot, error)
+	// CachedPlaylistForURL returns the raw playlist body last downloaded
+	// via DownloadPlaylist(ctx, raw, sourceURL), for commandrouter's
+	// displayPlaylist-by-URL fallback when live DP-1 resolution fails
+	// (e.g. the device has no network right now). Returns
+	// ErrPlaylistNotFound if sourceURL was never downloaded, or was but
+	// has since been cleared — see Store.LoadPlaylistIDForURL's doc for
+	// why a stale index entry still fails closed correctly here.
+	CachedPlaylistForURL(sourceURL string) (json.RawMessage, error)
 }
 
 type captureJob struct {
@@ -410,7 +426,7 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	return nil
 }
 
-func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage) (int, int, error) {
+func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
 	if !s.started.Load() {
 		return 0, 0, ErrServiceNotStarted
 	}
@@ -424,6 +440,16 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 
 	if err := s.store.SavePlaylist(playlist.ID, playlistRaw); err != nil {
 		return 0, 0, fmt.Errorf("offline cache: save playlist %s: %w", playlist.ID, err)
+	}
+	if sourceURL != "" {
+		// Best-effort: the playlist itself is already safely saved above
+		// regardless of whether this index write succeeds, so a failure
+		// here only degrades the displayPlaylist-by-URL offline fallback
+		// (CachedPlaylistForURL) rather than the download itself.
+		if err := s.store.SavePlaylistURLIndex(sourceURL, playlist.ID); err != nil {
+			s.logger.Warn("offline cache: failed to index playlist by source URL",
+				zap.String("playlist_id", playlist.ID), zap.Error(err))
+		}
 	}
 
 	total := len(playlist.Items)
@@ -687,6 +713,14 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	return nil
 }
 
+func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error) {
+	playlistID, err := s.store.LoadPlaylistIDForURL(sourceURL)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.LoadPlaylist(playlistID)
+}
+
 func (s *service) Status(itemIDs []string) (StatusSnapshot, error) {
 	ids := itemIDs
 	if len(ids) == 0 {
@@ -774,9 +808,18 @@ func (s *service) itemStatus(itemID string) ItemStatus {
 	}
 }
 
+// percentForState is coarse (0 or 100): capture is a single bounded-window
+// operation, not chunked, so there is no meaningful mid-capture progress
+// to report. StateBrokenOnline belongs at 100, not 0, alongside
+// StateReady/StatePartial: it means the capture window already finished
+// (see stateFromCoverage) — the artwork itself is what is broken (a
+// CSP-blocked asset that would fail even online), not the download.
+// StateFailed is the only terminal-but-not-"done" case: it has no prior
+// successful capture on disk at all (see ItemStatus's doc), so there is
+// nothing captured to call 100% of.
 func percentForState(state ItemState) int {
 	switch state {
-	case StateReady, StatePartial:
+	case StateReady, StatePartial, StateBrokenOnline:
 		return 100
 	default:
 		return 0

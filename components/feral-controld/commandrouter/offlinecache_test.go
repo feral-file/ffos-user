@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
+	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -186,7 +187,7 @@ func TestCommandHandler_DownloadPlaylist_Success(t *testing.T) {
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled)).Return(1, 2, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).Return(1, 2, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
@@ -197,6 +198,38 @@ func TestCommandHandler_DownloadPlaylist_Success(t *testing.T) {
 	resp := assertOkResponse(t, result)
 	assert.Equal(t, 2, resp["total"])
 	assert.Equal(t, 1, resp["softwareCount"])
+}
+
+// TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL
+// pins that a dp1_call (inline) download has no source URL to index by:
+// Service.DownloadPlaylist's third argument must be "" so
+// CachedPlaylistForURL never spuriously resolves for some URL this
+// playlist was never actually downloaded from.
+func TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{}}
+	playlistBytes := []byte(`{"id":"playlist-1","items":[]}`)
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1"}}
+	marshaledResolved := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockJSON.EXPECT().Marshal(playlistMap).Return(playlistBytes, nil).Times(1)
+	ts.mockJSON.EXPECT().Unmarshal(playlistBytes, gomock.Any()).DoAndReturn(func(_ []byte, v interface{}) error {
+		p := v.(**dp1.Playlist)
+		*p = playlist
+		return nil
+	}).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaledResolved, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaledResolved), "").Return(0, 0, nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
+		Arguments: map[string]any{"dp1_call": playlistMap},
+	})
+
+	require.NoError(t, err)
+	assertOkResponse(t, result)
 }
 
 func TestCommandHandler_DownloadPlaylist_ResolveFailure(t *testing.T) {
@@ -222,7 +255,7 @@ func TestCommandHandler_DownloadPlaylist_ServiceError(t *testing.T) {
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled)).Return(0, 0, assertError("disk error")).Times(1)
+	mockOfflineCache.EXPECT().DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).Return(0, 0, assertError("disk error")).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST,

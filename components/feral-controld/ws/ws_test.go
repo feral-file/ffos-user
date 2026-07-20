@@ -79,6 +79,11 @@ func TestNewConnection_Success(t *testing.T) {
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		Close().
 		Return(nil).
 		AnyTimes()
@@ -148,6 +153,11 @@ func TestSend_Success(t *testing.T) {
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		Close().
 		Return(nil).
 		AnyTimes()
@@ -175,6 +185,94 @@ func TestSend_Success(t *testing.T) {
 	// Remove the connection while the mocks are still valid: the deferred
 	// readRelease close wakes the background goroutine concurrently with
 	// ctrl.Finish, and its closeConn must find nothing left to touch.
+	ts.ws.Close()
+}
+
+// TestSend_SetsWriteDeadlineBeforeWriteJSON is the regression test for
+// the PR #229 review finding that Send/SendAll called WriteJSON with no
+// deadline at all: a stalled/backpressured local hub client's TCP buffer
+// filling up could then block indefinitely. Every caller of Send/SendAll
+// runs synchronously on whatever goroutine triggered the notification
+// (see offlinecache.Notifier.OnItemStateChanged, called from Service's
+// single worker goroutine), so an unbounded write here could silently
+// stall unrelated work — not just this one slow connection.
+func TestSend_SetsWriteDeadlineBeforeWriteJSON(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	req := httptest.NewRequest("GET", "/ws", nil)
+	w := httptest.NewRecorder()
+
+	ts.mockUpgrader.EXPECT().
+		Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(ts.mockConn, nil)
+
+	readRelease := make(chan struct{})
+	defer close(readRelease)
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			<-readRelease
+			return 0, nil, errors.New("connection closed")
+		}).
+		AnyTimes()
+	ts.mockConn.EXPECT().WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().Close().Return(nil).AnyTimes()
+	ts.mockClock.EXPECT().Now().Return(time.Now()).AnyTimes()
+
+	connID, err := ts.ws.NewConnection(w, req)
+	assert.NoError(t, err)
+
+	message := map[string]string{"test": "message"}
+	gomock.InOrder(
+		ts.mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).Times(1),
+		ts.mockConn.EXPECT().WriteJSON(message).Return(nil).Times(1),
+	)
+
+	err = ts.ws.Send(connID, message)
+	assert.NoError(t, err)
+
+	ts.ws.Close()
+}
+
+// TestSendAll_SetsWriteDeadlineBeforeWriteJSON is SendAll's counterpart to
+// TestSend_SetsWriteDeadlineBeforeWriteJSON above.
+func TestSendAll_SetsWriteDeadlineBeforeWriteJSON(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	req := httptest.NewRequest("GET", "/ws", nil)
+	w := httptest.NewRecorder()
+
+	ts.mockUpgrader.EXPECT().
+		Upgrade(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(ts.mockConn, nil)
+
+	readRelease := make(chan struct{})
+	defer close(readRelease)
+	ts.mockConn.EXPECT().
+		ReadMessage().
+		DoAndReturn(func() (int, []byte, error) {
+			<-readRelease
+			return 0, nil, errors.New("connection closed")
+		}).
+		AnyTimes()
+	ts.mockConn.EXPECT().WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().Close().Return(nil).AnyTimes()
+	ts.mockClock.EXPECT().Now().Return(time.Now()).AnyTimes()
+
+	_, err := ts.ws.NewConnection(w, req)
+	assert.NoError(t, err)
+
+	message := map[string]string{"test": "broadcast"}
+	gomock.InOrder(
+		ts.mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).Times(1),
+		ts.mockConn.EXPECT().WriteJSON(message).Return(nil).Times(1),
+	)
+
+	err = ts.ws.SendAll(message)
+	assert.NoError(t, err)
+
 	ts.ws.Close()
 }
 
@@ -217,6 +315,11 @@ func TestSend_WriteError(t *testing.T) {
 
 	ts.mockConn.EXPECT().
 		WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -294,6 +397,11 @@ func TestSendAll_Success(t *testing.T) {
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		Close().
 		Return(nil).
 		AnyTimes()
@@ -308,6 +416,11 @@ func TestSendAll_Success(t *testing.T) {
 
 	mockConn2.EXPECT().
 		WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	mockConn2.EXPECT().
+		SetWriteDeadline(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -385,6 +498,11 @@ func TestSendAll_PartialFailure(t *testing.T) {
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		Close().
 		Return(nil).
 		AnyTimes()
@@ -399,6 +517,11 @@ func TestSendAll_PartialFailure(t *testing.T) {
 
 	mockConn2.EXPECT().
 		WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	mockConn2.EXPECT().
+		SetWriteDeadline(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -448,6 +571,11 @@ func TestSendAll_PartialFailure(t *testing.T) {
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		Close().
 		Return(nil).
 		AnyTimes()
@@ -459,6 +587,11 @@ func TestSendAll_PartialFailure(t *testing.T) {
 
 	mockConn2.EXPECT().
 		WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	mockConn2.EXPECT().
+		SetWriteDeadline(gomock.Any()).
 		Return(nil).
 		AnyTimes()
 
@@ -547,6 +680,11 @@ func TestClose_MultipleConnections(t *testing.T) {
 		Times(1)
 
 	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		Close().
 		Return(nil).
 		Times(1)
@@ -560,6 +698,11 @@ func TestClose_MultipleConnections(t *testing.T) {
 		WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).
 		Times(1)
+
+	mockConn2.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
 
 	mockConn2.EXPECT().
 		Close().
@@ -717,6 +860,11 @@ func TestConcurrentNewConnections(t *testing.T) {
 		AnyTimes()
 
 	ts.mockConn.EXPECT().
+		SetWriteDeadline(gomock.Any()).
+		Return(nil).
+		AnyTimes()
+
+	ts.mockConn.EXPECT().
 		Close().
 		Return(nil).
 		AnyTimes()
@@ -797,6 +945,11 @@ func TestConcurrentSendToMultipleConnections(t *testing.T) {
 
 		mockConns[i].EXPECT().
 			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			SetWriteDeadline(gomock.Any()).
 			Return(nil).
 			AnyTimes()
 
@@ -895,6 +1048,11 @@ func TestConcurrentSendAll(t *testing.T) {
 			AnyTimes()
 
 		mockConns[i].EXPECT().
+			SetWriteDeadline(gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
 			Close().
 			Return(nil).
 			AnyTimes()
@@ -976,6 +1134,11 @@ func TestConcurrentCloseAndSend(t *testing.T) {
 
 		mockConns[i].EXPECT().
 			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			SetWriteDeadline(gomock.Any()).
 			Return(nil).
 			AnyTimes()
 
@@ -1101,6 +1264,11 @@ func TestConcurrentNewConnectionAndClose(t *testing.T) {
 			AnyTimes()
 
 		mockConns[i].EXPECT().
+			SetWriteDeadline(gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
 			Close().
 			Return(nil).
 			AnyTimes()
@@ -1199,6 +1367,11 @@ func TestRaceCondition_ConcurrentWritesToSameConnection(t *testing.T) {
 
 		mockConns[i].EXPECT().
 			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			SetWriteDeadline(gomock.Any()).
 			Return(nil).
 			AnyTimes()
 
@@ -1312,6 +1485,11 @@ func TestRaceCondition_SendAllWhileModifyingConnections(t *testing.T) {
 			AnyTimes()
 
 		mockConn.EXPECT().
+			SetWriteDeadline(gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConn.EXPECT().
 			Close().
 			Return(nil).
 			AnyTimes()
@@ -1340,6 +1518,11 @@ func TestRaceCondition_SendAllWhileModifyingConnections(t *testing.T) {
 
 		mockConn.EXPECT().
 			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConn.EXPECT().
+			SetWriteDeadline(gomock.Any()).
 			Return(nil).
 			AnyTimes()
 
@@ -1442,6 +1625,11 @@ func TestRaceCondition_ConcurrentSendAndClose(t *testing.T) {
 
 		mockConns[i].EXPECT().
 			WriteControl(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil).
+			AnyTimes()
+
+		mockConns[i].EXPECT().
+			SetWriteDeadline(gomock.Any()).
 			Return(nil).
 			AnyTimes()
 

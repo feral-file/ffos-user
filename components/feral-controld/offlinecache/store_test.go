@@ -198,6 +198,51 @@ func TestStore_Playlist_SaveLoadDelete(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
+func TestStore_PlaylistURLIndex_SaveAndLoad(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	require.NoError(t, store.SavePlaylistURLIndex("https://feed.example.com/p1", "playlist-1"))
+
+	id, err := store.LoadPlaylistIDForURL("https://feed.example.com/p1")
+	require.NoError(t, err)
+	assert.Equal(t, "playlist-1", id)
+}
+
+func TestStore_PlaylistURLIndex_UnknownURLReturnsNotFound(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	_, err := store.LoadPlaylistIDForURL("https://feed.example.com/never-downloaded")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+func TestStore_PlaylistURLIndex_EmptyURLReturnsNotFound(t *testing.T) {
+	store, _ := newTestStore(t)
+	assert.NoError(t, store.SavePlaylistURLIndex("https://feed.example.com/p1", "playlist-1"))
+
+	_, err := store.LoadPlaylistIDForURL("")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+func TestStore_PlaylistURLIndex_RejectsEmptyArgs(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	assert.Error(t, store.SavePlaylistURLIndex("", "playlist-1"))
+	assert.Error(t, store.SavePlaylistURLIndex("https://feed.example.com/p1", ""))
+}
+
+// TestStore_PlaylistURLIndex_DoesNotLeakIntoListPlaylistIDs pins that the
+// index's nested by-url/ subdirectory is invisible to ListPlaylistIDs,
+// which only matches "*.json" files directly inside playlistsDir.
+func TestStore_PlaylistURLIndex_DoesNotLeakIntoListPlaylistIDs(t *testing.T) {
+	store, _ := newTestStore(t)
+	require.NoError(t, store.SavePlaylist("playlist-1", json.RawMessage(`{"id":"playlist-1"}`)))
+	require.NoError(t, store.SavePlaylistURLIndex("https://feed.example.com/p1", "playlist-1"))
+
+	ids, err := store.ListPlaylistIDs()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"playlist-1"}, ids)
+}
+
 func TestStore_GC_RemovesOnlyOrphanBlobs(t *testing.T) {
 	store, _ := newTestStore(t)
 

@@ -155,19 +155,29 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
-				// Known limitation (see docs/offline-artwork-capture.md
-				// §6): this errors out before the offline-cache
-				// SyncPlaylist below ever runs, so a playlist that was
-				// fully downloaded via downloadPlaylist still cannot be
-				// displayed by URL on a device with no network right
-				// now. Fixing that needs the offline-cache store to
-				// index a saved playlist by source URL too (it is keyed
-				// only by DP-1 playlist id today) plus a fallback here
-				// on resolution failure — deliberately deferred, not
-				// folded into unrelated changes.
 				playlist, err = h.dp1.ProcessPlaylistURL(ctx, url, true)
 				if err != nil {
-					return nil, err
+					// Live DP-1 resolution failed — most commonly, the
+					// device has no network right now. Fall back to the
+					// exact playlist body last saved by downloadPlaylist
+					// for this same URL, if any, rather than hard-failing
+					// a playlist that is actually fully cached and
+					// replayable offline (see docs/offline-artwork-
+					// capture.md §6 and Service.CachedPlaylistForURL's
+					// doc). This is a "last known good" copy, not a live
+					// re-resolution: it will not reflect anything
+					// published at url after it was downloaded, and (by
+					// construction, since it can only exist if it was
+					// downloaded successfully before) was already
+					// signature-verified once at that time.
+					cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
+					if cacheErr != nil {
+						return nil, err
+					}
+					h.logger.Warn("offline cache: displayPlaylist falling back to cached copy after live DP-1 resolution failure",
+						zap.String("playlist_url", url), zap.Error(err))
+					playlist = cachedPlaylist
+					err = nil
 				}
 
 			case command.Arguments["dp1_call"] != nil:

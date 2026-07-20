@@ -252,6 +252,7 @@ offline-artworks/
   blobs/<sha256>                      # shared content-addressed bytes (the ONLY place binary payloads live)
   items/<itemId>.json                 # the ONE per-item record (ItemRecord in types.go)
   playlists/<playlistId>.json         # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
+  playlists/by-url/<sha256(url)>.json  # {"playlistId": "..."} pointer, only when DownloadPlaylist was given a sourceURL
 ```
 
 `items/<itemId>.json` (`ItemRecord`, see `types.go`):
@@ -316,6 +317,18 @@ There is deliberately **no** top-level manifest, no separate
   into the queue sits there unprocessed.
 - Ordering and membership for a whole-playlist download already live in the
   verbatim `playlists/<id>.json`'s own `items[]`.
+- `playlists/by-url/<sha256(url)>.json` is the one deliberate exception to
+  "everything else derives" — it exists purely to make `displayPlaylist`
+  by `playlistUrl` work offline (§6), and cannot itself be derived from
+  `items/`/`playlists/` scanning since a DP-1 playlist document has no
+  self-describing source URL field. It is a small pointer
+  (`{"playlistId": "..."}`), not a duplicate of the playlist body, and is
+  intentionally not kept in lockstep with `DeletePlaylist`: a stale
+  pointer to a since-cleared playlist still fails closed correctly (the
+  subsequent `LoadPlaylist` call returns `ErrPlaylistNotFound`), so there
+  is no correctness reason to reclaim it eagerly, and `ListPlaylistIDs`
+  never sees it since it only matches `*.json` directly inside
+  `playlists/`, not this nested subdirectory.
 - Only fields replay routing and status reporting actually consume are
   kept on `Resource`: `url`/`status`/`redirectTo` drive replay's
   fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
@@ -411,6 +424,15 @@ Replay is only enabled while a cached item is on screen:
 item IDs before/after the CDP display call, which enables `Fetch`
 interception scoped to whichever of those IDs are actually cached
 (`EnableForPlaylist` in `replay.go`) and disables it entirely when none are.
+`Replayer.Disable` only clears its local resources/scope AFTER the
+underlying `Fetch.disable` CDP call actually succeeds — if that call
+itself fails, the previous scope is left in place but with its miss
+policy forced to pass-through (the same relaxation `mixed` uses above),
+rather than clearing to a fail-closed state while Chromium's own
+interception might still be live: doing the latter used to turn every
+subsequent request on whatever is now on screen into a `Fetch.failRequest`,
+breaking normal online playback outright the moment a device moved to an
+uncached/online playlist.
 Because `Fetch.enable`'s pattern is `"*"` (every request on the page, not
 just the cached items' own URLs — DP-1 playback advances between a
 playlist's items client-side, without telling `feral-controld` which one
@@ -424,26 +446,29 @@ just because it happens to share a CDP target with a cached item.
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.
 
-**Known scope limitation — `displayPlaylist` by `playlistUrl` still
-requires live DP-1 resolution.** `commandrouter`'s `displayPlaylist`
-handler calls `dp1.ProcessPlaylistURL` and returns its error immediately
-when the command carries a `playlistUrl` (as opposed to an inline
-`dp1_call` payload), *before* `SyncPlaylist`/replay ever runs. A
-playlist that was previously fully downloaded via `downloadPlaylist` is
-therefore still undisplayable-by-URL on a device with no network at the
-moment `displayPlaylist` is called, even though every one of its items
-is sitting on disk ready to replay — offline replay only ever helps a
-playlist that DP-1 (or an inline `dp1_call`) was able to resolve first.
-Making this path work fully offline would require the offline-cache
-store to additionally index a saved playlist by its source URL (today
-`store.SavePlaylist`/`playlists/<id>.json` are keyed only by the DP-1
-playlist `id`, which `DownloadPlaylist` reads from the *body*, not the
-URL that pulled it — see `service.go`'s `DownloadPlaylist`) and for
-`commandrouter` to fall back to that cached copy on a resolution
-failure. That is real, deliberately deferred backlog rather than a fix
-folded into this change, since it touches the offline-cache store's
-indexing scheme and the live-display error path, not just the
-capture/replay pipeline this document otherwise covers.
+**`displayPlaylist` by `playlistUrl` falls back to the cached copy when
+offline.** `commandrouter`'s `displayPlaylist` handler calls
+`dp1.ProcessPlaylistURL` first; if that fails (most commonly: no
+network) and the command carries a `playlistUrl` (as opposed to an
+inline `dp1_call` payload), it tries `Service.CachedPlaylistForURL(url)`
+before giving up. That method looks up `store.LoadPlaylistIDForURL`
+(`playlists/by-url/<sha256(url)>.json`, a small pointer file distinct
+from the playlist record itself) and then `store.LoadPlaylist` for the
+resolved ID — both populated by `DownloadPlaylist`'s `sourceURL`
+parameter whenever a download was originally requested by URL (an
+inline `dp1_call` download passes `""` and is deliberately not
+URL-recoverable, only ID-recoverable, same as before this fallback
+existed). The fallback playlist is a "last known good" copy: it does not
+reflect anything republished at that URL since it was downloaded, and —
+since it can only exist by having been downloaded successfully once
+before — was already signature-verified and fully DP-1-resolved
+(dynamic content materialized) at that time, so no further DP-1
+processing happens on the cached copy. If there is nothing to fall back
+to (never downloaded, offline caching disabled, or the download was
+since cleared — `LoadPlaylistIDForURL` intentionally is not kept in
+lockstep with `DeletePlaylist`, see its doc), `displayPlaylist` reports
+the original live-resolution error, not a confusing "no cached copy"
+error about a fallback the caller never asked for.
 
 ## 7. Relationship to the DP-1 spec
 

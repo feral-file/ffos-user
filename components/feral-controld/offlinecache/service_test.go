@@ -160,7 +160,7 @@ func TestService_DownloadPlaylist_BeforeStartReturnsNotStarted(t *testing.T) {
 	defer ts.ctrl.Finish()
 
 	raw := json.RawMessage(`{"id":"playlist-1","items":[]}`)
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
 	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 	assert.Zero(t, queued)
 	assert.Zero(t, total)
@@ -299,6 +299,15 @@ func TestService_DownloadItem_CoverageClassification(t *testing.T) {
 		},
 	}
 
+	// Every case above is a finished capture (the capture window
+	// already ran to completion; only the resulting artwork differs in
+	// how playable it is), so getOfflineCacheStatus must always report
+	// percent:100 for all of them — PR #229 review regression: percent
+	// used to fall back to 0 for StateBrokenOnline, which reads to a
+	// mobile client as "still downloading" for an item that is
+	// permanently done and will never progress further.
+	const wantPercent = 100
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := setupService(t, 0, nil)
@@ -322,6 +331,11 @@ func TestService_DownloadItem_CoverageClassification(t *testing.T) {
 
 			require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 			waitForState(t, ts.service, "item-1", tt.wantState)
+
+			snap, err := ts.service.Status([]string{"item-1"})
+			require.NoError(t, err)
+			require.Len(t, snap.Items, 1)
+			assert.Equal(t, wantPercent, snap.Items[0].Percent)
 		})
 	}
 }
@@ -353,7 +367,7 @@ func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued)
 	assert.Equal(t, 2, total)
@@ -365,11 +379,77 @@ func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.
 	assert.JSONEq(t, string(raw), string(stored), "the playlist must be stored byte-for-byte as received, not re-marshaled")
 }
 
+// TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback
+// is the regression test for PR #229 review's "displayPlaylist by URL
+// cannot use the downloaded cache offline" finding: a non-empty sourceURL
+// must make the downloaded playlist recoverable by that same URL via
+// CachedPlaylistForURL, for commandrouter's offline displayPlaylist
+// fallback (see handler.go).
+func TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items":     []map[string]interface{}{},
+	})
+	require.NoError(t, err)
+	sourceURL := "https://feed.example.com/playlists/playlist-1"
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, sourceURL)
+	require.NoError(t, err)
+
+	cached, err := ts.service.CachedPlaylistForURL(sourceURL)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(raw), string(cached))
+}
+
+// TestService_DownloadPlaylist_EmptySourceURLIsNotIndexed pins the inline
+// dp1_call download path (empty sourceURL): it must not become spuriously
+// recoverable by any URL, since it was never actually downloaded from one.
+func TestService_DownloadPlaylist_EmptySourceURLIsNotIndexed(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items":     []map[string]interface{}{},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+
+	_, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+// TestService_CachedPlaylistForURL_UnknownURLReturnsNotFound covers the
+// "never downloaded" case directly (as opposed to the "downloaded, but
+// via a different/no URL" cases above).
+func TestService_CachedPlaylistForURL_UnknownURLReturnsNotFound(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	_, err := ts.service.CachedPlaylistForURL("https://feed.example.com/never-downloaded")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
 func TestService_DownloadPlaylist_InvalidJSON(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`))
+	_, _, err := ts.service.DownloadPlaylist(context.Background(), json.RawMessage(`not json`), "")
 	assert.Error(t, err)
 }
 
@@ -380,7 +460,7 @@ func TestService_DownloadPlaylist_MissingID(t *testing.T) {
 	raw, err := json.Marshal(map[string]interface{}{"dpVersion": "1.0.0", "items": []interface{}{}})
 	require.NoError(t, err)
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw)
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
 	assert.Error(t, err)
 }
 

@@ -85,6 +85,28 @@ type Store interface {
 	DeletePlaylist(playlistID string) error
 	ListPlaylistIDs() ([]string, error)
 
+	// SavePlaylistURLIndex records that a displayPlaylist/downloadPlaylist
+	// command resolved sourceURL to playlistID, so a later
+	// displayPlaylist-by-URL for the same sourceURL can still find and
+	// serve this exact cached playlist when live DP-1 resolution fails
+	// (e.g. no network) — see commandrouter's displayPlaylist branch.
+	// Keyed by sha256(sourceURL), mirroring WriteBlob's content-addressing
+	// convention, so an index file's name never embeds an arbitrary
+	// externally-controlled URL string as a path component. Call only
+	// when playlistID actually came from resolving sourceURL itself —
+	// never for an inline dp1_call download, which has no source URL to
+	// index by.
+	SavePlaylistURLIndex(sourceURL, playlistID string) error
+	// LoadPlaylistIDForURL returns the playlistID last recorded for
+	// sourceURL, or ErrPlaylistNotFound if none was ever recorded. The
+	// returned ID is not guaranteed to still resolve via LoadPlaylist —
+	// e.g. it may have since been cleared — callers must handle that
+	// LoadPlaylist call failing with ErrPlaylistNotFound too; this index
+	// is intentionally not kept in lockstep with DeletePlaylist (see
+	// DeletePlaylist's doc) since a stale pointer to a since-deleted
+	// playlist already fails closed correctly on the next LoadPlaylist.
+	LoadPlaylistIDForURL(sourceURL string) (string, error)
+
 	// GC sweeps blobs/ and removes any blob not referenced by a resource of
 	// a currently saved item. A sweep (rather than a live refcount) is
 	// enough because the set of saved items is already the source of
@@ -349,6 +371,51 @@ func (s *fsStore) DeletePlaylist(playlistID string) error {
 
 func (s *fsStore) ListPlaylistIDs() ([]string, error) {
 	return s.listJSONIDs(s.playlistsDir(), "list playlists")
+}
+
+// playlistsByURLDir is a subdirectory of playlistsDir, not a sibling —
+// listJSONIDs/ListPlaylistIDs only match "*.json" entries directly inside
+// playlistsDir, so a nested directory here is invisible to that walk and
+// can never be mistaken for a playlist ID.
+func (s *fsStore) playlistsByURLDir() string { return filepath.Join(s.playlistsDir(), "by-url") }
+
+func (s *fsStore) playlistURLIndexPath(sourceURL string) string {
+	sum := sha256.Sum256([]byte(sourceURL))
+	return filepath.Join(s.playlistsByURLDir(), hex.EncodeToString(sum[:])+".json")
+}
+
+type playlistURLIndexRecord struct {
+	PlaylistID string `json:"playlistId"`
+}
+
+func (s *fsStore) SavePlaylistURLIndex(sourceURL, playlistID string) error {
+	if sourceURL == "" || playlistID == "" {
+		return errors.New("offline cache: playlist URL index requires both a source URL and a playlist id")
+	}
+	data, err := s.json.Marshal(playlistURLIndexRecord{PlaylistID: playlistID})
+	if err != nil {
+		return fmt.Errorf("offline cache: marshal playlist URL index: %w", err)
+	}
+	path := s.playlistURLIndexPath(sourceURL)
+	return s.writeFileAtomic(s.playlistsByURLDir(), path, data, recordFilePerm)
+}
+
+func (s *fsStore) LoadPlaylistIDForURL(sourceURL string) (string, error) {
+	if sourceURL == "" {
+		return "", ErrPlaylistNotFound
+	}
+	data, err := s.os.ReadFile(s.playlistURLIndexPath(sourceURL))
+	if s.os.IsNotExist(err) {
+		return "", ErrPlaylistNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("offline cache: read playlist URL index: %w", err)
+	}
+	var rec playlistURLIndexRecord
+	if err := s.json.Unmarshal(data, &rec); err != nil {
+		return "", fmt.Errorf("offline cache: parse playlist URL index: %w", err)
+	}
+	return rec.PlaylistID, nil
 }
 
 func (s *fsStore) listJSONIDs(dir, opDescription string) ([]string, error) {

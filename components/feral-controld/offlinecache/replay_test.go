@@ -268,6 +268,39 @@ func TestReplayer_Disable_DisablesFetchAndClearsScope(t *testing.T) {
 	awaitSend(t, done)
 }
 
+// TestReplayer_Disable_FetchDisableFailureForcesPassThroughInsteadOfFailClosed
+// is the regression test for the PR #229 review finding that Disable
+// cleared scope to a fail-closed state BEFORE confirming Fetch.disable
+// actually succeeded on Chromium's side. If Fetch.disable's CDP call
+// itself fails, this must not turn every subsequent request into a
+// Fetch.failRequest (which would break normal online playback outright);
+// it must instead force pass-through on miss, same as a mixed scope does.
+func TestReplayer_Disable_FetchDisableFailureForcesPassThroughInsteadOfFailClosed(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).
+		Return(nil, assert.AnError).Times(1)
+	err := ts.replayer.Disable(context.Background())
+	assert.ErrorIs(t, err, assert.AnError)
+
+	// A previously-cached URL is still served: Disable's failure did not
+	// wipe the previous scope, only relaxed its miss policy.
+	hitDone := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-hit", res.URL))
+	awaitSend(t, hitDone)
+
+	// An unrelated URL — exactly what every request would look like on
+	// whatever screen is now on-screen after a failed Disable — passes
+	// through to the live network instead of being fail_closed.
+	missDone := ts.expectSend("Fetch.continueRequest")
+	ts.handler(requestPausedEvent(t, "req-miss", "https://example.com/unrelated.js"))
+	awaitSend(t, missDone)
+}
+
 func TestReplayer_Disable_NoSessionAttached_Noop(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

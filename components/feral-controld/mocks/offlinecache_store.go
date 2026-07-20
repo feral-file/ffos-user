@@ -184,6 +184,21 @@ func (mr *MockOfflineCacheStoreMockRecorder) LoadPlaylist(playlistID interface{}
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadPlaylist", reflect.TypeOf((*MockOfflineCacheStore)(nil).LoadPlaylist), playlistID)
 }
 
+// LoadPlaylistIDForURL mocks base method.
+func (m *MockOfflineCacheStore) LoadPlaylistIDForURL(sourceURL string) (string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "LoadPlaylistIDForURL", sourceURL)
+	ret0, _ := ret[0].(string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// LoadPlaylistIDForURL indicates an expected call of LoadPlaylistIDForURL.
+func (mr *MockOfflineCacheStoreMockRecorder) LoadPlaylistIDForURL(sourceURL interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadPlaylistIDForURL", reflect.TypeOf((*MockOfflineCacheStore)(nil).LoadPlaylistIDForURL), sourceURL)
+}
+
 // ReadBlob mocks base method.
 func (m *MockOfflineCacheStore) ReadBlob(sha256Hex string) ([]byte, error) {
 	m.ctrl.T.Helper()
@@ -239,6 +254,20 @@ func (m *MockOfflineCacheStore) SavePlaylist(playlistID string, raw json.RawMess
 func (mr *MockOfflineCacheStoreMockRecorder) SavePlaylist(playlistID, raw interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SavePlaylist", reflect.TypeOf((*MockOfflineCacheStore)(nil).SavePlaylist), playlistID, raw)
+}
+
+// SavePlaylistURLIndex mocks base method.
+func (m *MockOfflineCacheStore) SavePlaylistURLIndex(sourceURL, playlistID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SavePlaylistURLIndex", sourceURL, playlistID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SavePlaylistURLIndex indicates an expected call of SavePlaylistURLIndex.
+func (mr *MockOfflineCacheStoreMockRecorder) SavePlaylistURLIndex(sourceURL, playlistID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SavePlaylistURLIndex", reflect.TypeOf((*MockOfflineCacheStore)(nil).SavePlaylistURLIndex), sourceURL, playlistID)
 }
 
 // WriteBlob mocks base method.

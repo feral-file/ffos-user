@@ -2,6 +2,7 @@ package commandrouter_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -451,6 +452,81 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 
 	assert.NoError(t, err, "a replay-sync failure must never fail the display command itself")
 	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOffline
+// is the regression test for PR #229 review's "displayPlaylist with
+// playlistUrl still cannot use the downloaded cache when offline" finding:
+// a playlist previously downloaded via downloadPlaylist for this exact
+// URL must still be displayable when live DP-1 resolution fails.
+func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOffline(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item1","source":"https://example.com/video.mp4"}]}`)
+	cachedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-1",
+		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
+	}}
+
+	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, ts.mockJSON, ts.logger)
+
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		Return(nil, errors.New("network unreachable")).
+		Times(1)
+
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal(cachedRawBytes, gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			p := v.(**dp1.Playlist)
+			*p = cachedPlaylist
+			return nil
+		}).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerOkResponse(), nil).
+		Times(1)
+
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCachedFallback
+// pins that the original live-resolution error is what gets reported when
+// there is nothing to fall back to (offline caching disabled here), not a
+// confusing "cache lookup failed" error about a fallback the caller never
+// asked for.
+func TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCachedFallback(t *testing.T) {
+	ts := setup(t) // setup() wires offlineCache as nil
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	liveErr := errors.New("network unreachable")
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		Return(nil, liveErr).
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+
+	assert.ErrorIs(t, err, liveErr)
+	assert.Nil(t, result)
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T) {

@@ -337,12 +337,21 @@ Current success response: Chromium/player response from
 }
 ```
 
+If offline caching is enabled and `playlistUrl` was previously used with
+`downloadPlaylist` for this exact URL, a live DP1 fetch/processing
+failure (e.g. no network) falls back to that downloaded copy instead of
+failing the command — see `offline-artwork-capture.md` §6. This is a
+"last known good" copy: it will not reflect anything republished at that
+URL since it was downloaded.
+
 Current error cases:
 
 - Missing both `playlistUrl` and `dp1_call`: command failure with
   `unknown payload type`.
 - `playlistUrl` is not a non-empty string.
-- DP1 URL fetch or processing fails.
+- DP1 URL fetch or processing fails, and no cached fallback exists for
+  that URL (never downloaded, offline caching disabled, or since
+  cleared).
 - `dp1_call` is not an object.
 - Inline DP1 cannot be marshaled/unmarshaled.
 - Dynamic query resolution fails.
@@ -1454,7 +1463,12 @@ Success response:
 were actually queued. The resolved playlist (as `dp1.DP1` returns it —
 `dynamicQuery` items already materialized, all field values including
 `source` intact) is stored as-is (`playlists/<playlistId>.json`, no further
-mutation) so a later `clearPlaylistCache` can operate on it. This is not
+mutation) so a later `clearPlaylistCache` can operate on it. When the
+request carried `playlistUrl` (as opposed to `dp1_call`), that URL is
+additionally indexed so `displayPlaylist` with the same `playlistUrl` can
+still find and display this exact cached playlist offline if live DP1
+resolution later fails — see `displayPlaylist`'s section above and
+`offline-artwork-capture.md` §6. This is not
 guaranteed to be byte-identical to whatever a publisher
 originally served (`dp1` resolution re-serializes the Go struct, so key
 order/whitespace can differ), but DP-1 signatures verify against a
@@ -1581,7 +1595,14 @@ Success response:
 `state` is one of `not_cached`, `queued`, `downloading`, `ready`, `partial`,
 `failed`, `broken_online`. `percent` is coarse (`0` or `100`): capture is a
 single bounded-window operation, not chunked, so there is no meaningful
-mid-download progress beyond queued/downloading vs. done. `reason` is only
+mid-download progress beyond queued/downloading vs. done. `100` covers
+every state where the capture window already finished — `ready`,
+`partial`, and `broken_online` (a finished capture whose only failures
+were CSP blocks, so the artwork itself, not the download, is what is
+broken — see below) — since none of those three will ever progress
+further on their own; `0` covers `not_cached`, `queued`, `downloading`,
+and `failed` (no successful capture ever completed to report progress
+on). `reason` is only
 present when `coverageComplete` is `false` and is free text, not a fixed
 enum — it is a semicolon-joined list of per-resource capture outcomes,
 each one of:
@@ -1632,8 +1653,18 @@ to local hub WebSocket clients.
 
 Delivery is best-effort on both transports: relayer delivery is skipped
 (and logged) when the relayer is not connected, and hub WS delivery is
-skipped (and logged) when there are no connected hub clients. Clients that
-need a definitive current state should still poll `getOfflineCacheStatus`.
+skipped (and logged) when there are no connected hub clients. Both sends
+run synchronously on the offline-cache service's single worker goroutine
+(the same one that runs captures — see `service.notify`), so both are
+write-deadline-bounded (5s) rather than able to block indefinitely on a
+stalled/backpressured client: relayer via `notifySendTimeout` in
+`notifier.go`, hub WS via `ws.go`'s `SetWriteDeadline` call before every
+`WriteJSON` (also shared by every other hub WS sender, not just this
+notification — see `ws.go`'s `sendWriteWait`). A connection that hits its
+deadline is dropped as a failed write and closed, same as any other write
+error; the queued/downloading captures behind it in the worker's queue
+are unaffected. Clients that need a definitive current state should still
+poll `getOfflineCacheStatus`.
 
 ## Response Shape Recommendation for New Inbound Commands
 

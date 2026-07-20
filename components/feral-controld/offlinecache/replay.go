@@ -84,7 +84,12 @@ type Replayer interface {
 	// every resource the page can legitimately need is then known.
 	EnableForPlaylist(ctx context.Context, itemIDs []string, mixed bool) error
 	// Disable turns interception off; all requests pass through
-	// untouched. Call when moving to an uncached/online item.
+	// untouched. Call when moving to an uncached/online item. If the
+	// underlying Fetch.disable CDP call itself fails, scope is NOT
+	// cleared to a fail-closed state (see the implementation's doc
+	// comment) — the returned error should be logged/retried by the
+	// caller, but must never be treated as "safe to ignore, disable
+	// probably still happened."
 	Disable(ctx context.Context) error
 }
 
@@ -173,19 +178,50 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixe
 	return nil
 }
 
+// Disable clears local scope only AFTER Fetch.disable actually succeeds
+// (PR #229 review regression fix). Clearing resources/mixedScope
+// optimistically before the CDP call, as this used to do, meant a failed
+// Fetch.disable left Chromium's Fetch interception (pattern "*", so it
+// matches every request on the page) potentially still live while local
+// state said "disabled, nothing cached, strict policy" — turning every
+// subsequent request on whatever is now on screen into a fail_closed
+// Fetch.failRequest, i.e. breaking normal online playback outright the
+// moment a device moved to (or refreshed) an uncached/online item. On
+// failure this instead forces mixedScope=true, the same "cannot
+// distinguish a miss from a legitimate live request" relaxation
+// EnableForPlaylist's mixed parameter already uses, so at worst a stale
+// cached resource keeps being replayed (still correct bytes) while
+// everything else passes through to the network — never a network
+// failure the page didn't actually have. The caller (KioskReplay.
+// SyncPlaylist) propagates the error so it can be logged and retried on
+// the next sync pass.
 func (r *replayer) Disable(ctx context.Context) error {
-	r.mu.Lock()
+	r.mu.RLock()
 	session := r.session
+	r.mu.RUnlock()
+
+	if session == nil {
+		// Fetch was never enabled without a session to enable it on, so
+		// there is nothing that could still be active — always safe to
+		// clear unconditionally.
+		r.mu.Lock()
+		r.resources = nil
+		r.mixedScope = false
+		r.mu.Unlock()
+		return nil
+	}
+
+	if _, err := session.Send(ctx, "Fetch.disable", map[string]interface{}{}); err != nil {
+		r.mu.Lock()
+		r.mixedScope = true
+		r.mu.Unlock()
+		return fmt.Errorf("offline cache replay: Fetch.disable: %w", err)
+	}
+
+	r.mu.Lock()
 	r.resources = nil
 	r.mixedScope = false
 	r.mu.Unlock()
-
-	if session == nil {
-		return nil
-	}
-	if _, err := session.Send(ctx, "Fetch.disable", map[string]interface{}{}); err != nil {
-		return fmt.Errorf("offline cache replay: Fetch.disable: %w", err)
-	}
 	return nil
 }
 
