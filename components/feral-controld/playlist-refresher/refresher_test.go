@@ -428,6 +428,94 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 	r.Stop()
 }
 
+// TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick is the
+// regression test for the PR #229 review finding that offline-cache replay
+// scope was only ever re-synced by the next displayPlaylist command or the
+// next PLAYLIST_REFRESH_INTERVAL tick — up to 5 minutes after a kiosk/CDP
+// reconnect (see main.go's onConnect hook). The ticker channel here never
+// fires on its own, so the only way a second sync pass can happen is via
+// ForceRefresh.
+func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	// A ticker channel that never delivers a tick: without ForceRefresh,
+	// only the one initial pass from background()'s own
+	// retry-until-success loop would ever run.
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	playlistURL := "http://example.com/playlist.json"
+	mockPlaylist := createMockPlaylist()
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return("success", nil).
+		AnyTimes()
+
+	syncCount := make(chan struct{}, 8)
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item1"}).
+		DoAndReturn(func(context.Context, []string) error {
+			syncCount <- struct{}{}
+			return nil
+		}).
+		MinTimes(1)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r.Start()
+	defer r.Stop()
+
+	// Drain the one sync pass background()'s own initial retry-until-
+	// success loop produces at Start.
+	select {
+	case <-syncCount:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the initial sync pass")
+	}
+
+	r.ForceRefresh()
+
+	select {
+	case <-syncCount:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ForceRefresh did not trigger an additional sync pass")
+	}
+}
+
+// TestRefresher_ForceRefresh_BeforeStartIsSafeNoOp pins that calling
+// ForceRefresh before Start (or after Stop) never panics or blocks: the
+// buffered channel just absorbs the signal until/unless a background loop
+// is running to consume it.
+func TestRefresher_ForceRefresh_BeforeStartIsSafeNoOp(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	assert.NotPanics(t, func() {
+		ts.refresher.ForceRefresh()
+	})
+}
+
 func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefresh(t *testing.T) {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctrl := gomock.NewController(t)

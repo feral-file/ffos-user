@@ -17,6 +17,7 @@ import (
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -399,6 +400,63 @@ func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
 
 	err := ts.app.run(testCtx, ts.config)
 	assert.NoError(t, err)
+}
+
+// TestApp_Run_OnConnectResyncsOfflineCacheReplayScope is the regression
+// test for the PR #229 review finding that AttachOnReconnect alone leaves
+// offline-cache replay scope stale (Fetch.enable is not even reissued)
+// until the next displayPlaylist command or PlaylistRefresher's next
+// periodic pass — up to PLAYLIST_REFRESH_INTERVAL later. It captures the
+// onConnect callback CDP.Start is given and invokes it directly, asserting
+// both AttachOnReconnect and PlaylistRefresher.ForceRefresh run.
+func TestApp_Run_OnConnectResyncsOfflineCacheReplayScope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().ForceRefresh()
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+	ts.mockStateManager.EXPECT().
+		Load(ts.logger).
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: ""}}, nil)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().AttachOnReconnect(gomock.Any()).Return(nil).Times(1)
+	ts.app.KioskReplay = mockKioskReplay
+	ts.mockRefresher.EXPECT().ForceRefresh().Times(1)
+
+	var onConnect func()
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any()).Do(func(_ context.Context, fn func()) {
+		onConnect = fn
+	})
+	ts.mockCDP.EXPECT().Close()
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err)
+
+	require.NotNil(t, onConnect, "CDP.Start must be given an onConnect callback")
+	onConnect()
 }
 
 func TestApp_Run_Errors(t *testing.T) {

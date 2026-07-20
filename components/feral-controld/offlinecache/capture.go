@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	go_http "net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -178,7 +179,7 @@ func (c *capturer) Close() error {
 // final Resource list, fetching bytes for every successful (2xx) resource
 // and building the Coverage summary from anything that failed.
 func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker) ([]Resource, Coverage) {
-	urls, resources, failures := tracker.snapshot()
+	urls, resources, failures, pendingURLs := tracker.snapshot()
 
 	result := make([]Resource, 0, len(urls))
 	var failureReasons []string
@@ -200,6 +201,16 @@ func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker
 
 	for u, reason := range failures {
 		failureReasons = append(failureReasons, fmt.Sprintf("loading_failed(%s):%s", reason, u))
+	}
+
+	// A request the page made but that never reached responseReceived or
+	// loadingFailed before the window closed (e.g. a slow/hanging origin)
+	// has no Resource entry above and would otherwise vanish from the
+	// record with Coverage.Complete left true — silently promising a
+	// resource offline playback does not actually have. Counting it as a
+	// failure here is what keeps that promise honest.
+	for _, u := range pendingURLs {
+		failureReasons = append(failureReasons, fmt.Sprintf("unresolved_at_deadline:%s", u))
 	}
 
 	coverage := Coverage{Complete: len(failureReasons) == 0}
@@ -277,6 +288,7 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 			return
 		}
 		tracker.recordResource(evt.Response.URL, evt.Response.Status, evt.Response.MimeType, "")
+		tracker.resolveRequest(evt.RequestID)
 	})
 
 	session.On("Network.loadingFailed", func(params json.RawMessage) {
@@ -300,6 +312,7 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 			reason = ReasonCSPBlocked
 		}
 		tracker.recordFailure(url, reason)
+		tracker.resolveRequest(evt.RequestID)
 	})
 }
 
@@ -317,6 +330,14 @@ type captureTracker struct {
 	resources  map[string]Resource
 	order      []string // URLs in first-seen order, for deterministic output
 	failures   map[string]string
+	// pending holds every requestId seen via Network.requestWillBeSent
+	// that has not yet reached a terminal event (Network.responseReceived
+	// or Network.loadingFailed). A request still pending when the capture
+	// window closes was asked for by the page but its outcome was never
+	// observed — resolveResources must count that as an incomplete
+	// capture (see its doc), or a slow/hanging resource could silently
+	// vanish from the record while Coverage.Complete still reports true.
+	pending map[string]struct{}
 }
 
 func newCaptureTracker() *captureTracker {
@@ -324,6 +345,7 @@ func newCaptureTracker() *captureTracker {
 		requestURL: make(map[string]string),
 		resources:  make(map[string]Resource),
 		failures:   make(map[string]string),
+		pending:    make(map[string]struct{}),
 	}
 }
 
@@ -357,10 +379,22 @@ func (t *captureTracker) recordFailure(url, reason string) {
 	t.failures[url] = reason
 }
 
+// trackRequest records a Network.requestWillBeSent observation and marks
+// requestID pending. Called on every hop of a redirect chain (CDP reuses
+// the same requestId across hops, only changing the URL), which is exactly
+// why this must (re-)mark it pending rather than only doing so on first
+// sight: a request is not resolved until its FINAL hop reaches a terminal
+// event, so an earlier hop's resolveRequest call (from that hop's own
+// redirect responseReceived) must not be mistaken for the whole chain being
+// done. In practice each hop's requestWillBeSent fires strictly after the
+// previous hop's responseReceived, so this re-marking is what keeps the
+// invariant "pending means the CURRENT url has no terminal event yet" true
+// throughout the chain.
 func (t *captureTracker) trackRequest(requestID, url string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.requestURL[requestID] = url
+	t.pending[requestID] = struct{}{}
 }
 
 func (t *captureTracker) urlForRequest(requestID string) string {
@@ -369,9 +403,23 @@ func (t *captureTracker) urlForRequest(requestID string) string {
 	return t.requestURL[requestID]
 }
 
+// resolveRequest marks requestID as having reached a terminal event
+// (Network.responseReceived or Network.loadingFailed), removing it from
+// the "still in flight when the window closes" set snapshot exposes.
+func (t *captureTracker) resolveRequest(requestID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.pending, requestID)
+}
+
 // snapshot returns copies of the tracker's state for lock-free use after
-// the observation window closes.
-func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]string) {
+// the observation window closes. pendingURLs is sorted for deterministic
+// Coverage.Reason ordering (map iteration order is not); it excludes
+// blob:/data: URLs for the same reason recordResource/recordFailure do —
+// those schemes never reach a Network terminal event since they resolve
+// in-page, so treating one as "still pending" would be a permanent false
+// incompleteness on every capture rather than a real signal.
+func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]string, []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -384,5 +432,12 @@ func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]s
 	for k, v := range t.failures {
 		failures[k] = v
 	}
-	return urls, resources, failures
+	pendingURLs := make([]string, 0, len(t.pending))
+	for reqID := range t.pending {
+		if u := t.requestURL[reqID]; u != "" && !isIgnoredCaptureURL(u) {
+			pendingURLs = append(pendingURLs, u)
+		}
+	}
+	sort.Strings(pendingURLs)
+	return urls, resources, failures, pendingURLs
 }

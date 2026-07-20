@@ -230,6 +230,74 @@ func TestCapturer_Capture_LoadingFailedMarksIncomplete(t *testing.T) {
 	assert.Contains(t, rec.Coverage.Reason, "net::ERR_CONNECTION_RESET")
 }
 
+// TestCapturer_Capture_UnresolvedRequestAtDeadlineMarksIncomplete is the
+// regression test for the PR #229 review finding that a request observed
+// via requestWillBeSent but never reaching responseReceived/loadingFailed
+// before the capture window closes used to vanish from the record entirely
+// while Coverage.Complete still reported true.
+func TestCapturer_Capture_UnresolvedRequestAtDeadlineMarksIncomplete(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/still-loading.js"},
+		})
+		// Deliberately never send responseReceived/loadingFailed for
+		// req-1: this reproduces a resource whose outcome the page
+		// never observed before the capture window closed.
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-hang", Source: "https://example.com/index.html"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	assert.False(t, rec.Coverage.Complete, "a request with no terminal event by the deadline must not report Complete=true")
+	assert.Contains(t, rec.Coverage.Reason, "unresolved_at_deadline")
+	assert.Contains(t, rec.Coverage.Reason, "https://example.com/still-loading.js")
+	assert.Empty(t, rec.Resources, "an unresolved request has no Resource entry to include")
+}
+
+// TestCapturer_Capture_RedirectChainUnresolvedFinalHopMarksIncomplete pins
+// that pending-tracking follows a redirect chain's requestId to its LATEST
+// hop rather than being satisfied by an earlier hop's own recordResource
+// call: the first hop gets a Resource entry (from redirectResponse) purely
+// as a side effect of observing the redirect, which must not be mistaken
+// for the chain as a whole having resolved.
+func TestCapturer_Capture_RedirectChainUnresolvedFinalHopMarksIncomplete(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/lib.min.js"},
+		})
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/lib@2.0/lib.min.js"},
+			"redirectResponse": map[string]interface{}{
+				"url": "https://example.com/lib.min.js", "status": 302,
+			},
+		})
+		// The final hop's own response is never observed: req-1 stays
+		// pending on its latest (redirected-to) URL.
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-redirect-hang", Source: "https://example.com/lib.min.js"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	assert.False(t, rec.Coverage.Complete)
+	assert.Contains(t, rec.Coverage.Reason, "unresolved_at_deadline")
+	assert.Contains(t, rec.Coverage.Reason, "https://example.com/lib@2.0/lib.min.js")
+	require.Len(t, rec.Resources, 1, "the redirect hop itself was observed and recorded")
+	assert.True(t, rec.Resources[0].IsRedirect())
+}
+
 func TestCapturer_Capture_CSPBlockedReason(t *testing.T) {
 	h := setupCapture(t)
 	defer h.ctrl.Finish()

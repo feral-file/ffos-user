@@ -330,6 +330,16 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			if err := app.KioskReplay.AttachOnReconnect(ctx); err != nil {
 				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
 			}
+			// AttachOnReconnect deliberately does not re-apply the
+			// previously-enabled item scope (Fetch.enable is not even
+			// reissued until something calls SyncPlaylist). Without this,
+			// a playlist that was already scoped for offline replay
+			// before the restart would silently fall back to live
+			// network for up to PLAYLIST_REFRESH_INTERVAL — exactly the
+			// window OOM-recovery restarts happen in — until
+			// PlaylistRefresher's next periodic pass. ForceRefresh runs
+			// that same resync immediately instead of waiting.
+			app.PlaylistRefresher.ForceRefresh()
 		}
 	})
 	defer app.CDP.Close()

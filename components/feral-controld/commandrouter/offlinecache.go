@@ -11,6 +11,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
 // offlineCacheCommands is deliberately separate from deviceCtlCommands: these
@@ -45,9 +46,9 @@ func (h *handler) handleOfflineCacheCommand(ctx context.Context, commandType com
 	case commands.CMD_DOWNLOAD_PLAYLIST:
 		return h.handleDownloadPlaylist(ctx, args)
 	case commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE:
-		return h.handleClearPlaylistItemCache(args)
+		return h.handleClearPlaylistItemCache(ctx, args)
 	case commands.CMD_CLEAR_PLAYLIST_CACHE:
-		return h.handleClearPlaylistCache(args)
+		return h.handleClearPlaylistCache(ctx, args)
 	case commands.CMD_GET_OFFLINE_CACHE_STATUS:
 		return h.handleGetOfflineCacheStatus(args)
 	default:
@@ -98,7 +99,7 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	return map[string]any{"ok": true, "status": "queued", "total": total, "softwareCount": queued}, nil
 }
 
-func (h *handler) handleClearPlaylistItemCache(args map[string]any) (interface{}, error) {
+func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[string]any) (interface{}, error) {
 	itemID, ok := stringArg(args["itemId"])
 	if !ok {
 		return errorResponse("invalid_request", "itemId is required", false), nil
@@ -106,10 +107,11 @@ func (h *handler) handleClearPlaylistItemCache(args map[string]any) (interface{}
 	if err := h.offlineCache.ClearItem(itemID); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
+	h.resyncKioskReplayScopeAfterClear(ctx)
 	return map[string]any{"ok": true, "itemId": itemID}, nil
 }
 
-func (h *handler) handleClearPlaylistCache(args map[string]any) (interface{}, error) {
+func (h *handler) handleClearPlaylistCache(ctx context.Context, args map[string]any) (interface{}, error) {
 	playlistID, ok := stringArg(args["playlistId"])
 	if !ok {
 		return errorResponse("invalid_request", "playlistId is required", false), nil
@@ -117,7 +119,81 @@ func (h *handler) handleClearPlaylistCache(args map[string]any) (interface{}, er
 	if err := h.offlineCache.ClearPlaylist(playlistID); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
+	h.resyncKioskReplayScopeAfterClear(ctx)
 	return map[string]any{"ok": true, "playlistId": playlistID}, nil
+}
+
+// resyncKioskReplayScopeAfterClear re-syncs replay's live Fetch-
+// interception scope with whichever items are still cached, immediately
+// after a successful clear. Without this, ClearItem/ClearPlaylist only
+// touch the store (see their docs) — if the item just cleared is the one
+// currently displayed, replayer's in-memory resources map keeps stale
+// entries pointing at now-deleted blobs until the next displayPlaylist
+// command or playlist-refresher's periodic pass (up to
+// refresher.PLAYLIST_REFRESH_INTERVAL later), during which every request
+// for it is a miss instead of either serving correctly or falling back to
+// the network cleanly.
+//
+// Best-effort and fire-and-forget: a resync failure here must never turn a
+// successful clear into a reported error, since the clear itself already
+// fully succeeded against the store. Mirrors the same
+// FetchPlayerStatus->resolve->SyncPlaylist shape Process's
+// CMD_DISPLAY_PLAYLIST branch and playlist-refresher's own
+// processPlayingPlaylist independently implement for their own inputs
+// (RPC command arguments vs. polled player status respectively) —
+// commandrouter and playlist-refresher intentionally do not depend on each
+// other (see AGENTS.md's service-boundary guidance), so this is kept as
+// its own small instance of that shape rather than reaching across the
+// package boundary for it.
+func (h *handler) resyncKioskReplayScopeAfterClear(ctx context.Context) {
+	if h.kioskReplay == nil || h.statusPoller == nil {
+		return
+	}
+	playerStatus, err := h.statusPoller.FetchPlayerStatus(ctx)
+	if err != nil {
+		h.logger.Warn("offline cache: failed to fetch player status to resync replay scope after clear", zap.Error(err))
+		return
+	}
+	if playerStatus == nil || playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
+		return
+	}
+
+	playlist, err := h.resolveDisplayedPlaylist(ctx, playerStatus)
+	if err != nil {
+		h.logger.Warn("offline cache: failed to resolve currently displayed playlist to resync replay scope after clear", zap.Error(err))
+		return
+	}
+	if playlist == nil {
+		return
+	}
+
+	itemIDs := make([]string, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		itemIDs = append(itemIDs, item.ID)
+	}
+	if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
+		h.logger.Warn("offline cache: failed to sync kiosk replay scope after clear", zap.Error(syncErr))
+	}
+}
+
+// resolveDisplayedPlaylist mirrors playlist-refresher's own
+// playerStatus.PlaylistURL/Playlist resolution (see
+// refresher.processPlayingPlaylist). A nil, nil return means the player
+// status carried neither a URL nor an inline playlist (as opposed to an
+// error resolving one it did carry), which the caller treats as "nothing
+// to resync."
+func (h *handler) resolveDisplayedPlaylist(ctx context.Context, playerStatus *status.PlayerStatus) (*dp1.Playlist, error) {
+	switch {
+	case playerStatus.PlaylistURL != nil:
+		return h.dp1.ProcessPlaylistURL(ctx, *playerStatus.PlaylistURL, false)
+	case playerStatus.Playlist != nil:
+		if !playerStatus.Playlist.HasDynamicContent() {
+			return playerStatus.Playlist, nil
+		}
+		return h.dp1.ProcessDynamicPlaylist(ctx, *playerStatus.Playlist, false)
+	default:
+		return nil, nil
+	}
 }
 
 func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{}, error) {

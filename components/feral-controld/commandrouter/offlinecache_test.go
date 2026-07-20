@@ -13,6 +13,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
 // setupOfflineCache builds a handler with a mocked offlinecache.Service so
@@ -266,6 +267,120 @@ func TestCommandHandler_ClearPlaylistCache_Success(t *testing.T) {
 	defer ts.teardown()
 
 	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_CACHE,
+		Arguments: map[string]any{"playlistId": "playlist-1"},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "playlist-1", resp["playlistId"])
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope is the
+// regression test for the PR #229 review finding that clearing an item's
+// cache left replayer's live Fetch-interception scope untouched: without
+// this resync, an item cleared while it is the one currently displayed
+// would keep serving from (now-deleted) stale blob entries instead of
+// either playing correctly or falling back to the network cleanly.
+func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+
+	playlistURL := "https://example.com/playlist.json"
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
+		{ID: "item-1"}, {ID: "item-2"},
+	}}}
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &playlistURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "item-1", resp["itemId"])
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlaylist
+// pins that resyncKioskReplayScopeAfterClear is a no-op (no SyncPlaylist
+// call at all) when the player is not currently on a displayPlaylist
+// command — nothing to resync.
+func TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlaylist(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command: "someOtherCommand",
+	}, nil).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	// No SyncPlaylist expectation: gomock fails the test if one occurs.
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_ResyncFailureDoesNotBlockResponse
+// pins that a resync failure (here, FetchPlayerStatus erroring) never turns
+// an already-successful clear into a reported error.
+func TestCommandHandler_ClearPlaylistItemCache_ResyncFailureDoesNotBlockResponse(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(nil, assertError("cdp not ready")).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "item-1", resp["itemId"])
+}
+
+// TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope mirrors
+// TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope for the
+// whole-playlist clear path.
+func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(nil).Times(1)
+
+	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a"}}}}
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
+		Playlist: inlinePlaylist,
+	}, nil).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-a"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_CACHE,

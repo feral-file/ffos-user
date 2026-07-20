@@ -32,6 +32,19 @@ var errCDPNotReady = errors.New("CDP not connected")
 type Refresher interface {
 	Start()
 	Stop()
+	// ForceRefresh triggers an immediate refresh pass instead of waiting
+	// for the next PLAYLIST_REFRESH_INTERVAL tick. Call after any event
+	// that can invalidate offline-cache replay scope without this
+	// background loop noticing right away — currently only a kiosk/CDP
+	// reconnect (see cdp.CDP's onConnect hook in main.go):
+	// Fetch-interception scope does not survive a Chromium restart
+	// (plain restart or OOM-recovery), so a playlist that was already
+	// scoped for offline replay before the restart would otherwise
+	// silently fall back to live network for up to
+	// PLAYLIST_REFRESH_INTERVAL. Safe to call even when a refresh is
+	// already pending or the loop has not started yet (a no-op in the
+	// latter case, mirroring Stop's nil-cancel guard).
+	ForceRefresh()
 }
 
 type refresher struct {
@@ -51,6 +64,15 @@ type refresher struct {
 
 	done    chan struct{}
 	started bool
+	// refreshChan is a 1-buffered, non-blocking signal (mirrors
+	// status.Poller.ForceRefresh's channel pattern) that background's
+	// select loop drains to run an extra processPlayingPlaylist pass
+	// immediately rather than waiting for the next ticker tick. Created
+	// once in New and never recreated across Start/Stop cycles (unlike
+	// done), since a stale buffered signal surviving a restart is
+	// harmless: it just costs one redundant extra pass right after the
+	// next Start.
+	refreshChan chan struct{}
 }
 
 func New(
@@ -71,6 +93,19 @@ func New(
 		clock:        clock,
 		logger:       logger,
 		done:         make(chan struct{}),
+		refreshChan:  make(chan struct{}, 1),
+	}
+}
+
+// ForceRefresh triggers an immediate refresh pass. See the Refresher
+// interface doc for why this exists.
+func (r *refresher) ForceRefresh() {
+	select {
+	case r.refreshChan <- struct{}{}:
+	default:
+		// A refresh is already pending; it will observe whatever is
+		// currently displayed by the time it runs, so a second signal
+		// here would be redundant.
 	}
 }
 
@@ -108,6 +143,10 @@ func (r *refresher) background() {
 	for {
 		select {
 		case <-ticker.C():
+			if err := r.processPlayingPlaylist(); err != nil {
+				r.logProcessFailure(err)
+			}
+		case <-r.refreshChan:
 			if err := r.processPlayingPlaylist(); err != nil {
 				r.logProcessFailure(err)
 			}
