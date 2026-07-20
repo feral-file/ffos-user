@@ -1,0 +1,35 @@
+name: Release Guardrail
+
+# Enforces the AGENTS.md "Release guardrail: two shipping rails" contract on
+# release PRs: a diff that touches both components/** (pacman package rail)
+# and users/** (full-image rsync rail, built in the ffos repo) must carry a
+# full-image declaration in RELEASES.md. No path filter — the check must run
+# on every PR into a release branch precisely because the failure mode is a
+# cross-rail diff that FORGOT the release evidence.
+on:
+  pull_request:
+    branches:
+      - staging
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-guardrail-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Full-image rail evidence
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history: the check diffs against the PR base ref, which a
+          # shallow checkout of the merge commit does not carry.
+          fetch-depth: 0
+
+      - name: Check cross-rail release evidence
+        run: bash scripts/check-release-rail.sh "origin/${{ github.base_ref }}"

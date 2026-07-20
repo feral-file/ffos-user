@@ -74,4 +74,5 @@ verify-setupd-lint:
 verify-setupd-test:
 	@cd components/feral-setupd && cargo check --verbose
 	@./scripts/test-serve-feral-player.sh
+	@./scripts/test-headless-startup-contract.sh
 	@cd components/feral-setupd && cargo test --all-targets --all-features --verbose

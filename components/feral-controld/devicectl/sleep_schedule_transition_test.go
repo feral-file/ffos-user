@@ -17,9 +17,18 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 )
 
+// panelDDCTrackerStub supplies default implementations of the PanelDDC
+// tracker probes (ShouldPoll/Generation) for test fakes that don't exercise
+// them: always pollable, single display generation.
+type panelDDCTrackerStub struct{}
+
+func (panelDDCTrackerStub) ShouldPoll() bool   { return true }
+func (panelDDCTrackerStub) Generation() uint64 { return 0 }
+
 // slowBlockingPanelDDC blocks in ApplyControl until unblock is closed, so tests
 // can prove sleep transitions do not wait on DDC.
 type slowBlockingPanelDDC struct {
+	panelDDCTrackerStub
 	applyStarted chan struct{}
 	unblock      chan struct{}
 }
@@ -78,9 +87,43 @@ func TestApplySleepTransition_DoesNotBlockOnFfpPowerDDC(t *testing.T) {
 	close(unblock)
 }
 
+func TestInvalidatePlayerSleepState_ForcesRedriveAfterCDPReconnect(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	// The IfChanged path only re-drives the player while CDP is connected.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	// Exactly two player round-trips: the initial drive and the post-invalidation
+	// re-drive. The aligned tick in between must not send.
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).Times(2)
+
+	e := &executor{
+		cdp:    mockCDP,
+		logger: zaptest.NewLogger(t),
+	}
+	ctx := context.Background()
+
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "test"))
+	// Aligned state: the de-dup skips the player.
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "test"))
+
+	// Chromium restarted: the player web app reloaded awake while the tracker still
+	// says sleeping. Invalidation must make the next tick re-drive the player
+	// instead of skipping until the next schedule boundary.
+	e.invalidatePlayerSleepState()
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateSleeping, "test"))
+}
+
+func TestInvalidatePlayerSleepState_UnsupportedExecutorIsNoOp(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	// The exported helper takes the narrow Executor interface; an implementation
+	// without the private hook (e.g. a mock) must be a safe no-op, not a panic.
+	InvalidatePlayerSleepState(mocks.NewMockExecutor(ctrl), zaptest.NewLogger(t))
+}
+
 // stagedPanelDDC waits on release before each ApplyControl so tests can interleave
 // sleep transitions and observe serialized DDC order.
 type stagedPanelDDC struct {
+	panelDDCTrackerStub
 	release chan struct{}
 
 	mu      sync.Mutex
@@ -152,6 +195,7 @@ func TestApplySleepTransition_SerializesRapidFfpPowerChanges(t *testing.T) {
 
 // tinyDelayPanelDDC adds a short delay so concurrent enqueue races the worker.
 type tinyDelayPanelDDC struct {
+	panelDDCTrackerStub
 	delay time.Duration
 }
 

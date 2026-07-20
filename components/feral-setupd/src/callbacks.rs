@@ -2,7 +2,7 @@
 
 use crate::app_state::AppState;
 use crate::ble;
-use crate::cdp::Cdp;
+use crate::cdp::CdpHandle;
 use crate::constant;
 use crate::dbus_utils;
 use crate::persistent_state;
@@ -46,7 +46,7 @@ fn relatch_update_failed(app_state: &Arc<AppState>, caller: &str) {
 
 async fn internet_setup_successfully_cb(
     app_state: &Arc<AppState>,
-    chromium: &Arc<Cdp>,
+    chromium: &Arc<CdpHandle>,
     guard: UpdateGuard,
     // True when this callback is entered from a recovery retry that started in `UpdateFailed`.
     // On VersionCheckFailed the latch must be restored so mobile still sees update_failed and
@@ -170,7 +170,7 @@ fn parse_bundled_upload_logs_payload(
 
 pub fn create_bt_connected_cb(
     app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
+    chromium: Arc<CdpHandle>,
 ) -> ble::BTConnectedCallback {
     Some(Box::new(move || {
         let app_state = app_state.clone();
@@ -191,7 +191,7 @@ pub fn create_bt_connected_cb(
 
 pub fn create_bt_disconnected_cb(
     app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
+    chromium: Arc<CdpHandle>,
 ) -> ble::BTDisconnectedCallback {
     Some(Box::new(move || {
         let app_state = app_state.clone();
@@ -216,7 +216,7 @@ pub fn create_bt_disconnected_cb(
 
 pub fn create_connect_wifi_cb(
     app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
+    chromium: Arc<CdpHandle>,
 ) -> ble::ConnectWifiCallback {
     Box::new(move |ssid, pwd| {
         let app_state = app_state.clone();
@@ -380,7 +380,10 @@ pub fn create_connect_wifi_cb(
     })
 }
 
-pub fn create_keep_wifi_cb(app_state: Arc<AppState>, chromium: Arc<Cdp>) -> ble::KeepWifiCallback {
+pub fn create_keep_wifi_cb(
+    app_state: Arc<AppState>,
+    chromium: Arc<CdpHandle>,
+) -> ble::KeepWifiCallback {
     Box::new(move || {
         let app_state = app_state.clone();
         let chromium = chromium.clone();
@@ -472,7 +475,7 @@ pub fn create_get_info_cb(app_state: Arc<AppState>) -> ble::GetInfoCallback {
 
 pub fn create_qrcode_switch_cb(
     app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
+    chromium: Arc<CdpHandle>,
 ) -> dbus_utils::ListenCallback {
     Box::new(move |msg| {
         println!("MAIN: QR switch callback received");
@@ -542,7 +545,7 @@ pub fn create_qrcode_switch_cb(
     })
 }
 
-async fn do_factory_reset(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
+async fn do_factory_reset(chromium: &Arc<CdpHandle>, app_state: &Arc<AppState>) {
     // Show factory reset page
     let _ = show_factory_reset(chromium, app_state).await;
     // Execute factory reset
@@ -551,7 +554,7 @@ async fn do_factory_reset(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
     }
 }
 
-async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
+async fn do_system_update(chromium: &Arc<CdpHandle>, app_state: &Arc<AppState>) {
     // Acquire device ownership BEFORE any connectivity probe, no-internet navigation, or
     // UpdateFailed latch clear/restore. A load-only precheck left a TOCTOU window where a
     // concurrent task could acquire ownership after the check while this path still mutated the
@@ -660,7 +663,7 @@ async fn do_system_update(chromium: &Arc<Cdp>, app_state: &Arc<AppState>) {
 
 pub fn create_factory_reset_cb(
     app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
+    chromium: Arc<CdpHandle>,
 ) -> ble::FactoryResetCallback {
     Some(Box::new(move || {
         let chromium = chromium.clone();
@@ -673,7 +676,7 @@ pub fn create_factory_reset_cb(
 
 pub fn create_factory_reset_dbus_cb(
     app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
+    chromium: Arc<CdpHandle>,
 ) -> dbus_utils::ListenCallback {
     Box::new(move |_msg| {
         println!("MAIN: Factory reset DBus callback received");
@@ -687,7 +690,7 @@ pub fn create_factory_reset_dbus_cb(
 
 pub fn create_system_update_dbus_cb(
     app_state: Arc<AppState>,
-    chromium: Arc<Cdp>,
+    chromium: Arc<CdpHandle>,
 ) -> dbus_utils::ListenCallback {
     Box::new(move |_msg| {
         println!("MAIN: System update DBus callback received");

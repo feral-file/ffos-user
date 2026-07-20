@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type testSetup struct {
@@ -35,8 +36,18 @@ type testSetup struct {
 }
 
 func setup(t *testing.T) *testSetup {
+	ts := setupWithLogger(t, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	// Most tests exercise the connected-CDP paths, so default Initialized to
+	// true. Headless tests build their own setup via setupWithLogger and stub
+	// Initialized themselves.
+	ts.mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	return ts
+}
+
+func setupWithLogger(t *testing.T, logger *zap.Logger) *testSetup {
 	ctrl := gomock.NewController(t)
-	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Dependencies
@@ -869,6 +880,91 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 
 	// Give it a moment to process the done signal
 	time.Sleep(50 * time.Millisecond)
+}
+
+// TestRefresher_HeadlessBoot_CDPNotInitialized pins the headless expected-state
+// contract: with CDP uninitialized (headless boot, Chromium intentionally not
+// running) the refresher must not touch the status poller, DP1, or CDP.Send,
+// and must not emit Error-level logs — it just retries quietly.
+func TestRefresher_HeadlessBoot_CDPNotInitialized(t *testing.T) {
+	core, observed := observer.New(zap.DebugLevel)
+	ts := setupWithLogger(t, zap.New(core))
+	defer ts.teardown()
+
+	// CDP stays down for the whole test.
+	ts.mockCDP.EXPECT().Initialized().Return(false).MinTimes(2)
+
+	// Quiet retry loop: sleep between passes.
+	ts.mockClock.EXPECT().
+		Sleep(refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		AnyTimes()
+
+	// No expectations on FetchPlayerStatus / DP1 / CDP.Send: any such call is an
+	// unexpected-call failure, proving the guard short-circuits before them.
+
+	ts.refresher.Start()
+	time.Sleep(100 * time.Millisecond)
+	ts.refresher.Stop()
+
+	for _, entry := range observed.All() {
+		assert.Less(t, entry.Level, zap.ErrorLevel,
+			"headless CDP absence must not log at Error level: %s", entry.Message)
+	}
+}
+
+// TestRefresher_HeadlessBoot_CDPConnectsLater verifies the startup loop keeps
+// retrying while CDP is absent and performs the initial refresh as soon as the
+// connection appears, rather than giving up or deferring to the 5-minute tick.
+func TestRefresher_HeadlessBoot_CDPConnectsLater(t *testing.T) {
+	ts := setupWithLogger(t, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer ts.teardown()
+
+	setupBackgroundMocks(ts)
+
+	gomock.InOrder(
+		ts.mockCDP.EXPECT().Initialized().Return(false).Times(2),
+		ts.mockCDP.EXPECT().Initialized().Return(true).AnyTimes(),
+	)
+
+	ts.mockClock.EXPECT().
+		Sleep(refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		Times(2)
+
+	playlistURL := "http://example.com/playlist.json"
+	mockPlaylist := createMockPlaylist()
+
+	fetched := make(chan struct{}, 1)
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		DoAndReturn(func(ctx context.Context) (*status.PlayerStatus, error) {
+			select {
+			case fetched <- struct{}{}:
+			default:
+			}
+			return createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil
+		}).
+		AnyTimes()
+
+	ts.mockDP1.EXPECT().
+		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return("success", nil).
+		AnyTimes()
+
+	ts.refresher.Start()
+
+	select {
+	case <-fetched:
+		// Initial refresh ran once CDP reported initialized.
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial refresh never ran after CDP became initialized")
+	}
+
+	ts.refresher.Stop()
 }
 
 func TestRefresher_Background_RetryLogic(t *testing.T) {

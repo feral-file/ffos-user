@@ -1,6 +1,5 @@
 [Unit]
 Description=Feral File Controld
-PartOf=chromium-ready.target
 After=system-ready.target feral-sys-monitord.service
 StartLimitBurst=5
 StartLimitIntervalSec=600
@@ -16,3 +15,9 @@ RestartSec=5
 WatchdogSec=30s
 StandardOutput=append:/home/feralfile/.logs/controld.log
 StandardError=append:/home/feralfile/.logs/controld.log
+
+# Activation is the explicit start in .start-services.sh — units in this dir are
+# bind-mounted, never `systemctl --user enable`d, so [Install] alone starts
+# nothing. Kept for consistency with the other units here.
+[Install]
+WantedBy=default.target

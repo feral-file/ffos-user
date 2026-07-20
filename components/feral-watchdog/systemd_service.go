@@ -13,11 +13,6 @@ import (
 const (
 	// Chromium configuration
 	SYSTEMD_CHECK_INTERVAL = 30 * time.Second // Check systemd service status every 30 seconds
-
-	// chromiumReadyTarget gates feral-controld/feral-setupd. While it is not
-	// active those services are expected to be inactive (teardown window);
-	// while it is active they must be running, so inactive is a fault.
-	chromiumReadyTarget = "chromium-ready.target"
 )
 
 var (
@@ -28,11 +23,15 @@ var (
 		"feral-sys-monitord.service": true,
 	}
 
-	// servicesGatedByChromiumReady are PartOf=chromium-ready.target: systemd
-	// tears them down whenever that target stops (before the first CDP-up and
-	// during every Chromium restart window). For these, an inactive reading is
-	// only a genuine fault when chromium-ready.target is itself active.
-	servicesGatedByChromiumReady = map[string]bool{
+	// servicesReportInactiveAsFailure lists services whose INACTIVE reading is a
+	// hard fault. feral-setupd and feral-controld were formerly
+	// PartOf=chromium-ready.target and legitimately torn down with it (the old
+	// "expected teardown" window); they have since been decoupled and run
+	// unconditionally at boot, so an inactive reading now means they failed to
+	// stay up and must be reported (metric + notification) regardless of any
+	// target state. feral-player and feral-sys-monitord are intentionally
+	// excluded to preserve their existing log-only inactive handling.
+	servicesReportInactiveAsFailure = map[string]bool{
 		"feral-controld.service": true,
 		"feral-setupd.service":   true,
 	}
@@ -98,10 +97,19 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 			return errors.New("service state is nil")
 		}
 
-		// Check if service just recovered (failed -> active)
+		// Collapse the raw state into a single "down" verdict so the failure
+		// reporting below is uniform. FAILED is always down (the 90 s
+		// recent-exit grace is already applied upstream in
+		// checkSystemdUserServiceStatus, which returns ACTIVE for a recently
+		// exited service). INACTIVE is down only for the services that must run
+		// unconditionally now that setupd/controld are decoupled from
+		// chromium-ready.target; for player/sys-monitord inactive stays a
+		// log-only observation, preserving their prior behavior.
 		lastState := m.lastServiceStates[service]
-		hasRecovered := lastState != nil && *lastState == SYSTEMD_SERVICE_STATUS_FAILED && *state == SYSTEMD_SERVICE_STATUS_ACTIVE
-		hasJustFailed := (lastState == nil || *lastState != SYSTEMD_SERVICE_STATUS_FAILED) && *state == SYSTEMD_SERVICE_STATUS_FAILED
+		wasDown := m.isServiceDown(service, lastState)
+		nowDown := m.isServiceDown(service, state)
+		hasRecovered := wasDown && *state == SYSTEMD_SERVICE_STATUS_ACTIVE
+		hasJustFailed := !wasDown && nowDown
 
 		switch *state {
 		case SYSTEMD_SERVICE_STATUS_ACTIVE:
@@ -123,12 +131,27 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 					zap.String("service", service))
 			}
 		case SYSTEMD_SERVICE_STATUS_FAILED:
-			hasFailedService = true
 			m.logger.Error("Systemd: Service is failed",
 				zap.String("service", service),
 				zap.String("dependency", service))
+		case SYSTEMD_SERVICE_STATUS_INACTIVE:
+			// With setupd/controld no longer PartOf=chromium-ready.target there
+			// is no "expected teardown" window: every monitored service is meant
+			// to be up, so any inactive reading is an Error. setupd/controld
+			// additionally escalate to a failure metric via the nowDown block.
+			m.logger.Error("Systemd: Service is inactive",
+				zap.String("service", service))
+		default:
+			m.logger.Error("Systemd: Unknown service state",
+				zap.String("service", service),
+				zap.Any("state", state))
+		}
 
-			// Send service failed metric to vmagent
+		// Uniform failure reporting keyed off the normalized down verdict, so an
+		// inactive setupd/controld raises the same per-service metric + incident
+		// notification as a failed service.
+		if nowDown {
+			hasFailedService = true
 			if hasJustFailed {
 				if m.vmagentClient != nil {
 					m.vmagentClient.SendServiceFailedMetric(ctx, service)
@@ -136,25 +159,6 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 					m.logger.Warn("Vmagent client is nil, skipping service failed metric")
 				}
 			}
-		case SYSTEMD_SERVICE_STATUS_INACTIVE:
-			// A gated service (PartOf=chromium-ready.target) is expected to be
-			// inactive only while that target is down — the normal Chromium
-			// teardown window. If the target is active the service should be
-			// running too, so an inactive reading there is a genuine fault.
-			expectedTeardown := servicesGatedByChromiumReady[service] &&
-				!m.commandHandler.isUnitActive(ctx, chromiumReadyTarget)
-			if expectedTeardown {
-				m.logger.Info("Systemd: Service is inactive",
-					zap.String("service", service),
-					zap.Bool("expected_teardown", true))
-			} else {
-				m.logger.Error("Systemd: Service is inactive",
-					zap.String("service", service))
-			}
-		default:
-			m.logger.Error("Systemd: Unknown service state",
-				zap.String("service", service),
-				zap.Any("state", state))
 		}
 
 		// Update last state
@@ -185,4 +189,23 @@ func (m *SystemdMonitor) check(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// isServiceDown reports whether a service is in a state that must be reported as
+// a failure. FAILED is down for every service. INACTIVE is down only for the
+// services in servicesReportInactiveAsFailure (setupd/controld), which are now
+// expected to run unconditionally; for the others inactive is not a reported
+// failure. A nil state (never observed yet) is treated as not-down.
+func (m *SystemdMonitor) isServiceDown(service string, state *SystemdServiceStatus) bool {
+	if state == nil {
+		return false
+	}
+	switch *state {
+	case SYSTEMD_SERVICE_STATUS_FAILED:
+		return true
+	case SYSTEMD_SERVICE_STATUS_INACTIVE:
+		return servicesReportInactiveAsFailure[service]
+	default:
+		return false
+	}
 }

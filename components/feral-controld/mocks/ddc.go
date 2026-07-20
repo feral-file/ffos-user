@@ -64,3 +64,31 @@ func (mr *MockPanelDDCMockRecorder) CollectStatus(ctx interface{}) *gomock.Call 
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CollectStatus", reflect.TypeOf((*MockPanelDDC)(nil).CollectStatus), ctx)
 }
+
+// ShouldPoll mocks base method
+func (m *MockPanelDDC) ShouldPoll() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ShouldPoll")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ShouldPoll indicates an expected call of ShouldPoll
+func (mr *MockPanelDDCMockRecorder) ShouldPoll() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShouldPoll", reflect.TypeOf((*MockPanelDDC)(nil).ShouldPoll))
+}
+
+// Generation mocks base method
+func (m *MockPanelDDC) Generation() uint64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Generation")
+	ret0, _ := ret[0].(uint64)
+	return ret0
+}
+
+// Generation indicates an expected call of Generation
+func (mr *MockPanelDDCMockRecorder) Generation() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Generation", reflect.TypeOf((*MockPanelDDC)(nil).Generation))
+}

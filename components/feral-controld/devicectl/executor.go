@@ -126,6 +126,12 @@ type executor struct {
 	// (e.g. an older display lacking VCP 0xD6) is not hammered with ddcutil every
 	// tick. A genuine state change resets the streak and retries fresh.
 	sleepPanelFailStreak int
+	// sleepPanelGen is the ddc display generation observed at the last panel
+	// apply. The retry cap above only holds while the generation is unchanged:
+	// plugging/swapping a display bumps ddc.PanelDDC.Generation(), so a capped
+	// give-up on the OLD panel never sticks to a NEW one — the next tick
+	// re-drives the panel leg instead of waiting for the next schedule boundary.
+	sleepPanelGen uint64
 }
 
 func New(

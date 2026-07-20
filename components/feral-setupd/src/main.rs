@@ -23,7 +23,8 @@ use anyhow::Result;
 use ble::Ble;
 use dbus_handlers::{setup_dbus_listeners, wait_for_controld};
 use startup::{
-    init_app_state, init_cdp, start_ble, startup_with_internet, startup_without_internet,
+    init_app_state, init_cdp, spawn_cdp_reconnect_loop, start_ble, startup_with_internet,
+    startup_without_internet,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -71,14 +72,27 @@ async fn run() -> Result<()> {
     // Initialize state
     let ble_service = Arc::new(Ble::new());
     let app_state = init_app_state(&ble_service).await?;
-    let chrome = init_cdp().await?;
+    // Never fatal on a headless device: CDP may be absent at boot and appear later. init_cdp does a
+    // best-effort connect; the reconnect loop keeps it live and resyncs the UI on (re)connect.
+    let chrome = init_cdp().await;
+    spawn_cdp_reconnect_loop(chrome.clone(), app_state.clone());
 
     // Start bluetooth advertising with callbacks
     let ssids_cacher = Arc::new(SSIDsCacher::new());
     start_ble(&ble_service, &app_state, &chrome, &ssids_cacher).await?;
 
-    // Wait for controld D-Bus connection before proceeding
-    wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await?;
+    // Wait for controld D-Bus before proceeding, but never exit on timeout: BLE advertising is
+    // already up above, and exiting here would take down the one recovery path (phone-driven
+    // provisioning) exactly when controld is crash-looping and the user needs it most. Everything
+    // downstream that talks to controld (get_relayer_info, connectivity queries) is fallible
+    // per-call and simply degrades until controld appears.
+    if let Err(e) =
+        wait_for_controld(Duration::from_millis(constant::WAIT_FOR_CONTROLD_TIMEOUT)).await
+    {
+        eprintln!("MAIN: controld not reachable, continuing without it (BLE stays up): {e:#?}");
+        let error: &dyn std::error::Error = e.as_ref();
+        sentry::capture_error(error);
+    }
 
     // Spawn background task to refresh remote version info every hour
     updater::spawn_remote_version_refresher();

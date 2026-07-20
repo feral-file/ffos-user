@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
@@ -81,9 +82,14 @@ type fakeCDP struct {
 	noLogSendCalls         int
 	noLogSendResult        any
 	noLogSendErr           error
+	// notInitialized inverts Initialized() so the zero value reports a connected client
+	// (the common case for these tests); set it to exercise the CDP-absent skip path.
+	notInitialized bool
 }
 
 func (f *fakeCDP) Init(context.Context) error { return nil }
+
+func (f *fakeCDP) Start(context.Context, func()) {}
 
 func (f *fakeCDP) Send(string, map[string]interface{}) (interface{}, error) { return nil, nil }
 
@@ -98,7 +104,7 @@ func (f *fakeCDP) PageNavigationURL(context.Context) (string, error) {
 
 func (f *fakeCDP) Close() {}
 
-func (f *fakeCDP) Initialized() bool { return true }
+func (f *fakeCDP) Initialized() bool { return !f.notInitialized }
 
 type fakeDeviceStatus struct {
 	status *DeviceStatusResponse
@@ -288,6 +294,38 @@ func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
 	}
 }
 
+func TestPollPlayerStatus_SkipsWhenCDPNotConnected(t *testing.T) {
+	// Headless / mid-reconnect: CDP reports not connected. The poll must skip entirely
+	// (no checkStatus send, no error notification) so logs and Sentry are not flooded.
+	mockCDP := &fakeCDP{
+		notInitialized:    true,
+		pageNavigationURL: constants.WEBAPP_URL,
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockCDP.noLogSendCalls != 0 {
+		t.Fatalf("expected no checkStatus send while CDP is disconnected, got %d", mockCDP.noLogSendCalls)
+	}
+	if mockWS.sendAllCalls != 0 {
+		t.Fatalf("expected no websocket notification while CDP is disconnected, got %d", mockWS.sendAllCalls)
+	}
+	if mockRelayer.sendCalls != 0 {
+		t.Fatalf("expected no relayer notification while CDP is disconnected, got %d", mockRelayer.sendCalls)
+	}
+}
+
 func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 	mockCDP := &fakeCDP{
 		pageNavigationURL: constants.WEBAPP_URL,
@@ -311,11 +349,61 @@ func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 	}
 }
 
+func TestPollRound_ClearsDedupHashesWhenCDPReconnects(t *testing.T) {
+	fCDP := &fakeCDP{notInitialized: true}
+	p := &poller{
+		cdp:     fCDP,
+		relayer: &fakeRelayer{}, // never connected: device/DDC polls skip themselves
+		ws:      &fakeWS{},
+		logger:  zap.NewNop(),
+		lastRelayerStatusHashes: map[relayer.NotificationType]string{
+			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
+		},
+		lastWSStatusHashes: map[relayer.NotificationType]string{
+			relayer.NOTIFICATION_TYPE_PLAYER_STATUS: "pre-restart",
+		},
+	}
+	ctx := context.Background()
+
+	// CDP still down: the caches describe the last state actually pushed and must
+	// survive so the down-window itself does not force re-sends.
+	p.pollRound(ctx)
+	if len(p.lastRelayerStatusHashes) != 1 || len(p.lastWSStatusHashes) != 1 {
+		t.Fatalf("expected dedup hashes to survive while CDP stays down, got %d/%d entries",
+			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
+	}
+
+	// CDP (re)connects: a restarted Chromium reloaded the web app from defaults, so
+	// "unchanged since last push" no longer proves clients have the state — both
+	// caches must be dropped for one fresh push (the old PartOf= design got this by
+	// restarting controld).
+	fCDP.notInitialized = false
+	p.pollRound(ctx)
+	if len(p.lastRelayerStatusHashes) != 0 || len(p.lastWSStatusHashes) != 0 {
+		t.Fatalf("expected dedup hashes cleared on CDP reconnect, got %d/%d entries",
+			len(p.lastRelayerStatusHashes), len(p.lastWSStatusHashes))
+	}
+
+	// Steady state after the reconnect tick: no further clearing churn.
+	p.lastWSStatusHashes[relayer.NOTIFICATION_TYPE_PLAYER_STATUS] = "fresh"
+	p.pollRound(ctx)
+	if len(p.lastWSStatusHashes) != 1 {
+		t.Fatalf("expected dedup hashes kept while CDP stays connected, got %d entries",
+			len(p.lastWSStatusHashes))
+	}
+}
+
 // fakePanelDDC captures the context for deadline inspection.
 type fakePanelDDC struct {
 	collectCtx chan context.Context
 	status     *ddc.DdcPanelStatus
 	err        error
+	// noPoll simulates the availability tracker's "unsupported" verdict.
+	noPoll bool
+	// shouldPollCalls counts ShouldPoll invocations; the real implementation
+	// refreshes the display fingerprint as a side effect, so the poller must
+	// call it every round even when the no-display gate skips the poll.
+	shouldPollCalls int
 }
 
 func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
@@ -328,6 +416,12 @@ func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, 
 func (f *fakePanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.RawMessage) error {
 	return nil
 }
+
+func (f *fakePanelDDC) ShouldPoll() bool {
+	f.shouldPollCalls++
+	return !f.noPoll
+}
+func (f *fakePanelDDC) Generation() uint64 { return 0 }
 
 func TestPollDDCStatus_ContextCarriesTimeout(t *testing.T) {
 	ctxCh := make(chan context.Context, 1)
@@ -415,4 +509,152 @@ func (b *blockingPanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStat
 
 func (b *blockingPanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.RawMessage) error {
 	return nil
+}
+
+func (b *blockingPanelDDC) ShouldPoll() bool   { return true }
+func (b *blockingPanelDDC) Generation() uint64 { return 0 }
+
+// TestPollDDCStatus_SkipsWhenNoDisplayConnected pins the headless gate: with no
+// DRM connector connected, ddcutil can never find a display, so the 5s poll
+// must not shell out to ddcutil at all (previously an info+warn+error log
+// triplet every round, forever, on headless devices).
+func TestPollDDCStatus_SkipsWhenNoDisplayConnected(t *testing.T) {
+	ctxCh := make(chan context.Context, 1)
+	fakeDDC := &fakePanelDDC{
+		collectCtx: ctxCh,
+		status:     &ddc.DdcPanelStatus{},
+	}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return false },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+
+	select {
+	case <-ctxCh:
+		t.Fatal("CollectStatus must not run while no display is connected")
+	default:
+	}
+
+	// The skip still pushes a one-shot "panel unreadable" status so consumers
+	// drop any cached panel values; repeats are collapsed by the hash dedup.
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected exactly one unavailable-status notification, got %d", fRelayer.sendCalls)
+	}
+	p.pollDDCStatus(context.Background())
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected dedup to suppress the repeat notification, got %d sends", fRelayer.sendCalls)
+	}
+}
+
+// TestPollDDCStatus_NoDisplaySkipStillObservesFingerprint pins the tracker's
+// visibility into off periods: ShouldPoll (whose side effect is the per-tick
+// display-fingerprint refresh) must run even on rounds the no-display gate
+// skips. Otherwise a monitor powered off and back on with an unchanged end
+// fingerprint is invisible to the tracker, and verdicts latched around
+// power-off (unsupported, recovery-futile) survive the power cycle and kill
+// ddc_status forever.
+func TestPollDDCStatus_NoDisplaySkipStillObservesFingerprint(t *testing.T) {
+	fakeDDC := &fakePanelDDC{status: &ddc.DdcPanelStatus{}}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return false },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+
+	if fakeDDC.shouldPollCalls != 1 {
+		t.Fatalf("ShouldPoll must run on no-display rounds to refresh the fingerprint, got %d calls", fakeDDC.shouldPollCalls)
+	}
+}
+
+// TestPollDDCStatus_PollsAgainOnceDisplayConnects proves the gate is evaluated
+// per round: plugging a monitor in (connector flips to "connected") resumes DDC
+// polling on the next tick with no restart required.
+func TestPollDDCStatus_PollsAgainOnceDisplayConnects(t *testing.T) {
+	ctxCh := make(chan context.Context, 1)
+	fakeDDC := &fakePanelDDC{
+		collectCtx: ctxCh,
+		status:     &ddc.DdcPanelStatus{},
+	}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true, true}}
+
+	connected := false
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return connected },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+	select {
+	case <-ctxCh:
+		t.Fatal("CollectStatus must not run while no display is connected")
+	default:
+	}
+
+	connected = true
+	p.pollDDCStatus(context.Background())
+	select {
+	case <-ctxCh:
+	default:
+		t.Fatal("CollectStatus should run once a display is connected")
+	}
+}
+
+// TestPollDDCStatus_UnsupportedIsQuietSkipWithOneNotification pins the
+// poller's contract with the ddc availability tracker: ShouldPoll()==false
+// means "display has no DDC/CI" — no CollectStatus call, no Error-level log
+// (the pre-tracker code error-logged every 5s round forever), and exactly one
+// dedup-collapsed "panel unreadable" notification so consumers drop cached
+// panel values instead of showing them stale forever.
+func TestPollDDCStatus_UnsupportedIsQuietSkipWithOneNotification(t *testing.T) {
+	core, observed := observer.New(zap.ErrorLevel)
+
+	ctxCh := make(chan context.Context, 1)
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      &fakeWS{},
+		panelDDC:                &fakePanelDDC{collectCtx: ctxCh, noPoll: true},
+		displayConnected:        func() bool { return true },
+		logger:                  zap.New(core),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollDDCStatus(context.Background())
+	p.pollDDCStatus(context.Background())
+
+	select {
+	case <-ctxCh:
+		t.Fatal("CollectStatus must not run while the tracker says unsupported")
+	default:
+	}
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected exactly one unavailable-status notification (dedup collapses repeats), got %d", fRelayer.sendCalls)
+	}
+	if n := observed.Len(); n != 0 {
+		t.Fatalf("expected no Error-level logs for an unsupported display, got %d: %v",
+			n, observed.All())
+	}
 }

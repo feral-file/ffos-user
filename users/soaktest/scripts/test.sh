@@ -151,8 +151,9 @@ get_cpu_freq() {
 }
 
 get_cpu_temp() {
+  # AMD exposes CPU temperature via the k10temp sensor (Tctl)
   sensors -u 2>/dev/null | awk '
-    /^Package id 0:/ { in_pkg=1; next }
+    /^k10temp-pci-/ { in_pkg=1; next }
     /^$/ { in_pkg=0 }
     in_pkg && /temp1_input:/ {printf "%.1f",$2; exit}' || echo "0.0" # Fallback
 }
@@ -172,27 +173,18 @@ chrome_mem() {
 }
 
 gpu_stats() {
-  local raw json pids_j busy freq
-  raw=$(timeout 1s sudo intel_gpu_top -J -s 1000 -o - 2>/dev/null)
-  json=$(sed '1s/^[[:space:]]*\[//' <<<"$raw")
-  [[ -z $json ]] && { echo "0 0"; return; }
+  # amdgpu exposes total GPU busy % and the active sclk P-state via sysfs.
+  # Unlike intel_gpu_top there is no per-process attribution, so this reports
+  # whole-GPU utilization rather than Chromium-only utilization.
+  local dev="" busy freq d
+  for d in /sys/class/drm/card*/device; do
+    [[ -r "$d/gpu_busy_percent" ]] && { dev=$d; break; }
+  done
+  [[ -z $dev ]] && { echo "0 0"; return; }
 
-  if [ -n "$C_PIDS" ]; then # Ensure C_PIDS is not empty
-    pids_j=$(printf '%s\n' $C_PIDS | jq -R . | jq -cs . 2>/dev/null)
-  else
-    pids_j="[]" # Empty JSON array if C_PIDS is empty
-  fi
-  
-  busy=$(jq -r --argjson p "$pids_j" '
-    reduce .clients?[]? as $c (0;
-      if $p|index($c.pid) then
-        . + ($c["engine-classes"]["Render/3D"].busy|tonumber)
-      else . end ) // 0
-    ' <<<"$json" 2>/dev/null)
-  busy=${busy:-0} # Default to 0 if null
-
-  [[ "$busy" == "0" || "$busy" == "0.0" ]] && busy=$(jq -r '.engines."Render/3D".busy // 0' <<<"$json" 2>/dev/null)
-  freq=$(jq -r '.frequency.actual // 0' <<<"$json" | awk '{printf "%d",$1}')
+  busy=$(cat "$dev/gpu_busy_percent" 2>/dev/null)
+  # pp_dpm_sclk marks the active P-state line with '*', e.g. "2: 2200Mhz *"
+  freq=$(sed -n 's/^.*: \([0-9][0-9]*\)Mhz \*.*$/\1/p' "$dev/pp_dpm_sclk" 2>/dev/null | head -n1)
   echo "${busy:-0} ${freq:-0}"
 }
 
@@ -209,6 +201,9 @@ fps_from_rAF() {
 }
 
 # RAPL Energy helpers
+# NOTE: "intel-rapl" is the kernel powercap driver name, not a vendor marker —
+# the same sysfs hierarchy serves AMD Zen package power. Do not rename these
+# paths when cleaning up Intel-specific code.
 find_zone() {
   local want=$1 base=/sys/class/powercap/intel-rapl:0
   for n in "$base"/*/name; do
