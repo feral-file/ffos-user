@@ -16,16 +16,15 @@ The shipped claiming flow uses QR codes:
 https://link.feralfile.com/device_connect/<device_info>
 ```
 
-where `device_info` is base64-encoded JSON containing:
+where `device_info` is a pipe-delimited plaintext string (byte-identical to the
+pre-merge format; built in `devicectl`):
 
-```json
-{
-  "deviceId": "...",
-  "topicId": "...",
-  "version": "...",
-  "contract": 1
-}
 ```
+<device_id>|<topic_id>|<internet true/false>|<branch>|<version>|pairing
+```
+
+(The LAN API version field `contract: "1"` lives on the hub's `GET /api/status`,
+not in the QR payload.)
 
 The mobile app parses this QR, extracts the topic ID, and binds it to the user's account via a cloud pairing call. The device rotates its topic ID on factory reset; unclaim revokes binding server-side.
 
@@ -33,7 +32,7 @@ The mobile app parses this QR, extracts the topic ID, and binds it to the user's
 
 A future HTTPS page at `https://feralfile.com/device/connect` can:
 
-1. **Accept the device_info as a URL fragment:** Parse `#deviceId=...&topicId=...&version=...&contract=1`. The fragment stays in the browser; it is never sent to any server.
+1. **Accept the device_info as a URL fragment:** Receive the same pipe-delimited `device_info` string in the URL fragment (e.g. `#<device_id>|<topic_id>|...`) and parse it client-side. The fragment stays in the browser; it is never sent to any server.
 
 2. **Perform the same binding:** Call the same cloud pairing endpoint (with user auth token) to link the topic ID to the user's account. This is the same operation the mobile app already does.
 
