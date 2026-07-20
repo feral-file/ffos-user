@@ -46,6 +46,11 @@ type PlayerStatus struct {
 	DeviceSettings *struct {
 		Scaling     *string `json:"scaling,omitempty"`
 		Orientation *string `json:"orientation,omitempty"`
+		// Device-level default playlist item duration in seconds, set via the
+		// updateDefaultDuration cast command. Absent means "auto" (no
+		// override). Must round-trip here or this typed re-marshal drops it
+		// from player_status notifications before controllers can read it.
+		DefaultDuration *float64 `json:"defaultDuration,omitempty"`
 	} `json:"deviceSettings,omitempty"`
 	LoopMode *LoopMode `json:"loopMode,omitempty"`
 	Shuffle  *bool     `json:"shuffle,omitempty"`
