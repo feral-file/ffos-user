@@ -85,10 +85,9 @@ type app struct {
 	Hub               hub.Hub
 	LinkChecker       *status.LinkChecker
 
-	// Provisioning is the setup-AP trigger state machine. It is constructed
-	// unconditionally but STARTED only when controld owns setup (see run()); left
-	// nil in the test app. Typed as an interface so tests can inject an ordering
-	// spy.
+	// Provisioning is the setup-AP trigger state machine. run() starts it
+	// unconditionally; left nil in the test app. Typed as an interface so tests
+	// can inject an ordering spy.
 	Provisioning provisioningRunner
 	// SetupUI is the on-screen setup-narration surface driven by the provisioning
 	// domain. run() re-pushes its last state (Resync) when CDP (re)connects so a
@@ -260,12 +259,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		app.Logger.Info("Connecting relayer during startup")
 		err = app.Relayer.Connect(ctx)
 		if err != nil {
-			// Never fatal: returning here would exit before SdNotifyReady and before our
-			// D-Bus interface has been up long enough for setupd's wait_for_controld, so a
-			// relayer outage would crash-loop this daemon AND take BLE provisioning down
-			// with it — the exact coupling the unconditional-start model exists to remove
-			// (.start-services.sh starts us --no-block precisely because pre-READY failure
-			// can happen). Retry in the background instead; the mediator's
+			// Never fatal: returning here would exit before SdNotifyReady, so a relayer
+			// outage would crash-loop this daemon and take the in-process SoftAP
+			// provisioning and LAN recovery down with it — the exact coupling the
+			// unconditional-start model exists to remove (.start-services.sh starts us
+			// --no-block precisely because pre-READY failure can happen). Retry in the
+			// background instead; the mediator's
 			// connectivity-restored handler and the GetRelayerInfo D-Bus path also
 			// re-attempt the connection, and RetryableConnect tolerates racing them
 			// (ErrAlreadyConnected is success).
@@ -535,12 +534,11 @@ func initializeApp(
 	// neither package depends on the other's concrete type.
 	executor.SetClaimObserver(mediator.SetClaimed)
 
-	// Provisioning domain (SoftAP setup). Constructed unconditionally so the
-	// wiring stays legible; it is STARTED only when controld owns setup (see
-	// run()), so on a default (setupd-owned) device it stays dormant and raises no
-	// AP. The connectivity adapter reads sys-monitord over the shared D-Bus client;
-	// the WiredLink guard reuses the link checker so an unprovisioned ethernet
-	// device never pops the setup AP. Narration flows through a setupui.Service.
+	// Provisioning domain (SoftAP setup). controld owns setup, so run() starts it
+	// unconditionally. The connectivity adapter reads sys-monitord over the shared
+	// D-Bus client; the WiredLink guard reuses the link checker so an unprovisioned
+	// ethernet device never pops the setup AP. Narration flows through a
+	// setupui.Service.
 	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with

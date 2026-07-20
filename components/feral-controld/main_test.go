@@ -432,11 +432,11 @@ func TestApp_Run_Errors(t *testing.T) {
 		},
 		{
 			// PR #218 review regression: a failed initial relayer connection must NOT
-			// abort run(). Aborting here happens before SdNotifyReady and before setupd's
-			// wait_for_controld can see our D-Bus interface, so a relayer outage would
-			// crash-loop controld and take BLE provisioning down with it. The new contract:
-			// log, hand the connection to a background RetryableConnect, and proceed all
-			// the way to READY.
+			// abort run(). Aborting here happens before SdNotifyReady, so a relayer
+			// outage would crash-loop controld and take the in-process SoftAP
+			// provisioning and LAN recovery down with it. The new contract: log, hand
+			// the connection to a background RetryableConnect, and proceed all the way
+			// to READY.
 			name: "relayer initial connect failure continues to READY",
 			setupFunc: func(ts *testSetup) {
 				// Mock state load ok - relayer ready (topic present)
