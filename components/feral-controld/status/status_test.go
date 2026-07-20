@@ -658,3 +658,73 @@ func TestPollDDCStatus_UnsupportedIsQuietSkipWithOneNotification(t *testing.T) {
 			n, observed.All())
 	}
 }
+
+// TestPlayerStatus_DefaultDurationRoundTrip guards the checkStatus -> typed
+// unmarshal -> player_status re-marshal bridge for deviceSettings.defaultDuration.
+// PlayerStatus is a typed struct, so any field missing from it is silently
+// dropped between the player and controllers; this is the regression the
+// field addition exists to prevent.
+func TestPlayerStatus_DefaultDurationRoundTrip(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape", "defaultDuration": 600}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	if status.DeviceSettings == nil || status.DeviceSettings.DefaultDuration == nil {
+		t.Fatal("deviceSettings.defaultDuration was dropped on unmarshal")
+	}
+	if *status.DeviceSettings.DefaultDuration != 600 {
+		t.Fatalf("defaultDuration = %v, want 600", *status.DeviceSettings.DefaultDuration)
+	}
+
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if got := ds["defaultDuration"]; got != float64(600) {
+		t.Fatalf("re-marshaled defaultDuration = %v, want 600", got)
+	}
+}
+
+// TestPlayerStatus_DefaultDurationOmittedWhenAbsent ensures current-firmware
+// replies (no defaultDuration) re-marshal without inventing the field.
+func TestPlayerStatus_DefaultDurationOmittedWhenAbsent(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape"}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if _, present := ds["defaultDuration"]; present {
+		t.Fatal("defaultDuration should be omitted when the player did not report one")
+	}
+}
