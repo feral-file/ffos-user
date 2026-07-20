@@ -25,6 +25,5 @@
     "disabled": false,
     "maxConcurrent": 0
   },
-  "enableHub": true,
-  "setupOwner": "controld"
+  "enableHub": true
 }

@@ -167,26 +167,6 @@ func (r *fakeRunner) calls() int {
 	return r.call
 }
 
-// fakeForwarder is a Forwarder counting invocations.
-type fakeForwarder struct {
-	mu   sync.Mutex
-	call int
-	err  error
-}
-
-func (f *fakeForwarder) ForwardUpdate(context.Context) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.call++
-	return f.err
-}
-
-func (f *fakeForwarder) calls() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.call
-}
-
 // transientRunErr / permanentRunErr are runner errors whose messages classify
 // (via classifyUpdaterMessage) as transient/permanent respectively.
 func transientRunErr() error { return fmt.Errorf("No network connection. Aborting update.") }

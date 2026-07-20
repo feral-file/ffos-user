@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,9 +18,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
-	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -35,7 +32,6 @@ type testSetup struct {
 	ctx              context.Context
 	executor         devicectl.Executor
 	mockCDP          *mocks.MockCDP
-	mockDBus         *mocks.MockDBus
 	mockStatus       *mocks.MockStatusPoller
 	mockJSON         *mocks.MockJSON
 	mockClock        *mocks.MockClock
@@ -55,7 +51,6 @@ func setup(t *testing.T) *testSetup {
 
 	// Create mocks
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockDBus := mocks.NewMockDBus(ctrl)
 	mockStatus := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
@@ -76,7 +71,6 @@ func setup(t *testing.T) *testSetup {
 	// Create executor with mocks
 	executor := devicectl.New(
 		mockCDP,
-		mockDBus,
 		mockDeviceStatus,
 		mockStatus,
 		panelDDC,
@@ -93,7 +87,6 @@ func setup(t *testing.T) *testSetup {
 		ctx:              ctx,
 		executor:         executor,
 		mockCDP:          mockCDP,
-		mockDBus:         mockDBus,
 		mockStatus:       mockStatus,
 		mockJSON:         mockJSON,
 		mockClock:        mockClock,
@@ -110,21 +103,6 @@ func setup(t *testing.T) *testSetup {
 func (ts *testSetup) teardown() {
 	state.ResetForTesting()
 	ts.ctrl.Finish()
-}
-
-func strPtrTest(s string) *string { return &s }
-
-// pinSetupOwnerSetupd forces the deprecated setupd-owned path for a single test.
-// controld now owns setup by default, so the legacy D-Bus-forward tests below
-// must explicitly select setupd to keep exercising that path. Registers its own
-// cleanup, so the caller only needs a single line.
-func pinSetupOwnerSetupd(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockCfg := mocks.NewMockConfigManager(ctrl)
-	mockCfg.EXPECT().Get().Return(&config.Config{SetupOwner: strPtrTest(config.SetupOwnerSetupd)}).AnyTimes()
-	config.InjectConfigManagerForTesting(mockCfg)
-	t.Cleanup(config.ResetForTesting)
-	t.Cleanup(ctrl.Finish)
 }
 
 func TestExecutor_Execute_InvalidCommand(t *testing.T) {
@@ -349,96 +327,6 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 			assert.Nil(t, result, "expected nil result on error")
 		})
 	}
-}
-
-func TestExecutor_ShowPairingQRCode_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	// Setup test data
-	cmd := commands.Command{
-		Type: commands.CMD_SHOW_PAIRING_QR_CODE,
-		Arguments: map[string]interface{}{
-			"show": true,
-		},
-	}
-
-	arguments := `{"show":true}`
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(arguments), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal([]byte(arguments), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			args := v.(*struct {
-				Show bool `json:"show"`
-			})
-			args.Show = true
-			return nil
-		})
-
-	// Mock DBus call
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_SHOW_PAIRING_QR_CODE,
-			Body:      []interface{}{true},
-		}).
-		Return(nil)
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_ShowPairingQRCode_DBusError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	// Setup test data
-	cmd := commands.Command{
-		Type: commands.CMD_SHOW_PAIRING_QR_CODE,
-		Arguments: map[string]interface{}{
-			"show": true,
-		},
-	}
-
-	arguments := `{"show":true}`
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return([]byte(arguments), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal([]byte(arguments), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			args := v.(*struct {
-				Show bool `json:"show"`
-			})
-			args.Show = true
-			return nil
-		})
-
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send show pairing QR code")
 }
 
 func TestExecutor_DeviceStatus_Success(t *testing.T) {
@@ -4676,154 +4564,9 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 	assert.Equal(t, 45.0, resultMap["disk"], "disk metric should match saved value")
 }
 
-func TestExecutor_SystemUpdate_Success(t *testing.T) {
+func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_UPDATE_TO_LATEST,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// Mock DBus call for factory reset
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
-			Body:      []interface{}{},
-		}).
-		Return(nil)
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_SystemUpdate_DBusError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_UPDATE_TO_LATEST,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send system update signal")
-}
-
-func TestExecutor_FactoryReset_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_FACTORY_RESET,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// Topic rotation runs before the reset in both owner modes: a persisted topic
-	// is cleared and saved.
-	ts.mockStateManager.EXPECT().
-		GetState().
-		Return(&state.State{Relayer: &state.RelayerState{TopicID: "old-topic"}})
-	ts.mockStateManager.EXPECT().
-		Save(gomock.Any()).
-		DoAndReturn(func(s *state.State) error {
-			assert.Equal(t, "", s.Relayer.TopicID, "factory reset must clear the persisted relayer topic")
-			return nil
-		})
-
-	// Mock DBus call for factory reset
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_FACTORY_RESET,
-			Body:      []interface{}{},
-		}).
-		Return(nil)
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_FactoryReset_DBusError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_FACTORY_RESET,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// No persisted topic => topic rotation is a no-op (GetState only, no Save).
-	ts.mockStateManager.EXPECT().
-		GetState().
-		Return(&state.State{Relayer: &state.RelayerState{}})
-
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send factory reset signal")
-}
-
-func TestExecutor_FactoryReset_ControldMode_StartsServiceAndRotatesTopic(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Flip setup ownership to controld for this test only.
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockCfg := mocks.NewMockConfigManager(ctrl)
-	mockCfg.EXPECT().Get().Return(&config.Config{SetupOwner: strPtrTest(config.SetupOwnerControld)}).AnyTimes()
-	config.InjectConfigManagerForTesting(mockCfg)
-	defer config.ResetForTesting()
 
 	cmd := commands.Command{
 		Type:      commands.CMD_FACTORY_RESET,
@@ -4834,7 +4577,7 @@ func TestExecutor_FactoryReset_ControldMode_StartsServiceAndRotatesTopic(t *test
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Topic is cleared before the reset proceeds (security property, both modes).
+	// Topic is cleared before the reset proceeds (security property).
 	ts.mockStateManager.EXPECT().
 		GetState().
 		Return(&state.State{Relayer: &state.RelayerState{TopicID: "old-topic"}})
@@ -4845,7 +4588,7 @@ func TestExecutor_FactoryReset_ControldMode_StartsServiceAndRotatesTopic(t *test
 			return nil
 		})
 
-	// controld-owned path starts the system reset unit directly; no D-Bus signal.
+	// The in-process reset starts the system reset unit directly.
 	ts.mockExec.EXPECT().
 		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
 		Return(ts.mockExecCmd)
@@ -4856,229 +4599,6 @@ func TestExecutor_FactoryReset_ControldMode_StartsServiceAndRotatesTopic(t *test
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_UploadLogs_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId": "test-user-id",
-			"apiKey": "test-api-key",
-			"title":  "test-title",
-		},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-			}
-			return nil
-		})
-
-	// Mock DBus call for upload logs
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
-			Body:      []interface{}{"test-user-id", "test-api-key", "test-title"},
-		}).
-		Return(nil)
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_UploadLogs_WithSupportBundleID(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId":          "test-user-id",
-			"apiKey":          "test-api-key",
-			"title":           "test-title",
-			"supportBundleID": "bundle-123",
-		},
-	}
-
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","supportBundleID":"bundle-123"}`), nil)
-
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-				args.SupportBundleID = "bundle-123"
-			}
-			return nil
-		})
-
-	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-123"}`)
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return(bundledPayload, nil)
-
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
-			Body:      []interface{}{bundledPayload},
-		}).
-		Return(nil)
-
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_UploadLogs_WithSnakeCaseSupportBundleID(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId":            "test-user-id",
-			"apiKey":            "test-api-key",
-			"title":             "test-title",
-			"support_bundle_id": "bundle-456",
-		},
-	}
-
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","support_bundle_id":"bundle-456"}`), nil)
-
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-				args.SupportBundleIDSnake = "bundle-456"
-			}
-			return nil
-		})
-
-	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-456"}`)
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return(bundledPayload, nil)
-
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
-			Body:      []interface{}{bundledPayload},
-		}).
-		Return(nil)
-
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_UploadLogs_WithSupportBundleIDReturnsBundledSignalError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId":          "test-user-id",
-			"apiKey":          "test-api-key",
-			"title":           "test-title",
-			"supportBundleID": "bundle-123",
-		},
-	}
-
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","supportBundleID":"bundle-123"}`), nil)
-
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-				args.SupportBundleID = "bundle-123"
-			}
-			return nil
-		})
-
-	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-123"}`)
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return(bundledPayload, nil)
-
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
-			Body:      []interface{}{bundledPayload},
-		}).
-		Return(errors.New("ack timeout"))
-
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send bundled upload logs signal")
-	assert.Contains(t, err.Error(), "ack timeout")
 }
 
 func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
@@ -5138,62 +4658,12 @@ func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
 	}
 }
 
-func TestExecutor_UploadLogs_DBusError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-	pinSetupOwnerSetupd(t)
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId": "test-user-id",
-			"apiKey": "test-api-key",
-			"title":  "test-title",
-		},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-			}
-			return nil
-		})
-
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send upload logs signal")
-}
-
 func TestExecutor_NewHandler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockDBus := mocks.NewMockDBus(ctrl)
 	mockDeviceStatus := mocks.NewMockDeviceStatus(ctrl)
 	mockStatus := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
@@ -5205,7 +4675,6 @@ func TestExecutor_NewHandler(t *testing.T) {
 
 	handler := devicectl.New(
 		mockCDP,
-		mockDBus,
 		mockDeviceStatus,
 		mockStatus,
 		panelDDC,

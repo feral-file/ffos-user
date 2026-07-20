@@ -8,18 +8,16 @@ import (
 	"time"
 )
 
-// localDeps builds Deps for a locally-driven gate (LocalOwner true) whose version
-// check always returns the given manifest and whose runner follows the script.
+// localDeps builds Deps for a locally-driven gate whose version check always
+// returns the given manifest and whose runner follows the script.
 func localDeps(current string, manifest string, runner UpdateRunner, clock *fakeClock) Deps {
 	return Deps{
 		HTTP: &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
 			return jsonResponse(200, manifest), nil
 		}},
-		Clock:      clock,
-		Runner:     runner,
-		Forwarder:  &fakeForwarder{},
-		Config:     fakeConfig{branch: "b", version: current, endpoint: "https://x"},
-		LocalOwner: true,
+		Clock:  clock,
+		Runner: runner,
+		Config: fakeConfig{branch: "b", version: current, endpoint: "https://x"},
 	}
 }
 
@@ -38,12 +36,10 @@ func TestSingleFlightCoalesces(t *testing.T) {
 		return jsonResponse(200, okManifest("1.0.0", "0.9.0", "2.0.0")), nil
 	}}
 	gate := New(Deps{
-		HTTP:       http,
-		Clock:      newFakeClock(),
-		Runner:     runner,
-		Forwarder:  &fakeForwarder{},
-		Config:     fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
-		LocalOwner: true,
+		HTTP:   http,
+		Clock:  newFakeClock(),
+		Runner: runner,
+		Config: fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
 	})
 
 	var start sync.WaitGroup
@@ -174,11 +170,9 @@ func TestVersionCheckFailureDoesNotLatch(t *testing.T) {
 		HTTP: &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
 			return jsonResponse(503, "unavailable"), nil
 		}},
-		Clock:      newFakeClock(),
-		Runner:     runner,
-		Forwarder:  &fakeForwarder{},
-		Config:     fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
-		LocalOwner: true,
+		Clock:  newFakeClock(),
+		Runner: runner,
+		Config: fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
 	})
 
 	res, err := gate.EnsureLatestBeforeClaim(context.Background())
@@ -234,7 +228,7 @@ func TestModeRequiredVsAvailable(t *testing.T) {
 		t.Error("required mode must not update when at/above min-runtime")
 	}
 
-	// ModeAvailable via RequestUpdate (LocalOwner true): current 1.3.0 < latest 1.5.0.
+	// ModeAvailable via RequestUpdate: current 1.3.0 < latest 1.5.0.
 	availRunner := &fakeRunner{results: []error{nil}}
 	availGate := New(localDeps("1.3.0", manifest, availRunner, newFakeClock()))
 	res, err = availGate.RequestUpdate(context.Background())
@@ -246,38 +240,5 @@ func TestModeRequiredVsAvailable(t *testing.T) {
 	}
 	if availRunner.calls() != 1 {
 		t.Errorf("available mode should run updater once, got %d", availRunner.calls())
-	}
-}
-
-// TestForwardDuringDualOwnerWindow: with LocalOwner unset, RequestUpdate forwards
-// to setupd over D-Bus and never touches the local version check or runner.
-func TestForwardDuringDualOwnerWindow(t *testing.T) {
-	fwd := &fakeForwarder{}
-	runner := &fakeRunner{results: []error{nil}}
-	http := &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
-		t.Fatal("version check must not run while forwarding")
-		return nil, nil
-	}}
-	gate := New(Deps{
-		HTTP:       http,
-		Clock:      newFakeClock(),
-		Runner:     runner,
-		Forwarder:  fwd,
-		Config:     fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
-		LocalOwner: false,
-	})
-
-	res, err := gate.RequestUpdate(context.Background())
-	if err != nil {
-		t.Fatalf("forward error: %v", err)
-	}
-	if res != ResultForwarded {
-		t.Errorf("result = %v, want ResultForwarded", res)
-	}
-	if fwd.calls() != 1 {
-		t.Errorf("forwarder called %d times, want 1", fwd.calls())
-	}
-	if runner.calls() != 0 {
-		t.Error("runner must not run in the forward path")
 	}
 }

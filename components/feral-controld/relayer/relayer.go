@@ -503,8 +503,8 @@ func (r *relayer) background(ctx context.Context) {
 // Backpressure is accounted PER PAYLOAD, not per handler: one dispatch slot
 // covers the whole fan-out and a saturated command is shed exactly once. This
 // matters because more than one handler can be registered at a time — the
-// mediator is permanent, but dbus.GetRelayerTopicID temporarily registers a
-// control-plane listener. Per-handler accounting would otherwise shed the same
+// mediator is permanent, but a transient control-plane listener can register
+// alongside it. Per-handler accounting would otherwise shed the same
 // command once per listener (duplicate rate_limited replies for one messageID)
 // and make effective command capacity depend on how many listeners happen to
 // be installed.

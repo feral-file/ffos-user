@@ -34,13 +34,10 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
-
-func strPtrUploadLAN(s string) *string { return &s }
 
 func TestLANRecovery_UploadLogsInProcess_PresignThenPut(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -48,17 +45,11 @@ func TestLANRecovery_UploadLogsInProcess_PresignThenPut(t *testing.T) {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
 
-	// setupOwner=controld selects the in-process upload path.
-	mockCfg := mocks.NewMockConfigManager(ctrl)
-	mockCfg.EXPECT().Get().Return(&config.Config{SetupOwner: strPtrUploadLAN(config.SetupOwnerControld)}).AnyTimes()
-	config.InjectConfigManagerForTesting(mockCfg)
-	defer config.ResetForTesting()
-
+	// controld runs the log upload in-process (the only owner now).
 	// Executor leaf seams. The executor's own OS reads (device_id / build
 	// descriptor) all miss, so device_id falls back to "FF1" and branch/version
 	// are empty — none of that gates the upload.
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockDBus := mocks.NewMockDBus(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
 	mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, os.ErrNotExist).AnyTimes()
 	mockOS.EXPECT().IsNotExist(gomock.Any()).Return(true).AnyTimes()
@@ -70,7 +61,7 @@ func TestLANRecovery_UploadLogsInProcess_PresignThenPut(t *testing.T) {
 	panelDDC := ddc.New(mockExec, mockClock, logger)
 
 	executor := New(
-		mockCDP, mockDBus, mockDevSts, mockPoller, panelDDC,
+		mockCDP, mockDevSts, mockPoller, panelDDC,
 		wrapper.NewJSON(), mockOS, mockExec, mockMath, mockClock, logger,
 	).(*executor)
 

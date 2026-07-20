@@ -69,9 +69,6 @@ const (
 	// NOT latch a permanent failure (matches feral-setupd: only a failed update
 	// process latches update_failed, not a failed version check).
 	ResultVersionCheckFailed
-	// ResultForwarded: during the dual-owner window the update was handed to
-	// feral-setupd over D-Bus rather than driven locally.
-	ResultForwarded
 )
 
 // FailureState is the latched permanent-failure snapshot, surfaced to a future
@@ -83,30 +80,14 @@ type FailureState struct {
 	At     time.Time
 }
 
-// Forwarder performs the legacy behavior of handing an update off to feral-setupd
-// over D-Bus. During the dual-owner window (setupd still owns the device UI and
-// the updater), controld forwards user-triggered updates rather than driving the
-// updater itself.
-type Forwarder interface {
-	ForwardUpdate(ctx context.Context) error
-}
-
 // Deps are the injectable seams the gate is built from. Clock, HTTP, Runner, and
 // Config are all replaceable so the table tests run fast and deterministic.
 type Deps struct {
-	HTTP      wrapper.HTTPClient
-	Clock     wrapper.Clock
-	Runner    UpdateRunner
-	Forwarder Forwarder
-	Config    ConfigProvider
-	Logger    *zap.Logger
-
-	// LocalOwner is the future "setupOwner" cutover flag. While false (today),
-	// the user-triggered RequestUpdate path forwards to setupd over D-Bus,
-	// preserving current behavior during the dual-owner window; once a later
-	// story flips it, RequestUpdate drives the updater locally like the pre-claim
-	// gate already does. EnsureLatestBeforeClaim always drives locally.
-	LocalOwner bool
+	HTTP   wrapper.HTTPClient
+	Clock  wrapper.Clock
+	Runner UpdateRunner
+	Config ConfigProvider
+	Logger *zap.Logger
 }
 
 // Gate is the OTA update gate. Construct it once (long-lived) so the single-flight
@@ -126,17 +107,10 @@ func New(deps Deps) *Gate {
 }
 
 // RequestUpdate is entry point (a): the user-triggered updateToLatestVersion
-// relayer command (ModeAvailable). During the dual-owner window it forwards to
-// setupd over D-Bus; once LocalOwner is set it drives the updater locally. Either
-// way the call is single-flighted so a burst of relayer commands coalesces.
+// relayer command (ModeAvailable). It drives the updater locally and is
+// single-flighted so a burst of relayer commands coalesces.
 func (g *Gate) RequestUpdate(ctx context.Context) (Result, error) {
 	res, err, _ := g.do(ctx, func() (Result, error) {
-		if !g.deps.LocalOwner {
-			if err := g.deps.Forwarder.ForwardUpdate(ctx); err != nil {
-				return ResultForwarded, err
-			}
-			return ResultForwarded, nil
-		}
 		return g.runLocal(ctx, ModeAvailable)
 	})
 	return res, err

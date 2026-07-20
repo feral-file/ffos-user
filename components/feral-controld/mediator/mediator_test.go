@@ -537,9 +537,9 @@ func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Test unknown signal - we'll use a known signal type but test the warning case
+	// Test unknown signal - a member the mediator does not handle.
 	payload := godbus.DBusPayload{
-		Member: dbus.SETUPD_EVENT_SHOW_PAIRING_QR_CODE, // This is an unknown signal for the mediator
+		Member: godbus.Member("unknown_signal"),
 		Body:   []interface{}{},
 	}
 

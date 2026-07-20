@@ -221,7 +221,6 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock DBus start and stop
 				ts.mockDBus.EXPECT().Start().Return(nil)
 				ts.mockDBus.EXPECT().Stop().Return(nil)
-				ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
 
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
@@ -285,7 +284,6 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock DBus start and stop
 				ts.mockDBus.EXPECT().Start().Return(nil)
 				ts.mockDBus.EXPECT().Stop().Return(nil)
-				ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
 
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
@@ -349,7 +347,6 @@ func TestApp_Run_Success(t *testing.T) {
 				// Mock DBus start and stop
 				ts.mockDBus.EXPECT().Start().Return(nil)
 				ts.mockDBus.EXPECT().Stop().Return(nil)
-				ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
 
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
@@ -434,33 +431,6 @@ func TestApp_Run_Errors(t *testing.T) {
 			wantErr: "DBus service unavailable",
 		},
 		{
-			name: "DBus export failure",
-			setupFunc: func(ts *testSetup) {
-				// Mock state load ok
-				ts.mockStateManager.EXPECT().
-					Load(ts.logger).
-					Return(&state.State{
-						Relayer: &state.RelayerState{TopicID: ""},
-					}, nil)
-
-				// CDP.Start runs after DBus.Export, so an Export failure returns before it.
-
-				// Mock Watchdog start and stop
-				ts.mockWatchdog.EXPECT().Start(gomock.Any())
-				ts.mockWatchdog.EXPECT().Stop()
-
-				// Mock DBus start ok
-				ts.mockDBus.EXPECT().Start().Return(nil)
-				ts.mockDBus.EXPECT().Stop().Return(nil)
-
-				// Mock DBus export failure
-				ts.mockDBus.EXPECT().
-					Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).
-					Return(errors.New("failed to export interface"))
-			},
-			wantErr: "failed to export interface",
-		},
-		{
 			// PR #218 review regression: a failed initial relayer connection must NOT
 			// abort run(). Aborting here happens before SdNotifyReady and before setupd's
 			// wait_for_controld can see our D-Bus interface, so a relayer outage would
@@ -483,7 +453,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock DBus start ok
 				ts.mockDBus.EXPECT().Start().Return(nil)
 				ts.mockDBus.EXPECT().Stop().Return(nil)
-				ts.mockDBus.EXPECT().Export(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
@@ -563,7 +532,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock DBus start ok
 				ts.mockDBus.EXPECT().Start().Return(nil)
 				ts.mockDBus.EXPECT().Stop().Return(nil)
-				ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
 
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
@@ -621,7 +589,6 @@ func TestApp_Run_Errors(t *testing.T) {
 				// Mock DBus start ok
 				ts.mockDBus.EXPECT().Start().Return(nil)
 				ts.mockDBus.EXPECT().Stop().Return(nil)
-				ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
 
 				// Mock Mediator start and stop
 				ts.mockMediator.EXPECT().Start()
@@ -902,10 +869,6 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// controld owns setup so the provisioning domain is started.
-	owner := config.SetupOwnerControld
-	ts.config.SetupOwner = &owner
-
 	var mu sync.Mutex
 	var order []string
 	record := func(s string) {
@@ -927,7 +890,6 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	ts.mockWatchdog.EXPECT().Stop()
 	ts.mockDBus.EXPECT().Start().Return(nil)
 	ts.mockDBus.EXPECT().Stop().Return(nil)
-	ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
 	ts.mockMediator.EXPECT().Start()
 	ts.mockMediator.EXPECT().Stop()
 
@@ -959,7 +921,7 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	err := ts.app.run(testCtx, ts.config)
 	assert.NoError(t, err)
 
-	assert.True(t, spy.wasStarted(), "provisioning must start when controld owns setup")
+	assert.True(t, spy.wasStarted(), "provisioning must start")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -971,54 +933,4 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	require.GreaterOrEqual(t, idxRelayer, 0, "relayer connect must have been attempted")
 	assert.Less(t, idxHub, idxRelayer, "hub must start before the relayer connect")
 	assert.Less(t, idxProv, idxRelayer, "provisioning must start before the relayer connect")
-}
-
-// TestApp_Run_ProvisioningDormant pins the dormant contract: with setupd owning
-// setup (the default), run() never starts the provisioning domain, so no setup AP
-// is ever raised.
-func TestApp_Run_ProvisioningDormant(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Pin setupd ownership so the provisioning domain stays dormant (controld now
-	// owns setup by default).
-	owner := config.SetupOwnerSetupd
-	ts.config.SetupOwner = &owner
-	spy := &spyProvisioning{}
-	ts.app.Provisioning = spy
-
-	ts.mockStateManager.EXPECT().Load(ts.logger).Return(&state.State{
-		Relayer: &state.RelayerState{TopicID: ""},
-	}, nil)
-
-	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
-	ts.mockCDP.EXPECT().Close()
-	ts.mockWatchdog.EXPECT().Start(gomock.Any())
-	ts.mockWatchdog.EXPECT().Stop()
-	ts.mockDBus.EXPECT().Start().Return(nil)
-	ts.mockDBus.EXPECT().Stop().Return(nil)
-	ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
-	ts.mockMediator.EXPECT().Start()
-	ts.mockMediator.EXPECT().Stop()
-	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
-	ts.mockStatusPoller.EXPECT().Stop()
-	ts.mockRefresher.EXPECT().Start()
-	ts.mockRefresher.EXPECT().Stop()
-	ts.mockHub.EXPECT().Start()
-	ts.mockHub.EXPECT().Stop().Return(nil)
-	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
-	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
-	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
-	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
-	ts.mockDBus.EXPECT().
-		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
-		Return([]interface{}{false}, nil)
-
-	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
-	defer cancel()
-	err := ts.app.run(testCtx, ts.config)
-	assert.NoError(t, err)
-
-	assert.False(t, spy.wasStarted(),
-		"provisioning must stay dormant when setupd owns setup; no setup AP is ever raised")
 }

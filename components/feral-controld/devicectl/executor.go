@@ -11,14 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
-	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
@@ -76,7 +73,6 @@ type Executor interface {
 type executor struct {
 	sync.Mutex
 	cdp          cdp.CDP
-	dbus         dbus.DBus
 	deviceStatus status.DeviceStatus
 	logger       *zap.Logger
 
@@ -172,7 +168,6 @@ type executor struct {
 
 func New(
 	cdp cdp.CDP,
-	dbus dbus.DBus,
 	deviceStatus status.DeviceStatus,
 	statusPoller status.Poller,
 	panelDDC ddc.PanelDDC,
@@ -185,7 +180,6 @@ func New(
 ) Executor {
 	return &executor{
 		cdp:          cdp,
-		dbus:         dbus,
 		deviceStatus: deviceStatus,
 		statusPoller: statusPoller,
 		logger:       l,
@@ -340,30 +334,14 @@ func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interfac
 	var cmdArgs struct {
 		Show bool `json:"show"`
 	}
-	err := e.json.Unmarshal(args, &cmdArgs)
-	if err != nil {
+	if err := e.json.Unmarshal(args, &cmdArgs); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// setupOwner cutover: once controld owns setup, the claim/pairing QR is driven
-	// in-process (pre-claim OTA gate + on-screen claim QR / ready). While setupd
-	// owns setup (the default) the D-Bus signal below is unchanged.
-	if config.Get().SetupOwnerIsControld() {
-		return e.showPairingQRCodeInProcess(ctx, cmdArgs.Show)
-	}
-
-	err = e.dbus.RetryableSend(ctx,
-		godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_SHOW_PAIRING_QR_CODE,
-			Body:      []interface{}{cmdArgs.Show},
-		})
-	if err != nil {
-		return nil, fmt.Errorf("failed to send show pairing QR code: %w", err)
-	}
-
-	return CmdOK, nil
+	// controld drives the claim/pairing QR in-process: on show=true it runs the
+	// mandatory pre-claim OTA gate and, only on a supported build, paints the
+	// claim QR; on show=false it records the Ready transition then hides.
+	return e.showPairingQRCodeInProcess(ctx, cmdArgs.Show)
 }
 
 // showPairingQRCodeInProcess is the controld-owned claim flow. On show=true it
@@ -1641,10 +1619,7 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Executing system update command")
 
 	// Route the user-triggered update through the OTA gate so it is single-flighted
-	// with the mandatory pre-claim gate. During the dual-owner window the gate's
-	// LocalOwner flag is unset, so this still forwards to setupd over D-Bus
-	// (dbusUpdateForwarder) exactly as before; a later setupOwner-cutover story
-	// flips the flag and the same call drives the updater locally instead.
+	// with the mandatory pre-claim gate. The gate drives the updater locally.
 	if _, err := e.otaGateInstance().RequestUpdate(ctx); err != nil {
 		return nil, fmt.Errorf("failed to request system update: %w", err)
 	}
@@ -1658,16 +1633,11 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 func (e *executor) otaGateInstance() *otagate.Gate {
 	e.otaGateOnce.Do(func() {
 		e.otaGate = otagate.New(otagate.Deps{
-			HTTP:      wrapper.NewHTTPClient(),
-			Clock:     e.clock,
-			Runner:    otagate.NewSystemdRunner(e.exec, e.clock, e.logger),
-			Forwarder: dbusUpdateForwarder{dbus: e.dbus, logger: e.logger},
-			Config:    otagate.NewFileConfigProvider(e.os, e.json),
-			Logger:    e.logger,
-			// LocalOwner tracks the setupOwner cutover: while setupd owns setup the
-			// user-triggered update path forwards to setupd over D-Bus (dual-owner
-			// window); once controld owns setup it drives the updater locally.
-			LocalOwner: config.Get().SetupOwnerIsControld(),
+			HTTP:   wrapper.NewHTTPClient(),
+			Clock:  e.clock,
+			Runner: otagate.NewSystemdRunner(e.exec, e.clock, e.logger),
+			Config: otagate.NewFileConfigProvider(e.os, e.json),
+			Logger: e.logger,
 		})
 		// Surface a latched permanent OTA failure on-screen. There is no dedicated
 		// update-failed CDP state in the shipping player contract, so we reuse the
@@ -1685,62 +1655,21 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 	return e.otaGate
 }
 
-// dbusUpdateForwarder hands a system update to feral-setupd over D-Bus. This is
-// the current dual-owner-window behavior: setupd still owns the device UI and
-// drives the updater. The OTA gate calls this while its LocalOwner flag is unset.
-type dbusUpdateForwarder struct {
-	dbus   dbus.DBus
-	logger *zap.Logger
-}
-
-func (f dbusUpdateForwarder) ForwardUpdate(ctx context.Context) error {
-	f.logger.Info("Forwarding system update to setupd via DBus")
-	// Send DBus signal to setupd to handle system update (show page + execute update)
-	if err := f.dbus.RetryableSend(ctx,
-		godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
-			Body:      []interface{}{},
-		}); err != nil {
-		return fmt.Errorf("failed to send system update signal: %w", err)
-	}
-	return nil
-}
-
 func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Executing factory reset command")
 
-	// Topic rotation (security invariant — holds in BOTH owner modes):
-	// set-factory-boot.service stages a one-shot boot into a pristine factory
-	// btrfs snapshot and reboots; it does NOT wipe the currently running
-	// subvolume, so the persisted relayer topicID (and the live relayer session)
-	// survive on disk until that reboot actually completes. A resold device — or
-	// one whose reset is interrupted before the reboot — would otherwise keep
-	// running on the old subvolume and stay commandable via the former owner's
-	// saved topic. Clear the persisted topic here so that window is closed no
-	// matter which daemon owns the reset.
+	// Topic rotation (security invariant): set-factory-boot.service stages a
+	// one-shot boot into a pristine factory btrfs snapshot and reboots; it does
+	// NOT wipe the currently running subvolume, so the persisted relayer topicID
+	// (and the live relayer session) survive on disk until that reboot actually
+	// completes. A resold device — or one whose reset is interrupted before the
+	// reboot — would otherwise keep running on the old subvolume and stay
+	// commandable via the saved topic. Clear the persisted topic here so that
+	// window is closed.
 	e.clearPersistedRelayerTopic()
 
-	// setupOwner cutover: once controld owns setup, run the reset in-process;
-	// while setupd owns setup (the default) forward it over D-Bus, unchanged.
-	if config.Get().SetupOwnerIsControld() {
-		return e.factoryResetInProcess(ctx)
-	}
-
-	// Send DBus signal to setupd to handle factory reset (show page + execute reset)
-	err := e.dbus.RetryableSend(ctx,
-		godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_FACTORY_RESET,
-			Body:      []interface{}{},
-		})
-	if err != nil {
-		return nil, fmt.Errorf("failed to send factory reset signal: %w", err)
-	}
-
-	return CmdOK, nil
+	// controld runs the reset in-process: start the system reset unit directly.
+	return e.factoryResetInProcess(ctx)
 }
 
 // clearPersistedRelayerTopic zeroes the persisted relayer topicID. See
@@ -1779,7 +1708,7 @@ func (e *executor) factoryResetInProcess(ctx context.Context) (interface{}, erro
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {
-	e.logger.Info("Executing upload logs command via DBus")
+	e.logger.Info("Executing upload logs command")
 
 	var cmdArgs struct {
 		UserID               string `json:"userId"`
@@ -1802,57 +1731,10 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 		supportBundleID = strings.TrimSpace(cmdArgs.SupportBundleIDSnake)
 	}
 
-	// setupOwner cutover: once controld owns setup, the log upload runs in-process
-	// (ported from feral-setupd log_uploader.rs) instead of being forwarded to
-	// setupd over D-Bus. While setupd owns setup (the default) the D-Bus forward
-	// below is unchanged. userId/title are validated for parity but unused by the
+	// controld runs the log upload in-process (ported from feral-setupd
+	// log_uploader.rs). userId/title are validated for parity but unused by the
 	// v2 API, exactly as the Rust callback ignores them.
-	if config.Get().SetupOwnerIsControld() {
-		return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID)
-	}
-
-	legacyPayload := godbus.DBusPayload{
-		Interface: dbus.INTERFACE,
-		Path:      dbus.PATH,
-		Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
-		Body:      []interface{}{cmdArgs.UserID, cmdArgs.APIKey, cmdArgs.Title},
-	}
-	if supportBundleID != "" {
-		// Use an additive D-Bus signal for bundled uploads so older setupd listeners
-		// keep the original upload_logs contract unchanged. The new signal carries
-		// JSON bytes so support-bundle metadata can evolve additively.
-		payload, err := e.json.Marshal(struct {
-			UserID          string `json:"user_id"`
-			APIKey          string `json:"api_key"`
-			Title           string `json:"title"`
-			SupportBundleID string `json:"support_bundle_id"`
-		}{
-			UserID:          cmdArgs.UserID,
-			APIKey:          cmdArgs.APIKey,
-			Title:           cmdArgs.Title,
-			SupportBundleID: supportBundleID,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal bundled upload logs payload: %w", err)
-		}
-		bundledPayload := godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
-			Body:      []interface{}{payload},
-		}
-		if err := e.dbus.RetryableSend(ctx, bundledPayload); err != nil {
-			return nil, fmt.Errorf("failed to send bundled upload logs signal: %w", err)
-		}
-		return CmdOK, nil
-	}
-
-	// Send DBus signal to setupd to handle log upload
-	if err := e.dbus.RetryableSend(ctx, legacyPayload); err != nil {
-		return nil, fmt.Errorf("failed to send upload logs signal: %w", err)
-	}
-
-	return CmdOK, nil
+	return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID)
 }
 
 // uploadLogsInProcess zips and uploads the device logs directly (controld-owned

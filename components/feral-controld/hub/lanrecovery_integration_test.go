@@ -26,15 +26,14 @@ package hub
 // does not re-build or re-assert the advertiser; it covers the hub-side command
 // pipeline composition.
 //
-// Scope note (uploadLogs presign+PUT): the setupOwner=controld in-process log
-// upload is fire-and-forget and its HTTP client + endpoint are only reachable
-// through devicectl's unexported logUploaderFactory seam, which a hub-package
-// test cannot set. The presign POST + PUT wire behavior on a mocked HTTP client
-// is therefore asserted at the executor level in
+// Scope note (uploadLogs presign+PUT): the in-process log upload is
+// fire-and-forget and its HTTP client + endpoint are only reachable through
+// devicectl's unexported logUploaderFactory seam, which a hub-package test cannot
+// set. The presign POST + PUT wire behavior on a mocked HTTP client is therefore
+// asserted at the executor level in
 // devicectl/lanrecovery_uploadlogs_integration_test.go. Here, uploadLogs is
-// exercised through the LAN ingress on the default (setupd) owner path, proving
-// the command reaches the executor offline and is handled via the local D-Bus
-// forward — itself relayer-independent.
+// exercised through the LAN ingress to prove the command reaches the executor
+// offline and is handled in-process (fire-and-forget) with no relayer.
 
 import (
 	"context"
@@ -46,7 +45,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,8 +53,6 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
-	"github.com/feral-file/ffos-user/components/feral-controld/config"
-	ffdbus "github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -65,19 +61,16 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-func lanStrPtr(s string) *string { return &s }
-
 // errLANNotExist stands in for an fs "not found": every executor OS read misses
 // in this test. Its identity does not matter because IsNotExist is mocked true.
 var errLANNotExist = errors.New("lan test: not exist")
 
 // lanRig is a fully wired offline hub: real executor -> real storm gate ->
 // real hub handler chain, fronted by a loopback httptest.Server. Only the leaf
-// device seams (cdp/dbus/exec/os/...) are mocked.
+// device seams (cdp/exec/os/...) are mocked.
 type lanRig struct {
 	ctrl       *gomock.Controller
 	server     *httptest.Server
-	mockDBus   *mocks.MockDBus
 	mockExec   *mocks.MockExec
 	mockOS     *mocks.MockOS
 	mockDevSts *mocks.MockDeviceStatus
@@ -104,7 +97,6 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Return(map[string]any{"ok": true}, nil).AnyTimes()
 	mockCDP.EXPECT().NoLogSend(gomock.Any(), gomock.Any()).Return(map[string]any{"ok": true}, nil).AnyTimes()
 
-	mockDBus := mocks.NewMockDBus(ctrl)
 	mockExec := mocks.NewMockExec(ctrl)
 	mockOS := mocks.NewMockOS(ctrl)
 	mockMath := mocks.NewMockMath(ctrl)
@@ -117,7 +109,7 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 	panelDDC := ddc.New(mockExec, mockClock, logger)
 
 	executor := devicectl.New(
-		mockCDP, mockDBus, mockDevSts, mockPoller, panelDDC,
+		mockCDP, mockDevSts, mockPoller, panelDDC,
 		jsonw, mockOS, mockExec, mockMath, mockClock, logger,
 	)
 
@@ -141,7 +133,6 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 	return &lanRig{
 		ctrl:       ctrl,
 		server:     srv,
-		mockDBus:   mockDBus,
 		mockExec:   mockExec,
 		mockOS:     mockOS,
 		mockDevSts: mockDevSts,
@@ -187,13 +178,8 @@ func permissiveOSReads(m *mocks.MockOS) {
 // storm-gate token buckets, fresh mocks, fresh global config/state injection).
 func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 	t.Run("factoryReset starts factory-boot unit and rotates relayer topic", func(t *testing.T) {
-		// setupOwner=controld -> in-process reset (systemctl start), plus the
-		// security-critical persisted-topic rotation that holds in both owner modes.
-		cfg := mocks.NewMockConfigManager(gomock.NewController(t))
-		cfg.EXPECT().Get().Return(&config.Config{SetupOwner: lanStrPtr(config.SetupOwnerControld)}).AnyTimes()
-		config.InjectConfigManagerForTesting(cfg)
-		defer config.ResetForTesting()
-
+		// In-process reset (systemctl start), plus the security-critical
+		// persisted-topic rotation.
 		seeded := &state.State{Relayer: &state.RelayerState{TopicID: "relayer-topic-to-rotate"}}
 		var saveCount int
 		var savedTopic string
@@ -255,59 +241,37 @@ func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 		assert.JSONEq(t, `{"ok":true}`, body)
 	})
 
-	t.Run("updateToLatestVersion reaches the OTA gate", func(t *testing.T) {
-		// Default (setupd) owner: the user-triggered update forwards to setupd over
-		// the LOCAL D-Bus rather than driving the local updater. This proves the
-		// command traverses the LAN ingress + storm gate + executor with no relayer.
-		// The forward is still relayer-independent: it rides the local system bus.
-		cfg := mocks.NewMockConfigManager(gomock.NewController(t))
-		cfg.EXPECT().Get().Return(&config.Config{SetupOwner: lanStrPtr(config.SetupOwnerSetupd)}).AnyTimes()
-		config.InjectConfigManagerForTesting(cfg)
-		defer config.ResetForTesting()
-
-		var forwardedMember godbus.Member
+	t.Run("updateToLatestVersion drives the local OTA gate offline", func(t *testing.T) {
+		// controld owns the update: updateToLatestVersion drives the OTA gate's
+		// LOCAL path — no relayer, no D-Bus forward to any other daemon. Offline the
+		// mandatory version check cannot read the local build descriptor (every OS
+		// read misses), so the gate fails the version check and the command errors;
+		// crucially it ran the in-process gate rather than forwarding elsewhere. The
+		// successful local update path (mocked HTTP version check + updater) is
+		// covered by the otagate package tests.
 		rig := newLANRig(t, commandrouter.DefaultGateConfig(), offlineStatus())
 		permissiveOSReads(rig.mockOS)
-		rig.mockDBus.EXPECT().
-			RetryableSend(gomock.Any(), gomock.Any()).
-			DoAndReturn(func(_ context.Context, p godbus.DBusPayload) error {
-				forwardedMember = p.Member
-				return nil
-			}).Times(1)
 
 		code, body := rig.postCast(t, `{"command":"updateToLatestVersion"}`)
-		assert.Equal(t, http.StatusOK, code)
-		assert.JSONEq(t, `{"ok":true}`, body)
-		assert.Equal(t, ffdbus.SETUPD_EVENT_SYSTEM_UPDATE, forwardedMember,
-			"update must reach the OTA gate and forward the system_update signal")
+		assert.Equal(t, http.StatusInternalServerError, code,
+			"offline the local version check fails; the command is handled in-process, not forwarded")
+		assert.Contains(t, body, "Failed to process cast request")
 	})
 
-	t.Run("uploadLogs reaches the executor offline via local D-Bus forward", func(t *testing.T) {
-		// Default (setupd) owner: uploadLogs forwards over the LOCAL D-Bus to
-		// setupd. This proves the command traverses the LAN ingress + storm gate +
-		// executor with no relayer, and is dispatched. (The controld in-process
-		// presign+PUT path is asserted in the devicectl-level test.)
-		cfg := mocks.NewMockConfigManager(gomock.NewController(t))
-		cfg.EXPECT().Get().Return(&config.Config{SetupOwner: lanStrPtr(config.SetupOwnerSetupd)}).AnyTimes()
-		config.InjectConfigManagerForTesting(cfg)
-		defer config.ResetForTesting()
-
-		var uploadMember godbus.Member
+	t.Run("uploadLogs is handled in-process offline", func(t *testing.T) {
+		// controld owns log upload: uploadLogs runs in-process (fire-and-forget)
+		// with no relayer and no D-Bus forward. Offline, permissiveOSReads makes the
+		// background log-zip find nothing, so it aborts before any HTTP — the
+		// command still ACKs immediately. The presign+PUT wire contract is asserted
+		// at the executor level in
+		// devicectl/lanrecovery_uploadlogs_integration_test.go.
 		rig := newLANRig(t, commandrouter.DefaultGateConfig(), offlineStatus())
 		permissiveOSReads(rig.mockOS)
-		rig.mockDBus.EXPECT().
-			RetryableSend(gomock.Any(), gomock.Any()).
-			DoAndReturn(func(_ context.Context, p godbus.DBusPayload) error {
-				uploadMember = p.Member
-				return nil
-			}).Times(1)
 
 		body := `{"command":"uploadLogs","request":{"userId":"u","apiKey":"k","title":"t"}}`
 		code, respBody := rig.postCast(t, body)
 		assert.Equal(t, http.StatusOK, code)
 		assert.JSONEq(t, `{"ok":true}`, respBody)
-		assert.Equal(t, ffdbus.SETUPD_EVENT_UPLOAD_LOGS, uploadMember,
-			"uploadLogs must reach the executor and forward the upload_logs signal")
 	})
 
 	t.Run("status read returns contract 1 while offline", func(t *testing.T) {

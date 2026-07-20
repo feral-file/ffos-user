@@ -526,25 +526,3 @@ func TestConfig_Get_Success(t *testing.T) {
 	assert.Empty(t, result.CDPConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.Endpoint)
 }
-
-func strPtr(s string) *string { return &s }
-
-func TestConfig_SetupOwnerIsControld(t *testing.T) {
-	tests := []struct {
-		name  string
-		owner *string
-		want  bool
-	}{
-		{name: "absent defaults to controld", owner: nil, want: true},
-		{name: "explicit setupd", owner: strPtr(config.SetupOwnerSetupd), want: false},
-		{name: "controld", owner: strPtr(config.SetupOwnerControld), want: true},
-		{name: "unknown value is controld-owned", owner: strPtr("something-else"), want: true},
-		{name: "empty string is controld-owned", owner: strPtr(""), want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := &config.Config{SetupOwner: tt.owner}
-			assert.Equal(t, tt.want, c.SetupOwnerIsControld())
-		})
-	}
-}

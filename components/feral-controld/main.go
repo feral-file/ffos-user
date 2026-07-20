@@ -202,12 +202,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		_ = app.DBus.Stop()
 	}()
 
-	dbusHandler := dbus.NewHandler(ctx, app.Relayer, app.Logger)
-	err = app.DBus.Export(dbusHandler, dbus.PATH, dbus.INTERFACE)
-	if err != nil {
-		return err
-	}
-
 	// Initialize Mediator
 	app.Mediator.Start()
 	defer app.Mediator.Stop()
@@ -240,20 +234,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		app.Mediator.InitializeMDNS(advertiser, deviceInfo, app.LinkChecker)
 	}
 
-	// Start the provisioning (setup-AP) domain, but only when controld owns setup.
-	// While setupd owns it (the default) the machine stays dormant — never started,
-	// so no AP is ever raised — and we log that fact exactly once. The machine runs
-	// its own supervised event loop, so its startup cannot be aborted by a relayer
-	// or CDP failure below (both come after this point). app.Provisioning is nil in
-	// the test app; guard for it.
-	if conf.SetupOwnerIsControld() {
-		if app.Provisioning != nil {
-			app.Logger.Info("Starting provisioning domain (setupOwner=controld)")
-			app.Provisioning.Start(ctx)
-			defer app.Provisioning.Stop()
-		}
-	} else {
-		app.Logger.Info("Provisioning domain dormant (setupOwner=setupd); setupd owns device setup")
+	// Start the provisioning (setup-AP) domain. controld owns device setup, so the
+	// machine runs its own supervised event loop; its startup cannot be aborted by
+	// a relayer or CDP failure below (both come after this point). app.Provisioning
+	// is nil in the test app; guard for it.
+	if app.Provisioning != nil {
+		app.Logger.Info("Starting provisioning domain")
+		app.Provisioning.Start(ctx)
+		defer app.Provisioning.Stop()
 	}
 
 	// Get connectivity status and connect to relayer if ready
@@ -491,7 +479,6 @@ func initializeApp(
 	// Executor
 	executor := devicectl.New(
 		cdp,
-		dbusClient,
 		deviceStatus,
 		poller,
 		ddcPanel,
@@ -574,16 +561,10 @@ func initializeApp(
 	})
 
 	// Hub status provider. The base provider reads identity/version/claim/topic
-	// from on-device state and reports a placeholder setup_state; when controld
-	// owns setup we wrap it so the live provisioning machine supplies the real
-	// setup_state. While setupd owns setup the machine is dormant, so the base
-	// placeholder is kept (wrapping it with a never-started machine would report a
-	// misleading "online").
+	// from on-device state and reports a placeholder setup_state; the wrapper lets
+	// the live provisioning machine supply the real setup_state.
 	baseStatusProvider := hub.NewStateStatusProvider(os, json, linkChecker, logger)
-	statusProvider := baseStatusProvider
-	if config.Get().SetupOwnerIsControld() {
-		statusProvider = &provisioningStatusProvider{base: baseStatusProvider, machine: provMachine}
-	}
+	statusProvider := &provisioningStatusProvider{base: baseStatusProvider, machine: provMachine}
 	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
 
 	return &app{

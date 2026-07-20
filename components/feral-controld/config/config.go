@@ -36,18 +36,6 @@ type MintPairingConfig struct {
 	ApprovalTimeoutSeconds int    `json:"approvalTimeoutSeconds"`
 }
 
-// Setup ownership values for Config.SetupOwner. Exactly one owner is active at a
-// time.
-const (
-	// SetupOwnerSetupd keeps feral-setupd the owner of device-setup concerns
-	// (factory reset, log upload, claim/pairing UI). It is the deprecated
-	// escape-hatch value now that controld owns setup by default.
-	SetupOwnerSetupd = "setupd"
-	// SetupOwnerControld moves those concerns in-process into feral-controld. It
-	// is the default owner.
-	SetupOwnerControld = "controld"
-)
-
 // CommandStormConfig tunes device-side command-storm protection in the command
 // router. All fields are optional; an absent section keeps the built-in
 // defaults, which are safe with zero configuration.
@@ -71,14 +59,6 @@ type Config struct {
 	EnableHub    *bool               `json:"enableHub"`
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 
-	// SetupOwner selects which daemon owns device-setup concerns (factory reset,
-	// log upload, and the claim/pairing UI). The setupd -> controld strangler
-	// window is over: controld now owns setup in-process by default. It is a
-	// pointer so an absent key defaults to SetupOwnerControld; setting "setupd" is
-	// the deprecated escape hatch that falls back to the legacy setupd-owned flow.
-	// Read via SetupOwnerIsControld(), never directly.
-	SetupOwner *string `json:"setupOwner"`
-
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
@@ -88,15 +68,6 @@ type Config struct {
 // explicit "enableHub": false disables it.
 func (c *Config) HubEnabled() bool {
 	return c.EnableHub == nil || *c.EnableHub
-}
-
-// SetupOwnerIsControld reports whether controld owns the in-process setup flow.
-// It defaults to true (controld-owned): the setupd -> controld strangler window
-// is over, so controld owns device setup unless an operator explicitly pins
-// "setupOwner": "setupd" to fall back to the deprecated setupd-owned flow. Any
-// other value (including the absent key) is controld-owned.
-func (c *Config) SetupOwnerIsControld() bool {
-	return c.SetupOwner == nil || *c.SetupOwner != SetupOwnerSetupd
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager
