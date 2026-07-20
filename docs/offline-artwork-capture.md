@@ -86,7 +86,20 @@ the item's `source`. For each distinct URL:
 - **Found on a successful response** → fetch the exact bytes via an
   out-of-band `http.Client` request (see §4 for why not
   `Network.getResponseBody`), hash into the blob store, record the
-  resource.
+  resource. The response body is streamed straight from the HTTP
+  connection into a temp file on disk while it is hashed —
+  `store.WriteBlob` never buffers a whole body in memory first — since a
+  single resource can be gigabyte-scale (§4.3's 1.1 GB video) and
+  `feral-controld` runs alongside a kiosk Chromium already under its own
+  memory pressure on a constrained device. `WriteBlob`'s `maxBytes`
+  parameter additionally aborts the stream (before the oversized body
+  ever fully lands on disk) if a single resource alone would already
+  exceed `offlineCache.maxDiskBytes` — `capturer`'s `maxResourceBytes`
+  passes that same config value through, so one pathological resource
+  cannot silently blow past the whole cache's disk budget before
+  `Service.enforceDiskLimit`'s post-capture eviction loop ever runs (that
+  loop can only reclaim space by deleting *other* items, which cannot
+  help if one resource alone already exceeds the entire budget).
 - **3xx redirect** → record `status` + `redirectTo` (the `Location`
   header), no body. See §4.1.
 - **206 Partial Content** → CDP cannot return a body for a range response
@@ -154,8 +167,9 @@ either.
 ### 4.3 A single asset over ~400 MB breaks `Fetch.fulfillRequest` itself
 
 One sample item's background video (a 1.1 GB `.mp4`, requested as an HTTP
-206 range request) was captured correctly — all ~1.1 GB hashed and stored —
-but fulfilling it via `Fetch.fulfillRequest` failed with
+206 range request) was captured correctly — all ~1.1 GB streamed to disk
+and hashed on the fly (see §3.2; capture never buffers the whole body in
+memory) — but fulfilling it via `Fetch.fulfillRequest` failed with
 `Cannot create a string longer than 0x1fffffe8 characters`. This is a hard
 ceiling in Chromium DevTools Protocol's `Fetch.fulfillRequest`: the response
 body is transmitted as a base64 **string**, and V8 caps string length at
@@ -269,6 +283,31 @@ There is deliberately **no** top-level manifest, no separate
 
 - `Store` rebuilds its in-memory index by scanning `items/` + `playlists/`
   at `Service.Start` — no persisted manifest to drift out of sync with disk.
+  `main.go` treats a `Start` failure (e.g. the root directory being
+  unreadable) as best-effort — it logs and keeps `feral-controld` running
+  rather than crashing, since the daemon's core playback/command path
+  never depended on this feature before it existed — but that means the
+  worker goroutine that drains `s.queue` never starts. `DownloadItem`/
+  `DownloadPlaylist` guard against silently queuing into that void with
+  `ErrServiceNotStarted` (backed by an atomic flag `Start`/`Stop` set),
+  which `commandrouter` surfaces as the same `disabled` RPC error code
+  used for the feature being config-disabled entirely (see
+  `docs/controld-inbound-controller-messages.md`'s offline-cache section).
+  A plain top-of-function `started.Load()` is not enough on its own:
+  `Classify` does a network round trip, so a `Stop()` can land in the
+  middle of `DownloadItem`/`DownloadPlaylist` after that check passes but
+  before the job is actually queued. `enqueue()` re-checks `started`
+  immediately before `queue.push`, under the same mutex `Start`/`Stop`
+  use to flip the flag, so the push and the flag flip are strictly
+  ordered relative to each other — closing the window where a job could
+  land in `s.queue` after the worker has already exited and nothing is
+  left to drain it. `run()`'s shutdown path additionally drains any
+  remaining queued jobs before returning, since Go's `select` does not
+  prefer whichever channel became ready first: a job's wake signal and
+  the shutdown context's cancellation can both be ready by the time the
+  worker's `select` runs, and without an explicit final drain the worker
+  could pick the cancellation and exit while a job that already made it
+  into the queue sits there unprocessed.
 - Ordering and membership for a whole-playlist download already live in the
   verbatim `playlists/<id>.json`'s own `items[]`.
 - Only fields replay routing and status reporting actually consume are
@@ -278,6 +317,25 @@ There is deliberately **no** top-level manifest, no separate
   on disk. Capture-time diagnostics collapse into `Coverage.{Complete,Reason}`
   (e.g. `csp_blocked`, `large_asset_static`, `capture_window_elapsed`,
   `download_failed`) rather than a separate `failedRequests` list.
+- `WriteBlob` streams into a temp file and renames it into place, the
+  same atomicity pattern every other write in this store already uses,
+  but two-step: the content-addressed final name is only known once the
+  stream has been fully hashed, so the write lands in a uniquely-named
+  `blobs/incoming-*.tmp` file first (`os.CreateTemp`, not the fixed
+  `.tmp` suffix `writeFileAtomic` uses for item/playlist JSON, since a
+  fixed name would collide across writes if this were ever called
+  concurrently — today it never is, since captures are serialized to one
+  at a time) and is renamed into place only after a successful, complete
+  write; any early return (oversized body, I/O error) removes the temp
+  file instead. `GC()` already skips any `*.tmp` name so it never treats
+  one as an orphan blob, but a write interrupted by the process dying
+  mid-stream (SIGKILL, power loss — not a handled Go error, so the
+  `defer`-based cleanup above never runs) leaves a temp file GC will
+  never remove either, since its random suffix is never reused by a
+  later write. This is an accepted, narrow trade-off (the same class of
+  "unsupervised headless capture can be killed mid-write" risk
+  `writeFileAtomic`'s own doc already calls out) rather than adding
+  age-based temp-file sweeping just for a crash-only leak.
 - Blobs are freed by a **sweep, not a refcount**: `store.go`'s `GC()` walks
   every saved item record's `Resources` to build the "keep" set, then
   deletes any blob not in it. There is no separate reference count kept in

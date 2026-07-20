@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	go_os "os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,9 @@ var (
 	ErrPlaylistNotFound = errors.New("offline cache: playlist not found")
 	ErrBlobNotFound     = errors.New("offline cache: blob not found")
 	ErrBlobHashMismatch = errors.New("offline cache: blob content does not match its sha256 name")
+	// ErrBlobTooLarge is returned by WriteBlob when the source reader
+	// produces more than the maxBytes cap passed to it.
+	ErrBlobTooLarge = errors.New("offline cache: blob exceeds size limit")
 )
 
 // blobFilePerm/recordFilePerm are intentionally not group/world-writable:
@@ -43,11 +47,22 @@ const (
 //
 //go:generate mockgen -source=store.go -destination=../mocks/offlinecache_store.go -package=mocks -mock_names=Store=MockOfflineCacheStore
 type Store interface {
-	// WriteBlob content-addresses data under blobs/<sha256>. Writing the
-	// same content twice (across items/playlists) is a cheap no-op — this
-	// is the entire dedup mechanism, there is no separate refcount to
-	// maintain.
-	WriteBlob(data []byte) (sha256Hex string, err error)
+	// WriteBlob content-addresses data streamed from r under
+	// blobs/<sha256>. Hashing happens while copying to a temp file, not
+	// after buffering the whole body in memory — captured resources can
+	// be gigabyte-scale (see docs/offline-artwork-capture.md's 1.1GB
+	// video case), and controld runs on memory-constrained devices
+	// alongside a kiosk Chromium already under its own memory pressure.
+	// maxBytes caps how many bytes may be read from r before the write
+	// aborts with ErrBlobTooLarge and the partial temp file is discarded
+	// (<=0 means unlimited); this lets a caller reject one oversized
+	// resource mid-stream against a disk budget, rather than discovering
+	// the overrun only once the whole body has already landed on disk.
+	// Writing content that already exists under its hash (across
+	// items/playlists) is a cheap no-op after the redundant temp file is
+	// discarded — this is the entire dedup mechanism, there is no
+	// separate refcount to maintain.
+	WriteBlob(r io.Reader, maxBytes int64) (sha256Hex string, err error)
 	// ReadBlob reads a blob and re-verifies its hash before returning it,
 	// so on-disk corruption fails loudly instead of silently feeding a
 	// mismatched body to replay.
@@ -138,20 +153,72 @@ func (s *fsStore) blobPath(hexSum string) string { return filepath.Join(s.blobsD
 
 func (s *fsStore) BlobPath(hexSum string) string { return s.blobPath(hexSum) }
 
-func (s *fsStore) WriteBlob(data []byte) (string, error) {
-	sum := sha256.Sum256(data)
-	hexSum := hex.EncodeToString(sum[:])
-	path := s.blobPath(hexSum)
-
-	if _, err := s.os.Stat(path); err == nil {
-		return hexSum, nil // already stored: dedup across items/playlists
-	} else if !s.os.IsNotExist(err) {
-		return "", fmt.Errorf("offline cache: stat blob %s: %w", hexSum, err)
+func (s *fsStore) WriteBlob(r io.Reader, maxBytes int64) (string, error) {
+	if err := s.os.MkdirAll(s.blobsDir(), dirPerm); err != nil {
+		return "", fmt.Errorf("offline cache: create dir %s: %w", s.blobsDir(), err)
 	}
 
-	if err := s.writeFileAtomic(s.blobsDir(), path, data, blobFilePerm); err != nil {
-		return "", err
+	// The final content-addressed name is only known after r has been
+	// fully hashed, so the stream lands in a uniquely-named temp file
+	// first (CreateTemp, not writeFileAtomic's fixed ".tmp" suffix,
+	// since a fixed name would collide if this were ever called
+	// concurrently) and gets renamed into place below.
+	tmp, err := s.os.CreateTemp(s.blobsDir(), "incoming-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("offline cache: create temp blob: %w", err)
 	}
+	tmpPath := tmp.Name()
+	if err := tmp.Chmod(blobFilePerm); err != nil {
+		_ = tmp.Close()
+		_ = s.os.Remove(tmpPath)
+		return "", fmt.Errorf("offline cache: chmod temp blob %s: %w", tmpPath, err)
+	}
+
+	// Every return path below must go through this cleanup unless the
+	// write is renamed into its final name: GC only recognizes a blob as
+	// "live" by its saved-item-referenced hash name (see GC's doc), so a
+	// stray un-renamed temp file would otherwise never be reclaimed
+	// until the next process restart happens to overwrite it.
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = s.os.Remove(tmpPath)
+		}
+	}()
+
+	hasher := sha256.New()
+	src := r
+	if maxBytes > 0 {
+		// Read one byte past the cap so a body exactly maxBytes long is
+		// never mistaken for an overrun, while still detecting an
+		// actual overrun without having to read the entire oversized
+		// body first.
+		src = io.LimitReader(r, maxBytes+1)
+	}
+	written, copyErr := io.Copy(tmp, io.TeeReader(src, hasher))
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("offline cache: stream blob to disk: %w", copyErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("offline cache: finalize temp blob %s: %w", tmpPath, closeErr)
+	}
+	if maxBytes > 0 && written > maxBytes {
+		return "", ErrBlobTooLarge
+	}
+
+	hexSum := hex.EncodeToString(hasher.Sum(nil))
+	finalPath := s.blobPath(hexSum)
+	if _, statErr := s.os.Stat(finalPath); statErr == nil {
+		return hexSum, nil // already stored: dedup across items/playlists, discard the redundant temp file via defer
+	} else if !s.os.IsNotExist(statErr) {
+		return "", fmt.Errorf("offline cache: stat blob %s: %w", hexSum, statErr)
+	}
+
+	if err := s.os.Rename(tmpPath, finalPath); err != nil {
+		return "", fmt.Errorf("offline cache: finalize blob %s: %w", hexSum, err)
+	}
+	renamed = true
 	return hexSum, nil
 }
 

@@ -9,8 +9,11 @@ package offlinecache_test
 // components rather than perform I/O themselves.
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -29,14 +32,26 @@ func newTestStore(t *testing.T) (offlinecache.Store, string) {
 	return store, root
 }
 
+// writeBlobString is the test-only equivalent of the []byte-taking
+// WriteBlob this store had before it became streaming (WriteBlob now takes
+// an io.Reader so capture.go never has to buffer a whole response body —
+// see store.go's doc). maxBytes 0 means unlimited, matching WriteBlob's own
+// "<=0 means unlimited" contract; tests exercising the limit call
+// store.WriteBlob directly instead of through this helper.
+func writeBlobString(t *testing.T, store offlinecache.Store, content string) string {
+	t.Helper()
+	hash, err := store.WriteBlob(strings.NewReader(content), 0)
+	require.NoError(t, err)
+	return hash
+}
+
 // seedItem writes a minimal ready ItemRecord (one HTML resource) directly to
 // store, for tests elsewhere in this package (replay_test.go,
 // kioskreplay_test.go) that need a pre-cached item without going through the
 // full capture pipeline.
 func seedItem(t *testing.T, store offlinecache.Store, itemID, blobContent string) offlinecache.Resource {
 	t.Helper()
-	hash, err := store.WriteBlob([]byte(blobContent))
-	require.NoError(t, err)
+	hash := writeBlobString(t, store, blobContent)
 
 	res := offlinecache.Resource{
 		URL:         "https://example.com/" + itemID + "/index.html",
@@ -58,12 +73,12 @@ func TestStore_WriteBlob_DedupAndVerify(t *testing.T) {
 	store, root := newTestStore(t)
 
 	data := []byte("hello offline world")
-	hash1, err := store.WriteBlob(data)
+	hash1, err := store.WriteBlob(bytes.NewReader(data), 0)
 	require.NoError(t, err)
 	assert.NotEmpty(t, hash1)
 
 	// Writing identical content again must be a no-op that returns the same hash.
-	hash2, err := store.WriteBlob(data)
+	hash2, err := store.WriteBlob(bytes.NewReader(data), 0)
 	require.NoError(t, err)
 	assert.Equal(t, hash1, hash2)
 
@@ -91,14 +106,13 @@ func TestStore_ReadBlob_NotFound(t *testing.T) {
 func TestStore_ReadBlob_HashMismatch(t *testing.T) {
 	store, root := newTestStore(t)
 
-	hash, err := store.WriteBlob([]byte("original"))
-	require.NoError(t, err)
+	hash := writeBlobString(t, store, "original")
 
 	// Corrupt the blob on disk directly, bypassing the store's write path.
 	corruptPath := filepath.Join(root, "blobs", hash)
 	require.NoError(t, wrapper.NewOS().WriteFile(corruptPath, []byte("corrupted"), 0o644))
 
-	_, err = store.ReadBlob(hash)
+	_, err := store.ReadBlob(hash)
 	assert.ErrorIs(t, err, offlinecache.ErrBlobHashMismatch)
 }
 
@@ -187,10 +201,8 @@ func TestStore_Playlist_SaveLoadDelete(t *testing.T) {
 func TestStore_GC_RemovesOnlyOrphanBlobs(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	keepHash, err := store.WriteBlob([]byte("keep me"))
-	require.NoError(t, err)
-	orphanHash, err := store.WriteBlob([]byte("orphan"))
-	require.NoError(t, err)
+	keepHash := writeBlobString(t, store, "keep me")
+	orphanHash := writeBlobString(t, store, "orphan")
 
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
 		ItemID: "item-1",
@@ -218,12 +230,80 @@ func TestStore_DiskUsage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, usage)
 
-	_, err = store.WriteBlob([]byte("12345"))
-	require.NoError(t, err)
-	_, err = store.WriteBlob([]byte("1234567890"))
-	require.NoError(t, err)
+	writeBlobString(t, store, "12345")
+	writeBlobString(t, store, "1234567890")
 
 	usage, err = store.DiskUsage()
 	require.NoError(t, err)
 	assert.Equal(t, int64(15), usage)
+}
+
+func TestStore_WriteBlob_StreamsWithoutFullyBufferingBody(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	// A reader that panics on any call reading more than a small chunk
+	// at once would be the sharpest way to prove this, but io.Copy's
+	// buffer size is an implementation detail this test should not pin.
+	// Instead, this proves the streamed hash/write is correct for a
+	// payload assembled from many small chunks — the property that
+	// actually matters (capture.go feeds an http.Response.Body, which
+	// is exactly this kind of chunked io.Reader, not an in-memory
+	// []byte) — rather than asserting on memory usage directly.
+	const chunk = "0123456789"
+	const repeats = 1000
+	r := io.LimitReader(&repeatingReader{chunk: []byte(chunk)}, int64(len(chunk)*repeats))
+
+	hash, err := store.WriteBlob(r, 0)
+	require.NoError(t, err)
+
+	got, err := store.ReadBlob(hash)
+	require.NoError(t, err)
+	assert.Equal(t, strings.Repeat(chunk, repeats), string(got))
+}
+
+func TestStore_WriteBlob_RejectsOversizedReaderAndCleansUpTempFile(t *testing.T) {
+	store, root := newTestStore(t)
+
+	_, err := store.WriteBlob(strings.NewReader("0123456789"), 5)
+	assert.ErrorIs(t, err, offlinecache.ErrBlobTooLarge)
+
+	// No blob must have been committed under any name, and no orphan
+	// "incoming-*.tmp" file must be left behind in blobs/ — a leaked
+	// temp file here would never be cleaned up by GC (GC deliberately
+	// skips ".tmp" names) until a process restart happened to reuse it.
+	entries, err := wrapper.NewOS().ReadDir(filepath.Join(root, "blobs"))
+	require.NoError(t, err)
+	assert.Empty(t, entries, "oversized write must leave blobs/ empty")
+}
+
+func TestStore_WriteBlob_ExactlyAtLimitSucceeds(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	// maxBytes+1 is read internally to detect an overrun without
+	// buffering the whole oversized body; a body exactly at the limit
+	// must not be misclassified as having exceeded it.
+	hash, err := store.WriteBlob(strings.NewReader("01234"), 5)
+	require.NoError(t, err)
+
+	got, err := store.ReadBlob(hash)
+	require.NoError(t, err)
+	assert.Equal(t, "01234", string(got))
+}
+
+// repeatingReader emits chunk repeatedly, ignoring EOF, until the caller's
+// io.LimitReader wrapper cuts it off — used to feed WriteBlob a payload
+// that arrives as many small reads rather than one contiguous []byte.
+type repeatingReader struct {
+	chunk []byte
+	pos   int
+}
+
+func (r *repeatingReader) Read(p []byte) (int, error) {
+	n := 0
+	for n < len(p) {
+		p[n] = r.chunk[r.pos]
+		r.pos = (r.pos + 1) % len(r.chunk)
+		n++
+	}
+	return n, nil
 }

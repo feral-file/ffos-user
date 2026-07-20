@@ -129,6 +129,29 @@ func TestCommandHandler_DownloadPlaylistItem_ResolveFailure(t *testing.T) {
 	assertErrorResponse(t, result, "resolve_failed")
 }
 
+func TestCommandHandler_DownloadPlaylistItem_ServiceNotStarted(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrServiceNotStarted).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	// Same "disabled" shape as h.offlineCache == nil (see
+	// TestCommandHandler_OfflineCache_AllCommandsDisabledWhenServiceNil):
+	// a startup failure is not something a client can fix by retrying.
+	assertErrorResponse(t, result, "disabled")
+}
+
 func TestCommandHandler_DownloadPlaylistItem_UnsupportedMediaClass(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()

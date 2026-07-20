@@ -61,7 +61,7 @@ func setupCapture(t *testing.T) *captureTestHarness {
 
 	capturer := offlinecache.NewCapturer(
 		mockDownloader, mockDialer, mockHTTP, store,
-		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), logger,
+		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, logger,
 	)
 
 	return &captureTestHarness{
@@ -303,7 +303,7 @@ func TestCapturer_Capture_IgnoresBlobAndDataURLs(t *testing.T) {
 
 func TestCapturer_Capture_RequiresIDAndSource(t *testing.T) {
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(nil, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(nil, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	_, err := capturer.Capture(context.Background(), dp1playlist.PlaylistItem{}, 0)
 	assert.Error(t, err)
@@ -317,7 +317,7 @@ func TestCapturer_Capture_AcquireFails(t *testing.T) {
 	mockDownloader.EXPECT().Acquire(gomock.Any()).Return("", assertError("busy")).Times(1)
 
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	_, err := capturer.Capture(context.Background(), item, 0)
@@ -332,7 +332,7 @@ func TestCapturer_Close_DelegatesToDownloader(t *testing.T) {
 	mockDownloader.EXPECT().Close().Return(nil).Times(1)
 
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	assert.NoError(t, capturer.Close())
 }

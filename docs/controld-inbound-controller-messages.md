@@ -1353,6 +1353,15 @@ config. When disabled (or the config is absent), every command below returns:
 }
 ```
 
+`downloadPlaylistItem`/`downloadPlaylist` also return this same `disabled`
+shape (message: `"offline cache: service is not started"`) if the offline
+cache's background worker never started successfully — `feral-controld`
+treats a `Service.Start` failure (e.g. an unreadable cache root) as
+best-effort and keeps running rather than crashing, so this guards against
+silently queuing a download nothing will ever process. As with the
+feature-disabled case, this is not retryable by the client; it clears only
+on a daemon restart (or after the underlying startup failure is fixed).
+
 All five commands use the explicit RPC ok/error shape from
 ["Response Shape Recommendation for New Inbound Commands"](#response-shape-recommendation-for-new-inbound-commands)
 below. Downloads are asynchronous: the command ACKs `queued` immediately and

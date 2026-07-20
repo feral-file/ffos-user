@@ -3,6 +3,7 @@ package offlinecache_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -51,8 +52,7 @@ func setupService(t *testing.T, maxDiskBytes int64, observer offlinecache.Progre
 
 func seedItemWithCapturedAt(t *testing.T, store offlinecache.Store, itemID, blobContent string, capturedAt time.Time) offlinecache.Resource {
 	t.Helper()
-	hash, err := store.WriteBlob([]byte(blobContent))
-	require.NoError(t, err)
+	hash := writeBlobString(t, store, blobContent)
 	res := offlinecache.Resource{URL: "https://example.com/" + itemID, Status: 200, SHA256: hash, ContentType: "text/html"}
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
 		ItemID:     itemID,
@@ -115,6 +115,9 @@ func TestService_DownloadItem_RequiresIDAndSource(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
 	err := ts.service.DownloadItem(context.Background(), dp1playlist.PlaylistItem{})
 	assert.Error(t, err)
 }
@@ -126,8 +129,104 @@ func TestService_DownloadItem_ClassifyError(t *testing.T) {
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassUnknown, assertError("network down")).Times(1)
 
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
 	err := ts.service.DownloadItem(context.Background(), item)
 	assert.Error(t, err)
+}
+
+// TestService_DownloadItem_BeforeStartReturnsNotStarted and its
+// DownloadPlaylist counterpart below are the regression tests for
+// ErrServiceNotStarted: without this guard, DownloadItem/DownloadPlaylist
+// would enqueue a job onto s.queue and report success even though no
+// worker goroutine exists yet to ever process it (either Start was never
+// called, or — see main.go's offline-cache section — Start's own setup
+// failed and main.go logged it but kept the service wired into
+// commandrouter rather than crashing controld).
+func TestService_DownloadItem_BeforeStartReturnsNotStarted(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	// No Classify/Capture expectations: the guard must fire before
+	// either is ever reached.
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	err := ts.service.DownloadItem(context.Background(), item)
+	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
+}
+
+func TestService_DownloadPlaylist_BeforeStartReturnsNotStarted(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw := json.RawMessage(`{"id":"playlist-1","items":[]}`)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw)
+	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
+	assert.Zero(t, queued)
+	assert.Zero(t, total)
+}
+
+// TestService_DownloadItem_AfterStartFailureReturnsNotStarted reproduces
+// the exact scenario from the PR review: Start's own index rebuild fails
+// (e.g. an unreadable store root), main.go logs and continues rather than
+// crashing controld, and a later DownloadItem call must not silently
+// queue a job that nothing will ever drain.
+func TestService_DownloadItem_AfterStartFailureReturnsNotStarted(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("permission denied")).Times(1)
+
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+
+	err := svc.Start(context.Background())
+	require.Error(t, err)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	downloadErr := svc.DownloadItem(context.Background(), item)
+	assert.ErrorIs(t, downloadErr, offlinecache.ErrServiceNotStarted)
+}
+
+// TestService_DownloadItem_ConcurrentStopDuringClassifyReturnsNotStarted
+// is the regression test for the second review round's race: Classify
+// does network I/O and can straddle a concurrent Stop(), so the
+// started.Load() fast-fail at the top of DownloadItem is only advisory —
+// this pins that enqueue()'s re-check under the same mu Stop uses to
+// flip started is what actually stops a job from being pushed onto a
+// queue the worker has already stopped draining.
+func TestService_DownloadItem_ConcurrentStopDuringClassifyReturnsNotStarted(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+
+	classifyStarted := make(chan struct{})
+	releaseClassify := make(chan struct{})
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).DoAndReturn(
+		func(_ context.Context, _ string) (offlinecache.MediaClass, error) {
+			close(classifyStarted)
+			<-releaseClassify
+			return offlinecache.ClassSoftware, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+
+	downloadDone := make(chan error, 1)
+	go func() {
+		downloadDone <- ts.service.DownloadItem(context.Background(), item)
+	}()
+
+	// Wait until DownloadItem is parked inside Classify (i.e. already
+	// past its own started.Load() fast-fail), then stop the service out
+	// from under it before letting Classify return.
+	<-classifyStarted
+	ts.service.Stop()
+	close(releaseClassify)
+
+	err := <-downloadDone
+	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 }
 
 func TestService_DownloadItem_IdempotentWhileInFlight(t *testing.T) {
@@ -329,8 +428,7 @@ func TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC(t *testing.T) 
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 			// Mirrors capture.go's real shape: the blob lands on disk
 			// well before SaveItem persists any record referencing it.
-			hash, err := ts.store.WriteBlob([]byte("payload-b"))
-			require.NoError(t, err)
+			hash := writeBlobString(t, ts.store, "payload-b")
 			close(blobWritten)
 			<-proceedToSave
 			rec := &offlinecache.ItemRecord{
@@ -379,17 +477,58 @@ func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
 	defer ts.ctrl.Finish()
 	seedItemWithCapturedAt(t, ts.store, "item-1", "old payload", time.Now())
 
+	// A separate busyItem occupies the single worker goroutine so
+	// item-1's job provably sits in the queue (not yet popped) for the
+	// DownloadItem/ClearItem sequence below — DownloadItem now requires
+	// Start to have already succeeded (see ErrServiceNotStarted), so
+	// this test can no longer enqueue before starting the worker the
+	// way it used to.
+	busyItem := dp1playlist.PlaylistItem{ID: "busy-item", Source: "https://example.com/busy-item"}
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
-	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
-	// Capture is deliberately given no expectation: if the queued job is
-	// not removed, the worker (started below) calling it unexpectedly
-	// fails the test via gomock.
+	busyStarted := make(chan struct{})
+	proceedBusy := make(chan struct{})
 
-	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-	require.NoError(t, ts.service.ClearItem("item-1"))
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), busyItem.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), busyItem, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			close(busyStarted)
+			<-proceedBusy
+			return &offlinecache.ItemRecord{ItemID: busyItem.ID, Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
+		}).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	// Capture is deliberately given no expectation for item-1: if the
+	// queued job is not removed, the worker calling it unexpectedly
+	// fails the test via gomock.
 
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), busyItem))
+	<-busyStarted // worker is now blocked on busyItem; item-1's job below is guaranteed to still be queued, not running
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+
+	// ClearItem cannot be called synchronously here: it always GCs (see
+	// service.gc's doc), and that GC call blocks on captureMu until
+	// busyItem's in-flight capture finishes — the same fence
+	// TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC
+	// covers directly. Run it in the background instead.
+	clearDone := make(chan error, 1)
+	go func() { clearDone <- ts.service.ClearItem("item-1") }()
+
+	// ClearItem's queue removal (jobQueue.removeItems) happens before
+	// its blocking GC call, and item-1's on-disk delete happens
+	// immediately before that removal in the same, unblocked call —
+	// so waiting for the delete to land is a safe proxy for "the queued
+	// job has already been removed" before releasing busyItem, which
+	// is what would let the worker's run loop reach queue.pop() next.
+	require.Eventually(t, func() bool {
+		_, err := ts.store.LoadItem("item-1")
+		return errors.Is(err, offlinecache.ErrItemNotFound)
+	}, time.Second, 5*time.Millisecond, "ClearItem must delete item-1's record before this test releases busyItem")
+
+	close(proceedBusy) // let the worker finish busyItem and advance to item-1's (removed) queue slot
+	require.NoError(t, <-clearDone)
 
 	require.Never(t, func() bool {
 		_, err := ts.store.LoadItem("item-1")
@@ -511,8 +650,7 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 	seedItemWithCapturedAt(t, ts.store, "old-1", "0123456789", time.Now().Add(-2*time.Hour))
 	seedItemWithCapturedAt(t, ts.store, "old-2", "abcdefghij", time.Now().Add(-1*time.Hour))
 
-	newHash, err := ts.store.WriteBlob([]byte("zzzzzzzzzz"))
-	require.NoError(t, err)
+	newHash := writeBlobString(t, ts.store, "zzzzzzzzzz")
 	newItem := dp1playlist.PlaylistItem{ID: "new-item", Source: "https://example.com/new"}
 	newRec := &offlinecache.ItemRecord{
 		ItemID: "new-item", Item: newItem, Entry: newItem.Source,
@@ -539,7 +677,7 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 		return err == nil && usage <= 12
 	}, 2*time.Second, 10*time.Millisecond, "disk usage should settle back under budget")
 
-	_, err = ts.store.LoadItem("old-1")
+	_, err := ts.store.LoadItem("old-1")
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "oldest item should be evicted first")
 	_, err = ts.store.LoadItem("old-2")
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "second-oldest item should also be evicted to get under budget")

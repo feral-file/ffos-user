@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -20,6 +21,17 @@ import (
 // source does not classify as software (see classify.go): offline caching
 // only supports software-based DP-1 artworks per the plan's constraints.
 var ErrUnsupportedMediaClass = errors.New("offline cache: item is not software-based and cannot be downloaded offline")
+
+// ErrServiceNotStarted is returned by DownloadItem/DownloadPlaylist when
+// the worker goroutine that actually processes queued jobs is not
+// running — either Start was never called, or Start's own setup (index
+// rebuild from disk) failed and returned an error. main.go treats a
+// Start failure as best-effort (it logs and continues rather than
+// crashing controld — see main.go's offline-cache section), so without
+// this guard DownloadItem/DownloadPlaylist would enqueue jobs onto a
+// queue nothing will ever drain and report false success to the mobile
+// app.
+var ErrServiceNotStarted = errors.New("offline cache: service is not started")
 
 // ItemStatus is one entry of a Status snapshot, shaped for the
 // getOfflineCacheStatus command and offline_cache_status notification.
@@ -89,6 +101,9 @@ type Service interface {
 	// only cleanup path.
 	Stop()
 
+	// DownloadItem, like DownloadPlaylist below, returns ErrServiceNotStarted
+	// if Start was never called or failed, rather than queueing a job
+	// nothing will ever process.
 	DownloadItem(ctx context.Context, item dp1playlist.PlaylistItem) error
 	// DownloadPlaylist stores playlistRaw exactly as given by the caller
 	// (no further marshaling/unmarshaling happens here) and queues every
@@ -203,6 +218,22 @@ type service struct {
 	mu    sync.RWMutex
 	state map[string]ItemState // itemID -> last-known state, seeded from disk on Start
 
+	// started gates DownloadItem/DownloadPlaylist on the worker
+	// goroutine actually running — see ErrServiceNotStarted's doc. Three
+	// checks exist against it, each cheaper/more advisory than the
+	// last, because Stop() can race in at any point during Classify or
+	// the observer notification: DownloadItem/DownloadPlaylist do a
+	// lock-free started.Load() up front purely to fail fast before
+	// paying for Classify's network round trip; enqueue() repeats that
+	// lock-free check before deciding whether to notify the observer of
+	// "queued", to avoid a spurious notification for a job that is
+	// about to be rejected anyway; the one check that is actually
+	// authoritative is enqueue()'s final re-read under mu immediately
+	// before queue.push (the same lock Start/Stop use to flip this
+	// flag), which is what actually prevents a job from being pushed
+	// onto a queue the worker has already stopped draining.
+	started atomic.Bool
+
 	cancel context.CancelFunc
 	doneCh chan struct{}
 }
@@ -255,6 +286,9 @@ func (s *service) Start(ctx context.Context) error {
 	s.cancel = cancel
 	s.doneCh = make(chan struct{})
 	go s.run(runCtx)
+	s.mu.Lock()
+	s.started.Store(true)
+	s.mu.Unlock()
 	return nil
 }
 
@@ -262,6 +296,14 @@ func (s *service) Stop() {
 	if s.cancel == nil {
 		return
 	}
+	// Flip started under mu before cancelling: enqueue() takes the same
+	// lock to check-and-push atomically, so once this returns no
+	// concurrent DownloadItem/DownloadPlaylist call can observe
+	// started==true and still push a job after the worker below is
+	// torn down and stops draining the queue.
+	s.mu.Lock()
+	s.started.Store(false)
+	s.mu.Unlock()
 	s.cancel()
 	<-s.doneCh
 	if err := s.capturer.Close(); err != nil {
@@ -278,7 +320,27 @@ func (s *service) run(ctx context.Context) {
 			case <-s.queue.wake:
 				continue
 			case <-ctx.Done():
-				return
+				// enqueue() pushes while still holding s.mu, the same
+				// lock Stop() takes to flip started before calling
+				// cancel (see enqueue's doc), so any job a caller
+				// successfully enqueued is guaranteed to already be
+				// sitting in s.queue by the time ctx.Done() fires here.
+				// But Go's select does not prefer whichever case became
+				// ready first: if that push's wake signal and this
+				// cancellation are both ready by the time this select
+				// runs, it picks between them uniformly at random, so
+				// ctx.Done() can still win the pick. Drain whatever is
+				// left before actually returning so that job fails
+				// fast (ctx is already cancelled, so Capture below
+				// will error quickly) instead of sitting stranded in
+				// StateQueued forever with no worker left to drain it.
+				for {
+					j, ok := s.queue.pop()
+					if !ok {
+						return
+					}
+					s.process(ctx, j)
+				}
 			}
 		}
 		s.process(ctx, j)
@@ -321,6 +383,9 @@ func isBrokenOnlineCoverage(reason string) bool {
 }
 
 func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistItem) error {
+	if !s.started.Load() {
+		return ErrServiceNotStarted
+	}
 	if item.ID == "" || item.Source == "" {
 		return errors.New("offline cache: item must have an id and a source")
 	}
@@ -333,11 +398,22 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 		return ErrUnsupportedMediaClass
 	}
 
-	s.enqueue(item)
+	// Classify above can be slow (network I/O), so the started.Load()
+	// fast-fail at the top of this function is only advisory: a Stop()
+	// racing this call could tear the worker down in between. enqueue
+	// re-checks started under the same lock Stop uses to flip it, so
+	// this is the authoritative check that actually prevents pushing a
+	// job onto a queue nobody will ever drain.
+	if !s.enqueue(item) {
+		return ErrServiceNotStarted
+	}
 	return nil
 }
 
 func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage) (int, int, error) {
+	if !s.started.Load() {
+		return 0, 0, ErrServiceNotStarted
+	}
 	var playlist dp1playlist.Playlist
 	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
 		return 0, 0, fmt.Errorf("offline cache: parse playlist: %w", err)
@@ -365,25 +441,79 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		if class != ClassSoftware {
 			continue
 		}
-		s.enqueue(item)
+		if !s.enqueue(item) {
+			// Stop() raced in mid-loop; the remaining items would fail
+			// the same way, so stop trying rather than log once per item.
+			break
+		}
 		queued++
 	}
 	return queued, total, nil
 }
 
 // enqueue is idempotent: an item already queued or downloading is left
-// alone rather than double-scheduled.
-func (s *service) enqueue(item dp1playlist.PlaylistItem) {
+// alone rather than double-scheduled. Returns false without touching the
+// queue if the service was stopped concurrently — see the started field's
+// doc comment for why the fresh check in phase 2 below (rather than the
+// caller's earlier started.Load(), or even this function's own advisory
+// check up front) is the one that actually matters.
+//
+// This runs in two locked phases with the observer notification in
+// between, rather than one critical section covering everything, for two
+// reasons:
+//   - Calling out to s.observer while holding s.mu would block every
+//     other state read/write in the service for as long as the observer
+//     takes, which this package has no bound on (it may be a websocket
+//     send).
+//   - Ordering: the "queued" notification must reach the observer before
+//     the worker can possibly dequeue this job and report "downloading"
+//     for the same item (mobile status displays assume that sequence).
+//     Phase 2's push is what first makes the job visible to the worker,
+//     so notifying in between the phases — rather than after phase 2, as
+//     an earlier version of this function did — guarantees that ordering
+//     by construction instead of by coincidence.
+func (s *service) enqueue(item dp1playlist.PlaylistItem) bool {
+	if !s.started.Load() {
+		return false
+	}
+	s.mu.RLock()
+	st, tracked := s.state[item.ID]
+	s.mu.RUnlock()
+	if tracked && (st == StateQueued || st == StateDownloading) {
+		return true
+	}
+
+	if s.observer != nil {
+		s.observer.OnItemStateChanged(ItemStatus{
+			ItemID:  item.ID,
+			State:   StateQueued,
+			Percent: percentForState(StateQueued),
+		})
+	}
+
+	// Phase 2: push happens before mu is released, not after. Stop()
+	// must take this same mu to flip started false before it can call
+	// cancel() (see Stop's doc), so pushing here — while re-checking
+	// started fresh, since phase 1's check above and the observer call
+	// just above could have raced a Stop() in between — makes "job is
+	// in the queue" happen-before any subsequent Stop() via mutex
+	// handoff. Without this fresh check-and-push done atomically, a
+	// Stop() landing after phase 1 but before this point could tear the
+	// worker down and strand the job in s.queue forever with nothing
+	// left to drain it.
 	s.mu.Lock()
+	if !s.started.Load() {
+		s.mu.Unlock()
+		return false
+	}
 	if st, ok := s.state[item.ID]; ok && (st == StateQueued || st == StateDownloading) {
 		s.mu.Unlock()
-		return
+		return true
 	}
 	s.state[item.ID] = StateQueued
-	s.mu.Unlock()
-
-	s.notify(item.ID, StateQueued, Coverage{})
 	s.queue.push(captureJob{itemID: item.ID, item: item})
+	s.mu.Unlock()
+	return true
 }
 
 func (s *service) process(ctx context.Context, j captureJob) {

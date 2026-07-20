@@ -28,6 +28,12 @@ type OS interface {
 	// requests for video seeking) without loading the whole file into
 	// memory the way ReadFile would.
 	Open(path string) (*go_os.File, error)
+	// CreateTemp backs the offline-cache store's streaming blob write
+	// path (see offlinecache/store.go's WriteBlob): a blob's
+	// content-addressed name is only known after its full content has
+	// been hashed, so the write has to land in a uniquely-named temp
+	// file first and get renamed into place once the hash is known.
+	CreateTemp(dir, pattern string) (*go_os.File, error)
 	Exit(code int)
 }
 
@@ -75,6 +81,10 @@ func (o os) Stat(path string) (go_os.FileInfo, error) {
 
 func (o os) Open(path string) (*go_os.File, error) {
 	return go_os.Open(path)
+}
+
+func (o os) CreateTemp(dir, pattern string) (*go_os.File, error) {
+	return go_os.CreateTemp(dir, pattern)
 }
 
 func (o os) Exit(code int) {

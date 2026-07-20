@@ -6,6 +6,7 @@ package mocks
 
 import (
 	json "encoding/json"
+	io "io"
 	reflect "reflect"
 
 	offlinecache "github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
@@ -241,16 +242,16 @@ func (mr *MockOfflineCacheStoreMockRecorder) SavePlaylist(playlistID, raw interf
 }
 
 // WriteBlob mocks base method.
-func (m *MockOfflineCacheStore) WriteBlob(data []byte) (string, error) {
+func (m *MockOfflineCacheStore) WriteBlob(r io.Reader, maxBytes int64) (string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "WriteBlob", data)
+	ret := m.ctrl.Call(m, "WriteBlob", r, maxBytes)
 	ret0, _ := ret[0].(string)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // WriteBlob indicates an expected call of WriteBlob.
-func (mr *MockOfflineCacheStoreMockRecorder) WriteBlob(data interface{}) *gomock.Call {
+func (mr *MockOfflineCacheStoreMockRecorder) WriteBlob(r, maxBytes interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteBlob", reflect.TypeOf((*MockOfflineCacheStore)(nil).WriteBlob), data)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WriteBlob", reflect.TypeOf((*MockOfflineCacheStore)(nil).WriteBlob), r, maxBytes)
 }

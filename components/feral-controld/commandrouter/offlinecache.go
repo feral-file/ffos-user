@@ -229,6 +229,13 @@ func errorResponse(code, message string, retryable bool) map[string]any {
 // treat as non-retryable (the artwork will never become software-based);
 // everything else (disk/store/network) is surfaced as retryable.
 func offlineCacheErrorResponse(err error) map[string]any {
+	if errors.Is(err, offlinecache.ErrServiceNotStarted) {
+		// Same "disabled" shape h.offlineCache == nil already returns
+		// above: a client cannot resolve this by retrying the command,
+		// only by the daemon restarting (or the underlying startup
+		// failure — e.g. an unreadable store root — being fixed).
+		return disabledResponse(err.Error())
+	}
 	if errors.Is(err, offlinecache.ErrUnsupportedMediaClass) {
 		return errorResponse("unsupported_media", err.Error(), false)
 	}

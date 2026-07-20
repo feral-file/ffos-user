@@ -310,8 +310,7 @@ func TestReplayer_ProcessRequestPaused_PartialContentBlobNormalizedTo200(t *test
 	// verbatim with the full body and no Content-Range would be spec-
 	// non-compliant; this resource is well under largeAssetThreshold so
 	// it takes the inline-fulfill path, not the static-server redirect.
-	hash, err := ts.store.WriteBlob([]byte("audio-bytes"))
-	require.NoError(t, err)
+	hash := writeBlobString(t, ts.store, "audio-bytes")
 	rec := &offlinecache.ItemRecord{
 		ItemID: "item-206",
 		Resources: []offlinecache.Resource{
@@ -339,8 +338,7 @@ func TestReplayer_ProcessRequestPaused_RedirectResource(t *testing.T) {
 	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
 	defer ts.ctrl.Finish()
 
-	finalHash, err := ts.store.WriteBlob([]byte("console.log(1)"))
-	require.NoError(t, err)
+	finalHash := writeBlobString(t, ts.store, "console.log(1)")
 	rec := &offlinecache.ItemRecord{
 		ItemID: "item-redirect",
 		Item:   dp1playlist.PlaylistItem{ID: "item-redirect", Source: "https://example.com/lib.min.js"},

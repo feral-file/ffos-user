@@ -36,6 +36,21 @@ func (m *MockOS) EXPECT() *MockOSMockRecorder {
 	return m.recorder
 }
 
+// CreateTemp mocks base method.
+func (m *MockOS) CreateTemp(dir, pattern string) (*os.File, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateTemp", dir, pattern)
+	ret0, _ := ret[0].(*os.File)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CreateTemp indicates an expected call of CreateTemp.
+func (mr *MockOSMockRecorder) CreateTemp(dir, pattern interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateTemp", reflect.TypeOf((*MockOS)(nil).CreateTemp), dir, pattern)
+}
+
 // Exit mocks base method.
 func (m *MockOS) Exit(code int) {
 	m.ctrl.T.Helper()

@@ -27,8 +27,7 @@ func TestStaticServer_URLFor(t *testing.T) {
 
 func TestStaticServer_ServesBlobWithContentType(t *testing.T) {
 	store, _ := newTestStore(t)
-	hash, err := store.WriteBlob([]byte("large asset payload"))
-	require.NoError(t, err)
+	hash := writeBlobString(t, store, "large asset payload")
 
 	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
 	ts := httptest.NewServer(server.Handler())
@@ -48,8 +47,7 @@ func TestStaticServer_ServesBlobWithContentType(t *testing.T) {
 
 func TestStaticServer_SupportsRangeRequests(t *testing.T) {
 	store, _ := newTestStore(t)
-	hash, err := store.WriteBlob([]byte("0123456789"))
-	require.NoError(t, err)
+	hash := writeBlobString(t, store, "0123456789")
 
 	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
 	ts := httptest.NewServer(server.Handler())
@@ -98,8 +96,7 @@ func TestStaticServer_InvalidBlobID_400(t *testing.T) {
 
 func TestStaticServer_MethodNotAllowed(t *testing.T) {
 	store, _ := newTestStore(t)
-	hash, err := store.WriteBlob([]byte("data"))
-	require.NoError(t, err)
+	hash := writeBlobString(t, store, "data")
 
 	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
 	ts := httptest.NewServer(server.Handler())

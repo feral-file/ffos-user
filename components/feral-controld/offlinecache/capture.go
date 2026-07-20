@@ -64,9 +64,22 @@ type capturer struct {
 	httpClient wrapper.HTTPClient
 	store      Store
 	json       wrapper.JSON
-	io         wrapper.IO
-	clock      wrapper.Clock
-	logger     *zap.Logger
+	// io is used only for DialPageSession's small (/json targets list)
+	// HTTP body read — fetchAndStoreBody streams resource bodies
+	// straight into the store instead, see maxResourceBytes below.
+	io    wrapper.IO
+	clock wrapper.Clock
+	// maxResourceBytes bounds each individual resource's stream-to-disk
+	// write (see fetchAndStoreBody/store.WriteBlob), mirroring
+	// service.maxDiskBytes's "<=0 means unlimited" semantics. It exists
+	// so a single pathological resource cannot silently consume more
+	// disk than the entire configured budget before
+	// service.enforceDiskLimit ever gets a chance to run — that
+	// post-capture eviction loop can only reclaim space by deleting
+	// *other* items, which is not possible if one resource alone
+	// already exceeds the whole budget.
+	maxResourceBytes int64
+	logger           *zap.Logger
 }
 
 func NewCapturer(
@@ -77,17 +90,19 @@ func NewCapturer(
 	jsonWrapper wrapper.JSON,
 	ioWrapper wrapper.IO,
 	clockWrapper wrapper.Clock,
+	maxDiskBytes int64,
 	logger *zap.Logger,
 ) Capturer {
 	return &capturer{
-		downloader: downloader,
-		dialer:     dialer,
-		httpClient: httpClient,
-		store:      store,
-		json:       jsonWrapper,
-		io:         ioWrapper,
-		clock:      clockWrapper,
-		logger:     logger,
+		downloader:       downloader,
+		dialer:           dialer,
+		httpClient:       httpClient,
+		store:            store,
+		json:             jsonWrapper,
+		io:               ioWrapper,
+		clock:            clockWrapper,
+		maxResourceBytes: maxDiskBytes,
+		logger:           logger,
 	}
 }
 
@@ -207,11 +222,14 @@ func (c *capturer) fetchAndStoreBody(ctx context.Context, url string) (string, e
 	if resp.StatusCode < go_http.StatusOK || resp.StatusCode >= go_http.StatusMultipleChoices {
 		return "", fmt.Errorf("unexpected status %d fetching %s", resp.StatusCode, url)
 	}
-	data, err := c.io.ReadAll(resp.Body)
+	// resp.Body is streamed straight into the store (hashed while it is
+	// copied to disk, never buffered whole in memory first) — see
+	// maxResourceBytes's doc for why this call also bounds the write.
+	hash, err := c.store.WriteBlob(resp.Body, c.maxResourceBytes)
 	if err != nil {
 		return "", err
 	}
-	return c.store.WriteBlob(data)
+	return hash, nil
 }
 
 // attachHandlers wires the Network domain events capture needs. Handlers

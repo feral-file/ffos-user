@@ -135,7 +135,7 @@ func Bootstrap(
 		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, opts.HeadlessDebugPort,
 		opts.HeadlessIdleTeardown, execWrapper, osWrapper, clockWrapper, httpClient, logger,
 	)
-	capturer := NewCapturer(downloader, dialer, httpClient, store, jsonWrapper, ioWrapper, clockWrapper, logger)
+	capturer := NewCapturer(downloader, dialer, httpClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, jsonWrapper, logger)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
