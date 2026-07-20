@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	go_http "net/http"
 	"net/url"
 	"strings"
@@ -62,8 +63,13 @@ type staticServer struct {
 
 // NewStaticServer builds a StaticServer bound to addr (expected a loopback
 // address such as 127.0.0.1:8082 — see the offlineCache.staticServerAddr
-// config). It does not start listening; call ListenAndServe.
+// config). addr is passed through safeLoopbackAddr first: this server
+// exists purely as a kiosk-loopback fallback for oversized cached-artwork
+// blobs and has no auth of its own, so a config typo must never be able to
+// expose it over the LAN. It does not start listening; call
+// ListenAndServe.
 func NewStaticServer(addr string, store Store, osWrapper wrapper.OS, logger *zap.Logger) StaticServer {
+	addr = safeLoopbackAddr(addr, logger)
 	s := &staticServer{addr: addr, store: store, os: osWrapper, logger: logger}
 	mux := go_http.NewServeMux()
 	mux.HandleFunc(blobsRoutePrefix, s.handleBlob)
@@ -73,6 +79,52 @@ func NewStaticServer(addr string, store Store, osWrapper wrapper.OS, logger *zap
 		ReadHeaderTimeout: staticServerReadHeaderTimeout,
 	})
 	return s
+}
+
+// safeLoopbackAddr defends against a misconfigured offlineCache.
+// staticServerAddr accidentally exposing cached artwork blobs over the LAN
+// with no authentication of any kind. This server exists purely as a
+// kiosk-loopback fallback for assets over the CDP body ceiling (see the
+// package doc), so any host that is not a literal loopback address (or the
+// "localhost" alias) is coerced to 127.0.0.1 with the configured port
+// preserved — including the unspecified host net.Listen would otherwise
+// treat as "all interfaces" (e.g. ":8082"), which is the most dangerous
+// case because it looks harmless in config. A parse failure (missing
+// port, garbage input) falls back to DefaultStaticServerAddr entirely
+// rather than trying to guess a port to preserve. Every case logs at
+// Error so a config typo is visible in the daemon's own logs rather than
+// silently binding somewhere reachable from the network.
+func safeLoopbackAddr(addr string, logger *zap.Logger) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		logger.Error("offline cache static server: staticServerAddr is not a valid host:port, forcing loopback default",
+			zap.String("configured", addr), zap.String("fallback", DefaultStaticServerAddr), zap.Error(err))
+		return DefaultStaticServerAddr
+	}
+	if isLoopbackHost(host) {
+		return addr
+	}
+	safe := net.JoinHostPort("127.0.0.1", port)
+	logger.Error("offline cache static server: staticServerAddr host is not loopback, forcing 127.0.0.1 to avoid exposing cached artwork blobs over the network",
+		zap.String("configured", addr), zap.String("forced", safe))
+	return safe
+}
+
+// isLoopbackHost reports whether host (as split from a host:port pair,
+// so never containing brackets) is safe for this loopback-only server.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		// net.Listen treats an empty host as "listen on all interfaces"
+		// — exactly the unsafe case this function exists to reject —
+		// so this must not be treated as loopback despite
+		// net.ParseIP("") also failing below anyway.
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *staticServer) URLFor(sha256Hex, contentType string) string {

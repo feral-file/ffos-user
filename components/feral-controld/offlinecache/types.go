@@ -57,15 +57,15 @@ func (r Resource) IsRedirect() bool {
 	return r.Status >= 300 && r.Status < 400 && r.RedirectTo != ""
 }
 
-// Coverage reasons. Left as plain strings (loading-failed reasons embed the
-// offending URL) rather than an enum so capture can attach detail without
-// growing the schema.
-const (
-	ReasonCSPBlocked        = "csp_blocked"
-	ReasonLargeAssetStatic  = "large_asset_static"
-	ReasonCaptureIncomplete = "capture_window_elapsed"
-	ReasonDownloadFailed    = "download_failed"
-)
+// ReasonCSPBlocked is the one Coverage.Reason token capture.go emits as a
+// fixed string; every other reason capture.go records
+// (fetch_failed:<url>, loading_failed(<errorText>):<url>,
+// unresolved_at_deadline:<url>) is free-text with the offending URL
+// embedded, which is why Coverage.Reason itself is a plain string rather
+// than an enum — see docs/controld-inbound-controller-messages.md's
+// getOfflineCacheStatus section for the documented wire format clients
+// actually receive.
+const ReasonCSPBlocked = "csp_blocked"
 
 // Coverage summarizes whether a captured item is complete enough for
 // deterministic offline replay. Complete=false + Reason lets status

@@ -1565,7 +1565,7 @@ Success response:
       "percent": 100,
       "bytes": 189234,
       "coverageComplete": false,
-      "reason": "large_asset_static"
+      "reason": "loading_failed(net::ERR_CONNECTION_RESET):https://cdn.example/track.mp3"
     }
   ],
   "totals": {
@@ -1582,8 +1582,27 @@ Success response:
 `failed`, `broken_online`. `percent` is coarse (`0` or `100`): capture is a
 single bounded-window operation, not chunked, so there is no meaningful
 mid-download progress beyond queued/downloading vs. done. `reason` is only
-present when `coverageComplete` is `false` (e.g. `csp_blocked`,
-`large_asset_static`, `capture_window_elapsed`, `download_failed`).
+present when `coverageComplete` is `false` and is free text, not a fixed
+enum — it is a semicolon-joined list of per-resource capture outcomes,
+each one of:
+- `csp_blocked` embedded inside `loading_failed(csp_blocked):<url>` — the
+  resource's own request failed even with live network, because the
+  origin's Content-Security-Policy blocked it (see
+  `offline-artwork-capture.md` §4.5). Clients should treat this as
+  permanently degraded, not a transient capture failure.
+- `loading_failed(<errorText>):<url>` — the browser's own
+  `Network.loadingFailed` event for that URL, with `errorText` as CDP
+  reported it (e.g. `net::ERR_CONNECTION_RESET`).
+- `fetch_failed:<url>` — the resource loaded successfully in-browser but
+  controld's own out-of-band re-fetch of its bytes failed.
+- `unresolved_at_deadline:<url>` — the page requested this URL but it
+  never reached a terminal `Network.responseReceived`/`loadingFailed`
+  event before the capture window closed (e.g. a hanging/slow origin).
+
+Clients should match on the fixed prefix before the first `:`/`(` rather
+than the whole string, and must not assume the reason list is exhaustive
+or stable in wording — only `coverageComplete` itself is a stable
+boolean contract.
 
 Error cases: `offline_cache_error`.
 

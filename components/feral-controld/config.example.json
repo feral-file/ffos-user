@@ -24,5 +24,8 @@
   "commandStorm": {
     "disabled": false,
     "maxConcurrent": 0
+  },
+  "offlineCache": {
+    "enabled": false
   }
 }

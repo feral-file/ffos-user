@@ -94,6 +94,49 @@ func TestStaticServer_InvalidBlobID_400(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, resp.StatusCode)
 }
 
+// TestNewStaticServer_CoercesNonLoopbackHostTo127001 is the regression
+// test for the PR #229 review finding that a misconfigured
+// offlineCache.staticServerAddr (e.g. a typo like "0.0.0.0:8082") would be
+// bound to verbatim, exposing cached artwork blobs over the LAN with no
+// authentication. NewStaticServer must force the host to 127.0.0.1
+// regardless, preserving the configured port.
+func TestNewStaticServer_CoercesNonLoopbackHostTo127001(t *testing.T) {
+	store, _ := newTestStore(t)
+	server := offlinecache.NewStaticServer("0.0.0.0:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	assert.Equal(t, "http://127.0.0.1:8082", server.BaseURL())
+}
+
+// TestNewStaticServer_NormalizesUnspecifiedHostTo127001 covers the most
+// dangerous misconfiguration: an empty host (e.g. ":8082") looks harmless
+// in config but net.Listen treats it as "listen on all interfaces."
+func TestNewStaticServer_NormalizesUnspecifiedHostTo127001(t *testing.T) {
+	store, _ := newTestStore(t)
+	server := offlinecache.NewStaticServer(":8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	assert.Equal(t, "http://127.0.0.1:8082", server.BaseURL())
+}
+
+// TestNewStaticServer_KeepsConfiguredLoopbackAddrUnchanged pins that a
+// correctly-configured loopback address (IPv4 loopback, IPv6 loopback, or
+// the "localhost" alias) is never rewritten.
+func TestNewStaticServer_KeepsConfiguredLoopbackAddrUnchanged(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	for _, addr := range []string{"127.0.0.1:8082", "127.5.6.7:8082", "[::1]:8082", "localhost:8082"} {
+		t.Run(addr, func(t *testing.T) {
+			server := offlinecache.NewStaticServer(addr, store, wrapper.NewOS(), zaptest.NewLogger(t))
+			assert.Equal(t, "http://"+addr, server.BaseURL())
+		})
+	}
+}
+
+// TestNewStaticServer_InvalidAddrFallsBackToDefault covers a
+// staticServerAddr that is not even a valid host:port pair.
+func TestNewStaticServer_InvalidAddrFallsBackToDefault(t *testing.T) {
+	store, _ := newTestStore(t)
+	server := offlinecache.NewStaticServer("not-a-valid-addr", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	assert.Equal(t, "http://"+offlinecache.DefaultStaticServerAddr, server.BaseURL())
+}
+
 func TestStaticServer_MethodNotAllowed(t *testing.T) {
 	store, _ := newTestStore(t)
 	hash := writeBlobString(t, store, "data")

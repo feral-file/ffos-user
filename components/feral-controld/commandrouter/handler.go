@@ -155,6 +155,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
+				// Known limitation (see docs/offline-artwork-capture.md
+				// §6): this errors out before the offline-cache
+				// SyncPlaylist below ever runs, so a playlist that was
+				// fully downloaded via downloadPlaylist still cannot be
+				// displayed by URL on a device with no network right
+				// now. Fixing that needs the offline-cache store to
+				// index a saved playlist by source URL too (it is keyed
+				// only by DP-1 playlist id today) plus a fallback here
+				// on resolution failure — deliberately deferred, not
+				// folded into unrelated changes.
 				playlist, err = h.dp1.ProcessPlaylistURL(ctx, url, true)
 				if err != nil {
 					return nil, err

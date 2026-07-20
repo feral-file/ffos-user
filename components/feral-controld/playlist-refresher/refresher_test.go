@@ -649,6 +649,54 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 	ts.refresher.Stop()
 }
 
+// TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope
+// is the regression test for the PR #229 review finding that the static
+// (non-dynamic) inline-playlist branch returned before ever reaching the
+// kioskReplay.SyncPlaylist call below it. A static playlist can loop on
+// screen indefinitely while a background downloadPlaylistItem/
+// downloadPlaylist completes, or a cache gets cleared — the periodic
+// refresher is the only path that would otherwise notice that for a
+// playlist with nothing dynamic to re-resolve. This must still skip
+// ProcessDynamicPlaylist and the CDP resend (the original, intentional
+// "do not re-send an unchanged static playlist" behavior).
+func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	mockPlaylist := createMockPlaylistNoDynamic()
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, mockPlaylist), nil).
+		AnyTimes()
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item1"}).
+		Return(nil).
+		MinTimes(1)
+	// Neither must ever be called: a static playlist has nothing dynamic
+	// to re-resolve, and it must not be re-sent to CDP on every refresh
+	// pass (gomock fails the test if either occurs).
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
+}
+
 func TestRefresher_ProcessPlayingPlaylist_WrongCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

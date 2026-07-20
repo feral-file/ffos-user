@@ -222,6 +222,15 @@ func (r *refresher) processPlayingPlaylist() error {
 
 	// Process playlist
 	var playlist *dp1.Playlist
+	// skipCDPResend preserves the original "a static inline playlist never
+	// changes, so do not re-send it to CDP every refresh pass" behavior.
+	// It must NOT also skip the offline-cache resync below (see the PR
+	// #229 review regression this guards against): a background
+	// downloadPlaylistItem/downloadPlaylist can finish, or a cache can be
+	// cleared, while this exact static playlist keeps looping on screen,
+	// and the periodic refresher is the only thing that would ever notice
+	// that for a playlist with nothing dynamic to re-resolve.
+	skipCDPResend := false
 	switch {
 	case playerStatus.PlaylistURL != nil:
 		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
@@ -230,8 +239,10 @@ func (r *refresher) processPlayingPlaylist() error {
 		}
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
-			r.logger.Debug("Playlist has no dynamic queries, skipping")
-			return nil
+			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
+			playlist = playerStatus.Playlist
+			skipCDPResend = true
+			break
 		}
 
 		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
@@ -257,6 +268,10 @@ func (r *refresher) processPlayingPlaylist() error {
 		if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
 			r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))
 		}
+	}
+
+	if skipCDPResend {
+		return nil
 	}
 
 	// Send playlist to CDP

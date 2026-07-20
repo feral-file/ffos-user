@@ -178,14 +178,20 @@ body is transmitted as a base64 **string**, and V8 caps string length at
 **hybrid**, not `Fetch.fulfillRequest`-only: `staticserver.go` streams any
 blob over a 200 MB threshold (comfortably below the actual ~400-536 MB V8
 ceiling) from a loopback `http.Server` instead, and `replay.go` redirects
-large assets to it. Because the large asset is still
-fully captured and servable (just through a different path), this alone
-does not mark the item's `Coverage.Complete` false; `large_asset_static` is
-a reserved `Coverage.Reason` value (`types.go`) for a future partial-capture
-signal on this path, but the capturer today records incompleteness only for
-genuine failures — see §4.5's `csp_blocked` and the free-text
-`loading_failed(...)`/`fetch_failed:...` reasons `capture.go` actually
-emits.
+large assets to it. Because the large asset is still fully captured and
+servable (just through a different path), this alone does not mark the
+item's `Coverage.Complete` false; the capturer records incompleteness
+only for genuine failures — see §4.5's `csp_blocked` and the free-text
+`loading_failed(...)`/`fetch_failed:...`/`unresolved_at_deadline:...`
+reasons `capture.go` actually emits (`types.go`'s `Coverage.Reason` doc
+comment and `docs/controld-inbound-controller-messages.md`'s
+`getOfflineCacheStatus` section are the two places these are enumerated;
+keep both in sync with what `capture.go` actually produces rather than
+adding aspirational/unused reason constants — a prior revision briefly
+carried `large_asset_static`/`capture_window_elapsed`/`download_failed`
+constants for exactly this kind of future signal, and they went stale
+and unreferenced immediately, which is why they were removed rather than
+kept "for later").
 
 ### 4.4 206 Partial Content also has no CDP body
 
@@ -315,8 +321,10 @@ There is deliberately **no** top-level manifest, no separate
   fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
   body. `size` is not persisted — it derives from the blob file's own size
   on disk. Capture-time diagnostics collapse into `Coverage.{Complete,Reason}`
-  (e.g. `csp_blocked`, `large_asset_static`, `capture_window_elapsed`,
-  `download_failed`) rather than a separate `failedRequests` list.
+  (free text — `csp_blocked`, `loading_failed(<errorText>):<url>`,
+  `fetch_failed:<url>`, `unresolved_at_deadline:<url>`; see §4.3/§4.5 and
+  `types.go`'s `ReasonCSPBlocked` doc comment) rather than a separate
+  `failedRequests` list.
 - `WriteBlob` streams into a temp file and renames it into place, the
   same atomicity pattern every other write in this store already uses,
   but two-step: the content-addressed final name is only known once the
@@ -415,6 +423,27 @@ just because it happens to share a CDP target with a cached item.
 `KioskReplay.AttachOnReconnect` re-attaches the replay CDP session in
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.
+
+**Known scope limitation — `displayPlaylist` by `playlistUrl` still
+requires live DP-1 resolution.** `commandrouter`'s `displayPlaylist`
+handler calls `dp1.ProcessPlaylistURL` and returns its error immediately
+when the command carries a `playlistUrl` (as opposed to an inline
+`dp1_call` payload), *before* `SyncPlaylist`/replay ever runs. A
+playlist that was previously fully downloaded via `downloadPlaylist` is
+therefore still undisplayable-by-URL on a device with no network at the
+moment `displayPlaylist` is called, even though every one of its items
+is sitting on disk ready to replay — offline replay only ever helps a
+playlist that DP-1 (or an inline `dp1_call`) was able to resolve first.
+Making this path work fully offline would require the offline-cache
+store to additionally index a saved playlist by its source URL (today
+`store.SavePlaylist`/`playlists/<id>.json` are keyed only by the DP-1
+playlist `id`, which `DownloadPlaylist` reads from the *body*, not the
+URL that pulled it — see `service.go`'s `DownloadPlaylist`) and for
+`commandrouter` to fall back to that cached copy on a resolution
+failure. That is real, deliberately deferred backlog rather than a fix
+folded into this change, since it touches the offline-cache store's
+indexing scheme and the live-display error path, not just the
+capture/replay pipeline this document otherwise covers.
 
 ## 7. Relationship to the DP-1 spec
 
