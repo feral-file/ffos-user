@@ -535,11 +535,11 @@ func TestConfig_SetupOwnerIsControld(t *testing.T) {
 		owner *string
 		want  bool
 	}{
-		{name: "absent defaults to setupd", owner: nil, want: false},
+		{name: "absent defaults to controld", owner: nil, want: true},
 		{name: "explicit setupd", owner: strPtr(config.SetupOwnerSetupd), want: false},
 		{name: "controld", owner: strPtr(config.SetupOwnerControld), want: true},
-		{name: "unknown value stays setupd-owned", owner: strPtr("something-else"), want: false},
-		{name: "empty string stays setupd-owned", owner: strPtr(""), want: false},
+		{name: "unknown value is controld-owned", owner: strPtr("something-else"), want: true},
+		{name: "empty string is controld-owned", owner: strPtr(""), want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

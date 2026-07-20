@@ -256,12 +256,15 @@ func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 	})
 
 	t.Run("updateToLatestVersion reaches the OTA gate", func(t *testing.T) {
-		// FINDING (reported): otaGateInstance() hardcodes LocalOwner:false, so even
-		// with setupOwner=controld the user-triggered update forwards to setupd over
-		// the LOCAL D-Bus rather than driving the local updater + live HTTP version
-		// check. We therefore assert the forwarder seam (the version-check HTTP path
-		// is not reachable through the executor's public wiring yet). The forward is
-		// still relayer-independent: it rides the local system bus, not the relayer.
+		// Default (setupd) owner: the user-triggered update forwards to setupd over
+		// the LOCAL D-Bus rather than driving the local updater. This proves the
+		// command traverses the LAN ingress + storm gate + executor with no relayer.
+		// The forward is still relayer-independent: it rides the local system bus.
+		cfg := mocks.NewMockConfigManager(gomock.NewController(t))
+		cfg.EXPECT().Get().Return(&config.Config{SetupOwner: lanStrPtr(config.SetupOwnerSetupd)}).AnyTimes()
+		config.InjectConfigManagerForTesting(cfg)
+		defer config.ResetForTesting()
+
 		var forwardedMember godbus.Member
 		rig := newLANRig(t, commandrouter.DefaultGateConfig(), offlineStatus())
 		permissiveOSReads(rig.mockOS)

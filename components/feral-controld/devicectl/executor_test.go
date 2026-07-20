@@ -114,6 +114,19 @@ func (ts *testSetup) teardown() {
 
 func strPtrTest(s string) *string { return &s }
 
+// pinSetupOwnerSetupd forces the deprecated setupd-owned path for a single test.
+// controld now owns setup by default, so the legacy D-Bus-forward tests below
+// must explicitly select setupd to keep exercising that path. Registers its own
+// cleanup, so the caller only needs a single line.
+func pinSetupOwnerSetupd(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockCfg := mocks.NewMockConfigManager(ctrl)
+	mockCfg.EXPECT().Get().Return(&config.Config{SetupOwner: strPtrTest(config.SetupOwnerSetupd)}).AnyTimes()
+	config.InjectConfigManagerForTesting(mockCfg)
+	t.Cleanup(config.ResetForTesting)
+	t.Cleanup(ctrl.Finish)
+}
+
 func TestExecutor_Execute_InvalidCommand(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -341,6 +354,7 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 func TestExecutor_ShowPairingQRCode_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	// Setup test data
 	cmd := commands.Command{
@@ -387,6 +401,7 @@ func TestExecutor_ShowPairingQRCode_Success(t *testing.T) {
 func TestExecutor_ShowPairingQRCode_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	// Setup test data
 	cmd := commands.Command{
@@ -4664,6 +4679,7 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 func TestExecutor_SystemUpdate_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	// Setup test data
 	cmd := commands.Command{
@@ -4695,6 +4711,7 @@ func TestExecutor_SystemUpdate_Success(t *testing.T) {
 func TestExecutor_SystemUpdate_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	// Setup test data
 	cmd := commands.Command{
@@ -4722,6 +4739,7 @@ func TestExecutor_SystemUpdate_DBusError(t *testing.T) {
 func TestExecutor_FactoryReset_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	// Setup test data
 	cmd := commands.Command{
@@ -4765,6 +4783,7 @@ func TestExecutor_FactoryReset_Success(t *testing.T) {
 func TestExecutor_FactoryReset_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	// Setup test data
 	cmd := commands.Command{
@@ -4842,6 +4861,7 @@ func TestExecutor_FactoryReset_ControldMode_StartsServiceAndRotatesTopic(t *test
 func TestExecutor_UploadLogs_Success(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	cmd := commands.Command{
 		Type: commands.CMD_UPLOAD_LOGS,
@@ -4894,6 +4914,7 @@ func TestExecutor_UploadLogs_Success(t *testing.T) {
 func TestExecutor_UploadLogs_WithSupportBundleID(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	cmd := commands.Command{
 		Type: commands.CMD_UPLOAD_LOGS,
@@ -4949,6 +4970,7 @@ func TestExecutor_UploadLogs_WithSupportBundleID(t *testing.T) {
 func TestExecutor_UploadLogs_WithSnakeCaseSupportBundleID(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	cmd := commands.Command{
 		Type: commands.CMD_UPLOAD_LOGS,
@@ -5004,6 +5026,7 @@ func TestExecutor_UploadLogs_WithSnakeCaseSupportBundleID(t *testing.T) {
 func TestExecutor_UploadLogs_WithSupportBundleIDReturnsBundledSignalError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	cmd := commands.Command{
 		Type: commands.CMD_UPLOAD_LOGS,
@@ -5118,6 +5141,7 @@ func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
 func TestExecutor_UploadLogs_DBusError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	pinSetupOwnerSetupd(t)
 
 	cmd := commands.Command{
 		Type: commands.CMD_UPLOAD_LOGS,

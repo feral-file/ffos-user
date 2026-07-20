@@ -980,7 +980,10 @@ func TestApp_Run_ProvisioningDormant(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Default config leaves SetupOwner unset -> setupd owns setup.
+	// Pin setupd ownership so the provisioning domain stays dormant (controld now
+	// owns setup by default).
+	owner := config.SetupOwnerSetupd
+	ts.config.SetupOwner = &owner
 	spy := &spyProvisioning{}
 	ts.app.Provisioning = spy
 
