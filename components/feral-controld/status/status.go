@@ -537,6 +537,21 @@ func (s *poller) pollDDCStatus(ctx context.Context) {
 		return
 	}
 
+	// A failed reprobe of a panel the tracker still judges unavailable must
+	// push the SAME steady "unsupported" payload the skip path above pushes,
+	// not the raw per-field ddcutil errors. Otherwise the two payloads
+	// alternate in the per-type hash dedup (skip rounds send one, reprobe
+	// rounds the other) and BOTH go to the relayer every reprobe cycle,
+	// forever, while a monitor is merely powered off. ShouldPoll is false
+	// right after a failed reprobe (the failure re-armed the next window) and
+	// true after a successful one, so real status flows the moment the panel
+	// answers again — and first-time failures of a not-yet-demoted panel still
+	// surface their real error fields.
+	if !s.panelDDC.ShouldPoll() {
+		s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatusUnsupported())
+		return
+	}
+
 	s.sendNotification(ctx, relayer.NOTIFICATION_TYPE_DDC_STATUS, ddcStatus)
 }
 

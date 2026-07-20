@@ -404,6 +404,11 @@ type fakePanelDDC struct {
 	// refreshes the display fingerprint as a side effect, so the poller must
 	// call it every round even when the no-display gate skips the poll.
 	shouldPollCalls int
+	// shouldPollSeq scripts individual ShouldPoll answers (consumed in order,
+	// then falling back to !noPoll) so a single pollDDCStatus call can see the
+	// gate open and the post-collect verdict still closed, the way a failed
+	// reprobe of an unsupported panel does.
+	shouldPollSeq []bool
 }
 
 func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
@@ -419,6 +424,11 @@ func (f *fakePanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.Ra
 
 func (f *fakePanelDDC) ShouldPoll() bool {
 	f.shouldPollCalls++
+	if len(f.shouldPollSeq) > 0 {
+		v := f.shouldPollSeq[0]
+		f.shouldPollSeq = f.shouldPollSeq[1:]
+		return v
+	}
 	return !f.noPoll
 }
 func (f *fakePanelDDC) Generation() uint64 { return 0 }
@@ -618,6 +628,62 @@ func TestPollDDCStatus_PollsAgainOnceDisplayConnects(t *testing.T) {
 	case <-ctxCh:
 	default:
 		t.Fatal("CollectStatus should run once a display is connected")
+	}
+}
+
+// TestPollDDCStatus_FailedReprobeSendsSteadyUnsupportedPayload pins the wire
+// contract for the powered-off-monitor steady state: a reprobe round whose
+// collect still fails against an unchanged tracker verdict (ShouldPoll stays
+// false afterwards) must push the SAME "display does not support DDC/CI"
+// payload the skip rounds push. Pre-fix it pushed the raw per-field ddcutil
+// errors, so skip rounds and reprobe rounds alternated payloads under the
+// per-type dedup hash and the relayer received BOTH payloads every reprobe
+// lease, forever, while a monitor was merely powered off.
+func TestPollDDCStatus_FailedReprobeSendsSteadyUnsupportedPayload(t *testing.T) {
+	fakeDDC := &fakePanelDDC{
+		status: &ddc.DdcPanelStatus{
+			Errors: map[string]string{"power": "No displays implementing DDC/CI found: exit status 1"},
+		},
+		// Reprobe round: gate open, then still-unsupported after the failed
+		// collect. Every later round takes the noPoll skip path.
+		shouldPollSeq: []bool{true, false},
+		noPoll:        true,
+	}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	fWS := &fakeWS{}
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      fWS,
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return true },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	// The failed reprobe round must send the steady unsupported payload, not
+	// the raw error fields.
+	p.pollDDCStatus(context.Background())
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected the failed reprobe to send one notification, got %d", fRelayer.sendCalls)
+	}
+	data, ok := fWS.lastPayload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected websocket payload type %T", fWS.lastPayload)
+	}
+	st, ok := data["message"].(*ddc.DdcPanelStatus)
+	if !ok {
+		t.Fatalf("unexpected notification message type %T", data["message"])
+	}
+	if st.Errors["panel"] != "display does not support DDC/CI" {
+		t.Fatalf("failed reprobe must push the steady unsupported payload, got %+v", st)
+	}
+
+	// A following skip round pushes the identical payload — the dedup hash
+	// must collapse it instead of alternating.
+	p.pollDDCStatus(context.Background())
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected dedup to collapse the skip-round repeat, got %d sends", fRelayer.sendCalls)
 	}
 }
 
