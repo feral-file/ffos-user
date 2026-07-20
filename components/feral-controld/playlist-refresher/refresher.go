@@ -12,6 +12,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -40,6 +41,10 @@ type refresher struct {
 	cdp          cdp.CDP
 	statusPoller status.Poller
 	dp1          dp1.DP1
+	// kioskReplay may be nil (feature disabled / not yet wired via
+	// config), mirroring the nil-guard pattern used throughout
+	// commandrouter for optional offline-cache dependencies.
+	kioskReplay offlinecache.KioskReplay
 
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -53,6 +58,7 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	cdp cdp.CDP,
+	kioskReplay offlinecache.KioskReplay,
 	clock wrapper.Clock,
 	logger *zap.Logger,
 ) Refresher {
@@ -61,6 +67,7 @@ func New(
 		cdp:          cdp,
 		statusPoller: statusPoller,
 		dp1:          dp1,
+		kioskReplay:  kioskReplay,
 		clock:        clock,
 		logger:       logger,
 		done:         make(chan struct{}),
@@ -194,6 +201,23 @@ func (r *refresher) processPlayingPlaylist() error {
 		}
 	default:
 		return errors.New("player status has no playlist URL or playlist")
+	}
+
+	// Re-sync offline-cache replay scope before every re-send: this is
+	// the periodic path (see plan "display-integration") that keeps
+	// interception coherent while a playlist keeps looping — a
+	// background download can finish, or a cache can be cleared, between
+	// refresh passes. Best-effort: never let a sync failure block the
+	// actual refresh, since offline replay is a strict enhancement over
+	// the live path this loop exists to maintain.
+	if r.kioskReplay != nil {
+		itemIDs := make([]string, 0, len(playlist.Items))
+		for _, item := range playlist.Items {
+			itemIDs = append(itemIDs, item.ID)
+		}
+		if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
+			r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))
+		}
 	}
 
 	// Send playlist to CDP

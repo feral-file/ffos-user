@@ -44,7 +44,7 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -220,7 +220,7 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "started"}
 	mintSvc := &fakeMintPairingService{startResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
@@ -260,7 +260,7 @@ func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "closed"}
 	mintSvc := &fakeMintPairingService{closeResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
@@ -282,7 +282,7 @@ func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testin
 	args := map[string]any{"approvalRequestID": "mpa_1", "decision": "approve"}
 	want := map[string]any{"ok": true, "status": "accepted"}
 	mintSvc := &fakeMintPairingService{approvalResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
@@ -393,6 +393,63 @@ func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	result, err := ts.handler.Process(ts.ctx, command)
 
 	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	mockPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "item1", Source: "https://example.com/video.mp4"},
+				{ID: "item2", Source: "https://example.com/app.js"},
+			},
+		},
+	}
+	expectDisplayPlaylistSuccess(ts, playlistURL, mockPlaylist)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1", "item2"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	}
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlockDisplay(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	mockPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
+		},
+	}
+	expectDisplayPlaylistSuccess(ts, playlistURL, mockPlaylist)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1"}).Return(errors.New("dial failed")).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	}
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err, "a replay-sync failure must never fail the display command itself")
 	assert.NotNil(t, result)
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -351,6 +352,53 @@ func TestApp_Run_Success(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+	ts.mockCDP.EXPECT().Close()
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+	ts.mockStateManager.EXPECT().
+		Load(ts.logger).
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: ""}}, nil)
+
+	ctrl := ts.ctrl
+	mockOfflineService := mocks.NewMockOfflineCacheService(ctrl)
+	mockStaticServer := mocks.NewMockOfflineCacheStaticServer(ctrl)
+	mockOfflineService.EXPECT().Start(gomock.Any()).Return(nil).Times(1)
+	mockOfflineService.EXPECT().Stop().Times(1)
+	mockStaticServer.EXPECT().ListenAndServe().Return(http.ErrServerClosed).Times(1)
+	mockStaticServer.EXPECT().Shutdown(gomock.Any()).Return(nil).Times(1)
+	ts.app.OfflineCacheService = mockOfflineService
+	ts.app.OfflineCacheStaticServer = mockStaticServer
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err)
 }
 
 func TestApp_Run_Errors(t *testing.T) {
@@ -732,6 +780,7 @@ func TestInitializeApp(t *testing.T) {
 		"wss://test.relay.com",
 		"test-api-key",
 		nil,
+		nil,
 		"com.feralfile.test",
 		nil,
 	)
@@ -751,6 +800,11 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.PlaylistRefresher)
 	assert.NotNil(t, app.Hub)
 
+	// offlineCacheConfig was nil, so the feature stays fully disabled.
+	assert.Nil(t, app.KioskReplay)
+	assert.Nil(t, app.OfflineCacheService)
+	assert.Nil(t, app.OfflineCacheStaticServer)
+
 	// Test all wrappers are initialized
 	assert.NotNil(t, app.Clock)
 	assert.NotNil(t, app.OS)
@@ -762,6 +816,26 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.Random)
 	assert.NotNil(t, app.Exec)
 	assert.NotNil(t, app.Math)
+}
+
+func TestInitializeApp_OfflineCacheEnabled(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	app := initializeApp(
+		logger,
+		"http://localhost:9222",
+		"wss://test.relay.com",
+		"test-api-key",
+		nil,
+		&config.OfflineCacheConfig{Enabled: true, RootDir: t.TempDir()},
+		"com.feralfile.test",
+		nil,
+	)
+
+	assert.NotNil(t, app)
+	assert.NotNil(t, app.KioskReplay)
+	assert.NotNil(t, app.OfflineCacheService)
+	assert.NotNil(t, app.OfflineCacheStaticServer)
 }
 
 func TestInitializeTestApp(t *testing.T) {

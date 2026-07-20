@@ -11,6 +11,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -27,7 +28,15 @@ type handler struct {
 	json         wrapper.JSON
 	statusPoller status.Poller
 	mintPairing  mintpairing.Service
-	logger       *zap.Logger
+	// offlineCache may be nil (feature disabled / not yet wired), mirroring
+	// the mintPairing nil-guard pattern above.
+	offlineCache offlinecache.Service
+	// kioskReplay may be nil for the same reason as offlineCache above.
+	// Kept as a separate nilable dependency (rather than folded into
+	// offlineCache) because it is specifically about the kiosk's live CDP
+	// Fetch-interception scope, not the download/store side of caching.
+	kioskReplay offlinecache.KioskReplay
+	logger      *zap.Logger
 }
 
 func New(
@@ -36,6 +45,8 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	mintPairing mintpairing.Service,
+	offlineCache offlinecache.Service,
+	kioskReplay offlinecache.KioskReplay,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
@@ -45,6 +56,8 @@ func New(
 		dp1:          dp1,
 		statusPoller: statusPoller,
 		mintPairing:  mintPairing,
+		offlineCache: offlineCache,
+		kioskReplay:  kioskReplay,
 		json:         json,
 		logger:       logger,
 	}
@@ -101,6 +114,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}, nil
 		}
 		return h.mintPairing.HandleApprovalDecision(ctx, command.Arguments)
+	}
+
+	if isOfflineCacheCommand(commandType) {
+		return h.handleOfflineCacheCommand(ctx, commandType, command.Arguments)
 	}
 
 	if commandType.DeviceCtlCommand() {
@@ -173,6 +190,24 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 			command.Arguments["dp1_call"] = playlist
 
+			// Sync replay's Fetch-interception scope to this playlist's
+			// currently-cached items before forwarding to CDP below.
+			// feral-player advances through a multi-item playlist
+			// client-side without telling controld which item is on
+			// screen at any instant, so scope covers every cached item
+			// in the playlist rather than a single "current" one (see
+			// Replayer.EnableForPlaylist's doc). Best-effort: a sync
+			// failure must never block the actual display command, since
+			// offline replay is a strict enhancement over the live path.
+			if h.kioskReplay != nil && playlist != nil {
+				itemIDs := make([]string, 0, len(playlist.Items))
+				for _, item := range playlist.Items {
+					itemIDs = append(itemIDs, item.ID)
+				}
+				if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
+					h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
+				}
+			}
 		}
 
 		if commandType == commands.CMD_REFRESH_ARTWORK {

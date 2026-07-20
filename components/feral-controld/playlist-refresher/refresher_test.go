@@ -56,7 +56,7 @@ func setupWithLogger(t *testing.T, logger *zap.Logger) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 
-	refresher := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockClock, logger)
+	refresher := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, mockClock, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -381,6 +381,97 @@ func TestRefresher_ProcessPlayingPlaylist_PlaylistURL(t *testing.T) {
 
 	// Stop the refresher
 	ts.refresher.Stop()
+}
+
+func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	playlistURL := "http://example.com/playlist.json"
+	mockPlaylist := createMockPlaylist()
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item1"}).
+		Return(nil).
+		MinTimes(1)
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return("success", nil).
+		AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
+}
+
+func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefresh(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	playlistURL := "http://example.com/playlist.json"
+	mockPlaylist := createMockPlaylist()
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item1"}).
+		Return(errors.New("dial failed")).
+		MinTimes(1)
+	// The refresh must still proceed to CDP despite the sync failure.
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return("success", nil).
+		MinTimes(1)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
 }
 
 func TestRefresher_ProcessPlayingPlaylist_DynamicPlaylist(t *testing.T) {

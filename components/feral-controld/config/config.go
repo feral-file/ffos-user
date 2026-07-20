@@ -46,6 +46,38 @@ type CommandStormConfig struct {
 	MaxConcurrent int64 `json:"maxConcurrent"`
 }
 
+// OfflineCacheConfig tunes the offlinecache package (see
+// components/feral-controld/offlinecache and docs/offline-artwork-capture.md).
+// All fields besides Enabled are optional; zero/empty values fall back to
+// offlinecache.OptionsFromConfig's built-in defaults, which are safe with
+// zero configuration beyond Enabled=true. The feature defaults OFF: it
+// spawns a second Chromium process and opens a second CDP connection to
+// the kiosk (see offlinecache.KioskReplay's doc on that risk), so it must
+// be explicitly opted into per the plan's "Open risks".
+type OfflineCacheConfig struct {
+	Enabled bool `json:"enabled"`
+	// RootDir is the on-disk store root (blobs/items/playlists).
+	RootDir string `json:"rootDir,omitempty"`
+	// MaxDiskBytes bounds total store size; <=0 means unlimited.
+	MaxDiskBytes int64 `json:"maxDiskBytes,omitempty"`
+	// CaptureWindowMs bounds how long one capture observes network
+	// activity before finalizing; <=0 uses the capturer's own default.
+	CaptureWindowMs int `json:"captureWindowMs,omitempty"`
+	// HeadlessBinaryPath/HeadlessUserDataDir/HeadlessDebugPort configure
+	// the separate headless Chromium capture uses (distinct from the
+	// kiosk at CDPConfig.Endpoint).
+	HeadlessBinaryPath          string `json:"headlessBinaryPath,omitempty"`
+	HeadlessUserDataDir         string `json:"headlessUserDataDir,omitempty"`
+	HeadlessDebugPort           int    `json:"headlessDebugPort,omitempty"`
+	HeadlessIdleTeardownSeconds int    `json:"headlessIdleTeardownSeconds,omitempty"`
+	// StaticServerAddr is the loopback host:port serving large (>200MB)
+	// cached assets that exceed the CDP Fetch.fulfillRequest body ceiling.
+	StaticServerAddr string `json:"staticServerAddr,omitempty"`
+	// MissPolicy is "fail_closed" (default) or "pass_through"; see
+	// offlinecache.MissPolicy's doc.
+	MissPolicy string `json:"missPolicy,omitempty"`
+}
+
 // Configuration for all components
 type Config struct {
 	CDPConfig         *CDPConfig           `json:"cdp"`
@@ -54,6 +86,7 @@ type Config struct {
 	SentryConfig      *logger.SentryConfig `json:"sentry"`
 	EnableHub         bool                 `json:"enableHub"`
 	CommandStorm      *CommandStormConfig  `json:"commandStorm,omitempty"`
+	OfflineCache      *OfflineCacheConfig  `json:"offlineCache,omitempty"`
 
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}

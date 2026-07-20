@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
@@ -78,7 +80,12 @@ type app struct {
 	Watchdog          watchdog.Watchdog
 	PlaylistRefresher playlist_refresher.Refresher
 	MintPairing       mintpairing.Service
-	Hub               hub.Hub
+	// KioskReplay, OfflineCacheService, and OfflineCacheStaticServer may
+	// all be nil (feature disabled via config.OfflineCacheConfig).
+	KioskReplay              offlinecache.KioskReplay
+	OfflineCacheService      offlinecache.Service
+	OfflineCacheStaticServer offlinecache.StaticServer
+	Hub                      hub.Hub
 }
 
 func main() {
@@ -126,6 +133,7 @@ func main() {
 		config.RelayerConfig.Endpoint,
 		config.RelayerConfig.APIKey,
 		config.MintPairingConfig,
+		config.OfflineCache,
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
@@ -267,6 +275,33 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.MintPairing.Stop()
 	}
 
+	// Start offline cache (job-queue worker + loopback static server for
+	// large cached assets) when config.OfflineCacheConfig.Enabled. Both
+	// are best-effort: a start failure here must not crash controld, since
+	// the daemon's core playback/command path never depended on this
+	// feature before it existed.
+	if app.OfflineCacheService != nil {
+		if err := app.OfflineCacheService.Start(ctx); err != nil {
+			app.Logger.Error("Failed to start offline cache service", zap.Error(err))
+		} else {
+			defer app.OfflineCacheService.Stop()
+		}
+	}
+	if app.OfflineCacheStaticServer != nil {
+		go func() {
+			if err := app.OfflineCacheStaticServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				app.Logger.Error("Offline cache static server stopped unexpectedly", zap.Error(err))
+			}
+		}()
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), SHUTDOWN_TIMEOUT)
+			defer shutdownCancel()
+			if err := app.OfflineCacheStaticServer.Shutdown(shutdownCtx); err != nil {
+				app.Logger.Warn("Failed to shut down offline cache static server", zap.Error(err))
+			}
+		}()
+	}
+
 	// Start StatusPoller - it will handle relayer connection status internally
 	go app.StatusPoller.Start(ctx)
 	defer app.StatusPoller.Stop()
@@ -285,6 +320,17 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.CDP.Start(ctx, func() {
 		devicectl.InvalidatePlayerSleepState(app.Executor, app.Logger)
 		app.StatusPoller.ForceRefresh()
+
+		// Re-attach offline-cache replay interception on every (re)connect —
+		// this covers plain kiosk restarts AND OOM-recovery restarts alike,
+		// since both funnel through this same reconnect loop (see
+		// offlinecache.KioskReplay.AttachOnReconnect's doc). Nil until the
+		// config/wiring todo constructs a real KioskReplay.
+		if app.KioskReplay != nil {
+			if err := app.KioskReplay.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
+			}
+		}
 	})
 	defer app.CDP.Close()
 
@@ -384,6 +430,7 @@ func initializeApp(
 	relayerEndpoint string,
 	relayerAPIKey string,
 	mintPairingConfig *config.MintPairingConfig,
+	offlineCacheConfig *config.OfflineCacheConfig,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
@@ -464,12 +511,31 @@ func initializeApp(
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
 
+	// Offline cache. Disabled by default (see config.OfflineCacheConfig's
+	// doc on why it defaults off) — offlineCache/kioskReplay/staticServer
+	// stay nil in that case, and handler.go's/refresher's nil-guards
+	// mirror mintPairing's so the rest of the daemon behaves exactly as
+	// before this feature existed.
+	var offlineCache offlinecache.Service
+	var kioskReplay offlinecache.KioskReplay
+	var offlineCacheStaticServer offlinecache.StaticServer
+	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
+		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
+		ocRuntime := offlinecache.Bootstrap(
+			ocOpts, relayer, wsHandler, httpClient, webSocketDialer,
+			os, io, json, exec, clock, logger,
+		)
+		offlineCache = ocRuntime.Service
+		kioskReplay = ocRuntime.KioskReplay
+		offlineCacheStaticServer = ocRuntime.StaticServer
+	}
+
 	// Command handler. The raw handler serves internal daemon lifecycle flows
 	// (e.g. OOM recovery) directly; external ingress (relayer + LAN hub) is
 	// wrapped with command-storm protection so both paths share one set of
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
-	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, json, logger)
+	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, json, logger)
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -482,7 +548,7 @@ func initializeApp(
 	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
-	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
+	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, clock, logger)
 
 	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
 	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)
@@ -494,30 +560,33 @@ func initializeApp(
 	hub := hub.New(context, wsHandler, cmdHandler, nil, json, logger)
 
 	return &app{
-		Ctx:               context,
-		Logger:            logger,
-		Clock:             clock,
-		OS:                os,
-		Signal:            signal,
-		Daemon:            daemon,
-		HTTPClient:        httpClient,
-		IO:                io,
-		JSON:              json,
-		Random:            randomizer,
-		Exec:              exec,
-		Math:              math,
-		CDP:               cdp,
-		Relayer:           relayer,
-		DBus:              dbusClient,
-		Mediator:          mediator,
-		OOMRecoverer:      oomRecoverer,
-		Executor:          executor,
-		DeviceStatus:      deviceStatus,
-		StatusPoller:      poller,
-		Watchdog:          watchdog,
-		PlaylistRefresher: playlistRefresher,
-		MintPairing:       mintPairing,
-		Hub:               hub,
+		Ctx:                      context,
+		Logger:                   logger,
+		Clock:                    clock,
+		OS:                       os,
+		Signal:                   signal,
+		Daemon:                   daemon,
+		HTTPClient:               httpClient,
+		IO:                       io,
+		JSON:                     json,
+		Random:                   randomizer,
+		Exec:                     exec,
+		Math:                     math,
+		CDP:                      cdp,
+		Relayer:                  relayer,
+		DBus:                     dbusClient,
+		Mediator:                 mediator,
+		OOMRecoverer:             oomRecoverer,
+		Executor:                 executor,
+		DeviceStatus:             deviceStatus,
+		StatusPoller:             poller,
+		Watchdog:                 watchdog,
+		PlaylistRefresher:        playlistRefresher,
+		MintPairing:              mintPairing,
+		KioskReplay:              kioskReplay,
+		OfflineCacheService:      offlineCache,
+		OfflineCacheStaticServer: offlineCacheStaticServer,
+		Hub:                      hub,
 	}
 }
 

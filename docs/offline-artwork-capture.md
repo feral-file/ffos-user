@@ -1,0 +1,364 @@
+# Capturing Web-Based Artwork for Offline Playback
+
+This document describes how `feral-controld` captures a web-based
+(HTML+CSS+JS, canvas, WebGL, WASM) DP-1 artwork so `ff-player` can play it
+back with no network access, and how the result is stored and replayed.
+
+**Status:** implemented in `components/feral-controld/offlinecache/`. This
+document is the living reference for that package; the original design
+draft was validated against real, live DP-1 feed content before
+implementation (§4 below) and this text has been updated to match what was
+actually shipped, including edge cases the draft did not anticipate.
+
+---
+
+## 1. Problem statement
+
+A DP-1 playlist item's `source` is a single URL to an HTML entry point:
+
+```json
+{ "source": "https://cdn.example.com/work/index.html" }
+```
+
+Unlike single-file media (image/video/audio), that entry point can load an
+arbitrary, **unenumerable** set of dependencies: scripts, stylesheets, fonts,
+JSON/binary data, WASM modules, Web Worker scripts, and further resources
+computed at runtime rather than declared statically in the HTML.
+
+There is no manifest listing "every file this artwork needs" in the common
+case (DP-1's `repro.assetsSHA256` is a hash list for *verification*, not a
+fetchable manifest, and is optional). To cache such a work offline, the only
+reliable method is to **run the code and observe what it actually
+requests**, not to statically parse its HTML/CSS for references. Offline
+caching in `feral-controld` is therefore restricted to **software-based**
+items (`classify.go` distinguishes software from media by resolved
+`Content-Type`); media items (video/image/audio) do not need this pipeline
+at all and are rejected by the download commands.
+
+## 2. Pipeline overview
+
+```
+Discover  →  Capture  →  Store  →  Replay
+(what does   (fetch the   (content-  (serve
+ it load?)    exact        addressed   locally,
+              bytes)       dedup)      no network)
+```
+
+- **Discover + Capture**: `downloader.go` spawns a separate headless
+  Chromium (`:9223`, its own user-data-dir); `capture.go` attaches an
+  event-driven CDP session (`cdpsession.go`) to observe `Network` domain
+  events for a bounded window, then fetches each observed URL's exact
+  bytes out-of-band.
+- **Store**: `store.go` content-addresses the bytes (sha256) into a shared
+  blob store, deduplicated across items/playlists, plus one
+  `items/<itemId>.json` record per edition.
+- **Replay**: `replay.go` intercepts `Fetch.requestPaused` on the kiosk
+  Chromium (`:9222`) and fulfills from the local blob store or a loopback
+  static server, without rewriting a single byte of the artwork's own code
+  or the signed playlist's `source` field.
+
+Both browsers stay independent: the headless downloader (`:9223`) never
+shares state with the kiosk (`:9222`), so downloading does not disturb
+whatever is currently playing on the player surface.
+
+---
+
+## 3. Discovery and capture technique
+
+### 3.1 Why static HTML/CSS parsing is insufficient alone
+
+Parsing `<script src>`, `<link href>`, CSS `url(...)`/`@import` catches the
+*declared* dependency graph only. It misses `fetch()`/`XMLHttpRequest` calls
+to runtime-computed URLs, dynamic `import()`, WASM modules that fetch
+further data based on internal logic, Web Worker-initiated requests,
+absolute cross-origin URLs baked into JS string literals, and
+randomized/branching behavior. `feral-controld` does not attempt static
+parsing; it always runs the code and observes.
+
+### 3.2 CDP `Network` domain — the chosen capture mechanism
+
+`capture.go` enables the CDP `Network` and `Page` domains (not `Fetch` —
+`Fetch` interception is what *replay* uses, §6) and observes
+`Network.requestWillBeSent`/`responseReceived`/`loadingFailed` for a
+bounded capture window (`offlineCache.captureWindowMs`) after navigating to
+the item's `source`. For each distinct URL:
+
+- **Found on a successful response** → fetch the exact bytes via an
+  out-of-band `http.Client` request (see §4 for why not
+  `Network.getResponseBody`), hash into the blob store, record the
+  resource.
+- **3xx redirect** → record `status` + `redirectTo` (the `Location`
+  header), no body. See §4.1.
+- **206 Partial Content** → CDP cannot return a body for a range response
+  either; `capture.go` falls back to an out-of-band full-URL fetch. See
+  §4.2.
+- **`blob:`/`data:` URL** → excluded entirely, never written to the index.
+  See §4.3.
+- **`Network.loadingFailed`** → recorded so "never requested" can be
+  distinguished from "requested and failed" in `Coverage.Reason` (as
+  `loading_failed(<errorText>):<url>`, or `csp_blocked` for the CSP case in
+  §4.5).
+
+`downloader.go` runs one capture job at a time and tears the headless
+Chromium down when idle — the device already carries OOM pressure from the
+kiosk Chromium, so a second one is not left resident.
+
+## 4. Validated edge cases
+
+The pipeline was validated end-to-end against real, live DP-1 feed content
+(every publisher channel in `https://feed.feralfile.com/api/v1/registry/channels`,
+17 deliberately hard items sampled for technical diversity: on-chain
+hash-in-URL items, `<model-viewer>` WebGL + external CDN + `.glb`/HDR
+assets, Web Audio DSP runtimes, pre-rendered-variant patterns, and a
+different publisher/CDN). Result: 15/17 fully byte-for-byte playable
+offline with zero network egress; the other 2 surfaced the specific,
+previously-undocumented findings below rather than generic failures. Full
+validation artifacts: `tmp/dp1-offline-capture/` (`discover.mjs`,
+`select.mjs`, `pipeline.mjs`, `report.md`) — a standalone Node/Playwright
+harness, not part of the shipped Go implementation, used only to validate
+the design before porting it into `capture.go`/`replay.go`.
+
+### 4.1 Redirects need their own schema, not a null-body resource
+
+Two sample items loaded an *unversioned* "latest" CDN URL
+(`https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js`) that
+Chromium resolves via HTTP 302 to a versioned URL. CDP's
+`Network.getResponseBody` cannot return a body for a redirect response at
+all (`Response body is unavailable for redirect responses`), so treating a
+redirect as "a resource with a missing blob" reports a false cache miss
+even though the real target was captured perfectly. `types.go`'s
+`Resource.RedirectTo` + `Resource.IsRedirect()` and `replay.go` fix this:
+capture records the `Location` header and status per hop; replay fulfills
+the redirect itself (status + `Location` header, no body) and lets the
+browser naturally re-request the already-cached resolved URL, which is
+captured and cached as its own `Resource` entry.
+
+### 4.2 `blob:`/`data:` URLs are not cacheable dependencies
+
+A common pattern for glTF/WebGL loaders is to re-slice an already-downloaded
+binary into `URL.createObjectURL()` object URLs for internal use. These are
+**not real network requests** — they are single-session, freshly-minted
+UUIDs on every page load and can never be looked up by URL on a later load.
+`capture.go` excludes `blob:`/`data:` URLs from the resource index entirely
+rather than recording them as same-class resources; no replay-side handling
+is needed since Chromium never routes them through `Fetch` interception
+either.
+
+### 4.3 A single asset over ~400 MB breaks `Fetch.fulfillRequest` itself
+
+One sample item's background video (a 1.1 GB `.mp4`, requested as an HTTP
+206 range request) was captured correctly — all ~1.1 GB hashed and stored —
+but fulfilling it via `Fetch.fulfillRequest` failed with
+`Cannot create a string longer than 0x1fffffe8 characters`. This is a hard
+ceiling in Chromium DevTools Protocol's `Fetch.fulfillRequest`: the response
+body is transmitted as a base64 **string**, and V8 caps string length at
+`0x1fffffe8` (~536,870,904) characters — a 1.1 GB video base64-encodes to
+~1.46 GB of text, over the ceiling by ~3x. This is why replay (§6) is a
+**hybrid**, not `Fetch.fulfillRequest`-only: `staticserver.go` streams any
+blob over a 200 MB threshold (comfortably below the actual ~400-536 MB V8
+ceiling) from a loopback `http.Server` instead, and `replay.go` redirects
+large assets to it. Because the large asset is still
+fully captured and servable (just through a different path), this alone
+does not mark the item's `Coverage.Complete` false; `large_asset_static` is
+a reserved `Coverage.Reason` value (`types.go`) for a future partial-capture
+signal on this path, but the capturer today records incompleteness only for
+genuine failures — see §4.5's `csp_blocked` and the free-text
+`loading_failed(...)`/`fetch_failed:...` reasons `capture.go` actually
+emits.
+
+### 4.4 206 Partial Content also has no CDP body
+
+The same 1.1 GB video is requested by the `<video>` element as an HTTP 206
+range request, and CDP cannot return a body for a 206 any more than for a
+3xx. `capture.go`'s fallback is the same as for redirects at the transport
+level: it issues a supplementary out-of-band fetch of the same URL
+(ignoring the original `Range` header) to obtain the full body once, then
+serves ranges out of that single cached blob during replay via the static
+server (which supports `Range` requests).
+
+### 4.5 A CSP-broken-online item is not a caching failure
+
+One sample item rendered blank in **both** the live online load and the
+offline replay: the CDN hosting the artifact served a Content-Security-Policy
+that blocked the artwork's own first-party script dependency, so the piece
+never worked even with live internet access. This is not a caching gap.
+`capture.go` records this as `Coverage.Reason` containing `csp_blocked`
+(from CDP `Network.loadingFailed`'s `blockedReason=="csp"`); `service.go`'s
+`stateFromCoverage` reports the item's `ItemState` as `broken_online`
+rather than `partial` when every recorded failure was CSP-related, so a
+mobile app does not present "the download failed" when the real finding is
+"the piece was already broken publisher-side." A capture with any non-CSP
+failure alongside a CSP one keeps the more general `partial` classification,
+since a mix of failure types is closer to an ordinary incomplete capture
+than a fully broken page.
+
+---
+
+## 5. On-disk format (simplified, no redundancy)
+
+Root: `offlineCache.rootDir` (default
+`/home/feralfile/.cache/offline-artworks/`).
+
+Design rule: **keep only what replay and status reporting need; derive
+everything else.** Three directories, one essential record per item:
+
+```
+offline-artworks/
+  blobs/<sha256>                      # shared content-addressed bytes (the ONLY place binary payloads live)
+  items/<itemId>.json                 # the ONE per-item record (ItemRecord in types.go)
+  playlists/<playlistId>.json         # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
+```
+
+`items/<itemId>.json` (`ItemRecord`, see `types.go`):
+
+```json
+{
+  "itemId":  "work-1",
+  "item":    { "id": "work-1", "source": "...", "...": "verbatim DP-1 item, source NEVER rewritten" },
+  "entry":   "https://host/index.html",
+  "resources": [
+    { "url": "https://host/app.js",  "status": 200, "sha256": "ab12…", "contentType": "application/javascript" },
+    { "url": "https://host/mv.min.js", "status": 302, "redirectTo": "https://host/mv@1.2/mv.min.js" }
+  ],
+  "coverage": { "complete": true, "reason": "" },
+  "capturedAt": "2026-07-17T04:55:00Z"
+}
+```
+
+`playlists/<playlistId>.json` is the playlist as `commandrouter` resolved it
+through `dp1.DP1` before calling `Service.DownloadPlaylist` — `dynamicQuery`
+items already materialized, all field values (including every item's
+`source`) intact and never mutated by `offlinecache` itself. It is **not**
+guaranteed to be byte-identical to whatever a publisher originally served:
+`dp1` resolution parses the fetched JSON into a Go struct and re-serializes
+it, so key order and whitespace can differ from the original wire bytes.
+This is safe for DP-1 signature validity because DP-1 signatures verify
+against a JCS-canonicalized form of the document (`dp1-go`'s `sign`
+package), not raw bytes — see §7's Signing row. If a future caller needs
+byte-exact reproduction of the original document for a reason JCS
+canonicalization does not cover, that caller must capture the raw fetch
+bytes itself before `dp1` resolution; `offlinecache` does not do so today.
+
+There is deliberately **no** top-level manifest, no separate
+`capsules/{key}/assets/index.json`, and no `playlists/{id}/items.json`:
+
+- `Store` rebuilds its in-memory index by scanning `items/` + `playlists/`
+  at `Service.Start` — no persisted manifest to drift out of sync with disk.
+- Ordering and membership for a whole-playlist download already live in the
+  verbatim `playlists/<id>.json`'s own `items[]`.
+- Only fields replay routing and status reporting actually consume are
+  kept on `Resource`: `url`/`status`/`redirectTo` drive replay's
+  fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
+  body. `size` is not persisted — it derives from the blob file's own size
+  on disk. Capture-time diagnostics collapse into `Coverage.{Complete,Reason}`
+  (e.g. `csp_blocked`, `large_asset_static`, `capture_window_elapsed`,
+  `download_failed`) rather than a separate `failedRequests` list.
+- Blobs are freed by filesystem **link count**: when an item or playlist
+  record referencing a blob is deleted, `store.go`'s GC removes any blob no
+  longer referenced by any surviving record, without a separate reference
+  count to keep in sync.
+
+## 6. Replay: hybrid `Fetch` interception + static-file fallback
+
+`replay.go` attaches to the kiosk Chromium's existing CDP endpoint (`:9222`)
+through a second, event-driven CDP session (`cdpsession.go`) — a separate
+connection from `feral-controld`'s existing synchronous `cdp.go` client, so
+enabling replay never blocks or interferes with normal command handling. On
+every `Fetch.requestPaused` event, keyed on the **exact original URL**
+(never a rewritten relative path — this is what makes replay work for
+absolute and cross-origin URLs without touching the artwork's own code):
+
+- **Redirect resource** → `Fetch.fulfillRequest` with the recorded status
+  and `Location` header, no body (§4.1).
+- **Small resource (under 200 MB)** → `Fetch.fulfillRequest` with the
+  blob's bytes read from `blobs/<sha256>` directly. `replay.go` uses a
+  200 MB threshold rather than pushing all the way to the ~400 MB
+  ceiling found in §4.3 — comfortably under it so the CDP path never gets
+  close to the actual V8 string-length limit.
+- **Large resource (200 MB or over)** → redirect the request to
+  `staticserver.go`'s loopback `http.Server`
+  (`offlineCache.staticServerAddr`, default `127.0.0.1:8082`), which streams
+  the blob (with `Range` support for the 206 case, §4.4) instead of
+  base64-encoding it through CDP.
+- **Miss** (URL not in the cached item's resource set) → governed by
+  `offlineCache.missPolicy` (`MissPolicy` in `replay.go`):
+  `fail_closed` (default) fails the request visibly rather than silently
+  substituting or passing through, which guarantees deterministic offline
+  behavior and surfaces partial captures honestly; `pass_through` lets the
+  request continue to the real network and is only sensible when the
+  device is known to be online (progressive capture) — it is a config
+  toggle, not the default, and today is a plain pass-through rather than
+  an implementation of progressive re-capture.
+
+Replay is only enabled while a cached item is on screen:
+`commandrouter`'s `displayPlaylist` path and `playlist-refresher` call
+`KioskReplay.SyncPlaylist` (`kioskreplay.go`) with the current playlist's
+item IDs before/after the CDP display call, which enables `Fetch`
+interception scoped to whichever of those IDs are actually cached
+(`EnableForPlaylist` in `replay.go`) and disables it entirely when none are.
+`KioskReplay.AttachOnReconnect` re-attaches the replay CDP session in
+`main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
+recovery) does not leave replay silently detached.
+
+## 7. Relationship to the DP-1 spec
+
+| Spec reference | Relevance here |
+|---|---|
+| §5 `repro` block | `assetsSHA256` is the optional, publisher-supplied completeness/verification signal; not consulted automatically today, but a future coverage cross-check could use it |
+| §8 Transport Profile | Confirms `file://`/offline transport is in-scope for DP-1 generally |
+| §7.1 Signing | `source` is never rewritten in `ItemRecord.Item` or the stored playlist document; replay interception keys on the original URL. Signatures verify against a JCS-canonicalized form (`dp1-go`'s `sign` package), not raw bytes, so re-serializing the resolved playlist through `dp1.DP1` (§5) does not affect signature validity even though it is not byte-identical to the original wire document |
+
+## 8. Known limitations
+
+- **Not provably complete.** Capture is observation-based over a bounded
+  window, not manifest-based; no capture is a formal guarantee. Coverage
+  (`Coverage.Complete`/`Reason`) is the best-effort signal surfaced to the
+  mobile app, not a certification.
+- **Nested targets are not separately attached.** Capture only observes the
+  top-level page target's `Network` events; it does not attach
+  `Target.setAutoAttach` for Web Workers or nested iframes, so requests
+  issued purely from within a worker or iframe (rather than proxied through
+  the top-level page) can be invisible to capture. Service Workers
+  registered by the artwork itself compound this: they can intercept and
+  serve their own responses, further hiding requests from top-level
+  `Network` domain capture.
+- **WebSocket / streaming data** cannot be captured-and-replayed this way —
+  such items are out of scope for this pipeline (§3.2).
+- **Personalized/authenticated responses** captured once may not be valid
+  to replay for a different session; this pipeline does not attempt to
+  detect or special-case per-session content beyond what URL-keying already
+  handles (on-chain hash-in-URL items are deterministic per edition and work
+  cleanly; true per-session/cookie-gated content is not covered).
+- **A live on-chain "provenance check" API call** is a real pattern seen in
+  production content (fired unconditionally by first-party code on load,
+  distinct from third-party analytics); such calls are recorded as a normal
+  capture miss/failure like any other unreachable-offline request rather
+  than special-cased, and artworks that degrade gracefully when it is
+  unavailable are unaffected.
+- **Headless GPU rendering path is not identical to the kiosk's.**
+  `downloader.go` launches headless Chromium with GPU acceleration enabled
+  (`--ignore-gpu-blocklist`/`--enable-gpu-rasterization`, no
+  `--disable-gpu`) so WebGL/canvas artworks take the same
+  context-available code path during capture as they do live — the prior
+  `--disable-gpu` flag made `canvas.getContext("webgl")` return `null`
+  during capture, which could make a feature-detecting artwork silently
+  skip GL-dependent resource fetches that the live kiosk does make. This
+  narrows, but does not close, the gap: headless capture still renders
+  off-screen rather than through the kiosk's Wayland surface
+  (`start-kiosk.sh`), and the two Chromium instances are not forced onto
+  the same ANGLE/Vulkan backend. This has not been validated against the
+  actual device GPU/driver under concurrent kiosk load; if field capture
+  results diverge from live rendering for GPU-heavy artworks, start by
+  comparing `chrome://gpu` output between the two Chromium instances on
+  the actual hardware.
+
+## 9. See also
+
+- `components/feral-controld/offlinecache/` — the implementation.
+- `docs/controld-inbound-controller-messages.md` — the 5 controller-visible
+  commands (`downloadPlaylistItem`, `downloadPlaylist`,
+  `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`)
+  and the `offline_cache_status` notification.
+- `components/feral-controld/config/config.go` — `OfflineCacheConfig`
+  (`offlineCache.*`) tuning knobs, and their defaults in
+  `offlinecache/bootstrap.go`.

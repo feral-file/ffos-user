@@ -58,6 +58,11 @@ for relayer topic assignment:
   through CDP as `window.handleCDPRequest(...)`.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
+- `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
+  `clearPlaylistCache`, and `getOfflineCacheStatus` are likewise handled by
+  `feral-controld` as commandrouter pre-CDP special cases, owned by the
+  `offlinecache` package (see "Offline Artwork Caching Inbound Messages"
+  below).
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
 - Any other non-device command is forwarded to Chromium through CDP.
@@ -1325,6 +1330,282 @@ Allowed `status` values:
 - `cancelled`
 
 The outcome must not include the browser session token.
+
+## Offline Artwork Caching Inbound Messages
+
+`feral-controld` can download **software-based** DP-1 playlist items into a
+local cache so `ff-player` can play them back without internet access. This
+is a `commandrouter`-owned, pre-CDP command family (same precedent as
+mint-pairing): these commands never reach `window.handleCDPRequest(...)`.
+Media-based items (video/image) are rejected — see `classify.go`.
+
+The subsystem is opt-in through `offlineCache.enabled` in `feral-controld`
+config. When disabled (or the config is absent), every command below returns:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "disabled",
+    "message": "offline caching is not enabled",
+    "retryable": false
+  }
+}
+```
+
+All five commands use the explicit RPC ok/error shape from
+["Response Shape Recommendation for New Inbound Commands"](#response-shape-recommendation-for-new-inbound-commands)
+below. Downloads are asynchronous: the command ACKs `queued` immediately and
+per-item progress arrives later over the `offline_cache_status` notification.
+
+Common error codes across this command family:
+
+- `disabled`: offline caching is not enabled.
+- `invalid_request`: a required field (`itemId`, `playlistId`) is missing, or
+  neither `playlistUrl` nor `dp1_call` was supplied.
+- `resolve_failed`: DP1 playlist resolution failed (bad URL, fetch failure,
+  malformed `dp1_call`); `retryable: true`.
+- `not_found`: the requested `itemId` was not found in the resolved playlist,
+  or the item/playlist being cleared or queried is not cached.
+- `unsupported_media`: the item's source does not classify as software (see
+  `classify.go`); this item can never be cached offline, so
+  `retryable: false`.
+- `offline_cache_error`: a store/disk/network failure inside the offline
+  cache service; `retryable: true`.
+
+### downloadPlaylistItem
+
+Purpose: resolve a playlist, verify one item is software-based, and queue it
+for offline capture.
+
+Example:
+
+```json
+{
+  "messageID": "msg-dl-item-1",
+  "message": {
+    "command": "downloadPlaylistItem",
+    "request": {
+      "playlistUrl": "https://gallery.example/dp1/feed.json",
+      "itemId": "work-1"
+    }
+  }
+}
+```
+
+`dp1_call` (inline/dynamic DP1) is also accepted in place of `playlistUrl`,
+using the same shapes as `displayPlaylist`.
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "status": "queued",
+  "itemId": "work-1"
+}
+```
+
+Error cases: `invalid_request` (missing `itemId`), `resolve_failed`,
+`not_found` (itemId not in the resolved playlist), `unsupported_media`,
+`offline_cache_error`.
+
+### downloadPlaylist
+
+Purpose: resolve a playlist and queue every software-classified item it
+contains (up to `dp1.MAX_PLAYLIST_ITEMS_LIMIT` items); non-software items are
+silently skipped rather than failing the whole request.
+
+Example:
+
+```json
+{
+  "messageID": "msg-dl-playlist-1",
+  "message": {
+    "command": "downloadPlaylist",
+    "request": {
+      "playlistUrl": "https://gallery.example/dp1/feed.json"
+    }
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "status": "queued",
+  "total": 12,
+  "softwareCount": 5
+}
+```
+
+`total` is every item in the resolved playlist; `softwareCount` is how many
+were actually queued. The resolved playlist (as `dp1.DP1` returns it —
+`dynamicQuery` items already materialized, all field values including
+`source` intact) is stored as-is (`playlists/<playlistId>.json`, no further
+mutation) so a later `clearPlaylistCache` can operate on it. This is not
+guaranteed to be byte-identical to whatever a publisher
+originally served (`dp1` resolution re-serializes the Go struct, so key
+order/whitespace can differ), but DP-1 signatures verify against a
+JCS-canonicalized form rather than raw bytes, so this does not affect
+signature validity — see `docs/offline-artwork-capture.md`.
+
+Error cases: `resolve_failed`, `offline_cache_error`.
+
+### clearPlaylistItemCache
+
+Purpose: delete one cached item's record and garbage-collect any blobs it
+was the last referent of.
+
+Example:
+
+```json
+{
+  "messageID": "msg-clear-item-1",
+  "message": {
+    "command": "clearPlaylistItemCache",
+    "request": {
+      "itemId": "work-1"
+    }
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "itemId": "work-1"
+}
+```
+
+Error cases: `invalid_request` (missing `itemId`), `not_found` (item is not
+cached), `offline_cache_error`.
+
+### clearPlaylistCache
+
+Purpose: delete a cached playlist's record and every one of its cached
+items, garbage-collecting shared blobs.
+
+Example:
+
+```json
+{
+  "messageID": "msg-clear-playlist-1",
+  "message": {
+    "command": "clearPlaylistCache",
+    "request": {
+      "playlistId": "playlist-1"
+    }
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "playlistId": "playlist-1"
+}
+```
+
+Error cases: `invalid_request` (missing `playlistId`), `not_found` (playlist
+is not cached), `offline_cache_error`.
+
+### getOfflineCacheStatus
+
+Purpose: return a cache-state snapshot for the mobile app to render.
+
+Example (specific items):
+
+```json
+{
+  "messageID": "msg-status-1",
+  "message": {
+    "command": "getOfflineCacheStatus",
+    "request": {
+      "itemIds": ["work-1", "work-2"]
+    }
+  }
+}
+```
+
+Omitting `itemIds` (or passing an empty array) reports on every item this
+process currently knows about, on disk and in flight.
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "items": [
+    {
+      "itemId": "work-1",
+      "state": "ready",
+      "percent": 100,
+      "bytes": 4213456,
+      "coverageComplete": true
+    },
+    {
+      "itemId": "work-2",
+      "state": "partial",
+      "percent": 100,
+      "bytes": 189234,
+      "coverageComplete": false,
+      "reason": "large_asset_static"
+    }
+  ],
+  "totals": {
+    "total": 2,
+    "ready": 1,
+    "downloading": 0,
+    "failed": 0
+  },
+  "diskUsed": 4402690
+}
+```
+
+`state` is one of `not_cached`, `queued`, `downloading`, `ready`, `partial`,
+`failed`, `broken_online`. `percent` is coarse (`0` or `100`): capture is a
+single bounded-window operation, not chunked, so there is no meaningful
+mid-download progress beyond queued/downloading vs. done. `reason` is only
+present when `coverageComplete` is `false` (e.g. `csp_blocked`,
+`large_asset_static`, `capture_window_elapsed`, `download_failed`).
+
+Error cases: `offline_cache_error`.
+
+### offline_cache_status notification
+
+Purpose: push per-item state transitions (queued, downloading, terminal
+state) to the mobile app as they happen, so it does not need to poll
+`getOfflineCacheStatus`.
+
+Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`, and mirrored
+to local hub WebSocket clients.
+
+```json
+{
+  "type": "notification",
+  "notification_type": "offline_cache_status",
+  "persist_record_count": 1,
+  "message": {
+    "itemId": "work-1",
+    "state": "ready",
+    "percent": 100,
+    "bytes": 4213456,
+    "coverageComplete": true
+  }
+}
+```
+
+Delivery is best-effort on both transports: relayer delivery is skipped
+(and logged) when the relayer is not connected, and hub WS delivery is
+skipped (and logged) when there are no connected hub clients. Clients that
+need a definitive current state should still poll `getOfflineCacheStatus`.
 
 ## Response Shape Recommendation for New Inbound Commands
 

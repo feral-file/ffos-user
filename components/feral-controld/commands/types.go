@@ -91,6 +91,16 @@ const (
 	CMD_DDC_PANEL_CONTROL Type = "ddcPanelControl"
 	// CMD_DDC_PANEL_STATUS reads the same VCPs as ddcPanelControl via ddcutil getvcp --brief.
 	CMD_DDC_PANEL_STATUS Type = "ddcPanelStatus"
+
+	// Offline artwork caching commands (see components/feral-controld/offlinecache
+	// and offline-artwork-capture.md). Routed as a pre-CDP special case in
+	// commandrouter, same precedent as the mint-pairing commands above: these
+	// are controld-owned and never forwarded to window.handleCDPRequest.
+	CMD_DOWNLOAD_PLAYLIST_ITEM    Type = "downloadPlaylistItem"
+	CMD_DOWNLOAD_PLAYLIST         Type = "downloadPlaylist"
+	CMD_CLEAR_PLAYLIST_ITEM_CACHE Type = "clearPlaylistItemCache"
+	CMD_CLEAR_PLAYLIST_CACHE      Type = "clearPlaylistCache"
+	CMD_GET_OFFLINE_CACHE_STATUS  Type = "getOfflineCacheStatus"
 )
 
 func (c Type) DeviceCtlCommand() bool {

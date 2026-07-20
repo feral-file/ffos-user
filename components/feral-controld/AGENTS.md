@@ -34,6 +34,12 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
   2. `CMD_DISPLAY_PLAYLIST` → `dp1` (playlist resolution) then CDP (`window.handleCDPRequest(...)`).
   3. Everything else → CDP directly via `window.handleCDPRequest(...)`.
   Mint pairing is the intentional pre-CDP special case: `startMintPairingSession` and `mintPairingApprovalDecision` are routed by `commandrouter` into `mintpairing` so controld can own broker channels, approval notifications, and relayer session creation without exposing browser tokens to Chromium.
+  Offline artwork caching is the same kind of pre-CDP special case:
+  `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
+  `clearPlaylistCache`, and `getOfflineCacheStatus` are routed by
+  `commandrouter` into `offlinecache` (never forwarded to
+  `window.handleCDPRequest`) because they queue background work and report
+  async progress rather than talking to Chromium directly.
 - `devicectl` (executor) implements all device-control commands: connect, showPairingQRCode, keyboard/mouse events, screen rotation, shutdown, reboot, analytics toggle, beta features toggle, device status, update, factory reset, upload logs, volume, SSH access, and panel control over DDC/CI (`ddcPanelControl` / `ddcPanelStatus` for brightness, contrast, volume, mute, and power via `ddcutil` with a simple retry/recovery path).
   - `showPairingQRCode`, `factoryReset`, `updateToLatest`, `uploadLogs` also send D-Bus signals to `feral-setupd` on controld's own bus (`/com/feralfile/controld`, interface `com.feralfile.controld.general`) via `RetryableSend`. `uploadLogs` emits the original `upload_logs` signal for legacy three-field uploads, or additive `upload_logs_with_bundle` with a JSON byte payload when the relayer request includes `supportBundleID` / `support_bundle_id`.
   - Executor manages three sentinel state files: `/home/feralfile/.state/analytics-toggle-off` (presence = analytics disabled), `/home/feralfile/.state/beta-features-toggle-on` (presence = beta features enabled), `/home/feralfile/.state/saved-volume` (persisted volume level).
@@ -48,6 +54,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - `dp1` processes DP1 playlist format (URL and dynamic queries). Uses `ff-indexer` for content resolution.
 - `ff-indexer` fetches Feral File content index via HTTP.
 - `mintpairing` owns controller-started browser-session mint pairing. It uses the temporary `ff-art-computer-handoff` Go minter library only for Mint Pairing Broker channels and E2EE browser messages; `feral-controld` remains responsible for driving the player mint-pairing overlay via CDP, sending approval request/outcome notifications over the relayer, and creating ephemeral browser sessions through `POST /api/ephemeral-sessions?topicID=...`.
+- `offlinecache` (opt-in via `offlineCache.enabled`) downloads, stores, and replays **software-based** DP-1 playlist items so `ff-player` can show them with no network access. It owns: a separate headless Chromium (`downloader.go`, its own debug port and user-data-dir, never the kiosk's) for capture; a content-addressed blob store plus one `items/<id>.json`/`playlists/<id>.json` record per edition (`store.go`, no persisted top-level manifest); a loopback static file server for assets over the CDP `Fetch.fulfillRequest` body ceiling (`staticserver.go`); and a second, event-driven CDP session (`cdpsession.go`) that intercepts `Fetch` on the kiosk (`:9222`) to replay cached items (`replay.go`, `kioskreplay.go`) without ever touching the daemon's existing synchronous `cdp` client. `commandrouter`'s `displayPlaylist` path and `playlist-refresher` call `KioskReplay.SyncPlaylist` to keep replay scope in sync with what is actually cached and on screen; `main.go`'s CDP `onConnect` hook re-attaches the replay session across kiosk restarts (including OOM recovery). See `docs/offline-artwork-capture.md` for the full design and validated capture edge cases.
 - `watchdog` is a **systemd keepalive notifier** only — it sends `sd_notify WATCHDOG=1` every 15 seconds. It does NOT make recovery decisions (that is `feral-watchdog`'s job).
 - `state` persists durable local state; treat it as a contract, not casual scratch storage.
 - `wrapper` exists to keep code testable around time, OS, exec, random, IO, and serialization.
@@ -66,6 +73,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - Connectivity, relayer readiness, and D-Bus events interact. Do not change one of those flows without checking the others.
 - State writes, relayer reconnection, and CDP updates should stay understandable in logs and comments.
 - If a new path changes command routing or topic/state persistence, document the invariant close to the code.
+- `offlinecache`'s headless downloader Chromium (`:9223`) and its kiosk replay CDP session are intentionally separate processes/connections from the kiosk (`:9222`) and its existing synchronous `cdp` client. Do not merge them for convenience — a shared browser or connection would let a stuck/slow download block player command handling, and would reintroduce the OOM-pressure and multi-client CDP behavior risks this separation exists to avoid.
 
 ## Verification for touched work
 - Format changed Go files with `gofmt -s -w <changed-go-files>`.
