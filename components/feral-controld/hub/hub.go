@@ -24,12 +24,6 @@ const (
 	READ_TIMEOUT        = 30 * time.Second
 	WRITE_TIMEOUT       = 30 * time.Second
 	IDLE_TIMEOUT        = 60 * time.Second
-
-	// MAX_INFLIGHT_CASTS caps concurrent /api/cast handlers so a LAN command
-	// storm (including floods of byte-identical commands that the command
-	// router dedupes downstream) cannot pile up unbounded HTTP goroutines.
-	// Excess requests are rejected with 429 rather than blocking.
-	MAX_INFLIGHT_CASTS = 64
 )
 
 //go:generate mockgen -source=hub.go -destination=../mocks/hub.go -package=mocks -mock_names=Hub=MockHub
@@ -39,19 +33,21 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx        context.Context
-	logger     *zap.Logger
-	server     wrapper.HTTPServer
-	wsHandler  ws.WS
-	cmdHandler commandrouter.Handler
-	json       wrapper.JSON
-	castSlots  chan struct{}
+	ctx            context.Context
+	logger         *zap.Logger
+	server         wrapper.HTTPServer
+	wsHandler      ws.WS
+	cmdHandler     commandrouter.Handler
+	statusProvider StatusProvider
+	json           wrapper.JSON
+	reqSlots       chan struct{}
 }
 
 func New(
 	ctx context.Context,
 	wsHandler ws.WS,
 	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
 	server wrapper.HTTPServer,
 	json wrapper.JSON,
 	logger *zap.Logger,
@@ -68,18 +64,23 @@ func New(
 		server = wrapper.NewHTTPServer(httpServer)
 	}
 	h := &hub{
-		ctx:        ctx,
-		wsHandler:  wsHandler,
-		cmdHandler: cmdHandler,
-		json:       json,
-		server:     server,
-		logger:     logger,
-		castSlots:  make(chan struct{}, MAX_INFLIGHT_CASTS),
+		ctx:            ctx,
+		wsHandler:      wsHandler,
+		cmdHandler:     cmdHandler,
+		statusProvider: statusProvider,
+		json:           json,
+		server:         server,
+		logger:         logger,
+		reqSlots:       make(chan struct{}, MAX_INFLIGHT_REQUESTS),
 	}
 	h.routes()
 	return h
 }
 
+// routes registers every hub endpoint through the shared middleware. Each route
+// MUST be wrapped by withMiddleware — it is the single chokepoint for the
+// in-flight storm cap, request logging, and the future LAN authorization check
+// (issue #3471). Do not register a bare handler here.
 func (h *hub) routes() {
 	handler := h.server.Handler()
 	mux, ok := handler.(*http.ServeMux)
@@ -87,9 +88,12 @@ func (h *hub) routes() {
 		panic("Expected ServeMux handler, got different type")
 	}
 
-	mux.HandleFunc("/api/cast", h.handleCast)
-	mux.HandleFunc("/api/notification", h.handleNotification)
-	mux.Handle("/metrics", promhttp.HandlerFor(status.PlaybackMetricsGatherer(), promhttp.HandlerOpts{}))
+	metrics := promhttp.HandlerFor(status.PlaybackMetricsGatherer(), promhttp.HandlerOpts{})
+
+	mux.HandleFunc("/api/cast", h.withMiddleware("cast", h.handleCast))
+	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
+	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
+	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
 }
 
 // Start starts the HTTP server
@@ -124,16 +128,8 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bound concurrent in-flight casts so a LAN storm cannot exhaust goroutines.
-	select {
-	case h.castSlots <- struct{}{}:
-		defer func() { <-h.castSlots }()
-	default:
-		h.logger.Warn("Cast rejected: hub at capacity")
-		http.Error(w, "Too many concurrent commands, slow down", http.StatusTooManyRequests)
-		return
-	}
-
+	// Concurrency is bounded upstream by the shared middleware (reqSlots); the
+	// per-command token-bucket gate runs below inside cmdHandler.Process.
 	var payload commands.Command
 	if err := h.json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		h.logger.Error("Failed to decode cast payload", zap.Error(err))

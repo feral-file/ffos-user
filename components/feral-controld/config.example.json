@@ -24,5 +24,7 @@
   "commandStorm": {
     "disabled": false,
     "maxConcurrent": 0
-  }
+  },
+  "enableHub": true,
+  "setupOwner": "setupd"
 }

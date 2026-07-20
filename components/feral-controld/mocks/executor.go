@@ -8,9 +8,9 @@ import (
 	context "context"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
-
 	commands "github.com/feral-file/ffos-user/components/feral-controld/commands"
+	setupui "github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	gomock "github.com/golang/mock/gomock"
 )
 
 // MockExecutor is a mock of Executor interface.
@@ -61,4 +61,111 @@ func (m *MockExecutor) SaveLastSysMetrics(metrics []byte) {
 func (mr *MockExecutorMockRecorder) SaveLastSysMetrics(metrics interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveLastSysMetrics", reflect.TypeOf((*MockExecutor)(nil).SaveLastSysMetrics), metrics)
+}
+
+// SetClaimObserver mocks base method.
+func (m *MockExecutor) SetClaimObserver(observer func(bool)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetClaimObserver", observer)
+}
+
+// SetClaimObserver indicates an expected call of SetClaimObserver.
+func (mr *MockExecutorMockRecorder) SetClaimObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimObserver", reflect.TypeOf((*MockExecutor)(nil).SetClaimObserver), observer)
+}
+
+// SetSetupUI mocks base method.
+func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSetupUI", ui)
+}
+
+// SetSetupUI indicates an expected call of SetSetupUI.
+func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
+}
+
+// MocksetupNarrator is a mock of setupNarrator interface.
+type MocksetupNarrator struct {
+	ctrl     *gomock.Controller
+	recorder *MocksetupNarratorMockRecorder
+}
+
+// MocksetupNarratorMockRecorder is the mock recorder for MocksetupNarrator.
+type MocksetupNarratorMockRecorder struct {
+	mock *MocksetupNarrator
+}
+
+// NewMocksetupNarrator creates a new mock instance.
+func NewMocksetupNarrator(ctrl *gomock.Controller) *MocksetupNarrator {
+	mock := &MocksetupNarrator{ctrl: ctrl}
+	mock.recorder = &MocksetupNarratorMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MocksetupNarrator) EXPECT() *MocksetupNarratorMockRecorder {
+	return m.recorder
+}
+
+// Hide mocks base method.
+func (m *MocksetupNarrator) Hide() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Hide")
+}
+
+// Hide indicates an expected call of Hide.
+func (mr *MocksetupNarratorMockRecorder) Hide() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Hide", reflect.TypeOf((*MocksetupNarrator)(nil).Hide))
+}
+
+// ShowClaimQR mocks base method.
+func (m *MocksetupNarrator) ShowClaimQR(url string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowClaimQR", url)
+}
+
+// ShowClaimQR indicates an expected call of ShowClaimQR.
+func (mr *MocksetupNarratorMockRecorder) ShowClaimQR(url interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowClaimQR", reflect.TypeOf((*MocksetupNarrator)(nil).ShowClaimQR), url)
+}
+
+// ShowFactoryReset mocks base method.
+func (m *MocksetupNarrator) ShowFactoryReset() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowFactoryReset")
+}
+
+// ShowFactoryReset indicates an expected call of ShowFactoryReset.
+func (mr *MocksetupNarratorMockRecorder) ShowFactoryReset() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowFactoryReset", reflect.TypeOf((*MocksetupNarrator)(nil).ShowFactoryReset))
+}
+
+// ShowJoinFailed mocks base method.
+func (m *MocksetupNarrator) ShowJoinFailed(reason string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowJoinFailed", reason)
+}
+
+// ShowJoinFailed indicates an expected call of ShowJoinFailed.
+func (mr *MocksetupNarratorMockRecorder) ShowJoinFailed(reason interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowJoinFailed", reflect.TypeOf((*MocksetupNarrator)(nil).ShowJoinFailed), reason)
+}
+
+// ShowReady mocks base method.
+func (m *MocksetupNarrator) ShowReady() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ShowReady")
+}
+
+// ShowReady indicates an expected call of ShowReady.
+func (mr *MocksetupNarratorMockRecorder) ShowReady() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShowReady", reflect.TypeOf((*MocksetupNarrator)(nil).ShowReady))
 }

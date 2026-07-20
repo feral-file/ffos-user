@@ -20,6 +20,7 @@ import (
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -28,7 +29,11 @@ import (
 type Mediator interface {
 	Start()
 	Stop()
-	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, internetConnected bool)
+	// InitializeMDNS keys advertising on link state (status.LinkState), not
+	// internet reachability, so the LAN recovery hub stays discoverable on any
+	// LAN even with no upstream internet.
+	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState)
+	SetClaimed(claimed bool)
 }
 
 type mediator struct {
@@ -44,6 +49,7 @@ type mediator struct {
 	mdnsMu         sync.Mutex
 	mdnsAdvertiser mdns.Advertiser
 	mdnsDeviceInfo mdns.DeviceInfo
+	linkState      status.LinkState
 }
 
 func New(
@@ -78,16 +84,50 @@ func (m *mediator) Stop() {
 	m.dbus.RemoveBusSignal(m.handleDBusSignal)
 }
 
-func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, internetConnected bool) {
+// InitializeMDNS registers the advertiser and starts it when a local link is
+// present. Advertising is keyed on link state, not internet reachability: the
+// LAN hub is the BLE-replacement recovery channel and must be discoverable on
+// any LAN even with no upstream internet.
+func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState) {
 	m.mdnsMu.Lock()
 	defer m.mdnsMu.Unlock()
 
 	m.mdnsAdvertiser = advertiser
 	m.mdnsDeviceInfo = info
+	m.linkState = link
 
-	if internetConnected {
+	if link != nil && link.HasLink(context.Background()) {
 		if err := m.mdnsAdvertiser.Start(info); err != nil {
 			m.logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
+		}
+	}
+}
+
+// SetClaimed updates the advertised claim state. Because zeroconf only publishes
+// its TXT record once at Register time, reflecting a claim-state change requires
+// a Stop+Start re-registration with the updated TXT. This is a no-op when the
+// state is unchanged so repeated claim signals do not churn the advertiser.
+func (m *mediator) SetClaimed(claimed bool) {
+	m.mdnsMu.Lock()
+	defer m.mdnsMu.Unlock()
+
+	if m.mdnsDeviceInfo.Claimed == claimed {
+		return
+	}
+	m.mdnsDeviceInfo.Claimed = claimed
+
+	if m.mdnsAdvertiser == nil {
+		return
+	}
+
+	m.logger.Info("Re-registering mDNS after claim-state change", zap.Bool("claimed", claimed))
+	m.mdnsAdvertiser.Stop()
+	// Only re-advertise while a link exists, mirroring the link-keyed lifecycle;
+	// if the link is down the connectivity-change handler will bring it back with
+	// the current (now updated) TXT.
+	if m.linkState != nil && m.linkState.HasLink(context.Background()) {
+		if err := m.mdnsAdvertiser.Start(m.mdnsDeviceInfo); err != nil {
+			m.logger.Warn("Failed to re-register mDNS after claim change", zap.Error(err))
 		}
 	}
 }
@@ -159,12 +199,23 @@ func (m *mediator) handleDBusSignal(
 			}
 		}
 
-		// Re-register mDNS on connectivity changes: stop on network loss
-		// (sockets become invalid) and re-register on restore (bind fresh interfaces).
+		// Re-register mDNS on connectivity changes. The Stop+Start is preserved
+		// from the original interface-change handling: a connectivity event can
+		// accompany an interface set change, and the advertiser's sockets bind
+		// specific interfaces, so stale sockets must be torn down and fresh ones
+		// re-registered. What changed is the *gate*: whether to re-advertise is
+		// now keyed on LINK state, not the internet-reachability `connected`
+		// flag. Losing internet while a LAN link remains must NOT take the LAN
+		// recovery hub's discoverability down — that was exactly the old bug.
+		//
+		// Note: this handler only fires on internet-reachability transitions, so
+		// a link that comes up while internet stays down is caught by the
+		// startup InitializeMDNS gate rather than here; the wifictl work will add
+		// a real link-change signal later.
 		m.mdnsMu.Lock()
 		if m.mdnsAdvertiser != nil {
 			m.mdnsAdvertiser.Stop()
-			if connected {
+			if m.linkState != nil && m.linkState.HasLink(ctx) {
 				if err := m.mdnsAdvertiser.Start(m.mdnsDeviceInfo); err != nil {
 					m.logger.Warn("Failed to restart mDNS advertiser", zap.Error(err))
 				}

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -53,7 +54,7 @@ func setup(t *testing.T) *testSetup {
 	mux := http.NewServeMux()
 	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	h := New(ctx, mockWS, mockCmd, mockServer, mockJSON, logger)
+	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:        ctrl,
@@ -92,7 +93,7 @@ func TestNew(t *testing.T) {
 		Return(http.NewServeMux()).
 		Times(1)
 
-	h := New(ctx, mockWS, mockCmd, mockServer, mockJSON, logger)
+	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
 	assert.NotNil(t, h)
 }
 
@@ -116,7 +117,7 @@ func TestNew_UnsupportedHandlerType(t *testing.T) {
 		Times(1)
 
 	assert.Panics(t, func() {
-		New(ctx, mockWS, mockCmd, mockServer, mockJSON, logger)
+		New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
 	})
 }
 
@@ -336,7 +337,7 @@ func TestHub_ContextCancellation(t *testing.T) {
 	mockServer.EXPECT().Shutdown(gomock.Any()).Return(nil).AnyTimes()
 
 	// Create hub with cancellable context
-	h := New(ctx, ts.mockWS, ts.mockCmd, mockServer, wrapper.NewJSON(), logger)
+	h := New(ctx, ts.mockWS, ts.mockCmd, nil, mockServer, wrapper.NewJSON(), logger)
 
 	// Mock WS Close - may be called multiple times due to context cancellation
 	ts.mockWS.EXPECT().Close().AnyTimes()
@@ -683,19 +684,20 @@ func (c *countingHandler) Process(_ context.Context, _ commands.Command) (interf
 	return nil, nil
 }
 
-// TestHandleCast_RejectsWhenAtCapacity verifies the LAN hub bounds concurrent
-// casts: once the in-flight budget is exhausted, further casts are rejected
-// with 429 before decoding or reaching the command handler, so a storm cannot
-// pile up unbounded HTTP goroutines (feral-file/ffos-user#208).
-func TestHandleCast_RejectsWhenAtCapacity(t *testing.T) {
+// TestMiddleware_RejectsWhenAtCapacity verifies the shared hub middleware bounds
+// concurrent in-flight requests across all routes: once the in-flight budget is
+// exhausted, further requests are rejected with 429 before decoding or reaching
+// the handler, so a storm cannot pile up unbounded HTTP goroutines
+// (feral-file/ffos-user#208).
+func TestMiddleware_RejectsWhenAtCapacity(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	hubImpl := ts.hub.(*hub)
 
-	// Saturate the in-flight cast budget; nothing releases these in the test.
-	for i := 0; i < MAX_INFLIGHT_CASTS; i++ {
-		hubImpl.castSlots <- struct{}{}
+	// Saturate the shared in-flight budget; nothing releases these in the test.
+	for i := 0; i < MAX_INFLIGHT_REQUESTS; i++ {
+		hubImpl.reqSlots <- struct{}{}
 	}
 
 	req := httptest.NewRequest(
@@ -707,11 +709,127 @@ func TestHandleCast_RejectsWhenAtCapacity(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// No mockCmd.Process / mockJSON.NewDecoder expectations: the capacity check
-	// runs before either, so a satisfied gomock controller asserts they are
-	// never reached.
-	hubImpl.handleCast(w, req)
+	// in the middleware runs before either, so a satisfied gomock controller
+	// asserts they are never reached. The cast handler is reached only through
+	// the shared middleware, so exercise the wrapped handler here.
+	hubImpl.withMiddleware("cast", hubImpl.handleCast)(w, req)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
+// stubStatusProvider is a fixed StatusProvider for status-endpoint tests.
+type stubStatusProvider struct{ info StatusInfo }
+
+func (s stubStatusProvider) Status(context.Context) StatusInfo { return s.info }
+
+// TestHandleStatus_ReturnsContractAndFields verifies GET /api/status, served
+// through the shared middleware, returns the provider's device fields plus the
+// hub-owned LAN contract version.
+func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	provider := stubStatusProvider{info: StatusInfo{
+		DeviceID:     "ff1-abc",
+		Version:      "1.2.3",
+		Claimed:      true,
+		SetupState:   "claimed",
+		Connectivity: "connected",
+		TopicID:      "topic-xyz",
+	}}
+	h := New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger).(*hub)
+
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	w := httptest.NewRecorder()
+	h.withMiddleware("status", h.handleStatus)(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+	var got map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, "ff1-abc", got["device_id"])
+	assert.Equal(t, "1.2.3", got["version"])
+	assert.Equal(t, StatusContract, got["contract"])
+	assert.Equal(t, true, got["claimed"])
+	assert.Equal(t, "claimed", got["setup_state"])
+	assert.Equal(t, "connected", got["connectivity"])
+	assert.Equal(t, "topic-xyz", got["topic_id"])
+}
+
+// TestHandleStatus_NilProviderReturnsContract verifies a nil provider still
+// yields a valid response carrying the contract (forward-compat detection must
+// work even before a provider is wired).
+func TestHandleStatus_NilProviderReturnsContract(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	hubImpl := ts.hub.(*hub) // setup() wires a nil status provider
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	w := httptest.NewRecorder()
+
+	// setup()'s hub uses a mocked JSON encoder, so drive a real one here.
+	hubImpl.json = wrapper.NewJSON()
+	hubImpl.withMiddleware("status", hubImpl.handleStatus)(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var got map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, StatusContract, got["contract"])
+}
+
+// TestHandleStatus_InvalidMethod verifies non-GET is rejected.
+func TestHandleStatus_InvalidMethod(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	hubImpl := ts.hub.(*hub)
+	req := httptest.NewRequest("POST", "/api/status", nil)
+	w := httptest.NewRecorder()
+	hubImpl.handleStatus(w, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+// TestMiddleware_EnvelopeRoundTrip proves a normal cast envelope flows through
+// the shared middleware (in-flight limiter + logging active) and the storm gate
+// to the inner handler and back, unharmed.
+func TestMiddleware_EnvelopeRoundTrip(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	stub := &countingHandler{}
+	gated := commandrouter.NewGate(stub, commandrouter.GateConfig{
+		Enabled:       true,
+		MaxConcurrent: 16,
+		Default:       commandrouter.Policy{Rate: 5, Burst: 5, Weight: 1},
+	}, logger)
+	h := New(ctx, mockWS, gated, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
+
+	body := `{"command":"roundtrip","request":{"k":"v"}}`
+	req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.withMiddleware("cast", h.handleCast)(w, req)
+
+	// countingHandler returns (nil, nil) -> 204 No Content, proving the envelope
+	// decoded and reached the inner handler through the wrapped path.
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, int64(1), stub.calls.Load())
 }
 
 // TestHandleCast_StormProtection drives a burst of cast requests through the LAN
@@ -737,7 +855,7 @@ func TestHandleCast_StormProtection(t *testing.T) {
 	}
 	gated := commandrouter.NewGate(stub, gateCfg, logger)
 
-	h := New(ctx, mockWS, gated, mockServer, wrapper.NewJSON(), logger).(*hub)
+	h := New(ctx, mockWS, gated, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	const total = 5
 	var accepted, limited int

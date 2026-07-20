@@ -33,10 +33,14 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/watchdog"
+	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
@@ -79,6 +83,17 @@ type app struct {
 	PlaylistRefresher playlist_refresher.Refresher
 	MintPairing       mintpairing.Service
 	Hub               hub.Hub
+	LinkChecker       *status.LinkChecker
+
+	// Provisioning is the setup-AP trigger state machine. It is constructed
+	// unconditionally but STARTED only when controld owns setup (see run()); left
+	// nil in the test app. Typed as an interface so tests can inject an ordering
+	// spy.
+	Provisioning provisioningRunner
+	// SetupUI is the on-screen setup-narration surface driven by the provisioning
+	// domain. run() re-pushes its last state (Resync) when CDP (re)connects so a
+	// late-loading player catches up. Nil in the test app.
+	SetupUI *setupui.Service
 }
 
 func main() {
@@ -197,6 +212,50 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.Mediator.Start()
 	defer app.Mediator.Stop()
 
+	// P2.5 startup ordering: the local recovery + setup surfaces (hub + mDNS, then
+	// the provisioning domain) come up BEFORE the relayer/CDP init below and never
+	// wait on them. The relayer connection is a best-effort, never-fatal step (see
+	// the gate further down); bringing the LAN hub and the SoftAP setup path up
+	// first means a device that cannot reach the relayer at all can still be
+	// recovered over the LAN and can still raise its setup AP. Nothing here depends
+	// on the relayer or CDP being up.
+
+	// Start Hub if enabled. The hub listener stays bound unconditionally (it is
+	// the BLE-replacement LAN recovery channel), while mDNS *discoverability* is
+	// keyed on link state inside the mediator — see InitializeMDNS.
+	if conf.HubEnabled() {
+		app.Hub.Start()
+		defer func() {
+			if err := app.Hub.Stop(); err != nil {
+				app.Logger.Warn("Failed to stop hub", zap.Error(err))
+			}
+		}()
+
+		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
+		deviceInfo.Claimed = s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != ""
+		advertiser := mdns.New(app.Logger)
+		defer advertiser.Stop()
+
+		// Key mDNS on link state, not the internet-reachability `connected` flag.
+		app.Mediator.InitializeMDNS(advertiser, deviceInfo, app.LinkChecker)
+	}
+
+	// Start the provisioning (setup-AP) domain, but only when controld owns setup.
+	// While setupd owns it (the default) the machine stays dormant — never started,
+	// so no AP is ever raised — and we log that fact exactly once. The machine runs
+	// its own supervised event loop, so its startup cannot be aborted by a relayer
+	// or CDP failure below (both come after this point). app.Provisioning is nil in
+	// the test app; guard for it.
+	if conf.SetupOwnerIsControld() {
+		if app.Provisioning != nil {
+			app.Logger.Info("Starting provisioning domain (setupOwner=controld)")
+			app.Provisioning.Start(ctx)
+			defer app.Provisioning.Stop()
+		}
+	} else {
+		app.Logger.Info("Provisioning domain dormant (setupOwner=setupd); setupd owns device setup")
+	}
+
 	// Get connectivity status and connect to relayer if ready
 	connected, err := getConnectivityStatus(ctx, app.DBus, app.Logger)
 	if err != nil {
@@ -242,22 +301,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		)
 	}
 
-	// Start Hub if enabled
-	if conf.EnableHub {
-		app.Hub.Start()
-		defer func() {
-			if err := app.Hub.Stop(); err != nil {
-				app.Logger.Warn("Failed to stop hub", zap.Error(err))
-			}
-		}()
-
-		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
-		advertiser := mdns.New(app.Logger)
-		defer advertiser.Stop()
-
-		app.Mediator.InitializeMDNS(advertiser, deviceInfo, connected)
-	}
-
 	// Start Playlist Refresher
 	app.PlaylistRefresher.Start()
 	defer app.PlaylistRefresher.Stop()
@@ -285,6 +328,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.CDP.Start(ctx, func() {
 		devicectl.InvalidatePlayerSleepState(app.Executor, app.Logger)
 		app.StatusPoller.ForceRefresh()
+		// Re-push the last setup-narration state so a freshly-(re)loaded player
+		// catches up to where provisioning currently is. No-op if nothing has been
+		// narrated yet or (test app) no narrator is wired.
+		if app.SetupUI != nil {
+			app.SetupUI.Resync()
+		}
 	})
 	defer app.CDP.Close()
 
@@ -490,8 +539,52 @@ func initializeApp(
 	// Mediator
 	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
 
-	// Hub
-	hub := hub.New(context, wsHandler, cmdHandler, nil, json, logger)
+	// LinkChecker is the shared link-state seam keying mDNS/hub discoverability
+	// on the presence of any LAN link rather than internet reachability.
+	linkChecker := status.NewLinkChecker(exec, logger)
+
+	// Claim-state transitions (a successful connect) re-register mDNS with the
+	// updated `claimed` TXT. Wire the executor's observer to the mediator here so
+	// neither package depends on the other's concrete type.
+	executor.SetClaimObserver(mediator.SetClaimed)
+
+	// Provisioning domain (SoftAP setup). Constructed unconditionally so the
+	// wiring stays legible; it is STARTED only when controld owns setup (see
+	// run()), so on a default (setupd-owned) device it stays dormant and raises no
+	// AP. The connectivity adapter reads sys-monitord over the shared D-Bus client;
+	// the WiredLink guard reuses the link checker so an unprovisioned ethernet
+	// device never pops the setup AP. Narration flows through a setupui.Service.
+	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
+	// One narration surface for the whole process: the executor's controld-owned
+	// claim / factory-reset / OTA-failure narration shares this exact instance with
+	// the provisioning domain below, so the single on-connect Resync() wired into
+	// CDP.Start re-pushes every narration state (not just provisioning's) when
+	// Chromium reconnects mid-setup.
+	executor.SetSetupUI(setupNarrator)
+	softAP := softap.NewNetworkManager(exec, logger, "", nil)
+	wifiCtl := wifictl.New(exec, clock, logger, "")
+	provMachine := provisioning.New(provisioning.Config{
+		AP:           softAP,
+		Wifi:         wifiCtl,
+		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
+		Clock:        clock,
+		Logger:       logger,
+		Notifier:     &setupNotifier{ui: setupNarrator, logger: logger},
+		WiredLink:    linkChecker.HasWiredLink,
+	})
+
+	// Hub status provider. The base provider reads identity/version/claim/topic
+	// from on-device state and reports a placeholder setup_state; when controld
+	// owns setup we wrap it so the live provisioning machine supplies the real
+	// setup_state. While setupd owns setup the machine is dormant, so the base
+	// placeholder is kept (wrapping it with a never-started machine would report a
+	// misleading "online").
+	baseStatusProvider := hub.NewStateStatusProvider(os, json, linkChecker, logger)
+	statusProvider := baseStatusProvider
+	if config.Get().SetupOwnerIsControld() {
+		statusProvider = &provisioningStatusProvider{base: baseStatusProvider, machine: provMachine}
+	}
+	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
 
 	return &app{
 		Ctx:               context,
@@ -518,6 +611,9 @@ func initializeApp(
 		PlaylistRefresher: playlistRefresher,
 		MintPairing:       mintPairing,
 		Hub:               hub,
+		LinkChecker:       linkChecker,
+		Provisioning:      provMachine,
+		SetupUI:           setupNarrator,
 	}
 }
 

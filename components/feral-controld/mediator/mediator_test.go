@@ -351,16 +351,28 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 	}
 }
 
+// stubLinkState is a controllable status.LinkState for tests. It is mutable so a
+// test can advertise one link state at InitializeMDNS time (to suppress the
+// init-time Start) and another during the connectivity-change event.
+type stubLinkState struct{ hasLink bool }
+
+func (s *stubLinkState) HasLink(context.Context) bool { return s.hasLink }
+
 func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
 
 	tests := []struct {
-		name      string
-		setupFunc func(*testSetup, *mocks.MockAdvertiser) (godbus.DBusPayload, error)
+		name string
+		// linkUp is the link state during the connectivity-change event.
+		linkUp    bool
+		setupFunc func(*testSetup, *mocks.MockAdvertiser) godbus.DBusPayload
 	}{
 		{
-			name: "connectivity gained - restarts mDNS advertiser",
-			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+			// Internet restored with a link present: tear down stale sockets and
+			// re-register on the fresh interface set.
+			name:   "internet gained, link up - re-registers advertiser",
+			linkUp: true,
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
 				ts.mockCDP.EXPECT().
 					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 						"expression": "window.handleConnectivityChange(true)",
@@ -376,33 +388,39 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
 					Body:   []interface{}{true},
-				}, nil
+				}
 			},
 		},
 		{
-			name: "connectivity gained - mDNS start fails",
-			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+			// The core LAN-recovery regression: internet reachability dropped but
+			// a LAN link remains, so the advertiser MUST stay up (re-register),
+			// not tear down. Future stories must not re-couple this to internet.
+			name:   "internet lost but link up - advertiser stays up",
+			linkUp: true,
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
 				ts.mockCDP.EXPECT().
 					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(true)",
+						"expression": "window.handleConnectivityChange(false)",
 					}).
 					Return(map[string]interface{}{"result": "ok"}, nil).
 					Times(1)
 
-				ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(2)
+				ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
 
 				mockAdvertiser.EXPECT().Stop().Times(1)
-				mockAdvertiser.EXPECT().Start(deviceInfo).Return(errors.New("bind failed")).Times(1)
+				mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
 
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
-					Body:   []interface{}{true},
-				}, nil // mDNS start error is logged, not propagated
+					Body:   []interface{}{false},
+				}
 			},
 		},
 		{
-			name: "connectivity lost - stops mDNS advertiser",
-			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+			// No link at all: stop and stay down.
+			name:   "internet lost and link down - advertiser stays down",
+			linkUp: false,
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
 				ts.mockCDP.EXPECT().
 					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 						"expression": "window.handleConnectivityChange(false)",
@@ -417,7 +435,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
 					Body:   []interface{}{false},
-				}, nil
+				}
 			},
 		},
 	}
@@ -428,7 +446,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 			defer ts.teardown()
 
 			mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
-			payload, expectedError := tt.setupFunc(ts, mockAdvertiser)
+			payload := tt.setupFunc(ts, mockAdvertiser)
 
 			var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
 			ts.mockDbus.EXPECT().
@@ -439,20 +457,80 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 
 			ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
 
+			// Initialize with link down so InitializeMDNS does not Start at init;
+			// then set the link state that the connectivity-change event sees.
+			link := &stubLinkState{hasLink: false}
 			ts.mediator.Start()
-			ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, false)
+			ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, link)
+			link.hasLink = tt.linkUp
 
 			result, err := capturedHandler(ts.ctx, payload)
 
-			if expectedError != nil {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), expectedError.Error())
-			} else {
-				assert.NoError(t, err)
-				assert.Nil(t, result)
-			}
+			assert.NoError(t, err)
+			assert.Nil(t, result)
 		})
 	}
+}
+
+// TestMediator_InitializeMDNS_LinkGated verifies mDNS starts at init only when a
+// link is present, and is independent of internet reachability.
+func TestMediator_InitializeMDNS_LinkGated(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
+
+	t.Run("link up - starts at init", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+	})
+
+	t.Run("link down - does not start at init", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// No Start expectation: a satisfied controller asserts Start is never called.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: false})
+	})
+}
+
+// TestMediator_SetClaimed verifies the claim-state re-register path: a
+// false->true transition re-registers the advertiser with the updated TXT
+// (claimed), while a no-op transition does not churn it.
+func TestMediator_SetClaimed(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
+	claimedInfo := deviceInfo
+	claimedInfo.Claimed = true
+
+	t.Run("claim flip re-registers with updated TXT", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// Start at init (link up), then Stop+Start for the claim flip.
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		mockAdvertiser.EXPECT().Stop().Times(1)
+		mockAdvertiser.EXPECT().Start(claimedInfo).Return(nil).Times(1)
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetClaimed(true)
+	})
+
+	t.Run("no-op transition does not re-register", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		// Already unclaimed; SetClaimed(false) must not touch the advertiser.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetClaimed(false)
+	})
 }
 
 func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {

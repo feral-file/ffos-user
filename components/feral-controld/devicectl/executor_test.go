@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
@@ -110,6 +111,8 @@ func (ts *testSetup) teardown() {
 	state.ResetForTesting()
 	ts.ctrl.Finish()
 }
+
+func strPtrTest(s string) *string { return &s }
 
 func TestExecutor_Execute_InvalidCommand(t *testing.T) {
 	ts := setup(t)
@@ -4731,6 +4734,18 @@ func TestExecutor_FactoryReset_Success(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
+	// Topic rotation runs before the reset in both owner modes: a persisted topic
+	// is cleared and saved.
+	ts.mockStateManager.EXPECT().
+		GetState().
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: "old-topic"}})
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			assert.Equal(t, "", s.Relayer.TopicID, "factory reset must clear the persisted relayer topic")
+			return nil
+		})
+
 	// Mock DBus call for factory reset
 	ts.mockDBus.EXPECT().
 		RetryableSend(ts.ctx, godbus.DBusPayload{
@@ -4762,6 +4777,11 @@ func TestExecutor_FactoryReset_DBusError(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
+	// No persisted topic => topic rotation is a no-op (GetState only, no Save).
+	ts.mockStateManager.EXPECT().
+		GetState().
+		Return(&state.State{Relayer: &state.RelayerState{}})
+
 	// Mock DBus call to fail
 	ts.mockDBus.EXPECT().
 		RetryableSend(ts.ctx, gomock.Any()).
@@ -4772,6 +4792,51 @@ func TestExecutor_FactoryReset_DBusError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "failed to send factory reset signal")
+}
+
+func TestExecutor_FactoryReset_ControldMode_StartsServiceAndRotatesTopic(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Flip setup ownership to controld for this test only.
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCfg := mocks.NewMockConfigManager(ctrl)
+	mockCfg.EXPECT().Get().Return(&config.Config{SetupOwner: strPtrTest(config.SetupOwnerControld)}).AnyTimes()
+	config.InjectConfigManagerForTesting(mockCfg)
+	defer config.ResetForTesting()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_FACTORY_RESET,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	// Topic is cleared before the reset proceeds (security property, both modes).
+	ts.mockStateManager.EXPECT().
+		GetState().
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: "old-topic"}})
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			assert.Equal(t, "", s.Relayer.TopicID)
+			return nil
+		})
+
+	// controld-owned path starts the system reset unit directly; no D-Bus signal.
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
+		Return(ts.mockExecCmd)
+	ts.mockExecCmd.EXPECT().
+		CombinedOutput().
+		Return([]byte(""), nil)
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.NoError(t, err)
+	assert.Equal(t, devicectl.CmdOK, result)
 }
 
 func TestExecutor_UploadLogs_Success(t *testing.T) {

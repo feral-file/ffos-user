@@ -19,6 +19,12 @@ type DeviceInfo struct {
 	ID   string
 	Name string
 	Port int
+	// Claimed reflects whether the device is currently paired/claimed. It is
+	// published as a mDNS TXT flag so LAN discovery can tell claimed devices
+	// from unclaimed ones without a round-trip. Because zeroconf only publishes
+	// the TXT once at Register time, a claim-state change requires a Stop+Start
+	// re-registration (see mediator.SetClaimed).
+	Claimed bool
 }
 
 // Advertiser publishes FF1 discovery records over mDNS.
@@ -65,6 +71,13 @@ func (a *advertiser) Start(info DeviceInfo) error {
 	}
 	if info.Name != "" {
 		txt = append(txt, "name="+info.Name)
+	}
+	// claimed is always published (even when false) so a resolver can rely on
+	// its presence rather than having to infer "unclaimed" from an absent key.
+	if info.Claimed {
+		txt = append(txt, "claimed=true")
+	} else {
+		txt = append(txt, "claimed=false")
 	}
 
 	server, err := zeroconf.Register(name, serviceType, serviceDomain, port, txt, nil)

@@ -1,0 +1,424 @@
+// Package setupui pushes best-effort on-screen narration of device setup
+// progress to ff-player (the kiosk Chromium app) over CDP.
+//
+// Narration is fire-and-forget by design. The phone-side captive portal is the
+// real provisioning channel; the on-screen story is a courtesy for a bystander
+// watching the panel. Chromium may be slow to load, crashed, or entirely absent
+// (headless device) during provisioning, so every push here MUST tolerate the
+// player not being reachable: pushes never block the caller, never return a
+// fatal error, and never panic. A dead or absent screen must never gate or
+// crash the provisioning state machine.
+package setupui
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"sync"
+
+	"go.uber.org/zap"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+)
+
+// DefaultContractPath is the on-device location of the player capability
+// manifest. It mirrors mintpairing's contract path; both narration surfaces are
+// gated by the same file.
+const DefaultContractPath = "/opt/feral/feral-player/ffos-player-contract.json"
+
+const setupDisplayCommand = "setupDisplay"
+
+// Setup narration states. These match the player-side contract exactly. The
+// player accepts unknown state strings with {ok:true} and renders nothing, so
+// adding a future state here is safe even against an older player.
+const (
+	stateSoftAPQR   = "softap_qr"
+	stateJoining    = "joining"
+	stateJoinFailed = "join_failed"
+	stateUpdating   = "updating"
+	stateClaimQR    = "claim_qr"
+	stateReady      = "ready"
+	stateHidden     = "hidden"
+
+	// stateFactoryReset is an extension state used by the in-process factory-reset
+	// flow (setupOwner=controld). It is deliberately NOT in the required set that
+	// validateSetupDisplayContract checks: the currently-shipping player manifest
+	// does not list it, and requiring it would fail the gate and disable ALL setup
+	// narration on fielded players. Players that predate the corresponding
+	// ff-player renderer accept it as a no-op ({ok:true}, renders nothing); once
+	// ff-player adds the state it renders. This is the contract-level extensibility
+	// path in action.
+	stateFactoryReset = "factory_reset"
+)
+
+// support tracks the one-shot manifest capability decision for the process
+// lifetime. Once resolved it never flips: an older player that predates the
+// setupDisplay contract yields a permanent no-narration fallback.
+type support int
+
+const (
+	supportUnknown support = iota
+	supportYes
+	supportNo
+)
+
+// CDPSender is the narrow slice of the CDP client this package needs. Owning a
+// single-method interface here keeps the seam injectable for tests without
+// pulling in the full CDP surface. cdp.CDP satisfies it.
+type CDPSender interface {
+	NoLogSend(method string, params map[string]interface{}) (interface{}, error)
+}
+
+// Service renders setup narration to the player. Its typed Show* methods are
+// safe to call from any goroutine and return immediately; the actual CDP push
+// happens on a background worker.
+type Service struct {
+	cdp          CDPSender
+	contractPath string
+	logger       *zap.Logger
+
+	mu      sync.Mutex
+	support support
+	// last is the most recently intended narration state. It is retained (not
+	// cleared after sending) so it can be re-pushed when CDP reconnects.
+	last map[string]any
+	// pending is the state the worker still needs to push. It is the newest
+	// intent; a slow send that is superseded is simply dropped in favor of the
+	// latest state. nil means nothing is queued.
+	pending map[string]any
+	// running guards against spawning more than one worker goroutine at a time.
+	running bool
+}
+
+// New builds a narration Service. A blank contractPath falls back to
+// DefaultContractPath. logger may be nil (narration then stays silent about its
+// own failures, which is acceptable for a best-effort surface).
+func New(sender CDPSender, contractPath string, logger *zap.Logger) *Service {
+	if strings.TrimSpace(contractPath) == "" {
+		contractPath = DefaultContractPath
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return &Service{
+		cdp:          sender,
+		contractPath: contractPath,
+		logger:       logger,
+	}
+}
+
+// ShowSoftAPQR narrates the soft-AP onboarding step: the phone should join the
+// device's setup Wi-Fi. ssid is required; psk (the WPA2 passphrase) is optional
+// and omitted from the payload when blank.
+func (s *Service) ShowSoftAPQR(ssid string, psk string) {
+	req := map[string]any{
+		"state": stateSoftAPQR,
+		"ssid":  ssid,
+	}
+	if strings.TrimSpace(psk) != "" {
+		req["password"] = psk
+	}
+	s.push(req)
+}
+
+// ShowJoining narrates that the device is attempting to join the chosen Wi-Fi.
+func (s *Service) ShowJoining() {
+	s.push(map[string]any{"state": stateJoining})
+}
+
+// ShowJoinFailed narrates a failed Wi-Fi join. reason is optional context and
+// is omitted from the payload when blank.
+func (s *Service) ShowJoinFailed(reason string) {
+	req := map[string]any{"state": stateJoinFailed}
+	if strings.TrimSpace(reason) != "" {
+		req["reason"] = reason
+	}
+	s.push(req)
+}
+
+// ShowUpdating narrates an in-progress OTA update. progress is a percent
+// (0-100).
+func (s *Service) ShowUpdating(progress int) {
+	s.push(map[string]any{
+		"state":    stateUpdating,
+		"progress": progress,
+	})
+}
+
+// ShowClaimQR narrates the final claim step, rendering url as a QR code. The
+// caller constructs the device_connect URL; this package passes it through
+// verbatim as the required url field.
+func (s *Service) ShowClaimQR(url string) {
+	s.push(map[string]any{
+		"state": stateClaimQR,
+		"url":   url,
+	})
+}
+
+// ShowReady narrates that setup completed successfully.
+func (s *Service) ShowReady() {
+	s.push(map[string]any{"state": stateReady})
+}
+
+// ShowFactoryReset narrates that an in-process factory reset is underway, before
+// the device reboots into the factory snapshot. Like every push here it is
+// best-effort: it must never gate or delay the reset itself. It uses the
+// extension state stateFactoryReset, which is safe to send to players that do
+// not yet render it (see the constant's note).
+func (s *Service) ShowFactoryReset() {
+	s.push(map[string]any{"state": stateFactoryReset})
+}
+
+// Hide clears any setup narration overlay, returning the player to its default
+// display.
+func (s *Service) Hide() {
+	s.push(map[string]any{"state": stateHidden})
+}
+
+// Resync re-pushes the last intended narration state. It is the "CDP became
+// available" trigger: wire it to the CDP client's on-connect callback so a
+// reconnecting or freshly-loaded player catches up to the current setup state.
+// It is a no-op if nothing has been shown yet.
+func (s *Service) Resync() {
+	s.mu.Lock()
+	if s.last == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.pending = s.last
+	if s.running {
+		s.mu.Unlock()
+		return
+	}
+	s.running = true
+	s.mu.Unlock()
+	go s.worker()
+}
+
+// push records req as the newest intended state and ensures a worker is draining
+// the queue. It returns immediately; the CDP send never happens on the caller's
+// goroutine. Retry policy is deliberately "retry on next change", not a hot
+// loop: a failed send is not re-attempted on its own. The last state is retained
+// for Resync so a later CDP reconnect can recover it.
+func (s *Service) push(req map[string]any) {
+	s.mu.Lock()
+	s.last = req
+	s.pending = req
+	if s.running {
+		// The in-flight worker will pick up this newest pending state.
+		s.mu.Unlock()
+		return
+	}
+	s.running = true
+	s.mu.Unlock()
+	go s.worker()
+}
+
+// worker drains pending narration states one at a time until the queue is empty.
+// Because pending always holds only the newest intent, a burst of rapid state
+// changes collapses to at most one trailing send.
+func (s *Service) worker() {
+	for {
+		s.mu.Lock()
+		req := s.pending
+		s.pending = nil
+		if req == nil {
+			s.running = false
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+
+		s.trySend(req)
+	}
+}
+
+// trySend performs one best-effort CDP push. All failures are logged and
+// swallowed; nothing here is fatal to provisioning.
+func (s *Service) trySend(req map[string]any) {
+	if !s.narrationSupported() {
+		return
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"command": setupDisplayCommand,
+		"request": req,
+	})
+	if err != nil {
+		// A non-serializable request is a programming error, but narration must
+		// still not be fatal; log and move on.
+		s.logger.Debug("Failed to marshal setup narration payload", zap.Error(err), zap.Any("request", req))
+		return
+	}
+
+	result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression":    "window.handleCDPRequest(" + string(payload) + ")",
+		"returnByValue": true,
+	})
+	if err != nil {
+		// Expected while Chromium is still loading or has crashed during setup.
+		s.logger.Debug("Setup narration push failed", zap.Error(err), zap.String("state", stringField(req, "state")))
+		return
+	}
+	if err := validateSetupDisplayResult(result); err != nil {
+		s.logger.Debug("Setup narration push rejected", zap.Error(err), zap.String("state", stringField(req, "state")))
+	}
+}
+
+// narrationSupported resolves, once, whether the player advertises setupDisplay
+// support. The decision is cached for the process lifetime: an older player
+// yields a permanent no-narration fallback so narration-disabled is
+// indistinguishable from narration-working from the state machine's side.
+func (s *Service) narrationSupported() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch s.support {
+	case supportYes:
+		return true
+	case supportNo:
+		return false
+	}
+	if err := validateSetupDisplayContract(s.contractPath); err != nil {
+		s.support = supportNo
+		// Logged exactly once, at info: the fallback is expected on players that
+		// predate the setupDisplay contract and is not an error condition.
+		s.logger.Info("Setup narration disabled: player contract lacks setupDisplay support",
+			zap.Error(err), zap.String("path", s.contractPath))
+		return false
+	}
+	s.support = supportYes
+	return true
+}
+
+func validateSetupDisplayResult(result any) error {
+	response, err := normalizeEvaluationResult(result)
+	if err != nil {
+		return err
+	}
+	ok, hasOK := response["ok"].(bool)
+	if !hasOK {
+		return fmt.Errorf("setup display response missing ok: %v", response)
+	}
+	if !ok {
+		return fmt.Errorf("setup display rejected request: %v", response)
+	}
+	return nil
+}
+
+// normalizeEvaluationResult unwraps the nested Runtime.evaluate envelope down to
+// the player's {ok:...} application response. It mirrors the tolerant unwrapping
+// used by the mint-pairing display path so both narration surfaces accept the
+// same result shapes.
+func normalizeEvaluationResult(result any) (map[string]any, error) {
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("setup display returned unsupported result type %T", result)
+	}
+	if _, hasException := resultMap["exceptionDetails"]; hasException {
+		return nil, fmt.Errorf("setup display evaluation raised exception: %v", resultMap["exceptionDetails"])
+	}
+	if _, hasOK := resultMap["ok"]; hasOK {
+		return resultMap, nil
+	}
+	if message, ok := resultMap["message"]; ok {
+		return normalizeEvaluationResult(message)
+	}
+	if value, ok := resultMap["value"]; ok {
+		return normalizeEvaluationValue(value)
+	}
+
+	rawResult, hasResult := resultMap["result"]
+	if !hasResult {
+		return resultMap, nil
+	}
+	rawResultMap, ok := rawResult.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("setup display returned malformed Runtime.evaluate result: %v", resultMap)
+	}
+	if _, hasException := rawResultMap["exceptionDetails"]; hasException {
+		return nil, fmt.Errorf("setup display evaluation raised exception: %v", rawResultMap["exceptionDetails"])
+	}
+	if nested, ok := rawResultMap["result"]; ok {
+		return normalizeEvaluationResult(nested)
+	}
+	if value, ok := rawResultMap["value"]; ok {
+		return normalizeEvaluationValue(value)
+	}
+	return nil, fmt.Errorf("setup display returned unsupported Runtime.evaluate result: %v", rawResultMap)
+}
+
+func normalizeEvaluationValue(value any) (map[string]any, error) {
+	if raw, ok := value.(string); ok {
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+			return nil, fmt.Errorf("decode setup display response: %w", err)
+		}
+		return decoded, nil
+	}
+	return normalizeEvaluationResult(value)
+}
+
+type playerContractManifest struct {
+	Contracts map[string]playerDisplayContract `json:"contracts"`
+}
+
+type playerDisplayContract struct {
+	Version          int                            `json:"version"`
+	RequestKey       string                         `json:"requestKey"`
+	States           []string                       `json:"states"`
+	AcceptedResponse playerContractAcceptedResponse `json:"acceptedResponse"`
+}
+
+type playerContractAcceptedResponse struct {
+	OK bool `json:"ok"`
+}
+
+// validateSetupDisplayContract reports whether the player manifest at path
+// advertises the setupDisplay contract this Service speaks. It mirrors
+// mintpairing's contract validation mechanism (read the manifest from the
+// filesystem, not over HTTP).
+func validateSetupDisplayContract(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("player contract path is empty")
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
+	if err != nil {
+		return fmt.Errorf("read player contract: %w", err)
+	}
+	var manifest playerContractManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return fmt.Errorf("decode player contract: %w", err)
+	}
+	contract, ok := manifest.Contracts["setupDisplay"]
+	if !ok {
+		return fmt.Errorf("missing contracts.setupDisplay")
+	}
+	if contract.Version != 1 {
+		return fmt.Errorf("contracts.setupDisplay.version must be 1")
+	}
+	if contract.RequestKey != "request" {
+		return fmt.Errorf(`contracts.setupDisplay.requestKey must be "request"`)
+	}
+	states := make(map[string]bool, len(contract.States))
+	for _, state := range contract.States {
+		states[state] = true
+	}
+	for _, required := range []string{stateSoftAPQR, stateJoining, stateJoinFailed, stateUpdating, stateClaimQR, stateReady, stateHidden} {
+		if !states[required] {
+			return fmt.Errorf("contracts.setupDisplay.states missing %q", required)
+		}
+	}
+	if !contract.AcceptedResponse.OK {
+		return fmt.Errorf("contracts.setupDisplay.acceptedResponse.ok must be true")
+	}
+	return nil
+}
+
+func stringField(req map[string]any, key string) string {
+	if v, ok := req[key].(string); ok {
+		return v
+	}
+	return ""
+}

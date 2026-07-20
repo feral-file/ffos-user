@@ -1,0 +1,283 @@
+package otagate
+
+import (
+	"context"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+)
+
+// localDeps builds Deps for a locally-driven gate (LocalOwner true) whose version
+// check always returns the given manifest and whose runner follows the script.
+func localDeps(current string, manifest string, runner UpdateRunner, clock *fakeClock) Deps {
+	return Deps{
+		HTTP: &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
+			return jsonResponse(200, manifest), nil
+		}},
+		Clock:      clock,
+		Runner:     runner,
+		Forwarder:  &fakeForwarder{},
+		Config:     fakeConfig{branch: "b", version: current, endpoint: "https://x"},
+		LocalOwner: true,
+	}
+}
+
+// TestSingleFlightCoalesces mirrors the feral-setupd ownership-guard intent
+// (device_ownership_is_exclusive_across_entry_points): concurrent update requests
+// must not each launch an updater. Here they coalesce onto one flight, so the
+// runner and the version check each run exactly once for N parallel callers.
+func TestSingleFlightCoalesces(t *testing.T) {
+	const callers = 8
+	runner := &fakeRunner{
+		results: []error{nil},
+		gate:    make(chan struct{}),
+		entered: make(chan struct{}),
+	}
+	http := &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
+		return jsonResponse(200, okManifest("1.0.0", "0.9.0", "2.0.0")), nil
+	}}
+	gate := New(Deps{
+		HTTP:       http,
+		Clock:      newFakeClock(),
+		Runner:     runner,
+		Forwarder:  &fakeForwarder{},
+		Config:     fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
+		LocalOwner: true,
+	})
+
+	var start sync.WaitGroup
+	start.Add(callers)
+	var done sync.WaitGroup
+	done.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer done.Done()
+			start.Done()
+			_, _ = gate.RequestUpdate(context.Background())
+		}()
+	}
+
+	// Wait for the leader to reach the (blocked) runner, then give the followers a
+	// moment to park inside singleflight before releasing the one flight.
+	<-runner.entered
+	start.Wait()
+	time.Sleep(50 * time.Millisecond)
+	close(runner.gate)
+	done.Wait()
+
+	if got := runner.calls(); got != 1 {
+		t.Errorf("runner called %d times, want 1 (callers coalesced)", got)
+	}
+	if got := http.calls(); got != 1 {
+		t.Errorf("version check ran %d times, want 1 (callers coalesced)", got)
+	}
+}
+
+// TestRetryLadderTiming mirrors update_coordinator.rs::update: a persistently
+// transient updater failure is retried up to MaxUpdateRetries with 2^attempt
+// second backoff (2s, 4s), then latches a permanent failure.
+func TestRetryLadderTiming(t *testing.T) {
+	clock := newFakeClock()
+	runner := &fakeRunner{results: []error{transientRunErr()}} // always transient
+	gate := New(localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock))
+
+	res, err := gate.RequestUpdate(context.Background())
+	if err == nil {
+		t.Fatal("expected permanent failure after exhausting the ladder")
+	}
+	if res != ResultUpdateStarted {
+		t.Errorf("result = %v, want ResultUpdateStarted", res)
+	}
+	if got := runner.calls(); got != MaxUpdateRetries {
+		t.Errorf("runner attempts = %d, want %d", got, MaxUpdateRetries)
+	}
+	// MaxUpdateRetries attempts => MaxUpdateRetries-1 backoffs: 2s then 4s.
+	wantSleeps := []time.Duration{2 * time.Second, 4 * time.Second}
+	got := clock.recordedSleeps()
+	if len(got) != len(wantSleeps) {
+		t.Fatalf("backoffs = %v, want %v", got, wantSleeps)
+	}
+	for i := range wantSleeps {
+		if got[i] != wantSleeps[i] {
+			t.Errorf("backoff[%d] = %v, want %v", i, got[i], wantSleeps[i])
+		}
+	}
+	// A transient exhaustion latches a permanent failure.
+	if fs := gate.Failure(); !fs.Failed {
+		t.Error("expected latched failure after ladder exhaustion")
+	}
+}
+
+// TestLadderSucceedsAfterTransientRetry: a transient failure then success stops
+// retrying, clears the latch, and reports ResultUpdateStarted.
+func TestLadderSucceedsAfterTransientRetry(t *testing.T) {
+	clock := newFakeClock()
+	runner := &fakeRunner{results: []error{transientRunErr(), nil}}
+	gate := New(localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock))
+
+	res, err := gate.RequestUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after one retry, got %v", err)
+	}
+	if res != ResultUpdateStarted {
+		t.Errorf("result = %v, want ResultUpdateStarted", res)
+	}
+	if got := runner.calls(); got != 2 {
+		t.Errorf("runner attempts = %d, want 2", got)
+	}
+	if got := clock.recordedSleeps(); len(got) != 1 || got[0] != 2*time.Second {
+		t.Errorf("backoffs = %v, want [2s]", got)
+	}
+	if fs := gate.Failure(); fs.Failed {
+		t.Error("latch must be clear after a successful update")
+	}
+}
+
+// TestPermanentFailureLatchesImmediately: a permanent updater error is not
+// retried, latches, and fires the OnPermanentFailure callback.
+func TestPermanentFailureLatchesImmediately(t *testing.T) {
+	clock := newFakeClock()
+	runner := &fakeRunner{results: []error{permanentRunErr()}}
+	gate := New(localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock))
+
+	var cbFires int
+	var cbState FailureState
+	gate.OnPermanentFailure(func(fs FailureState) {
+		cbFires++
+		cbState = fs
+	})
+
+	_, err := gate.RequestUpdate(context.Background())
+	if err == nil {
+		t.Fatal("expected permanent failure")
+	}
+	if got := runner.calls(); got != 1 {
+		t.Errorf("runner attempts = %d, want 1 (no retry for permanent)", got)
+	}
+	if len(clock.recordedSleeps()) != 0 {
+		t.Errorf("permanent failure must not back off, got %v", clock.recordedSleeps())
+	}
+	if cbFires != 1 || !cbState.Failed {
+		t.Errorf("callback fired=%d state.Failed=%v, want 1/true", cbFires, cbState.Failed)
+	}
+	if fs := gate.Failure(); !fs.Failed || fs.Err == nil {
+		t.Errorf("Failure() = %+v, want latched with error", fs)
+	}
+}
+
+// TestVersionCheckFailureDoesNotLatch: a failed version check is not an update
+// failure; it returns ResultVersionCheckFailed and leaves the latch clear.
+func TestVersionCheckFailureDoesNotLatch(t *testing.T) {
+	runner := &fakeRunner{results: []error{nil}}
+	gate := New(Deps{
+		HTTP: &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
+			return jsonResponse(503, "unavailable"), nil
+		}},
+		Clock:      newFakeClock(),
+		Runner:     runner,
+		Forwarder:  &fakeForwarder{},
+		Config:     fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
+		LocalOwner: true,
+	})
+
+	res, err := gate.EnsureLatestBeforeClaim(context.Background())
+	if err == nil {
+		t.Fatal("expected version-check error")
+	}
+	if res != ResultVersionCheckFailed {
+		t.Errorf("result = %v, want ResultVersionCheckFailed", res)
+	}
+	if runner.calls() != 0 {
+		t.Error("runner must not run when the version check fails")
+	}
+	if fs := gate.Failure(); fs.Failed {
+		t.Error("a version-check failure must NOT latch a permanent update failure")
+	}
+}
+
+// TestTooOldToUpgrade: below the minimum upgradeable version returns
+// ResultTooOldToUpgrade without running the updater or latching.
+func TestTooOldToUpgrade(t *testing.T) {
+	runner := &fakeRunner{results: []error{nil}}
+	gate := New(localDeps("0.5.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, newFakeClock()))
+
+	res, err := gate.EnsureLatestBeforeClaim(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res != ResultTooOldToUpgrade {
+		t.Errorf("result = %v, want ResultTooOldToUpgrade", res)
+	}
+	if runner.calls() != 0 {
+		t.Error("runner must not run for a too-old device")
+	}
+}
+
+// TestModeRequiredVsAvailable: a build at/above min-runtime but below latest needs
+// no update under ModeRequired (pre-claim gate) yet would under ModeAvailable
+// (user-triggered).
+func TestModeRequiredVsAvailable(t *testing.T) {
+	manifest := okManifest("1.2.0", "0.9.0", "1.5.0")
+
+	// ModeRequired via EnsureLatestBeforeClaim: current 1.3.0 >= min-runtime 1.2.0.
+	reqRunner := &fakeRunner{results: []error{nil}}
+	reqGate := New(localDeps("1.3.0", manifest, reqRunner, newFakeClock()))
+	res, err := reqGate.EnsureLatestBeforeClaim(context.Background())
+	if err != nil {
+		t.Fatalf("required-mode error: %v", err)
+	}
+	if res != ResultNoUpdateNeeded {
+		t.Errorf("required-mode result = %v, want ResultNoUpdateNeeded", res)
+	}
+	if reqRunner.calls() != 0 {
+		t.Error("required mode must not update when at/above min-runtime")
+	}
+
+	// ModeAvailable via RequestUpdate (LocalOwner true): current 1.3.0 < latest 1.5.0.
+	availRunner := &fakeRunner{results: []error{nil}}
+	availGate := New(localDeps("1.3.0", manifest, availRunner, newFakeClock()))
+	res, err = availGate.RequestUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("available-mode error: %v", err)
+	}
+	if res != ResultUpdateStarted {
+		t.Errorf("available-mode result = %v, want ResultUpdateStarted", res)
+	}
+	if availRunner.calls() != 1 {
+		t.Errorf("available mode should run updater once, got %d", availRunner.calls())
+	}
+}
+
+// TestForwardDuringDualOwnerWindow: with LocalOwner unset, RequestUpdate forwards
+// to setupd over D-Bus and never touches the local version check or runner.
+func TestForwardDuringDualOwnerWindow(t *testing.T) {
+	fwd := &fakeForwarder{}
+	runner := &fakeRunner{results: []error{nil}}
+	http := &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
+		t.Fatal("version check must not run while forwarding")
+		return nil, nil
+	}}
+	gate := New(Deps{
+		HTTP:       http,
+		Clock:      newFakeClock(),
+		Runner:     runner,
+		Forwarder:  fwd,
+		Config:     fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
+		LocalOwner: false,
+	})
+
+	res, err := gate.RequestUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("forward error: %v", err)
+	}
+	if res != ResultForwarded {
+		t.Errorf("result = %v, want ResultForwarded", res)
+	}
+	if fwd.calls() != 1 {
+		t.Errorf("forwarder called %d times, want 1", fwd.calls())
+	}
+	if runner.calls() != 0 {
+		t.Error("runner must not run in the forward path")
+	}
+}

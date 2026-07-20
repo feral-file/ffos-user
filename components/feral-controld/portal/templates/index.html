@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up your Feral File device</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f4f4f5;
+    color: #18181b;
+    line-height: 1.5;
+  }
+  main {
+    max-width: 30rem;
+    margin: 0 auto;
+    padding: 1.5rem 1.25rem 3rem;
+  }
+  h1 { font-size: 1.4rem; margin: 1rem 0 0.5rem; }
+  .note {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    color: #7c2d12;
+    padding: 0.75rem 0.9rem;
+    border-radius: 0.6rem;
+    font-size: 0.92rem;
+    margin: 1rem 0 1.5rem;
+  }
+  label { display: block; font-weight: 600; margin: 1rem 0 0.35rem; }
+  select, input[type="text"], input[type="password"] {
+    width: 100%;
+    padding: 0.7rem 0.75rem;
+    font-size: 1rem;
+    border: 1px solid #d4d4d8;
+    border-radius: 0.55rem;
+    background: #fff;
+    color: #18181b;
+  }
+  button {
+    width: 100%;
+    margin-top: 1.5rem;
+    padding: 0.85rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #fff;
+    background: #2563eb;
+    border: 0;
+    border-radius: 0.6rem;
+  }
+  button:active { background: #1d4ed8; }
+  .status {
+    margin-top: 1.5rem;
+    padding: 0.75rem 0.9rem;
+    border-radius: 0.6rem;
+    font-size: 0.92rem;
+  }
+  .status-failed { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+  .status-joining { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+  .status-succeeded { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #18181b; color: #f4f4f5; }
+    select, input { background: #27272a; color: #f4f4f5; border-color: #3f3f46; }
+    .note { background: #2a1a0e; border-color: #7c2d12; color: #fdba74; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Connect to Wi-Fi</h1>
+  <p class="note">
+    After you tap Connect, this page may stop responding while the device
+    switches networks. If that happens, reconnect your phone to
+    <strong>{{.APSSID}}</strong> and reopen this page to check progress.
+  </p>
+
+  {{if .LastStatus}}
+  <div class="status status-{{.LastStatus.State}}">
+    {{.LastStatus.Message}}
+  </div>
+  {{end}}
+
+  <form method="POST" action="/connect">
+    <label for="ssid">Network</label>
+    {{if .SSIDs}}
+    <select id="ssid" name="ssid">
+      {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+    {{else}}
+    <input id="ssid" name="ssid" type="text" autocomplete="off"
+           autocapitalize="none" placeholder="Network name">
+    {{end}}
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="off">
+
+    <button type="submit">Connect</button>
+  </form>
+</main>
+</body>
+</html>

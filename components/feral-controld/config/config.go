@@ -36,6 +36,16 @@ type MintPairingConfig struct {
 	ApprovalTimeoutSeconds int    `json:"approvalTimeoutSeconds"`
 }
 
+// Setup ownership values for Config.SetupOwner. Exactly one owner is active at a
+// time.
+const (
+	// SetupOwnerSetupd keeps feral-setupd the owner of device-setup concerns
+	// (factory reset, log upload, claim/pairing UI). It is the default.
+	SetupOwnerSetupd = "setupd"
+	// SetupOwnerControld moves those concerns in-process into feral-controld.
+	SetupOwnerControld = "controld"
+)
+
 // CommandStormConfig tunes device-side command-storm protection in the command
 // router. All fields are optional; an absent section keeps the built-in
 // defaults, which are safe with zero configuration.
@@ -52,12 +62,45 @@ type Config struct {
 	RelayerConfig     *RelayerConfig       `json:"relayer"`
 	MintPairingConfig *MintPairingConfig   `json:"mintPairing"`
 	SentryConfig      *logger.SentryConfig `json:"sentry"`
-	EnableHub         bool                 `json:"enableHub"`
-	CommandStorm      *CommandStormConfig  `json:"commandStorm,omitempty"`
+	// EnableHub gates the LAN hub. It is a pointer so an absent key can default
+	// ON: the hub is the BLE-replacement recovery channel, so it must run
+	// unless an operator explicitly sets "enableHub": false. Read via
+	// HubEnabled(), never directly.
+	EnableHub    *bool               `json:"enableHub"`
+	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
+
+	// SetupOwner selects which daemon owns device-setup concerns (factory reset,
+	// log upload, and the claim/pairing UI) during the feral-setupd ->
+	// feral-controld strangler merge. It is a pointer so an absent key defaults to
+	// SetupOwnerSetupd: while setupd owns setup, every new in-process setup path
+	// controld gained during the merge stays dormant and today's D-Bus signal
+	// emissions to setupd keep flowing unchanged. Setting "controld" flips
+	// ownership to the in-process paths.
+	//
+	// Cutover discipline (strangler): the default stays "setupd" until Phase 4,
+	// which flips the default and deletes feral-setupd; until then reverting this
+	// flag to "setupd" restores a fully working setupd-owned flow, so the
+	// in-process paths must never regress the setupd path while dormant. Read via
+	// SetupOwnerIsControld(), never directly.
+	SetupOwner *string `json:"setupOwner"`
 
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
+}
+
+// HubEnabled reports whether the LAN hub should run. It defaults ON: only an
+// explicit "enableHub": false disables it.
+func (c *Config) HubEnabled() bool {
+	return c.EnableHub == nil || *c.EnableHub
+}
+
+// SetupOwnerIsControld reports whether controld owns the in-process setup flow.
+// It defaults to false (setupd-owned): ownership only moves in-process when an
+// operator explicitly sets "setupOwner": "controld". Any other value (including
+// the absent key or "setupd") keeps setupd the owner.
+func (c *Config) SetupOwnerIsControld() bool {
+	return c.SetupOwner != nil && *c.SetupOwner == SetupOwnerControld
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager

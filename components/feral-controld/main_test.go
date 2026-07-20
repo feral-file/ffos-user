@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,9 +17,49 @@ import (
 	go_daemon "github.com/coreos/go-systemd/v22/daemon"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
+
+func boolPtr(b bool) *bool { return &b }
+
+// spyProvisioning is an ordering/lifecycle spy for the provisioning runner seam.
+// It records whether (and, via onStart, when relative to other startup steps) the
+// provisioning domain was started.
+type spyProvisioning struct {
+	mu      sync.Mutex
+	started bool
+	onStart func()
+}
+
+func (s *spyProvisioning) Start(context.Context) {
+	s.mu.Lock()
+	s.started = true
+	fn := s.onStart
+	s.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+func (s *spyProvisioning) Stop() {}
+
+func (s *spyProvisioning) wasStarted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.started
+}
+
+// orderIndex returns the first index of s in list, or -1.
+func orderIndex(list []string, s string) int {
+	for i, e := range list {
+		if e == s {
+			return i
+		}
+	}
+	return -1
+}
 
 type testSetup struct {
 	ctrl              *gomock.Controller
@@ -105,7 +146,7 @@ func setup(t *testing.T) *testSetup {
 			DSN:         "",
 			Environment: "test",
 		},
-		EnableHub: true,
+		EnableHub: boolPtr(true),
 	}
 
 	// Create test app with mocked components
@@ -287,7 +328,7 @@ func TestApp_Run_Success(t *testing.T) {
 		{
 			name: "successful startup with hub disabled",
 			setupFunc: func(ts *testSetup) {
-				ts.config.EnableHub = false
+				ts.config.EnableHub = boolPtr(false)
 
 				// Mock successful state loading
 				ts.mockStateManager.EXPECT().
@@ -849,4 +890,132 @@ func TestInitializeTestApp(t *testing.T) {
 	assert.Equal(t, mockRandom, app.Random)
 	assert.Equal(t, mockExec, app.Exec)
 	assert.Equal(t, mockMath, app.Math)
+}
+
+// TestApp_Run_StartupOrdering pins the P2.5 invariant: the LAN hub and the
+// provisioning (setup-AP) domain come up BEFORE the relayer connection, so a
+// device that cannot reach the relayer can still be recovered over LAN and can
+// still raise its setup AP. It drives run() with an ordering spy on provisioning
+// and Do hooks on the hub/relayer mocks, then asserts both precede the relayer
+// connect.
+func TestApp_Run_StartupOrdering(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// controld owns setup so the provisioning domain is started.
+	owner := config.SetupOwnerControld
+	ts.config.SetupOwner = &owner
+
+	var mu sync.Mutex
+	var order []string
+	record := func(s string) {
+		mu.Lock()
+		order = append(order, s)
+		mu.Unlock()
+	}
+
+	spy := &spyProvisioning{onStart: func() { record("provisioning") }}
+	ts.app.Provisioning = spy
+
+	// Relayer ready (topic present) + connectivity true so the gate attempts a
+	// relayer connect (the step ordering is measured against).
+	ts.mockStateManager.EXPECT().Load(ts.logger).Return(&state.State{
+		Relayer: &state.RelayerState{TopicID: "test-topic"},
+	}, nil)
+
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+
+	ts.mockHub.EXPECT().Start().Do(func() { record("hub") })
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{true}, nil)
+	ts.mockRelayer.EXPECT().Connect(gomock.Any()).DoAndReturn(func(context.Context) error {
+		record("relayer")
+		return nil
+	})
+	ts.mockRelayer.EXPECT().Close()
+
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+	ts.mockCDP.EXPECT().Close()
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err)
+
+	assert.True(t, spy.wasStarted(), "provisioning must start when controld owns setup")
+
+	mu.Lock()
+	defer mu.Unlock()
+	idxHub := orderIndex(order, "hub")
+	idxProv := orderIndex(order, "provisioning")
+	idxRelayer := orderIndex(order, "relayer")
+	require.GreaterOrEqual(t, idxHub, 0, "hub must have started")
+	require.GreaterOrEqual(t, idxProv, 0, "provisioning must have started")
+	require.GreaterOrEqual(t, idxRelayer, 0, "relayer connect must have been attempted")
+	assert.Less(t, idxHub, idxRelayer, "hub must start before the relayer connect")
+	assert.Less(t, idxProv, idxRelayer, "provisioning must start before the relayer connect")
+}
+
+// TestApp_Run_ProvisioningDormant pins the dormant contract: with setupd owning
+// setup (the default), run() never starts the provisioning domain, so no setup AP
+// is ever raised.
+func TestApp_Run_ProvisioningDormant(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	// Default config leaves SetupOwner unset -> setupd owns setup.
+	spy := &spyProvisioning{}
+	ts.app.Provisioning = spy
+
+	ts.mockStateManager.EXPECT().Load(ts.logger).Return(&state.State{
+		Relayer: &state.RelayerState{TopicID: ""},
+	}, nil)
+
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+	ts.mockCDP.EXPECT().Close()
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err)
+
+	assert.False(t, spy.wasStarted(),
+		"provisioning must stay dormant when setupd owns setup; no setup AP is ever raised")
 }

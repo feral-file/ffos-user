@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connecting…</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f4f4f5;
+    color: #18181b;
+    line-height: 1.5;
+  }
+  main { max-width: 30rem; margin: 0 auto; padding: 2rem 1.25rem; }
+  h1 { font-size: 1.4rem; }
+  .note {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1e40af;
+    padding: 0.85rem 0.95rem;
+    border-radius: 0.6rem;
+    margin: 1.25rem 0;
+  }
+  a { color: #2563eb; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #18181b; color: #f4f4f5; }
+    .note { background: #10233f; border-color: #1e3a8a; color: #93c5fd; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Connecting to {{.SSID}}</h1>
+  <p class="note">
+    The device is switching to your Wi-Fi network. This page may stop
+    responding for a moment. If it does, reconnect your phone to
+    <strong>{{.APSSID}}</strong> and reopen this page.
+  </p>
+  <p><a href="/">Check progress</a></p>
+</main>
+</body>
+</html>

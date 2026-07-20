@@ -16,11 +16,14 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
+	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -58,6 +61,16 @@ type Device struct {
 type Executor interface {
 	SaveLastSysMetrics(metrics []byte)
 	Execute(ctx context.Context, cmd commands.Command) (interface{}, error)
+	// SetClaimObserver registers a callback invoked when the device's claim
+	// state changes (e.g. a successful connect claims the device). It is the
+	// seam that lets the mediator re-register mDNS with an updated `claimed` TXT
+	// without coupling the executor to the mediator. Set once at wiring time.
+	SetClaimObserver(observer func(claimed bool))
+	// SetSetupUI injects the process-wide setup-narration surface so the
+	// controld-owned claim/factory-reset/OTA-failure narration shares ONE
+	// setupui.Service with the provisioning domain. Set once at wiring time; the
+	// lazy setupUI() fallback still covers tests that do not inject.
+	SetSetupUI(ui *setupui.Service)
 }
 
 type executor struct {
@@ -69,6 +82,10 @@ type executor struct {
 
 	// State
 	lastSysMetrics []byte
+
+	// claimObserver, when set, is notified on claim-state transitions. Set once
+	// at wiring time before commands are served, so it needs no lock.
+	claimObserver func(claimed bool)
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -89,6 +106,25 @@ type executor struct {
 	clock wrapper.Clock
 
 	panelDDC ddc.PanelDDC
+
+	// otaGate owns the OTA update flow (single-flight guard, retry ladder,
+	// version check, permanent-failure latch) ported from feral-setupd. Built
+	// lazily via otaGateOnce so New()'s wiring is unchanged during the
+	// setupd->controld merge.
+	otaGate     *otagate.Gate
+	otaGateOnce sync.Once
+
+	// setupNarrator is the on-screen setup-narration surface driven by the
+	// controld-owned claim/factory-reset flows (dormant while setupd owns setup).
+	// Built lazily via setupUI() from the existing CDP seam so New()'s wiring is
+	// unchanged during the merge; tests set it directly to a spy.
+	setupNarrator     setupNarrator
+	setupNarratorOnce sync.Once
+
+	// logUploaderFactory builds the in-process log uploader. Overridable in tests
+	// to avoid a real network transfer; nil in production, where newLogUploader
+	// builds the HTTP-backed uploader.
+	logUploaderFactory func() logUploaderIface
 
 	// Serialized, coalescing queue for applyFfpPowerStateAsync (see sleep_schedule.go).
 	sleepPowerAlignCh        chan sleepPowerAlignJob
@@ -160,6 +196,33 @@ func New(
 		clock:        clock,
 		panelDDC:     panelDDC,
 	}
+}
+
+func (e *executor) SetClaimObserver(observer func(claimed bool)) {
+	e.claimObserver = observer
+}
+
+// SetSetupUI injects the shared setup-narration surface so the controld-owned
+// claim/factory-reset/OTA-failure narration and the provisioning domain's
+// narration all flow through ONE setupui.Service — the same instance main wires
+// to CDP's on-connect Resync(), so every narration state (not just
+// provisioning's) is re-pushed when Chromium reconnects mid-setup. It consumes
+// setupNarratorOnce so the lazy setupUI() builder never later replaces the
+// injected instance; tests that skip injection keep the lazy fallback.
+//
+// Intent — why one shared instance is safe despite setupui's single last-state,
+// newest-intent-wins model: the executor's claim flow narrates only once the
+// device is provisioned and online (claim runs AFTER Wi-Fi setup completes),
+// which is exactly when the provisioning machine sits at StateOnline/idle and is
+// not narrating. The two surfaces never legitimately drive the overlay at the
+// same time, so newest-intent-wins never drops a state the other still needs.
+func (e *executor) SetSetupUI(ui *setupui.Service) {
+	if ui == nil {
+		return
+	}
+	e.setupNarratorOnce.Do(func() {
+		e.setupNarrator = ui
+	})
 }
 
 func (e *executor) SaveLastSysMetrics(metrics []byte) {
@@ -264,6 +327,12 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 		return nil, fmt.Errorf("failed to save state: %w", err)
 	}
 
+	// A successful connect claims the device; notify any observer so LAN
+	// discovery (mDNS TXT) reflects the new claim state.
+	if e.claimObserver != nil {
+		e.claimObserver(true)
+	}
+
 	return CmdOK, nil
 }
 
@@ -274,6 +343,13 @@ func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interfac
 	err := e.json.Unmarshal(args, &cmdArgs)
 	if err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	// setupOwner cutover: once controld owns setup, the claim/pairing QR is driven
+	// in-process (pre-claim OTA gate + on-screen claim QR / ready). While setupd
+	// owns setup (the default) the D-Bus signal below is unchanged.
+	if config.Get().SetupOwnerIsControld() {
+		return e.showPairingQRCodeInProcess(ctx, cmdArgs.Show)
 	}
 
 	err = e.dbus.RetryableSend(ctx,
@@ -288,6 +364,124 @@ func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interfac
 	}
 
 	return CmdOK, nil
+}
+
+// showPairingQRCodeInProcess is the controld-owned claim flow. On show=true it
+// runs the mandatory pre-claim OTA gate and, only when the device is already on a
+// supported build, paints the claim QR on screen. On show=false (cloud ended
+// pairing) it records the Ready transition before hiding the overlay.
+func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (interface{}, error) {
+	ui := e.setupUI()
+
+	if !show {
+		// Record the Ready transition BEFORE hiding the overlay. This ports
+		// callbacks.rs:476's record-before-transition rule: the pairing
+		// confirmation is a durable one-shot signal (controld ACKs it and never
+		// re-emits), so Ready must be registered even if the subsequent hide is
+		// interrupted. Ordering Hide first would risk losing the Ready record and
+		// stranding the device in Pairing while the cloud believes pairing
+		// succeeded.
+		ui.ShowReady()
+		ui.Hide()
+		return CmdOK, nil
+	}
+
+	// Mandatory pre-claim OTA gate: the device must reach a supported build before
+	// it can be claimed. EnsureLatestBeforeClaim always drives the updater locally
+	// and runs a live version check. If it started an update the device is
+	// rebooting; if the check failed or the build is too old, the gate owns the
+	// device and we withhold the claim QR. Only a clean "no update needed"
+	// proceeds to paint the claim QR.
+	result, err := e.otaGateInstance().EnsureLatestBeforeClaim(ctx)
+	if err != nil {
+		e.logger.Warn("Pre-claim OTA gate did not pass; withholding claim QR",
+			zap.Error(err), zap.Int("gateResult", int(result)))
+		return CmdOK, nil
+	}
+	if result != otagate.ResultNoUpdateNeeded {
+		e.logger.Info("Pre-claim OTA gate did not settle on no-update; withholding claim QR",
+			zap.Int("gateResult", int(result)))
+		return CmdOK, nil
+	}
+
+	ui.ShowClaimQR(e.buildDeviceConnectURL(ctx))
+	return CmdOK, nil
+}
+
+const (
+	// deviceConnectURLPrefix is the claim link launcher-ui renders as a QR. Kept
+	// byte-identical to components/launcher-ui/index.html so the phone's parser
+	// cannot tell the controld-built QR from the setupd-built one.
+	deviceConnectURLPrefix = "https://link.feralfile.com/device_connect/"
+
+	// claimSetupPhase is the setup_phase reported in the claim device_info.
+	// feral-setupd paints the pairing QR while in SetupPhase::Pairing ("pairing");
+	// the controld-owned claim QR is that same surface, so it reports "pairing".
+	claimSetupPhase = "pairing"
+)
+
+// setupNarrator is the narrow slice of setupui.Service the controld-owned setup
+// flows drive. Owning the interface here keeps the dependency small and lets
+// tests assert call ordering with a spy. *setupui.Service satisfies it.
+type setupNarrator interface {
+	ShowClaimQR(url string)
+	ShowReady()
+	ShowFactoryReset()
+	ShowJoinFailed(reason string)
+	Hide()
+}
+
+// setupUI lazily builds the setup-narration surface from the executor's CDP
+// seam. Built once; tests may pre-set e.setupNarrator to a spy.
+func (e *executor) setupUI() setupNarrator {
+	e.setupNarratorOnce.Do(func() {
+		if e.setupNarrator == nil {
+			e.setupNarrator = setupui.New(e.cdp, "", e.logger)
+		}
+	})
+	return e.setupNarrator
+}
+
+// buildDeviceConnectURL gathers the live claim inputs and formats the claim URL.
+// device_id comes from the hostname, topic_id from persisted relayer state, and
+// branch/version from the FF1 build descriptor — the same sources setupd's
+// AppState used. Reaching this point means the pre-claim OTA gate's live version
+// check just succeeded, so the device is online; that is the same fact setupd
+// read from is_online_cached(), so internet is reported true.
+func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
+	topicID := ""
+	if s := state.GetState(); s != nil && s.Relayer != nil {
+		topicID = s.Relayer.TopicID
+	}
+	branch, version := "", ""
+	if b, v, _, err := otagate.NewFileConfigProvider(e.os, e.json).LocalBuild(ctx); err == nil {
+		branch, version = b, v
+	} else {
+		e.logger.Warn("Claim QR: could not read local build; branch/version omitted", zap.Error(err))
+	}
+	return formatDeviceConnectURL(e.deviceID(), topicID, true, branch, version, claimSetupPhase)
+}
+
+// formatDeviceConnectURL replicates the claim URL built by
+// components/launcher-ui/index.html byte-for-byte:
+//
+//	https://link.feralfile.com/device_connect/<device_info>
+//
+// where device_info is
+//
+//	<device_id>|<topic_id>|<internet>|<branch>|<version>|<setup_phase>
+//
+// with the branch's '/' percent-encoded to %2F and nothing else encoded. Ported
+// from feral-setupd startup.rs::build_device_info; the app's parser must not be
+// able to tell this apart from the setupd-built payload.
+func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, version, setupPhase string) string {
+	internet := "false"
+	if online {
+		internet = "true"
+	}
+	branch = strings.ReplaceAll(branch, "/", "%2F")
+	deviceInfo := fmt.Sprintf("%s|%s|%s|%s|%s|%s", deviceID, topicID, internet, branch, version, setupPhase)
+	return deviceConnectURLPrefix + deviceInfo
 }
 
 func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
@@ -1444,25 +1638,95 @@ func (e *executor) getSysMetrics() (interface{}, error) {
 }
 
 func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
-	e.logger.Info("Executing system update command via DBus")
+	e.logger.Info("Executing system update command")
 
-	// Send DBus signal to setupd to handle system update (show page + execute update)
-	err := e.dbus.RetryableSend(ctx,
-		godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
-			Body:      []interface{}{},
-		})
-	if err != nil {
-		return nil, fmt.Errorf("failed to send system update signal: %w", err)
+	// Route the user-triggered update through the OTA gate so it is single-flighted
+	// with the mandatory pre-claim gate. During the dual-owner window the gate's
+	// LocalOwner flag is unset, so this still forwards to setupd over D-Bus
+	// (dbusUpdateForwarder) exactly as before; a later setupOwner-cutover story
+	// flips the flag and the same call drives the updater locally instead.
+	if _, err := e.otaGateInstance().RequestUpdate(ctx); err != nil {
+		return nil, fmt.Errorf("failed to request system update: %w", err)
 	}
 
 	return CmdOK, nil
 }
 
+// otaGateInstance lazily builds the shared OTA gate from the executor's existing
+// seams. Built once so its single-flight guard and permanent-failure latch persist
+// across relayer commands.
+func (e *executor) otaGateInstance() *otagate.Gate {
+	e.otaGateOnce.Do(func() {
+		e.otaGate = otagate.New(otagate.Deps{
+			HTTP:      wrapper.NewHTTPClient(),
+			Clock:     e.clock,
+			Runner:    otagate.NewSystemdRunner(e.exec, e.clock, e.logger),
+			Forwarder: dbusUpdateForwarder{dbus: e.dbus, logger: e.logger},
+			Config:    otagate.NewFileConfigProvider(e.os, e.json),
+			Logger:    e.logger,
+			// LocalOwner tracks the setupOwner cutover: while setupd owns setup the
+			// user-triggered update path forwards to setupd over D-Bus (dual-owner
+			// window); once controld owns setup it drives the updater locally.
+			LocalOwner: config.Get().SetupOwnerIsControld(),
+		})
+		// Surface a latched permanent OTA failure on-screen. There is no dedicated
+		// update-failed CDP state in the shipping player contract, so we reuse the
+		// existing join_failed narration (the least-surprising "setup could not
+		// complete" surface) rather than inventing a new state. Best-effort: a dead
+		// or absent player must never gate the OTA latch.
+		e.otaGate.OnPermanentFailure(func(fs otagate.FailureState) {
+			reason := "update-failed"
+			if fs.Err != nil {
+				reason = fs.Err.Error()
+			}
+			e.setupUI().ShowJoinFailed(reason)
+		})
+	})
+	return e.otaGate
+}
+
+// dbusUpdateForwarder hands a system update to feral-setupd over D-Bus. This is
+// the current dual-owner-window behavior: setupd still owns the device UI and
+// drives the updater. The OTA gate calls this while its LocalOwner flag is unset.
+type dbusUpdateForwarder struct {
+	dbus   dbus.DBus
+	logger *zap.Logger
+}
+
+func (f dbusUpdateForwarder) ForwardUpdate(ctx context.Context) error {
+	f.logger.Info("Forwarding system update to setupd via DBus")
+	// Send DBus signal to setupd to handle system update (show page + execute update)
+	if err := f.dbus.RetryableSend(ctx,
+		godbus.DBusPayload{
+			Interface: dbus.INTERFACE,
+			Path:      dbus.PATH,
+			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
+			Body:      []interface{}{},
+		}); err != nil {
+		return fmt.Errorf("failed to send system update signal: %w", err)
+	}
+	return nil
+}
+
 func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
-	e.logger.Info("Executing factory reset command via DBus")
+	e.logger.Info("Executing factory reset command")
+
+	// Topic rotation (security invariant — holds in BOTH owner modes):
+	// set-factory-boot.service stages a one-shot boot into a pristine factory
+	// btrfs snapshot and reboots; it does NOT wipe the currently running
+	// subvolume, so the persisted relayer topicID (and the live relayer session)
+	// survive on disk until that reboot actually completes. A resold device — or
+	// one whose reset is interrupted before the reboot — would otherwise keep
+	// running on the old subvolume and stay commandable via the former owner's
+	// saved topic. Clear the persisted topic here so that window is closed no
+	// matter which daemon owns the reset.
+	e.clearPersistedRelayerTopic()
+
+	// setupOwner cutover: once controld owns setup, run the reset in-process;
+	// while setupd owns setup (the default) forward it over D-Bus, unchanged.
+	if config.Get().SetupOwnerIsControld() {
+		return e.factoryResetInProcess(ctx)
+	}
 
 	// Send DBus signal to setupd to handle factory reset (show page + execute reset)
 	err := e.dbus.RetryableSend(ctx,
@@ -1476,6 +1740,41 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 		return nil, fmt.Errorf("failed to send factory reset signal: %w", err)
 	}
 
+	return CmdOK, nil
+}
+
+// clearPersistedRelayerTopic zeroes the persisted relayer topicID. See
+// factoryReset for the security rationale. Best-effort: a save failure is logged
+// but does not abort the reset (the reboot into the factory snapshot still
+// discards the topic). A no-op when no topic is persisted.
+func (e *executor) clearPersistedRelayerTopic() {
+	s := state.GetState()
+	if s == nil || s.Relayer == nil || s.Relayer.TopicID == "" {
+		return
+	}
+	s.Relayer.TopicID = ""
+	if err := s.Save(); err != nil {
+		e.logger.Error("Factory reset: failed to clear persisted relayer topic", zap.Error(err))
+	}
+}
+
+// factoryResetInProcess runs the controld-owned reset: start the system reset
+// unit directly. Ported from feral-setupd system.rs::factory_reset
+// (systemctl start set-factory-boot.service; no sudo, matching the otagate
+// updater-unit start). set-factory-boot.service stages a one-shot boot into the
+// pristine factory snapshot and reboots.
+func (e *executor) factoryResetInProcess(ctx context.Context) (interface{}, error) {
+	// On-screen confirmation before the device reboots into the factory image.
+	// Best-effort like all setup narration — a dead or absent screen must never
+	// block the reset. It is sent as an extension state ("factory_reset"): a
+	// current player accepts it with {ok:true} and renders nothing, so the panel
+	// only paints the confirmation once ff-player adds the state to its renderer.
+	e.setupUI().ShowFactoryReset()
+
+	out, err := e.exec.CommandContext(ctx, "systemctl", "start", "set-factory-boot.service").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("failed to start factory reset service: %w: %s", err, strings.TrimSpace(string(out)))
+	}
 	return CmdOK, nil
 }
 
@@ -1501,6 +1800,15 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	supportBundleID := strings.TrimSpace(cmdArgs.SupportBundleID)
 	if supportBundleID == "" {
 		supportBundleID = strings.TrimSpace(cmdArgs.SupportBundleIDSnake)
+	}
+
+	// setupOwner cutover: once controld owns setup, the log upload runs in-process
+	// (ported from feral-setupd log_uploader.rs) instead of being forwarded to
+	// setupd over D-Bus. While setupd owns setup (the default) the D-Bus forward
+	// below is unchanged. userId/title are validated for parity but unused by the
+	// v2 API, exactly as the Rust callback ignores them.
+	if config.Get().SetupOwnerIsControld() {
+		return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID)
 	}
 
 	legacyPayload := godbus.DBusPayload{
@@ -1545,6 +1853,67 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	}
 
 	return CmdOK, nil
+}
+
+// uploadLogsInProcess zips and uploads the device logs directly (controld-owned
+// path). Like feral-setupd's D-Bus callback it is fire-and-forget: the relayer
+// command ACKs immediately while the upload runs on a detached context, so a
+// slow zip or network transfer never holds the command executor (and its
+// command-storm budget) open. Errors are logged, not surfaced, matching setupd.
+func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string) (interface{}, error) {
+	info := e.logUploadBuildInfo(ctx)
+	uploader := e.newLogUploader()
+
+	go func() {
+		// Detached from the command ctx: the command returns as soon as the upload
+		// is scheduled, so ctx would be canceled out from under the transfer.
+		if err := uploader.Upload(context.Background(), apiKey, logUploadSource, info, supportBundleID); err != nil {
+			e.logger.Error("In-process log upload failed", zap.Error(err))
+		}
+	}()
+
+	return CmdOK, nil
+}
+
+// newLogUploader builds the uploader used by the in-process path, honoring a
+// test override.
+func (e *executor) newLogUploader() logUploaderIface {
+	if e.logUploaderFactory != nil {
+		return e.logUploaderFactory()
+	}
+	return newLogUploader(wrapper.NewHTTPClient(), e.os, e.json, e.logger)
+}
+
+// logUploadBuildInfo gathers the device identity/build metadata the log
+// submission reports, from the same on-device sources feral-setupd's AppState
+// used: the hostname for device_id and the FF1 build descriptor for
+// branch/version. A missing build descriptor is non-fatal — the upload proceeds
+// with empty branch/version rather than being blocked on metadata.
+func (e *executor) logUploadBuildInfo(ctx context.Context) logUploadBuildInfo {
+	info := logUploadBuildInfo{DeviceID: e.deviceID()}
+	branch, version, _, err := otagate.NewFileConfigProvider(e.os, e.json).LocalBuild(ctx)
+	if err != nil {
+		e.logger.Warn("Log upload: could not read local build; branch/version omitted", zap.Error(err))
+		return info
+	}
+	info.Branch = branch
+	info.Version = version
+	return info
+}
+
+// deviceID reads the device identity from the hostname, falling back to "FF1".
+// Ported from feral-setupd system.rs::get_device_id; it is the identity the
+// claim/pairing device_info and the log submission both report.
+func (e *executor) deviceID() string {
+	data, err := e.os.ReadFile(constants.HOSTNAME_FILE)
+	if err != nil {
+		return "FF1"
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return "FF1"
+	}
+	return id
 }
 
 func (e *executor) setVolume(ctx context.Context, args []byte) (interface{}, error) {
