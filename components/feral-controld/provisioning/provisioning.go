@@ -665,10 +665,16 @@ func (m *Machine) hasWiredLink(ctx context.Context) bool {
 // (unprovisioned / sustained-offline). Without it the portal would greet a
 // user mid-setup with the success banner of a join that happened weeks ago.
 // The join-failure re-raise in applyJoin deliberately keeps its status: the
-// phone re-associates and polls /status for exactly that outcome.
+// phone re-associates and polls /status for exactly that outcome. That is why
+// the reset is edge-gated on state: the unprovisioned-offline branch is
+// level-triggered, and a redundant offline event while the AP is already up
+// (e.g. wlan churn during the post-failure re-raise) must not wipe the
+// outcome the phone is about to poll for.
 func (m *Machine) resetJoinStatus() {
 	m.mu.Lock()
-	m.status = portal.Status{State: portal.JoinIdle}
+	if m.state != StateAPActive {
+		m.status = portal.Status{State: portal.JoinIdle}
+	}
 	m.mu.Unlock()
 }
 

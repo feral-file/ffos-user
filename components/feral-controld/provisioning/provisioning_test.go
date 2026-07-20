@@ -521,3 +521,27 @@ func TestFreshAPRaiseResetsStaleJoinStatus(t *testing.T) {
 	// The re-raised portal must greet the user fresh, not with the old outcome.
 	assert.Equal(t, portal.JoinIdle, h.m.Status().State)
 }
+
+// TestRedundantOfflineKeepsJoinFailureStatus: the unprovisioned-offline branch
+// is level-triggered, so a redundant offline event while the AP is already up
+// (wlan churn during the post-failure re-raise) must not wipe the join-failure
+// outcome the re-associated phone polls /status for.
+func TestRedundantOfflineKeepsJoinFailureStatus(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	// User submits a wrong password; the failure outcome must be recorded.
+	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
+	h.m.applyJoin(ctx, "HomeNet", "wrong-pw")
+	require.Equal(t, StateAPActive, h.m.State())
+	require.Equal(t, portal.JoinFailed, h.m.Status().State)
+
+	// Redundant offline event with the AP already up: status must survive.
+	h.m.onConnectivity(ctx, false)
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, portal.JoinFailed, h.m.Status().State)
+}
