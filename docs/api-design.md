@@ -117,6 +117,14 @@ All messages are JSON. The message envelope is:
 - If `command == "mintPairingApprovalDecision"` → handle inside
   `feral-controld` as a commandrouter pre-CDP special case that validates and
   completes a pending browser-session approval request.
+- If `command` is one of `downloadPlaylistItem`, `downloadPlaylist`,
+  `clearPlaylistItemCache`, `clearPlaylistCache`, or `getOfflineCacheStatus`
+  → handle inside `feral-controld` as a commandrouter pre-CDP special case
+  that drives the `offlinecache` package (software-artwork download/clear/
+  status; never forwarded to the player). See
+  `docs/controld-inbound-controller-messages.md`'s "Offline Artwork Caching
+  Inbound Messages" section and `docs/offline-artwork-capture.md` for the
+  full command/notification contract and on-disk design.
 - Otherwise → route to Chromium via CDP (`Runtime.evaluate`).
 
 **Device-control relayer commands**

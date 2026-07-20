@@ -56,7 +56,8 @@ type Replayer interface {
 	Attach(session CDPSession)
 	// EnableForItem loads itemID's captured record and enables Fetch
 	// interception scoped to it. Call before displaying a single cached
-	// item. Equivalent to EnableForPlaylist(ctx, []string{itemID}).
+	// item. Equivalent to EnableForPlaylist(ctx, []string{itemID}, false):
+	// a lone item is by definition not a "mixed" scope.
 	EnableForItem(ctx context.Context, itemID string) error
 	// EnableForPlaylist loads every itemID's captured record and enables
 	// Fetch interception scoped to the union of their captured
@@ -66,7 +67,22 @@ type Replayer interface {
 	// playlist client-side), so replay must recognize any cached item's
 	// URLs for as long as that playlist is showing rather than trying to
 	// track a single "current" item from the daemon side.
-	EnableForPlaylist(ctx context.Context, itemIDs []string) error
+	//
+	// mixed must be true whenever itemIDs is not the complete set of
+	// items the displayed playlist actually contains (i.e. the caller
+	// filtered out some uncached items before calling this — see
+	// KioskReplay.SyncPlaylist). It relaxes the miss policy to
+	// pass-through for the duration of this scope: with Fetch.enable
+	// patterned on "*", any request Chromium makes while ANY item from
+	// the playlist is on screen goes through this handler, including
+	// requests that belong to a sibling item this call was never told
+	// about because it isn't cached. Failing those as fail_closed would
+	// misreport a live, reachable resource as offline-missing just
+	// because it happens to share a CDP target with a cached item.
+	// mixed=false (a single item, or a playlist where every item is
+	// cached) keeps the configured missPolicy's strict guarantee, since
+	// every resource the page can legitimately need is then known.
+	EnableForPlaylist(ctx context.Context, itemIDs []string, mixed bool) error
 	// Disable turns interception off; all requests pass through
 	// untouched. Call when moving to an uncached/online item.
 	Disable(ctx context.Context) error
@@ -86,6 +102,11 @@ type replayer struct {
 	// map (rather than per-item scoping) is what lets EnableForPlaylist
 	// serve a multi-item playlist correctly: nil when disabled.
 	resources map[string]Resource
+	// mixedScope mirrors EnableForPlaylist's mixed parameter for the
+	// currently-enabled scope; read alongside resources under the same
+	// lock so a miss decision always sees a consistent (resources, mixed)
+	// pair. See EnableForPlaylist's doc for why this exists.
+	mixedScope bool
 }
 
 // NewReplayer constructs a Replayer. staticServer's BaseURL is used to let
@@ -120,10 +141,10 @@ func (r *replayer) Attach(session CDPSession) {
 }
 
 func (r *replayer) EnableForItem(ctx context.Context, itemID string) error {
-	return r.EnableForPlaylist(ctx, []string{itemID})
+	return r.EnableForPlaylist(ctx, []string{itemID}, false)
 }
 
-func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string) error {
+func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixed bool) error {
 	resources := make(map[string]Resource)
 	for _, itemID := range itemIDs {
 		rec, err := r.store.LoadItem(itemID)
@@ -138,6 +159,7 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string) erro
 	r.mu.Lock()
 	session := r.session
 	r.resources = resources
+	r.mixedScope = mixed
 	r.mu.Unlock()
 
 	if session == nil {
@@ -155,6 +177,7 @@ func (r *replayer) Disable(ctx context.Context) error {
 	r.mu.Lock()
 	session := r.session
 	r.resources = nil
+	r.mixedScope = false
 	r.mu.Unlock()
 
 	if session == nil {
@@ -191,6 +214,7 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 	r.mu.RLock()
 	session := r.session
 	resources := r.resources
+	mixed := r.mixedScope
 	r.mu.RUnlock()
 	if session == nil {
 		return
@@ -210,7 +234,7 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 	// ok=false), so no explicit nil-check is needed here when disabled.
 	resource, found := resources[evt.Request.URL]
 	if !found {
-		r.handleMiss(ctx, session, evt.RequestID)
+		r.handleMiss(ctx, session, evt.RequestID, mixed)
 		return
 	}
 
@@ -218,11 +242,11 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 	case resource.IsRedirect():
 		r.fulfill(ctx, session, evt.RequestID, statusOrDefault(resource.Status, go_http.StatusFound), "", nil, resource.RedirectTo)
 	case resource.SHA256 != "":
-		r.fulfillFromBlob(ctx, session, evt.RequestID, resource)
+		r.fulfillFromBlob(ctx, session, evt.RequestID, resource, mixed)
 	default:
 		// Captured but with no body (e.g. its fetch failed at capture
 		// time) — nothing to serve, so treat exactly like a miss.
-		r.handleMiss(ctx, session, evt.RequestID)
+		r.handleMiss(ctx, session, evt.RequestID, mixed)
 	}
 }
 
@@ -233,12 +257,12 @@ func statusOrDefault(status, fallback int) int {
 	return status
 }
 
-func (r *replayer) fulfillFromBlob(ctx context.Context, session CDPSession, requestID string, resource Resource) {
+func (r *replayer) fulfillFromBlob(ctx context.Context, session CDPSession, requestID string, resource Resource, mixed bool) {
 	size, err := r.store.BlobSize(resource.SHA256)
 	if err != nil {
 		r.logger.Warn("offline cache replay: blob size lookup failed, treating as miss",
 			zap.String("url", resource.URL), zap.Error(err))
-		r.handleMiss(ctx, session, requestID)
+		r.handleMiss(ctx, session, requestID, mixed)
 		return
 	}
 
@@ -252,10 +276,28 @@ func (r *replayer) fulfillFromBlob(ctx context.Context, session CDPSession, requ
 	if err != nil {
 		r.logger.Warn("offline cache replay: blob read failed, treating as miss",
 			zap.String("url", resource.URL), zap.Error(err))
-		r.handleMiss(ctx, session, requestID)
+		r.handleMiss(ctx, session, requestID, mixed)
 		return
 	}
-	r.fulfill(ctx, session, requestID, statusOrDefault(resource.Status, go_http.StatusOK), resource.ContentType, data, "")
+	r.fulfill(ctx, session, requestID, inlineFulfillStatus(resource.Status), resource.ContentType, data, "")
+}
+
+// inlineFulfillStatus normalizes a captured resource's status for the
+// inline-blob fulfill path (used for anything under largeAssetThreshold).
+// Capture only ever has the complete body to hand back here — a 206 was
+// what the browser's own request observed live, but fetchAndStoreBody
+// (capture.go) always issues an unranged GET and stores the whole asset,
+// so replaying that stored 206 verbatim with the full body and no
+// Content-Range header is not a valid partial-content response and can
+// break range-aware <video>/<audio> elements. 200 is the honest status
+// for what is actually being returned; only staticServer's redirect path
+// (>largeAssetThreshold) serves real Range/Content-Range semantics via
+// http.ServeContent.
+func inlineFulfillStatus(status int) int {
+	if status == go_http.StatusPartialContent {
+		return go_http.StatusOK
+	}
+	return statusOrDefault(status, go_http.StatusOK)
 }
 
 // fulfill issues Fetch.fulfillRequest. body/location are mutually
@@ -293,8 +335,15 @@ func (r *replayer) continueRequest(ctx context.Context, session CDPSession, requ
 	}
 }
 
-func (r *replayer) handleMiss(ctx context.Context, session CDPSession, requestID string) {
-	if r.missPolicy == MissPolicyPassThrough {
+func (r *replayer) handleMiss(ctx context.Context, session CDPSession, requestID string, mixed bool) {
+	// mixed means the enabled scope is a strict subset of a playlist's
+	// items (see EnableForPlaylist's doc): a miss here cannot be
+	// distinguished from "belongs to an uncached sibling item that must
+	// still reach the live network", so pass-through is the only choice
+	// that does not break that sibling's playback. The configured
+	// missPolicy's fail_closed guarantee only holds when the full set of
+	// resources the page can request is actually known.
+	if mixed || r.missPolicy == MissPolicyPassThrough {
 		r.continueRequest(ctx, session, requestID)
 		return
 	}

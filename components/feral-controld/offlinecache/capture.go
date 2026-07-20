@@ -49,6 +49,13 @@ type Capturer interface {
 	// discovered resource's bytes, and saves the resulting ItemRecord to
 	// the store. It returns the saved record.
 	Capture(ctx context.Context, item dp1playlist.PlaylistItem, captureWindowMs int) (*ItemRecord, error)
+	// Close tears down the headless Chromium the capturer acquires jobs
+	// from (see Downloader.Close's doc). Capturer is the only thing
+	// Service holds a reference to — Downloader itself is private to
+	// this package's Bootstrap wiring — so this delegating method is
+	// what lets Service.Stop reach it on daemon shutdown without
+	// main.go needing its own handle to the downloader.
+	Close() error
 }
 
 type capturer struct {
@@ -146,6 +153,10 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 		return nil, fmt.Errorf("offline cache: save item %s: %w", item.ID, err)
 	}
 	return rec, nil
+}
+
+func (c *capturer) Close() error {
+	return c.downloader.Close()
 }
 
 // resolveResources turns the tracker's observed network activity into the

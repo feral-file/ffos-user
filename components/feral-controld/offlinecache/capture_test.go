@@ -324,6 +324,19 @@ func TestCapturer_Capture_AcquireFails(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestCapturer_Close_DelegatesToDownloader(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockDownloader := mocks.NewMockOfflineCacheDownloader(ctrl)
+	mockDownloader.EXPECT().Close().Return(nil).Times(1)
+
+	store, _ := newTestStore(t)
+	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
+
+	assert.NoError(t, capturer.Close())
+}
+
 func TestCapturer_Capture_UsesDefaultWindowWhenUnset(t *testing.T) {
 	// A 0ms window must fall back to captureWindowDefault rather than
 	// returning immediately with no observation at all.

@@ -90,10 +90,12 @@ the item's `source`. For each distinct URL:
 - **3xx redirect** → record `status` + `redirectTo` (the `Location`
   header), no body. See §4.1.
 - **206 Partial Content** → CDP cannot return a body for a range response
-  either; `capture.go` falls back to an out-of-band full-URL fetch. See
-  §4.2.
+  either; `capture.go` falls back to an out-of-band full-URL fetch (no
+  `Range` header), so the stored blob is always the complete asset
+  regardless of what the browser's own request happened to ask for. See
+  §4.4.
 - **`blob:`/`data:` URL** → excluded entirely, never written to the index.
-  See §4.3.
+  See §4.2.
 - **`Network.loadingFailed`** → recorded so "never requested" can be
   distinguished from "requested and failed" in `Coverage.Reason` (as
   `loading_failed(<errorText>):<url>`, or `csp_blocked` for the CSP case in
@@ -101,7 +103,12 @@ the item's `source`. For each distinct URL:
 
 `downloader.go` runs one capture job at a time and tears the headless
 Chromium down when idle — the device already carries OOM pressure from the
-kiosk Chromium, so a second one is not left resident.
+kiosk Chromium, so a second one is not left resident. `Downloader.Close()`
+also tears it down immediately and rejects further jobs; `capturer.Close()`
+delegates to it, and `Service.Stop()` calls that once the worker goroutine
+has fully exited, so daemon shutdown (`main.go`) reaches this second
+Chromium process without needing its own direct handle to the downloader
+(it is private to `bootstrap.go`'s wiring).
 
 ## 4. Validated edge cases
 
@@ -172,9 +179,27 @@ The same 1.1 GB video is requested by the `<video>` element as an HTTP 206
 range request, and CDP cannot return a body for a 206 any more than for a
 3xx. `capture.go`'s fallback is the same as for redirects at the transport
 level: it issues a supplementary out-of-band fetch of the same URL
-(ignoring the original `Range` header) to obtain the full body once, then
-serves ranges out of that single cached blob during replay via the static
-server (which supports `Range` requests).
+(ignoring the original `Range` header) to obtain the full body once. The
+stored `Resource.Status` still records the originally-observed `206` (it
+is not rewritten at capture time), but the blob itself is always the
+complete asset — capture never has a partial body to store.
+
+Replay's two paths handle that stored `206` differently, and only one of
+them is a genuine `Range` response:
+
+- **Over `largeAssetThreshold` (§6, e.g. this 1.1 GB video)** → redirected
+  to `staticserver.go`'s loopback server, which serves the blob through
+  `http.ServeContent` and so honors any `Range` header on the *replayed*
+  request with a real `206`/`Content-Range` response.
+- **Under `largeAssetThreshold`** → fulfilled inline via
+  `Fetch.fulfillRequest` with the complete blob body. Replaying the stored
+  `206` verbatim here would be invalid (a `206` without a matching
+  `Content-Range` header, body length equal to the *whole* asset rather
+  than the requested range) and can break range-aware `<video>`/`<audio>`
+  elements; `replay.go`'s `inlineFulfillStatus` normalizes this case to
+  `200` instead, which is the honest status for "here is the entire
+  asset" — this is the only place capture's observed status is not used
+  as-is at replay time.
 
 ### 4.5 A CSP-broken-online item is not a caching failure
 
@@ -253,10 +278,28 @@ There is deliberately **no** top-level manifest, no separate
   on disk. Capture-time diagnostics collapse into `Coverage.{Complete,Reason}`
   (e.g. `csp_blocked`, `large_asset_static`, `capture_window_elapsed`,
   `download_failed`) rather than a separate `failedRequests` list.
-- Blobs are freed by filesystem **link count**: when an item or playlist
-  record referencing a blob is deleted, `store.go`'s GC removes any blob no
-  longer referenced by any surviving record, without a separate reference
-  count to keep in sync.
+- Blobs are freed by a **sweep, not a refcount**: `store.go`'s `GC()` walks
+  every saved item record's `Resources` to build the "keep" set, then
+  deletes any blob not in it. There is no separate reference count kept in
+  sync with saves/deletes — the saved item records are already the source
+  of truth for what is live.
+- That sweep is dangerous to run concurrently with an in-flight capture:
+  `capturer.Capture` writes each resource's blob as it observes it and only
+  calls `SaveItem` once, at the end, so for the whole capture window there
+  can be blobs on disk that no saved record yet references. `GC()` would
+  treat those as orphans. `Service` fences this: `ClearItem`/`ClearPlaylist`
+  and the disk-limit eviction path all run `GC()` through a shared
+  `captureMu` that the active `Capture` call also holds for its whole
+  duration, so a clear that races an unrelated in-flight capture simply
+  waits for that capture to finish saving before sweeping, rather than
+  risking deleting its not-yet-referenced blobs. `ClearItem`/`ClearPlaylist`
+  additionally drop any same-item job still sitting in the (single-worker)
+  capture queue, so a clear cannot be silently undone by a re-download that
+  was merely queued, not yet running. Canceling a capture that is already
+  *active* for the exact item being cleared is an accepted, narrower edge
+  case this does not cover: that capture's record will legitimately
+  reappear once it finishes, since only the queued case is preventable
+  without threading per-job cancellation through the worker.
 
 ## 6. Replay: hybrid `Fetch` interception + static-file fallback
 
@@ -274,21 +317,27 @@ absolute and cross-origin URLs without touching the artwork's own code):
   blob's bytes read from `blobs/<sha256>` directly. `replay.go` uses a
   200 MB threshold rather than pushing all the way to the ~400 MB
   ceiling found in §4.3 — comfortably under it so the CDP path never gets
-  close to the actual V8 string-length limit.
+  close to the actual V8 string-length limit. A stored `206` status is
+  normalized to `200` on this path — see §4.4 for why.
 - **Large resource (200 MB or over)** → redirect the request to
   `staticserver.go`'s loopback `http.Server`
   (`offlineCache.staticServerAddr`, default `127.0.0.1:8082`), which streams
-  the blob (with `Range` support for the 206 case, §4.4) instead of
+  the blob (with real `Range` support for the 206 case, §4.4) instead of
   base64-encoding it through CDP.
-- **Miss** (URL not in the cached item's resource set) → governed by
-  `offlineCache.missPolicy` (`MissPolicy` in `replay.go`):
+- **Miss** (URL not in the currently-enabled scope's resource set) →
+  governed by `offlineCache.missPolicy` (`MissPolicy` in `replay.go`) when
+  the scope is a single item or a playlist whose every item is cached:
   `fail_closed` (default) fails the request visibly rather than silently
   substituting or passing through, which guarantees deterministic offline
   behavior and surfaces partial captures honestly; `pass_through` lets the
   request continue to the real network and is only sensible when the
   device is known to be online (progressive capture) — it is a config
   toggle, not the default, and today is a plain pass-through rather than
-  an implementation of progressive re-capture.
+  an implementation of progressive re-capture. When the scope is a
+  *mixed* playlist (some items cached, some not — see below), a miss
+  always passes through regardless of the configured policy, since it
+  cannot be told apart from a legitimate request belonging to an
+  uncached sibling item still sharing the same CDP target.
 
 Replay is only enabled while a cached item is on screen:
 `commandrouter`'s `displayPlaylist` path and `playlist-refresher` call
@@ -296,6 +345,15 @@ Replay is only enabled while a cached item is on screen:
 item IDs before/after the CDP display call, which enables `Fetch`
 interception scoped to whichever of those IDs are actually cached
 (`EnableForPlaylist` in `replay.go`) and disables it entirely when none are.
+Because `Fetch.enable`'s pattern is `"*"` (every request on the page, not
+just the cached items' own URLs — DP-1 playback advances between a
+playlist's items client-side, without telling `feral-controld` which one
+is currently on screen), `SyncPlaylist` also tells `EnableForPlaylist`
+whether the enabled set is a strict subset of the displayed playlist's
+items (`mixed`); `replay.go` uses that to relax `fail_closed` to
+pass-through for exactly that scope, so an uncached sibling item can still
+reach the live network instead of having every one of its requests failed
+just because it happens to share a CDP target with a cached item.
 `KioskReplay.AttachOnReconnect` re-attaches the replay CDP session in
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.

@@ -77,9 +77,16 @@ type Service interface {
 	// launches the background worker goroutine. Call once before any
 	// other method; ctx bounds the worker's lifetime.
 	Start(ctx context.Context) error
-	// Stop cancels in-flight work and blocks until the worker goroutine
-	// has exited, so callers can rely on no further ProgressObserver
-	// callbacks firing after Stop returns.
+	// Stop cancels in-flight work, blocks until the worker goroutine has
+	// exited (so callers can rely on no further ProgressObserver
+	// callbacks firing after Stop returns), and then closes the
+	// Capturer — which tears down the headless Chromium process
+	// Downloader owns. This is the daemon's one shutdown hook for that
+	// second Chromium: main.go has no direct handle to the downloader
+	// (it is private to this package's Bootstrap wiring), so closing it
+	// here is what fulfills Downloader.Close's "called once, on daemon
+	// shutdown" contract without leaning on systemd's cgroup kill as the
+	// only cleanup path.
 	Stop()
 
 	DownloadItem(ctx context.Context, item dp1playlist.PlaylistItem) error
@@ -147,6 +154,23 @@ func (q *jobQueue) pop() (captureJob, bool) {
 	return j, true
 }
 
+// removeItems drops any not-yet-started job for one of ids. Used by
+// ClearItem/ClearPlaylist so a clear that races an item still sitting in
+// the queue (as opposed to actively capturing — see service.captureMu)
+// does not get silently undone once that queued job eventually runs and
+// calls SaveItem again.
+func (q *jobQueue) removeItems(ids map[string]bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	kept := q.items[:0]
+	for _, j := range q.items {
+		if !ids[j.itemID] {
+			kept = append(kept, j)
+		}
+	}
+	q.items = kept
+}
+
 type service struct {
 	store      Store
 	classifier Classifier
@@ -159,6 +183,22 @@ type service struct {
 	observer        ProgressObserver
 
 	queue *jobQueue
+
+	// captureMu fences store.GC() sweeps against an in-flight Capture.
+	// capturer.Capture (capture.go) writes blobs to the store one
+	// resource at a time as it observes them, and only calls
+	// store.SaveItem once at the very end — so for the whole span of a
+	// capture there can be freshly-written blobs on disk that no saved
+	// item record yet references. GC() treats "not referenced by any
+	// saved item" as "orphan, delete it" (store.go), so a GC that runs
+	// concurrently with that window (from ClearItem/ClearPlaylist, called
+	// directly from commandrouter on a different goroutine than the
+	// single capture worker) can delete another, unrelated item's
+	// in-progress capture out from under it before its record is ever
+	// saved. Holding captureMu for the full Capture call and every GC()
+	// call closes that window: a clear that races an active capture
+	// simply waits for it to finish saving before sweeping.
+	captureMu sync.Mutex
 
 	mu    sync.RWMutex
 	state map[string]ItemState // itemID -> last-known state, seeded from disk on Start
@@ -224,6 +264,9 @@ func (s *service) Stop() {
 	}
 	s.cancel()
 	<-s.doneCh
+	if err := s.capturer.Close(); err != nil {
+		s.logger.Warn("offline cache: closing capturer/headless chromium on shutdown failed", zap.Error(err))
+	}
 }
 
 func (s *service) run(ctx context.Context) {
@@ -346,7 +389,12 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem) {
 func (s *service) process(ctx context.Context, j captureJob) {
 	s.notify(j.itemID, StateDownloading, Coverage{})
 
+	// Held for the full Capture call, not just its final SaveItem — see
+	// captureMu's doc on why the whole blob-writing window must be
+	// fenced, not only the save.
+	s.captureMu.Lock()
 	rec, err := s.capturer.Capture(ctx, j.item, s.captureWindowMs)
+	s.captureMu.Unlock()
 	if err != nil {
 		s.logger.Warn("offline cache: capture failed", zap.String("item_id", j.itemID), zap.Error(err))
 		s.notify(j.itemID, StateFailed, Coverage{Reason: err.Error()})
@@ -390,11 +438,21 @@ func (s *service) enforceDiskLimit(justCapturedID string) {
 		}
 		s.notify(victim, StateNotCached, Coverage{})
 
-		if _, _, err := s.store.GC(); err != nil {
+		if _, _, err := s.gc(); err != nil {
 			s.logger.Warn("offline cache: GC during eviction failed", zap.Error(err))
 			return
 		}
 	}
+}
+
+// gc runs store.GC() under captureMu — see captureMu's doc. Every GC()
+// call in this file must go through here rather than calling the store
+// directly, or the fence it provides against an in-flight Capture is
+// silently bypassed.
+func (s *service) gc() (int, int64, error) {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	return s.store.GC()
 }
 
 func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
@@ -421,7 +479,30 @@ func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 	return oldestID, found
 }
 
+// ClearItem deletes itemID's record and GCs any blob it was the last
+// referent of. It returns ErrItemNotFound (wrapped) if itemID has no
+// record on disk, matching ClearPlaylist's existing not-cached behavior
+// and the not_found contract documented in
+// docs/controld-inbound-controller-messages.md — store.DeleteItem itself
+// stays a low-level idempotent primitive (Remove-if-exists), so the
+// existence check happens here via LoadItem, the same way ClearPlaylist
+// already checks via LoadPlaylist.
+//
+// Any job for itemID still sitting in the queue (not yet started) is
+// dropped so it cannot silently resurrect the record this call just
+// deleted once it eventually runs. A capture for itemID that is already
+// ACTIVE (past the queue, inside capturer.Capture) is a narrower,
+// accepted edge case: this call's GC still waits for it via captureMu
+// (so it can never corrupt that capture's blobs), but the capture is not
+// canceled, so its record will legitimately reappear once it finishes.
+// Canceling an in-flight capture would need per-job cancellation plumbed
+// through the single-worker queue, which is a larger change than this
+// fix's scope; the corruption bug (an unrelated capture's blobs getting
+// GC'd out from under it) is what captureMu closes.
 func (s *service) ClearItem(itemID string) error {
+	if _, err := s.store.LoadItem(itemID); err != nil {
+		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
+	}
 	if err := s.store.DeleteItem(itemID); err != nil {
 		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
 	}
@@ -429,13 +510,17 @@ func (s *service) ClearItem(itemID string) error {
 	s.mu.Lock()
 	delete(s.state, itemID)
 	s.mu.Unlock()
+	s.queue.removeItems(map[string]bool{itemID: true})
 
-	if _, _, err := s.store.GC(); err != nil {
+	if _, _, err := s.gc(); err != nil {
 		return fmt.Errorf("offline cache: GC after clearing item %s: %w", itemID, err)
 	}
 	return nil
 }
 
+// ClearPlaylist deletes a cached playlist's record and every one of its
+// items, GCing shared blobs. See ClearItem's doc for the queued-job and
+// active-capture semantics, which apply per item here too.
 func (s *service) ClearPlaylist(playlistID string) error {
 	raw, err := s.store.LoadPlaylist(playlistID)
 	if err != nil {
@@ -447,11 +532,14 @@ func (s *service) ClearPlaylist(playlistID string) error {
 		return fmt.Errorf("offline cache: parse playlist %s: %w", playlistID, err)
 	}
 
+	itemIDs := make(map[string]bool, len(playlist.Items))
 	s.mu.Lock()
 	for _, item := range playlist.Items {
 		delete(s.state, item.ID)
+		itemIDs[item.ID] = true
 	}
 	s.mu.Unlock()
+	s.queue.removeItems(itemIDs)
 
 	for _, item := range playlist.Items {
 		if err := s.store.DeleteItem(item.ID); err != nil {
@@ -463,7 +551,7 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	if err := s.store.DeletePlaylist(playlistID); err != nil {
 		return fmt.Errorf("offline cache: delete playlist %s: %w", playlistID, err)
 	}
-	if _, _, err := s.store.GC(); err != nil {
+	if _, _, err := s.gc(); err != nil {
 		return fmt.Errorf("offline cache: GC after clearing playlist %s: %w", playlistID, err)
 	}
 	return nil

@@ -65,7 +65,7 @@ func TestKioskReplay_AttachOnReconnect_DialFailure(t *testing.T) {
 	assert.Error(t, kr.AttachOnReconnect(context.Background()))
 }
 
-func TestKioskReplay_SyncPlaylist_EnablesOnlyCachedItems(t *testing.T) {
+func TestKioskReplay_SyncPlaylist_EnablesOnlyCachedItemsAsMixedScope(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -73,12 +73,38 @@ func TestKioskReplay_SyncPlaylist_EnablesOnlyCachedItems(t *testing.T) {
 	store, _ := newTestStore(t)
 	seedItem(t, store, "cached-1", "software payload")
 
-	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{"cached-1"}).Return(nil).Times(1)
+	// "uncached-1" is a real item in the displayed playlist that has no
+	// capture on disk: SyncPlaylist must flag this scope as mixed so
+	// Replayer relaxes fail_closed to pass-through for it, or its
+	// requests would be wrongly failed while cached-1 is also in scope.
+	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{"cached-1"}, true).Return(nil).Times(1)
 
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), zaptest.NewLogger(t))
 
 	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{"cached-1", "uncached-1", ""}))
+}
+
+func TestKioskReplay_SyncPlaylist_AllItemsCachedIsNotMixedScope(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	store, _ := newTestStore(t)
+	seedItem(t, store, "cached-1", "software payload one")
+	seedItem(t, store, "cached-2", "software payload two")
+
+	// Every real item in the playlist is cached (the "" entry is not a
+	// real item and must not count against that), so the fail_closed
+	// guarantee should still hold: mixed must be false.
+	mockReplayer.EXPECT().
+		EnableForPlaylist(gomock.Any(), []string{"cached-1", "cached-2"}, false).
+		Return(nil).Times(1)
+
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), zaptest.NewLogger(t))
+
+	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{"cached-1", "cached-2", ""}))
 }
 
 func TestKioskReplay_SyncPlaylist_NoCachedItemsDisables(t *testing.T) {

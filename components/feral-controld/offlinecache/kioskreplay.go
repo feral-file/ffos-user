@@ -106,10 +106,12 @@ func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
 // same playlist is still on screen.
 func (k *kioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error {
 	cachedIDs := make([]string, 0, len(itemIDs))
+	total := 0
 	for _, id := range itemIDs {
 		if id == "" {
 			continue
 		}
+		total++
 		if _, err := k.store.LoadItem(id); err == nil {
 			cachedIDs = append(cachedIDs, id)
 			continue
@@ -122,5 +124,9 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error 
 	if len(cachedIDs) == 0 {
 		return k.replayer.Disable(ctx)
 	}
-	return k.replayer.EnableForPlaylist(ctx, cachedIDs)
+	// mixed is true whenever some (but not all) of the playlist's items
+	// are cached: see Replayer.EnableForPlaylist's doc for why that
+	// relaxes the miss policy to pass-through for this scope.
+	mixed := len(cachedIDs) < total
+	return k.replayer.EnableForPlaylist(ctx, cachedIDs, mixed)
 }

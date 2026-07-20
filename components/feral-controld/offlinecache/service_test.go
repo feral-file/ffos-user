@@ -35,6 +35,12 @@ func setupService(t *testing.T, maxDiskBytes int64, observer offlinecache.Progre
 	store, _ := newTestStore(t)
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	// Stop() always closes the capturer (see service.go's Stop doc) —
+	// stubbed here rather than per-test since nearly every test defers
+	// Stop(); tests asserting the shutdown-close behavior itself set
+	// their own tighter expectation instead (see
+	// TestService_Stop_ClosesCapturer).
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
 
 	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, observer, zaptest.NewLogger(t))
 
@@ -292,11 +298,103 @@ func TestService_ClearItem_RemovesRecordAndBlob(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrBlobNotFound, "GC should reclaim the now-orphaned blob")
 }
 
-func TestService_ClearItem_MissingIsIdempotent(t *testing.T) {
+func TestService_ClearItem_MissingReturnsNotFound(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	assert.NoError(t, ts.service.ClearItem("does-not-exist"))
+	// Matches docs/controld-inbound-controller-messages.md's documented
+	// not_found contract for clearPlaylistItemCache, and ClearPlaylist's
+	// existing not-cached behavior below.
+	err := ts.service.ClearItem("does-not-exist")
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
+}
+
+// TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC is the
+// regression test for the captureMu fence: without it, GC() treats any
+// blob not yet referenced by a saved item record as an orphan, and
+// capturer.Capture writes blobs well before it calls SaveItem, so a clear
+// for an unrelated item could delete another item's in-flight capture's
+// blobs before that capture ever gets to save its record.
+func TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-a", "payload-a", time.Now())
+
+	itemB := dp1playlist.PlaylistItem{ID: "item-b", Source: "https://example.com/item-b"}
+	blobWritten := make(chan struct{})
+	proceedToSave := make(chan struct{})
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), itemB.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), itemB, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			// Mirrors capture.go's real shape: the blob lands on disk
+			// well before SaveItem persists any record referencing it.
+			hash, err := ts.store.WriteBlob([]byte("payload-b"))
+			require.NoError(t, err)
+			close(blobWritten)
+			<-proceedToSave
+			rec := &offlinecache.ItemRecord{
+				ItemID: "item-b", Item: itemB, Entry: itemB.Source,
+				Resources: []offlinecache.Resource{{URL: itemB.Source, Status: 200, SHA256: hash, ContentType: "text/html"}},
+				Coverage:  offlinecache.Coverage{Complete: true},
+			}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+	require.NoError(t, ts.service.DownloadItem(context.Background(), itemB))
+
+	<-blobWritten // item-b's blob now exists on disk, but its record does not yet.
+
+	clearDone := make(chan error, 1)
+	go func() { clearDone <- ts.service.ClearItem("item-a") }()
+
+	select {
+	case <-clearDone:
+		t.Fatal("ClearItem(\"item-a\") returned before the unrelated in-flight capture of item-b finished; GC was not fenced against it")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(proceedToSave)
+	require.NoError(t, <-clearDone)
+
+	_, err := ts.store.LoadItem("item-a")
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "item-a should still be cleared once the fence releases")
+
+	rec, err := ts.store.LoadItem("item-b")
+	require.NoError(t, err, "item-b's capture must have completed normally")
+	_, err = ts.store.ReadBlob(rec.Resources[0].SHA256)
+	assert.NoError(t, err, "item-b's blob must not have been GC'd out from under its own in-flight capture")
+}
+
+// TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns is the
+// regression test for jobQueue.removeItems: clearing an item that has a
+// re-download still sitting in the queue (not yet started) must prevent
+// that queued job from silently resurrecting the record once it
+// eventually runs, or "clear" would not actually stick.
+func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "old payload", time.Now())
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	// Capture is deliberately given no expectation: if the queued job is
+	// not removed, the worker (started below) calling it unexpectedly
+	// fails the test via gomock.
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+	require.NoError(t, ts.service.ClearItem("item-1"))
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.Never(t, func() bool {
+		_, err := ts.store.LoadItem("item-1")
+		return err == nil
+	}, 200*time.Millisecond, 10*time.Millisecond, "the cleared item's queued recapture must not resurrect its record")
 }
 
 func TestService_ClearPlaylist_RemovesPlaylistAndItsItems(t *testing.T) {
@@ -387,6 +485,25 @@ func TestService_Stop_WithoutStart_Noop(t *testing.T) {
 	assert.NotPanics(t, func() { ts.service.Stop() })
 }
 
+// TestService_Stop_ClosesCapturer is the regression test for the
+// downloader-shutdown fix: Stop must close the Capturer (which tears
+// down Downloader's headless Chromium — see capturer.Close and
+// downloader.go's Close doc) so main.go's shutdown sequence actually
+// reaches that second Chromium process instead of relying solely on
+// systemd's cgroup kill to clean it up.
+func TestService_Stop_ClosesCapturer(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store, _ := newTestStore(t)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).Times(1)
+
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+	svc.Stop()
+}
+
 func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 	ts := setupService(t, 12, nil)
 	defer ts.ctrl.Finish()
@@ -436,6 +553,7 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 	store, _ := newTestStore(t)
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}

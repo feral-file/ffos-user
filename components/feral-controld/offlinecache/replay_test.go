@@ -179,7 +179,7 @@ func TestReplayer_EnableForPlaylist_UnionsMultipleItemsResources(t *testing.T) {
 	res2 := seedItem(t, ts.store, "item-2", "software payload two")
 	ts.stubFetchEnable()
 
-	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1", "item-2"}))
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1", "item-2"}, false))
 
 	done1 := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEvent(t, "req-1", res1.URL))
@@ -195,7 +195,7 @@ func TestReplayer_EnableForPlaylist_UnknownItemErrorsAndLeavesScopeUnchanged(t *
 	defer ts.ctrl.Finish()
 	seedItem(t, ts.store, "item-1", "software payload")
 
-	err := ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1", "missing-item"})
+	err := ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1", "missing-item"}, false)
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 }
 
@@ -204,12 +204,50 @@ func TestReplayer_EnableForPlaylist_EmptyListIsValidNoScope(t *testing.T) {
 	defer ts.ctrl.Finish()
 	ts.stubFetchEnable()
 
-	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), nil))
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), nil, false))
 
 	// With no items in scope, even a URL that would otherwise resolve
 	// (there is none seeded here) must fail closed.
 	done := ts.expectSend("Fetch.failRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/anything.js"))
+	awaitSend(t, done)
+}
+
+func TestReplayer_EnableForPlaylist_MixedScopeMissPassesThroughEvenUnderFailClosed(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload")
+	ts.stubFetchEnable()
+
+	// mixed=true models KioskReplay.SyncPlaylist enabling only the cached
+	// items of a playlist that also contains an uncached sibling: a miss
+	// (the sibling's own request) must pass through to the live network
+	// even though the configured policy is fail_closed, or the sibling
+	// item could never play. A cached hit must still be served normally.
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1"}, true))
+
+	missDone := ts.expectSend("Fetch.continueRequest")
+	ts.handler(requestPausedEvent(t, "req-miss", "https://example.com/uncached-sibling.js"))
+	awaitSend(t, missDone)
+
+	hitDone := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-hit", res.URL))
+	awaitSend(t, hitDone)
+}
+
+func TestReplayer_EnableForPlaylist_NonMixedScopeMissStillFailsClosed(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedItem(t, ts.store, "item-1", "software payload")
+	ts.stubFetchEnable()
+
+	// mixed=false (every item in the displayed playlist is cached) must
+	// keep the strict fail_closed guarantee: nothing here should ever
+	// legitimately need the live network.
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1"}, false))
+
+	done := ts.expectSend("Fetch.failRequest")
+	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/unrelated.js"))
 	awaitSend(t, done)
 }
 
@@ -260,6 +298,41 @@ func TestReplayer_ProcessRequestPaused_FulfillsSmallBlob(t *testing.T) {
 	ct, ok := headerValue(t, params, "Content-Type")
 	require.True(t, ok)
 	assert.Equal(t, "text/html", ct)
+}
+
+func TestReplayer_ProcessRequestPaused_PartialContentBlobNormalizedTo200(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	// Capture observed this resource as 206 (the page's own request used
+	// a Range header), but capture.go's fetchAndStoreBody always fetches
+	// and stores the complete body regardless. Replaying the stored 206
+	// verbatim with the full body and no Content-Range would be spec-
+	// non-compliant; this resource is well under largeAssetThreshold so
+	// it takes the inline-fulfill path, not the static-server redirect.
+	hash, err := ts.store.WriteBlob([]byte("audio-bytes"))
+	require.NoError(t, err)
+	rec := &offlinecache.ItemRecord{
+		ItemID: "item-206",
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/track.mp3", Status: 206, SHA256: hash, ContentType: "audio/mpeg"},
+		},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}
+	require.NoError(t, ts.store.SaveItem(rec))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-206"))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/track.mp3"))
+	params := awaitSend(t, done)
+
+	assert.EqualValues(t, 200, params["responseCode"])
+	body, ok := params["body"].(string)
+	require.True(t, ok)
+	decoded, err := base64.StdEncoding.DecodeString(body)
+	require.NoError(t, err)
+	assert.Equal(t, "audio-bytes", string(decoded))
 }
 
 func TestReplayer_ProcessRequestPaused_RedirectResource(t *testing.T) {

@@ -48,7 +48,9 @@ type Downloader interface {
 	// arrives within the configured idle timeout, Chromium is torn down.
 	Release()
 	// Close tears Chromium down immediately and makes all pending/future
-	// Acquire calls fail. Called once, on daemon shutdown.
+	// Acquire calls fail. Called once, on daemon shutdown, via
+	// Capturer.Close -> Service.Stop (main.go has no direct handle to
+	// Downloader itself — see bootstrap.go).
 	Close() error
 }
 
