@@ -296,7 +296,7 @@ func (s *service) Stop() {
 	if s.cancel == nil {
 		return
 	}
-	// Flip started under mu before cancelling: enqueue() takes the same
+	// Flip started under mu before canceling: enqueue() takes the same
 	// lock to check-and-push atomically, so once this returns no
 	// concurrent DownloadItem/DownloadPlaylist call can observe
 	// started==true and still push a job after the worker below is
@@ -331,7 +331,7 @@ func (s *service) run(ctx context.Context) {
 				// runs, it picks between them uniformly at random, so
 				// ctx.Done() can still win the pick. Drain whatever is
 				// left before actually returning so that job fails
-				// fast (ctx is already cancelled, so Capture below
+				// fast (ctx is already canceled, so Capture below
 				// will error quickly) instead of sitting stranded in
 				// StateQueued forever with no worker left to drain it.
 				for {
