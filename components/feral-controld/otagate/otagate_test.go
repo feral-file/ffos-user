@@ -242,3 +242,43 @@ func TestModeRequiredVsAvailable(t *testing.T) {
 		t.Errorf("available mode should run updater once, got %d", availRunner.calls())
 	}
 }
+
+// TestUpdateProgressReachesOnProgress asserts the runner's parsed percent is
+// carried through the gate to Deps.OnProgress in order (the seam devicectl points
+// at the setupui updating overlay). A progress line with no percent surfaces as
+// -1; the gate forwards it as-is and leaves the skip policy to the consumer.
+func TestUpdateProgressReachesOnProgress(t *testing.T) {
+	cases := []struct {
+		name string
+		emit []int
+		want []int
+	}{
+		{name: "percent lines forwarded in order", emit: []int{30, 60, 100}, want: []int{30, 60, 100}},
+		{name: "percent-less line surfaces as -1", emit: []int{-1, 50, 100}, want: []int{-1, 50, 100}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeRunner{results: []error{nil}, emit: tc.emit}
+			deps := localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, newFakeClock())
+			var got []int
+			deps.OnProgress = func(pct int) { got = append(got, pct) }
+			gate := New(deps)
+
+			res, err := gate.RequestUpdate(context.Background())
+			if err != nil {
+				t.Fatalf("RequestUpdate error: %v", err)
+			}
+			if res != ResultUpdateStarted {
+				t.Fatalf("result = %v, want ResultUpdateStarted", res)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("OnProgress received %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("OnProgress[%d] = %d, want %d", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

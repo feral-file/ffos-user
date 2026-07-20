@@ -111,9 +111,9 @@ type setupStateSource interface {
 }
 
 // provisioningStatusProvider wraps the default hub status provider and overrides
-// setup_state with the live provisioning machine's state. It is used only when
-// controld owns setup; while setupd owns it the machine is dormant and the base
-// provider's placeholder claim-derived setup_state is kept instead.
+// setup_state with the live provisioning machine's state. When no machine is
+// wired (a nil machine, e.g. the default/test path) the base provider's
+// placeholder claim-derived setup_state is kept instead.
 type provisioningStatusProvider struct {
 	base    hub.StatusProvider
 	machine setupStateSource

@@ -15,8 +15,9 @@ import (
 // narratorSpy records setup-narration calls in order so ordering invariants can
 // be asserted.
 type narratorSpy struct {
-	calls   []string
-	lastURL string
+	calls        []string
+	lastURL      string
+	lastProgress int
 }
 
 func (s *narratorSpy) ShowClaimQR(url string) { s.calls = append(s.calls, "claim"); s.lastURL = url }
@@ -25,6 +26,10 @@ func (s *narratorSpy) ShowFactoryReset()      { s.calls = append(s.calls, "facto
 func (s *narratorSpy) ShowJoinFailed(reason string) {
 	s.calls = append(s.calls, "join_failed")
 	s.lastURL = reason
+}
+func (s *narratorSpy) ShowUpdating(progress int) {
+	s.calls = append(s.calls, "updating")
+	s.lastProgress = progress
 }
 func (s *narratorSpy) Hide() { s.calls = append(s.calls, "hide") }
 
@@ -83,4 +88,22 @@ func TestFactoryResetInProcess_ShowsConfirmationThenStartsService(t *testing.T) 
 	assert.Equal(t, CmdOK, res)
 	// The controld-owned reset pushes the on-screen confirmation.
 	assert.Equal(t, []string{"factory_reset"}, spy.calls)
+}
+
+// TestNarrateUpdateProgress_ForwardsPercentSkipsUnparsed exercises the exact
+// Deps.OnProgress callback otaGateInstance installs: a parsed percent paints the
+// updating overlay with that value; a percent-less progress line (pct -1) is
+// skipped so the panel never shows a misleading 0%.
+func TestNarrateUpdateProgress_ForwardsPercentSkipsUnparsed(t *testing.T) {
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
+
+	e.narrateUpdateProgress(42)
+	assert.Equal(t, []string{"updating"}, spy.calls)
+	assert.Equal(t, 42, spy.lastProgress)
+
+	// A percent-less line must not add another narration nor overwrite the value.
+	e.narrateUpdateProgress(-1)
+	assert.Equal(t, []string{"updating"}, spy.calls)
+	assert.Equal(t, 42, spy.lastProgress)
 }

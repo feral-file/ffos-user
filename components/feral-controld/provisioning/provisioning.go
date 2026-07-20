@@ -254,9 +254,10 @@ func New(cfg Config) *Machine {
 // Lifecycle (the Run/Start-Stop surface main.go composes)
 // -----------------------------------------------------------------------------
 
-// Start launches the supervised event loop in the background. main.go can leave
-// the machine dormant by simply not calling Start (the setupOwner flag), so no
-// AP is ever raised on a device that should not own setup.
+// Start launches the supervised event loop in the background. A Machine whose
+// Start is never called stays fully dormant and raises no AP; run() guards its
+// Start call so the test app (which leaves Provisioning nil) never pops the setup
+// AP.
 func (m *Machine) Start(ctx context.Context) {
 	m.runMu.Lock()
 	defer m.runMu.Unlock()

@@ -42,7 +42,7 @@ const (
 	stateHidden     = "hidden"
 
 	// stateFactoryReset is an extension state used by the in-process factory-reset
-	// flow (setupOwner=controld). It is deliberately NOT in the required set that
+	// flow. It is deliberately NOT in the required set that
 	// validateSetupDisplayContract checks: the currently-shipping player manifest
 	// does not list it, and requiring it would fail the gate and disable ALL setup
 	// narration on fielded players. Players that predate the corresponding

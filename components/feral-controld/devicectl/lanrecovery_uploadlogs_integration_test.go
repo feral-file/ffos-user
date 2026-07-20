@@ -5,7 +5,7 @@ package devicectl
 // Companion to hub/lanrecovery_integration_test.go. That test proves the ex-BLE
 // recovery commands traverse the real hub -> storm gate -> executor pipeline
 // offline. This test covers the one leg that cannot be observed from the hub
-// package: the setupOwner=controld in-process log upload, whose HTTP client and
+// package: the controld-owned in-process log upload, whose HTTP client and
 // endpoint are only reachable through devicectl's unexported logUploaderFactory
 // seam. Here we drive the REAL executor's uploadLogs command and assert the
 // ported v2 wire contract — a pre-sign POST followed by an S3 PUT — lands on a

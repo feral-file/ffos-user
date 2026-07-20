@@ -130,6 +130,10 @@ type fakeRunner struct {
 	mu      sync.Mutex
 	results []error
 	call    int
+	// emit, when non-nil, is delivered to Run's onProgress callback in order
+	// (before the scripted result is returned), modeling the updater's progress
+	// lines. Each entry is a percent, or -1 for a line with no percent field.
+	emit []int
 	// gate, when non-nil, is received-from before each Run returns; entered is
 	// closed on the first Run entry so a test can synchronize on it.
 	gate    chan struct{}
@@ -137,10 +141,11 @@ type fakeRunner struct {
 	once    sync.Once
 }
 
-func (r *fakeRunner) Run(_ context.Context, _ func(string)) error {
+func (r *fakeRunner) Run(_ context.Context, onProgress func(int, string)) error {
 	r.mu.Lock()
 	idx := r.call
 	r.call++
+	emit := r.emit
 	r.mu.Unlock()
 
 	if r.entered != nil {
@@ -148,6 +153,12 @@ func (r *fakeRunner) Run(_ context.Context, _ func(string)) error {
 	}
 	if r.gate != nil {
 		<-r.gate
+	}
+
+	if onProgress != nil {
+		for _, pct := range emit {
+			onProgress(pct, "")
+		}
 	}
 
 	r.mu.Lock()

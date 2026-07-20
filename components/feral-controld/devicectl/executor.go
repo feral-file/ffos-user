@@ -406,6 +406,7 @@ type setupNarrator interface {
 	ShowReady()
 	ShowFactoryReset()
 	ShowJoinFailed(reason string)
+	ShowUpdating(progress int)
 	Hide()
 }
 
@@ -1638,6 +1639,9 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 			Runner: otagate.NewSystemdRunner(e.exec, e.clock, e.logger),
 			Config: otagate.NewFileConfigProvider(e.os, e.json),
 			Logger: e.logger,
+			// Narrate update progress on-screen: the gate hands each parsed percent
+			// to setupui's updating overlay via this callback.
+			OnProgress: e.narrateUpdateProgress,
 		})
 		// Surface a latched permanent OTA failure on-screen. There is no dedicated
 		// update-failed CDP state in the shipping player contract, so we reuse the
@@ -1653,6 +1657,19 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 		})
 	})
 	return e.otaGate
+}
+
+// narrateUpdateProgress paints the OTA update percent on-screen via the shared
+// setup narrator. It is the gate's Deps.OnProgress callback. pct == -1 marks a
+// progress line the updater emitted without a percent field (e.g. "Preparing");
+// that is skipped rather than painting a misleading 0%, since ff-player's
+// updating panel renders progress 0 as an actual zero. Best-effort like every
+// setupui push: a dead or absent player never gates the update.
+func (e *executor) narrateUpdateProgress(pct int) {
+	if pct < 0 {
+		return
+	}
+	e.setupUI().ShowUpdating(pct)
 }
 
 func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {

@@ -88,6 +88,12 @@ type Deps struct {
 	Runner UpdateRunner
 	Config ConfigProvider
 	Logger *zap.Logger
+
+	// OnProgress, when non-nil, receives each update progress percent parsed from
+	// the updater log (pct == -1 for a progress line that carried no percent
+	// field). nil keeps the debug-log-only behavior. devicectl wires this to the
+	// setupui updating narration so the on-screen overlay tracks the update.
+	OnProgress func(pct int)
 }
 
 // Gate is the OTA update gate. Construct it once (long-lived) so the single-flight
@@ -224,11 +230,16 @@ func (g *Gate) runUpdateLadder(ctx context.Context) error {
 	return nil
 }
 
-func (g *Gate) forwardProgress(progress string) {
-	// Progress copy drove the setupd TV screen; controld has no UI surface yet
-	// (a future setupui package will consume this). Log at debug for now.
+func (g *Gate) forwardProgress(pct int, message string) {
+	// Progress copy drove the setupd TV screen; controld now narrates it through
+	// Deps.OnProgress (devicectl points that at setupui's updating overlay). pct is
+	// forwarded as-is, including -1 for a percent-less line, so the policy of what
+	// to do with -1 lives with the consumer, not here. The debug log is retained.
 	if g.deps.Logger != nil {
-		g.deps.Logger.Debug("OTA update progress", zap.String("progress", progress))
+		g.deps.Logger.Debug("OTA update progress", zap.Int("pct", pct), zap.String("progress", message))
+	}
+	if g.deps.OnProgress != nil {
+		g.deps.OnProgress(pct)
 	}
 }
 

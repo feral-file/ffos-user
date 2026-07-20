@@ -35,13 +35,14 @@ const (
 
 // UpdateRunner spawns the OTA updater and blocks until it completes (returns nil
 // after reaching 100%) or fails (returns an error carrying the raw updater
-// message so the retry ladder can classify it). onProgress receives each
-// human-readable progress string for a future UI surface; it may be nil.
+// message so the retry ladder can classify it). onProgress receives the parsed
+// percent and human-readable message for each progress line; pct is -1 when the
+// line carried no percent field (e.g. a "Preparing" message). It may be nil.
 //
 // This is the injectable seam the gate's table tests replace with a fake, and
 // the boundary behind which the real systemd-unit + log-tail mechanism lives.
 type UpdateRunner interface {
-	Run(ctx context.Context, onProgress func(progress string)) error
+	Run(ctx context.Context, onProgress func(pct int, message string)) error
 }
 
 // systemdRunner replicates feral-setupd's updater.rs spawn/monitor mechanism:
@@ -70,7 +71,7 @@ func NewSystemdRunner(exec wrapper.Exec, clock wrapper.Clock, logger *zap.Logger
 	}
 }
 
-func (r *systemdRunner) Run(ctx context.Context, onProgress func(string)) error {
+func (r *systemdRunner) Run(ctx context.Context, onProgress func(int, string)) error {
 	// A per-run id lets us ignore stale lines from an earlier updater run still
 	// present in the append-only log. Ported from updater.rs run id.
 	id := fmt.Sprintf("controld-%d", rand.Int63n(int64(^uint64(0)>>1))+1) //nolint:gosec
@@ -119,7 +120,7 @@ func (r *systemdRunner) openLogWithRetry(ctx context.Context) (io.ReadCloser, er
 	}
 }
 
-func (r *systemdRunner) tail(ctx context.Context, rc io.Reader, id string, onProgress func(string)) error {
+func (r *systemdRunner) tail(ctx context.Context, rc io.Reader, id string, onProgress func(int, string)) error {
 	reader := bufio.NewReader(rc)
 	receivedProgress := false
 	for {
@@ -133,7 +134,11 @@ func (r *systemdRunner) tail(ctx context.Context, rc io.Reader, id string, onPro
 			case updaterProgress:
 				receivedProgress = true
 				if onProgress != nil {
-					onProgress(evt.message)
+					pct := -1
+					if evt.hasPct {
+						pct = evt.pct
+					}
+					onProgress(pct, evt.message)
 				}
 				if evt.pct == 100 {
 					return nil
@@ -172,8 +177,12 @@ const (
 )
 
 type updaterEvent struct {
-	kind    updaterLineKind
-	pct     int
+	kind updaterLineKind
+	pct  int
+	// hasPct distinguishes a real "progress=0" from a progress line that carried
+	// no percent field (a message-only "Preparing" line). The tail forwards -1 for
+	// the latter so a downstream UI does not paint a misleading 0%.
+	hasPct  bool
 	message string
 }
 
@@ -200,6 +209,7 @@ func parseUpdaterLine(line, id string) updaterEvent {
 		if m := progressValueRe.FindStringSubmatch(line); m != nil {
 			pct, _ := strconv.Atoi(m[1])
 			evt.pct = pct
+			evt.hasPct = true
 			payload = m[1] + "%"
 		}
 		if m := messageRe.FindStringSubmatch(line); m != nil {

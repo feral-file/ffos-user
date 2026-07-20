@@ -1,6 +1,10 @@
 package otagate
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 // TestParseUpdaterLine ports the line-interpretation logic from
 // updater.rs::run_update_and_send (id filtering, [PROGRESS] percent/message
@@ -66,5 +70,48 @@ func TestParseUpdaterLine(t *testing.T) {
 				t.Errorf("message = %q, want %q", evt.message, tc.wantMsg)
 			}
 		})
+	}
+}
+
+// TestTailForwardsParsedPercent drives systemdRunner.tail over canned log lines
+// and asserts each progress line's parsed percent reaches onProgress. A line with
+// no percent field surfaces as -1 (not a misleading 0), and the terminal 100 line
+// is forwarded before tail returns nil.
+func TestTailForwardsParsedPercent(t *testing.T) {
+	const id = "controld-7"
+	lines := strings.Join([]string{
+		`2026-01-01T00:00:00+0000 [PROGRESS] id=controld-7 message="Preparing"`,
+		`2026-01-01T00:00:00+0000 [PROGRESS] id=controld-99 progress=5 message="Other run"`,
+		`2026-01-01T00:00:00+0000 [PROGRESS] id=controld-7 progress=30 message="Downloading"`,
+		`2026-01-01T00:00:00+0000 [PROGRESS] id=controld-7 progress=100 message="Done"`,
+		"",
+	}, "\n")
+
+	r := &systemdRunner{clock: newFakeClock()}
+
+	type report struct {
+		pct int
+		msg string
+	}
+	var got []report
+	err := r.tail(context.Background(), strings.NewReader(lines), id, func(pct int, msg string) {
+		got = append(got, report{pct, msg})
+	})
+	if err != nil {
+		t.Fatalf("tail error: %v", err)
+	}
+
+	want := []report{
+		{-1, "Preparing"},
+		{30, "30% - Downloading"},
+		{100, "100% - Done"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("onProgress calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("onProgress[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
