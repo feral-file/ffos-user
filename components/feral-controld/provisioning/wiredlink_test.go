@@ -88,6 +88,62 @@ func TestWiredLinkGuard(t *testing.T) {
 	}
 }
 
+// TestWiredLinkGuardProvisionedSustainedOffline covers the guard's PROVISIONED
+// flavor: a provisioned device on active ethernet must not raise the AP even
+// when the sustained-offline window expires (the AP exists to fix broken Wi-Fi
+// credentials; the wire is already the intended path). The window is re-armed
+// fresh at each guarded expiry, so unplugging the wire starts a new sustained
+// window rather than raising the AP instantly off a stale one.
+func TestWiredLinkGuardProvisionedSustainedOffline(t *testing.T) {
+	wired := true
+	rec := &recorder{}
+	h := &harness{
+		rec:      rec,
+		ap:       &fakeAP{rec: rec, info: softap.Info{SSID: "FF1-abc", PSK: "abc12345"}},
+		wifi:     &fakeWifi{rec: rec},
+		conn:     &fakeConn{},
+		clk:      newFakeClock(),
+		notifier: &fakeNotifier{},
+	}
+	h.m = New(Config{
+		AP:            h.ap,
+		Wifi:          h.wifi,
+		Connectivity:  h.conn,
+		Clock:         h.clk,
+		Logger:        zap.NewNop(),
+		Notifier:      h.notifier,
+		OfflineWindow: 5 * time.Minute,
+		CheckInterval: 15 * time.Second,
+		PortalAddr:    "127.0.0.1:0",
+		WiredLink:     func(context.Context) bool { return wired },
+		NewPortal: func(cfg portal.Config) PortalServer {
+			p := &fakePortal{rec: rec, cfg: cfg}
+			h.portals = append(h.portals, p)
+			return p
+		},
+	})
+	h.wifi.setProfile(true) // provisioned
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false) // offline: arms the window
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+
+	h.clk.advance(6 * time.Minute) // past the window, but wired
+	h.m.onTick(ctx)
+	assert.Equal(t, StateOfflineRetrying, h.m.State(), "wired expiry must not raise the AP")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	wired = false // wire unplugged, still offline
+	h.m.onTick(ctx)
+	assert.Equal(t, 0, h.rec.count("ap.Up"),
+		"unplug must not raise instantly off a stale window (window was re-armed)")
+
+	h.clk.advance(6 * time.Minute) // a fresh sustained window elapses wireless
+	h.m.onTick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
 // TestWiredLinkGuardNilDefaultsToNoSuppression proves the guard is opt-in: with no
 // WiredLink configured (the newHarness default), an unprovisioned offline device
 // raises the AP exactly as before, so the seam cannot silently change behavior on

@@ -437,6 +437,20 @@ func (m *Machine) onTick(ctx context.Context) {
 
 	if st == StateOfflineRetrying && !since.IsZero() &&
 		m.clock.Now().Sub(since) >= m.offlineWindow {
+		// Wired-link guard, provisioned flavor: the sustained-offline AP exists to
+		// fix broken Wi-Fi credentials, but a device on active ethernet is already
+		// on its intended path — popping the setup AP would only add noise (and an
+		// open WPA2 surface). Re-arm the window instead of raising: if the wire is
+		// later unplugged while still offline, the NEXT expiry raises the AP, which
+		// keeps the "sustained offline" semantics relative to losing the wire.
+		if m.hasWiredLink(ctx) {
+			// clearOffline+start = reset to a FRESH window: startOfflineWindow alone
+			// is a no-op on an armed window, which would leave a stale expiry that
+			// raises the AP instantly the moment the wire disappears.
+			m.clearOffline()
+			m.startOfflineWindow()
+			return
+		}
 		m.clearOffline()
 		m.transition(ctx, StateAPActive, Detail{
 			Reason:  "sustained-offline",
