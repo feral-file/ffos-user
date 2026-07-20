@@ -2,10 +2,12 @@ package offlinecache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	go_http "net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -14,7 +16,13 @@ import (
 
 // blobsRoutePrefix is the fixed path prefix the static server serves blobs
 // under; kept as a constant so URLFor and the handler cannot drift apart.
-const blobsRoutePrefix = "/blobs/"
+const (
+	blobsRoutePrefix = "/blobs/"
+	// staticServerReadHeaderTimeout bounds how long a client may take to
+	// send request headers. Loopback-only, but gosec G112 still applies;
+	// matches hub's posture for local HTTP servers in this daemon.
+	staticServerReadHeaderTimeout = 10 * time.Second
+)
 
 // StaticServer is the loopback HTTP fallback for assets over the ~400MB
 // CDP Fetch.fulfillRequest body ceiling: base64-encoding a body that large
@@ -59,7 +67,11 @@ func NewStaticServer(addr string, store Store, osWrapper wrapper.OS, logger *zap
 	s := &staticServer{addr: addr, store: store, os: osWrapper, logger: logger}
 	mux := go_http.NewServeMux()
 	mux.HandleFunc(blobsRoutePrefix, s.handleBlob)
-	s.server = wrapper.NewHTTPServer(&go_http.Server{Addr: addr, Handler: mux})
+	s.server = wrapper.NewHTTPServer(&go_http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: staticServerReadHeaderTimeout,
+	})
 	return s
 }
 
@@ -133,7 +145,7 @@ func (s *staticServer) Handler() go_http.Handler {
 }
 
 func (s *staticServer) ListenAndServe() error {
-	if err := s.server.ListenAndServe(); err != nil && err != go_http.ErrServerClosed {
+	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, go_http.ErrServerClosed) {
 		return fmt.Errorf("offline cache static server: %w", err)
 	}
 	return nil

@@ -153,14 +153,12 @@ func TestClassifier_Classify_RequestError(t *testing.T) {
 	require.NoError(t, err)
 
 	mockHTTP.EXPECT().NewRequest(http.MethodHead, "https://example.com/art", nil).Return(req, nil).Times(1)
-	mockHTTP.EXPECT().Do(gomock.Any()).Return(nil, assertErr).Times(1)
+	mockHTTP.EXPECT().Do(gomock.Any()).Return(nil, assertError("network unreachable")).Times(1)
 
 	classifier := offlinecache.NewClassifier(mockHTTP)
 	_, err = classifier.Classify(context.Background(), "https://example.com/art")
 	assert.Error(t, err)
 }
-
-var assertErr = assertError("network unreachable")
 
 type assertError string
 
