@@ -82,7 +82,7 @@ The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `
 
 ### UI control: Chrome DevTools Protocol (CDP)
 
-Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-controld` forwards web commands from the relayer to Chromium via CDP, and drives the on-screen **setup narration** through the player's `setupDisplay` CDP contract (see `setupui`, below). `feral-watchdog` monitors Chromium health via HTTP polling of `/json/version` (not CDP). Neither daemon embeds a web server for UI assets.
+Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-controld` forwards web commands from the relayer to Chromium via CDP, and drives the on-screen **setup narration** through the player's `setupDisplay` CDP contract (see `setupui`, below). `feral-watchdog` monitors Chromium health via HTTP polling of `/json/version` and uses CDP navigation to steer Chromium back to the player during recovery. Neither daemon embeds a web server for UI assets.
 
 `feral-player.service` is the readiness gate for the bundled local webapp. Chromium kiosk and any daemon that navigates to the local player must wait for that unit to report `READY=1`. The kiosk boots the bundled player at `http://127.0.0.1:8080/`.
 
@@ -187,7 +187,7 @@ Component versions follow semantic versioning. The `ffos` build repo pins the `f
 1. `feral-sys-monitord` emits signals; it never takes recovery actions or calls other services.
 2. `feral-watchdog` consumes signals; it never emits its own D-Bus health signals.
 3. `feral-controld` is the only service that connects to the remote relayer.
-4. CDP access (port 9222) is used only by `feral-controld`. `feral-watchdog` checks Chromium via HTTP `/json/version`, not CDP.
+4. CDP access (port 9222) is limited to `feral-controld` (command forwarding and setup narration) and `feral-watchdog` (recovery navigation; its health checks poll HTTP `/json/version`). No other service touches CDP.
 5. Provisioning has exactly one owner (`feral-controld`, via SoftAP + captive portal). There is no BLE/GATT surface and no second provisioning path.
 6. State files under `/home/feralfile/.state/` are single-owner. No two services write the same file.
 7. The Chromium kiosk is launched by `start-kiosk.sh`; it does not restart Chromium after a crash — `feral-watchdog` or systemd does.

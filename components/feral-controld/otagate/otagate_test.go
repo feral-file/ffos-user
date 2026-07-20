@@ -306,3 +306,46 @@ func TestCanceledContextDoesNotLatch(t *testing.T) {
 		t.Errorf("a canceled ctx latched a permanent failure: %+v", fs)
 	}
 }
+
+// TestNoUpdateNeededClearsStaleLatch: a latched permanent failure clears once a
+// later check shows the device satisfies the gate (e.g. the distributor lowered
+// min_runtime_version, or the device was updated out of band). Otherwise the
+// long-lived Gate keeps reporting a now-healthy device as permanently failed.
+func TestNoUpdateNeededClearsStaleLatch(t *testing.T) {
+	var mu sync.Mutex
+	manifest := okManifest("2.0.0", "0.9.0", "2.0.0") // 1.0.0 requires an update
+	runner := &fakeRunner{results: []error{permanentRunErr()}}
+	gate := New(Deps{
+		HTTP: &fakeHTTP{do: func(*http.Request) (*http.Response, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return jsonResponse(200, manifest), nil
+		}},
+		Clock:  newFakeClock(),
+		Runner: runner,
+		Config: fakeConfig{branch: "b", version: "1.0.0", endpoint: "https://x"},
+	})
+
+	if _, err := gate.EnsureLatestBeforeClaim(context.Background()); err == nil {
+		t.Fatal("expected permanent update failure")
+	}
+	if fs := gate.Failure(); !fs.Failed {
+		t.Fatal("permanent failure must latch")
+	}
+
+	// The distributor lowers the requirement; the device now satisfies the gate.
+	mu.Lock()
+	manifest = okManifest("1.0.0", "0.9.0", "2.0.0")
+	mu.Unlock()
+
+	res, err := gate.EnsureLatestBeforeClaim(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res != ResultNoUpdateNeeded {
+		t.Errorf("result = %v, want ResultNoUpdateNeeded", res)
+	}
+	if fs := gate.Failure(); fs.Failed {
+		t.Error("stale latch must clear when no update is needed")
+	}
+}

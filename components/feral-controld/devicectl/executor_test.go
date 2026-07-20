@@ -5214,3 +5214,43 @@ func TestExecutor_DdcPanelStatus_RetryWhenNoVcpLines(t *testing.T) {
 	assert.Equal(t, "ASUS:ROG-Strix", *st.Monitor)
 	assert.Nil(t, st.Errors)
 }
+
+// TestExecutor_Connect_EmptyDeviceID: an empty clientDevice ID must be rejected
+// before any state is saved or the claim observer fires — every derived claim
+// view (mDNS init, /api/status, topic withholding) keys on a non-empty ID, so
+// accepting it would desync mDNS TXT claimed=true from /api/status claimed=false.
+func TestExecutor_Connect_EmptyDeviceID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	device := devicectl.Device{ID: "  ", Name: "Test Device", Platform: 1}
+	cmd := commands.Command{
+		Type: commands.CMD_CONNECT,
+		Arguments: map[string]interface{}{
+			"clientDevice":   device,
+			"primaryAddress": "192.168.1.100",
+		},
+	}
+
+	arguments := `{"clientDevice":{"device_id":"  ","device_name":"Test Device","platform":1},"primaryAddress":"192.168.1.100"}`
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			args := v.(*struct {
+				Device         devicectl.Device `json:"clientDevice"`
+				PrimaryAddress string           `json:"primaryAddress"`
+			})
+			args.Device = device
+			args.PrimaryAddress = "192.168.1.100"
+			return nil
+		})
+	// No state-manager or claim-observer expectations: rejection must happen first.
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "clientDevice.id is required")
+}

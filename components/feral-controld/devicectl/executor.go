@@ -319,6 +319,14 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
+	// Claimed state is derived everywhere else (mDNS init, /api/status, the LAN
+	// topic-withholding guard) as "ConnectedDevice with a non-empty ID". Reject
+	// an empty ID so a malformed connect can't flip the claim observer to true
+	// while every derived view still reports unclaimed.
+	if strings.TrimSpace(cmdArgs.Device.ID) == "" {
+		return nil, fmt.Errorf("invalid arguments: clientDevice.id is required")
+	}
+
 	s := state.GetState()
 	s.ConnectedDevice = &state.Device{
 		ID:       cmdArgs.Device.ID,

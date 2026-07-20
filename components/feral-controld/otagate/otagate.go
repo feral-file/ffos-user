@@ -190,6 +190,10 @@ func (g *Gate) runLocal(ctx context.Context, mode Mode) (Result, error) {
 		needsUpdate = isUpdateAvailable(current, versions)
 	}
 	if !needsUpdate {
+		// The device satisfies the gate, so any latched permanent failure is
+		// stale (e.g. the distributor lowered min_runtime_version, or the device
+		// was updated out of band since the latch was set).
+		g.clearLatch()
 		return ResultNoUpdateNeeded, nil
 	}
 

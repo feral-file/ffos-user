@@ -495,3 +495,29 @@ func TestPortalBindFailureTearsAPBackDown(t *testing.T) {
 	assert.Less(t, indexOf(last, "wifi.RefreshScanCache"), indexOf(last, "ap.Up"),
 		"retry must scan before re-raising the AP: %v", events)
 }
+
+// TestFreshAPRaiseResetsStaleJoinStatus: a join outcome from a past setup must
+// not survive onto a portal raised weeks later for sustained-offline — the
+// user mid-re-setup would see a "Connected to X" success banner.
+func TestFreshAPRaiseResetsStaleJoinStatus(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	// Full successful setup.
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+	h.m.applyJoin(ctx, "HomeNet", "pw")
+	require.Equal(t, StateOnline, h.m.State())
+	require.Equal(t, portal.JoinSucceeded, h.m.Status().State)
+
+	// Weeks later: provisioned but sustained-offline past the window.
+	h.wifi.setProfile(true)
+	h.m.onConnectivity(ctx, false)
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	// The re-raised portal must greet the user fresh, not with the old outcome.
+	assert.Equal(t, portal.JoinIdle, h.m.Status().State)
+}

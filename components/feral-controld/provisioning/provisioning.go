@@ -413,6 +413,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 		// Unprovisioned AND no other connectivity: the device cannot self-heal,
 		// so raise the AP immediately.
 		m.clearOffline()
+		m.resetJoinStatus()
 		m.transition(ctx, StateAPActive, Detail{
 			Reason:  "unprovisioned",
 			Message: "Set up Wi-Fi to continue",
@@ -453,6 +454,7 @@ func (m *Machine) onTick(ctx context.Context) {
 			return
 		}
 		m.clearOffline()
+		m.resetJoinStatus()
 		m.transition(ctx, StateAPActive, Detail{
 			Reason:  "sustained-offline",
 			Message: "Wi-Fi unavailable; starting setup",
@@ -657,6 +659,17 @@ func (m *Machine) hasWiredLink(ctx context.Context) bool {
 		return false
 	}
 	return m.wiredLink(ctx)
+}
+
+// resetJoinStatus drops any prior join outcome before a FRESH AP raise
+// (unprovisioned / sustained-offline). Without it the portal would greet a
+// user mid-setup with the success banner of a join that happened weeks ago.
+// The join-failure re-raise in applyJoin deliberately keeps its status: the
+// phone re-associates and polls /status for exactly that outcome.
+func (m *Machine) resetJoinStatus() {
+	m.mu.Lock()
+	m.status = portal.Status{State: portal.JoinIdle}
+	m.mu.Unlock()
 }
 
 func (m *Machine) startOfflineWindow() {
