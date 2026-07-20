@@ -185,4 +185,12 @@ rmdir "$drm_root/card0-HDMI-A-1/status"
 rm "$drm_root/card1-DP-1/status"
 expect_proceed "no readable status fails open" "fail open"
 
+# --- 5. controld start-limit never latches -------------------------------------
+
+# controld is the device's only provisioning path (SoftAP portal + LAN hub —
+# no BLE fallback), so a systemd start-limit latch ("start-limit-hit") would
+# permanently strand an offline device instead of degrading into slow
+# Restart=always retries. See docs/architecture.md "Relaxed StartLimit".
+assert_contains "$units_dir/feral-controld.service" "StartLimitIntervalSec=0"
+
 echo "test-headless-startup-contract: OK"

@@ -2,6 +2,9 @@ package otagate
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 )
@@ -94,7 +97,7 @@ func TestTailForwardsParsedPercent(t *testing.T) {
 		msg string
 	}
 	var got []report
-	err := r.tail(context.Background(), strings.NewReader(lines), id, func(pct int, msg string) {
+	err := r.tail(context.Background(), strings.NewReader(lines), id, "feral-updater-run@controld-7.service", func(pct int, msg string) {
 		got = append(got, report{pct, msg})
 	})
 	if err != nil {
@@ -113,5 +116,130 @@ func TestTailForwardsParsedPercent(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("onProgress[%d] = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// TestTailDetectsSilentUnitDeath is the G2 regression: an updater killed without
+// writing an id-tagged terminal line (SIGKILL/OOM/systemctl stop) must terminate
+// the tail with a transient-classified error instead of EOF-polling forever and
+// wedging the gate's single-flight (which would permanently block claiming).
+func TestTailDetectsSilentUnitDeath(t *testing.T) {
+	clock := newFakeClock()
+	var probes int
+	r := &systemdRunner{
+		clock: clock,
+		// Alive on the first probe (exercises the deadSince reset path), dead from
+		// the second probe on.
+		unitActive: func(context.Context, string) bool {
+			probes++
+			return probes == 1
+		},
+	}
+
+	err := r.tail(context.Background(), strings.NewReader(""), "controld-1", "feral-updater-run@controld-1.service", nil)
+	if err == nil {
+		t.Fatal("tail returned nil for a silently-dead unit; want error")
+	}
+	if !strings.Contains(err.Error(), "updater service exited without reporting completion") {
+		t.Fatalf("tail error = %q, want the silent-death message", err)
+	}
+	if kind := classifyUpdaterMessage(err.Error()); kind != errTransient {
+		t.Fatalf("silent unit death classified as %v, want errTransient", kind)
+	}
+	if probes < 2 {
+		t.Fatalf("liveness probes = %d, want at least 2", probes)
+	}
+}
+
+// TestTailKeepsPollingWhileUnitAlive guards against the liveness watch aborting
+// a healthy-but-quiet update: an alive unit with an idle log must keep the tail
+// polling (here until ctx cancellation ends the test deterministically).
+func TestTailKeepsPollingWhileUnitAlive(t *testing.T) {
+	clock := newFakeClock()
+	ctx, cancel := context.WithCancel(context.Background())
+	polls := 0
+	clockCancelAfter := 200 // ~40s of fake time, several liveness intervals
+	clock.onSleep = func() {
+		polls++
+		if polls >= clockCancelAfter {
+			cancel()
+		}
+	}
+	r := &systemdRunner{
+		clock:      clock,
+		unitActive: func(context.Context, string) bool { return true },
+	}
+
+	err := r.tail(ctx, strings.NewReader(""), "controld-2", "feral-updater-run@controld-2.service", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("tail error = %v, want context.Canceled (the test's own stop), not a liveness abort", err)
+	}
+}
+
+// TestRunRestartsWatchdogOnFailure is the G3 regression: Run stops
+// feral-watchdog up front, and Restart=always does NOT resurrect an explicitly
+// stopped unit — so every failure path must start it again or the kiosk
+// watchdog stays dead until a manual reboot.
+func TestRunRestartsWatchdogOnFailure(t *testing.T) {
+	exec := &fakeExec{fail: map[string]error{
+		"systemctl start feral-updater-run@": fmt.Errorf("boom"),
+	}}
+	r := &systemdRunner{exec: exec, clock: newFakeClock()}
+	r.unitActive = func(context.Context, string) bool { return true }
+
+	err := r.Run(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "Failed to start updater service") {
+		t.Fatalf("Run error = %v, want updater start failure", err)
+	}
+
+	var stopped, restarted bool
+	for _, cmd := range exec.recorded() {
+		switch cmd {
+		case "systemctl --user stop feral-watchdog.service":
+			stopped = true
+		case "systemctl --user start feral-watchdog.service":
+			restarted = true
+		}
+	}
+	if !stopped {
+		t.Error("watchdog was never stopped")
+	}
+	if !restarted {
+		t.Error("watchdog was not restarted on the failure path")
+	}
+}
+
+// TestRunRestartsWatchdogOnSuccess is the F5 regression: even on a successful
+// update the watchdog must be restarted, so a deferred/staged/failed reboot does
+// not leave a dead watchdog on the still-running old build. (In production the
+// imminent reboot usually kills it again, harmlessly.)
+func TestRunRestartsWatchdogOnSuccess(t *testing.T) {
+	exec := &fakeExec{}
+	r := &systemdRunner{exec: exec, clock: newFakeClock()}
+	r.unitActive = func(context.Context, string) bool { return true }
+	r.openLog = func(string) (io.ReadCloser, error) {
+		// The run id is random; recover it from the recorded systemctl start so the
+		// canned log lines carry a matching id= tag.
+		id := ""
+		for _, cmd := range exec.recorded() {
+			if strings.Contains(cmd, "feral-updater-run@") {
+				id = strings.TrimSuffix(strings.SplitAfter(cmd, "feral-updater-run@")[1], ".service")
+			}
+		}
+		return io.NopCloser(strings.NewReader(
+			`[PROGRESS] id=` + id + ` progress=100 message="Done"` + "\n")), nil
+	}
+
+	if err := r.Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run error = %v, want nil", err)
+	}
+	var restarted bool
+	for _, cmd := range exec.recorded() {
+		if cmd == "systemctl --user start feral-watchdog.service" {
+			restarted = true
+		}
+	}
+	if !restarted {
+		t.Error("watchdog was not restarted on the success path (F5): a deferred reboot would strand a dead watchdog")
 	}
 }

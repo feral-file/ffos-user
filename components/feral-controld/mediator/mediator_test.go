@@ -533,6 +533,71 @@ func TestMediator_SetClaimed(t *testing.T) {
 	})
 }
 
+// TestMediator_SysMetricsSelfHealsMDNS is the F1 regression: a LAN link that
+// comes up while the internet stays down never fires connectivity_change, so the
+// advertiser would otherwise never start and the recovery hub would be
+// undiscoverable. The periodic SYSMETRICS reconcile must start it once a link
+// appears, and must not churn a healthy advertiser.
+func TestMediator_SysMetricsSelfHealsMDNS(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
+	metricsData := []byte(`{"cpu":1}`)
+
+	sysMetrics := godbus.DBusPayload{
+		Member: dbus.MONITORD_EVENT_SYSMETRICS,
+		Body:   []interface{}{metricsData},
+	}
+
+	captureHandler := func(ts *testSetup) *func(context.Context, godbus.DBusPayload) ([]interface{}, error) {
+		var h func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+		ts.mockDbus.EXPECT().
+			OnBusSignal(gomock.Any()).
+			DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+				h = handler
+			}).Times(1)
+		ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+		return &h
+	}
+
+	t.Run("link up without internet starts the advertiser via SYSMETRICS", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// Init link-down → not started. connectivity_change never fires (internet
+		// stays down), so this Start can only come from the SYSMETRICS reconcile.
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+
+		handler := captureHandler(ts)
+		link := &stubLinkState{hasLink: false}
+		ts.mediator.Start()
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, link)
+
+		// LAN link appears; internet still down (no connectivity_change).
+		link.hasLink = true
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("reconcile does not churn an already-advertising device", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// Init link-up → started once; a later SYSMETRICS with link still up must
+		// NOT Start again.
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+}
+
 func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

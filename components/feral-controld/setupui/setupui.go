@@ -83,13 +83,24 @@ type Service struct {
 	// last is the most recently intended narration state. It is retained (not
 	// cleared after sending) so it can be re-pushed when CDP reconnects.
 	last map[string]any
-	// pending is the state the worker still needs to push. It is the newest
-	// intent; a slow send that is superseded is simply dropped in favor of the
-	// latest state. nil means nothing is queued.
-	pending map[string]any
+	// pending is the ordered queue of states the worker still needs to push.
+	// Coalescing rule: a new push REPLACES a queued entry with the same "state"
+	// value in place (so an OTA progress burst collapses to one trailing
+	// "updating" send), but DISTINCT states are all delivered in order. The
+	// distinction matters: the claim flow's ShowReady()+Hide() are two
+	// back-to-back different states and both must reach the player — a
+	// single-slot newest-intent-wins design silently dropped the Ready. Bounded
+	// by maxPendingStates (drop-oldest) purely as a leak guard; in practice the
+	// setup flow never queues more than a handful of distinct states.
+	pending []map[string]any
 	// running guards against spawning more than one worker goroutine at a time.
 	running bool
 }
+
+// maxPendingStates bounds the pending queue. Setup narration has 8 distinct
+// states total, so a deeper queue only ever means a stalled CDP send; dropping
+// the oldest intent is the correct staleness policy for a courtesy overlay.
+const maxPendingStates = 8
 
 // New builds a narration Service. A blank contractPath falls back to
 // DefaultContractPath. logger may be nil (narration then stays silent about its
@@ -186,7 +197,9 @@ func (s *Service) Resync() {
 		s.mu.Unlock()
 		return
 	}
-	s.pending = s.last
+	// A reconnect only needs the CURRENT intent; anything still queued is
+	// superseded by re-painting the latest state.
+	s.pending = []map[string]any{s.last}
 	if s.running {
 		s.mu.Unlock()
 		return
@@ -196,17 +209,17 @@ func (s *Service) Resync() {
 	go s.worker()
 }
 
-// push records req as the newest intended state and ensures a worker is draining
-// the queue. It returns immediately; the CDP send never happens on the caller's
-// goroutine. Retry policy is deliberately "retry on next change", not a hot
-// loop: a failed send is not re-attempted on its own. The last state is retained
-// for Resync so a later CDP reconnect can recover it.
+// push enqueues req (see the pending field for the coalescing rule) and ensures
+// a worker is draining the queue. It returns immediately; the CDP send never
+// happens on the caller's goroutine. Retry policy is deliberately "retry on
+// next change", not a hot loop: a failed send is not re-attempted on its own.
+// The last state is retained for Resync so a later CDP reconnect can recover it.
 func (s *Service) push(req map[string]any) {
 	s.mu.Lock()
 	s.last = req
-	s.pending = req
+	s.enqueueLocked(req)
 	if s.running {
-		// The in-flight worker will pick up this newest pending state.
+		// The in-flight worker will drain this entry too.
 		s.mu.Unlock()
 		return
 	}
@@ -215,19 +228,37 @@ func (s *Service) push(req map[string]any) {
 	go s.worker()
 }
 
-// worker drains pending narration states one at a time until the queue is empty.
-// Because pending always holds only the newest intent, a burst of rapid state
-// changes collapses to at most one trailing send.
+// enqueueLocked applies the coalescing rule: same-state entries are replaced in
+// place (newest payload, original queue position), distinct states append in
+// arrival order. Caller holds mu.
+func (s *Service) enqueueLocked(req map[string]any) {
+	state := stringField(req, "state")
+	for i, queued := range s.pending {
+		if stringField(queued, "state") == state {
+			s.pending[i] = req
+			return
+		}
+	}
+	if len(s.pending) >= maxPendingStates {
+		s.pending = s.pending[1:]
+	}
+	s.pending = append(s.pending, req)
+}
+
+// worker drains pending narration states one at a time, in order, until the
+// queue is empty. Same-state bursts (OTA progress) collapse via enqueueLocked;
+// distinct states each get their own send so ordered sequences like
+// Ready→Hidden are delivered, not coalesced away.
 func (s *Service) worker() {
 	for {
 		s.mu.Lock()
-		req := s.pending
-		s.pending = nil
-		if req == nil {
+		if len(s.pending) == 0 {
 			s.running = false
 			s.mu.Unlock()
 			return
 		}
+		req := s.pending[0]
+		s.pending = s.pending[1:]
 		s.mu.Unlock()
 
 		s.trySend(req)

@@ -2,6 +2,7 @@ package provisioning
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -137,13 +138,17 @@ func (c *fakeConn) push(online bool) {
 }
 
 type fakePortal struct {
-	rec     *recorder
-	cfg     portal.Config
-	started bool
+	rec      *recorder
+	cfg      portal.Config
+	started  bool
+	startErr error
 }
 
 func (p *fakePortal) Start() error {
 	p.rec.add("portal.Start")
+	if p.startErr != nil {
+		return p.startErr
+	}
 	p.started = true
 	return nil
 }
@@ -189,6 +194,8 @@ type harness struct {
 	clk      *fakeClock
 	notifier *fakeNotifier
 	portals  []*fakePortal
+	// portalStartErr, when set, makes every NEW portal's Start fail with it.
+	portalStartErr error
 }
 
 func newHarness(t *testing.T) *harness {
@@ -213,7 +220,7 @@ func newHarness(t *testing.T) *harness {
 		CheckInterval: 15 * time.Second,
 		PortalAddr:    "127.0.0.1:0",
 		NewPortal: func(cfg portal.Config) PortalServer {
-			p := &fakePortal{rec: rec, cfg: cfg}
+			p := &fakePortal{rec: rec, cfg: cfg, startErr: h.portalStartErr}
 			h.portals = append(h.portals, p)
 			return p
 		},
@@ -445,4 +452,46 @@ func TestConnectivityRecoveryThroughLoop(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return h.m.State() == StateOnline && h.rec.count("ap.Down") >= 1
 	}, 2*time.Second, 5*time.Millisecond)
+}
+
+// TestPortalBindFailureTearsAPBackDown is the orphaned-AP regression: if the
+// captive portal cannot bind, the just-raised radio hotspot must be torn back
+// down in the same ensureAPUp — apUp is still false at that point, so a later
+// ensureAPDown would no-op and the WPA2 setup AP (PSK derivable from the
+// advertised SSID) would keep broadcasting with nothing behind it, surviving
+// daemon shutdown as a persisted NM profile. The next tick then retries the
+// whole scan→AP→portal sequence cleanly.
+func TestPortalBindFailureTearsAPBackDown(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false) // unprovisioned
+	h.portalStartErr = errors.New("listen tcp :80: address already in use")
+	ctx := context.Background()
+
+	// Offline + unprovisioned + no wire → APActive → reconcile → portal fails.
+	h.m.onConnectivity(ctx, false)
+
+	events := h.rec.list()
+	iUp := indexOf(events, "ap.Up")
+	iStart := indexOf(events, "portal.Start")
+	iDown := indexOf(events, "ap.Down")
+	require.NotEqual(t, -1, iUp, "AP must be raised: %v", events)
+	require.NotEqual(t, -1, iStart, "portal start must be attempted: %v", events)
+	require.NotEqual(t, -1, iDown, "AP must be torn back down after the portal failed to bind: %v", events)
+	assert.Less(t, iStart, iDown, "teardown must follow the failed portal start: %v", events)
+	assert.Equal(t, StateAPActive, h.m.State(), "machine stays in APActive so the tick retries")
+
+	// Retry with the bind conflict resolved: the full constraint-1 sequence
+	// (scan refresh before ap.Up) must run again and converge.
+	h.portalStartErr = nil
+	h.m.onTick(ctx)
+
+	events = h.rec.list()
+	assert.Equal(t, 2, h.rec.count("ap.Up"), "retry must re-raise the AP: %v", events)
+	assert.Equal(t, 2, h.rec.count("portal.Start"), "retry must re-start the portal: %v", events)
+	require.Len(t, h.portals, 2)
+	assert.True(t, h.portals[1].started, "second portal must be running")
+	// The retry's scan refresh must precede its ap.Up (radio back in station mode).
+	last := events[indexOf(events[iDown:], "wifi.RefreshScanCache")+iDown:]
+	assert.Less(t, indexOf(last, "wifi.RefreshScanCache"), indexOf(last, "ap.Up"),
+		"retry must scan before re-raising the AP: %v", events)
 }

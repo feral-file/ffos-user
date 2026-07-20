@@ -567,10 +567,17 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		Logger: m.logger,
 	})
 	if err := srv.Start(); err != nil {
-		// The AP is up but the portal could not bind. Report the error so a tick
-		// retries; leave apUp false so the next ensureAPUp re-attempts cleanly
-		// (softap.Up is idempotent).
-		m.logger.Error("provisioning: portal failed to start", zap.Error(err))
+		// The AP is up but the portal could not bind. Tear the radio hotspot back
+		// down immediately so AP+portal stay atomic: apUp is still false here, so a
+		// later ensureAPDown would no-op and an AP with no portal behind it would
+		// otherwise keep broadcasting indefinitely (it survives daemon shutdown as
+		// a persisted NM profile). Tearing down also returns the radio to station
+		// mode, so the retry tick's RefreshScanCache honors constraint 1 again.
+		// Backend.Down is idempotent, so this is safe even if Up half-failed.
+		m.logger.Error("provisioning: portal failed to start; tearing setup AP back down", zap.Error(err))
+		if derr := m.ap.Down(ctx); derr != nil {
+			m.logger.Warn("provisioning: setup AP down after portal failure also failed", zap.Error(derr))
+		}
 		return err
 	}
 

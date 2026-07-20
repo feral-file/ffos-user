@@ -62,10 +62,13 @@ func classifyUpdaterMessage(message string) updateErrorKind {
 		return errTransient
 	}
 
-	// Updater-spawn infrastructure failures (service start, log file access).
+	// Updater-spawn infrastructure failures (service start, log file access, or
+	// the unit dying without an id-tagged terminal line — SIGKILL/OOM/stop; see
+	// systemdRunner.tail's liveness watch). All retryable.
 	if strings.Contains(msg, "Failed to start updater service") ||
 		strings.Contains(msg, "Failed to open /var/log/updaterd.log") ||
-		msg == "updater closed channel without sending progress" {
+		msg == "updater closed channel without sending progress" ||
+		strings.Contains(msg, "updater service exited without reporting completion") {
 		return errTransient
 	}
 

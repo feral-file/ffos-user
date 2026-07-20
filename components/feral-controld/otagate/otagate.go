@@ -134,6 +134,14 @@ func (g *Gate) EnsureLatestBeforeClaim(ctx context.Context) (Result, error) {
 }
 
 // do runs fn under the single-flight guard and unpacks the shared result.
+//
+// ctx caveat: the shared run executes under the FIRST caller's ctx (captured in
+// fn's closure); singleflight ignores joiners' ctx entirely, so a joiner cannot
+// cancel or outlive the flight it joined. Today both entry points pass the
+// app-lifetime ctx, so this only matters at shutdown. If a future caller passes
+// a deadline ctx, its expiry cancels the shared update for every joiner — the
+// runLocal ctx.Err() guard keeps that from latching a bogus permanent failure,
+// but the shared-cancellation behavior itself is inherent to coalescing.
 func (g *Gate) do(_ context.Context, fn func() (Result, error)) (Result, error, bool) {
 	v, err, shared := g.group.Do(singleFlightKey, func() (interface{}, error) {
 		return fn()
@@ -186,6 +194,15 @@ func (g *Gate) runLocal(ctx context.Context, mode Mode) (Result, error) {
 	}
 
 	if err := g.runUpdateLadder(ctx); err != nil {
+		// A canceled/deadline ctx is the CALLER going away (e.g. daemon shutdown),
+		// not evidence the device cannot update. Latching it would paint a bogus
+		// permanent update-failed state that survives until the next explicit
+		// retry — especially nasty because the single-flight shares the FIRST
+		// caller's ctx with every joiner (see do()), so one canceled caller would
+		// otherwise poison the shared outcome for all.
+		if ctx.Err() != nil {
+			return ResultUpdateStarted, err
+		}
 		g.latch(err)
 		return ResultUpdateStarted, err
 	}

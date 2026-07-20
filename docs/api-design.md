@@ -215,7 +215,12 @@ The portal binds `:80` (permitted by the system-wide `net.ipv4.ip_unprivileged_p
 | `/status` | GET | JSON `{ "state", "ssid?", "reason?", "message?" }` where `state` ∈ `idle` / `joining` / `succeeded` / `failed`. Sourced from the provisioning machine so it survives a portal restart across the AP bounce. `Cache-Control: no-store`. |
 | OS probe paths | GET | `/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt` all `302` to `/`. Any other unmatched non-root path is also redirected, covering unenumerated probe variants. |
 
-The `302`-on-probe (rather than returning the 204/success body each OS expects) is what makes the phone conclude it is behind a captive portal and auto-open the page. DNS-level catch-all is intentionally **not** used; the redirect is done at the HTTP layer.
+Captive detection is a two-layer design split across the `ffos` image and this portal:
+
+- **DNS layer (image-shipped, `ffos` repo):** the hotspot's dedicated dnsmasq instance resolves every name to the device itself (`address=/#/10.42.0.1` in `archiso-ff1/airootfs/etc/NetworkManager/dnsmasq-shared.d/captive.conf`). Without this, a client with no other route to the internet couldn't resolve the OS probe hostname at all, and the probe request would never reach the portal.
+- **HTTP layer (this service):** once the probe's DNS resolves locally, its request lands on the routes above. The `302`-on-probe (rather than returning the 204/success body each OS expects) is what makes the phone conclude it is behind a captive portal and auto-open the page.
+
+The DNS layer only makes the probe request arrive; the HTTP layer is what makes it look like a captive portal.
 
 ### AP trigger state machine (`provisioning`)
 

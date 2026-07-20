@@ -50,6 +50,56 @@ type mediator struct {
 	mdnsAdvertiser mdns.Advertiser
 	mdnsDeviceInfo mdns.DeviceInfo
 	linkState      status.LinkState
+	// mdnsStarted mirrors whether the advertiser is currently registered, so the
+	// periodic self-heal (see reconcileMDNSLocked) can tell "needs starting" from
+	// "already up" without relying on Advertiser.Start's already-started error.
+	mdnsStarted bool
+}
+
+// startMDNSLocked registers the advertiser with the current device info and
+// records the started state. Caller holds mdnsMu. No-op guidance: callers gate
+// on link presence; this only touches the started flag on a successful Start so
+// a failed Start is retried by the next reconcile.
+func (m *mediator) startMDNSLocked() {
+	if m.mdnsAdvertiser == nil || m.mdnsStarted {
+		return
+	}
+	if err := m.mdnsAdvertiser.Start(m.mdnsDeviceInfo); err != nil {
+		m.logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
+		return
+	}
+	m.mdnsStarted = true
+}
+
+// stopMDNSLocked tears the advertiser down and clears the started state. Caller
+// holds mdnsMu. Idempotent.
+func (m *mediator) stopMDNSLocked() {
+	if m.mdnsAdvertiser == nil || !m.mdnsStarted {
+		return
+	}
+	m.mdnsAdvertiser.Stop()
+	m.mdnsStarted = false
+}
+
+// reconcileMDNSLocked drives the advertiser to match link state: advertising
+// while a local link exists, down otherwise. It is the self-heal for the gap
+// that sys-monitord's connectivity_change signal cannot cover — that signal
+// fires only on INTERNET-reachability transitions, so a link that comes up while
+// the internet stays down (LAN switch with a dead WAN — precisely the case the
+// recovery hub exists for) would otherwise never start the advertiser. Driven
+// off the periodic SYSMETRICS signal, which arrives regardless of internet
+// state, so discovery recovers within one metrics interval. Caller holds mdnsMu.
+func (m *mediator) reconcileMDNSLocked(ctx context.Context) {
+	if m.mdnsAdvertiser == nil {
+		return
+	}
+	hasLink := m.linkState != nil && m.linkState.HasLink(ctx)
+	switch {
+	case hasLink && !m.mdnsStarted:
+		m.startMDNSLocked()
+	case !hasLink && m.mdnsStarted:
+		m.stopMDNSLocked()
+	}
 }
 
 func New(
@@ -97,9 +147,7 @@ func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceIn
 	m.linkState = link
 
 	if link != nil && link.HasLink(context.Background()) {
-		if err := m.mdnsAdvertiser.Start(info); err != nil {
-			m.logger.Warn("Failed to start mDNS advertiser", zap.Error(err))
-		}
+		m.startMDNSLocked()
 	}
 }
 
@@ -121,14 +169,12 @@ func (m *mediator) SetClaimed(claimed bool) {
 	}
 
 	m.logger.Info("Re-registering mDNS after claim-state change", zap.Bool("claimed", claimed))
-	m.mdnsAdvertiser.Stop()
+	m.stopMDNSLocked()
 	// Only re-advertise while a link exists, mirroring the link-keyed lifecycle;
-	// if the link is down the connectivity-change handler will bring it back with
-	// the current (now updated) TXT.
+	// if the link is down the periodic reconcile (SYSMETRICS) brings it back with
+	// the current (now updated) TXT once a link appears.
 	if m.linkState != nil && m.linkState.HasLink(context.Background()) {
-		if err := m.mdnsAdvertiser.Start(m.mdnsDeviceInfo); err != nil {
-			m.logger.Warn("Failed to re-register mDNS after claim change", zap.Error(err))
-		}
+		m.startMDNSLocked()
 	}
 }
 
@@ -158,6 +204,17 @@ func (m *mediator) handleDBusSignal(
 
 		m.logger.Debug("Received sysmetrics", zap.String("metrics", string(body)))
 		m.executor.SaveLastSysMetrics(body)
+
+		// Self-heal mDNS discoverability off this periodic signal. connectivity_change
+		// only fires on INTERNET transitions, so a link that comes up while the
+		// internet stays down (LAN with a dead WAN — the recovery hub's raison
+		// d'être) never triggers the advertiser there. SYSMETRICS arrives regardless
+		// of internet state, so reconciling here recovers discovery within one
+		// metrics interval. Idempotent: a no-op when the advertiser already matches
+		// link state.
+		m.mdnsMu.Lock()
+		m.reconcileMDNSLocked(ctx)
+		m.mdnsMu.Unlock()
 
 	case dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE:
 		if len(payload.Body) != 1 {
@@ -208,17 +265,22 @@ func (m *mediator) handleDBusSignal(
 		// flag. Losing internet while a LAN link remains must NOT take the LAN
 		// recovery hub's discoverability down — that was exactly the old bug.
 		//
-		// Note: this handler only fires on internet-reachability transitions, so
-		// a link that comes up while internet stays down is caught by the
-		// startup InitializeMDNS gate rather than here; the wifictl work will add
-		// a real link-change signal later.
+		// A link that comes up while the internet stays down does NOT fire this
+		// handler; that gap is covered by the periodic SYSMETRICS reconcile above.
+		// Here we force a Stop+Start rebind (not a plain reconcile) because a
+		// connectivity event can accompany an interface-set change and the
+		// advertiser's sockets bind specific interfaces, so stale sockets must be
+		// torn down even when the advertiser was already up.
 		m.mdnsMu.Lock()
 		if m.mdnsAdvertiser != nil {
+			// Unconditional Stop (not the guarded stopMDNSLocked): an interface-set
+			// change can accompany this event, so any lingering zeroconf server bound
+			// to a stale interface must be torn down before re-registering, even if we
+			// believe we were not advertising. Stop is idempotent when not registered.
 			m.mdnsAdvertiser.Stop()
+			m.mdnsStarted = false
 			if m.linkState != nil && m.linkState.HasLink(ctx) {
-				if err := m.mdnsAdvertiser.Start(m.mdnsDeviceInfo); err != nil {
-					m.logger.Warn("Failed to restart mDNS advertiser", zap.Error(err))
-				}
+				m.startMDNSLocked()
 			}
 		}
 		m.mdnsMu.Unlock()

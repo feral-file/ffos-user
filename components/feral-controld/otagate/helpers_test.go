@@ -21,6 +21,9 @@ type fakeClock struct {
 	sleeps []time.Duration
 	// sleepErr, when set, is returned by SleepContext (models ctx cancellation).
 	sleepErr error
+	// onSleep, when set, runs after each recorded sleep (outside the lock) so a
+	// test can count polls or cancel a ctx after N iterations.
+	onSleep func()
 }
 
 func newFakeClock() *fakeClock {
@@ -37,12 +40,17 @@ func (c *fakeClock) Sleep(d time.Duration) { _ = c.SleepContext(context.Backgrou
 
 func (c *fakeClock) SleepContext(_ context.Context, d time.Duration) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.sleepErr != nil {
+		c.mu.Unlock()
 		return c.sleepErr
 	}
 	c.sleeps = append(c.sleeps, d)
 	c.now = c.now.Add(d)
+	cb := c.onSleep
+	c.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 	return nil
 }
 
@@ -182,3 +190,53 @@ func (r *fakeRunner) calls() int {
 // (via classifyUpdaterMessage) as transient/permanent respectively.
 func transientRunErr() error { return fmt.Errorf("No network connection. Aborting update.") }
 func permanentRunErr() error { return fmt.Errorf("airootfs.sfs not found in image.") }
+
+// fakeExec is a scripted wrapper.Exec: it records every command line and fails
+// commands whose argv contains a configured substring. Unmatched commands
+// succeed with empty output. Kept hand-rolled (like the other fakes here) so
+// runner tests stay free of gomock ceremony.
+type fakeExec struct {
+	mu   sync.Mutex
+	cmds []string
+	// fail maps an argv substring to the error its Run/CombinedOutput returns.
+	fail map[string]error
+}
+
+func (e *fakeExec) CommandContext(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
+	line := strings.Join(append([]string{name}, arg...), " ")
+	e.mu.Lock()
+	e.cmds = append(e.cmds, line)
+	e.mu.Unlock()
+	return fakeCmd{line: line, exec: e}
+}
+
+func (e *fakeExec) recorded() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.cmds))
+	copy(out, e.cmds)
+	return out
+}
+
+func (e *fakeExec) errFor(line string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for sub, err := range e.fail {
+		if strings.Contains(line, sub) {
+			return err
+		}
+	}
+	return nil
+}
+
+type fakeCmd struct {
+	line string
+	exec *fakeExec
+}
+
+func (c fakeCmd) String() string                  { return c.line }
+func (c fakeCmd) Run() error                      { return c.exec.errFor(c.line) }
+func (c fakeCmd) Start() error                    { return c.exec.errFor(c.line) }
+func (c fakeCmd) Wait() error                     { return nil }
+func (c fakeCmd) Output() ([]byte, error)         { return nil, c.exec.errFor(c.line) }
+func (c fakeCmd) CombinedOutput() ([]byte, error) { return nil, c.exec.errFor(c.line) }

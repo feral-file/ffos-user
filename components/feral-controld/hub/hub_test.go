@@ -739,8 +739,8 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	provider := stubStatusProvider{info: StatusInfo{
 		DeviceID:     "ff1-abc",
 		Version:      "1.2.3",
-		Claimed:      true,
-		SetupState:   "claimed",
+		Claimed:      false,
+		SetupState:   "unclaimed",
 		Connectivity: "connected",
 		TopicID:      "topic-xyz",
 	}}
@@ -758,10 +758,45 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	assert.Equal(t, "ff1-abc", got["device_id"])
 	assert.Equal(t, "1.2.3", got["version"])
 	assert.Equal(t, StatusContract, got["contract"])
-	assert.Equal(t, true, got["claimed"])
-	assert.Equal(t, "claimed", got["setup_state"])
+	assert.Equal(t, false, got["claimed"])
+	assert.Equal(t, "unclaimed", got["setup_state"])
 	assert.Equal(t, "connected", got["connectivity"])
-	assert.Equal(t, "topic-xyz", got["topic_id"])
+	assert.Equal(t, "topic-xyz", got["topic_id"],
+		"an UNCLAIMED device serves its topic_id — that is the LAN claim handover")
+}
+
+// TestHandleStatus_ClaimedDeviceWithholdsTopicID is the topic-exposure
+// regression: once a device is claimed there is no legitimate unauthenticated
+// LAN reader of the relayer topic, and serving it would let any LAN peer
+// command an owned device through the cloud path. The claimed flag itself stays
+// visible (discovery/UX needs it); only the routing key is withheld.
+func TestHandleStatus_ClaimedDeviceWithholdsTopicID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	provider := stubStatusProvider{info: StatusInfo{
+		DeviceID: "ff1-abc",
+		Claimed:  true,
+		TopicID:  "topic-xyz",
+	}}
+	h := New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger).(*hub)
+
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	w := httptest.NewRecorder()
+	h.withMiddleware("status", h.handleStatus)(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var got map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, true, got["claimed"])
+	assert.Equal(t, "", got["topic_id"])
 }
 
 // TestHandleStatus_NilProviderReturnsContract verifies a nil provider still

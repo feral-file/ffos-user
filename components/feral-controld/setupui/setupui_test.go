@@ -422,3 +422,45 @@ func (r *rejectingCDP) NoLogSend(string, map[string]interface{}) (interface{}, e
 // The production CDP client must satisfy the narrow CDPSender seam so main can
 // wire it directly.
 var _ CDPSender = cdp.CDP(nil)
+
+// TestReadyThenHideDeliversBoth is the claim-flow ordering regression: the
+// show=false claim path calls ShowReady() then Hide() back-to-back, and the
+// player must receive BOTH (in order). The old single-slot newest-intent-wins
+// queue let Hide overwrite the still-pending Ready.
+func TestReadyThenHideDeliversBoth(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+
+	svc.ShowReady()
+	svc.Hide()
+	fake.waitForCalls(t, 2)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	require.Len(t, fake.requests, 2)
+	assert.Equal(t, stateReady, fake.requests[0]["state"])
+	assert.Equal(t, stateHidden, fake.requests[1]["state"])
+}
+
+// TestSameStateBurstCoalesces keeps the flip side of the queue contract honest:
+// a rapid burst of the SAME state (OTA progress) replaces the queued entry in
+// place instead of queueing one send per tick, so a slow CDP link never builds
+// a backlog of stale percentages.
+func TestSameStateBurstCoalesces(t *testing.T) {
+	svc := newTestService(t, newFakeCDP(), validContract)
+
+	// Enqueue directly (no worker running) to test the coalescing rule itself
+	// deterministically.
+	svc.mu.Lock()
+	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 10})
+	svc.enqueueLocked(map[string]any{"state": stateHidden})
+	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 50})
+	queue := make([]map[string]any, len(svc.pending))
+	copy(queue, svc.pending)
+	svc.mu.Unlock()
+
+	require.Len(t, queue, 2)
+	assert.Equal(t, stateUpdating, queue[0]["state"])
+	assert.Equal(t, 50, queue[0]["progress"], "same-state push must replace in place with the newest payload")
+	assert.Equal(t, stateHidden, queue[1]["state"])
+}

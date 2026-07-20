@@ -282,3 +282,27 @@ func TestUpdateProgressReachesOnProgress(t *testing.T) {
 		})
 	}
 }
+
+// TestCanceledContextDoesNotLatch is the ctx-capture regression: the shared
+// single-flight runs under the FIRST caller's ctx, so a canceled/expired ctx is
+// the caller going away — not evidence the device cannot update — and must not
+// latch a permanent failure that would then poison the outcome for every joiner
+// and persist until the next explicit retry.
+func TestCanceledContextDoesNotLatch(t *testing.T) {
+	clock := newFakeClock()
+	// The runner reports the cancellation the real systemd runner would surface
+	// ("context canceled" classifies as permanent — exactly the bogus-latch trap).
+	runner := &fakeRunner{results: []error{context.Canceled}}
+	gate := New(localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := gate.RequestUpdate(ctx)
+	if err == nil {
+		t.Fatal("expected the canceled run to surface an error")
+	}
+	if fs := gate.Failure(); fs.Failed {
+		t.Errorf("a canceled ctx latched a permanent failure: %+v", fs)
+	}
+}

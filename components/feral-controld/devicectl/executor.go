@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -121,6 +122,14 @@ type executor struct {
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
 	logUploaderFactory func() logUploaderIface
+
+	// logUploadInFlight single-flights the detached log upload. The command is
+	// fire-and-forget (ACKs before the transfer finishes), so a retry storm of
+	// uploadLogs commands would otherwise stack concurrent goroutines each
+	// zipping the whole log directory into memory. A duplicate while one upload
+	// runs is ACKed and dropped — support re-requesting logs mid-upload wants
+	// the one already in flight.
+	logUploadInFlight atomic.Bool
 
 	// Serialized, coalescing queue for applyFfpPowerStateAsync (see sleep_schedule.go).
 	sleepPowerAlignCh        chan sleepPowerAlignJob
@@ -1754,19 +1763,36 @@ func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, er
 	return e.uploadLogsInProcess(ctx, cmdArgs.APIKey, supportBundleID)
 }
 
+// logUploadTimeout bounds one detached log upload end-to-end (zip + pre-sign +
+// S3 PUT). Generous on purpose: big archives on slow uplinks are the case
+// support most needs, and the per-request 30s wrapper timeout that used to
+// apply killed exactly those. The bound exists so a hung transfer cannot pin
+// the single-flight guard forever.
+const logUploadTimeout = 10 * time.Minute
+
 // uploadLogsInProcess zips and uploads the device logs directly (controld-owned
 // path). Like feral-setupd's D-Bus callback it is fire-and-forget: the relayer
 // command ACKs immediately while the upload runs on a detached context, so a
 // slow zip or network transfer never holds the command executor (and its
 // command-storm budget) open. Errors are logged, not surfaced, matching setupd.
+// Single-flighted via logUploadInFlight (see the field note) and bounded by
+// logUploadTimeout so the guard always releases.
 func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundleID string) (interface{}, error) {
+	if !e.logUploadInFlight.CompareAndSwap(false, true) {
+		e.logger.Info("Log upload already in flight; duplicate command ignored")
+		return CmdOK, nil
+	}
+
 	info := e.logUploadBuildInfo(ctx)
 	uploader := e.newLogUploader()
 
 	go func() {
 		// Detached from the command ctx: the command returns as soon as the upload
 		// is scheduled, so ctx would be canceled out from under the transfer.
-		if err := uploader.Upload(context.Background(), apiKey, logUploadSource, info, supportBundleID); err != nil {
+		defer e.logUploadInFlight.Store(false)
+		uploadCtx, cancel := context.WithTimeout(context.Background(), logUploadTimeout)
+		defer cancel()
+		if err := uploader.Upload(uploadCtx, apiKey, logUploadSource, info, supportBundleID); err != nil {
 			e.logger.Error("In-process log upload failed", zap.Error(err))
 		}
 	}()
@@ -1775,12 +1801,15 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 }
 
 // newLogUploader builds the uploader used by the in-process path, honoring a
-// test override.
+// test override. The timeout-free HTTP client is deliberate: the default
+// client's 30s whole-request timeout covers the entire S3 PUT body, which
+// deterministically fails large archives on slow uplinks; the upload is bounded
+// by uploadLogsInProcess's 10-minute context instead.
 func (e *executor) newLogUploader() logUploaderIface {
 	if e.logUploaderFactory != nil {
 		return e.logUploaderFactory()
 	}
-	return newLogUploader(wrapper.NewHTTPClient(), e.os, e.json, e.logger)
+	return newLogUploader(wrapper.NewHTTPClientWithoutTimeout(), e.os, e.json, e.logger)
 }
 
 // logUploadBuildInfo gathers the device identity/build metadata the log

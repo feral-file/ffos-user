@@ -9,7 +9,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
-	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 )
 
 // provisioningRunner is the small lifecycle surface run() drives on the setup-AP
@@ -63,13 +62,37 @@ func (c *dbusConnectivity) Subscribe(fn func(online bool)) (unsubscribe func()) 
 	return func() { c.dbus.RemoveBusSignal(handler) }
 }
 
+// setupNarrationUI is the slice of setupui.Service the provisioning notifier
+// drives. Consumer-owned so main_test.go can spy on the hide-guard behavior
+// without a real CDP-backed service. *setupui.Service satisfies it.
+type setupNarrationUI interface {
+	ShowSoftAPQR(ssid, psk string)
+	ShowJoinFailed(reason string)
+	ShowJoining()
+	Hide()
+}
+
 // setupNotifier maps provisioning state changes to on-screen setup narration.
 // Every Show* call is fire-and-forget (setupui enqueues and returns), so calling
 // them inline on the machine's event-loop goroutine satisfies the Notifier
 // contract's "must not block" requirement.
 type setupNotifier struct {
-	ui     *setupui.Service
+	ui     setupNarrationUI
 	logger *zap.Logger
+
+	// narrating tracks whether THIS surface currently owns the overlay (it has
+	// painted softap/joining/join-failed narration that is still up). The
+	// Online/Unprovisioned branches hide only when it is set: the shared
+	// setupui.Service is also driven by the executor's claim flow, and an
+	// unconditional Hide on every →Online transition let a mere connectivity
+	// flap (offline→online while the claim QR is showing) erase the claim QR —
+	// and poison Resync, whose "last" became hidden. Guarding Hide keeps the
+	// "the two surfaces never legitimately drive the overlay at the same time"
+	// invariant SetSetupUI documents actually true.
+	//
+	// No lock: the Notifier contract runs OnStateChange inline on the machine's
+	// single event-loop goroutine, so this field is single-writer/single-reader.
+	narrating bool
 }
 
 // OnStateChange renders the least-surprising narration for each provisioning
@@ -85,19 +108,27 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 	case provisioning.StateAPActive:
 		switch {
 		case d.PSK != "":
+			n.narrating = true
 			n.ui.ShowSoftAPQR(d.SSID, d.PSK)
 		case d.SSID != "":
+			n.narrating = true
 			n.ui.ShowJoinFailed(d.Reason)
 		default:
 			// AP not raised yet; wait for the credentials-bearing announcement.
 		}
 	case provisioning.StateJoining:
+		n.narrating = true
 		n.ui.ShowJoining()
 	case provisioning.StateOnline, provisioning.StateUnprovisioned:
 		// Wi-Fi setup is done or unnecessary (connected, or reachable by wire):
-		// clear any setup overlay so the player shows content / the claim flow's
-		// own narration surface takes over.
-		n.ui.Hide()
+		// clear the setup overlay so the player shows content — but ONLY if this
+		// surface painted it. A connectivity flap arriving while the executor's
+		// claim QR is on screen must not hide someone else's narration (see the
+		// narrating field).
+		if n.narrating {
+			n.narrating = false
+			n.ui.Hide()
+		}
 	case provisioning.StateOfflineRetrying:
 		// Transient provisioned-device outage: leave the screen as-is rather than
 		// flashing a setup overlay on a blip.
