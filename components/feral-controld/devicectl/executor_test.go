@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -5255,4 +5256,117 @@ func TestExecutor_Connect_EmptyDeviceID(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "clientDevice.id is required")
+}
+
+// TestExecutor_ScreenRotation_ConcurrentTapsAdvanceTwoSteps pins the
+// serialization contract the command-storm gate now relies on: rotation is
+// not deduped (each byte-identical tap is a distinct relative step), so two
+// overlapping taps must advance two orientation steps. Without rotationMu the
+// orientation-file read-modify-write is a lost update — both taps read the
+// same start and apply the same target, collapsing two taps into one step.
+func TestExecutor_ScreenRotation_ConcurrentTapsAdvanceTwoSteps(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_SCREEN_ROTATION,
+		Arguments: map[string]interface{}{"clockwise": true},
+	}
+	arguments := `{"clockwise":true}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil).
+		Times(2)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			v.(*struct {
+				Clockwise bool `json:"clockwise"`
+			}).Clockwise = true
+			return nil
+		}).
+		Times(2)
+
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "wlr-randr").
+		Return(ts.mockExecCmd).
+		Times(2)
+	ts.mockExecCmd.EXPECT().
+		Output().
+		Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil).
+		Times(2)
+
+	// stored is the in-memory stand-in for SCREEN_ORIENTATION_FILE. The first
+	// ReadFile parks until the second ReadFile arrives (unserialized overlap)
+	// or a grace period elapses — under rotationMu the second command is
+	// parked on the mutex and can never reach ReadFile concurrently, so the
+	// timeout path is the serialized outcome.
+	var stateMu sync.Mutex
+	stored := "normal"
+	readCount := 0
+	secondReadEntered := make(chan struct{})
+	ts.mockOS.EXPECT().
+		ReadFile(constants.SCREEN_ORIENTATION_FILE).
+		DoAndReturn(func(string) ([]byte, error) {
+			stateMu.Lock()
+			readCount++
+			idx := readCount
+			val := stored
+			stateMu.Unlock()
+			if idx == 2 {
+				close(secondReadEntered)
+			} else {
+				select {
+				case <-secondReadEntered:
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+			return []byte(val), nil
+		}).
+		Times(2)
+
+	var transforms []string
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "wlr-randr", "--output", "HDMI-A-1", "--transform", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, arg ...string) wrapper.ExecCmd {
+			stateMu.Lock()
+			transforms = append(transforms, arg[len(arg)-1])
+			stateMu.Unlock()
+			return ts.mockExecCmd
+		}).
+		Times(2)
+	ts.mockExecCmd.EXPECT().
+		Run().
+		Return(nil).
+		Times(2)
+
+	ts.mockOS.EXPECT().
+		WriteFile(constants.SCREEN_ORIENTATION_FILE, gomock.Any(), os.FileMode(0600)).
+		DoAndReturn(func(_ string, data []byte, _ os.FileMode) error {
+			stateMu.Lock()
+			stored = string(data)
+			stateMu.Unlock()
+			return nil
+		}).
+		Times(2)
+	ts.mockStatus.EXPECT().
+		ForceRefresh().
+		Times(2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := ts.executor.Execute(ts.ctx, cmd)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+
+	// Two clockwise taps from normal must land on 180 (normal → 270 → 180).
+	// A lost update leaves 270 with both applies targeting 270.
+	assert.Equal(t, "180", stored)
+	assert.Equal(t, []string{"270", "180"}, transforms)
 }

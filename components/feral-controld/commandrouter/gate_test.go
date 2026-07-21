@@ -312,4 +312,14 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	// taps are not rejected (the executor coalesces bursts safely).
 	wake := cfg.Policies[commands.CMD_WAKE_NOW]
 	assert.Greater(t, wake.Rate, reboot.Rate)
+
+	// Screen rotation is a relative step command: reaching a target
+	// orientation takes up to 3 rapid taps, so it must not sit on the
+	// 1-per-5s disruptive budget (the third tap used to be rejected with a
+	// 429), and it must not dedupe — coalescing two overlapping identical
+	// taps would silently drop a rotation.
+	rotation := cfg.Policies[commands.CMD_SCREEN_ROTATION]
+	assert.Greater(t, rotation.Rate, reboot.Rate)
+	assert.GreaterOrEqual(t, rotation.Burst, 3)
+	assert.False(t, rotation.Dedupe)
 }

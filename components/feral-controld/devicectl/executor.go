@@ -163,6 +163,16 @@ type executor struct {
 	// Do not hold across waits, applySleepTransition, or wakeSleepScheduleLoop.
 	sleepScheduleFileMu sync.Mutex
 
+	// rotationMu serializes the whole screen-rotation step — orientation-file
+	// read, next-step computation, wlr-randr apply, and the write-back. Each
+	// rotate command is a RELATIVE step and the perceived orientation lives in
+	// SCREEN_ORIENTATION_FILE, so an unserialized overlap is a lost update:
+	// both taps read the same start, compute the same target, and two taps
+	// advance one step. The command-storm gate deliberately does not dedupe
+	// rotations (each byte-identical tap is a distinct user intent), so
+	// overlapping commands are routine, not exceptional.
+	rotationMu sync.Mutex
+
 	// sleepApplyMu serializes the whole apply — player CDP send, FFP DDC enqueue,
 	// and the tracker writes below — so a manual override and a schedule tick can
 	// never interleave and leave the player in one state while the tracker records
@@ -684,6 +694,12 @@ func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (inter
 	clockwise := cmdArgs.Clockwise
 	e.logger.Info("Screen rotation request",
 		zap.Bool("clockwise", clockwise))
+
+	// Hold rotationMu across the full read→compute→apply→write sequence so
+	// each tap advances exactly one orientation step; see the field comment
+	// for why overlapping rotate commands are routine.
+	e.rotationMu.Lock()
+	defer e.rotationMu.Unlock()
 
 	// Execute wlr-randr command
 	cmd := e.exec.CommandContext(ctx, "wlr-randr")
