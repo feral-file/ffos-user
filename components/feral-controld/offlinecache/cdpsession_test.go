@@ -68,6 +68,13 @@ func (c *fakeWSConn) Close() error {
 	}
 	c.closed = true
 	close(c.inbound)
+	// Closing outbound too (guarded by the same mutex WriteMessage checks
+	// c.closed under, so no send can race a concurrent close) lets a
+	// test's generic drainAndAckRemaining loop detect "no more messages
+	// are coming, ever" and exit, instead of needing to pre-know exactly
+	// how many trailing calls (e.g. capture.go's post-capture origin
+	// storage cleanup) a given scenario will produce.
+	close(c.outbound)
 	return nil
 }
 
@@ -94,6 +101,35 @@ func (c *fakeWSConn) nextOutbound(t *testing.T) map[string]interface{} {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for outbound CDP message")
 		return nil
+	}
+}
+
+// drainAndAckRemaining acks every outbound CDP call the fake conn sees
+// from here on, in an empty-result reply, until the session closes
+// c.outbound (see Close's doc). Tests use this as the last thing their
+// scripted-event goroutine does instead of returning immediately, so a
+// capture step whose exact trailing call count depends on this
+// scenario's own resources (capture.go's post-capture
+// clearObservedOriginsStorage issues one Storage.clearDataForOrigin per
+// distinct origin observed) always gets a reply rather than blocking on
+// cdpSession's internal send-timeout ceiling. Never calls t.Fatal: an
+// idle drain loop with nothing left to do is the expected steady state,
+// not a failure.
+func (c *fakeWSConn) drainAndAckRemaining(t *testing.T) {
+	t.Helper()
+	for data := range c.outbound {
+		var msg map[string]interface{}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return
+		}
+		reply, err := json.Marshal(map[string]interface{}{
+			"id":     int64(msg["id"].(float64)),
+			"result": map[string]interface{}{},
+		})
+		if err != nil {
+			return
+		}
+		c.pushReply(reply)
 	}
 }
 

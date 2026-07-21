@@ -26,10 +26,13 @@ import (
 // single mutex and can safely poison the whole connection via
 // socket-level read/write deadlines), cdpSession multiplexes many
 // concurrent in-flight calls over one connection keyed by request ID,
-// so the bound must be per-call via context rather than per-connection
-// via socket deadlines — setting a socket-level deadline here would
-// spuriously fail every other in-flight call sharing the connection,
-// not just the stuck one. 15s mirrors cdp.go's sendRequestTimeout:
+// so the reply-wait bound must be per-call via context rather than a
+// shared socket read deadline — setting one here would spuriously fail
+// every other in-flight call sharing the connection's read side, not
+// just the stuck one. (This does not rule out a socket WRITE deadline:
+// Send below also sets one immediately before its own WriteMessage
+// call, which is safe precisely because writes are already fully
+// serialized by writeMu — see that call site's doc.) 15s mirrors cdp.go's sendRequestTimeout:
 // generous relative to real CDP replies (these answer in milliseconds)
 // so it only fires on a genuinely dead/nonresponsive target.
 const defaultSendTimeout = 15 * time.Second
@@ -191,6 +194,35 @@ func (s *cdpSession) Send(ctx context.Context, method string, params map[string]
 	}
 
 	s.writeMu.Lock()
+	// A write deadline bounds only the raw WriteMessage call below, not
+	// any reply — it is independent of, and does not conflict with,
+	// this session's earlier design choice to bound the reply wait via
+	// ctx rather than a socket read deadline (see defaultSendTimeout's
+	// doc: a shared read deadline would spuriously fail every other
+	// pending call on this connection, but SetWriteDeadline only ever
+	// affects the next write, and writes are already fully serialized
+	// by writeMu). Without this, a write that blocks because the peer
+	// stopped reading (TCP send buffer full) would hold writeMu
+	// forever, wedging every future Send on this session too, not just
+	// the one whose write is stuck.
+	//
+	// Deliberately reuse ctx's OWN deadline here rather than a fresh
+	// time.Now().Add(s.sendTimeout): ctx is already
+	// context.WithTimeout(callerCtx, s.sendTimeout) above, so its
+	// deadline is already the EARLIER of the caller's own (possibly
+	// tighter) deadline and this call's internal ceiling. Send cannot
+	// reach the ctx.Done() select case below until WriteMessage itself
+	// returns, so if the write deadline ignored a tighter caller
+	// deadline and used the full internal ceiling instead, a blocked
+	// write would silently stretch that caller's shorter deadline out
+	// to the full 15s ceiling — defeating the exact "caller's tighter
+	// deadline wins" contract this ctx construction promises.
+	deadline, _ := ctx.Deadline() // ok is always true: WithTimeout above guarantees a deadline.
+	if err := s.conn.SetWriteDeadline(deadline); err != nil {
+		s.writeMu.Unlock()
+		cleanup()
+		return nil, fmt.Errorf("offline cache: set cdp write deadline for %s: %w", method, err)
+	}
 	err = s.conn.WriteMessage(websocket.TextMessage, data)
 	s.writeMu.Unlock()
 	if err != nil {

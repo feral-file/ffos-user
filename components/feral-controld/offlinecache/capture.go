@@ -140,6 +140,9 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	if _, err := session.Send(ctx, "Page.enable", map[string]interface{}{}); err != nil {
 		return nil, fmt.Errorf("offline cache: Page.enable: %w", err)
 	}
+	if err := c.resetTargetState(ctx, session, item.Source); err != nil {
+		return nil, fmt.Errorf("offline cache: reset chromium state before capture: %w", err)
+	}
 
 	navCtx, navCancel := context.WithTimeout(ctx, window)
 	defer navCancel()
@@ -152,13 +155,22 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	// indefinitely), so a bounded wall-clock observation window is the
 	// simplest signal that is both testable and safe against a runaway
 	// capture holding the single download slot forever.
-	select {
-	case <-navCtx.Done():
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if err := waitForObservationWindow(ctx, navCtx); err != nil {
+		return nil, err
 	}
 
 	resources, coverage := c.resolveResources(ctx, tracker)
+
+	// resetTargetState above only reaches item.Source's OWN origin,
+	// which cannot cover an origin this navigation redirects to or
+	// otherwise loads subresources from — those origins are only known
+	// once capture has actually happened. Clearing them now, before
+	// this session closes, means the NEXT capture job to touch any of
+	// these origins (regardless of ITS OWN item.Source) starts clean,
+	// closing the redirect/subresource-origin gap resetTargetState's
+	// preemptive, source-only clear leaves open. Best-effort: a failure
+	// here must not fail an otherwise-successful capture.
+	c.clearObservedOriginsStorage(ctx, session, resources)
 
 	rec := &ItemRecord{
 		ItemID:     item.ID,
@@ -176,6 +188,116 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 
 func (c *capturer) Close() error {
 	return c.downloader.Close()
+}
+
+// resetTargetState clears the headless Chromium's HTTP cache and every
+// storage bucket (cookies, IndexedDB, Cache Storage, Service Workers,
+// local storage, ...) scoped to sourceURL's origin, immediately before
+// navigating to it. Downloader deliberately runs one long-lived
+// Chromium process with a single persistent --user-data-dir and reuses
+// its one page target across every capture job (see downloader.go's
+// doc) rather than spinning up a fresh profile per item — cheap and,
+// for plain HTTP caching, actually more faithful to the kiosk's own
+// long-lived profile (fetchAndStoreBody re-fetches bytes directly over
+// HTTP regardless of the browser's cache state, so a same-origin HTTP
+// cache hit from an earlier item does not, on its own, cause a resource
+// to go unobserved). But a Service Worker, IndexedDB, or Cache Storage
+// entry left behind by a PRIOR item sharing the same origin (e.g. two
+// playlist items hosted on the same generative-art platform's domain)
+// could intercept or seed responses for THIS item without any of it
+// ever reaching the network, so resolveResources would never even learn
+// those URLs exist. Clearing before every navigation, scoped to this
+// item's own origin plus a full cache flush, removes that
+// cross-item leakage without the cost of a fresh profile/process per
+// job.
+//
+// This is deliberately only half of the defense: sourceURL's origin is
+// the only one knowable BEFORE navigation happens, but a redirect chain
+// (see resolveResources' IsRedirect handling) or cross-origin
+// subresources can leave THIS item's own state on origins other than
+// sourceURL's — see clearObservedOriginsStorage, called after capture,
+// for the other half.
+func (c *capturer) resetTargetState(ctx context.Context, session CDPSession, sourceURL string) error {
+	if _, err := session.Send(ctx, "Network.clearBrowserCache", map[string]interface{}{}); err != nil {
+		return fmt.Errorf("Network.clearBrowserCache: %w", err)
+	}
+
+	origin, err := requestOrigin(sourceURL)
+	if err != nil {
+		// item.Source is validated by the caller before Capture reaches
+		// here (a malformed URL fails Page.navigate itself, moments
+		// later, with a clearer error); skip the origin-scoped clear
+		// rather than fail capture entirely just for this defense-in-
+		// depth step.
+		c.logger.Warn("offline cache: could not determine origin for storage reset, skipping",
+			zap.String("source", sourceURL), zap.Error(err))
+		return nil
+	}
+	if _, err := session.Send(ctx, "Storage.clearDataForOrigin", map[string]interface{}{
+		"origin":       origin,
+		"storageTypes": "all",
+	}); err != nil {
+		return fmt.Errorf("Storage.clearDataForOrigin: %w", err)
+	}
+	return nil
+}
+
+// clearObservedOriginsStorage clears Cache/IndexedDB/Service-Worker/etc.
+// storage for every distinct origin actually present among resources —
+// i.e. every origin this capture's navigation, its redirect chain, and
+// its subresources actually touched, not just sourceURL's own origin
+// (resetTargetState's preemptive, pre-navigation clear can only target
+// the latter, since a redirect target or subresource origin is not
+// knowable before navigating). Running this at the END of a capture,
+// rather than only at the start of the NEXT one, means it also fires
+// (finishing state cleanup) even if Service.Stop tears the capturer
+// down before another job ever starts.
+//
+// Best-effort by design: called after the record this capture produced
+// is already final, so a failure here must never turn an otherwise-
+// successful capture into an error — it only affects how clean the
+// NEXT job's starting state is, not this one's correctness.
+func (c *capturer) clearObservedOriginsStorage(ctx context.Context, session CDPSession, resources []Resource) {
+	origins := make(map[string]bool, len(resources))
+	for _, res := range resources {
+		origin, err := requestOrigin(res.URL)
+		if err != nil {
+			continue // non-http(s) or unparsable URL; nothing to scope a clear to.
+		}
+		origins[origin] = true
+	}
+	for origin := range origins {
+		if _, err := session.Send(ctx, "Storage.clearDataForOrigin", map[string]interface{}{
+			"origin":       origin,
+			"storageTypes": "all",
+		}); err != nil {
+			c.logger.Warn("offline cache: post-capture origin storage clear failed",
+				zap.String("origin", origin), zap.Error(err))
+		}
+	}
+}
+
+// waitForObservationWindow blocks until either navCtx's per-navigation
+// timeout elapses or ctx (the caller's, possibly long-lived/unbounded,
+// context) is done, then returns ctx.Err(). navCtx is always derived
+// from ctx via context.WithTimeout, so a cancellation of ctx closes
+// BOTH Done() channels — and Go's select, faced with two simultaneously
+// ready cases, is free to pick either one. Re-checking ctx.Err()
+// explicitly after the select (rather than returning early only from a
+// dedicated ctx.Done() case, and falling through to resolveResources/
+// SaveItem from the navCtx.Done() case) means the caller gets the
+// correct outcome regardless of which case the runtime happens to
+// choose. This matters because Capture's caller (Service.Stop during a
+// recapture, most notably) must never have a canceled-mid-flight
+// capture fall through to SaveItem: that would resolve everything still
+// in flight as a failure and could overwrite an item that was already
+// fully captured and ready with an incomplete record.
+func waitForObservationWindow(ctx, navCtx context.Context) error {
+	select {
+	case <-navCtx.Done():
+	case <-ctx.Done():
+	}
+	return ctx.Err()
 }
 
 // safeIdempotentMethods are the HTTP methods resolveResources may safely

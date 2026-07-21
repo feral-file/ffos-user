@@ -70,12 +70,18 @@ func setupCapture(t *testing.T) *captureTestHarness {
 	}
 }
 
-// answerDomainEnables drains and acks the Network.enable/Page.enable/
-// Page.navigate calls capture.go always issues before the observation
-// window begins.
+// domainEnableCallCount is how many outbound CDP calls capture.go always
+// issues, in order, before the observation window begins: Network.enable,
+// Page.enable, resetTargetState's Network.clearBrowserCache and
+// Storage.clearDataForOrigin, then Page.navigate.
+const domainEnableCallCount = 5
+
+// answerDomainEnables drains and acks every call capture.go always
+// issues before the observation window begins (see
+// domainEnableCallCount).
 func (h *captureTestHarness) answerDomainEnables(t *testing.T) {
 	t.Helper()
-	for i := 0; i < 3; i++ {
+	for i := 0; i < domainEnableCallCount; i++ {
 		msg := h.conn.nextOutbound(t)
 		h.ackEmpty(t, msg)
 	}
@@ -96,6 +102,18 @@ func (h *captureTestHarness) pushEvent(t *testing.T, method string, params inter
 	data, err := json.Marshal(map[string]interface{}{"method": method, "params": params})
 	require.NoError(t, err)
 	h.conn.pushReply(data)
+}
+
+// drainAndAckRemaining is the last thing a test's scripted-event
+// goroutine should do instead of returning immediately: it keeps acking
+// any further outbound CDP calls (notably capture.go's post-capture
+// clearObservedOriginsStorage, whose Storage.clearDataForOrigin call
+// count depends on how many distinct origins THIS test's resources
+// happen to touch) until Capture returns and its internal
+// `defer session.Close()` closes the connection.
+func (h *captureTestHarness) drainAndAckRemaining(t *testing.T) {
+	t.Helper()
+	h.conn.drainAndAckRemaining(t)
 }
 
 func TestCapturer_Capture_SingleResource(t *testing.T) {
@@ -124,6 +142,7 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 				"url": "https://example.com/index.html", "status": 200, "mimeType": "text/html",
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
@@ -147,6 +166,150 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 	saved, err := h.store.LoadItem("item-1")
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources)
+}
+
+// TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort
+// pins clearObservedOriginsStorage's best-effort contract: it runs AFTER
+// the record this capture produced is already final (see its doc), so
+// a Storage.clearDataForOrigin RPC failure for an observed resource's
+// origin must only be logged, never turn an otherwise-successful
+// capture into an error or block SaveItem.
+func TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://example.com/index.html", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("<html>art</html>")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/index.html"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://example.com/index.html", "status": 200, "mimeType": "text/html",
+			},
+		})
+
+		// The post-capture clearObservedOriginsStorage call for this
+		// item's single observed origin: reply with a CDP RPC error
+		// (instead of ackEmpty) rather than a successful empty result.
+		msg := h.conn.nextOutbound(t)
+		assert.Equal(t, "Storage.clearDataForOrigin", msg["method"])
+		reply, err := json.Marshal(map[string]interface{}{
+			"id":    int64(msg["id"].(float64)),
+			"error": map[string]interface{}{"code": -32000, "message": "simulated origin clear failure"},
+		})
+		require.NoError(t, err)
+		h.conn.pushReply(reply)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err, "a post-capture cleanup RPC failure must never fail the capture itself")
+
+	require.Len(t, rec.Resources, 1)
+	assert.Equal(t, "https://example.com/index.html", rec.Resources[0].URL)
+	assert.True(t, rec.Coverage.Complete)
+
+	saved, err := h.store.LoadItem("item-1")
+	require.NoError(t, err, "the record must still be persisted despite the best-effort cleanup failure")
+	assert.Equal(t, rec.Resources, saved.Resources)
+}
+
+// TestCapturer_Capture_ClearsBrowserCacheAndOriginStorageBeforeNavigate
+// is the regression test for resetTargetState: the headless downloader
+// runs one long-lived Chromium process whose page target and
+// --user-data-dir are reused across every capture job (see
+// downloader.go's doc), so without an explicit reset a Service Worker,
+// IndexedDB entry, or Cache Storage entry left behind by a PRIOR item
+// sharing this item's origin could intercept or seed this item's
+// requests without any of them ever reaching the network — silently
+// hiding resources resolveResources needs to see. Pins both the
+// unconditional cache flush and the origin-scoped storage clear, in
+// that order, before Page.navigate.
+func TestCapturer_Capture_ClearsBrowserCacheAndOriginStorageBeforeNavigate(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://cdn.example.com:8443/index.html?x=1"}
+
+	go func() {
+		for i := 0; i < domainEnableCallCount; i++ {
+			msg := h.conn.nextOutbound(t)
+			switch i {
+			case 0:
+				assert.Equal(t, "Network.enable", msg["method"])
+			case 1:
+				assert.Equal(t, "Page.enable", msg["method"])
+			case 2:
+				assert.Equal(t, "Network.clearBrowserCache", msg["method"])
+			case 3:
+				assert.Equal(t, "Storage.clearDataForOrigin", msg["method"])
+				params, ok := msg["params"].(map[string]interface{})
+				require.True(t, ok)
+				assert.Equal(t, "https://cdn.example.com:8443", params["origin"],
+					"must scope the clear to the item's own origin, not the whole host or a bare domain")
+				assert.Equal(t, "all", params["storageTypes"])
+			case 4:
+				assert.Equal(t, "Page.navigate", msg["method"],
+					"the cache/storage reset must complete before navigation starts")
+			}
+			h.ackEmpty(t, msg)
+		}
+	}()
+
+	_, err := h.capturer.Capture(context.Background(), item, 50)
+	require.NoError(t, err)
+}
+
+// TestCapturer_Capture_UnparsableSourceSkipsOriginClearButStillClearsCache
+// pins resetTargetState's fallback: an origin that cannot be derived
+// from item.Source must not abort the whole capture (Page.navigate is
+// about to fail on the same malformed URL moments later with a clearer
+// error anyway) — only the origin-scoped Storage.clearDataForOrigin
+// call is skipped, while the unconditional Network.clearBrowserCache
+// call still happens.
+func TestCapturer_Capture_UnparsableSourceSkipsOriginClearButStillClearsCache(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "not-a-valid-origin-url"}
+
+	go func() {
+		msg := h.conn.nextOutbound(t)
+		assert.Equal(t, "Network.enable", msg["method"])
+		h.ackEmpty(t, msg)
+
+		msg = h.conn.nextOutbound(t)
+		assert.Equal(t, "Page.enable", msg["method"])
+		h.ackEmpty(t, msg)
+
+		msg = h.conn.nextOutbound(t)
+		assert.Equal(t, "Network.clearBrowserCache", msg["method"])
+		h.ackEmpty(t, msg)
+
+		// No Storage.clearDataForOrigin call: "not-a-valid-origin-url"
+		// has no scheme/host, so requestOrigin fails and resetTargetState
+		// skips straight to letting Page.navigate itself surface the bad
+		// URL.
+		msg = h.conn.nextOutbound(t)
+		assert.Equal(t, "Page.navigate", msg["method"])
+		h.ackEmpty(t, msg)
+	}()
+
+	_, err := h.capturer.Capture(context.Background(), item, 50)
+	require.NoError(t, err)
 }
 
 // TestCapturer_Capture_FiltersResponseHeadersToReplayableAllowlist pins
@@ -187,6 +350,7 @@ func TestCapturer_Capture_FiltersResponseHeadersToReplayableAllowlist(t *testing
 				},
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-cors", Source: "https://cdn.example.com/module.js"}
@@ -226,6 +390,7 @@ func TestCapturer_Capture_NonRedirectErrorStatusMarksIncomplete(t *testing.T) {
 				"url": "https://example.com/missing.js", "status": 404, "mimeType": "text/plain",
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-404", Source: "https://example.com/missing.js"}
@@ -264,6 +429,7 @@ func TestCapturer_Capture_UnsafeMethodSuccessMarksIncompleteWithoutRefetching(t 
 				"url": "https://example.com/api/report", "status": 200, "mimeType": "application/json",
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-post", Source: "https://example.com/api/report"}
@@ -320,6 +486,7 @@ func TestCapturer_Capture_CORSPreflightAndActualRequestDoNotCollide(t *testing.T
 				"url": "https://api.example.com/data", "status": 200, "mimeType": "application/json",
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-cors-preflight", Source: "https://api.example.com/data"}
@@ -377,6 +544,7 @@ func TestCapturer_Capture_RedirectChain(t *testing.T) {
 				"url": "https://example.com/lib@2.0/lib.min.js", "status": 200, "mimeType": "application/javascript",
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-redirect", Source: "https://example.com/lib.min.js"}
@@ -444,6 +612,7 @@ func TestCapturer_Capture_RedirectMethodChangeAttributesOriginalHopMethod(t *tes
 				"url": "https://example.com/result", "status": 200, "mimeType": "text/plain",
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-redirect-method-change", Source: "https://example.com/submit"}
@@ -548,6 +717,7 @@ func TestCapturer_Capture_RedirectChainUnresolvedFinalHopMarksIncomplete(t *test
 		})
 		// The final hop's own response is never observed: req-1 stays
 		// pending on its latest (redirected-to) URL.
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-redirect-hang", Source: "https://example.com/lib.min.js"}
@@ -622,6 +792,7 @@ func TestCapturer_Capture_IgnoresBlobAndDataURLs(t *testing.T) {
 				"url": "blob:https://example.com/abcd-1234", "status": 200, "mimeType": "application/octet-stream",
 			},
 		})
+		h.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-blob", Source: "https://example.com/index.html"}
@@ -653,6 +824,64 @@ func TestCapturer_Capture_AcquireFails(t *testing.T) {
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	_, err := capturer.Capture(context.Background(), item, 0)
 	assert.Error(t, err)
+}
+
+// TestCapturer_Capture_ParentCancellationAfterNavigateAbortsWithoutSaving
+// is the end-to-end, black-box counterpart to
+// TestWaitForObservationWindow_CtxCancellationWinsRegardlessOfSelectBranch
+// in capture_wedge_test.go: it drives a real Capture call through a
+// cancellation racing the post-navigate observation wait and asserts the
+// full-stack outcome (error returned, nothing saved). Real goroutine
+// scheduling makes it very unlikely this alone lands in the exact
+// ambiguous-select window on any given run (see that whitebox test's
+// doc for why only two independently-already-canceled contexts can
+// force it deterministically) — this test instead pins the black-box
+// contract "cancellation racing the observation window must never save
+// a partial record," repeated for some general race coverage.
+func TestCapturer_Capture_ParentCancellationAfterNavigateAbortsWithoutSaving(t *testing.T) {
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		h := setupCapture(t)
+
+		navigateAcked := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+
+		go func() {
+			h.answerDomainEnables(t) // acks Network.enable, Page.enable, Page.navigate
+			close(navigateAcked)
+			// Deliberately never send any Network.* events: nothing
+			// about this item resolves before cancellation.
+		}()
+
+		go func() {
+			<-navigateAcked
+			// No synchronization delay here on purpose: Capture falls
+			// straight from the navigate Send returning into the
+			// target select with no intervening work, so the race
+			// under test (navCtx.Done() and ctx.Done() becoming ready
+			// together) is only actually reachable if cancel() is
+			// called close to when Capture reaches the select, not
+			// once it is already safely parked inside it (a
+			// deliberate delay here would make the ctx.Done() branch
+			// win deterministically and defeat the point of this
+			// test — see the racecheck this was validated against).
+			cancel()
+		}()
+
+		// A large window ensures navCtx's own deadline is never what
+		// ends the select; only the explicit cancel above can.
+		item := dp1playlist.PlaylistItem{ID: "item-cancel", Source: "https://example.com/index.html"}
+		rec, err := h.capturer.Capture(ctx, item, 60_000)
+
+		assert.Nil(t, rec, "iteration %d: a canceled capture must not return a record", i)
+		assert.ErrorIs(t, err, context.Canceled, "iteration %d", i)
+
+		_, loadErr := h.store.LoadItem("item-cancel")
+		assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound,
+			"iteration %d: a canceled capture must not save a partial/incomplete ItemRecord", i)
+
+		h.ctrl.Finish()
+	}
 }
 
 func TestCapturer_Close_DelegatesToDownloader(t *testing.T) {

@@ -9,7 +9,9 @@
 package offlinecache
 
 import (
+	"fmt"
 	go_http "net/http"
+	go_url "net/url"
 	"strings"
 	"time"
 
@@ -102,6 +104,21 @@ func resourceKey(method, url string) string {
 		method = go_http.MethodGet
 	}
 	return strings.ToUpper(method) + " " + url
+}
+
+// requestOrigin returns rawURL's scheme://host[:port] origin (CDP's
+// Storage.clearDataForOrigin expects exactly this shape, no path/query/
+// fragment). Used by capture's resetTargetState to scope a per-item
+// storage clear to the artwork's own origin.
+func requestOrigin(rawURL string) (string, error) {
+	u, err := go_url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse url: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("url %q has no scheme/host to derive an origin from", rawURL)
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 // replayableResponseHeaders is the allowlist of CDP response headers

@@ -25,8 +25,19 @@ func TestOptionsFromConfig_NilConfigUsesDefaults(t *testing.T) {
 	assert.Equal(t, offlinecache.DefaultStaticServerAddr, opts.StaticServerAddr)
 	assert.Equal(t, offlinecache.MissPolicyFailClosed, opts.MissPolicy)
 	assert.Equal(t, "http://127.0.0.1:9222", opts.KioskCDPEndpoint)
-	assert.Zero(t, opts.MaxDiskBytes)
+	assert.Equal(t, int64(offlinecache.DefaultMaxDiskBytes), opts.MaxDiskBytes)
 	assert.Zero(t, opts.CaptureWindowMs)
+}
+
+// TestOptionsFromConfig_UnsetMaxDiskBytesFallsBackToDefaultBudget is the
+// regression test for the disk-exhaustion hazard DefaultMaxDiskBytes's
+// doc describes: enabling offlineCache without an explicit
+// maxDiskBytes must still leave the cache bounded (not "unlimited"),
+// since this feature caches potentially gigabyte-scale assets on a
+// disk-constrained device.
+func TestOptionsFromConfig_UnsetMaxDiskBytesFallsBackToDefaultBudget(t *testing.T) {
+	opts := offlinecache.OptionsFromConfig(&config.OfflineCacheConfig{Enabled: true}, "http://127.0.0.1:9222")
+	assert.Equal(t, int64(offlinecache.DefaultMaxDiskBytes), opts.MaxDiskBytes)
 }
 
 func TestOptionsFromConfig_EmptyConfigUsesDefaultsButRespectsEnabled(t *testing.T) {

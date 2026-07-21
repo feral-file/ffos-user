@@ -159,6 +159,52 @@ itself only clears shared state if no newer generation has since replaced
 it (an identity check, guarding against this goroutine waking up late and
 clobbering a replacement it knows nothing about).
 
+`Capture`'s bounded observation wait (`waitForObservationWindow`) blocks
+on a `select` between the per-navigation timeout (`navCtx`) and the
+caller's own `ctx`. Because `navCtx` is derived from `ctx` via
+`context.WithTimeout`, canceling `ctx` (e.g. `Service.Stop` racing an
+in-flight recapture) closes BOTH `Done()` channels, and Go's `select` is
+free to resolve via either case once both are ready. `Capture` must not
+rely on which case actually fired: falling through to
+`resolveResources`/`SaveItem` on a canceled `ctx` would resolve
+everything still in flight as a failure and could overwrite an item that
+was already fully captured and ready with an incomplete record.
+`waitForObservationWindow` re-checks `ctx.Err()` after the `select`
+unconditionally, so the outcome is correct regardless of which branch
+the runtime happened to pick.
+
+Because the headless Chromium is one long-lived process reused across
+every capture job, `Capture` also resets per-origin browser state
+immediately before each navigation (`resetTargetState`): an unconditional
+`Network.clearBrowserCache` plus a `Storage.clearDataForOrigin` scoped to
+the item's own origin (cookies, IndexedDB, Cache Storage, Service
+Workers, local storage — everything `storageTypes: "all"` covers). A
+plain same-origin HTTP cache hit from an earlier item is harmless on its
+own (`fetchAndStoreBody` always re-fetches bytes directly over HTTP
+regardless of the browser's cache state), but a Service Worker or
+Cache-Storage entry left behind by an earlier item sharing this item's
+origin (e.g. two playlist items hosted on the same generative-art
+platform's domain) could intercept or seed this item's requests entirely
+within the browser, so the request would never reach the network and
+`resolveResources` would never learn the URL exists at all. This clear
+step removes that cross-item leakage without the cost of a fresh
+profile/process per job. If the origin cannot be derived from a
+malformed `item.Source` (which is about to fail `Page.navigate` moments
+later anyway with a clearer error), only the origin-scoped clear is
+skipped; the unconditional cache flush still runs.
+
+`offlineCache.maxDiskBytes` deliberately does NOT default to "unlimited"
+the way most `OfflineCacheConfig` fields default to "off"/"unset" —
+`OptionsFromConfig` falls back to `DefaultMaxDiskBytes` (2 GiB) whenever
+config omits or zeroes it. This feature exists specifically to cache
+potentially gigabyte-scale software-artwork assets (§4.3's 1.1 GB video)
+on disk-constrained embedded devices; a config that merely flips
+`offlineCache.enabled` to `true` without also setting `maxDiskBytes`
+must not silently mean "fill the disk" — `Service.enforceDiskLimit` is a
+complete no-op when `maxDiskBytes <= 0` (see its doc), so an unset budget
+combined with `downloadPlaylist` against large assets could exhaust the
+filesystem.
+
 ## 4. Validated edge cases
 
 The pipeline was validated end-to-end against real, live DP-1 feed content
@@ -573,6 +619,30 @@ own targets-fetch + websocket-dial sequence, for the same reason: `main.go`'s
 on `cdp.CDP`'s own connect-loop goroutine, so a hung dial there would have
 stalled all future reconnect attempts, not just offline replay's own
 re-attach.
+
+The 15s ceiling above bounds the REPLY wait, not the raw write itself:
+`Send` also sets a socket write deadline (`SetWriteDeadline`) immediately
+before its own `WriteMessage` call — the one socket-level deadline that
+IS safe to set here, since writes are already fully serialized by
+`writeMu` and a write deadline only ever affects the very next write, not
+any other pending call's read-side wait. Without it, a write that blocks
+at the syscall level (the kiosk accepted the TCP connection but stopped
+reading, filling the OS send buffer) would hold `writeMu` forever,
+wedging every future `Send` on the session too — not just the one whose
+write is stuck — which the ceiling on the reply-wait alone cannot catch,
+since that select is never reached until the blocked write itself
+returns.
+
+That write deadline reuses `ctx.Deadline()` — the value already produced
+by the `context.WithTimeout(callerCtx, s.sendTimeout)` above, i.e. the
+EARLIER of the caller's own deadline (if any) and this call's internal
+15s ceiling — rather than a fresh `time.Now().Add(s.sendTimeout)`.
+`Send` cannot reach its `ctx.Done()` select case until `WriteMessage`
+itself returns, so if the write deadline ignored a tighter caller
+deadline in favor of the full internal ceiling, a blocked write would
+silently stretch a short caller deadline out to the full 15s — exactly
+the "caller's tighter deadline wins" contract this ctx construction
+otherwise promises everywhere else in `Send`.
 
 On every `Fetch.requestPaused` event, keyed on the **exact original URL**
 (never a rewritten relative path — this is what makes replay work for

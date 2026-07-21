@@ -58,7 +58,13 @@ type OfflineCacheConfig struct {
 	Enabled bool `json:"enabled"`
 	// RootDir is the on-disk store root (blobs/items/playlists).
 	RootDir string `json:"rootDir,omitempty"`
-	// MaxDiskBytes bounds total store size; <=0 means unlimited.
+	// MaxDiskBytes bounds total store size. Unlike most fields here,
+	// <=0 does NOT mean "unlimited" — offlinecache.OptionsFromConfig
+	// deliberately treats an unset/non-positive value as "use
+	// offlinecache.DefaultMaxDiskBytes" instead, since this feature
+	// caches potentially gigabyte-scale software-artwork assets and a
+	// config that merely omits this field must not silently let the
+	// cache grow unbounded on a disk-constrained device.
 	MaxDiskBytes int64 `json:"maxDiskBytes,omitempty"`
 	// CaptureWindowMs bounds how long one capture observes network
 	// activity before finalizing; <=0 uses the capturer's own default.

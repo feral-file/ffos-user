@@ -26,6 +26,19 @@ const (
 	DefaultHeadlessDebugPort    = 9223
 	DefaultHeadlessIdleTeardown = 30 * time.Second
 	DefaultStaticServerAddr     = "127.0.0.1:8082"
+	// DefaultMaxDiskBytes bounds the store's total size when
+	// offlineCache.maxDiskBytes is left unset (0) in config. Store and
+	// Service's own maxDiskBytes/maxBytes parameters treat <=0 as
+	// "unlimited" — a reasonable seam-level contract for direct
+	// construction (tests, other future callers) — but OptionsFromConfig
+	// deliberately does not let that meaning reach an operator's config
+	// file: this feature exists to cache potentially gigabyte-scale
+	// software-artwork assets (see docs/offline-artwork-capture.md's
+	// 1.1GB video case) on disk-constrained embedded devices, so a
+	// config that merely omits maxDiskBytes must not silently mean
+	// "fill the disk." 2 GiB comfortably holds a handful of
+	// video-heavy artworks while still bounding runaway growth.
+	DefaultMaxDiskBytes = 2 << 30 // 2 GiB
 )
 
 // Options bundles every offlinecache tunable, mirroring
@@ -57,6 +70,7 @@ type Options struct {
 func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) Options {
 	opts := Options{
 		RootDir:              DefaultRootDir,
+		MaxDiskBytes:         DefaultMaxDiskBytes,
 		HeadlessBinaryPath:   DefaultHeadlessBinaryPath,
 		HeadlessUserDataDir:  DefaultHeadlessUserDataDir,
 		HeadlessDebugPort:    DefaultHeadlessDebugPort,
@@ -73,7 +87,9 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 	if cfg.RootDir != "" {
 		opts.RootDir = cfg.RootDir
 	}
-	opts.MaxDiskBytes = cfg.MaxDiskBytes
+	if cfg.MaxDiskBytes > 0 {
+		opts.MaxDiskBytes = cfg.MaxDiskBytes
+	}
 	if cfg.CaptureWindowMs > 0 {
 		opts.CaptureWindowMs = cfg.CaptureWindowMs
 	}

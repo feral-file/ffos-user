@@ -1133,3 +1133,91 @@ func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskSta
 		"getOfflineCacheStatus must keep reporting the earlier successful capture, not the failed re-download attempt")
 	assert.Equal(t, 100, snap.Items[0].Percent)
 }
+
+// TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched is
+// the service-level counterpart to capture_wedge_test.go's
+// waitForObservationWindow unit tests: it exercises the real
+// Service.Stop() -> ctx-cancel -> Capture path end to end (rather than
+// a canned mock error standing in for it) to confirm that when
+// shutdown races an in-flight *re*-capture of an already-ready item,
+// the disk-backed record survives untouched. Capture itself (see
+// capture.go's waitForObservationWindow) is what guarantees the
+// canceled attempt never reaches SaveItem; this test pins that
+// Service.Stop's ctx-cancellation is what actually reaches Capture in
+// the first place, and that the observer's attempt-level "failed"
+// notification for the aborted attempt does not regress
+// getOfflineCacheStatus's disk-backed "ready" answer for the still-
+// valid earlier capture.
+func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store, _ := newTestStore(t)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).Times(1)
+	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	seedItemWithCapturedAt(t, store, "item-1", "already cached payload", time.Now())
+
+	captureStarted := make(chan struct{})
+	var seenFailed atomic.Bool
+	failedSeen := make(chan struct{})
+	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
+		if status.State == offlinecache.StateFailed && seenFailed.CompareAndSwap(false, true) {
+			close(failedSeen)
+		}
+	}).AnyTimes()
+
+	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	// Blocks on the SAME ctx Service.Start(ctx)/run(ctx) thread the
+	// worker calls Capture with — this is the real cancellation path
+	// (Service.Stop -> s.cancel()), not a stand-in error, so a future
+	// edit that broke that plumbing (e.g. Capture called with a
+	// context detached from Stop's cancel) would fail this test by
+	// timing out rather than silently passing.
+	mockCapturer.EXPECT().Capture(gomock.Any(), item, gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			close(captureStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}).Times(1)
+
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+
+	require.NoError(t, svc.DownloadItem(context.Background(), item))
+
+	select {
+	case <-captureStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the recapture's Capture call to start")
+	}
+
+	// Stop() cancels the worker's ctx then blocks on doneCh, which only
+	// closes once the blocked Capture call above actually returns — so
+	// by the time Stop() returns here, the canceled recapture attempt
+	// has already been through service.process's error path.
+	svc.Stop()
+
+	select {
+	case <-failedSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the observer to see the canceled recapture attempt")
+	}
+
+	snap, err := store.LoadItem("item-1")
+	require.NoError(t, err, "the pre-existing ready record must still be on disk, untouched by the canceled recapture")
+	assert.Equal(t, "already cached payload", func() string {
+		blob, blobErr := store.ReadBlob(snap.Resources[0].SHA256)
+		require.NoError(t, blobErr)
+		return string(blob)
+	}())
+
+	status, err := svc.Status([]string{"item-1"})
+	require.NoError(t, err)
+	require.Len(t, status.Items, 1)
+	assert.Equal(t, offlinecache.StateReady, status.Items[0].State,
+		"a recapture aborted by shutdown must never regress an already-ready item's disk-backed status")
+	assert.Equal(t, 100, status.Items[0].Percent)
+}
