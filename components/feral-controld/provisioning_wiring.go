@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
@@ -170,19 +171,52 @@ type setupStateSource interface {
 	State() provisioning.State
 }
 
+// internetProbeFrom returns the live internet-reachability probe the hub
+// status provider serves as the claim-QR-parity "internet" field. It reads
+// sys-monitord's CACHED state (refresh=false): LAN clients poll /api/status
+// while claiming, and each poll must cost one local D-Bus round-trip, never a
+// network probe. Errors degrade to false — the same value an offline device
+// reports — and log at Debug to keep polling out of production logs.
+func internetProbeFrom(dc dbus.DBus, logger *zap.Logger) func(context.Context) bool {
+	return func(ctx context.Context) bool {
+		deadlineCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		resp, err := dc.Call(
+			deadlineCtx,
+			dbus.MONITORD_NAME,
+			dbus.MONITORD_PATH,
+			dbus.MONITORD_INTERFACE,
+			dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
+			false,
+		)
+		if err != nil || len(resp) != 1 {
+			logger.Debug("internet probe: connectivity status unavailable", zap.Error(err))
+			return false
+		}
+		connected, ok := resp[0].(bool)
+		return ok && connected
+	}
+}
+
 // provisioningStatusProvider wraps the default hub status provider and overrides
 // setup_state with the live provisioning machine's state. When no machine is
 // wired (a nil machine, e.g. the default/test path) the base provider's
-// placeholder claim-derived setup_state is kept instead.
+// placeholder claim-derived setup_state is kept instead. internet, when wired,
+// supplies live internet reachability (the sys-monitord signal) for claim-QR
+// parity — the base provider only knows LAN-link state.
 type provisioningStatusProvider struct {
-	base    hub.StatusProvider
-	machine setupStateSource
+	base     hub.StatusProvider
+	machine  setupStateSource
+	internet func(ctx context.Context) bool
 }
 
 func (p *provisioningStatusProvider) Status(ctx context.Context) hub.StatusInfo {
 	info := p.base.Status(ctx)
 	if p.machine != nil {
 		info.SetupState = string(p.machine.State())
+	}
+	if p.internet != nil {
+		info.Internet = p.internet(ctx)
 	}
 	return info
 }

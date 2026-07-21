@@ -568,7 +568,11 @@ func initializeApp(
 	// from on-device state and reports a placeholder setup_state; the wrapper lets
 	// the live provisioning machine supply the real setup_state.
 	baseStatusProvider := hub.NewStateStatusProvider(os, json, linkChecker, logger)
-	statusProvider := &provisioningStatusProvider{base: baseStatusProvider, machine: provMachine}
+	statusProvider := &provisioningStatusProvider{
+		base:     baseStatusProvider,
+		machine:  provMachine,
+		internet: internetProbeFrom(dbusClient, logger),
+	}
 	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
 
 	return &app{

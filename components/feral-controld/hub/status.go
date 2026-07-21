@@ -33,7 +33,17 @@ type StatusProvider interface {
 type StatusInfo struct {
 	DeviceID string
 	Version  string
-	Claimed  bool
+	// Branch is the running build's distribution branch, read from the same
+	// ff1-config.json the OTA gate uses. It exists for claim-QR parity: the
+	// device_connect QR encodes device_id|topic_id|internet|branch|version|
+	// phase, and the LAN claim path must expose the same facts.
+	Branch  string
+	Claimed bool
+	// Internet reports live internet reachability (the sys-monitord signal) —
+	// the claim-QR "internet" segment. Distinct from Connectivity, which is
+	// LAN-link state: a device on a healthy LAN with a dead WAN is
+	// connectivity=connected, internet=false.
+	Internet bool
 	// SetupState is a coarse provisioning-state string. Today it is a
 	// placeholder derived from claim state; the provisioning package will
 	// replace it with a real signal.
@@ -48,12 +58,19 @@ type StatusInfo struct {
 	TopicID string
 }
 
-// statusResponse is the on-the-wire JSON shape of GET /api/status.
+// statusResponse is the on-the-wire JSON shape of GET /api/status. branch and
+// internet are additive (contract stays "1"); together with the existing
+// fields they make the LAN payload informationally equivalent to the
+// device_connect claim QR (device_id|topic_id|internet|branch|version|phase —
+// the QR's constant "pairing" phase is derivable as claimed==false with a
+// served topic_id).
 type statusResponse struct {
 	DeviceID     string `json:"device_id"`
 	Version      string `json:"version"`
+	Branch       string `json:"branch"`
 	Contract     string `json:"contract"`
 	Claimed      bool   `json:"claimed"`
+	Internet     bool   `json:"internet"`
 	SetupState   string `json:"setup_state"`
 	Connectivity string `json:"connectivity"`
 	TopicID      string `json:"topic_id"`
@@ -88,8 +105,10 @@ func (h *hub) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := statusResponse{
 		DeviceID:     info.DeviceID,
 		Version:      info.Version,
+		Branch:       info.Branch,
 		Contract:     StatusContract,
 		Claimed:      info.Claimed,
+		Internet:     info.Internet,
 		SetupState:   info.SetupState,
 		Connectivity: info.Connectivity,
 		TopicID:      topicID,
@@ -148,9 +167,11 @@ func (p *stateStatusProvider) Status(ctx context.Context) StatusInfo {
 		setupState = "claimed"
 	}
 
+	version, branch := p.installedBuild()
 	return StatusInfo{
 		DeviceID:     deviceID,
-		Version:      p.installedVersion(),
+		Version:      version,
+		Branch:       branch,
 		Claimed:      claimed,
 		SetupState:   setupState,
 		Connectivity: connectivity,
@@ -172,19 +193,21 @@ func (p *stateStatusProvider) deviceID(s *state.State) string {
 	return ""
 }
 
-// installedVersion reads the installed version from the FF1 config file. It is
-// best-effort: any read/parse failure yields an empty version rather than
-// failing the whole status response.
-func (p *stateStatusProvider) installedVersion() string {
+// installedBuild reads the installed version and distribution branch from the
+// FF1 config file — the SAME source the OTA gate and the claim QR read, so the
+// LAN payload can never disagree with the QR. Best-effort: any read/parse
+// failure yields empty values rather than failing the whole status response.
+func (p *stateStatusProvider) installedBuild() (version, branch string) {
 	configBytes, err := p.os.ReadFile(constants.FF1_CONFIG_FILE)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	var cfg struct {
 		Version string `json:"version"`
+		Branch  string `json:"branch"`
 	}
 	if err := p.json.Unmarshal(configBytes, &cfg); err != nil {
-		return ""
+		return "", ""
 	}
-	return cfg.Version
+	return cfg.Version, cfg.Branch
 }

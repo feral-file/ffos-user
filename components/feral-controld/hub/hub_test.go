@@ -739,7 +739,9 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	provider := stubStatusProvider{info: StatusInfo{
 		DeviceID:     "ff1-abc",
 		Version:      "1.2.3",
+		Branch:       "develop",
 		Claimed:      false,
+		Internet:     true,
 		SetupState:   "unclaimed",
 		Connectivity: "connected",
 		TopicID:      "topic-xyz",
@@ -757,8 +759,12 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, "ff1-abc", got["device_id"])
 	assert.Equal(t, "1.2.3", got["version"])
+	assert.Equal(t, "develop", got["branch"],
+		"branch is the claim-QR parity field; the LAN payload must carry it")
 	assert.Equal(t, StatusContract, got["contract"])
 	assert.Equal(t, false, got["claimed"])
+	assert.Equal(t, true, got["internet"],
+		"internet (reachability) is distinct from connectivity (LAN link)")
 	assert.Equal(t, "unclaimed", got["setup_state"])
 	assert.Equal(t, "connected", got["connectivity"])
 	assert.Equal(t, "topic-xyz", got["topic_id"],

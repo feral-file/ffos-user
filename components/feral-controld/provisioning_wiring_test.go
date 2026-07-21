@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 )
 
@@ -103,5 +104,34 @@ func TestSetupNotifierTriggersAutoClaimWhenReachable(t *testing.T) {
 	case <-fired:
 		t.Fatal("auto claim must not fire on StateAPActive")
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// stubHubStatusBase is a minimal hub.StatusProvider for wrapper tests.
+type stubHubStatusBase struct{ info hub.StatusInfo }
+
+func (s stubHubStatusBase) Status(context.Context) hub.StatusInfo { return s.info }
+
+// TestProvisioningStatusProviderSuppliesInternet: the wrapper must overlay the
+// live internet signal (claim-QR parity) onto the base payload, and leave it
+// at the zero value when no probe is wired (test/default path).
+func TestProvisioningStatusProviderSuppliesInternet(t *testing.T) {
+	base := stubHubStatusBase{info: hub.StatusInfo{DeviceID: "ff1-abc", Branch: "develop"}}
+
+	wired := &provisioningStatusProvider{
+		base:     base,
+		internet: func(context.Context) bool { return true },
+	}
+	got := wired.Status(context.Background())
+	if !got.Internet {
+		t.Fatal("wired probe must set Internet")
+	}
+	if got.Branch != "develop" {
+		t.Fatalf("base fields must pass through, got branch %q", got.Branch)
+	}
+
+	unwired := &provisioningStatusProvider{base: base}
+	if unwired.Status(context.Background()).Internet {
+		t.Fatal("no probe wired: Internet must stay false")
 	}
 }
