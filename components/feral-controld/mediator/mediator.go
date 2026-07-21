@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/feral-file/godbus"
@@ -242,7 +243,15 @@ func (m *mediator) handleDBusSignal(
 				"expression": fmt.Sprintf("window.handleConnectivityChange(%t)", connected),
 			})
 		if err != nil {
-			m.logger.Error("Failed to send CDP request", zap.Error(err))
+			// handleConnectivityChange is a notify-only hook; player builds that
+			// return nothing surface as "type mismatch: undefined" from the CDP
+			// client — the call was delivered, there is just no return value.
+			// Only real delivery failures deserve a visible log.
+			if strings.Contains(err.Error(), "type mismatch: undefined") {
+				m.logger.Debug("Connectivity change delivered; player handler returned no value")
+			} else {
+				m.logger.Warn("Failed to forward connectivity change to web app", zap.Error(err))
+			}
 		}
 
 		// Reconnect the relayer if it's not already connected

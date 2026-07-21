@@ -117,10 +117,12 @@ func TestNarrateUpdateProgress_ForwardsPercentSkipsUnparsed(t *testing.T) {
 // --- online-triggered auto claim (launcher-ui replacement) -------------------
 
 // autoClaimClock is a fake clock whose SleepContext advances fake time, so the
-// topic-wait window closes deterministically.
+// topic-wait window closes deterministically. onSleep, when set, runs after
+// each advance — tests use it to cancel the ctx and break retry loops.
 type autoClaimClock struct {
-	mu  sync.Mutex
-	now time.Time
+	mu      sync.Mutex
+	now     time.Time
+	onSleep func()
 }
 
 func (c *autoClaimClock) Now() time.Time {
@@ -132,7 +134,11 @@ func (c *autoClaimClock) Sleep(time.Duration) {}
 func (c *autoClaimClock) SleepContext(ctx context.Context, d time.Duration) error {
 	c.mu.Lock()
 	c.now = c.now.Add(d)
+	hook := c.onSleep
 	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return ctx.Err()
 }
 func (c *autoClaimClock) NewTicker(time.Duration) wrapper.Ticker { panic("unused") }
@@ -193,21 +199,30 @@ func TestMaybeShowClaimQROnOnline_UnclaimedRunsPreClaimGate(t *testing.T) {
 
 	core, observed := observer.New(zap.InfoLevel)
 	spy := &narratorSpy{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// A transiently failing gate is retried with backoff; the first backoff
+	// sleep cancels the ctx so the test observes exactly one retry cycle.
+	clk := &autoClaimClock{onSleep: cancel}
 	e := &executor{
 		logger:        zap.New(core),
 		setupNarrator: spy,
-		clock:         &autoClaimClock{},
+		clock:         clk,
 		os:            mockOS,
 	}
 
-	e.MaybeShowClaimQROnOnline(context.Background())
+	e.MaybeShowClaimQROnOnline(ctx)
 
-	gateRan := false
+	gateRan, retried := false, false
 	for _, entry := range observed.All() {
 		if entry.Message == "Auto claim flow: device online and unclaimed; running pre-claim gate" {
 			gateRan = true
 		}
+		if entry.Message == "Auto claim flow: gate not settled; retrying" {
+			retried = true
+		}
 	}
 	assert.True(t, gateRan, "unclaimed device must enter the pre-claim gate")
+	assert.True(t, retried, "a transient gate failure must schedule a retry")
 	assert.NotContains(t, spy.calls, "claim", "failed gate must withhold the claim QR")
 }

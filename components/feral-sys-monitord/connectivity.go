@@ -126,6 +126,14 @@ func (c *Connectivity) background() {
 	go func() {
 		c.logger.Info("Connectivity background goroutine started")
 
+		// Capture THIS watcher generation's done channel: restart() swaps
+		// c.doneChan, so reading the field from the loop races the swap — and a
+		// check already in flight across a stop/restart must not apply its
+		// stale result as current state.
+		c.Lock()
+		done := c.doneChan
+		c.Unlock()
+
 		// Get the last connected state
 		c.Lock()
 		lastConnected := c.lastConnected
@@ -164,12 +172,23 @@ func (c *Connectivity) background() {
 			case <-c.ctx.Done():
 				c.logger.Info("Connectivity background goroutine stopped")
 				return
-			case <-c.doneChan:
+			case <-done:
 				c.logger.Info("Connectivity Watcher stopped")
 				return
 			case <-ticker.C:
 				c.logger.Info("Checking connectivity")
 				connected, err := c.CheckConnectivity(PING_TIMEOUT)
+				// The watcher may have been stopped/restarted while the check
+				// was dialing (the change-triggered restart): its result belongs
+				// to the OLD generation and must not be applied or logged as
+				// current — a stale "offline" here would flap the whole stack.
+				select {
+				case <-done:
+					c.logger.Debug("Discarding connectivity result from stopped watcher",
+						zap.Bool("connected", connected))
+					return
+				default:
+				}
 				c.logger.Info("Connectivity check result", zap.Bool("connected", connected))
 				if err != nil {
 					// We accept not being able to check connectivity and only log the warning

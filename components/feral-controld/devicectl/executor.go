@@ -386,26 +386,34 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 		return CmdOK, nil
 	}
 
-	// Mandatory pre-claim OTA gate: the device must reach a supported build before
-	// it can be claimed. EnsureLatestBeforeClaim always drives the updater locally
-	// and runs a live version check. If it started an update the device is
-	// rebooting; if the check failed or the build is too old, the gate owns the
-	// device and we withhold the claim QR. Only a clean "no update needed"
-	// proceeds to paint the claim QR.
+	e.runPreClaimGateAndPaint(ctx)
+	return CmdOK, nil
+}
+
+// runPreClaimGateAndPaint runs the mandatory pre-claim OTA gate and paints the
+// claim QR only when the gate settles on a supported build: the device must
+// reach one before it can be claimed. It reports whether the QR was painted
+// and whether the outcome is terminal for this process (ResultUpdateStarted:
+// the device is rebooting into the new build; ResultTooOldToUpgrade: nothing
+// short of a reflash helps) so the auto-claim retry loop knows when another
+// attempt is pointless.
+func (e *executor) runPreClaimGateAndPaint(ctx context.Context) (painted, terminal bool) {
 	result, err := e.otaGateInstance().EnsureLatestBeforeClaim(ctx)
 	if err != nil {
+		// Retryable: version-check failures (often fresh-network DNS/route
+		// convergence) and failed update ladders (the ladder clears its own
+		// latch on the next explicit run).
 		e.logger.Warn("Pre-claim OTA gate did not pass; withholding claim QR",
 			zap.Error(err), zap.Int("gateResult", int(result)))
-		return CmdOK, nil
+		return false, false
 	}
 	if result != otagate.ResultNoUpdateNeeded {
 		e.logger.Info("Pre-claim OTA gate did not settle on no-update; withholding claim QR",
 			zap.Int("gateResult", int(result)))
-		return CmdOK, nil
+		return false, true
 	}
-
-	ui.ShowClaimQR(e.buildDeviceConnectURL(ctx))
-	return CmdOK, nil
+	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx))
+	return true, false
 }
 
 const (
@@ -456,6 +464,13 @@ const (
 	// topic-less QR would send the app to an unroutable device.
 	autoClaimTopicWait = 60 * time.Second
 	autoClaimTopicPoll = 2 * time.Second
+
+	// autoClaimRetryMin / autoClaimRetryMax bound the retry backoff when the
+	// pre-claim gate fails transiently. Nothing re-triggers the flow while the
+	// device simply STAYS online, so without this loop a version check that
+	// raced fresh-network DNS convergence would withhold the claim QR forever.
+	autoClaimRetryMin = 30 * time.Second
+	autoClaimRetryMax = 5 * time.Minute
 )
 
 // MaybeShowClaimQROnOnline is the SoftAP-era replacement for launcher-ui's
@@ -485,8 +500,23 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	}
 
 	e.logger.Info("Auto claim flow: device online and unclaimed; running pre-claim gate")
-	if _, err := e.showPairingQRCodeInProcess(ctx, true); err != nil {
-		e.logger.Warn("Auto claim flow: pre-claim gate errored", zap.Error(err))
+	backoff := autoClaimRetryMin
+	for {
+		painted, terminal := e.runPreClaimGateAndPaint(ctx)
+		if painted || terminal {
+			return
+		}
+		e.logger.Info("Auto claim flow: gate not settled; retrying", zap.Duration("backoff", backoff))
+		if err := e.clock.SleepContext(ctx, backoff); err != nil {
+			return
+		}
+		if e.deviceClaimed() {
+			return
+		}
+		backoff *= 2
+		if backoff > autoClaimRetryMax {
+			backoff = autoClaimRetryMax
+		}
 	}
 }
 
