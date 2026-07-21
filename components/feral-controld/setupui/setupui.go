@@ -41,6 +41,13 @@ const (
 	stateReady      = "ready"
 	stateHidden     = "hidden"
 
+	// stateScanning is an extension state narrating the pre-AP Wi-Fi scan (the
+	// device is looking for nearby networks before advertising its setup
+	// hotspot). Like stateFactoryReset below it is deliberately NOT in the
+	// required validation set: fielded players that predate it accept it as a
+	// no-op ({ok:true}, renders nothing) and keep full narration support.
+	stateScanning = "scanning"
+
 	// stateFactoryReset is an extension state used by the in-process factory-reset
 	// flow. It is deliberately NOT in the required set that
 	// validateSetupDisplayContract checks: the currently-shipping player manifest
@@ -131,6 +138,14 @@ func (s *Service) ShowSoftAPQR(ssid string, psk string) {
 		req["password"] = psk
 	}
 	s.push(req)
+}
+
+// ShowScanning narrates the pre-AP Wi-Fi scan: the device is searching for
+// nearby networks and will advertise its setup hotspot once the scan
+// completes. Extension state; older players render nothing (see
+// stateScanning).
+func (s *Service) ShowScanning() {
+	s.push(map[string]any{"state": stateScanning})
 }
 
 // ShowJoining narrates that the device is attempting to join the chosen Wi-Fi.

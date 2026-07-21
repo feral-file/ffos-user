@@ -85,6 +85,9 @@ type fakeWifi struct {
 	hasProfile bool
 	profileErr error
 	joinErr    error // returned by Join
+	// scanErrs is consumed one per RefreshScanCache call; nil entries and calls
+	// beyond the script succeed.
+	scanErrs []error
 }
 
 func (w *fakeWifi) HasSavedProfile(context.Context) (bool, error) {
@@ -94,6 +97,16 @@ func (w *fakeWifi) HasSavedProfile(context.Context) (bool, error) {
 }
 func (w *fakeWifi) RefreshScanCache(context.Context) ([]string, error) {
 	w.rec.add("wifi.RefreshScanCache")
+	w.mu.Lock()
+	var err error
+	if len(w.scanErrs) > 0 {
+		err = w.scanErrs[0]
+		w.scanErrs = w.scanErrs[1:]
+	}
+	w.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	return []string{"Net"}, nil
 }
 func (w *fakeWifi) CachedScan(context.Context) ([]string, error) {
@@ -544,4 +557,86 @@ func TestRedundantOfflineKeepsJoinFailureStatus(t *testing.T) {
 	h.m.onConnectivity(ctx, false)
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, portal.JoinFailed, h.m.Status().State)
+}
+
+// details returns a copy of every recorded notification.
+func (n *fakeNotifier) details() []struct {
+	State  State
+	Detail Detail
+} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]struct {
+		State  State
+		Detail Detail
+	}(nil), n.calls...)
+}
+
+// TestAPRaiseScanRetriesUntilComplete: the AP must not come up until a scan
+// pass completes — transient pre-AP scan failures are retried first, because
+// the portal picker can only ever offer what that scan saw.
+func TestAPRaiseScanRetriesUntilComplete(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.wifi.scanErrs = []error{errors.New("busy"), errors.New("busy")}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+
+	require.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 3, h.rec.count("wifi.RefreshScanCache"), "two failures then a success")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+	// The successful (last) scan still precedes the raise.
+	list := h.rec.list()
+	lastScan := -1
+	for i, e := range list {
+		if e == "wifi.RefreshScanCache" {
+			lastScan = i
+		}
+	}
+	assert.Less(t, lastScan, indexOf(list, "ap.Up"))
+}
+
+// TestAPRaiseProceedsAfterScanRetriesExhausted: a persistently failing scan
+// must not strand the user — the AP still comes up and the portal falls back
+// to manual SSID entry.
+func TestAPRaiseProceedsAfterScanRetriesExhausted(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.wifi.scanErrs = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+
+	require.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 3, h.rec.count("wifi.RefreshScanCache"))
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestScanningNarrationPrecedesAPRaise: the "scanning" announcement fires
+// before the credential-bearing AP-up announcement, so the screen can show a
+// scan-in-progress state until the hotspot is actually ready.
+func TestScanningNarrationPrecedesAPRaise(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	scanIdx, apIdx := -1, -1
+	for i, c := range h.notifier.details() {
+		if c.State != StateAPActive {
+			continue
+		}
+		if c.Detail.Reason == "scanning" && scanIdx == -1 {
+			scanIdx = i
+		}
+		if c.Detail.PSK != "" && apIdx == -1 {
+			apIdx = i
+		}
+	}
+	require.NotEqual(t, -1, scanIdx, "scanning announcement must fire")
+	require.NotEqual(t, -1, apIdx, "credential-bearing AP-up announcement must fire")
+	assert.Less(t, scanIdx, apIdx)
 }

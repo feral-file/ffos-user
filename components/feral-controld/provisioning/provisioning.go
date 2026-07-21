@@ -125,6 +125,13 @@ const (
 	defaultCheckInterval = 15 * time.Second
 	portalStopTimeout    = 3 * time.Second
 	eventBuffer          = 16
+
+	// preAPScanAttempts / preAPScanRetryDelay bound the pre-raise scan. The
+	// portal picker can only ever offer what this scan saw (the radio cannot
+	// scan again once the AP holds it), so a transient scan failure is retried
+	// rather than raising the AP over an empty or stale list.
+	preAPScanAttempts   = 3
+	preAPScanRetryDelay = 2 * time.Second
 )
 
 // Config wires the machine's dependencies and tunables.
@@ -550,9 +557,33 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		return nil
 	}
 
-	if _, err := m.wifi.RefreshScanCache(ctx); err != nil {
-		// Non-fatal: the portal falls back to manual SSID entry on an empty cache.
-		m.logger.Warn("provisioning: pre-AP scan refresh failed", zap.Error(err))
+	// Announce the scan before it starts so the narration surface can show a
+	// "looking for networks" state for however long the scan takes. Reason
+	// "scanning" is the discriminator (see setupNotifier.OnStateChange); the
+	// AP only comes up after the scan pass below completes.
+	m.notify(StateAPActive, Detail{
+		Reason:  "scanning",
+		Message: "Looking for nearby Wi-Fi networks",
+	})
+
+	var scanErr error
+	for attempt := 1; attempt <= preAPScanAttempts; attempt++ {
+		if _, scanErr = m.wifi.RefreshScanCache(ctx); scanErr == nil {
+			break
+		}
+		m.logger.Warn("provisioning: pre-AP scan failed",
+			zap.Int("attempt", attempt), zap.Int("max", preAPScanAttempts), zap.Error(scanErr))
+		if attempt < preAPScanAttempts {
+			if err := m.clock.SleepContext(ctx, preAPScanRetryDelay); err != nil {
+				break
+			}
+		}
+	}
+	if scanErr != nil {
+		// Non-fatal after retries: the portal falls back to manual SSID entry on
+		// an empty cache, and withholding the AP entirely would strand the user.
+		m.logger.Warn("provisioning: proceeding without a fresh scan; portal falls back to manual entry",
+			zap.Error(scanErr))
 	}
 
 	info, err := m.ap.Up(ctx)

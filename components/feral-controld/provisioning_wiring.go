@@ -66,6 +66,7 @@ func (c *dbusConnectivity) Subscribe(fn func(online bool)) (unsubscribe func()) 
 // drives. Consumer-owned so main_test.go can spy on the hide-guard behavior
 // without a real CDP-backed service. *setupui.Service satisfies it.
 type setupNarrationUI interface {
+	ShowScanning()
 	ShowSoftAPQR(ssid, psk string)
 	ShowJoinFailed(reason string)
 	ShowJoining()
@@ -98,6 +99,8 @@ type setupNotifier struct {
 // OnStateChange renders the least-surprising narration for each provisioning
 // state. The StateAPActive branch is disambiguated by the Detail the machine
 // sends (see provisioning.Detail.PSK):
+//   - Reason "scanning" -> the pre-raise Wi-Fi scan is running -> narrate the
+//     scan (the AP comes up only after it completes).
 //   - PSK present  -> the "AP is up" announcement -> render the soft-AP QR.
 //   - SSID present, no PSK -> a join just failed for that target SSID and the AP
 //     is being re-raised -> narrate the failure (the follow-up AP-up announcement
@@ -107,6 +110,9 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 	switch s {
 	case provisioning.StateAPActive:
 		switch {
+		case d.Reason == "scanning":
+			n.narrating = true
+			n.ui.ShowScanning()
 		case d.PSK != "":
 			n.narrating = true
 			n.ui.ShowSoftAPQR(d.SSID, d.PSK)

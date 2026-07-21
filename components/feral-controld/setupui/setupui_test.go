@@ -173,6 +173,12 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 			absent:     []string{"password"},
 		},
 		{
+			name:      "scanning",
+			call:      func(s *Service) { s.ShowScanning() },
+			wantState: stateScanning,
+			absent:    []string{"reason", "ssid", "url", "progress"},
+		},
+		{
 			name:      "joining",
 			call:      func(s *Service) { s.ShowJoining() },
 			wantState: stateJoining,
@@ -268,13 +274,14 @@ func TestDownCDPDoesNotBlockOrPanic(t *testing.T) {
 	sender.waitForCalls(t, 1)
 
 	// A subsequent change re-pushes (a new send attempt) despite prior failures.
-	before := sender.callCount()
+	// Wait on the CONTENT, not a call count: the worker may still be draining
+	// the earlier queued states, so the next send is not necessarily the ready
+	// push.
 	svc.ShowReady()
-	sender.waitForCalls(t, before+1)
-
-	last := sender.lastRequest()
-	require.NotNil(t, last)
-	assert.Equal(t, stateReady, last["state"])
+	assert.Eventually(t, func() bool {
+		last := sender.lastRequest()
+		return last != nil && last["state"] == stateReady
+	}, 2*time.Second, 10*time.Millisecond, "ready state never reached CDP")
 }
 
 // TestResyncRepushesLastStateWhenCDPReturns models CDP being down for the first
