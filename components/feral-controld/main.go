@@ -558,7 +558,7 @@ func initializeApp(
 	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
-	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, clock, logger)
+	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, clock, logger)
 
 	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
 	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)

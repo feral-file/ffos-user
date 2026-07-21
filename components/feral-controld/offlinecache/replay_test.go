@@ -269,9 +269,9 @@ func TestReplayer_Disable_DisablesFetchAndClearsScope(t *testing.T) {
 }
 
 // TestReplayer_Disable_FetchDisableFailureForcesPassThroughInsteadOfFailClosed
-// is the regression test for the PR #229 review finding that Disable
-// cleared scope to a fail-closed state BEFORE confirming Fetch.disable
-// actually succeeded on Chromium's side. If Fetch.disable's CDP call
+// is the regression test pinning that Disable must not clear scope to a
+// fail-closed state BEFORE confirming Fetch.disable actually succeeded on
+// Chromium's side. If Fetch.disable's CDP call
 // itself fails, this must not turn every subsequent request into a
 // Fetch.failRequest (which would break normal online playback outright);
 // it must instead force pass-through on miss, same as a mixed scope does.

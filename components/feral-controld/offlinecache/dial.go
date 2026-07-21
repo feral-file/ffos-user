@@ -4,11 +4,23 @@ import (
 	"context"
 	"fmt"
 	go_http "net/http"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// defaultDialTimeout bounds the whole targets-fetch + websocket-dial
+// sequence below, on top of whatever deadline the caller's ctx already
+// carries. main.go's CDP onConnect hook calls kioskReplay.AttachOnReconnect
+// (-> here) with the daemon's own long-lived lifetime context — see PR
+// #229 review — so without this ceiling, a kiosk DevTools HTTP endpoint
+// or websocket upgrade that hangs (accepts the connection but never
+// completes it) would wedge that onConnect callback forever, which runs
+// synchronously on cdp.CDP's connect-loop goroutine and would therefore
+// also stall all future reconnect attempts, not just this one dial.
+const defaultDialTimeout = 15 * time.Second
 
 // DialPageSession discovers endpoint's first "page" DevTools target (via
 // the HTTP /json target-list endpoint every Chromium DevTools instance
@@ -29,6 +41,26 @@ func DialPageSession(
 	ioWrapper wrapper.IO,
 	logger *zap.Logger,
 ) (CDPSession, error) {
+	return dialPageSessionWithTimeout(ctx, endpoint, httpClient, dialer, jsonWrapper, ioWrapper, logger, defaultDialTimeout)
+}
+
+// dialPageSessionWithTimeout is DialPageSession's actual implementation,
+// with an injectable dialTimeout so tests can pin the wedged-endpoint
+// ceiling behavior without waiting out the real production timeout —
+// mirrors newCDPSessionWithTimeout's same pattern in cdpsession.go.
+func dialPageSessionWithTimeout(
+	ctx context.Context,
+	endpoint string,
+	httpClient wrapper.HTTPClient,
+	dialer wrapper.WebSocketDialer,
+	jsonWrapper wrapper.JSON,
+	ioWrapper wrapper.IO,
+	logger *zap.Logger,
+	dialTimeout time.Duration,
+) (CDPSession, error) {
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+
 	req, err := httpClient.NewRequest(go_http.MethodGet, endpoint+"/json", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build targets request: %w", err)

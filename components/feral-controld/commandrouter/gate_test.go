@@ -315,12 +315,11 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 }
 
 // TestDefaultGateConfig_ClassifiesOfflineCacheCommands is the regression
-// test for the PR #229 review finding that the five offline-cache commands
-// (see commands/types.go's "Offline artwork caching commands" block) were
-// missing from Policies entirely and so silently inherited the generous
-// Default policy — undersized for downloadPlaylist/downloadPlaylistItem,
-// which do DP1 resolution plus enqueue into offlinecache.Service's
-// unbounded FIFO.
+// test pinning that the five offline-cache commands (see commands/types.go's
+// "Offline artwork caching commands" block) are classified in Policies
+// rather than silently inheriting the generous Default policy — undersized
+// for downloadPlaylist/downloadPlaylistItem, which do DP1 resolution plus
+// enqueue into offlinecache.Service's unbounded FIFO.
 func TestDefaultGateConfig_ClassifiesOfflineCacheCommands(t *testing.T) {
 	cfg := DefaultGateConfig()
 	query := cfg.Policies[commands.CMD_DEVICE_STATUS]

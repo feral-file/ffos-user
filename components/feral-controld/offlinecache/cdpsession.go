@@ -6,12 +6,33 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
+
+// defaultSendTimeout bounds how long Send will wait for a reply beyond
+// whatever deadline the caller's ctx already carries. Several production
+// callers (replay's per-request goroutine in replay.go, playlist-
+// refresher's periodic SyncPlaylist call, main.go's CDP onConnect hook)
+// pass a long-lived daemon/background context with no deadline of its
+// own, so without an internal ceiling, a kiosk DevTools socket that
+// accepts the write but never replies (a nonresponsive/wedged target)
+// would wedge Send, and therefore its caller, forever. Unlike
+// cdp.CDP.Send (which serializes one write+read at a time behind a
+// single mutex and can safely poison the whole connection via
+// socket-level read/write deadlines), cdpSession multiplexes many
+// concurrent in-flight calls over one connection keyed by request ID,
+// so the bound must be per-call via context rather than per-connection
+// via socket deadlines — setting a socket-level deadline here would
+// spuriously fail every other in-flight call sharing the connection,
+// not just the stuck one. 15s mirrors cdp.go's sendRequestTimeout:
+// generous relative to real CDP replies (these answer in milliseconds)
+// so it only fires on a genuinely dead/nonresponsive target.
+const defaultSendTimeout = 15 * time.Second
 
 // CDPSession is a minimal event-driven Chrome DevTools Protocol client: it
 // supports both blocking request/response calls AND delivery of unsolicited
@@ -66,6 +87,12 @@ type cdpSession struct {
 	json   wrapper.JSON
 	logger *zap.Logger
 
+	// sendTimeout is defaultSendTimeout in production; overridable only
+	// by newCDPSessionWithTimeout (test-only) to exercise the
+	// wedged-target path deterministically and fast, mirroring
+	// cdp.go's cdp.sendTimeout field/send_wedge_test.go convention.
+	sendTimeout time.Duration
+
 	nextID int64 // atomic, next outbound request id
 
 	// writeMu serializes conn.WriteMessage calls. gorilla/websocket's
@@ -94,13 +121,21 @@ type cdpSession struct {
 // enough between the two that sharing a dialer here would not simplify
 // either caller.
 func NewCDPSession(conn wrapper.WebSocketConn, jsonWrapper wrapper.JSON, logger *zap.Logger) CDPSession {
+	return newCDPSessionWithTimeout(conn, jsonWrapper, logger, defaultSendTimeout)
+}
+
+// newCDPSessionWithTimeout is NewCDPSession's actual constructor, with an
+// injectable sendTimeout so tests can pin the wedged-target ceiling
+// behavior without waiting out the real production timeout.
+func newCDPSessionWithTimeout(conn wrapper.WebSocketConn, jsonWrapper wrapper.JSON, logger *zap.Logger, sendTimeout time.Duration) CDPSession {
 	s := &cdpSession{
-		conn:     conn,
-		json:     jsonWrapper,
-		logger:   logger,
-		pending:  make(map[int64]*pendingCall),
-		handlers: make(map[string][]func(params json.RawMessage)),
-		doneChan: make(chan struct{}),
+		conn:        conn,
+		json:        jsonWrapper,
+		logger:      logger,
+		sendTimeout: sendTimeout,
+		pending:     make(map[int64]*pendingCall),
+		handlers:    make(map[string][]func(params json.RawMessage)),
+		doneChan:    make(chan struct{}),
 	}
 	go s.readPump()
 	return s
@@ -121,6 +156,16 @@ type cdpInbound struct {
 }
 
 func (s *cdpSession) Send(ctx context.Context, method string, params map[string]interface{}) (json.RawMessage, error) {
+	// Always impose the internal ceiling on top of whatever the caller's
+	// ctx already carries — context.WithTimeout keeps the sooner of the
+	// two deadlines, so a caller with its own tighter deadline is
+	// unaffected, and a caller with none (context.Background(), or a
+	// long-lived daemon-lifetime ctx) still cannot block this call
+	// forever. See defaultSendTimeout's doc for why this must be a
+	// per-call ctx bound rather than a per-connection socket deadline.
+	ctx, cancel := context.WithTimeout(ctx, s.sendTimeout)
+	defer cancel()
+
 	id := atomic.AddInt64(&s.nextID, 1)
 
 	call := &pendingCall{done: make(chan struct{})}

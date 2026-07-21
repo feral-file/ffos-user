@@ -231,10 +231,10 @@ func TestCapturer_Capture_LoadingFailedMarksIncomplete(t *testing.T) {
 }
 
 // TestCapturer_Capture_UnresolvedRequestAtDeadlineMarksIncomplete is the
-// regression test for the PR #229 review finding that a request observed
-// via requestWillBeSent but never reaching responseReceived/loadingFailed
-// before the capture window closes used to vanish from the record entirely
-// while Coverage.Complete still reported true.
+// regression test pinning that a request observed via requestWillBeSent
+// but never reaching responseReceived/loadingFailed before the capture
+// window closes must not vanish from the record entirely while
+// Coverage.Complete still reports true.
 func TestCapturer_Capture_UnresolvedRequestAtDeadlineMarksIncomplete(t *testing.T) {
 	h := setupCapture(t)
 	defer h.ctrl.Finish()

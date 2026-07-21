@@ -377,12 +377,11 @@ There is deliberately **no** top-level manifest, no separate
   was merely queued, not yet running. A capture that is already *active*
   for the item(s) being cleared (`state == StateDownloading`) is rejected
   outright with `ErrItemBusy` (RPC `busy`, retryable) instead of being
-  allowed to proceed and delete-then-let-GC-run: an earlier revision let
-  that case through, but the active capture would still save a fresh
-  record once it finished, making the just-cleared item "legitimately
-  reappear" moments later with no signal to the caller — a real
-  correctness bug flagged across multiple PR #229 reviews. Rejecting the
-  clear is simpler and safer than canceling the in-flight capture, which
+  allowed to proceed and delete-then-let-GC-run: allowing that case
+  through would let the active capture still save a fresh record once it
+  finished, making the just-cleared item "legitimately reappear" moments
+  later with no signal to the caller. Rejecting the clear is simpler and
+  safer than canceling the in-flight capture, which
   would need per-job cancellation threaded through the single-worker
   queue; `ClearPlaylist` checks every item in the playlist for this before
   deleting anything, so the outcome is all-or-nothing rather than leaving
@@ -393,8 +392,33 @@ There is deliberately **no** top-level manifest, no separate
 `replay.go` attaches to the kiosk Chromium's existing CDP endpoint (`:9222`)
 through a second, event-driven CDP session (`cdpsession.go`) — a separate
 connection from `feral-controld`'s existing synchronous `cdp.go` client, so
-enabling replay never blocks or interferes with normal command handling. On
-every `Fetch.requestPaused` event, keyed on the **exact original URL**
+enabling replay never blocks or interferes with normal command handling.
+
+`cdpsession.go`'s `Send` multiplexes many concurrent in-flight calls over
+one connection (keyed by request ID), unlike `cdp.go`'s synchronous
+client, which serializes one write+read at a time and can safely poison
+the whole connection via socket-level read/write deadlines on a stuck
+send. That per-connection approach would be wrong here — it would
+spuriously fail every other in-flight call sharing the connection, not
+just a stuck one — so `Send` instead imposes a 15s ceiling (`defaultSendTimeout`)
+per call via `context.WithTimeout`, on top of whatever deadline the
+caller's own `ctx` already carries. Several production callers pass a
+long-lived daemon/background context with no deadline of its own —
+`replay.go`'s per-`Fetch.requestPaused`-event goroutine, `playlist-refresher`'s
+periodic `SyncPlaylist` call, and `main.go`'s CDP `onConnect` hook — so
+without this internal ceiling, a kiosk DevTools socket that accepts the
+write but never replies (a nonresponsive/wedged target) would wedge
+`Send`, and therefore its caller, forever; for `playlist-refresher`'s
+single-goroutine background loop specifically, that would have stalled
+*all* future playlist refreshing, not just offline-cache resync. `DialPageSession`
+(`dial.go`) carries the same 15s ceiling (`defaultDialTimeout`) around its
+own targets-fetch + websocket-dial sequence, for the same reason: `main.go`'s
+`onConnect` hook calls it (via `KioskReplay.AttachOnReconnect`) synchronously
+on `cdp.CDP`'s own connect-loop goroutine, so a hung dial there would have
+stalled all future reconnect attempts, not just offline replay's own
+re-attach.
+
+On every `Fetch.requestPaused` event, keyed on the **exact original URL**
 (never a rewritten relative path — this is what makes replay work for
 absolute and cross-origin URLs without touching the artwork's own code):
 
@@ -489,6 +513,24 @@ the resolve would fail every time with no cache alternative, silently
 skipping the resync (best-effort, so the clear itself still succeeded, but
 replay's Fetch-interception scope could keep stale entries for the
 just-cleared item). Sharing the same fallback here closes that gap.
+
+`playlist-refresher`'s own `processPlayingPlaylist` — the periodic re-sync
+pass, and the one path `main.go`'s CDP `onConnect` hook actually drives via
+`ForceRefresh` after every kiosk/CDP reconnect — carries an equivalent
+`PlaylistURL` fallback (`refresher.loadCachedPlaylistForURL`, same shape as
+`commandrouter`'s). Before this existed, a device that went offline while
+already displaying a downloaded-by-URL playlist would fail this pass's live
+`ProcessPlaylistURL` call and return early on *every* periodic tick and on
+every reconnect-triggered `ForceRefresh`, permanently skipping the
+`kioskReplay.SyncPlaylist` call further down — so a Chromium restart that
+happened while offline would leave Fetch interception disabled for that
+playlist until connectivity returned, defeating the point of having
+downloaded it for offline playback in the first place. `commandrouter` and
+`playlist-refresher` intentionally do not share a single fallback
+implementation (they live in different packages with narrow interfaces
+onto `offlinecache.Service`/`offlinecache.KioskReplay`), but both resolve
+through the same `Service.CachedPlaylistForURL` seam, so they observe
+identical cache state.
 
 ## 7. Relationship to the DP-1 spec
 

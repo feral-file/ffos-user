@@ -95,11 +95,11 @@ func TestStaticServer_InvalidBlobID_400(t *testing.T) {
 }
 
 // TestNewStaticServer_CoercesNonLoopbackHostTo127001 is the regression
-// test for the PR #229 review finding that a misconfigured
-// offlineCache.staticServerAddr (e.g. a typo like "0.0.0.0:8082") would be
-// bound to verbatim, exposing cached artwork blobs over the LAN with no
-// authentication. NewStaticServer must force the host to 127.0.0.1
-// regardless, preserving the configured port.
+// test pinning that a misconfigured offlineCache.staticServerAddr (e.g. a
+// typo like "0.0.0.0:8082") must never be bound to verbatim, since that
+// would expose cached artwork blobs over the LAN with no authentication.
+// NewStaticServer must force the host to 127.0.0.1 regardless, preserving
+// the configured port.
 func TestNewStaticServer_CoercesNonLoopbackHostTo127001(t *testing.T) {
 	store, _ := newTestStore(t)
 	server := offlinecache.NewStaticServer("0.0.0.0:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))

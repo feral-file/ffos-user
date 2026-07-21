@@ -455,10 +455,10 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 }
 
 // TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOffline
-// is the regression test for PR #229 review's "displayPlaylist with
-// playlistUrl still cannot use the downloaded cache when offline" finding:
-// a playlist previously downloaded via downloadPlaylist for this exact
-// URL must still be displayable when live DP-1 resolution fails.
+// is the regression test pinning that displayPlaylist with playlistUrl
+// must be able to use the downloaded cache when offline: a playlist
+// previously downloaded via downloadPlaylist for this exact URL must
+// still be displayable when live DP-1 resolution fails.
 func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOffline(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

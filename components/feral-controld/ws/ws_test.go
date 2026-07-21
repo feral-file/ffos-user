@@ -188,9 +188,9 @@ func TestSend_Success(t *testing.T) {
 	ts.ws.Close()
 }
 
-// TestSend_SetsWriteDeadlineBeforeWriteJSON is the regression test for
-// the PR #229 review finding that Send/SendAll called WriteJSON with no
-// deadline at all: a stalled/backpressured local hub client's TCP buffer
+// TestSend_SetsWriteDeadlineBeforeWriteJSON is the regression test
+// pinning that Send/SendAll must never call WriteJSON with no deadline
+// at all: a stalled/backpressured local hub client's TCP buffer
 // filling up could then block indefinitely. Every caller of Send/SendAll
 // runs synchronously on whatever goroutine triggered the notification
 // (see offlinecache.Notifier.OnItemStateChanged, called from Service's

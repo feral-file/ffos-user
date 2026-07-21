@@ -178,8 +178,8 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixe
 	return nil
 }
 
-// Disable clears local scope only AFTER Fetch.disable actually succeeds
-// (PR #229 review regression fix). Clearing resources/mixedScope
+// Disable clears local scope only AFTER Fetch.disable actually succeeds.
+// Clearing resources/mixedScope
 // optimistically before the CDP call, as this used to do, meant a failed
 // Fetch.disable left Chromium's Fetch interception (pattern "*", so it
 // matches every request on the page) potentially still live while local

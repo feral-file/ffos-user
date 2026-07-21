@@ -2,6 +2,7 @@ package refresher_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -16,9 +17,11 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	"go.uber.org/zap/zaptest/observer"
@@ -56,7 +59,7 @@ func setupWithLogger(t *testing.T, logger *zap.Logger) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 
-	refresher := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, mockClock, logger)
+	refresher := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), mockClock, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -422,16 +425,16 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 		Return("success", nil).
 		AnyTimes()
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
 }
 
 // TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick is the
-// regression test for the PR #229 review finding that offline-cache replay
-// scope was only ever re-synced by the next displayPlaylist command or the
-// next PLAYLIST_REFRESH_INTERVAL tick — up to 5 minutes after a kiosk/CDP
+// regression test pinning that offline-cache replay scope must not only
+// ever be re-synced by the next displayPlaylist command or the next
+// PLAYLIST_REFRESH_INTERVAL tick — up to 5 minutes after a kiosk/CDP
 // reconnect (see main.go's onConnect hook). The ticker channel here never
 // fires on its own, so the only way a second sync pass can happen is via
 // ForceRefresh.
@@ -482,7 +485,7 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 		}).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
 	r.Start()
 	defer r.Stop()
 
@@ -514,6 +517,129 @@ func TestRefresher_ForceRefresh_BeforeStartIsSafeNoOp(t *testing.T) {
 	assert.NotPanics(t, func() {
 		ts.refresher.ForceRefresh()
 	})
+}
+
+// TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline
+// is the regression test pinning that this refresher path — which is what
+// actually runs on every periodic pass AND on the reconnect-triggered
+// ForceRefresh (main.go's onConnect hook) — must fall back to a
+// previously downloaded copy of a URL playlist when live DP-1 resolution
+// fails, the same way commandrouter's resolveDisplayedPlaylist already
+// does. Without this fallback, this pass would return early before ever
+// reaching kioskReplay.SyncPlaylist below.
+func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockOfflineCache := mocks.NewMockOfflineCacheService(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	playlistURL := "http://example.com/playlist.json"
+	cachedPlaylist := createMockPlaylistNoDynamic()
+	cachedRaw, err := json.Marshal(cachedPlaylist)
+	require.NoError(t, err)
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(nil, errors.New("network unreachable")).
+		AnyTimes()
+	mockOfflineCache.EXPECT().
+		CachedPlaylistForURL(playlistURL).
+		Return(json.RawMessage(cachedRaw), nil).
+		AnyTimes()
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item1"}).
+		Return(nil).
+		MinTimes(1)
+	// The device is offline (live resolution just failed), but the
+	// cached copy must still be pushed to the player, exactly as a live
+	// success would be.
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return("success", nil).
+		MinTimes(1)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockOfflineCache, wrapper.NewJSON(), mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
+}
+
+// TestRefresher_ProcessPlayingPlaylist_NoCachedFallbackReturnsOriginalError
+// pins that when there is nothing to fall back to (offline caching
+// disabled, or this URL was never downloaded), processPlayingPlaylist
+// still surfaces the original live DP-1 error rather than a confusing
+// cache-lookup error, and never reaches SyncPlaylist/CDP for this pass.
+func TestRefresher_ProcessPlayingPlaylist_NoCachedFallbackReturnsOriginalError(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockOfflineCache := mocks.NewMockOfflineCacheService(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	playlistURL := "http://example.com/playlist.json"
+
+	statusCalls := make(chan struct{}, 8)
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		DoAndReturn(func(context.Context) (*status.PlayerStatus, error) {
+			statusCalls <- struct{}{}
+			return createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil
+		}).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(nil, errors.New("network unreachable")).
+		AnyTimes()
+	mockOfflineCache.EXPECT().
+		CachedPlaylistForURL(playlistURL).
+		Return(nil, errors.New("offline cache: no playlist saved for this url")).
+		AnyTimes()
+	// Neither must ever be called: with no cached fallback available,
+	// the pass must fail out before reaching sync or CDP resend.
+
+	// The failing pass repeats via background()'s retry-until-success
+	// loop (see refresher.go), which sleeps between attempts.
+	mockClock.EXPECT().Sleep(gomock.Any()).AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, mockOfflineCache, wrapper.NewJSON(), mockClock, logger)
+	r.Start()
+
+	select {
+	case <-statusCalls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the initial process attempt")
+	}
+	r.Stop()
 }
 
 func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefresh(t *testing.T) {
@@ -556,7 +682,7 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 		Return("success", nil).
 		MinTimes(1)
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
@@ -650,8 +776,8 @@ func TestRefresher_ProcessPlayingPlaylist_NoDynamicQueries(t *testing.T) {
 }
 
 // TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskReplayScope
-// is the regression test for the PR #229 review finding that the static
-// (non-dynamic) inline-playlist branch returned before ever reaching the
+// is the regression test pinning that the static (non-dynamic)
+// inline-playlist branch must not return before ever reaching the
 // kioskReplay.SyncPlaylist call below it. A static playlist can loop on
 // screen indefinitely while a background downloadPlaylistItem/
 // downloadPlaylist completes, or a cache gets cleared — the periodic
@@ -691,7 +817,7 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 	// to re-resolve, and it must not be re-sent to CDP on every refresh
 	// pass (gomock fails the test if either occurs).
 
-	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, mockClock, logger)
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()

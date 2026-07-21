@@ -303,10 +303,10 @@ func TestService_DownloadItem_CoverageClassification(t *testing.T) {
 	// Every case above is a finished capture (the capture window
 	// already ran to completion; only the resulting artwork differs in
 	// how playable it is), so getOfflineCacheStatus must always report
-	// percent:100 for all of them — PR #229 review regression: percent
-	// used to fall back to 0 for StateBrokenOnline, which reads to a
-	// mobile client as "still downloading" for an item that is
-	// permanently done and will never progress further.
+	// percent:100 for all of them — percent must never fall back to 0
+	// for StateBrokenOnline, which would read to a mobile client as
+	// "still downloading" for an item that is permanently done and
+	// will never progress further.
 	const wantPercent = 100
 
 	for _, tt := range tests {
@@ -381,11 +381,11 @@ func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.
 }
 
 // TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback
-// is the regression test for PR #229 review's "displayPlaylist by URL
-// cannot use the downloaded cache offline" finding: a non-empty sourceURL
-// must make the downloaded playlist recoverable by that same URL via
-// CachedPlaylistForURL, for commandrouter's offline displayPlaylist
-// fallback (see handler.go).
+// is the regression test pinning that a non-empty sourceURL must make the
+// downloaded playlist recoverable by that same URL via
+// CachedPlaylistForURL, so displayPlaylist by URL can use the downloaded
+// cache offline — for commandrouter's offline displayPlaylist fallback
+// (see handler.go).
 func TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
@@ -618,15 +618,15 @@ func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
 }
 
 // TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting
-// is the regression test for ErrItemBusy: PR #229 review flagged that an
-// earlier revision let ClearItem proceed unconditionally even when
-// itemID's own re-download was actively in flight (as opposed to merely
-// queued, which TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns
-// already covers) — the clear returned success, but the in-flight
-// capture would still save a fresh record afterward, making the item
-// "legitimately reappear" with no signal to the caller. ClearItem must
-// now reject immediately (without touching the store or blocking on
-// captureMu/GC) instead.
+// is the regression test for ErrItemBusy: ClearItem must not proceed
+// unconditionally when itemID's own re-download is actively in flight (as
+// opposed to merely queued, which
+// TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns already
+// covers) — proceeding anyway would report the clear as a success while
+// the in-flight capture still saves a fresh record afterward, making the
+// item "legitimately reappear" with no signal to the caller. ClearItem
+// must instead reject immediately (without touching the store or
+// blocking on captureMu/GC).
 func TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()

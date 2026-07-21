@@ -58,6 +58,11 @@ type refresher struct {
 	// config), mirroring the nil-guard pattern used throughout
 	// commandrouter for optional offline-cache dependencies.
 	kioskReplay offlinecache.KioskReplay
+	// offlineCache backs the same cached-playlist-by-URL fallback
+	// commandrouter's resolveDisplayedPlaylist uses (see loadCachedPlaylistForURL
+	// below): also nil-able when offline caching is disabled/not wired.
+	offlineCache offlinecache.Service
+	json         wrapper.JSON
 
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -81,6 +86,8 @@ func New(
 	statusPoller status.Poller,
 	cdp cdp.CDP,
 	kioskReplay offlinecache.KioskReplay,
+	offlineCache offlinecache.Service,
+	jsonWrapper wrapper.JSON,
 	clock wrapper.Clock,
 	logger *zap.Logger,
 ) Refresher {
@@ -90,6 +97,8 @@ func New(
 		statusPoller: statusPoller,
 		dp1:          dp1,
 		kioskReplay:  kioskReplay,
+		offlineCache: offlineCache,
+		json:         jsonWrapper,
 		clock:        clock,
 		logger:       logger,
 		done:         make(chan struct{}),
@@ -233,9 +242,26 @@ func (r *refresher) processPlayingPlaylist() error {
 	skipCDPResend := false
 	switch {
 	case playerStatus.PlaylistURL != nil:
-		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
+		url := *playerStatus.PlaylistURL
+		playlist, err = r.dp1.ProcessPlaylistURL(r.context, url, false)
 		if err != nil {
-			return err
+			// Fall back to a previously downloaded copy of this exact
+			// URL before giving up — mirrors commandrouter's
+			// resolveDisplayedPlaylist (this
+			// refresher path lacked the same fallback the
+			// commandrouter/clear-resync path already has). Without
+			// this, a device that goes offline while displaying a
+			// playlist it already downloaded would return early here
+			// on every periodic pass AND on the reconnect-triggered
+			// ForceRefresh (main.go's onConnect hook), permanently
+			// skipping the kioskReplay.SyncPlaylist call below and
+			// leaving Fetch interception disabled after any Chromium
+			// restart that happens while offline.
+			cached, cacheErr := r.loadCachedPlaylistForURL(url)
+			if cacheErr != nil {
+				return err
+			}
+			playlist = cached
 		}
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
@@ -288,6 +314,29 @@ func (r *refresher) processPlayingPlaylist() error {
 	}
 
 	return nil
+}
+
+// loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL
+// (see its doc): the raw body Service.CachedPlaylistForURL returns was already
+// fully resolved and signature-verified once, back when downloadPlaylist
+// originally saved it, so unmarshaling it here needs no further DP-1
+// processing. Returns an error whenever there is nothing to fall back to
+// (offline caching disabled, url was never downloaded, or the downloaded
+// copy has since been cleared), so the caller can report the original
+// live resolution error instead.
+func (r *refresher) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
+	if r.offlineCache == nil {
+		return nil, fmt.Errorf("offline cache: disabled, no cached fallback for %s", url)
+	}
+	raw, err := r.offlineCache.CachedPlaylistForURL(url)
+	if err != nil {
+		return nil, fmt.Errorf("offline cache: no cached playlist for %s: %w", url, err)
+	}
+	var playlist *dp1.Playlist
+	if err := r.json.Unmarshal(raw, &playlist); err != nil {
+		return nil, fmt.Errorf("offline cache: parse cached playlist for %s: %w", url, err)
+	}
+	return playlist, nil
 }
 
 // sendCDPRequest marshals payload and sends to CDP

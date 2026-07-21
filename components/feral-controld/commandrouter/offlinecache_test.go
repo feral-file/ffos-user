@@ -312,9 +312,9 @@ func TestCommandHandler_ClearPlaylistCache_Success(t *testing.T) {
 }
 
 // TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope is the
-// regression test for the PR #229 review finding that clearing an item's
-// cache left replayer's live Fetch-interception scope untouched: without
-// this resync, an item cleared while it is the one currently displayed
+// regression test pinning that clearing an item's cache must resync
+// replayer's live Fetch-interception scope: without this resync, an item
+// cleared while it is the one currently displayed
 // would keep serving from (now-deleted) stale blob entries instead of
 // either playing correctly or falling back to the network cleanly.
 func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testing.T) {
@@ -426,8 +426,8 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 }
 
 // TestCommandHandler_ClearPlaylistItemCache_ActiveCaptureReturnsBusy is
-// the RPC-shape regression test for offlineCacheErrorResponse's new
-// ErrItemBusy mapping (PR #229 review): the mobile app must see a
+// the RPC-shape regression test for offlineCacheErrorResponse's
+// ErrItemBusy mapping: the mobile app must see a
 // distinct, retryable "busy" code rather than the generic
 // "offline_cache_error" bucket, so it knows to retry shortly instead of
 // treating this like an unexpected/non-retryable failure.
@@ -464,11 +464,11 @@ func TestCommandHandler_ClearPlaylistCache_ActiveCaptureReturnsBusy(t *testing.T
 
 // TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWhenOffline
 // is the regression test for resolveDisplayedPlaylist's cached-URL
-// fallback (PR #229 review): a device offline and displaying a playlist
-// through displayPlaylist's own playlistUrl->cache fallback must still be
-// able to resync replay scope after a clear, instead of resyncing
-// silently failing every time because live ProcessPlaylistURL always
-// errors while offline.
+// fallback: a device offline and displaying a playlist through
+// displayPlaylist's own playlistUrl->cache fallback must still be able to
+// resync replay scope after a clear, instead of resyncing silently
+// failing every time because live ProcessPlaylistURL always errors while
+// offline.
 func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWhenOffline(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()

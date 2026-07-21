@@ -403,8 +403,8 @@ func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
 }
 
 // TestApp_Run_OnConnectResyncsOfflineCacheReplayScope is the regression
-// test for the PR #229 review finding that AttachOnReconnect alone leaves
-// offline-cache replay scope stale (Fetch.enable is not even reissued)
+// test pinning that AttachOnReconnect alone must not leave offline-cache
+// replay scope stale (Fetch.enable is not even reissued)
 // until the next displayPlaylist command or PlaylistRefresher's next
 // periodic pass — up to PLAYLIST_REFRESH_INTERVAL later. It captures the
 // onConnect callback CDP.Start is given and invokes it directly, asserting
