@@ -203,10 +203,28 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 			wantFields: map[string]any{"progress": float64(42)},
 		},
 		{
-			name:       "claim qr carries url",
-			call:       func(s *Service) { s.ShowClaimQR("https://link.feralfile.com/device_connect/xyz") },
+			name:      "finalizing",
+			call:      func(s *Service) { s.ShowFinalizing() },
+			wantState: stateFinalizing,
+			absent:    []string{"reason", "ssid", "url", "progress"},
+		},
+		{
+			name: "claim qr carries url and device name",
+			call: func(s *Service) {
+				s.ShowClaimQR("https://link.feralfile.com/device_connect/xyz", "FF1-8EVTK3RE")
+			},
+			wantState: stateClaimQR,
+			wantFields: map[string]any{
+				"url":         "https://link.feralfile.com/device_connect/xyz",
+				"device_name": "FF1-8EVTK3RE",
+			},
+		},
+		{
+			name:       "claim qr omits blank device name",
+			call:       func(s *Service) { s.ShowClaimQR("https://link.feralfile.com/device_connect/xyz", " ") },
 			wantState:  stateClaimQR,
 			wantFields: map[string]any{"url": "https://link.feralfile.com/device_connect/xyz"},
+			absent:     []string{"device_name"},
 		},
 		{
 			name:      "ready",

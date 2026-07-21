@@ -48,6 +48,12 @@ const (
 	// no-op ({ok:true}, renders nothing) and keep full narration support.
 	stateScanning = "scanning"
 
+	// stateFinalizing is an extension state covering the gap between a
+	// successful Wi-Fi join and the claim QR: relayer topic wait plus the
+	// pre-claim OTA version check (and its retries). Without it the screen is
+	// black for those seconds with no hint that setup is still progressing.
+	stateFinalizing = "finalizing"
+
 	// stateFactoryReset is an extension state used by the in-process factory-reset
 	// flow. It is deliberately NOT in the required set that
 	// validateSetupDisplayContract checks: the currently-shipping player manifest
@@ -172,14 +178,28 @@ func (s *Service) ShowUpdating(progress int) {
 	})
 }
 
+// ShowFinalizing narrates the post-join finalization window (topic wait +
+// pre-claim version check) so the user sees progress instead of a black
+// screen. Extension state; older players render nothing (see stateFinalizing).
+func (s *Service) ShowFinalizing() {
+	s.push(map[string]any{"state": stateFinalizing})
+}
+
 // ShowClaimQR narrates the final claim step, rendering url as a QR code. The
 // caller constructs the device_connect URL; this package passes it through
-// verbatim as the required url field.
-func (s *Service) ShowClaimQR(url string) {
-	s.push(map[string]any{
+// verbatim as the required url field. deviceName, when non-blank, is the
+// mDNS-advertised name (e.g. "FF1-8EVTK3RE") the player weaves into the
+// "open the app on the same Wi-Fi and it finds this frame automatically"
+// guidance — the QR itself is the backup path.
+func (s *Service) ShowClaimQR(url string, deviceName string) {
+	req := map[string]any{
 		"state": stateClaimQR,
 		"url":   url,
-	})
+	}
+	if strings.TrimSpace(deviceName) != "" {
+		req["device_name"] = deviceName
+	}
+	s.push(req)
 }
 
 // ShowReady narrates that setup completed successfully.

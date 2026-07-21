@@ -23,12 +23,18 @@ import (
 type narratorSpy struct {
 	calls        []string
 	lastURL      string
+	lastName     string
 	lastProgress int
 }
 
-func (s *narratorSpy) ShowClaimQR(url string) { s.calls = append(s.calls, "claim"); s.lastURL = url }
-func (s *narratorSpy) ShowReady()             { s.calls = append(s.calls, "ready") }
-func (s *narratorSpy) ShowFactoryReset()      { s.calls = append(s.calls, "factory_reset") }
+func (s *narratorSpy) ShowFinalizing() { s.calls = append(s.calls, "finalizing") }
+func (s *narratorSpy) ShowClaimQR(url string, deviceName string) {
+	s.calls = append(s.calls, "claim")
+	s.lastURL = url
+	s.lastName = deviceName
+}
+func (s *narratorSpy) ShowReady()        { s.calls = append(s.calls, "ready") }
+func (s *narratorSpy) ShowFactoryReset() { s.calls = append(s.calls, "factory_reset") }
 func (s *narratorSpy) ShowJoinFailed(reason string) {
 	s.calls = append(s.calls, "join_failed")
 	s.lastURL = reason
@@ -177,7 +183,9 @@ func TestMaybeShowClaimQROnOnline_NoTopicWithholds(t *testing.T) {
 
 	e.MaybeShowClaimQROnOnline(context.Background())
 
-	assert.Empty(t, spy.calls, "no claim QR without a relayer topic")
+	// The gap narration paints, then clears when the flow gives up — never a
+	// stale "preparing" overlay with nothing coming, and never a claim QR.
+	assert.Equal(t, []string{"finalizing", "hide"}, spy.calls)
 }
 
 // TestMaybeShowClaimQROnOnline_UnclaimedRunsPreClaimGate: an unclaimed device
@@ -224,5 +232,7 @@ func TestMaybeShowClaimQROnOnline_UnclaimedRunsPreClaimGate(t *testing.T) {
 	}
 	assert.True(t, gateRan, "unclaimed device must enter the pre-claim gate")
 	assert.True(t, retried, "a transient gate failure must schedule a retry")
+	assert.Contains(t, spy.calls, "finalizing", "the gap narration must paint before the gate")
 	assert.NotContains(t, spy.calls, "claim", "failed gate must withhold the claim QR")
+	assert.NotContains(t, spy.calls, "hide", "finalizing must stay up while the gate retries")
 }

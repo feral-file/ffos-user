@@ -410,9 +410,15 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context) (painted, termin
 	if result != otagate.ResultNoUpdateNeeded {
 		e.logger.Info("Pre-claim OTA gate did not settle on no-update; withholding claim QR",
 			zap.Int("gateResult", int(result)))
+		// UpdateStarted: the updating narration owns the screen via OnProgress
+		// and the device reboots. TooOldToUpgrade: nothing further happens this
+		// boot, so don't leave a stale finalizing overlay implying progress.
+		if result == otagate.ResultTooOldToUpgrade {
+			e.setupUI().Hide()
+		}
 		return false, true
 	}
-	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx))
+	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
 	return true, false
 }
 
@@ -432,7 +438,8 @@ const (
 // flows drive. Owning the interface here keeps the dependency small and lets
 // tests assert call ordering with a spy. *setupui.Service satisfies it.
 type setupNarrator interface {
-	ShowClaimQR(url string)
+	ShowFinalizing()
+	ShowClaimQR(url string, deviceName string)
 	ShowReady()
 	ShowFactoryReset()
 	ShowJoinFailed(reason string)
@@ -490,12 +497,19 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	if e.deviceClaimed() {
 		return
 	}
+	// Narrate the gap: between the join succeeding and the claim QR there are
+	// seconds of topic wait + version check (more if the gate retries) that
+	// would otherwise be a silent black screen.
+	e.setupUI().ShowFinalizing()
+
 	if !e.waitForRelayerTopic(ctx) {
 		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
+		e.setupUI().Hide() // clear our finalizing narration; nothing is coming
 		return
 	}
 	// Re-check: the device may have been claimed while waiting (LAN connect).
 	if e.deviceClaimed() {
+		e.setupUI().Hide()
 		return
 	}
 
