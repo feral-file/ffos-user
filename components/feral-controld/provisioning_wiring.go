@@ -73,6 +73,13 @@ type setupNarrationUI interface {
 	Hide()
 }
 
+// autoClaimFlow is the narrow slice of the executor the online claim trigger
+// needs. Asserted at wiring time so test doubles without the method simply
+// leave the trigger disabled.
+type autoClaimFlow interface {
+	MaybeShowClaimQROnOnline(ctx context.Context)
+}
+
 // setupNotifier maps provisioning state changes to on-screen setup narration.
 // Every Show* call is fire-and-forget (setupui enqueues and returns), so calling
 // them inline on the machine's event-loop goroutine satisfies the Notifier
@@ -94,6 +101,15 @@ type setupNotifier struct {
 	// No lock: the Notifier contract runs OnStateChange inline on the machine's
 	// single event-loop goroutine, so this field is single-writer/single-reader.
 	narrating bool
+
+	// claim, when set, is the executor's online claim flow
+	// (MaybeShowClaimQROnOnline): the launcher-ui-replacement trigger that
+	// paints the claim QR for an unclaimed device once it is reachable. Run on
+	// its own goroutine — it waits on network state (relayer topic, OTA gate)
+	// and the Notifier must not block. claimCtx scopes those waits to the
+	// daemon lifetime.
+	claim    func(context.Context)
+	claimCtx context.Context
 }
 
 // OnStateChange renders the least-surprising narration for each provisioning
@@ -134,6 +150,13 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 		if n.narrating {
 			n.narrating = false
 			n.ui.Hide()
+		}
+		// An unclaimed device that just became reachable needs the claim QR —
+		// nothing else can start the claim flow (the app only connects AFTER
+		// scanning it). The flow itself no-ops for claimed devices and when the
+		// relayer topic never arrives (e.g. wired link without internet).
+		if n.claim != nil {
+			go n.claim(n.claimCtx)
 		}
 	case provisioning.StateOfflineRetrying:
 		// Transient provisioned-device outage: leave the screen as-is rather than

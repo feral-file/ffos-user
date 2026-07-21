@@ -110,8 +110,7 @@
     <button type="submit">Connect</button>
   </form>
 
-  <form method="POST" action="/rescan"
-        onsubmit="return confirm('The frame will restart its setup Wi-Fi to search for networks again. Your phone will be disconnected — scan the QR code on the frame again to reconnect. Continue?')">
+  <form method="GET" action="/rescan">
     <button type="submit" class="secondary">Search for networks again</button>
   </form>
 

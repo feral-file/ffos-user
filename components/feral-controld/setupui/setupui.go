@@ -303,12 +303,24 @@ func (s *Service) trySend(req map[string]any) {
 		"returnByValue": true,
 	})
 	if err != nil {
-		// Expected while Chromium is still loading or has crashed during setup.
-		s.logger.Debug("Setup narration push failed", zap.Error(err), zap.String("state", stringField(req, "state")))
+		// Expected while Chromium is still loading or has crashed during setup —
+		// but Info, not Debug: narration sends use NoLogSend (the payload embeds
+		// the AP PSK), so this line is the ONLY production trace of a state that
+		// never reached the screen.
+		s.logger.Info("Setup narration push failed", zap.Error(err), zap.String("state", stringField(req, "state")))
 		return
 	}
 	if err := validateSetupDisplayResult(result); err != nil {
-		s.logger.Debug("Setup narration push rejected", zap.Error(err), zap.String("state", stringField(req, "state")))
+		// The player actively rejected the state: a contract violation, not a
+		// timing hiccup.
+		s.logger.Warn("Setup narration push rejected", zap.Error(err), zap.String("state", stringField(req, "state")))
+		return
+	}
+	// Positive confirmation the state reached the screen (NoLogSend hides the
+	// payload, so this is the only production trace). updating stays quiet: its
+	// per-percent pushes would flood the log across an OTA.
+	if state := stringField(req, "state"); state != stateUpdating {
+		s.logger.Info("Setup narration pushed", zap.String("state", state))
 	}
 }
 
@@ -327,9 +339,11 @@ func (s *Service) narrationSupported() bool {
 	}
 	if err := validateSetupDisplayContract(s.contractPath); err != nil {
 		s.support = supportNo
-		// Logged exactly once, at info: the fallback is expected on players that
-		// predate the setupDisplay contract and is not an error condition.
-		s.logger.Info("Setup narration disabled: player contract lacks setupDisplay support",
+		// Logged exactly once, at Warn: expected on players that predate the
+		// setupDisplay contract, but on a SoftAP-era device it means NO setup
+		// narration (no QR, no join feedback) — that must be findable in
+		// production logs, which run at Info.
+		s.logger.Warn("Setup narration disabled: player contract lacks setupDisplay support",
 			zap.Error(err), zap.String("path", s.contractPath))
 		return false
 	}

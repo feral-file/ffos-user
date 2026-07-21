@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 )
@@ -66,5 +68,40 @@ func TestSetupNotifierNarratesScanning(t *testing.T) {
 
 	if len(spy.calls) != 2 || spy.calls[0] != "scanning" || spy.calls[1] != "hide" {
 		t.Fatalf("calls = %v, want [scanning hide]", spy.calls)
+	}
+}
+
+// TestSetupNotifierTriggersAutoClaimWhenReachable: Online and Unprovisioned
+// both fire the executor's auto claim flow (the launcher-ui replacement) on a
+// separate goroutine; the flow itself guards claimed/topic-less cases.
+func TestSetupNotifierTriggersAutoClaimWhenReachable(t *testing.T) {
+	spy := &spyNarrationUI{}
+	fired := make(chan struct{}, 2)
+	n := &setupNotifier{
+		ui:       spy,
+		claimCtx: context.Background(),
+		claim:    func(context.Context) { fired <- struct{}{} },
+	}
+
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto claim not triggered on StateOnline")
+	}
+
+	n.OnStateChange(provisioning.StateUnprovisioned, provisioning.Detail{})
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto claim not triggered on StateUnprovisioned")
+	}
+
+	// AP states must not trigger it.
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{Reason: "scanning"})
+	select {
+	case <-fired:
+		t.Fatal("auto claim must not fire on StateAPActive")
+	case <-time.After(50 * time.Millisecond):
 	}
 }

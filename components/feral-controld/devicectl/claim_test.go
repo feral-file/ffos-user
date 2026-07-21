@@ -2,14 +2,20 @@ package devicectl
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/state"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // narratorSpy records setup-narration calls in order so ordering invariants can
@@ -106,4 +112,102 @@ func TestNarrateUpdateProgress_ForwardsPercentSkipsUnparsed(t *testing.T) {
 	e.narrateUpdateProgress(-1)
 	assert.Equal(t, []string{"updating"}, spy.calls)
 	assert.Equal(t, 42, spy.lastProgress)
+}
+
+// --- online-triggered auto claim (launcher-ui replacement) -------------------
+
+// autoClaimClock is a fake clock whose SleepContext advances fake time, so the
+// topic-wait window closes deterministically.
+type autoClaimClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *autoClaimClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+func (c *autoClaimClock) Sleep(time.Duration) {}
+func (c *autoClaimClock) SleepContext(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+	return ctx.Err()
+}
+func (c *autoClaimClock) NewTicker(time.Duration) wrapper.Ticker { panic("unused") }
+
+// TestMaybeShowClaimQROnOnline_ClaimedIsNoop: a claimed device coming online
+// must not re-run the claim flow or repaint the claim QR.
+func TestMaybeShowClaimQROnOnline_ClaimedIsNoop(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().
+		Return(&state.State{ConnectedDevice: &state.Device{ID: "phone-1"}}).
+		AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Empty(t, spy.calls, "claimed device must not narrate anything")
+}
+
+// TestMaybeShowClaimQROnOnline_NoTopicWithholds: without a relayer topic the
+// claim QR would send the app to an unroutable device; the flow must exhaust
+// its bounded wait and withhold, leaving the next online transition to retry.
+func TestMaybeShowClaimQROnOnline_NoTopicWithholds(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Empty(t, spy.calls, "no claim QR without a relayer topic")
+}
+
+// TestMaybeShowClaimQROnOnline_UnclaimedRunsPreClaimGate: an unclaimed device
+// with a topic must enter the same mandatory pre-claim gate as the relayer
+// showPairingQRCode command (here the gate fails its version check — no local
+// build config — so the QR is correctly withheld, but the gate MUST have run).
+func TestMaybeShowClaimQROnOnline_UnclaimedRunsPreClaimGate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: "topic-abc"}}).
+		AnyTimes()
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).
+		Return(nil, errors.New("no local config")).
+		AnyTimes()
+
+	core, observed := observer.New(zap.InfoLevel)
+	spy := &narratorSpy{}
+	e := &executor{
+		logger:        zap.New(core),
+		setupNarrator: spy,
+		clock:         &autoClaimClock{},
+		os:            mockOS,
+	}
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	gateRan := false
+	for _, entry := range observed.All() {
+		if entry.Message == "Auto claim flow: device online and unclaimed; running pre-claim gate" {
+			gateRan = true
+		}
+	}
+	assert.True(t, gateRan, "unclaimed device must enter the pre-claim gate")
+	assert.NotContains(t, spy.calls, "claim", "failed gate must withhold the claim QR")
 }

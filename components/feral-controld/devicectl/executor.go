@@ -118,6 +118,11 @@ type executor struct {
 	setupNarrator     setupNarrator
 	setupNarratorOnce sync.Once
 
+	// autoClaimInFlight single-flights the online-triggered claim flow
+	// (MaybeShowClaimQROnOnline): connectivity flaps must not stack concurrent
+	// pre-claim gates.
+	autoClaimInFlight atomic.Bool
+
 	// logUploaderFactory builds the in-process log uploader. Overridable in tests
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
@@ -444,6 +449,71 @@ func (e *executor) setupUI() setupNarrator {
 // AppState used. Reaching this point means the pre-claim OTA gate's live version
 // check just succeeded, so the device is online; that is the same fact setupd
 // read from is_online_cached(), so internet is reported true.
+const (
+	// autoClaimTopicWait / autoClaimTopicPoll bound the wait for the relayer
+	// topic before the online-triggered claim QR paints. The topic lands a
+	// moment after connectivity (relayer dial + system message); painting a
+	// topic-less QR would send the app to an unroutable device.
+	autoClaimTopicWait = 60 * time.Second
+	autoClaimTopicPoll = 2 * time.Second
+)
+
+// MaybeShowClaimQROnOnline is the SoftAP-era replacement for launcher-ui's
+// boot-time claim QR. The relayer showPairingQRCode command cannot START the
+// claim flow on a factory-fresh device — the phone app only connects after
+// scanning the claim QR that command would paint — so provisioning triggers
+// this whenever the device comes online: an unclaimed device runs the same
+// mandatory pre-claim gate and paints the claim QR. Claimed devices,
+// concurrent runs, and topic-less waits (e.g. an offline wired link) are all
+// no-ops; a later online transition re-triggers.
+func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
+	if !e.autoClaimInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	defer e.autoClaimInFlight.Store(false)
+
+	if e.deviceClaimed() {
+		return
+	}
+	if !e.waitForRelayerTopic(ctx) {
+		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
+		return
+	}
+	// Re-check: the device may have been claimed while waiting (LAN connect).
+	if e.deviceClaimed() {
+		return
+	}
+
+	e.logger.Info("Auto claim flow: device online and unclaimed; running pre-claim gate")
+	if _, err := e.showPairingQRCodeInProcess(ctx, true); err != nil {
+		e.logger.Warn("Auto claim flow: pre-claim gate errored", zap.Error(err))
+	}
+}
+
+// deviceClaimed mirrors the claim derivation every other surface uses (mDNS
+// init, hub status): a ConnectedDevice with a non-empty ID.
+func (e *executor) deviceClaimed() bool {
+	s := state.GetState()
+	return s != nil && s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != ""
+}
+
+// waitForRelayerTopic polls persisted state until the relayer topic is
+// available, the wait window closes, or ctx ends.
+func (e *executor) waitForRelayerTopic(ctx context.Context) bool {
+	deadline := e.clock.Now().Add(autoClaimTopicWait)
+	for {
+		if s := state.GetState(); s != nil && s.Relayer != nil && strings.TrimSpace(s.Relayer.TopicID) != "" {
+			return true
+		}
+		if e.clock.Now().Add(autoClaimTopicPoll).After(deadline) {
+			return false
+		}
+		if err := e.clock.SleepContext(ctx, autoClaimTopicPoll); err != nil {
+			return false
+		}
+	}
+}
+
 func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
 	topicID := ""
 	if s := state.GetState(); s != nil && s.Relayer != nil {

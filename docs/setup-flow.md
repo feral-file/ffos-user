@@ -59,7 +59,7 @@ flowchart LR
 | `joining` | Credentials submitted; the device is joining the chosen network. |
 | `join_failed` | Join failed (wrong password / not found / timeout); AP is being re-raised for a retry. Carries a reason. |
 | `updating` | OTA install in progress. Carries progress. |
-| `claim_qr` | Provisioned and up to date; showing the `device_connect` claim QR. Carries the URL. |
+| `claim_qr` | Provisioned and up to date; showing the `device_connect` claim QR. Carries the URL. Painted automatically when an unclaimed device comes online (`MaybeShowClaimQROnOnline`, the launcher-ui replacement — the relayer `showPairingQRCode` command cannot start a first-time claim because the app only connects after scanning this QR), and again on demand via that relayer command. The auto-trigger waits for the relayer topic and runs the same mandatory pre-claim OTA gate. |
 | `ready` | Pairing confirmed; the player owns the screen. |
 | `hidden` | Overlay hidden; normal artwork playback. |
 | `factory_reset` | Factory reset staged (extension state, best-effort before reboot). |

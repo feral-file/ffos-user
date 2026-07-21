@@ -273,23 +273,32 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}{SSID: ssid, APSSID: s.cfg.APSSID})
 }
 
-// handleRescan accepts the "search for networks again" submission. The machine
-// bounces the AP to run a fresh scan, which will disconnect the phone — so the
-// response page (rendered BEFORE the bounce lands) tells the user to scan the
-// QR code on the frame again to reconnect.
+// handleRescan drives the "search for networks again" flow. GET renders a
+// plain-HTML confirmation page — captive-portal mini-browsers (iOS CNA,
+// Android's sign-in sheet) suppress window.confirm(), so the warning must not
+// depend on JS. POST performs the bounce: the machine tears the AP down to run
+// a fresh scan, which disconnects the phone, so the response page (rendered
+// BEFORE the bounce lands) tells the user to scan the QR code on the frame
+// again to reconnect.
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-	if s.cfg.Rescan != nil {
-		if err := s.cfg.Rescan(); err != nil {
-			s.logger.Info("portal: rescan request rejected", zap.Error(err))
-			s.renderIndex(w, r)
-			return
+	switch r.Method {
+	case http.MethodGet:
+		s.render(w, "rescan_confirm.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
+	case http.MethodPost:
+		// Info on receipt: the submission must be traceable in production logs
+		// even when the machine-side bounce log is missing.
+		s.logger.Info("portal: rescan submitted", zap.String("remote_addr", r.RemoteAddr))
+		if s.cfg.Rescan != nil {
+			if err := s.cfg.Rescan(); err != nil {
+				s.logger.Info("portal: rescan request rejected", zap.Error(err))
+				s.renderIndex(w, r)
+				return
+			}
 		}
+		s.render(w, "rescan.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
+	default:
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
-	s.render(w, "rescan.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

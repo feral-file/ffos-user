@@ -280,19 +280,43 @@ func TestRescanPostTriggersBounceAndExplainsRejoin(t *testing.T) {
 	assert.Contains(t, string(body), "scan it to reconnect")
 }
 
-func TestRescanGetRedirectsToPicker(t *testing.T) {
+// TestRescanGetShowsConfirmationWithoutTriggering: the warning is a plain-HTML
+// page (captive-portal mini-browsers suppress window.confirm), and merely
+// viewing it must not bounce the AP.
+func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 	called := 0
 	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-abc",
 		Rescan: func() error { called++; return nil },
 	})
 
 	resp, err := client.Get(ts.URL + "/rescan")
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, body, "Restart Wi-Fi search", "confirm page must carry the POST button")
+	assert.Contains(t, body, "FF1-abc")
+	assert.Contains(t, body, "disconnected")
+	assert.Zero(t, called, "GET must not trigger a bounce")
+}
+
+func TestRescanOtherMethodsRedirectToPicker(t *testing.T) {
+	called := 0
+	_, ts, client := newTestServer(t, Config{
+		Rescan: func() error { called++; return nil },
+	})
+
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/rescan", nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusSeeOther, resp.StatusCode)
 	assert.Equal(t, "/", resp.Header.Get("Location"))
-	assert.Zero(t, called, "GET must not trigger a bounce")
+	assert.Zero(t, called)
 }
 
 func TestRescanRejectedReRendersPicker(t *testing.T) {

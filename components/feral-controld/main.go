@@ -548,13 +548,19 @@ func initializeApp(
 	executor.SetSetupUI(setupNarrator)
 	softAP := softap.NewNetworkManager(exec, logger, "", nil)
 	wifiCtl := wifictl.New(exec, clock, logger, "")
+	// The claim QR auto-paints when an unclaimed device comes online — the
+	// launcher-ui replacement (see MaybeShowClaimQROnOnline).
+	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context}
+	if ac, ok := executor.(autoClaimFlow); ok {
+		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
+	}
 	provMachine := provisioning.New(provisioning.Config{
 		AP:           softAP,
 		Wifi:         wifiCtl,
 		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
 		Clock:        clock,
 		Logger:       logger,
-		Notifier:     &setupNotifier{ui: setupNarrator, logger: logger},
+		Notifier:     provisioningNotifier,
 		WiredLink:    linkChecker.HasWiredLink,
 	})
 
