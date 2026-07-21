@@ -78,6 +78,13 @@ type JoinFunc func(ssid, password string) error
 // machine so the outcome persists across portal restarts.
 type StatusFunc func() Status
 
+// RescanFunc asks the provisioning machine to bounce the AP and run a fresh
+// station-mode scan (the radio cannot scan while the AP holds it). Like
+// JoinFunc it MUST return promptly — the bounce runs asynchronously, since it
+// disconnects the phone that pressed the button; a non-nil error means the
+// request was rejected (e.g. the machine is busy) and the form is re-rendered.
+type RescanFunc func() error
+
 // Config wires the portal's listener and its three seams.
 type Config struct {
 	// Addr is the bind address. Production binds ":80" (a sysctl lowers the
@@ -90,6 +97,7 @@ type Config struct {
 	Scan   ScanFunc
 	Join   JoinFunc
 	Status StatusFunc
+	Rescan RescanFunc
 	Logger *zap.Logger
 }
 
@@ -123,6 +131,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleRoot)
 	s.mux.HandleFunc("/connect", s.handleConnect)
 	s.mux.HandleFunc("/status", s.handleStatus)
+	s.mux.HandleFunc("/rescan", s.handleRescan)
 
 	// OS captive-portal probes. Returning a redirect (rather than the 204 /
 	// success body each OS looks for) is what makes the phone decide it is
@@ -262,6 +271,25 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		SSID   string
 		APSSID string
 	}{SSID: ssid, APSSID: s.cfg.APSSID})
+}
+
+// handleRescan accepts the "search for networks again" submission. The machine
+// bounces the AP to run a fresh scan, which will disconnect the phone — so the
+// response page (rendered BEFORE the bounce lands) tells the user to scan the
+// QR code on the frame again to reconnect.
+func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if s.cfg.Rescan != nil {
+		if err := s.cfg.Rescan(); err != nil {
+			s.logger.Info("portal: rescan request rejected", zap.Error(err))
+			s.renderIndex(w, r)
+			return
+		}
+	}
+	s.render(w, "rescan.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

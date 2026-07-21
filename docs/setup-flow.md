@@ -54,6 +54,7 @@ flowchart LR
 
 | State | Shown when |
 |---|---|
+| `scanning` | The pre-AP Wi-Fi scan is running (extension state; players that predate it render nothing). Shown before the first AP raise and during a portal-requested rescan bounce. |
 | `softap_qr` | AP is up; the phone should join `FF1-<device_id>` and open the portal. Carries SSID and PSK. |
 | `joining` | Credentials submitted; the device is joining the chosen network. |
 | `join_failed` | Join failed (wrong password / not found / timeout); AP is being re-raised for a retry. Carries a reason. |
@@ -83,6 +84,7 @@ stateDiagram-v2
 
   unprovisioned --> ap_active: goes offline with no wired link
   ap_active --> joining: portal /connect (creds submitted)
+  ap_active --> ap_active: portal /rescan (AP bounce + fresh scan)
   joining --> online: join succeeded (AP stays down)
   joining --> ap_active: join failed (AP re-raised)
 

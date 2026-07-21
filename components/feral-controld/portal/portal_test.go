@@ -3,6 +3,7 @@ package portal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -254,4 +255,60 @@ func fetchStatus(t *testing.T, client *http.Client, base string) Status {
 	var st Status
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&st))
 	return st
+}
+
+// --- /rescan -----------------------------------------------------------------
+
+func TestRescanPostTriggersBounceAndExplainsRejoin(t *testing.T) {
+	called := 0
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-abc",
+		Rescan: func() error { called++; return nil },
+	})
+
+	resp, err := client.PostForm(ts.URL+"/rescan", url.Values{})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, called)
+	// The page must warn about the AP restart and tell the user to re-scan the
+	// QR code to reconnect.
+	assert.Contains(t, string(body), "FF1-abc")
+	assert.Contains(t, string(body), "scan it to reconnect")
+}
+
+func TestRescanGetRedirectsToPicker(t *testing.T) {
+	called := 0
+	_, ts, client := newTestServer(t, Config{
+		Rescan: func() error { called++; return nil },
+	})
+
+	resp, err := client.Get(ts.URL + "/rescan")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	assert.Equal(t, "/", resp.Header.Get("Location"))
+	assert.Zero(t, called, "GET must not trigger a bounce")
+}
+
+func TestRescanRejectedReRendersPicker(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-abc",
+		Scan:   func(context.Context) ([]string, error) { return []string{"Net"}, nil },
+		Rescan: func() error { return errors.New("device is busy") },
+	})
+
+	resp, err := client.PostForm(ts.URL+"/rescan", url.Values{})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	// Back on the picker, not the rescan page.
+	assert.Contains(t, string(body), "Connect to Wi-Fi")
 }

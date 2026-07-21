@@ -640,3 +640,96 @@ func TestScanningNarrationPrecedesAPRaise(t *testing.T) {
 	require.NotEqual(t, -1, apIdx, "credential-bearing AP-up announcement must fire")
 	assert.Less(t, scanIdx, apIdx)
 }
+
+// --- portal rescan bounce ----------------------------------------------------
+
+// TestRescanBouncesAPAndRunsFreshScan: the portal's "search again" request
+// tears the AP down, runs a fresh station-mode scan, and re-raises — in that
+// order — while the machine stays in StateAPActive throughout.
+func TestRescanBouncesAPAndRunsFreshScan(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+	require.Equal(t, 1, h.rec.count("ap.Up"))
+
+	h.m.applyRescan(ctx)
+
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Down"))
+	assert.Equal(t, 2, h.rec.count("ap.Up"))
+	assert.Equal(t, 1, h.rec.count("portal.Stop"))
+	assert.Equal(t, 2, h.rec.count("portal.Start"))
+	assert.Equal(t, 2, h.rec.count("wifi.RefreshScanCache"))
+
+	// After the bounce: down first, then the fresh scan, then the re-raise.
+	list := h.rec.list()
+	down := indexOf(list, "ap.Down")
+	require.NotEqual(t, -1, down)
+	tail := list[down:]
+	assert.Less(t, indexOf(tail, "wifi.RefreshScanCache"), indexOf(tail, "ap.Up"),
+		"fresh scan must precede the re-raise: %v", list)
+}
+
+// TestRescanClearsStaleJoinOutcome: the bounce starts a fresh portal session,
+// so a pre-bounce join failure must not greet the re-associated phone.
+func TestRescanClearsStaleJoinOutcome(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
+	h.m.applyJoin(ctx, "HomeNet", "wrong-pw")
+	require.Equal(t, portal.JoinFailed, h.m.Status().State)
+
+	h.m.applyRescan(ctx)
+
+	assert.Equal(t, portal.JoinIdle, h.m.Status().State)
+}
+
+// TestRescanIgnoredOutsideAPActive: an online device has no picker to refresh;
+// the request must not touch the AP.
+func TestRescanIgnoredOutsideAPActive(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, true)
+	require.Equal(t, StateOnline, h.m.State())
+
+	h.m.applyRescan(ctx)
+
+	assert.Equal(t, 0, h.rec.count("ap.Down"))
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+}
+
+// TestRescanNarratesScanningThenQR: the on-screen state must follow the bounce
+// — scanning first, then the QR once the AP is back.
+func TestRescanNarratesScanningThenQR(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+	before := len(h.notifier.details())
+
+	h.m.applyRescan(ctx)
+
+	scanIdx, qrIdx := -1, -1
+	for i, c := range h.notifier.details()[before:] {
+		if c.Detail.Reason == "scanning" && scanIdx == -1 {
+			scanIdx = i
+		}
+		if c.Detail.PSK != "" && qrIdx == -1 {
+			qrIdx = i
+		}
+	}
+	require.NotEqual(t, -1, scanIdx, "rescan must narrate scanning")
+	require.NotEqual(t, -1, qrIdx, "rescan must re-narrate the QR after the bounce")
+	assert.Less(t, scanIdx, qrIdx)
+}

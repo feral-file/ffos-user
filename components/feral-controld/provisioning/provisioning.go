@@ -211,6 +211,7 @@ type eventKind int
 const (
 	evConnectivity eventKind = iota
 	evJoin
+	evRescan
 )
 
 type event struct {
@@ -336,6 +337,8 @@ func (m *Machine) loop(ctx context.Context) {
 				m.onConnectivity(ctx, ev.online)
 			case evJoin:
 				m.applyJoin(ctx, ev.ssid, ev.psk)
+			case evRescan:
+				m.applyRescan(ctx)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
@@ -360,6 +363,21 @@ func (m *Machine) RequestJoin(ssid, password string) error {
 		return nil
 	default:
 		m.logger.Warn("provisioning: join queue full, dropping submission", zap.String("ssid", ssid))
+		return errors.New("device is busy, please try again")
+	}
+}
+
+// RequestRescan is the portal's RescanFunc: bounce the AP so a fresh
+// station-mode scan can run (the radio cannot scan while the AP holds it).
+// Like RequestJoin it returns immediately and the bounce runs on the loop
+// goroutine, because taking the AP down drops the phone that pressed the
+// button; the phone re-associates via the QR code and reloads the picker.
+func (m *Machine) RequestRescan() error {
+	select {
+	case m.events <- event{kind: evRescan}:
+		return nil
+	default:
+		m.logger.Warn("provisioning: rescan queue full, dropping request")
 		return errors.New("device is busy, please try again")
 	}
 }
@@ -513,6 +531,34 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
 	m.transition(ctx, StateAPActive, Detail{SSID: ssid, Reason: outcome.Reason, Message: outcome.Message})
 }
 
+// applyRescan bounces the AP purely to refresh the scan cache: the radio can
+// only scan in station mode, so the portal's "search for networks again"
+// button costs one AP restart and the phone must re-associate. Only valid from
+// StateAPActive; requests in any other state are ignored (a join in flight or
+// an online device has no picker to refresh).
+func (m *Machine) applyRescan(ctx context.Context) {
+	m.mu.Lock()
+	if m.state != StateAPActive {
+		st := m.state
+		m.mu.Unlock()
+		m.logger.Warn("provisioning: rescan ignored, AP not active", zap.String("state", string(st)))
+		return
+	}
+	// The bounce starts a fresh portal session; a join outcome from before it
+	// would be stale on the page the re-associated phone loads. Reset directly:
+	// resetJoinStatus is edge-gated on entering StateAPActive, which a rescan
+	// never leaves.
+	m.status = portal.Status{State: portal.JoinIdle}
+	m.mu.Unlock()
+
+	m.logger.Info("provisioning: rescan requested; bouncing setup AP")
+	m.ensureAPDown(ctx)
+	// State is still StateAPActive, so reconcile re-raises via ensureAPUp: it
+	// narrates the scan on-screen, completes a fresh scan pass, then brings the
+	// AP (and its QR narration) back.
+	m.reconcile(ctx)
+}
+
 // transition sets the desired state (notifying on change) and reconciles the
 // AP/portal to match. Reconcile runs even when the state is unchanged so a
 // previously failed AP operation converges.
@@ -597,6 +643,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		Scan:   m.wifi.CachedScan,
 		Join:   m.RequestJoin,
 		Status: m.Status,
+		Rescan: m.RequestRescan,
 		Logger: m.logger,
 	})
 	if err := srv.Start(); err != nil {

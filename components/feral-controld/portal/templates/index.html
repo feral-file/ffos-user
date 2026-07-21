@@ -61,11 +61,20 @@
   .status-joining { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
   .status-succeeded { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
   .hint { margin-top: 1.5rem; font-size: 0.88rem; color: #52525b; }
+  button.secondary {
+    margin-top: 0.75rem;
+    color: #2563eb;
+    background: transparent;
+    border: 1px solid #93c5fd;
+  }
+  button.secondary:active { background: #eff6ff; }
   @media (prefers-color-scheme: dark) {
     body { background: #18181b; color: #f4f4f5; }
     select, input { background: #27272a; color: #f4f4f5; border-color: #3f3f46; }
     .note { background: #2a1a0e; border-color: #7c2d12; color: #fdba74; }
     .hint { color: #a1a1aa; }
+    button.secondary { color: #93c5fd; border-color: #1e3a8a; }
+    button.secondary:active { background: #10233f; }
   }
 </style>
 </head>
@@ -101,11 +110,15 @@
     <button type="submit">Connect</button>
   </form>
 
+  <form method="POST" action="/rescan"
+        onsubmit="return confirm('The frame will restart its setup Wi-Fi to search for networks again. Your phone will be disconnected — scan the QR code on the frame again to reconnect. Continue?')">
+    <button type="submit" class="secondary">Search for networks again</button>
+  </form>
+
   <p class="hint">
     Don't see your Wi-Fi network in the list? Make sure your router is switched
-    on. The frame looks for nearby networks when it starts up, so if the router
-    was turned on later, restart the frame — unplug it, wait a few seconds, and
-    plug it back in — and it will find your network.
+    on, then tap “Search for networks again”. The frame will restart its setup
+    Wi-Fi, so you'll need to scan the QR code on the frame again afterwards.
   </p>
 </main>
 </body>
