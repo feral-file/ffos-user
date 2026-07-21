@@ -31,6 +31,11 @@ const (
 	// scanCacheTTL bounds how long a pre-AP scan stays usable. Ported from
 	// feral-setupd (constant::SSID_CACHE_TTL, 10 minutes).
 	scanCacheTTL = 10 * time.Minute
+
+	// ssidWaitTimeout / ssidWaitInterval bound the post-AP-bounce wait for the
+	// join target to reappear in NM's scan results (see Join / waitForSSID).
+	ssidWaitTimeout  = 20 * time.Second
+	ssidWaitInterval = 2 * time.Second
 )
 
 // exitCoder is implemented by *os/exec.ExitError (via the promoted
@@ -226,6 +231,13 @@ func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
 			zap.String("ssid", ssid), zap.Error(err))
 	}
 
+	// The AP-bounce join reaches here moments after the hotspot went down, with
+	// the radio freshly flipped from AP back to station mode and NM's BSS list
+	// empty or stale. `device wifi connect` consults that list WITHOUT
+	// rescanning, so connecting immediately fails "no network with SSID" even
+	// though the network exists. Wait for the target to become visible first.
+	c.waitForSSID(ctx, ssid)
+
 	args := []string{"device", "wifi", "connect", ssid, "password", psk}
 	if c.iface != "" {
 		args = append(args, "ifname", c.iface)
@@ -247,6 +259,49 @@ func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
 			zap.String("ssid", ssid), zap.Error(delErr))
 	}
 	return joinErr
+}
+
+// waitForSSID blocks until ssid appears in a forced rescan or the wait window
+// closes. Scan errors are retried, not fatal: right after the mode flip the
+// device can transiently report busy/unavailable. On timeout it returns
+// normally and lets the connect surface nmcli's real error — the network may
+// genuinely be gone, and nmcli's message is the truthful outcome.
+func (c *Controller) waitForSSID(ctx context.Context, ssid string) {
+	deadline := c.clock.Now().Add(ssidWaitTimeout)
+	for {
+		args := []string{"-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "yes"}
+		if c.iface != "" {
+			args = append(args, "ifname", c.iface)
+		}
+		out, _, err := c.run(ctx, args...)
+		if err == nil && ssidInScan(string(out), ssid) {
+			return
+		}
+		if err != nil {
+			c.logger.Debug("wifictl: post-bounce rescan failed; retrying",
+				zap.String("ssid", ssid), zap.Error(err))
+		}
+		if c.clock.Now().Add(ssidWaitInterval).After(deadline) {
+			c.logger.Warn("wifictl: ssid not visible within wait window; connecting anyway",
+				zap.String("ssid", ssid))
+			return
+		}
+		if err := c.clock.SleepContext(ctx, ssidWaitInterval); err != nil {
+			return
+		}
+	}
+}
+
+// ssidInScan reports whether ssid appears in nmcli terse scan output. Unlike
+// parseSSIDs it is deliberately NOT capped at maxSSIDs: the join target may
+// rank below the portal picker's cut in a dense environment.
+func ssidInScan(out, ssid string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if unescapeTerse(line) == ssid {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyJoin maps an nmcli exit code and its output onto a JoinErrorKind.
