@@ -40,6 +40,13 @@ import (
 type State string
 
 const (
+	// StateStarting is the pre-assessment sentinel a new Machine holds until
+	// the loop's initial connectivity assessment resolves. It exists so that
+	// FIRST transition always counts as a change and notifies — initializing
+	// to StateOnline made a boot-while-already-online resolve Online→Online
+	// with no notification, so nothing downstream (the claim trigger most
+	// critically) ever fired after a daemon restart on a healthy device.
+	StateStarting State = "starting"
 	// StateOnline: the device reaches the network and has a saved Wi-Fi profile.
 	// The setup AP is down.
 	StateOnline State = "online"
@@ -253,7 +260,7 @@ func New(cfg Config) *Machine {
 		checkInterval: cfg.CheckInterval,
 		sup:           newSupervisor(cfg.Clock, logger),
 		events:        make(chan event, eventBuffer),
-		state:         StateOnline,
+		state:         StateStarting,
 		status:        portal.Status{State: portal.JoinIdle},
 	}
 }
@@ -307,6 +314,16 @@ func (m *Machine) RestartCount() int64 { return m.sup.restartCount() }
 // in tests, are invoked directly), so state mutation is serialized without a
 // per-transition lock; mu guards only the fields external goroutines read.
 func (m *Machine) loop(ctx context.Context) {
+	// Sweep any leftover setup AP from a previous daemon life. An ungraceful
+	// exit (SIGKILL, panic, power cut) leaves the persisted ff1-softap NM
+	// profile behind — possibly still broadcasting — while this process boots
+	// believing apUp=false, so ensureAPDown would never touch it. A fresh boot
+	// never legitimately starts with our AP up, and the sweep must run BEFORE
+	// the first pre-AP scan so the radio is back in station mode (constraint 1).
+	if err := m.ap.Down(ctx); err != nil {
+		m.logger.Warn("provisioning: boot-time sweep of leftover setup AP failed", zap.Error(err))
+	}
+
 	unsub := m.conn.Subscribe(func(online bool) {
 		select {
 		case m.events <- event{kind: evConnectivity, online: online}:

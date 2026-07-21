@@ -126,7 +126,12 @@ func TestUp(t *testing.T) {
 	assert.Equal(t, "FF1-a1b2c3d4e5f6", info.SSID)
 	assert.Equal(t, "86106003", info.PSK) // numericPSK("a1b2c3d4e5f6")
 
-	call := strings.Join(exec.recorded()[0], " ")
+	// Replace-not-stack: the raise pre-deletes any same-name profile so a
+	// leftover from an ungraceful previous run can never become a duplicate.
+	calls := exec.recorded()
+	require.Len(t, calls, 2)
+	assert.Equal(t, []string{"nmcli", "connection", "delete", conName}, calls[0])
+	call := strings.Join(calls[1], " ")
 	assert.Contains(t, call, "device wifi hotspot")
 	assert.Contains(t, call, "con-name "+conName)
 	assert.Contains(t, call, "ssid FF1-a1b2c3d4e5f6")
@@ -140,7 +145,7 @@ func TestUpWithIface(t *testing.T) {
 	}).(*nmBackend)
 	_, err := b.Up(context.Background())
 	require.NoError(t, err)
-	assert.Contains(t, strings.Join(exec.recorded()[0], " "), "ifname wlan0")
+	assert.Contains(t, strings.Join(exec.recorded()[1], " "), "ifname wlan0")
 }
 
 func TestUpFailure(t *testing.T) {

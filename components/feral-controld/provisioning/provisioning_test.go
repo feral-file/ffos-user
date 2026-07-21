@@ -765,3 +765,51 @@ func TestRescanFlipsToScanningBeforeTeardown(t *testing.T) {
 	assert.NotEqual(t, -1, indexOf(seg, "notify:ap_active:scanning"),
 		"rescan must flip to scanning before teardown: %v", list)
 }
+
+// TestBootSweepsLeftoverAPBeforeFirstScan: an ungraceful previous exit leaves
+// the persisted ff1-softap profile behind while this boot starts with
+// apUp=false, so ensureAPDown would never touch it. The loop must sweep it
+// unconditionally at startup, BEFORE the first pre-AP scan (the leftover AP
+// would otherwise hold the radio through that scan).
+func TestBootSweepsLeftoverAPBeforeFirstScan(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.conn.online = false // unprovisioned + offline -> AP raise after the sweep
+
+	h.m.Start(context.Background())
+	defer h.m.Stop()
+
+	require.Eventually(t, func() bool {
+		return h.rec.count("ap.Up") == 1
+	}, 2*time.Second, 5*time.Millisecond)
+
+	list := h.rec.list()
+	sweep := indexOf(list, "ap.Down")
+	require.NotEqual(t, -1, sweep, "boot must sweep the leftover AP: %v", list)
+	assert.Less(t, sweep, indexOf(list, "wifi.RefreshScanCache"),
+		"sweep must precede the first pre-AP scan: %v", list)
+	assert.Less(t, sweep, indexOf(list, "ap.Up"))
+}
+
+// TestBootWhileOnlineNotifiesInitialState: a daemon restart on a healthy,
+// online device must still notify the initial StateOnline — the auto claim
+// trigger hangs off that notification, and initializing the machine AT
+// StateOnline used to swallow it (Online→Online, changed=false).
+func TestBootWhileOnlineNotifiesInitialState(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(true)
+	h.conn.online = true
+
+	h.m.Start(context.Background())
+	defer h.m.Stop()
+
+	require.Eventually(t, func() bool {
+		for _, s := range h.notifier.states() {
+			if s == StateOnline {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 5*time.Millisecond,
+		"boot-while-online must notify StateOnline (the claim trigger depends on it)")
+}

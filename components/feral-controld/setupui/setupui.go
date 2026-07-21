@@ -12,6 +12,7 @@ package setupui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -89,7 +90,11 @@ type CDPSender interface {
 type Service struct {
 	cdp          CDPSender
 	contractPath string
-	logger       *zap.Logger
+	// warnedUnreadable rate-limits the contract-unreadable Warn to once per
+	// process; the re-check itself happens on every push (see
+	// narrationSupported).
+	warnedUnreadable bool
+	logger           *zap.Logger
 
 	mu      sync.Mutex
 	support support
@@ -110,10 +115,11 @@ type Service struct {
 	running bool
 }
 
-// maxPendingStates bounds the pending queue. Setup narration has 8 distinct
-// states total, so a deeper queue only ever means a stalled CDP send; dropping
-// the oldest intent is the correct staleness policy for a courtesy overlay.
-const maxPendingStates = 8
+// maxPendingStates bounds the pending queue. Setup narration has 10 distinct
+// states total (including the scanning/finalizing/factory_reset extensions),
+// so a deeper queue only ever means a stalled CDP send; dropping the oldest
+// intent is the correct staleness policy for a courtesy overlay.
+const maxPendingStates = 12
 
 // New builds a narration Service. A blank contractPath falls back to
 // DefaultContractPath. logger may be nil (narration then stays silent about its
@@ -358,6 +364,22 @@ func (s *Service) narrationSupported() bool {
 		return false
 	}
 	if err := validateSetupDisplayContract(s.contractPath); err != nil {
+		if errors.Is(err, errContractUnreadable) {
+			// Do NOT latch supportNo on a read failure: the very first push
+			// fires within seconds of boot (provisioning starts before CDP),
+			// and the player bundle/rootfs may not be readable at that exact
+			// instant — or an OTA may be mid-replace of the bundle. Latching
+			// would permanently kill narration for the process. Stay
+			// undecided: this push is skipped and the next one re-checks. A
+			// genuinely absent manifest keeps narration off through this same
+			// path, at the cost of one file read per push attempt.
+			if !s.warnedUnreadable {
+				s.warnedUnreadable = true
+				s.logger.Warn("Setup narration deferred: player contract unreadable; re-checking on the next push",
+					zap.Error(err), zap.String("path", s.contractPath))
+			}
+			return false
+		}
 		s.support = supportNo
 		// Logged exactly once, at Warn: expected on players that predate the
 		// setupDisplay contract, but on a SoftAP-era device it means NO setup
@@ -454,6 +476,13 @@ type playerContractAcceptedResponse struct {
 	OK bool `json:"ok"`
 }
 
+// errContractUnreadable marks a validation failure caused by failing to READ
+// the manifest, as opposed to a successfully-read manifest that lacks
+// setupDisplay support. The two must not be conflated: unreadable may be
+// transient (boot ordering, OTA mid-replace) and is retried, while a read
+// manifest without the contract latches narration off for the process.
+var errContractUnreadable = errors.New("player contract unreadable")
+
 // validateSetupDisplayContract reports whether the player manifest at path
 // advertises the setupDisplay contract this Service speaks. It mirrors
 // mintpairing's contract validation mechanism (read the manifest from the
@@ -465,7 +494,7 @@ func validateSetupDisplayContract(path string) error {
 	}
 	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
 	if err != nil {
-		return fmt.Errorf("read player contract: %w", err)
+		return fmt.Errorf("%w: %v", errContractUnreadable, err)
 	}
 	var manifest playerContractManifest
 	if err := json.Unmarshal(raw, &manifest); err != nil {

@@ -123,6 +123,20 @@ type executor struct {
 	// pre-claim gates.
 	autoClaimInFlight atomic.Bool
 
+	// pairingConfirmed latches the cloud's showPairingQRCode(false) pairing
+	// confirmation. connect() (the claim) sets ConnectedDevice, but the
+	// confirmation does NOT — without this latch the auto-claim loop stayed
+	// blind to it and could repaint the claim QR over a paired device's
+	// Ready/hidden screen. In-memory: a restart re-derives via deviceClaimed
+	// (connect precedes the confirmation in the normal flow).
+	pairingConfirmed atomic.Bool
+
+	// staleOverlaySwept gates the once-per-process boot reconciliation of the
+	// player's overlay: narration is in-memory, so after a daemon restart the
+	// player keeps rendering the PREVIOUS life's overlay (e.g. a claim QR
+	// painted before a crash on a device that has since been claimed).
+	staleOverlaySwept atomic.Bool
+
 	// logUploaderFactory builds the in-process log uploader. Overridable in tests
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
@@ -224,6 +238,14 @@ func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 // which is exactly when the provisioning machine sits at StateOnline/idle and is
 // not narrating. The two surfaces never legitimately drive the overlay at the
 // same time, so newest-intent-wins never drops a state the other still needs.
+//
+// KNOWN LIMITATION — mintPairingDisplay is a SEPARATE player overlay (driven
+// via qrdisplay, not this Service) with no cross-surface arbitration: a
+// post-claim setupDisplay narration (updating progress, factory_reset, or a
+// latched-OTA join_failed) can be driven while a mint-pairing session's
+// overlay is up, and the player renders both. Contained in practice because
+// pairing sessions are short-lived and updating/factory_reset both end in a
+// reboot; a real fix needs the controller to arbitrate the two overlays.
 func (e *executor) SetSetupUI(ui *setupui.Service) {
 	if ui == nil {
 		return
@@ -332,6 +354,8 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 		return nil, fmt.Errorf("invalid arguments: clientDevice.id is required")
 	}
 
+	wasClaimed := e.deviceClaimed()
+
 	s := state.GetState()
 	s.ConnectedDevice = &state.Device{
 		ID:       cmdArgs.Device.ID,
@@ -349,6 +373,17 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 		e.claimObserver(true)
 	}
 
+	// The claim QR's job ended the moment the claim landed. The pairing
+	// confirmation (showPairingQRCode(false)) still records Ready later, but
+	// it is a separate cloud command this device cannot guarantee arrives —
+	// never leave a claimed device stranded behind its own claim QR. Guarded
+	// on the claim TRANSITION: an app re-connecting to an already-claimed
+	// device (e.g. mid-OTA with the updating narration up) must not wipe an
+	// unrelated overlay.
+	if !wasClaimed {
+		e.setupUI().Hide()
+	}
+
 	return CmdOK, nil
 }
 
@@ -363,6 +398,11 @@ func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interfac
 	// controld drives the claim/pairing QR in-process: on show=true it runs the
 	// mandatory pre-claim OTA gate and, only on a supported build, paints the
 	// claim QR; on show=false it records the Ready transition then hides.
+	if cmdArgs.Show {
+		// The cloud explicitly restarting the QR flow supersedes any earlier
+		// pairing confirmation (e.g. a re-pair round).
+		e.pairingConfirmed.Store(false)
+	}
 	return e.showPairingQRCodeInProcess(ctx, cmdArgs.Show)
 }
 
@@ -374,6 +414,10 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 	ui := e.setupUI()
 
 	if !show {
+		// Latch the confirmation so the auto-claim loop treats this device as
+		// settled (see pairingConfirmed): ConnectedDevice alone misses the
+		// paired-but-confirmation-first orderings.
+		e.pairingConfirmed.Store(true)
 		// Record the Ready transition BEFORE hiding the overlay. This ports
 		// callbacks.rs:476's record-before-transition rule: the pairing
 		// confirmation is a durable one-shot signal (controld ACKs it and never
@@ -386,7 +430,10 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 		return CmdOK, nil
 	}
 
-	e.runPreClaimGateAndPaint(ctx)
+	// The relayer command obeys the cloud unconditionally (skipIfSettled
+	// false): an explicit show=true on a claimed device is a deliberate
+	// re-pair request.
+	e.runPreClaimGateAndPaint(ctx, false)
 	return CmdOK, nil
 }
 
@@ -397,7 +444,7 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 // the device is rebooting into the new build; ResultTooOldToUpgrade: nothing
 // short of a reflash helps) so the auto-claim retry loop knows when another
 // attempt is pointless.
-func (e *executor) runPreClaimGateAndPaint(ctx context.Context) (painted, terminal bool) {
+func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bool) (painted, terminal bool) {
 	result, err := e.otaGateInstance().EnsureLatestBeforeClaim(ctx)
 	if err != nil {
 		// Retryable: version-check failures (often fresh-network DNS/route
@@ -416,6 +463,14 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context) (painted, termin
 		if result == otagate.ResultTooOldToUpgrade {
 			e.setupUI().Hide()
 		}
+		return false, true
+	}
+	// The gate is slow (live version check, possibly an update ladder); the
+	// device may have been claimed or pairing-confirmed while it ran. The
+	// auto loop must never repaint the QR over a settled device; the relayer
+	// command path opts out (an explicit cloud show=true is a re-pair).
+	if skipIfSettled && e.claimSettled() {
+		e.setupUI().Hide()
 		return false, true
 	}
 	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
@@ -494,7 +549,16 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	}
 	defer e.autoClaimInFlight.Store(false)
 
-	if e.deviceClaimed() {
+	if e.claimSettled() {
+		// Boot reconciliation: narration is in-memory, so after a daemon
+		// restart the player may still render the PREVIOUS life's overlay
+		// (e.g. claim_qr painted before a crash on a device that has since
+		// been claimed). Sweep it once — and only once: later online flaps on
+		// a settled device must not wipe a live updating/factory-reset
+		// narration.
+		if e.staleOverlaySwept.CompareAndSwap(false, true) {
+			e.setupUI().Hide()
+		}
 		return
 	}
 	// Narrate the gap: between the join succeeding and the claim QR there are
@@ -507,8 +571,8 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 		e.setupUI().Hide() // clear our finalizing narration; nothing is coming
 		return
 	}
-	// Re-check: the device may have been claimed while waiting (LAN connect).
-	if e.deviceClaimed() {
+	// Re-check: the device may have settled while waiting (LAN connect).
+	if e.claimSettled() {
 		e.setupUI().Hide()
 		return
 	}
@@ -516,7 +580,7 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	e.logger.Info("Auto claim flow: device online and unclaimed; running pre-claim gate")
 	backoff := autoClaimRetryMin
 	for {
-		painted, terminal := e.runPreClaimGateAndPaint(ctx)
+		painted, terminal := e.runPreClaimGateAndPaint(ctx, true)
 		if painted || terminal {
 			return
 		}
@@ -524,7 +588,8 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 		if err := e.clock.SleepContext(ctx, backoff); err != nil {
 			return
 		}
-		if e.deviceClaimed() {
+		if e.claimSettled() {
+			e.setupUI().Hide() // clear finalizing; the device settled mid-backoff
 			return
 		}
 		backoff *= 2
@@ -532,6 +597,14 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 			backoff = autoClaimRetryMax
 		}
 	}
+}
+
+// claimSettled reports whether the claim journey is over for this device —
+// either claimed (ConnectedDevice persisted by connect()) or pairing-confirmed
+// by the cloud this process lifetime. The auto-claim loop must treat both as
+// terminal; painting the claim QR over a settled device is always wrong.
+func (e *executor) claimSettled() bool {
+	return e.deviceClaimed() || e.pairingConfirmed.Load()
 }
 
 // deviceClaimed mirrors the claim derivation every other surface uses (mDNS

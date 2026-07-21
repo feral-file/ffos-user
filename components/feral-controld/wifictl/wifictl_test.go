@@ -14,12 +14,13 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// scriptedExec fakes wrapper.Exec: every nmcli invocation is recorded and
-// answered by reply.
+// scriptedExec fakes wrapper.Exec: every nmcli invocation is recorded (argv
+// plus the ctx's liveness at call time) and answered by reply.
 type scriptedExec struct {
-	mu    sync.Mutex
-	calls [][]string
-	reply func(argv []string) ([]byte, error)
+	mu      sync.Mutex
+	calls   [][]string
+	ctxErrs []error
+	reply   func(argv []string) ([]byte, error)
 }
 
 type scriptedCmd struct {
@@ -34,10 +35,11 @@ func (c scriptedCmd) Wait() error                     { return c.err }
 func (c scriptedCmd) Output() ([]byte, error)         { return c.out, c.err }
 func (c scriptedCmd) CombinedOutput() ([]byte, error) { return c.out, c.err }
 
-func (e *scriptedExec) CommandContext(_ context.Context, name string, arg ...string) wrapper.ExecCmd {
+func (e *scriptedExec) CommandContext(ctx context.Context, name string, arg ...string) wrapper.ExecCmd {
 	argv := append([]string{name}, arg...)
 	e.mu.Lock()
 	e.calls = append(e.calls, argv)
+	e.ctxErrs = append(e.ctxErrs, ctx.Err())
 	e.mu.Unlock()
 	out, err := e.reply(argv)
 	return scriptedCmd{out: out, err: err}
@@ -47,6 +49,12 @@ func (e *scriptedExec) recorded() [][]string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
+}
+
+func (e *scriptedExec) recordedCtxErrs() []error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]error(nil), e.ctxErrs...)
 }
 
 // fakeExitError is an error that reports a process exit code, matching the
@@ -364,4 +372,41 @@ func TestHasSavedProfileFalseWhenNone(t *testing.T) {
 	has, err := c.HasSavedProfile(context.Background())
 	require.NoError(t, err)
 	assert.False(t, has)
+}
+
+// TestJoinFailureCleanupSurvivesCanceledContext: when the join fails because
+// the CALLER's ctx died (daemon shutdown mid-join), the broken-profile cleanup
+// must still run — on a detached context — or the half-created profile biases
+// the next boot to "provisioned" and defers the setup AP a full offline window.
+func TestJoinFailureCleanupSurvivesCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "device wifi list") {
+			return []byte("Home"), nil
+		}
+		if strings.Contains(joined, "connect") {
+			// Shutdown arrives mid-connect: the caller's ctx dies and nmcli
+			// reports the interruption.
+			cancel()
+			return []byte("Error: Connection activation failed."),
+				fakeExitError{code: 4, msg: "exit status 4"}
+		}
+		return nil, nil
+	})
+
+	err := c.Join(ctx, "Home", "pw123456")
+	require.Error(t, err)
+
+	// Pre-delete, scan, connect, post-failure cleanup: the cleanup delete must
+	// have run despite the canceled parent ctx, and on a live context.
+	calls := exec.recorded()
+	require.Len(t, calls, 4)
+	assert.Equal(t, []string{"nmcli", "connection", "delete", "Home"}, calls[3])
+	// The parent ctx was canceled during the connect call, so a cleanup issued
+	// on it would arrive already-dead. The captured ctx state proves the
+	// cleanup ran on a detached, live context instead.
+	ctxErrs := exec.recordedCtxErrs()
+	require.Len(t, ctxErrs, 4)
+	assert.NoError(t, ctxErrs[3], "cleanup must run on a detached, live context")
 }

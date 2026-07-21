@@ -192,7 +192,8 @@ func TestExecutor_Connect_Success(t *testing.T) {
 			return nil
 		})
 
-	// Mock state manager get
+	// Mock state manager get. AnyTimes: connect() also reads state for the
+	// wasClaimed check before saving.
 	ts.mockStateManager.EXPECT().
 		GetState().
 		Return(&state.State{
@@ -201,7 +202,7 @@ func TestExecutor_Connect_Success(t *testing.T) {
 				Name:     device.Name,
 				Platform: device.Platform,
 			},
-		}).Times(2)
+		}).AnyTimes()
 
 	// Mock state manager save
 	ts.mockStateManager.EXPECT().
@@ -277,7 +278,8 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 						return nil
 					})
 
-				// Mock state manager get
+				// Mock state manager get. AnyTimes: connect() also reads state
+				// for the wasClaimed check before saving.
 				ts.mockStateManager.EXPECT().
 					GetState().
 					Return(&state.State{
@@ -286,7 +288,7 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 							Name:     "Test Device",
 							Platform: 1,
 						},
-					})
+					}).AnyTimes()
 
 				// Mock state manager save to fail
 				ts.mockStateManager.EXPECT().

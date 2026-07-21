@@ -36,6 +36,9 @@ const (
 	// join target to reappear in NM's scan results (see Join / waitForSSID).
 	ssidWaitTimeout  = 20 * time.Second
 	ssidWaitInterval = 2 * time.Second
+
+	// joinCleanupTimeout bounds the detached post-failure profile delete.
+	joinCleanupTimeout = 10 * time.Second
 )
 
 // exitCoder is implemented by *os/exec.ExitError (via the promoted
@@ -254,7 +257,13 @@ func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
 	}
 
 	// Failed-join cleanup: drop the broken profile nmcli may have persisted.
-	if _, _, delErr := c.run(ctx, "connection", "delete", ssid); delErr != nil {
+	// Detached ctx: the failure may BE the caller's ctx canceling (daemon
+	// shutdown mid-join), and running the delete on that dead ctx would skip
+	// it — stranding a broken saved profile that biases the next boot to
+	// "provisioned" and defers the setup AP a full offline window.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), joinCleanupTimeout)
+	defer cancel()
+	if _, _, delErr := c.run(cleanupCtx, "connection", "delete", ssid); delErr != nil {
 		c.logger.Debug("wifictl: post-failure profile cleanup failed",
 			zap.String("ssid", ssid), zap.Error(delErr))
 	}

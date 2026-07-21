@@ -149,9 +149,11 @@ func (c *autoClaimClock) SleepContext(ctx context.Context, d time.Duration) erro
 }
 func (c *autoClaimClock) NewTicker(time.Duration) wrapper.Ticker { panic("unused") }
 
-// TestMaybeShowClaimQROnOnline_ClaimedIsNoop: a claimed device coming online
-// must not re-run the claim flow or repaint the claim QR.
-func TestMaybeShowClaimQROnOnline_ClaimedIsNoop(t *testing.T) {
+// TestMaybeShowClaimQROnOnline_ClaimedSweepsStaleOverlayOnce: a claimed device
+// coming online must not re-run the claim flow; the FIRST such call performs
+// the boot reconciliation (Hide a possibly-stale overlay from the previous
+// daemon life), and later flaps must not wipe live narration.
+func TestMaybeShowClaimQROnOnline_ClaimedSweepsStaleOverlayOnce(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	sm := mocks.NewMockStateManager(ctrl)
@@ -164,8 +166,68 @@ func TestMaybeShowClaimQROnOnline_ClaimedIsNoop(t *testing.T) {
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
 
 	e.MaybeShowClaimQROnOnline(context.Background())
+	assert.Equal(t, []string{"hide"}, spy.calls, "boot reconciliation sweeps the stale overlay once")
 
-	assert.Empty(t, spy.calls, "claimed device must not narrate anything")
+	e.MaybeShowClaimQROnOnline(context.Background())
+	assert.Equal(t, []string{"hide"}, spy.calls, "later online flaps must not wipe live narration")
+}
+
+// TestPairingConfirmationSettlesAutoClaim: the cloud's showPairingQRCode(false)
+// does not set ConnectedDevice, but it must still stop the auto-claim loop
+// from ever repainting the claim QR (the paired-device repaint bug).
+func TestPairingConfirmationSettlesAutoClaim(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes() // never claimed
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
+
+	// Cloud confirms pairing.
+	res, err := e.showPairingQRCodeInProcess(context.Background(), false)
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, res)
+	require.Equal(t, []string{"ready", "hide"}, spy.calls)
+
+	// A later online transition must treat the device as settled: only the
+	// one-time boot sweep runs, no finalizing, no gate, no claim QR.
+	e.MaybeShowClaimQROnOnline(context.Background())
+	assert.Equal(t, []string{"ready", "hide", "hide"}, spy.calls)
+	assert.NotContains(t, spy.calls, "claim")
+	assert.NotContains(t, spy.calls, "finalizing")
+}
+
+// TestConnectClaimTransitionHidesOverlay: the claim landing is the moment the
+// claim QR's job ends — connect() must clear the overlay itself rather than
+// depending on the separate cloud confirmation command; and a RE-connect to an
+// already-claimed device must NOT hide (it could wipe an unrelated live
+// narration such as updating).
+func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	st := &state.State{}
+	sm.EXPECT().GetState().Return(st).AnyTimes()
+	sm.EXPECT().Save(gomock.Any()).Return(nil).Times(2)
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON()}
+
+	args := []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`)
+
+	res, err := e.connect(args)
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, res)
+	assert.Equal(t, []string{"hide"}, spy.calls, "the claim transition must clear the claim QR")
+
+	// Re-connect on the now-claimed device (connect mutated st in place).
+	res, err = e.connect(args)
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, res)
+	assert.Equal(t, []string{"hide"}, spy.calls, "a re-connect must not hide again")
 }
 
 // TestMaybeShowClaimQROnOnline_NoTopicWithholds: without a relayer topic the

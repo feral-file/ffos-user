@@ -489,3 +489,22 @@ func TestSameStateBurstCoalesces(t *testing.T) {
 	assert.Equal(t, 50, queue[0]["progress"], "same-state push must replace in place with the newest payload")
 	assert.Equal(t, stateHidden, queue[1]["state"])
 }
+
+// TestUnreadableContractDefersWithoutLatching: a read failure (boot ordering,
+// OTA mid-replace of the player bundle) must NOT latch narration off for the
+// process — the next push re-checks and recovers once the manifest appears.
+func TestUnreadableContractDefersWithoutLatching(t *testing.T) {
+	sender := newFakeCDP()
+	path := filepath.Join(t.TempDir(), "contract.json")
+	svc := New(sender, path, nil) // file does not exist yet
+
+	svc.ShowJoining()
+	time.Sleep(50 * time.Millisecond)
+	assert.Zero(t, sender.callCount(), "no push while the contract is unreadable")
+
+	// The player bundle lands: the very next push must recover without a
+	// daemon restart.
+	require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
+	svc.ShowJoining()
+	sender.waitForCalls(t, 1)
+}
