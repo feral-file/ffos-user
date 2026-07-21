@@ -29,7 +29,8 @@ counts as an active polkit session and masks the `settings.modify.system` /
 |---|---|
 | `nmcli device wifi hotspot` succeeds from service context without the polkit rule | _pending_ |
 | …with the shipped polkit rule (if needed) | _pending_ |
-| Catch-all dnsmasq drop-in serves `address=/#/10.42.0.1` | _pending_ |
+| Catch-all dnsmasq drop-in serves `address=/#/192.0.2.1` (TEST-NET, not the gateway IP: Samsung One UI skips captive detection when probe hostnames resolve to private IPs) | _pending_ |
+| nftables redirect `192.0.2.1:80/443 → local portal` active | _pending_ |
 | Portal binds :80 via `net.ipv4.ip_unprivileged_port_start=80` sysctl | _pending_ |
 
 ## P0.3 — Phone matrix
@@ -42,7 +43,7 @@ Per phone, record:
 |---|---|---|---|
 | `WIFI:` QR join works | _pending_ | _pending_ | _pending_ |
 | Captive portal auto-opens (probe → 302) | _pending_ | _pending_ | _pending_ |
-| Manual fallback `http://10.42.0.1` reachable | _pending_ | _pending_ | _pending_ |
+| Manual fallback `http://192.0.2.1` reachable | _pending_ | _pending_ | _pending_ |
 | AP behavior during STA join attempt (does the join kill the AP?) | _pending_ | _pending_ | _pending_ |
 | NM restores AP after failed join | _pending_ | _pending_ | _pending_ |
 | Phone re-associates to the AP after the bounce | _pending_ | _pending_ | _pending_ |

@@ -216,12 +216,13 @@ The portal binds `:80` (permitted by the system-wide `net.ipv4.ip_unprivileged_p
 | `/rescan` | POST | "Search for networks again": the machine bounces the AP (down → fresh station-mode scan → back up), which disconnects the phone; the response page (sent before the bounce lands) tells the user to re-scan the QR code to reconnect. Renders `rescan.html` on acceptance, re-renders the picker on rejection. Non-POST → `303` to `/`. |
 | OS probe paths | GET | `/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt` all `302` to `/`. Any other unmatched non-root path is also redirected, covering unenumerated probe variants. |
 
-Captive detection is a two-layer design split across the `ffos` image and this portal:
+Captive detection is a three-layer design split across the `ffos` image and this portal:
 
-- **DNS layer (image-shipped, `ffos` repo):** the hotspot's dedicated dnsmasq instance resolves every name to the device itself (`address=/#/10.42.0.1` in `archiso-ff1/airootfs/etc/NetworkManager/dnsmasq-shared.d/captive.conf`). Without this, a client with no other route to the internet couldn't resolve the OS probe hostname at all, and the probe request would never reach the portal.
-- **HTTP layer (this service):** once the probe's DNS resolves locally, its request lands on the routes above. The `302`-on-probe (rather than returning the 204/success body each OS expects) is what makes the phone conclude it is behind a captive portal and auto-open the page.
+- **DNS layer (image-shipped, `ffos` repo):** the hotspot's dedicated dnsmasq instance resolves every name to `192.0.2.1` (`address=/#/192.0.2.1` in `archiso-ff1/airootfs/etc/NetworkManager/dnsmasq-shared.d/captive.conf`). The answer is a public-looking RFC 5737 TEST-NET address, NOT the hotspot gateway: Samsung One UI's NetworkStack refuses captive detection when probe hostnames resolve to private IPs ("DNS response to the URL is private IP", verified on a Galaxy S23 Ultra), so answering with the gateway's RFC 1918 address would break the sign-in prompt on Samsung phones. `192.0.2.1` is also the canonical client-facing portal address (QR / manual-fallback instructions); the old `10.42.0.1` form is retired.
+- **NAT layer (image-shipped, `ffos` repo):** `/etc/nftables.conf` redirects client traffic to `192.0.2.1:80` back to the local portal, and `192.0.2.1:443` to a closed local port so HTTPS probes fail fast with a RST instead of hanging.
+- **HTTP layer (this service):** once the redirected probe lands on the routes above, the `302`-on-probe (rather than returning the 204/success body each OS expects) is what makes the phone conclude it is behind a captive portal and auto-open the page.
 
-The DNS layer only makes the probe request arrive; the HTTP layer is what makes it look like a captive portal.
+The DNS and NAT layers only make the probe request arrive; the HTTP layer is what makes it look like a captive portal.
 
 ### AP trigger state machine (`provisioning`)
 
