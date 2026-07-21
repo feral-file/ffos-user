@@ -59,7 +59,21 @@ Discover  →  Capture  →  Store  →  Replay
 
 Both browsers stay independent: the headless downloader (`:9223`) never
 shares state with the kiosk (`:9222`), so downloading does not disturb
-whatever is currently playing on the player surface.
+whatever is currently playing on the player surface. This separation is
+enforced only by the two processes listening on different ports, so
+`bootstrap.go`'s `safeHeadlessDebugPort` defends against
+`offlineCache.headlessDebugPort` being misconfigured to collide with the
+kiosk's own CDP port: without that guard, `Downloader.Acquire`'s
+readiness probe would succeed against the already-running kiosk endpoint
+instead of a freshly spawned headless process, and capture would
+discover and navigate the kiosk's own live page target — visibly
+corrupting whatever is on screen. Ports are compared numerically, and a
+colliding configured port is coerced to a port guaranteed distinct from
+the kiosk's — normally `DefaultHeadlessDebugPort`, but stepped past it if
+the kiosk's own (unusually configured) port happens to equal that default
+too, so the fallback itself can never reintroduce the same collision
+(logged at `Error`, mirroring `staticserver.go`'s `safeLoopbackAddr` guard
+for the same class of "config typo breaks an isolation invariant" hazard).
 
 ---
 
@@ -469,15 +483,23 @@ There is deliberately **no** top-level manifest, no separate
   concurrently — today it never is, since captures are serialized to one
   at a time) and is renamed into place only after a successful, complete
   write; any early return (oversized body, I/O error) removes the temp
-  file instead. `GC()` already skips any `*.tmp` name so it never treats
-  one as an orphan blob, but a write interrupted by the process dying
-  mid-stream (SIGKILL, power loss — not a handled Go error, so the
-  `defer`-based cleanup above never runs) leaves a temp file GC will
-  never remove either, since its random suffix is never reused by a
-  later write. This is an accepted, narrow trade-off (the same class of
-  "unsupervised headless capture can be killed mid-write" risk
-  `writeFileAtomic`'s own doc already calls out) rather than adding
-  age-based temp-file sweeping just for a crash-only leak.
+  file instead. `GC()` and `DiskUsage()` both deliberately skip any
+  `*.tmp` name — a write interrupted by the process dying mid-stream
+  (SIGKILL, power loss — not a handled Go error, so the `defer`-based
+  cleanup above never runs) leaves a temp file that is neither an
+  orphan blob GC's keep-set logic can recognize nor safe for GC to
+  delete unconditionally (GC can run concurrently with an active
+  capture — see below — and an in-progress temp file is exactly the
+  kind of not-yet-referenced write that concurrency fence protects).
+  Left unaddressed this would be a silent, unbounded disk leak: a
+  crash-orphaned temp file would sit on disk forever, uncounted against
+  `maxDiskBytes`, on a device meant to capture gigabyte-scale assets.
+  `Store.SweepIncompleteBlobs` reclaims these instead, but only from
+  `Service.Start`, before the worker goroutine exists and before any
+  caller could have enqueued a job — the one point in this package's
+  lifecycle where "no capture can possibly be in flight" is true by
+  construction, so unconditionally deleting every `*.tmp` file there is
+  safe in a way it would not be from `GC()`.
 - Blobs are freed by a **sweep, not a refcount**: `store.go`'s `GC()` walks
   every saved item record's `Resources` to build the "keep" set, then
   deletes any blob not in it. There is no separate reference count kept in

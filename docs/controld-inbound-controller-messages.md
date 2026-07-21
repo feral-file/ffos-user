@@ -1476,7 +1476,21 @@ Success response:
 ```
 
 `total` is every item in the resolved playlist; `softwareCount` is how many
-were actually queued. The resolved playlist (as `dp1.DP1` returns it —
+were actually queued. An item classified as non-software (or missing an
+`id`/`source`) is simply excluded from `softwareCount` with `ok: true` —
+that is the normal, successful shape for a playlist with few or no
+software items. If classification itself fails (e.g. a transient network
+error reaching the classify target) for every eligible item so nothing
+could be queued at all, this command instead fails with
+`offline_cache_error` rather than returning that same
+`ok: true`/`softwareCount: 0` shape: a broken classifier must not look
+identical to "this playlist genuinely has no software items" to the
+controller. A classify failure for only *some* items still returns
+`ok: true` with `softwareCount` reflecting whatever did queue
+successfully; the skipped item(s) are logged server-side but not
+individually reported here.
+
+The resolved playlist (as `dp1.DP1` returns it —
 `dynamicQuery` items already materialized, all field values including
 `source` intact) is stored as-is (`playlists/<playlistId>.json`, no further
 mutation) so a later `clearPlaylistCache` can operate on it. When the

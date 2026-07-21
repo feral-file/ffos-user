@@ -270,6 +270,22 @@ func (mr *MockOfflineCacheStoreMockRecorder) SavePlaylistURLIndex(sourceURL, pla
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SavePlaylistURLIndex", reflect.TypeOf((*MockOfflineCacheStore)(nil).SavePlaylistURLIndex), sourceURL, playlistID)
 }
 
+// SweepIncompleteBlobs mocks base method.
+func (m *MockOfflineCacheStore) SweepIncompleteBlobs() (int, int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SweepIncompleteBlobs")
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(int64)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// SweepIncompleteBlobs indicates an expected call of SweepIncompleteBlobs.
+func (mr *MockOfflineCacheStoreMockRecorder) SweepIncompleteBlobs() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SweepIncompleteBlobs", reflect.TypeOf((*MockOfflineCacheStore)(nil).SweepIncompleteBlobs))
+}
+
 // WriteBlob mocks base method.
 func (m *MockOfflineCacheStore) WriteBlob(r io.Reader, maxBytes int64) (string, error) {
 	m.ctrl.T.Helper()

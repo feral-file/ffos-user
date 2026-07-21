@@ -283,6 +283,48 @@ func TestStore_DiskUsage(t *testing.T) {
 	assert.Equal(t, int64(15), usage)
 }
 
+// TestStore_SweepIncompleteBlobs_RemovesOnlyTmpFilesAndCountsFreedBytes
+// pins the crash-recovery contract: a blobs/*.tmp file left behind by a
+// killed process (WriteBlob's own cleanup defer never ran) must be
+// removed and its size counted as freed, while a committed blob under
+// its content-hash name — even one that GC would itself consider an
+// orphan — is left untouched, since SweepIncompleteBlobs' job is
+// strictly "reclaim in-progress temp files," not general GC.
+func TestStore_SweepIncompleteBlobs_RemovesOnlyTmpFilesAndCountsFreedBytes(t *testing.T) {
+	store, root := newTestStore(t)
+
+	committedHash := writeBlobString(t, store, "already committed")
+
+	blobsDir := filepath.Join(root, "blobs")
+	require.NoError(t, wrapper.NewOS().MkdirAll(blobsDir, 0o755))
+	staleTmpPath := filepath.Join(blobsDir, "incoming-crashed123.tmp")
+	require.NoError(t, wrapper.NewOS().WriteFile(staleTmpPath, []byte("half-written"), 0o644))
+
+	removed, freed, err := store.SweepIncompleteBlobs()
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
+	assert.Equal(t, int64(len("half-written")), freed)
+
+	_, statErr := wrapper.NewOS().Stat(staleTmpPath)
+	assert.True(t, wrapper.NewOS().IsNotExist(statErr), "the stale temp file must be removed")
+
+	_, err = store.ReadBlob(committedHash)
+	assert.NoError(t, err, "a real committed blob must never be touched by the temp-file sweep")
+}
+
+// TestStore_SweepIncompleteBlobs_EmptyBlobsDirIsNoop covers the common
+// case (a clean prior shutdown, or first-ever startup with no blobs/
+// directory yet) so a fresh install/normal restart never logs a
+// misleading "swept N files" line.
+func TestStore_SweepIncompleteBlobs_EmptyBlobsDirIsNoop(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	removed, freed, err := store.SweepIncompleteBlobs()
+	require.NoError(t, err)
+	assert.Zero(t, removed)
+	assert.Zero(t, freed)
+}
+
 func TestStore_WriteBlob_StreamsWithoutFullyBufferingBody(t *testing.T) {
 	store, _ := newTestStore(t)
 

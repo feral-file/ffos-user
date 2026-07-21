@@ -112,10 +112,33 @@ type Store interface {
 	// enough because the set of saved items is already the source of
 	// truth for what is "live" — keeping a separate refcount in sync would
 	// be the redundancy the on-disk format was simplified to avoid.
+	//
+	// GC deliberately never touches blobs/*.tmp (WriteBlob's in-progress
+	// temp files): it can run concurrently with an active capture (e.g.
+	// triggered by a sibling item's clear), and an in-progress temp file
+	// is not yet a "blob" GC's keep-set logic has any way to recognize as
+	// live — deleting it out from under a running WriteBlob would corrupt
+	// that capture. See SweepIncompleteBlobs for the startup-only sweep
+	// that reclaims temp files left by a killed/crashed process instead.
 	GC() (removedBlobs int, freedBytes int64, err error)
 	// DiskUsage sums blob file sizes — blobs/ is the only place binary
 	// payloads live, so this is the whole of maxDiskBytes accounting.
+	// Like GC, it deliberately excludes blobs/*.tmp: an in-progress
+	// capture's temp file is not yet committed content, so counting it
+	// here would make maxDiskBytes accounting flicker based on capture
+	// timing rather than actual stored blobs.
 	DiskUsage() (int64, error)
+	// SweepIncompleteBlobs removes every blobs/*.tmp file and is safe to
+	// call ONLY when no capture can possibly be in flight (i.e. once at
+	// daemon startup, before the offline-cache worker starts processing
+	// jobs — see Service.Start). WriteBlob's temp file is cleaned up by
+	// its own defer on every normal return path, but a killed process
+	// (SIGKILL, power loss) skips that defer entirely, and neither GC nor
+	// DiskUsage ever reclaims or counts *.tmp files (by design — see
+	// their docs), so a temp file orphaned this way would otherwise sit
+	// on disk forever, silently eating into maxDiskBytes headroom that
+	// status reports as still available.
+	SweepIncompleteBlobs() (removedFiles int, freedBytes int64, err error)
 
 	RootDir() string
 }
@@ -509,4 +532,34 @@ func (s *fsStore) DiskUsage() (int64, error) {
 		total += info.Size()
 	}
 	return total, nil
+}
+
+func (s *fsStore) SweepIncompleteBlobs() (int, int64, error) {
+	entries, err := s.os.ReadDir(s.blobsDir())
+	if s.os.IsNotExist(err) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("offline cache: list blobs for incomplete-blob sweep: %w", err)
+	}
+	var removed int
+	var freed int64
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		path := filepath.Join(s.blobsDir(), name)
+		size, statErr := s.os.Stat(path)
+		if err := s.os.Remove(path); err != nil {
+			s.logger.Warn("offline cache: failed to remove stale incomplete blob",
+				zap.String("file", name), zap.Error(err))
+			continue
+		}
+		removed++
+		if statErr == nil {
+			freed += size.Size()
+		}
+	}
+	return removed, freed, nil
 }

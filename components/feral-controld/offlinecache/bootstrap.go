@@ -1,6 +1,8 @@
 package offlinecache
 
 import (
+	go_url "net/url"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -131,8 +133,9 @@ func Bootstrap(
 ) Runtime {
 	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
 	classifier := NewClassifier(httpClient)
+	headlessDebugPort := safeHeadlessDebugPort(opts.HeadlessDebugPort, opts.KioskCDPEndpoint, logger)
 	downloader := NewDownloader(
-		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, opts.HeadlessDebugPort,
+		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, headlessDebugPort,
 		opts.HeadlessIdleTeardown, execWrapper, osWrapper, clockWrapper, httpClient, logger,
 	)
 	capturer := NewCapturer(downloader, dialer, httpClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
@@ -143,4 +146,60 @@ func Bootstrap(
 	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, logger)
 
 	return Runtime{Service: service, KioskReplay: kioskReplay, StaticServer: staticServer}
+}
+
+// safeHeadlessDebugPort defends against offlineCache.headlessDebugPort
+// being accidentally configured to the same port as the kiosk's own CDP
+// endpoint (kioskCDPEndpoint, always the live config.CDPConfig.Endpoint
+// — see Options.KioskCDPEndpoint's doc). The two Chromium processes this
+// package deliberately keeps separate (headless capture vs. the kiosk
+// player surface — see Downloader's doc) are told apart ONLY by which
+// port each one's DevTools endpoint answers on. If the two ports
+// collided, Downloader.Acquire's readiness probe would succeed against
+// the ALREADY-RUNNING kiosk endpoint instead of a freshly spawned
+// headless process, and capture would then discover and navigate the
+// kiosk's own live page target — corrupting whatever is currently on
+// screen for the viewer. Ports are compared numerically (not as raw
+// strings) so formatting differences in the endpoint text never mask a
+// real collision. A colliding configured port is coerced to a port
+// guaranteed distinct from the kiosk's — starting from
+// DefaultHeadlessDebugPort but stepping past it if that default itself
+// happens to equal the (unusually) configured kiosk port, since a fixed
+// single fallback would otherwise just relocate the same hazard rather
+// than closing it — and logged at Error (mirroring safeLoopbackAddr's
+// staticServerAddr guard) rather than merely documented, since this is a
+// startup-time daemon misconfiguration, not something a caller can react
+// to at the point of use.
+func safeHeadlessDebugPort(configured int, kioskCDPEndpoint string, logger *zap.Logger) int {
+	kioskPort, ok := cdpEndpointPort(kioskCDPEndpoint)
+	if !ok || configured != kioskPort {
+		return configured
+	}
+	forced := DefaultHeadlessDebugPort
+	for forced == kioskPort {
+		forced++
+	}
+	logger.Error("offline cache: headlessDebugPort collides with the kiosk CDP endpoint's port, forcing a non-colliding headless port to prevent capture from attaching to the live kiosk Chromium",
+		zap.Int("configured", configured), zap.String("kiosk_cdp_endpoint", kioskCDPEndpoint), zap.Int("forced", forced))
+	return forced
+}
+
+// cdpEndpointPort extracts the numeric port from a CDP HTTP endpoint such
+// as "http://127.0.0.1:9222", returning ok=false if endpoint does not
+// parse or carries no explicit numeric port (safeHeadlessDebugPort then
+// skips the collision check rather than guessing).
+func cdpEndpointPort(endpoint string) (port int, ok bool) {
+	u, err := go_url.Parse(endpoint)
+	if err != nil {
+		return 0, false
+	}
+	portStr := u.Port()
+	if portStr == "" {
+		return 0, false
+	}
+	port, err = strconv.Atoi(portStr)
+	if err != nil {
+		return 0, false
+	}
+	return port, true
 }

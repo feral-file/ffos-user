@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -179,6 +180,7 @@ func TestService_DownloadItem_AfterStartFailureReturnsNotStarted(t *testing.T) {
 	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("permission denied")).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
@@ -379,6 +381,79 @@ func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.
 	stored, err := ts.store.LoadPlaylist("playlist-1")
 	require.NoError(t, err)
 	assert.JSONEq(t, string(raw), string(stored), "the playlist must be stored byte-for-byte as received, not re-marshaled")
+}
+
+// TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError is
+// the regression test for the false-success hazard: if the classifier
+// itself is broken (e.g. a transient network error) for every eligible
+// item, that must be reported as an error, not silently collapse into
+// the same ok:true/softwareCount:0 shape a playlist with genuinely no
+// software items would produce.
+func TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items": []map[string]interface{}{
+			{"id": "item-1", "source": "https://example.com/a.html"},
+			{"id": "item-2", "source": "https://example.com/b.html"},
+		},
+	})
+	require.NoError(t, err)
+
+	classifyErr := assertError("classifier unreachable")
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/a.html").Return(offlinecache.ClassUnknown, classifyErr).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/b.html").Return(offlinecache.ClassUnknown, classifyErr).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.Error(t, err, "a classifier outage must not be reported as a successful download of zero software items")
+	assert.Zero(t, queued)
+	assert.Equal(t, 2, total)
+}
+
+// TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccesses
+// pins that a classify failure for SOME items must not discard the items
+// that classified successfully: the caller already got real, correctly
+// queued work, so this is reported as success (the partial failure was
+// already logged server-side — see DownloadPlaylist's doc for why this
+// case is treated differently from the all-fail case above).
+func TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccesses(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items": []map[string]interface{}{
+			{"id": "item-ok", "source": "https://example.com/ok.html"},
+			{"id": "item-broken", "source": "https://example.com/broken.html"},
+		},
+	})
+	require.NoError(t, err)
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/ok.html").Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/broken.html").Return(offlinecache.ClassUnknown, assertError("classifier unreachable")).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, queued)
+	assert.Equal(t, 2, total)
 }
 
 // TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback
@@ -856,11 +931,35 @@ func TestService_Start_PropagatesListItemIDsError(t *testing.T) {
 	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("disk error")).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
 	err := svc.Start(context.Background())
 	assert.Error(t, err)
+}
+
+// TestService_Start_SweepsStaleIncompleteBlobLeftByPreviousCrash is the
+// regression test for the disk-accounting leak a killed daemon (SIGKILL,
+// power loss) could otherwise cause: WriteBlob's own cleanup defer never
+// runs in that case, and neither GC nor DiskUsage ever reclaim or count
+// blobs/*.tmp (by design), so without Start sweeping them, a stray temp
+// file from a previous run would sit on disk forever.
+func TestService_Start_SweepsStaleIncompleteBlobLeftByPreviousCrash(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	os := wrapper.NewOS()
+	blobsDir := filepath.Join(ts.store.RootDir(), "blobs")
+	require.NoError(t, os.MkdirAll(blobsDir, 0o755))
+	stalePath := filepath.Join(blobsDir, "incoming-crashed.tmp")
+	require.NoError(t, os.WriteFile(stalePath, []byte("half-written"), 0o644))
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, statErr := os.Stat(stalePath)
+	assert.True(t, os.IsNotExist(statErr), "Start must sweep away a stale incomplete blob left by a previous run")
 }
 
 func TestService_Stop_WithoutStart_Noop(t *testing.T) {

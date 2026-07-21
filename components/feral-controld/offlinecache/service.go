@@ -124,6 +124,20 @@ type Service interface {
 	// software-classified item it contains. total counts all items in the
 	// playlist; queued counts only those actually enqueued.
 	//
+	// An item whose Classifier.Classify call itself errors (network
+	// blip, unreachable host, etc.) is logged and skipped exactly like a
+	// genuinely non-software item, with one exception: if EVERY eligible
+	// item hit a classify error (queued==0 but at least one classify
+	// call failed), that is materially different from "this playlist
+	// really has no software items" and is reported as an error instead
+	// of a false ok:true/softwareCount:0 — a transient classifier outage
+	// must not look identical to an all-hardware playlist to the
+	// controller. A classify failure alongside at least one successful
+	// queue is still reported as success (queued reflects only the
+	// items that actually got scheduled); that partial case is logged
+	// but not surfaced as an error here, since the caller already got
+	// real, correct work queued.
+	//
 	// sourceURL, if non-empty, is recorded so a later displayPlaylist
 	// command for the same URL can still find and replay this exact
 	// playlist from cache when live DP-1 resolution fails (e.g. no
@@ -295,6 +309,20 @@ func NewService(
 }
 
 func (s *service) Start(ctx context.Context) error {
+	// Safe only here: nothing has enqueued a job yet and the worker
+	// goroutine below has not started, so no WriteBlob call can possibly
+	// be mid-write. Any blobs/*.tmp file found at this point is
+	// necessarily an orphan left by the daemon's own previous run being
+	// killed (SIGKILL, power loss) before WriteBlob's cleanup defer ran
+	// — see SweepIncompleteBlobs's doc for why GC/DiskUsage never reclaim
+	// these on their own.
+	if removed, freed, err := s.store.SweepIncompleteBlobs(); err != nil {
+		s.logger.Warn("offline cache: failed to sweep incomplete blobs on startup", zap.Error(err))
+	} else if removed > 0 {
+		s.logger.Info("offline cache: swept incomplete blobs left by a previous run",
+			zap.Int("removed_files", removed), zap.Int64("freed_bytes", freed))
+	}
+
 	ids, err := s.store.ListItemIDs()
 	if err != nil {
 		return fmt.Errorf("offline cache: rebuild index: %w", err)
@@ -468,12 +496,14 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 
 	total := len(playlist.Items)
 	queued := 0
+	classifyFailed := 0
 	for _, item := range playlist.Items {
 		if item.ID == "" || item.Source == "" {
 			continue
 		}
 		class, err := s.classifier.Classify(ctx, item.Source)
 		if err != nil {
+			classifyFailed++
 			s.logger.Warn("offline cache: classify failed while queuing playlist, skipping item",
 				zap.String("item_id", item.ID), zap.Error(err))
 			continue
@@ -487,6 +517,15 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 			break
 		}
 		queued++
+	}
+	if queued == 0 && classifyFailed > 0 {
+		// Distinguish "classification itself is broken" from "this
+		// playlist genuinely has no software items" — the latter is a
+		// normal, successful ok:true/softwareCount:0 outcome, but the
+		// former must not look identical to it (see this method's doc).
+		return 0, total, fmt.Errorf(
+			"offline cache: classify playlist %s items: %d of %d item(s) failed classification, none queued",
+			playlist.ID, classifyFailed, total)
 	}
 	return queued, total, nil
 }
