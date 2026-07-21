@@ -13,6 +13,8 @@ package softap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"strings"
@@ -56,9 +58,10 @@ const (
 	// ssidPrefix namespaces the setup SSID by product.
 	ssidPrefix = "FF1-"
 
-	// minPSKLen is the WPA2-PSK minimum passphrase length. A device_id shorter
-	// than this is padded to reach it.
-	minPSKLen = 8
+	// pskModulus caps the derived passphrase at 8 decimal digits — exactly
+	// WPA2-PSK's minimum length, and the shortest key a user can be asked to
+	// type on a phone keyboard.
+	pskModulus = 100_000_000
 
 	// defaultHostnamePath is the source of the MAC-derived device_id.
 	defaultHostnamePath = "/etc/hostname"
@@ -151,7 +154,7 @@ func (b *nmBackend) Status(ctx context.Context) (Status, error) {
 }
 
 // credentials derives the SSID (FF1-<device_id>) and WPA2 PSK from the
-// device_id. The PSK IS the device_id, padded to the WPA2 minimum when short.
+// device_id. The PSK is a deterministic 8-digit code (see numericPSK).
 func (b *nmBackend) credentials() (Info, error) {
 	raw, err := b.hostname()
 	if err != nil {
@@ -161,22 +164,29 @@ func (b *nmBackend) credentials() (Info, error) {
 	if id == "" {
 		return Info{}, fmt.Errorf("device id is empty")
 	}
+	// Provisioned /etc/hostname already carries the product prefix (e.g.
+	// "FF1-8EVTK3RE"); prefixing unconditionally advertised "FF1-FF1-…".
+	ssid := id
+	if !strings.HasPrefix(id, ssidPrefix) {
+		ssid = ssidPrefix + id
+	}
 	return Info{
-		SSID: ssidPrefix + id,
-		PSK:  padPSK(id),
+		SSID: ssid,
+		PSK:  numericPSK(id),
 	}, nil
 }
 
-// padPSK repeats the device_id until it satisfies the WPA2 8-char minimum. The
-// result is deterministic so the same device always advertises the same key;
-// ids already >= minPSKLen (the MAC-derived alphanumeric norm) pass through
-// unchanged.
-func padPSK(id string) string {
-	if len(id) >= minPSKLen {
-		return id
-	}
-	reps := (minPSKLen + len(id) - 1) / len(id)
-	return strings.Repeat(id, reps)[:minPSKLen]
+// numericPSK derives the WPA2 passphrase from the device_id: the first 4 bytes
+// of SHA-256(device_id), reduced to exactly 8 decimal digits (zero-padded).
+// Digits-only because users type this on a phone keyboard while reading it off
+// the TV; the previous PSK==device_id scheme (mixed case + dash) was too
+// error-prone. Deterministic so the same device always advertises the same
+// key. This is convenience-level gating, the same security posture as before:
+// the QR on screen carries the credentials, the id was already readable from
+// the SSID, and the AP is short-lived and offline.
+func numericPSK(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return fmt.Sprintf("%08d", binary.BigEndian.Uint32(sum[:4])%pskModulus)
 }
 
 func (b *nmBackend) run(ctx context.Context, args ...string) ([]byte, error) {

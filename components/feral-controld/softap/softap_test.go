@@ -59,26 +59,27 @@ func newBackend(id string, reply func(argv []string) ([]byte, error)) (*nmBacken
 	return b, exec
 }
 
-// --- credentials / PSK padding -----------------------------------------------
+// --- credentials / PSK derivation ---------------------------------------------
 
-func TestPadPSK(t *testing.T) {
+func TestNumericPSK(t *testing.T) {
+	// Pinned expected values: the PSK must stay stable across releases for a
+	// given device_id (users may have it written down), so a hash/derivation
+	// change should fail loudly here, not slip through.
 	cases := []struct {
 		id   string
 		want string
 	}{
-		{"a1b2c3d4e5f6", "a1b2c3d4e5f6"}, // 12 chars, MAC-derived norm: unchanged
-		{"abcdefgh", "abcdefgh"},         // exactly 8: unchanged
-		{"abc", "abcabcab"},              // 3 -> repeated to 8
-		{"ab", "abababab"},               // 2 -> repeated to 8
-		{"x", "xxxxxxxx"},                // 1 -> repeated to 8
-		{"abcdef", "abcdefab"},           // 6 -> "abcdef"+"ab" from repeat, sliced to 8
-		{"ab12cd", "ab12cdab"},           // 6 hex-ish -> repeat+slice to 8
+		{"a1b2c3", "28677962"},
+		{"FF1-8EVTK3RE", "36169297"},
+		{"a1b2c3d4e5f6", "86106003"},
+		{"x", "62385986"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
-			got := padPSK(tc.id)
+			got := numericPSK(tc.id)
 			assert.Equal(t, tc.want, got)
-			assert.GreaterOrEqual(t, len(got), minPSKLen)
+			assert.Len(t, got, 8)
+			assert.Regexp(t, "^[0-9]{8}$", got) // WPA2 minimum, digits only
 		})
 	}
 }
@@ -88,7 +89,15 @@ func TestCredentials(t *testing.T) {
 	info, err := b.credentials()
 	require.NoError(t, err)
 	assert.Equal(t, "FF1-a1b2c3", info.SSID)
-	assert.Equal(t, "a1b2c3a1", info.PSK) // 6 chars -> repeat "a1b2c3a1b2c3" sliced to 8
+	assert.Equal(t, "28677962", info.PSK) // numericPSK("a1b2c3")
+}
+
+func TestCredentialsAlreadyPrefixedHostname(t *testing.T) {
+	b, _ := newBackend("FF1-8EVTK3RE", nil) // provisioned hostnames carry the prefix
+	info, err := b.credentials()
+	require.NoError(t, err)
+	assert.Equal(t, "FF1-8EVTK3RE", info.SSID) // no FF1-FF1- doubling
+	assert.Equal(t, "36169297", info.PSK)      // numericPSK of the full device_id
 }
 
 func TestCredentialsEmptyHostname(t *testing.T) {
@@ -115,13 +124,13 @@ func TestUp(t *testing.T) {
 	info, err := b.Up(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "FF1-a1b2c3d4e5f6", info.SSID)
-	assert.Equal(t, "a1b2c3d4e5f6", info.PSK)
+	assert.Equal(t, "86106003", info.PSK) // numericPSK("a1b2c3d4e5f6")
 
 	call := strings.Join(exec.recorded()[0], " ")
 	assert.Contains(t, call, "device wifi hotspot")
 	assert.Contains(t, call, "con-name "+conName)
 	assert.Contains(t, call, "ssid FF1-a1b2c3d4e5f6")
-	assert.Contains(t, call, "password a1b2c3d4e5f6")
+	assert.Contains(t, call, "password 86106003")
 }
 
 func TestUpWithIface(t *testing.T) {
