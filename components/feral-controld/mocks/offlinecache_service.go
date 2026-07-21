@@ -145,6 +145,20 @@ func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL)
 }
 
+// IndexPlaylistForOfflineDisplay mocks base method.
+func (m *MockOfflineCacheService) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IndexPlaylistForOfflineDisplay", playlistRaw, sourceURL)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// IndexPlaylistForOfflineDisplay indicates an expected call of IndexPlaylistForOfflineDisplay.
+func (mr *MockOfflineCacheServiceMockRecorder) IndexPlaylistForOfflineDisplay(playlistRaw, sourceURL interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IndexPlaylistForOfflineDisplay", reflect.TypeOf((*MockOfflineCacheService)(nil).IndexPlaylistForOfflineDisplay), playlistRaw, sourceURL)
+}
+
 // Start mocks base method.
 func (m *MockOfflineCacheService) Start(ctx context.Context) error {
 	m.ctrl.T.Helper()

@@ -390,7 +390,11 @@ func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
 	mockStaticServer := mocks.NewMockOfflineCacheStaticServer(ctrl)
 	mockOfflineService.EXPECT().Start(gomock.Any()).Return(nil).Times(1)
 	mockOfflineService.EXPECT().Stop().Times(1)
-	mockStaticServer.EXPECT().ListenAndServe().Return(http.ErrServerClosed).Times(1)
+	// Listen must succeed BEFORE Serve is ever launched — see main.go's
+	// doc on why binding is synchronous now rather than folded into a
+	// single background ListenAndServe call.
+	mockStaticServer.EXPECT().Listen().Return(nil).Times(1)
+	mockStaticServer.EXPECT().Serve().Return(http.ErrServerClosed).Times(1)
 	mockStaticServer.EXPECT().Shutdown(gomock.Any()).Return(nil).Times(1)
 	ts.app.OfflineCacheService = mockOfflineService
 	ts.app.OfflineCacheStaticServer = mockStaticServer
@@ -400,6 +404,63 @@ func TestApp_Run_StartsAndStopsOfflineCacheWhenEnabled(t *testing.T) {
 
 	err := ts.app.run(testCtx, ts.config)
 	assert.NoError(t, err)
+}
+
+// TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails is the
+// regression test for the startup-ordering fix: if the static server's
+// port cannot be bound (e.g. an unrelated process already holds it),
+// main.go must never launch Serve in the background — the old
+// ListenAndServe-only wiring would only discover a bind failure
+// asynchronously, well after the rest of daemon startup had already
+// proceeded assuming success — nor attempt Shutdown on a server that
+// was never actually started.
+func TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+	ts.mockCDP.EXPECT().Close()
+	ts.mockWatchdog.EXPECT().Start(gomock.Any())
+	ts.mockWatchdog.EXPECT().Stop()
+	ts.mockDBus.EXPECT().Start().Return(nil)
+	ts.mockDBus.EXPECT().Stop().Return(nil)
+	ts.mockDBus.EXPECT().Export(gomock.Any(), dbus.PATH, dbus.INTERFACE).Return(nil)
+	ts.mockMediator.EXPECT().Start()
+	ts.mockMediator.EXPECT().Stop()
+	ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+	ts.mockStatusPoller.EXPECT().Stop()
+	ts.mockRefresher.EXPECT().Start()
+	ts.mockRefresher.EXPECT().Stop()
+	ts.mockHub.EXPECT().Start()
+	ts.mockHub.EXPECT().Stop().Return(nil)
+	ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+	ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+	ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+	ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+	ts.mockDBus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil)
+	ts.mockStateManager.EXPECT().
+		Load(ts.logger).
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: ""}}, nil)
+
+	ctrl := ts.ctrl
+	mockOfflineService := mocks.NewMockOfflineCacheService(ctrl)
+	mockStaticServer := mocks.NewMockOfflineCacheStaticServer(ctrl)
+	mockOfflineService.EXPECT().Start(gomock.Any()).Return(nil).Times(1)
+	mockOfflineService.EXPECT().Stop().Times(1)
+	mockStaticServer.EXPECT().Listen().Return(errors.New("bind: address already in use")).Times(1)
+	// Deliberately no Serve/Shutdown expectations: gomock's strict
+	// controller fails this test if main.go calls either despite Listen
+	// having failed.
+	ts.app.OfflineCacheService = mockOfflineService
+	ts.app.OfflineCacheStaticServer = mockStaticServer
+
+	testCtx, cancel := context.WithTimeout(ts.ctx, 50*time.Millisecond)
+	defer cancel()
+
+	err := ts.app.run(testCtx, ts.config)
+	assert.NoError(t, err, "a static-server bind failure must degrade gracefully, never fail the whole daemon run")
 }
 
 // TestApp_Run_OnConnectResyncsOfflineCacheReplayScope is the regression

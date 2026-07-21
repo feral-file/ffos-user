@@ -1444,6 +1444,15 @@ Error cases: `invalid_request` (missing `itemId`), `resolve_failed`,
 `not_found` (itemId not in the resolved playlist), `unsupported_media`,
 `offline_cache_error`.
 
+When the request was resolved via `playlistUrl` (not `dp1_call`) and the
+item is queued successfully, `feral-controld` also best-effort indexes the
+resolved playlist body under that same `playlistUrl` so a later offline
+`displayPlaylist` by that URL can fall back to it (see
+`docs/offline-artwork-capture.md`'s on-disk-format section). This indexing
+is best-effort and never changes this command's own response: a failure
+to index is logged, not surfaced as an error here, since the requested
+item is genuinely queued either way.
+
 ### downloadPlaylist
 
 Purpose: resolve a playlist and queue every software-classified item it
@@ -1498,7 +1507,12 @@ request carried `playlistUrl` (as opposed to `dp1_call`), that URL is
 additionally indexed so `displayPlaylist` with the same `playlistUrl` can
 still find and display this exact cached playlist offline if live DP1
 resolution later fails — see `displayPlaylist`'s section above and
-`offline-artwork-capture.md` §6. This is not
+`offline-artwork-capture.md` §6. Both the playlist body and its `playlistUrl`
+index are written only after classification/queuing finishes, never
+before — a request that ends up returning `offline_cache_error` above
+(every eligible item failed classification) persists neither, so a
+failed download can never leave a "last known good" offline fallback
+that looks like a successful one. This is not
 guaranteed to be byte-identical to whatever a publisher
 originally served (`dp1` resolution re-serializes the Go struct, so key
 order/whitespace can differ), but DP-1 signatures verify against a

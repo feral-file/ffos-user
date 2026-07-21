@@ -219,6 +219,17 @@ complete no-op when `maxDiskBytes <= 0` (see its doc), so an unset budget
 combined with `downloadPlaylist` against large assets could exhaust the
 filesystem.
 
+`maxDiskBytes` is enforced as a genuine hard bound, not just a
+"try to make room" heuristic: `enforceDiskLimit`'s eviction loop normally
+protects the just-captured item (`justCapturedID`) while evicting older
+items oldest-first, but if the cache is *still* over budget once every
+older item has been evicted — i.e. the just-captured item's own size
+alone exceeds `maxDiskBytes` — it evicts the just-captured item too
+rather than leaving the cache permanently over budget. The caller sees
+this as the item transitioning to `not_cached` immediately after
+appearing to complete, with `Coverage.Reason` explaining that it alone
+exceeded the disk budget.
+
 ## 4. Validated edge cases
 
 The pipeline was validated end-to-end against real, live DP-1 feed content
@@ -503,6 +514,32 @@ There is deliberately **no** top-level manifest, no separate
   is no correctness reason to reclaim it eagerly, and `ListPlaylistIDs`
   never sees it since it only matches `*.json` directly inside
   `playlists/`, not this nested subdirectory.
+- `DownloadPlaylist` persists the playlist body and its `by-url` pointer
+  (`savePlaylistAndURLIndex`) only *after* the classification/queuing loop
+  finishes, never before. If every eligible item in the playlist fails
+  classification (`queued == 0 && classifyFailed > 0`), the whole call
+  returns an error and neither the playlist body nor its `by-url` pointer
+  is written — a "downloaded" playlist that
+  `displayPlaylist`'s offline fallback (§6) can later load must mean at
+  least one item was genuinely queueable, not a playlist record whose own
+  items can never be classified into anything playable. Saving eagerly
+  and only failing loudly on the RPC response would leave a broken
+  "last known good" fallback on disk despite the caller having been told
+  the download failed.
+- `downloadPlaylistItem` (single-item download, resolved via `playlistUrl`)
+  queues only the one requested item through `DownloadItem` and does not
+  itself run `DownloadPlaylist`'s classification loop — but a device that
+  only ever calls `downloadPlaylistItem` for a given `playlistUrl` still
+  needs `displayPlaylist` by that same URL to work offline later.
+  `commandrouter.handleDownloadPlaylistItem` closes this gap with a
+  best-effort call to `Service.IndexPlaylistForOfflineDisplay` (marshal
+  the already-resolved `*dp1.Playlist` back to JSON, then call the same
+  `savePlaylistAndURLIndex` helper `DownloadPlaylist` uses) right after
+  `DownloadItem` succeeds. This is deliberately best-effort and does not
+  affect the RPC's own success/failure: the requested item is genuinely
+  queued either way, and only the separate by-URL fallback record would
+  be missing if indexing fails — a failure there is logged, not
+  propagated to the caller.
 - Only fields replay routing and status reporting actually consume are
   kept on `Resource`: `url`/`status`/`redirectTo` drive replay's
   fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
@@ -706,6 +743,17 @@ absolute and cross-origin URLs without touching the artwork's own code):
   `handleBlob` re-validates each decoded header name against the same
   allowlist as defense in depth, since this loopback endpoint has no
   authentication of its own.
+  `StaticServer.Listen()`/`Serve()` are deliberately split (rather than
+  one `ListenAndServe()`): `main.go` calls `Listen()` synchronously at
+  startup so a bind failure (e.g. port already in use) is caught and
+  logged immediately, then only launches `Serve()` in a background
+  goroutine once the bind actually succeeded. Before this redirect
+  bullet runs, `fulfillFromBlob` checks `staticServer.IsListening()` and
+  treats the asset as a miss if it is not — otherwise a bind failure at
+  startup would silently turn every large-asset replay into a dead
+  redirect (or, worse, a redirect to whatever unrelated service now owns
+  that port) with no indication in the replay path itself that the
+  static server was never actually serving.
 - **Miss** (URL not in the currently-enabled scope's resource set) →
   governed by `offlineCache.missPolicy` (`MissPolicy` in `replay.go`) when
   the scope is a single item or a playlist whose every item is cached:

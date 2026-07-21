@@ -312,6 +312,23 @@ func (r *replayer) fulfillFromBlob(ctx context.Context, session CDPSession, requ
 	}
 
 	if size > largeAssetThreshold {
+		// Only ever redirect here if the static server is DEFINITELY
+		// listening (see StaticServer.IsListening's doc): redirecting
+		// regardless would either produce a dead redirect (nobody
+		// home, if it never bound) or, worse, one silently absorbed by
+		// some unrelated loopback process that happens to occupy the
+		// same port — neither of which this method's caller (Chromium,
+		// mid-navigation) has any way to distinguish from a genuinely
+		// broken cached asset. Falling through to the normal miss path
+		// instead is the same honest "not actually available offline"
+		// signal replay already gives for any other unreplayable
+		// resource.
+		if r.staticServer == nil || !r.staticServer.IsListening() {
+			r.logger.Warn("offline cache replay: static server unavailable for an oversized cached asset, treating as a miss",
+				zap.String("url", resource.URL), zap.Int64("size_bytes", size))
+			r.handleMiss(ctx, session, requestID, mixed)
+			return
+		}
 		location := r.staticServer.URLFor(resource.SHA256, resource.ContentType, resource.Headers)
 		// The 302 fulfilled here is itself one hop of a redirect chain a
 		// cors-mode fetch() will CORS-check independently of the final

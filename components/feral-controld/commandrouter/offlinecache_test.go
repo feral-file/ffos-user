@@ -66,6 +66,14 @@ func TestCommandHandler_OfflineCache_AllCommandsDisabledWhenServiceNil(t *testin
 	}
 }
 
+// TestCommandHandler_DownloadPlaylistItem_Success also pins the
+// downloadPlaylistItem-by-URL offline-fallback fix: resolving the item
+// via playlistUrl must ALSO index the resolved playlist by that URL
+// (Service.IndexPlaylistForOfflineDisplay), not only queue the one
+// requested item — otherwise a device that only ever called
+// downloadPlaylistItem for this URL would have no
+// displayPlaylist-by-URL offline fallback at all once offline, even
+// though this item is now genuinely cached (see that method's doc).
 func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
@@ -73,9 +81,12 @@ func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 	playlistURL := "https://example.com/playlist.json"
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL).Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
@@ -86,6 +97,68 @@ func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 	resp := assertOkResponse(t, result)
 	assert.Equal(t, "queued", resp["status"])
 	assert.Equal(t, "item-1", resp["itemId"])
+}
+
+// TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing
+// pins that a dp1_call (inline) download has no source URL to index by
+// — mirroring TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL's
+// contract for downloadPlaylist. Deliberately no
+// IndexPlaylistForOfflineDisplay expectation: gomock's strict
+// controller fails this test if the handler calls it anyway.
+func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{map[string]interface{}{"id": "item-1", "source": item.Source}}}
+	playlistBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/index.html"}]}`)
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+
+	ts.mockJSON.EXPECT().Marshal(playlistMap).Return(playlistBytes, nil).Times(1)
+	ts.mockJSON.EXPECT().Unmarshal(playlistBytes, gomock.Any()).DoAndReturn(func(_ []byte, v interface{}) error {
+		p := v.(**dp1.Playlist)
+		*p = playlist
+		return nil
+	}).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"dp1_call": playlistMap, "itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+}
+
+// TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess
+// pins that a best-effort indexing failure must never turn an
+// already-successful item queue into an error response to the caller —
+// the requested item genuinely IS queued/cached either way; only the
+// separate displayPlaylist-by-URL offline fallback degrades.
+func TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL).
+		Return(offlinecache.ErrServiceNotStarted).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "queued", resp["status"])
 }
 
 func TestCommandHandler_DownloadPlaylistItem_MissingItemID(t *testing.T) {

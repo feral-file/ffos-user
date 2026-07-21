@@ -164,13 +164,37 @@ type Service interface {
 	// (on-disk + in-flight) when itemIDs is empty.
 	Status(itemIDs []string) (StatusSnapshot, error)
 	// CachedPlaylistForURL returns the raw playlist body last downloaded
-	// via DownloadPlaylist(ctx, raw, sourceURL), for commandrouter's
+	// via DownloadPlaylist(ctx, raw, sourceURL) OR indexed via
+	// IndexPlaylistForOfflineDisplay below, for commandrouter's
 	// displayPlaylist-by-URL fallback when live DP-1 resolution fails
 	// (e.g. the device has no network right now). Returns
-	// ErrPlaylistNotFound if sourceURL was never downloaded, or was but
-	// has since been cleared — see Store.LoadPlaylistIDForURL's doc for
-	// why a stale index entry still fails closed correctly here.
+	// ErrPlaylistNotFound if sourceURL was never downloaded/indexed, or
+	// was but has since been cleared — see Store.LoadPlaylistIDForURL's
+	// doc for why a stale index entry still fails closed correctly here.
 	CachedPlaylistForURL(sourceURL string) (json.RawMessage, error)
+	// IndexPlaylistForOfflineDisplay persists playlistRaw and, when
+	// sourceURL is non-empty, indexes it by that URL for
+	// CachedPlaylistForURL — exactly what DownloadPlaylist already does
+	// as a side effect of queuing every eligible item, but WITHOUT
+	// classifying or queuing anything itself.
+	//
+	// This exists for downloadPlaylistItem: that command resolves a
+	// whole playlist (possibly by playlistUrl) but only ever queues the
+	// ONE requested item, so without this, downloading a single item
+	// from a playlistUrl would leave that URL with no offline
+	// displayPlaylist-by-URL fallback at all — even though the item
+	// itself is now genuinely cached and replayable, the PLAYLIST BODY
+	// (the item list/order/metadata the player needs to even know to
+	// try displaying it) would never have been persisted. See
+	// commandrouter.handleDownloadPlaylistItem's call site.
+	//
+	// Returns ErrServiceNotStarted, a parse error, or a store save
+	// error under the same conditions DownloadPlaylist's own leading
+	// validation does; sourceURL indexing failures are logged and
+	// swallowed exactly like DownloadPlaylist's own best-effort index
+	// write, since the playlist body itself is what CachedPlaylistForURL
+	// needs most and is already durably saved by the time indexing runs.
+	IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string) error
 }
 
 type captureJob struct {
@@ -480,20 +504,6 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		return 0, 0, errors.New("offline cache: playlist has no id")
 	}
 
-	if err := s.store.SavePlaylist(playlist.ID, playlistRaw); err != nil {
-		return 0, 0, fmt.Errorf("offline cache: save playlist %s: %w", playlist.ID, err)
-	}
-	if sourceURL != "" {
-		// Best-effort: the playlist itself is already safely saved above
-		// regardless of whether this index write succeeds, so a failure
-		// here only degrades the displayPlaylist-by-URL offline fallback
-		// (CachedPlaylistForURL) rather than the download itself.
-		if err := s.store.SavePlaylistURLIndex(sourceURL, playlist.ID); err != nil {
-			s.logger.Warn("offline cache: failed to index playlist by source URL",
-				zap.String("playlist_id", playlist.ID), zap.Error(err))
-		}
-	}
-
 	total := len(playlist.Items)
 	queued := 0
 	classifyFailed := 0
@@ -523,11 +533,62 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		// playlist genuinely has no software items" — the latter is a
 		// normal, successful ok:true/softwareCount:0 outcome, but the
 		// former must not look identical to it (see this method's doc).
+		// Deliberately returns BEFORE saving the playlist/URL index
+		// below: loadCachedPlaylistForURL's/CachedPlaylistForURL's doc
+		// promises that an offline-fallback playlist record can only
+		// exist if downloadPlaylist actually succeeded for it, never for
+		// a download this method is about to report as failed to the
+		// caller — saving it anyway here would let displayPlaylist's
+		// offline fallback later serve a playlist body whose items were
+		// never actually queued because classification itself was down,
+		// not because it genuinely has none.
 		return 0, total, fmt.Errorf(
 			"offline cache: classify playlist %s items: %d of %d item(s) failed classification, none queued",
 			playlist.ID, classifyFailed, total)
 	}
+
+	if err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL); err != nil {
+		return queued, total, err
+	}
 	return queued, total, nil
+}
+
+// savePlaylistAndURLIndex is the shared save+index step DownloadPlaylist
+// and IndexPlaylistForOfflineDisplay both need — the only difference
+// between the two callers is whether classification/queuing happens
+// around it, not this part.
+func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.RawMessage, sourceURL string) error {
+	if err := s.store.SavePlaylist(playlistID, playlistRaw); err != nil {
+		return fmt.Errorf("offline cache: save playlist %s: %w", playlistID, err)
+	}
+	if sourceURL != "" {
+		// Best-effort: the playlist itself is already safely saved above
+		// regardless of whether this index write succeeds, so a failure
+		// here only degrades the displayPlaylist-by-URL offline fallback
+		// (CachedPlaylistForURL) rather than the download itself.
+		if err := s.store.SavePlaylistURLIndex(sourceURL, playlistID); err != nil {
+			s.logger.Warn("offline cache: failed to index playlist by source URL",
+				zap.String("playlist_id", playlistID), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// IndexPlaylistForOfflineDisplay: see the Service interface doc for why
+// this exists (downloadPlaylistItem's single-item scope) and what it
+// deliberately does NOT do (classify or queue anything).
+func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string) error {
+	if !s.started.Load() {
+		return ErrServiceNotStarted
+	}
+	var playlist dp1playlist.Playlist
+	if err := s.json.Unmarshal(playlistRaw, &playlist); err != nil {
+		return fmt.Errorf("offline cache: parse playlist: %w", err)
+	}
+	if playlist.ID == "" {
+		return errors.New("offline cache: playlist has no id")
+	}
+	return s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL)
 }
 
 // enqueue is idempotent: an item already queued or downloading is left
@@ -615,16 +676,33 @@ func (s *service) process(ctx context.Context, j captureJob) {
 }
 
 // enforceDiskLimit evicts the oldest-captured item (by CapturedAt),
-// excluding justCapturedID, and re-runs GC until usage is back under
-// maxDiskBytes or nothing more can be evicted. Blobs are deduped, so an
-// item's disk contribution is only knowable after GC reclaims blobs no
-// other item still references — hence the delete-then-GC-then-recheck loop
-// rather than trying to precompute how much one eviction will free.
+// preferring anything OTHER than justCapturedID, and re-runs GC until
+// usage is back under maxDiskBytes or nothing more can be evicted. Blobs
+// are deduped, so an item's disk contribution is only knowable after GC
+// reclaims blobs no other item still references — hence the
+// delete-then-GC-then-recheck loop rather than trying to precompute how
+// much one eviction will free.
+//
+// justCapturedID is only PREFERRED to survive, never permanently
+// exempted: capture enforces a per-resource size cap
+// (maxResourceBytes), never a per-item total, so a single multi-resource
+// artwork can still exceed the WHOLE cache's maxDiskBytes budget on its
+// own even after every older item has already been evicted. Leaving it
+// alone in that case would mean maxDiskBytes is not actually a hard
+// ceiling — exactly the "flip offlineCache.enabled on and it can still
+// fill the disk" failure mode this budget exists to prevent (see
+// OptionsFromConfig's DefaultMaxDiskBytes doc). So once
+// oldestEvictableItem has nothing else left to offer, this deliberately
+// evicts justCapturedID too — but that fallback fires at most once per
+// call (protectedID is cleared right after), so a store that is over
+// budget with truly nothing left on disk still terminates instead of
+// looping forever trying to re-evict an item that is already gone.
 func (s *service) enforceDiskLimit(justCapturedID string) {
 	if s.maxDiskBytes <= 0 {
 		return
 	}
 
+	protectedID := justCapturedID
 	for {
 		usage, err := s.store.DiskUsage()
 		if err != nil {
@@ -635,17 +713,26 @@ func (s *service) enforceDiskLimit(justCapturedID string) {
 			return
 		}
 
-		victim, ok := s.oldestEvictableItem(justCapturedID)
+		victim, ok := s.oldestEvictableItem(protectedID)
+		reason := ""
 		if !ok {
-			s.logger.Warn("offline cache: over disk budget with nothing left to evict",
-				zap.Int64("usage_bytes", usage), zap.Int64("max_bytes", s.maxDiskBytes))
-			return
+			if protectedID == "" {
+				// Already gave up the just-captured item's protection
+				// above and there is STILL nothing left to evict:
+				// nothing more this function can do.
+				s.logger.Warn("offline cache: over disk budget with nothing left to evict",
+					zap.Int64("usage_bytes", usage), zap.Int64("max_bytes", s.maxDiskBytes))
+				return
+			}
+			victim = protectedID
+			protectedID = ""
+			reason = "offline cache: evicted the just-captured item itself; it alone exceeds the disk budget with no older item left to evict"
 		}
 		if err := s.store.DeleteItem(victim); err != nil {
 			s.logger.Warn("offline cache: evict item failed", zap.String("item_id", victim), zap.Error(err))
 			return
 		}
-		s.notify(victim, StateNotCached, Coverage{})
+		s.notify(victim, StateNotCached, Coverage{Reason: reason})
 
 		if _, _, err := s.gc(); err != nil {
 			s.logger.Warn("offline cache: GC during eviction failed", zap.Error(err))

@@ -516,6 +516,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectPassesCORSHeadersToStat
 	require.NoError(t, rp.EnableForItem(context.Background(), "item-large-cors"))
 
 	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
+	mockStatic.EXPECT().IsListening().Return(true).Times(1)
 	mockStatic.EXPECT().URLFor("deadbeef", "video/mp4", corsHeaders).Return(testStaticBaseURL + "/blobs/deadbeef?ct=video%2Fmp4").Times(1)
 
 	done := make(chan map[string]interface{}, 1)
@@ -590,6 +591,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectsToStatic(t *testing.T)
 	require.NoError(t, rp.EnableForItem(context.Background(), "item-large"))
 
 	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
+	mockStatic.EXPECT().IsListening().Return(true).Times(1)
 	mockStatic.EXPECT().URLFor("deadbeef", "video/mp4", gomock.Nil()).Return(testStaticBaseURL + "/blobs/deadbeef?ct=video%2Fmp4").Times(1)
 
 	done := make(chan map[string]interface{}, 1)
@@ -607,6 +609,57 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectsToStatic(t *testing.T)
 	location, ok := headerValue(t, params, "Location")
 	require.True(t, ok)
 	assert.Equal(t, testStaticBaseURL+"/blobs/deadbeef?ct=video%2Fmp4", location)
+}
+
+// TestReplayer_ProcessRequestPaused_LargeAssetMissesWhenStaticServerNotListening
+// is the regression test for the static-server-unavailable hazard: if
+// the server never actually bound (e.g. its port collided with an
+// unrelated process, or Listen simply failed at startup), redirecting
+// to it anyway would either dead-end (nobody home) or, worse, be
+// silently absorbed by whatever unrelated service does own that port —
+// neither of which Chromium can distinguish from a genuinely broken
+// cached asset. An oversized resource must instead fall through to the
+// ordinary fail_closed miss path, and URLFor must never even be called.
+func TestReplayer_ProcessRequestPaused_LargeAssetMissesWhenStaticServerNotListening(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
+	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
+	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
+	mockSession := mocks.NewMockCDPSession(ctrl)
+
+	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+
+	var handler func(json.RawMessage)
+	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)
+	rp.Attach(mockSession)
+
+	rec := &offlinecache.ItemRecord{
+		ItemID: "item-large",
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/movie.mp4", Status: 200, SHA256: "deadbeef", ContentType: "video/mp4"},
+		},
+	}
+	mockStore.EXPECT().LoadItem("item-large").Return(rec, nil).Times(1)
+	mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	require.NoError(t, rp.EnableForItem(context.Background(), "item-large"))
+
+	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
+	mockStatic.EXPECT().IsListening().Return(false).Times(1)
+	// Deliberately no URLFor expectation: gomock's strict controller
+	// fails this test if fulfillFromBlob calls it despite the server
+	// not listening.
+
+	done := make(chan map[string]interface{}, 1)
+	mockSession.EXPECT().Send(gomock.Any(), "Fetch.failRequest", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, params map[string]interface{}) (json.RawMessage, error) {
+			done <- params
+			return json.RawMessage(`{}`), nil
+		}).Times(1)
+
+	handler(requestPausedEvent(t, "req-1", "https://example.com/movie.mp4"))
+	awaitSend(t, done)
 }
 
 func TestReplayer_ProcessRequestPaused_BlobMissingTreatedAsMiss(t *testing.T) {

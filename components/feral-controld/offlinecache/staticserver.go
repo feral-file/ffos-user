@@ -8,6 +8,7 @@ import (
 	go_http "net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -53,8 +54,45 @@ type StaticServer interface {
 	BaseURL() string
 	// Handler exposes the underlying mux for tests (httptest.NewServer) and
 	// for embedding into another server if ever needed; production code
-	// uses ListenAndServe.
+	// uses Listen+Serve.
 	Handler() go_http.Handler
+	// Listen synchronously binds addr and returns the bind error
+	// immediately. This is deliberately split out of Serve (net/http's
+	// ListenAndServe otherwise combines bind+serve into a single
+	// blocking call): a caller that only ever launches ListenAndServe
+	// in a background goroutine (as this server's own main.go wiring
+	// used to) can only ever learn about a bind failure asynchronously,
+	// via a log line, well after the rest of daemon startup has already
+	// proceeded assuming success — including, critically, after
+	// Replayer may have already started 302-redirecting large cached
+	// assets to a server that either never bound at all (dead
+	// redirects) or, worse, whose port was actually claimed by some
+	// OTHER unrelated loopback process (redirects silently served by
+	// the wrong service). Calling Listen first and gating both the
+	// Serve goroutine AND IsListening on its result closes both cases.
+	// Idempotent: calling it again after a successful bind is a no-op.
+	Listen() error
+	// IsListening reports whether Listen has already bound successfully.
+	// Replayer's large-asset redirect path (see replay.go's
+	// fulfillFromBlob) must check this before calling URLFor: redirecting
+	// to a server that is not actually listening would otherwise produce
+	// a dead redirect (nobody home) or, worse, one absorbed by an
+	// unrelated service that happens to occupy the same loopback port.
+	IsListening() bool
+	// Serve blocks, accepting connections on the listener Listen bound.
+	// Returns an error if Listen has not succeeded yet — callers must
+	// call Listen first and check its error before spawning Serve in a
+	// goroutine, rather than relying on Serve to bind for them. Once
+	// Serve returns, for ANY reason (graceful Shutdown or an unexpected
+	// accept/listener failure), IsListening reports false: replay's
+	// large-asset redirect gate must not keep treating this server as
+	// available once it has genuinely stopped accepting connections.
+	Serve() error
+	// ListenAndServe is a convenience one-call form (Listen then Serve)
+	// kept for callers, such as most existing tests, that do not need
+	// to observe the bind result separately from the blocking serve
+	// call. Production wiring (main.go) uses Listen/Serve directly so it
+	// CAN observe that result.
 	ListenAndServe() error
 	Shutdown(ctx context.Context) error
 }
@@ -65,6 +103,10 @@ type staticServer struct {
 	os     wrapper.OS
 	server wrapper.HTTPServer
 	logger *zap.Logger
+
+	mu       sync.RWMutex
+	listener net.Listener // set once by a successful Listen; Shutdown never clears this (see Shutdown's doc)
+	closed   bool         // flipped true by Shutdown; IsListening consults this instead of listener==nil
 }
 
 // NewStaticServer builds a StaticServer bound to addr (expected a loopback
@@ -72,8 +114,8 @@ type staticServer struct {
 // config). addr is passed through safeLoopbackAddr first: this server
 // exists purely as a kiosk-loopback fallback for oversized cached-artwork
 // blobs and has no auth of its own, so a config typo must never be able to
-// expose it over the LAN. It does not start listening; call
-// ListenAndServe.
+// expose it over the LAN. It does not start listening; call Listen then
+// Serve (or ListenAndServe for the combined, non-observable form).
 func NewStaticServer(addr string, store Store, osWrapper wrapper.OS, logger *zap.Logger) StaticServer {
 	addr = safeLoopbackAddr(addr, logger)
 	s := &staticServer{addr: addr, store: store, os: osWrapper, logger: logger}
@@ -224,13 +266,84 @@ func (s *staticServer) Handler() go_http.Handler {
 	return s.server.Handler()
 }
 
-func (s *staticServer) ListenAndServe() error {
-	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, go_http.ErrServerClosed) {
+func (s *staticServer) Listen() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listener != nil && !s.closed {
+		return nil
+	}
+	l, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("offline cache static server: listen on %s: %w", s.addr, err)
+	}
+	s.listener = l
+	s.closed = false
+	return nil
+}
+
+func (s *staticServer) IsListening() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.listener != nil && !s.closed
+}
+
+func (s *staticServer) Serve() error {
+	// Reads listener, never closed — see Shutdown's doc for why Shutdown
+	// deliberately never clears this field: doing so could race a Serve
+	// call whose goroutine had not yet reached this read (Serve is
+	// always launched in its own goroutine right after Listen succeeds
+	// — see main.go's wiring), making Serve spuriously report "before
+	// Listen succeeded" even though Listen genuinely already had.
+	s.mu.RLock()
+	l := s.listener
+	s.mu.RUnlock()
+	if l == nil {
+		return errors.New("offline cache static server: Serve called before Listen succeeded")
+	}
+	// Serve blocks until serving genuinely stops, for ANY reason — a
+	// graceful Shutdown (which already set closed=true itself, so this
+	// is a harmless no-op re-assignment) OR an unexpected accept/listener
+	// failure that Shutdown never saw coming. Without marking closed here
+	// too, an unexpected Serve exit would leave IsListening() reporting
+	// true forever after despite nothing actually being accepted anymore,
+	// so replay.go's large-asset redirect gate would keep sending the
+	// kiosk to a server that has stopped listening — reintroducing the
+	// exact dead-redirect risk Listen/IsListening was split out to close.
+	defer func() {
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
+	}()
+	if err := s.server.Serve(l); err != nil && !errors.Is(err, go_http.ErrServerClosed) {
 		return fmt.Errorf("offline cache static server: %w", err)
 	}
 	return nil
 }
 
+// ListenAndServe binds and serves in one blocking call for callers that
+// do not need to observe the bind result separately (see the interface
+// doc). It deliberately still calls Listen first rather than delegating
+// straight to s.server.ListenAndServe(), so IsListening reflects reality
+// for these callers too, not only for main.go's split Listen/Serve path.
+func (s *staticServer) ListenAndServe() error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	return s.Serve()
+}
+
+// Shutdown deliberately never nils s.listener (only Serve reads it, and
+// only ever to hand it to s.server.Serve — see Serve's doc for the
+// race that would otherwise create): net/http's own Shutdown already
+// makes any Serve call on this same *http.Server return
+// ErrServerClosed immediately once shutdown has begun, regardless of
+// whether this wrapper's own listener field is cleared or not, so
+// clearing it here would only add risk without adding any actual
+// safety. IsListening instead consults the separate closed flag.
 func (s *staticServer) Shutdown(ctx context.Context) error {
-	return s.server.Shutdown(ctx)
+	err := s.server.Shutdown(ctx)
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	return err
 }

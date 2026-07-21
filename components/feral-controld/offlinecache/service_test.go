@@ -389,6 +389,16 @@ func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.
 // item, that must be reported as an error, not silently collapse into
 // the same ok:true/softwareCount:0 shape a playlist with genuinely no
 // software items would produce.
+//
+// It also pins a second invariant on the SAME failure: the playlist
+// body and its sourceURL index must NOT be persisted either.
+// loadCachedPlaylistForURL's/CachedPlaylistForURL's offline-fallback
+// doc promises a saved playlist record can only exist if
+// downloadPlaylist actually succeeded for it — if this method saved it
+// anyway despite returning an error here, a later offline
+// displayPlaylist-by-URL could be handed a "last known good" playlist
+// whose items were never actually queued because classification was
+// down, not because the playlist genuinely has none.
 func TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
@@ -403,6 +413,7 @@ func TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError(t *test
 		},
 	})
 	require.NoError(t, err)
+	sourceURL := "https://feed.example.com/playlists/playlist-1"
 
 	classifyErr := assertError("classifier unreachable")
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/a.html").Return(offlinecache.ClassUnknown, classifyErr).Times(1)
@@ -411,10 +422,17 @@ func TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError(t *test
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, sourceURL)
 	require.Error(t, err, "a classifier outage must not be reported as a successful download of zero software items")
 	assert.Zero(t, queued)
 	assert.Equal(t, 2, total)
+
+	_, err = ts.service.CachedPlaylistForURL(sourceURL)
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound,
+		"a download this method reported as failed must never leave a 'last known good' offline fallback behind")
+	_, err = ts.store.LoadPlaylist("playlist-1")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound,
+		"the playlist body itself must also not be persisted on a total classification failure")
 }
 
 // TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccesses
@@ -509,6 +527,86 @@ func TestService_DownloadPlaylist_EmptySourceURLIsNotIndexed(t *testing.T) {
 
 	_, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+// TestService_IndexPlaylistForOfflineDisplay_MakesPlaylistRecoverableByURL
+// is the regression test for downloadPlaylistItem's URL-fallback gap:
+// this method must save+index playlistRaw exactly like DownloadPlaylist
+// does, WITHOUT requiring (or performing) any classification/queuing —
+// it never even touches mockClassifier/mockCapturer (setupService's
+// mocks would fail this test on any unexpected call to either).
+func TestService_IndexPlaylistForOfflineDisplay_MakesPlaylistRecoverableByURL(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items": []map[string]interface{}{
+			{"id": "item-1", "source": "https://example.com/a.html"},
+		},
+	})
+	require.NoError(t, err)
+	sourceURL := "https://feed.example.com/playlists/playlist-1"
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL))
+
+	cached, err := ts.service.CachedPlaylistForURL(sourceURL)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(raw), string(cached))
+
+	// Never queued: the ONE item in this playlist must not have been
+	// classified or captured just because the playlist was indexed.
+	_, loadErr := ts.store.LoadItem("item-1")
+	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
+}
+
+// TestService_IndexPlaylistForOfflineDisplay_EmptySourceURLIsNotIndexed
+// mirrors TestService_DownloadPlaylist_EmptySourceURLIsNotIndexed for
+// this method's own sourceURL parameter.
+func TestService_IndexPlaylistForOfflineDisplay_EmptySourceURLIsNotIndexed(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t", "items": []map[string]interface{}{},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, ""))
+
+	_, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+// TestService_IndexPlaylistForOfflineDisplay_BeforeStartReturnsNotStarted
+// mirrors DownloadPlaylist/DownloadItem's own started.Load() guard.
+func TestService_IndexPlaylistForOfflineDisplay_BeforeStartReturnsNotStarted(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"id":"playlist-1"}`), "https://example.com/p.json")
+	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
+}
+
+// TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors mirrors
+// DownloadPlaylist's own validation for a playlist with no id.
+func TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"title":"no id"}`), "https://example.com/p.json")
+	assert.Error(t, err)
 }
 
 // TestService_CachedPlaylistForURL_UnknownURLReturnsNotFound covers the
@@ -1026,7 +1124,51 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 	_, err = ts.store.LoadItem("old-2")
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "second-oldest item should also be evicted to get under budget")
 	_, err = ts.store.LoadItem("new-item")
-	assert.NoError(t, err, "the item that was just captured must never be evicted by its own capture")
+	assert.NoError(t, err, "the item that was just captured must never be evicted by its own capture when evicting OTHER items already brings usage back under budget")
+}
+
+// TestService_EnforceDiskLimit_EvictsJustCapturedItemWhenNoOtherVictimRemains
+// is the regression test for enforceDiskLimit's fallback: capture only
+// caps a single resource's size (maxResourceBytes), never an item's
+// TOTAL across all its resources, so a multi-resource artwork can
+// exceed the whole cache's maxDiskBytes on its own even with no older
+// item left to evict instead. Without the fallback, maxDiskBytes would
+// not actually be a hard ceiling in that case — this seeds NO older
+// items at all, so the only possible victim is the one that was just
+// captured.
+func TestService_EnforceDiskLimit_EvictsJustCapturedItemWhenNoOtherVictimRemains(t *testing.T) {
+	ts := setupService(t, 5, nil) // budget smaller than the new item's own 10-byte blob, and nothing older exists to evict instead
+	defer ts.ctrl.Finish()
+
+	newHash := writeBlobString(t, ts.store, "0123456789")
+	newItem := dp1playlist.PlaylistItem{ID: "new-item", Source: "https://example.com/new"}
+	newRec := &offlinecache.ItemRecord{
+		ItemID: "new-item", Item: newItem, Entry: newItem.Source,
+		Resources:  []offlinecache.Resource{{URL: newItem.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
+		Coverage:   offlinecache.Coverage{Complete: true},
+		CapturedAt: time.Now(),
+	}
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), newItem.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), newItem, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			require.NoError(t, ts.store.SaveItem(newRec))
+			return newRec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), newItem))
+	waitForState(t, ts.service, "new-item", offlinecache.StateNotCached)
+
+	usage, err := ts.store.DiskUsage()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, usage, int64(5), "the cache must never be left permanently over budget just because the only oversized item was also the most recent capture")
+
+	_, err = ts.store.LoadItem("new-item")
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound,
+		"an item that alone exceeds maxDiskBytes with no older item to evict instead must be rejected, not silently kept over budget forever")
 }
 
 func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -288,18 +287,36 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		}
 	}
 	if app.OfflineCacheStaticServer != nil {
-		go func() {
-			if err := app.OfflineCacheStaticServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				app.Logger.Error("Offline cache static server stopped unexpectedly", zap.Error(err))
-			}
-		}()
-		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), SHUTDOWN_TIMEOUT)
-			defer shutdownCancel()
-			if err := app.OfflineCacheStaticServer.Shutdown(shutdownCtx); err != nil {
-				app.Logger.Warn("Failed to shut down offline cache static server", zap.Error(err))
-			}
-		}()
+		// Listen (bind) synchronously, BEFORE Serve ever runs in the
+		// background: net/http's ListenAndServe combines bind+serve
+		// into one blocking call, which would only ever surface a bind
+		// failure asynchronously via the goroutine's own log line,
+		// after Replayer may have already started 302-redirecting large
+		// cached assets to a port that either never bound (dead
+		// redirect) or, worse, was claimed by some OTHER unrelated
+		// loopback process (redirects silently served by the wrong
+		// service). Replayer's own IsListening() check is the second
+		// half of this fix — this call is what lets it observe the
+		// truth. A bind failure here is still best-effort/non-fatal
+		// (large-asset offline replay just becomes unavailable; every
+		// other offline-cache path is unaffected), consistent with this
+		// whole feature's startup posture.
+		if err := app.OfflineCacheStaticServer.Listen(); err != nil {
+			app.Logger.Error("Failed to bind offline cache static server; large-asset offline replay will be unavailable", zap.Error(err))
+		} else {
+			go func() {
+				if err := app.OfflineCacheStaticServer.Serve(); err != nil {
+					app.Logger.Error("Offline cache static server stopped unexpectedly", zap.Error(err))
+				}
+			}()
+			defer func() {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), SHUTDOWN_TIMEOUT)
+				defer shutdownCancel()
+				if err := app.OfflineCacheStaticServer.Shutdown(shutdownCtx); err != nil {
+					app.Logger.Warn("Failed to shut down offline cache static server", zap.Error(err))
+				}
+			}()
+		}
 	}
 
 	// Start StatusPoller - it will handle relayer connection status internally

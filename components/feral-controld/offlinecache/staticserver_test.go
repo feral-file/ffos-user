@@ -1,11 +1,13 @@
 package offlinecache_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -199,6 +201,55 @@ func TestNewStaticServer_InvalidAddrFallsBackToDefault(t *testing.T) {
 	store, _ := newTestStore(t)
 	server := offlinecache.NewStaticServer("not-a-valid-addr", store, wrapper.NewOS(), zaptest.NewLogger(t))
 	assert.Equal(t, "http://"+offlinecache.DefaultStaticServerAddr, server.BaseURL())
+}
+
+// TestStaticServer_Listen_IsListeningReflectsBindAndShutdownState is the
+// regression test for the Listen/Serve split (see StaticServer's doc):
+// IsListening must report false before any bind attempt, true once
+// Listen succeeds, and false again after a graceful Shutdown — so a
+// caller (main.go, and Replayer's own IsListening gate) can rely on it
+// as the definitive "is this server actually reachable" signal rather
+// than inferring availability from a background goroutine's log output.
+func TestStaticServer_Listen_IsListeningReflectsBindAndShutdownState(t *testing.T) {
+	store, _ := newTestStore(t)
+	server := offlinecache.NewStaticServer("127.0.0.1:0", store, wrapper.NewOS(), zaptest.NewLogger(t))
+
+	assert.False(t, server.IsListening(), "must not report listening before Listen is ever called")
+
+	require.NoError(t, server.Listen())
+	assert.True(t, server.IsListening())
+
+	// Idempotent: a second Listen after a successful bind must not
+	// error or attempt to rebind the same address.
+	require.NoError(t, server.Listen())
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve() }()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, server.Shutdown(shutdownCtx))
+
+	select {
+	case err := <-serveErr:
+		assert.NoError(t, err, "Serve must return cleanly (http.ErrServerClosed swallowed) after a graceful Shutdown")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after Shutdown")
+	}
+
+	assert.False(t, server.IsListening(), "must report not-listening once Shutdown has torn the listener down")
+}
+
+// TestStaticServer_Serve_BeforeListenReturnsError pins that Serve
+// refuses to run without a prior successful Listen, rather than
+// silently binding for the caller — main.go's whole point in splitting
+// these apart is to observe the bind result BEFORE spawning Serve, so a
+// Serve that binds anyway would defeat that.
+func TestStaticServer_Serve_BeforeListenReturnsError(t *testing.T) {
+	store, _ := newTestStore(t)
+	server := offlinecache.NewStaticServer("127.0.0.1:0", store, wrapper.NewOS(), zaptest.NewLogger(t))
+
+	assert.Error(t, server.Serve())
 }
 
 func TestStaticServer_MethodNotAllowed(t *testing.T) {
