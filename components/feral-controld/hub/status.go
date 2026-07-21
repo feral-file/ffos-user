@@ -52,9 +52,9 @@ type StatusInfo struct {
 	Connectivity string
 	// TopicID is the relayer topicID. It is the transitional LAN topic-handover
 	// value replacing BLE's and is expected to be dropped in LAN contract v2.
-	// handleStatus serves it ONLY while the device is unclaimed (the claim
-	// handover is its sole purpose); providers should still populate it
-	// unconditionally and let the transport own that wire-level policy.
+	// handleStatus serves it unconditionally, claimed or not: FF1 supports
+	// multiple controlling phones, so a claimed device must stay pairable
+	// from any phone on the LAN (see handleStatus for the trust-model note).
 	TopicID string
 }
 
@@ -89,19 +89,14 @@ func (h *hub) handleStatus(w http.ResponseWriter, r *http.Request) {
 		info = h.statusProvider.Status(r.Context())
 	}
 
-	// topic_id is the LAN replacement for the value BLE used to hand over a
-	// PRIVATE pairing link, and it is the relayer routing key that reaches the
-	// device from anywhere. It exists on this endpoint solely so an unclaimed
-	// device can be claimed over LAN; once the device is claimed there is no
-	// legitimate unauthenticated LAN reader, and serving it would hand any LAN
-	// peer the cloud-side command topic of an owned device. Withhold it the
-	// moment the device is claimed. (The ff-app claim flow independently rejects
-	// claimed==true — this is the device-side half of that same guard.)
-	topicID := info.TopicID
-	if info.Claimed {
-		topicID = ""
-	}
-
+	// topic_id is served claimed or not. FF1 is a multi-controller product:
+	// several phones control one frame, and a frame whose original phone was
+	// lost or wiped must remain pairable from any phone on the LAN. The
+	// app-side flow suppresses only the unprompted app-open claim offer for
+	// claimed devices — manual pairing always works. LAN-presence acts as the
+	// authorization boundary, matching the BLE-era posture (any nearby phone
+	// could pair without authentication); an on-device confirmation before
+	// topic handover is the LAN contract v2 path if this needs tightening.
 	resp := statusResponse{
 		DeviceID:     info.DeviceID,
 		Version:      info.Version,
@@ -111,7 +106,7 @@ func (h *hub) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Internet:     info.Internet,
 		SetupState:   info.SetupState,
 		Connectivity: info.Connectivity,
-		TopicID:      topicID,
+		TopicID:      info.TopicID,
 	}
 
 	if err := h.respondJSON(w, http.StatusOK, resp); err != nil {

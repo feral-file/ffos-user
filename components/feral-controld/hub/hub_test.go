@@ -771,12 +771,13 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 		"an UNCLAIMED device serves its topic_id — that is the LAN claim handover")
 }
 
-// TestHandleStatus_ClaimedDeviceWithholdsTopicID is the topic-exposure
-// regression: once a device is claimed there is no legitimate unauthenticated
-// LAN reader of the relayer topic, and serving it would let any LAN peer
-// command an owned device through the cloud path. The claimed flag itself stays
-// visible (discovery/UX needs it); only the routing key is withheld.
-func TestHandleStatus_ClaimedDeviceWithholdsTopicID(t *testing.T) {
+// TestHandleStatus_ClaimedDeviceStillServesTopicID pins the multi-controller
+// contract: FF1 is controlled by several phones, and a frame whose original
+// phone is lost/wiped must stay pairable from any LAN peer, so a CLAIMED
+// device keeps serving its topic_id (LAN-presence = authorization, matching
+// the BLE-era posture). The claimed flag stays visible so the app can
+// suppress the unprompted app-open claim offer — manual pairing only.
+func TestHandleStatus_ClaimedDeviceStillServesTopicID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
@@ -802,7 +803,9 @@ func TestHandleStatus_ClaimedDeviceWithholdsTopicID(t *testing.T) {
 	var got map[string]any
 	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, true, got["claimed"])
-	assert.Equal(t, "", got["topic_id"])
+	assert.Equal(t, "topic-xyz", got["topic_id"],
+		"a claimed device keeps serving its topic — multi-phone pairing "+
+			"and lost-phone recovery depend on it")
 }
 
 // TestHandleStatus_NilProviderReturnsContract verifies a nil provider still
