@@ -224,6 +224,10 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 		DoAndReturn(func(method string, params map[string]any) (interface{}, error) {
 			expr, _ := params["expression"].(string)
 			assert.Contains(t, expr, string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST))
+			// The claim push must be conditional — the player's own fallback
+			// pull may already have artwork up, and only OOM recovery is
+			// allowed to force-replace playing content.
+			assert.Contains(t, expr, `"onlyIfNoPlaylist":true`)
 			return nil, nil
 		}).
 		Times(1)

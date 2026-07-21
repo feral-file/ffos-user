@@ -408,14 +408,21 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 
 // sendDisplayDefaultPlaylist forwards the displayDefaultPlaylist command to the
 // player over CDP — the same command OOM recovery uses to restore playback.
+// Unlike OOM recovery's unconditional reset, the claim-time push sets
+// onlyIfNoPlaylist: the player's own boot-fallback loop may have already put
+// artwork on screen by the time the user pairs (e.g. connectivity recovered
+// before the claim), and a force push would visibly restart it. The player
+// treats the flag as "make sure something is playing" and no-ops otherwise.
 func (e *executor) sendDisplayDefaultPlaylist() error {
 	if e.cdp == nil {
 		return fmt.Errorf("cdp client is not configured")
 	}
 
 	command := commands.Command{
-		Type:      commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-		Arguments: map[string]any{},
+		Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+		Arguments: map[string]any{
+			"onlyIfNoPlaylist": true,
+		},
 	}
 	payload, err := command.JSON()
 	if err != nil {
