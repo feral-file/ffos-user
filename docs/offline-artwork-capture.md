@@ -97,12 +97,11 @@ parsing; it always runs the code and observes.
 bounded capture window (`offlineCache.captureWindowMs`) after navigating to
 the item's `source`. For each distinct URL:
 
-- **Found on a successful (2xx) response, captured via a safe method
-  (`GET`/`HEAD`/`OPTIONS`)** → fetch the exact bytes via an out-of-band
-  `http.Client` request using that SAME method (see §4 for why not
-  `Network.getResponseBody`, and §4.7 for why method matters at all),
-  hash into the blob store, record the resource. The response body is
-  streamed straight from the HTTP
+- **Found on a successful (2xx) response, captured via `GET`/`HEAD`** →
+  fetch the exact bytes via an out-of-band `http.Client` request using
+  that SAME method (see §4 for why not `Network.getResponseBody`, and
+  §4.7 for why method matters at all), hash into the blob store, record
+  the resource. The response body is streamed straight from the HTTP
   connection into a temp file on disk while it is hashed —
   `store.WriteBlob` never buffers a whole body in memory first — since a
   single resource can be gigabyte-scale (§4.3's 1.1 GB video) and
@@ -116,6 +115,21 @@ the item's `source`. For each distinct URL:
   `Service.enforceDiskLimit`'s post-capture eviction loop ever runs (that
   loop can only reclaim space by deleting *other* items, which cannot
   help if one resource alone already exceeds the entire budget).
+- **Found on a successful (2xx) `OPTIONS` response (a CORS preflight)**
+  → store a canonical EMPTY body directly (`store.WriteBlob` on an empty
+  reader), never an out-of-band re-fetch. A bare re-issued `OPTIONS`
+  carries none of the real browser preflight's `Origin`/
+  `Access-Control-Request-Method`/`Access-Control-Request-Headers`
+  request headers, and many CORS-aware servers only special-case
+  `OPTIONS` (returning their `Access-Control-Allow-*` response headers)
+  when those preflight-specific request headers are present — otherwise
+  treating it as an ordinary request. Re-fetching could therefore
+  observe a genuinely different status/headers than the live browser
+  preflight did, or fail outright. This is safe to skip entirely because
+  a CORS preflight's response BODY is never exposed to page JS per the
+  Fetch spec — replay only needs the status/headers already captured
+  live from `Network.responseReceived`, which are recorded regardless of
+  this shortcut. See §4.7.
 - **3xx redirect** → record `status` + `redirectTo` (the `Location`
   header), no body. See §4.1.
 - **206 Partial Content** → CDP cannot return a body for a range response
@@ -362,11 +376,18 @@ tracker and `replay.go`'s replayer both index resources by that composite
 key, never by URL alone, and `Fetch.requestPaused`'s own `request.method`
 (not just `request.url`) is what replay matches against.
 
-This does not mean every method is captured faithfully, though.
-`resolveResources` only re-issues the byte-fetch for `GET`/`HEAD`/
-`OPTIONS` — HTTP's own safe/idempotent methods, which cannot have a
-server-side side effect from being re-issued purely to read their bytes.
-A successful (2xx) `POST`/`PUT`/`PATCH`/`DELETE`/... response is
+This does not mean every method is captured the same way, though.
+`GET`/`HEAD`/`OPTIONS` are HTTP's own safe/idempotent methods, so none
+of the three can have a server-side side effect just from being
+re-acquired — but `resolveResources` still treats `OPTIONS`
+differently from the other two: a successful `GET`/`HEAD` is re-fetched
+over HTTP, while a successful `OPTIONS` (a CORS preflight) instead gets
+a stored EMPTY body with no network round-trip at all, since re-issuing
+a bare preflight (missing the real browser's `Origin`/
+`Access-Control-Request-*` request headers) risks a different, or
+outright failing, response than the live one — see the capture-flow
+bullet list in §3.2 for why that shortcut is safe. A successful (2xx)
+`POST`/`PUT`/`PATCH`/`DELETE`/... response is
 deliberately left unfetched and reported as `unsupported_method(<method>):
 <url>` in `Coverage.Reason` instead: re-issuing it here to inspect its
 bytes would risk re-triggering the exact side effect (a mutation, an
@@ -520,16 +541,28 @@ There is deliberately **no** top-level manifest, no separate
   a `cors`-mode `fetch()` CORS-checks every hop of a cross-origin redirect
   chain, not only the final response.
 - `WriteBlob` streams into a temp file and renames it into place, the
-  same atomicity pattern every other write in this store already uses,
-  but two-step: the content-addressed final name is only known once the
-  stream has been fully hashed, so the write lands in a uniquely-named
-  `blobs/incoming-*.tmp` file first (`os.CreateTemp`, not the fixed
-  `.tmp` suffix `writeFileAtomic` uses for item/playlist JSON, since a
-  fixed name would collide across writes if this were ever called
-  concurrently — today it never is, since captures are serialized to one
-  at a time) and is renamed into place only after a successful, complete
-  write; any early return (oversized body, I/O error) removes the temp
-  file instead. `GC()` and `DiskUsage()` both deliberately skip any
+  same atomicity pattern every other write in this store already uses:
+  the content-addressed final name is only known once the stream has
+  been fully hashed, so the write lands in a uniquely-named
+  `blobs/incoming-*.tmp` file first (`os.CreateTemp`) and is renamed
+  into place only after a successful, complete write; any early return
+  (oversized body, I/O error) removes the temp file instead.
+  `writeFileAtomic` (item/playlist/playlist-URL-index JSON) uses this
+  same `CreateTemp`-based unique-temp-name pattern rather than a fixed
+  `path+".tmp"` suffix, for the same reason: `DownloadPlaylist` calls
+  `SavePlaylist`/`SavePlaylistURLIndex` directly on the caller's own
+  goroutine (unlike per-item `SaveItem`, which the single-worker capture
+  queue already serializes), and the command gate's dedupe only
+  collapses byte-identical arguments — so two overlapping
+  `downloadPlaylist` calls for the same playlist id with slightly
+  different raw JSON are not guaranteed to be serialized upstream. A
+  fixed shared temp name would let one writer's in-progress bytes be
+  clobbered by the other, or let one rename fail after the first already
+  moved the shared temp file; a unique-per-call name means the two
+  independent renames simply race harmlessly onto the same destination —
+  POSIX rename is atomic, so whichever runs last wins outright with its
+  own complete content, never a torn mixture of both.
+  `GC()` and `DiskUsage()` both deliberately skip any
   `*.tmp` name — a write interrupted by the process dying mid-stream
   (SIGKILL, power loss — not a handled Go error, so the `defer`-based
   cleanup above never runs) leaves a temp file that is neither an

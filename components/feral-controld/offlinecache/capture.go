@@ -37,8 +37,10 @@ const captureWindowDefault = 20 * time.Second
 // CDP Network events (requestWillBeSent/responseReceived/loadingFailed)
 // only to learn WHICH URLs the page actually requested, their method,
 // status, and redirect targets, then re-fetches each successful
-// GET/HEAD/OPTIONS resource's bytes with the same method (see
-// safeIdempotentMethods' doc for why other methods are deliberately left
+// GET/HEAD resource's bytes with the same method (a successful OPTIONS
+// gets a stored empty body instead, never a re-fetch — see
+// resolveResources' dedicated OPTIONS case; see safeIdempotentMethods'
+// doc for why methods other than GET/HEAD/OPTIONS are deliberately left
 // unfetched rather than blindly re-issued). This is correct for the
 // static JS/CSS/HTML/image/video assets software artworks are built
 // from; it is NOT correct for cookie-gated or per-request-dynamic
@@ -300,15 +302,16 @@ func waitForObservationWindow(ctx, navCtx context.Context) error {
 	return ctx.Err()
 }
 
-// safeIdempotentMethods are the HTTP methods resolveResources may safely
-// re-issue (via fetchAndStoreBody) purely to read a response's bytes.
-// GET/HEAD are spec-defined safe methods; OPTIONS is included because a
-// CORS preflight is spec-defined safe too and never carries a
-// page-visible body, so replaying it faithfully needs its (usually
-// empty) body and CORS headers captured just like any other resource.
-// Everything else (POST/PUT/PATCH/DELETE, ...) is deliberately left
-// unfetched — see resolveResources' unsupported_method branch for why
-// re-issuing one of those here would be unsafe.
+// safeIdempotentMethods are the HTTP methods resolveResources treats as
+// eligible to acquire a body for, one way or another: GET/HEAD via an
+// actual re-fetch (fetchAndStoreBody), OPTIONS via a stored empty body
+// instead of a re-fetch (see resolveResources' dedicated OPTIONS case —
+// a CORS preflight response body is never exposed to page JS per the
+// Fetch spec, and re-issuing the bare request ourselves risks a
+// different response than the browser's own preflight got). Everything
+// else (POST/PUT/PATCH/DELETE, ...) is deliberately left unfetched —
+// see resolveResources' unsupported_method branch for why re-issuing
+// one of those here would be unsafe.
 var safeIdempotentMethods = map[string]bool{
 	go_http.MethodGet:     true,
 	go_http.MethodHead:    true,
@@ -360,6 +363,32 @@ func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker
 			// default case), never as "ready" bytes for the wrong
 			// method.
 			failureReasons = append(failureReasons, fmt.Sprintf("unsupported_method(%s):%s", method, res.URL))
+		case method == go_http.MethodOptions:
+			// A CORS preflight is the one safe-idempotent method whose
+			// re-fetch is unsafe in a DIFFERENT way than the unsafe
+			// methods above: re-issuing a bare OPTIONS with none of the
+			// browser's own Origin/Access-Control-Request-Method/
+			// Access-Control-Request-Headers can get a genuinely
+			// different response than the live preflight did — many
+			// CORS-aware servers only special-case OPTIONS (and return
+			// their Access-Control-Allow-* headers) when those
+			// preflight-specific request headers are present, and treat
+			// a bare OPTIONS as an ordinary request otherwise. Rather
+			// than try to reconstruct and replay those request headers
+			// faithfully, skip the network re-fetch entirely: a
+			// preflight response's body is defined by the Fetch spec to
+			// never be exposed to page JS in the first place, so the
+			// real status/headers already captured live (via
+			// Network.responseReceived, above) are all replay actually
+			// needs — storing a canonical empty body here (bypassing
+			// the network) can never mismatch what the browser saw,
+			// unlike a second, differently-shaped HTTP round-trip could.
+			hash, storeErr := c.store.WriteBlob(strings.NewReader(""), c.maxResourceBytes)
+			if storeErr != nil {
+				failureReasons = append(failureReasons, fmt.Sprintf("fetch_failed:%s", res.URL))
+			} else {
+				res.SHA256 = hash
+			}
 		case res.SHA256 == "":
 			hash, fetchErr := c.fetchAndStoreBody(ctx, res.URL, method)
 			if fetchErr != nil {

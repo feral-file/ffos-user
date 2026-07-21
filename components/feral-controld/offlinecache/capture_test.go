@@ -449,20 +449,15 @@ func TestCapturer_Capture_UnsafeMethodSuccessMarksIncompleteWithoutRefetching(t 
 // that an OPTIONS CORS preflight and its paired actual (non-GET) request
 // to the identical URL are captured as two distinct Resource entries
 // (keyed by method, not URL alone) rather than one clobbering the other
-// — see Resource.Method's doc for the mis-replay this closes.
+// — see Resource.Method's doc for the mis-replay this closes. It also
+// pins that the preflight's SHA256 is populated WITHOUT ever calling
+// the mocked HTTPClient (no NewRequest/Do expectations set for OPTIONS
+// below) — see resolveResources' OPTIONS case for why capture stores a
+// canonical empty body directly instead of re-issuing the preflight
+// over the network.
 func TestCapturer_Capture_CORSPreflightAndActualRequestDoNotCollide(t *testing.T) {
 	h := setupCapture(t)
 	defer h.ctrl.Finish()
-
-	h.mockHTTP.EXPECT().
-		NewRequest(http.MethodOptions, "https://api.example.com/data", nil).
-		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
-			return http.NewRequest(method, url, body)
-		}).Times(1)
-	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
-		StatusCode: http.StatusNoContent,
-		Body:       io.NopCloser(strings.NewReader("")),
-	}, nil).Times(1)
 
 	go func() {
 		h.answerDomainEnables(t)
@@ -501,7 +496,10 @@ func TestCapturer_Capture_CORSPreflightAndActualRequestDoNotCollide(t *testing.T
 
 	preflight := byMethod["OPTIONS"]
 	assert.Equal(t, 204, preflight.Status)
-	require.NotEmpty(t, preflight.SHA256, "OPTIONS is safe to re-issue and cache")
+	require.NotEmpty(t, preflight.SHA256, "a successful OPTIONS preflight must still get a storable (empty) body")
+	blob, err := h.store.ReadBlob(preflight.SHA256)
+	require.NoError(t, err)
+	assert.Empty(t, blob, "the preflight's stored body must be the canonical empty body, never a network re-fetch")
 
 	actual := byMethod["PUT"]
 	assert.Equal(t, 200, actual.Status)
@@ -509,6 +507,68 @@ func TestCapturer_Capture_CORSPreflightAndActualRequestDoNotCollide(t *testing.T
 
 	assert.False(t, rec.Coverage.Complete)
 	assert.Contains(t, rec.Coverage.Reason, "unsupported_method(PUT):https://api.example.com/data")
+}
+
+// TestCapturer_Capture_OPTIONSPreflightRequiringOriginHeaderStillCaptures
+// is the regression test for the hazard resolveResources' OPTIONS case
+// exists to avoid: a real CORS-aware origin server commonly only
+// returns its 2xx/Access-Control-Allow-* preflight response when the
+// REQUEST carries Origin and Access-Control-Request-Method (Chromium
+// adds these itself when issuing a real preflight; a bare re-issued
+// OPTIONS from controld's own daemon HTTP client would not). This test
+// does not, and cannot, simulate "the origin would reject a header-less
+// OPTIONS" directly against a real server — instead it pins the actual
+// fix: setupCapture's mockHTTP has NO NewRequest/Do expectation
+// configured at all here, so gomock's strict controller would fail
+// this test the moment capture tried to re-issue ANY HTTP request for
+// the preflight. A capture that instead succeeds, with a populated
+// SHA256, proves the OPTIONS resource was satisfied entirely from the
+// live-observed status/headers — never a second, potentially
+// differently-shaped round-trip that could get a different answer than
+// the browser's own preflight did.
+func TestCapturer_Capture_OPTIONSPreflightRequiringOriginHeaderStillCaptures(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-preflight",
+			"request":   map[string]interface{}{"url": "https://strict-cors.example.com/api", "method": "OPTIONS"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-preflight",
+			"response": map[string]interface{}{
+				"url":    "https://strict-cors.example.com/api",
+				"status": 200,
+				"headers": map[string]interface{}{
+					// The real preflight, carrying the browser's own
+					// Origin/Access-Control-Request-Method, got this
+					// Allow-Origin header live. A header-less re-fetch
+					// against a strict server could easily get a 403 or
+					// a response missing this header entirely — but
+					// resolveResources must never even attempt that
+					// re-fetch for OPTIONS, so this captured value is
+					// what replay serves regardless.
+					"Access-Control-Allow-Origin": "https://gallery.example.com",
+				},
+			},
+		})
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-strict-cors", Source: "https://strict-cors.example.com/api"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	res := rec.Resources[0]
+	assert.Equal(t, "OPTIONS", res.Method)
+	assert.Equal(t, 200, res.Status)
+	require.NotEmpty(t, res.SHA256, "a strict-CORS preflight must still be captured without ever re-issuing the request")
+	assert.Equal(t, "https://gallery.example.com", res.Headers["Access-Control-Allow-Origin"],
+		"replay must serve the header the browser's OWN preflight observed live, not one from a re-fetch")
+	assert.True(t, rec.Coverage.Complete)
 }
 
 func TestCapturer_Capture_RedirectChain(t *testing.T) {

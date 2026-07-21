@@ -180,17 +180,65 @@ func safeID(id string) (string, error) {
 // writeFileAtomic writes data via a temp file + rename so a process killed
 // mid-write (headless capture is unsupervised) never leaves a partial file
 // for a later reader to trip over.
+//
+// The temp file's name is unique per call (CreateTemp, mirroring
+// WriteBlob's own pattern below) rather than a fixed path+".tmp" suffix.
+// Two concurrent writers targeting the SAME destination path are
+// possible here — DownloadPlaylist calls SavePlaylist/
+// SavePlaylistURLIndex directly on the caller's own goroutine (not
+// serialized through the single-worker capture queue the way per-item
+// SaveItem calls are), and the command gate's dedupe only collapses
+// byte-identical arguments, so two overlapping downloadPlaylist calls
+// for the same playlist id whose raw JSON differs slightly (e.g. a
+// refreshed feed payload) are not guaranteed to be serialized upstream.
+// A fixed shared temp name would let one writer's in-progress bytes be
+// clobbered by the other before either rename ran, or let one rename
+// fail after the first already moved the shared temp file out from
+// under it. A unique-per-call temp name sidesteps that entirely: POSIX
+// rename onto an existing destination is atomic, so two independent
+// renames targeting the same path simply race harmlessly — whichever
+// runs last wins outright with its own fully-written content, never a
+// mix of both, and never a missing destination file in between.
+//
+// Trade-off accepted deliberately: unlike the old fixed path+".tmp"
+// name (which the NEXT SaveItem/SavePlaylist call for that same path
+// would simply overwrite), a process killed between CreateTemp and
+// Rename now leaves a uniquely-named orphan that nothing ever reclaims
+// automatically — records are tiny hand-written JSON, not the
+// gigabyte-scale blobs SweepIncompleteBlobs exists for, so this is
+// negligible, bounded cruft rather than the unbounded disk-accounting
+// leak that motivated that startup sweep for blobs/*.tmp.
 func (s *fsStore) writeFileAtomic(dir, path string, data []byte, perm go_os.FileMode) error {
 	if err := s.os.MkdirAll(dir, dirPerm); err != nil {
 		return fmt.Errorf("offline cache: create dir %s: %w", dir, err)
 	}
-	tmp := path + ".tmp"
-	if err := s.os.WriteFile(tmp, data, perm); err != nil {
+	tmp, err := s.os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("offline cache: create temp file for %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = s.os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("offline cache: chmod temp file for %s: %w", path, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("offline cache: write %s: %w", path, err)
 	}
-	if err := s.os.Rename(tmp, path); err != nil {
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("offline cache: finalize temp file for %s: %w", path, err)
+	}
+	if err := s.os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("offline cache: finalize %s: %w", path, err)
 	}
+	renamed = true
 	return nil
 }
 
@@ -205,9 +253,12 @@ func (s *fsStore) WriteBlob(r io.Reader, maxBytes int64) (string, error) {
 
 	// The final content-addressed name is only known after r has been
 	// fully hashed, so the stream lands in a uniquely-named temp file
-	// first (CreateTemp, not writeFileAtomic's fixed ".tmp" suffix,
-	// since a fixed name would collide if this were ever called
-	// concurrently) and gets renamed into place below.
+	// first (CreateTemp — the same unique-per-call pattern
+	// writeFileAtomic below now also uses, for the same reason: a fixed
+	// name would collide if this were ever called concurrently, which
+	// it can be — dedup means WriteBlob can be reached from multiple
+	// items/playlists referencing identical content) and gets renamed
+	// into place below.
 	tmp, err := s.os.CreateTemp(s.blobsDir(), "incoming-*.tmp")
 	if err != nil {
 		return "", fmt.Errorf("offline cache: create temp blob: %w", err)

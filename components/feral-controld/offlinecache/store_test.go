@@ -11,9 +11,11 @@ package offlinecache_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -241,6 +243,66 @@ func TestStore_PlaylistURLIndex_DoesNotLeakIntoListPlaylistIDs(t *testing.T) {
 	ids, err := store.ListPlaylistIDs()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"playlist-1"}, ids)
+}
+
+// TestStore_SavePlaylist_ConcurrentDifferentPayloadsNeverCorrupts is the
+// regression test for writeFileAtomic's unique-per-call temp file name:
+// DownloadPlaylist calls SavePlaylist directly on the caller's own
+// goroutine (not serialized through the single-worker capture queue the
+// way per-item SaveItem calls are), and the command gate's dedupe only
+// collapses byte-identical arguments, so two overlapping
+// downloadPlaylist calls for the same playlist id with slightly
+// different raw JSON (e.g. a refreshed feed payload) can race here.
+// Before writeFileAtomic used CreateTemp, every writer shared the exact
+// same fixed path+".tmp" name, so one writer's WriteFile could
+// interleave with or be clobbered by another's before either renamed —
+// this drives many concurrent, sizeable, DISTINCT payloads at the same
+// playlist id and asserts the record that ends up on disk is always
+// byte-for-byte exactly one writer's own payload, never a torn mixture
+// of two.
+func TestStore_SavePlaylist_ConcurrentDifferentPayloadsNeverCorrupts(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	const n = 30
+	payloads := make([]json.RawMessage, n)
+	for i := 0; i < n; i++ {
+		// A sizeable payload per writer widens the write's time-in-flight
+		// window — this is what actually made the pre-fix shared-tmp-name
+		// race reliably reproducible under -race, rather than only
+		// theoretically possible with a tiny payload that writes near-
+		// instantaneously.
+		var items strings.Builder
+		for j := 0; j < 500; j++ {
+			if j > 0 {
+				items.WriteByte(',')
+			}
+			items.WriteString(fmt.Sprintf(`{"id":"item-%d-%d","source":"https://example.com/%d/%d"}`, i, j, i, j))
+		}
+		payloads[i] = json.RawMessage(fmt.Sprintf(`{"id":"playlist-1","marker":%d,"items":[%s]}`, i, items.String()))
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(payload json.RawMessage) {
+			defer wg.Done()
+			assert.NoError(t, store.SavePlaylist("playlist-1", payload))
+		}(payloads[i])
+	}
+	wg.Wait()
+
+	loaded, err := store.LoadPlaylist("playlist-1")
+	require.NoError(t, err, "the record on disk must never be left as a corrupted mix of two concurrent writers' bytes")
+
+	matchedWriter := -1
+	for i, p := range payloads {
+		if string(loaded) == string(p) {
+			matchedWriter = i
+			break
+		}
+	}
+	assert.GreaterOrEqual(t, matchedWriter, 0,
+		"loaded playlist record must exactly match exactly one writer's own payload, never a torn mixture of two: got %d bytes", len(loaded))
 }
 
 func TestStore_GC_RemovesOnlyOrphanBlobs(t *testing.T) {
