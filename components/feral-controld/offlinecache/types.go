@@ -10,6 +10,7 @@ package offlinecache
 
 import (
 	go_http "net/http"
+	"strings"
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -55,12 +56,52 @@ type Resource struct {
 	// exactly what is kept and why. nil/empty for a response that had
 	// none of them (the common case for a plain same-origin asset).
 	Headers map[string]string `json:"headers,omitempty"`
+	// Method is the HTTP method of the request that produced this
+	// response. Empty means GET: capture only ever recorded GET
+	// requests before this field existed, and GET is by far the common
+	// case for the static assets software artworks load, so leaving it
+	// unset for GET keeps the on-disk record free of redundant text
+	// (see resourceKey/EffectiveMethod for the empty-means-GET
+	// convention capture and replay both share).
+	//
+	// Method (not just URL) is part of this resource's identity —
+	// resourceKey combines both into the map key both capture.go's
+	// tracker and replay.go's replayer index by. Without it, an XHR/
+	// fetch() CORS preflight (OPTIONS) and its paired actual request
+	// (POST/PUT/...) to the identical URL would collide on a single
+	// map entry, and a captured GET response could later be replayed
+	// for an unrelated POST/DELETE/... request to the same URL — wrong
+	// bytes served for a method-sensitive endpoint while
+	// Coverage.Complete still claimed the item was faithfully cached.
+	Method string `json:"method,omitempty"`
 }
 
 // IsRedirect reports whether replay must fulfill this resource with a
 // Location header rather than a cached body.
 func (r Resource) IsRedirect() bool {
 	return r.Status >= 300 && r.Status < 400 && r.RedirectTo != ""
+}
+
+// EffectiveMethod returns r.Method, defaulting to GET — see Method's doc
+// for why an empty value has always meant GET.
+func (r Resource) EffectiveMethod() string {
+	if r.Method == "" {
+		return go_http.MethodGet
+	}
+	return r.Method
+}
+
+// resourceKey is the identity capture.go's tracker and replay.go's
+// replayer both index resources by: method+URL, never URL alone (see
+// Resource.Method's doc for the collision/mis-replay this closes).
+// Normalizing the empty method to GET here, in one place, is what lets
+// every pre-existing GET-only Resource (on disk or in a test fixture that
+// predates this field) keep matching without a migration.
+func resourceKey(method, url string) string {
+	if method == "" {
+		method = go_http.MethodGet
+	}
+	return strings.ToUpper(method) + " " + url
 }
 
 // replayableResponseHeaders is the allowlist of CDP response headers
@@ -135,7 +176,8 @@ func filterReplayableHeaders(raw map[string]string) map[string]string {
 // ReasonCSPBlocked is the one Coverage.Reason token capture.go emits as a
 // fixed string; every other reason capture.go records
 // (fetch_failed:<url>, loading_failed(<errorText>):<url>,
-// unresolved_at_deadline:<url>) is free-text with the offending URL
+// unresolved_at_deadline:<url>, http_error(<status>):<url>,
+// unsupported_method(<method>):<url>) is free-text with the offending URL
 // embedded, which is why Coverage.Reason itself is a plain string rather
 // than an enum — see docs/controld-inbound-controller-messages.md's
 // getOfflineCacheStatus section for the documented wire format clients
@@ -172,7 +214,13 @@ type ItemRecord struct {
 	CapturedAt time.Time  `json:"capturedAt"`
 }
 
-// ResourceByURL returns the captured resource for url, if any.
+// ResourceByURL returns the captured resource for url, if any. Method-
+// oblivious (unlike resourceKey, which capture.go/replay.go actually
+// index by): if url was captured under more than one method, this
+// returns whichever one appears first in Resources. Test-only helper
+// today — production replay/capture matching always goes through
+// resourceKey instead, precisely because that ambiguity would be a
+// correctness bug there.
 func (r *ItemRecord) ResourceByURL(url string) (Resource, bool) {
 	for _, res := range r.Resources {
 		if res.URL == url {

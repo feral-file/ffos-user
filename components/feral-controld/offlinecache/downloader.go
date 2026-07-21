@@ -68,10 +68,20 @@ type downloader struct {
 
 	sem chan struct{} // capacity 1: the single-job-at-a-time gate
 
-	mu             sync.Mutex
-	cmd            wrapper.ExecCmd
-	procCancel     context.CancelFunc
-	procDone       chan struct{} // closed once the reaper goroutine's cmd.Wait() returns
+	mu         sync.Mutex
+	cmd        wrapper.ExecCmd
+	procCancel context.CancelFunc
+	// procDone identifies the CURRENT process generation and is closed
+	// once that generation's reaper goroutine (start()'s go func) has
+	// observed cmd.Wait() return. Unlike cmd/procCancel, stopLocked does
+	// NOT clear this: it deliberately stays non-nil for the whole window
+	// between "kill signal sent" and "reaped", so Acquire can tell a
+	// process is still exiting (even though cmd==nil already) and wait
+	// for it instead of racing a replacement onto the same fixed debug
+	// port / user-data-dir lock (see Acquire's doc). Only the matching
+	// reaper clears it, and only if no newer generation has since
+	// replaced it — see reapCompleted's doc.
+	procDone       chan struct{}
 	teardownCancel context.CancelFunc
 	closed         bool
 }
@@ -106,6 +116,14 @@ func (d *downloader) endpoint() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", d.debugPort)
 }
 
+// Acquire reserves the capture slot and ensures Chromium is running. If a
+// prior generation was killed (Close/idle-teardown) but has not finished
+// being reaped yet, Acquire waits for that reap before starting a
+// replacement: starting a new Chromium on the same fixed debug port and
+// user-data-dir while the old one still holds them (socket/profile lock)
+// would make the new process fail to bind or corrupt the profile lock —
+// a race that is otherwise easy to hit because stopLocked's kill is
+// asynchronous (cmd.Wait() completing is what actually frees them).
 func (d *downloader) Acquire(ctx context.Context) (string, error) {
 	select {
 	case d.sem <- struct{}{}:
@@ -113,26 +131,42 @@ func (d *downloader) Acquire(ctx context.Context) (string, error) {
 		return "", ctx.Err()
 	}
 
-	d.mu.Lock()
-	if d.closed {
-		d.mu.Unlock()
-		<-d.sem
-		return "", ErrDownloaderClosed
-	}
-	// A pending idle-teardown from the previous job's Release is now moot:
-	// this Acquire reuses (or restarts) the process instead.
-	if d.teardownCancel != nil {
-		d.teardownCancel()
-		d.teardownCancel = nil
-	}
-	alreadyRunning := d.cmd != nil
-	d.mu.Unlock()
-
-	if !alreadyRunning {
-		if err := d.start(ctx); err != nil {
+	for {
+		d.mu.Lock()
+		if d.closed {
+			d.mu.Unlock()
 			<-d.sem
-			return "", err
+			return "", ErrDownloaderClosed
 		}
+		// A pending idle-teardown from the previous job's Release is now
+		// moot: this Acquire reuses (or restarts) the process instead.
+		if d.teardownCancel != nil {
+			d.teardownCancel()
+			d.teardownCancel = nil
+		}
+		if d.cmd != nil {
+			// A live generation is already running; reuse it.
+			d.mu.Unlock()
+			return d.endpoint(), nil
+		}
+		waitDone := d.procDone
+		d.mu.Unlock()
+
+		if waitDone == nil {
+			break // nothing running and nothing still exiting: start fresh
+		}
+		select {
+		case <-waitDone:
+			continue // prior generation fully reaped; re-check state
+		case <-ctx.Done():
+			<-d.sem
+			return "", ctx.Err()
+		}
+	}
+
+	if err := d.start(ctx); err != nil {
+		<-d.sem
+		return "", err
 	}
 	return d.endpoint(), nil
 }
@@ -233,21 +267,17 @@ func (d *downloader) start(ctx context.Context) error {
 
 	// CommandContext ties the process to procCtx: canceling it (stopLocked)
 	// sends the kill signal. Wait reaps the process so it does not remain
-	// a zombie, and clears state once it exits by any means (teardown,
-	// crash, or the daemon's own shutdown canceling ctx upstream). done is
-	// closed last so Close/scheduleTeardown can synchronously wait for the
-	// process to actually be gone instead of returning while it is still
-	// exiting in the background.
+	// a zombie; reapCompleted clears state once it exits by any means
+	// (teardown, crash, or the daemon's own shutdown canceling ctx
+	// upstream) and closes done last, so Close/scheduleTeardown/Acquire
+	// can synchronously wait for the process to actually be gone instead
+	// of proceeding while it is still exiting in the background.
 	go func() {
 		waitErr := cmd.Wait()
-		d.mu.Lock()
-		d.cmd = nil
-		d.procCancel = nil
-		d.mu.Unlock()
 		if waitErr != nil {
 			d.logger.Debug("offline cache: headless chromium process exited", zap.Error(waitErr))
 		}
-		close(done)
+		d.reapCompleted(done)
 	}()
 
 	if err := d.waitForDebugEndpoint(ctx); err != nil {
@@ -293,10 +323,18 @@ func (d *downloader) probeDebugEndpoint(ctx context.Context) bool {
 }
 
 // stopLocked cancels the process context (killing Chromium via
-// CommandContext's contract), clears process state, and returns the
-// channel the caller should wait on (after unlocking d.mu) to know the
-// reaper goroutine has actually finished cmd.Wait(). Callers must hold
-// d.mu; it is safe to call when no process is running (returns nil).
+// CommandContext's contract) and returns the channel the caller should
+// wait on (after unlocking d.mu) to know the reaper goroutine has
+// actually finished cmd.Wait(). Callers must hold d.mu; it is safe to
+// call when no process is running (returns nil).
+//
+// It clears cmd/procCancel immediately (nothing needs them once the
+// kill signal is sent) but deliberately leaves procDone set until
+// reapCompleted runs: Acquire uses "procDone != nil" to detect that a
+// process is still in the process of exiting (even though cmd is
+// already nil) and waits for it rather than starting a replacement that
+// would race the old process for the same debug port / user-data-dir
+// lock.
 func (d *downloader) stopLocked() <-chan struct{} {
 	if d.procCancel != nil {
 		d.procCancel()
@@ -304,8 +342,33 @@ func (d *downloader) stopLocked() <-chan struct{} {
 	done := d.procDone
 	d.cmd = nil
 	d.procCancel = nil
-	d.procDone = nil
 	return done
+}
+
+// reapCompleted runs once a process generation's cmd.Wait() has actually
+// returned (see start()'s go func). The d.procDone==done identity check
+// matters because this can be called after a NEWER generation has
+// already replaced d.cmd/d.procDone/d.procCancel — e.g. this process
+// crashed on its own after stopLocked had already run for an unrelated
+// reason and a subsequent Acquire started a replacement once THIS
+// generation's own reap (a still-earlier one, in a longer chain) had
+// already completed and cleared state. Without the check, a late-waking
+// reaper would blindly nil out a NEWER generation's live cmd/procCancel,
+// making the downloader think nothing is running while a Chromium
+// process it still owns is actually alive — leaking it and
+// desynchronizing Acquire's "is something running" decision from
+// reality. done is closed last (after the possible clear), so a waiter
+// blocked on it always observes the post-clear-or-not state once it
+// wakes.
+func (d *downloader) reapCompleted(done chan struct{}) {
+	d.mu.Lock()
+	if d.procDone == done {
+		d.cmd = nil
+		d.procCancel = nil
+		d.procDone = nil
+	}
+	d.mu.Unlock()
+	close(done)
 }
 
 func (d *downloader) Close() error {

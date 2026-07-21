@@ -35,12 +35,15 @@ const captureWindowDefault = 20 * time.Second
 // staticserver.go) and pointlessly re-transfers bytes controld's own
 // HTTP client can fetch directly and stream to disk. Instead, capture uses
 // CDP Network events (requestWillBeSent/responseReceived/loadingFailed)
-// only to learn WHICH URLs the page actually requested, their status, and
-// redirect targets, then re-fetches each successful URL's bytes with a
-// plain HTTP GET. This is correct for the static JS/CSS/HTML/image/video
-// assets software artworks are built from; it is NOT correct for
-// cookie-gated or per-request-dynamic resources. That trade-off is
-// accepted here and documented in offline-artwork-capture.md.
+// only to learn WHICH URLs the page actually requested, their method,
+// status, and redirect targets, then re-fetches each successful
+// GET/HEAD/OPTIONS resource's bytes with the same method (see
+// safeIdempotentMethods' doc for why other methods are deliberately left
+// unfetched rather than blindly re-issued). This is correct for the
+// static JS/CSS/HTML/image/video assets software artworks are built
+// from; it is NOT correct for cookie-gated or per-request-dynamic
+// resources. That trade-off is accepted here and documented in
+// offline-artwork-capture.md.
 //
 //go:generate mockgen -source=capture.go -destination=../mocks/offlinecache_capture.go -package=mocks -mock_names=Capturer=MockOfflineCacheCapturer
 type Capturer interface {
@@ -175,23 +178,70 @@ func (c *capturer) Close() error {
 	return c.downloader.Close()
 }
 
+// safeIdempotentMethods are the HTTP methods resolveResources may safely
+// re-issue (via fetchAndStoreBody) purely to read a response's bytes.
+// GET/HEAD are spec-defined safe methods; OPTIONS is included because a
+// CORS preflight is spec-defined safe too and never carries a
+// page-visible body, so replaying it faithfully needs its (usually
+// empty) body and CORS headers captured just like any other resource.
+// Everything else (POST/PUT/PATCH/DELETE, ...) is deliberately left
+// unfetched — see resolveResources' unsupported_method branch for why
+// re-issuing one of those here would be unsafe.
+var safeIdempotentMethods = map[string]bool{
+	go_http.MethodGet:     true,
+	go_http.MethodHead:    true,
+	go_http.MethodOptions: true,
+}
+
 // resolveResources turns the tracker's observed network activity into the
 // final Resource list, fetching bytes for every successful (2xx) resource
-// and building the Coverage summary from anything that failed.
+// captured via a safe method and building the Coverage summary from
+// anything that failed, returned a non-2xx/non-redirect status, or used a
+// method resolveResources will not re-issue.
 func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker) ([]Resource, Coverage) {
-	urls, resources, failures, pendingURLs := tracker.snapshot()
+	keys, resources, failures, pendingURLs := tracker.snapshot()
 
-	result := make([]Resource, 0, len(urls))
+	result := make([]Resource, 0, len(keys))
 	var failureReasons []string
-	for _, u := range urls {
-		res, ok := resources[u]
+	for _, key := range keys {
+		res, ok := resources[key]
 		if !ok {
 			continue
 		}
-		if res.Status >= go_http.StatusOK && res.Status < go_http.StatusMultipleChoices && res.SHA256 == "" {
-			hash, fetchErr := c.fetchAndStoreBody(ctx, u)
+		method := res.EffectiveMethod()
+		switch {
+		case res.IsRedirect():
+			// No body to fetch — replay fulfills this from
+			// RedirectTo/Status alone (see replay.go's onRequestPaused),
+			// and the redirect itself was only ever observed, never
+			// re-issued, so method safety does not apply here.
+		case res.Status < go_http.StatusOK || res.Status >= go_http.StatusMultipleChoices:
+			// A non-2xx, non-redirect response (4xx/5xx, or a 304 the
+			// page's own request observed via HTTP cache revalidation)
+			// has no faithful replay short of storing the exact error
+			// body/status the live origin returned at capture time, and
+			// fetchAndStoreBody's unconditional re-GET cannot reproduce
+			// a conditional-request 304. Marking it incomplete here (an
+			// honest miss on replay, per onRequestPaused's default case
+			// below) is preferred over silently reporting Complete=true
+			// for a resource that would never actually serve as this
+			// status offline.
+			failureReasons = append(failureReasons, fmt.Sprintf("http_error(%d):%s", res.Status, res.URL))
+		case !safeIdempotentMethods[method]:
+			// A successful (2xx) but unsafe-method (POST/PUT/DELETE/...)
+			// request: re-issuing it here to read its bytes risks
+			// triggering the exact side effect (a mutation, an
+			// analytics/provenance call) the original request caused,
+			// which capture must never do just to build an offline
+			// cache. Left unfetched and reported incomplete instead —
+			// replay treats it as an honest miss (see onRequestPaused's
+			// default case), never as "ready" bytes for the wrong
+			// method.
+			failureReasons = append(failureReasons, fmt.Sprintf("unsupported_method(%s):%s", method, res.URL))
+		case res.SHA256 == "":
+			hash, fetchErr := c.fetchAndStoreBody(ctx, res.URL, method)
 			if fetchErr != nil {
-				failureReasons = append(failureReasons, fmt.Sprintf("fetch_failed:%s", u))
+				failureReasons = append(failureReasons, fmt.Sprintf("fetch_failed:%s", res.URL))
 			} else {
 				res.SHA256 = hash
 			}
@@ -220,8 +270,8 @@ func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker
 	return result, coverage
 }
 
-func (c *capturer) fetchAndStoreBody(ctx context.Context, url string) (string, error) {
-	req, err := c.httpClient.NewRequest(go_http.MethodGet, url, nil)
+func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string) (string, error) {
+	req, err := c.httpClient.NewRequest(method, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -252,7 +302,8 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		var evt struct {
 			RequestID string `json:"requestId"`
 			Request   struct {
-				URL string `json:"url"`
+				URL    string `json:"url"`
+				Method string `json:"method"`
 			} `json:"request"`
 			RedirectResponse *struct {
 				URL     string            `json:"url"`
@@ -274,10 +325,17 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		// redirect chain, not only the final response, so replay must be
 		// able to serve the same allowlisted headers back on the
 		// redirect fulfill itself (see replay.go's onRequestPaused).
+		//
+		// The redirected-from hop's method must be read from the tracker
+		// BEFORE trackRequest below overwrites it with this event's own
+		// (post-redirect) method: redirectResponse describes the PREVIOUS
+		// hop's response, tracked by the SAME requestId at the time of
+		// its own earlier requestWillBeSent event, not this one's.
 		if evt.RedirectResponse != nil {
-			tracker.recordResource(evt.RedirectResponse.URL, evt.RedirectResponse.Status, "", evt.Request.URL, filterReplayableHeaders(evt.RedirectResponse.Headers))
+			redirectMethod := tracker.methodForRequest(evt.RequestID)
+			tracker.recordResource(evt.RedirectResponse.URL, evt.RedirectResponse.Status, "", evt.Request.URL, filterReplayableHeaders(evt.RedirectResponse.Headers), redirectMethod)
 		}
-		tracker.trackRequest(evt.RequestID, evt.Request.URL)
+		tracker.trackRequest(evt.RequestID, evt.Request.URL, evt.Request.Method)
 	})
 
 	session.On("Network.responseReceived", func(params json.RawMessage) {
@@ -294,7 +352,11 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 			c.logger.Debug("offline cache capture: failed to parse responseReceived", zap.Error(err))
 			return
 		}
-		tracker.recordResource(evt.Response.URL, evt.Response.Status, evt.Response.MimeType, "", filterReplayableHeaders(evt.Response.Headers))
+		// The request's method was tracked by this same requestId's
+		// requestWillBeSent event, which always precedes its terminal
+		// responseReceived/loadingFailed.
+		method := tracker.methodForRequest(evt.RequestID)
+		tracker.recordResource(evt.Response.URL, evt.Response.Status, evt.Response.MimeType, "", filterReplayableHeaders(evt.Response.Headers), method)
 		tracker.resolveRequest(evt.RequestID)
 	})
 
@@ -334,9 +396,17 @@ type captureTracker struct {
 	// Network.loadingFailed (which only carries the id) can be attributed
 	// to a URL recorded by an earlier requestWillBeSent.
 	requestURL map[string]string
-	resources  map[string]Resource
-	order      []string // URLs in first-seen order, for deterministic output
-	failures   map[string]string
+	// requestMethod mirrors requestURL, tracking each requestId's current
+	// hop's HTTP method — needed to attribute the right method to a
+	// redirectResponse (which describes the PREVIOUS hop) and to a
+	// responseReceived/loadingFailed event (which only carries the id),
+	// since neither event otherwise repeats the method.
+	requestMethod map[string]string
+	// resources is keyed by resourceKey(method, url), not url alone — see
+	// Resource.Method's doc for why method is part of this identity.
+	resources map[string]Resource
+	order     []string // resourceKeys in first-seen order, for deterministic output
+	failures  map[string]string
 	// pending holds every requestId seen via Network.requestWillBeSent
 	// that has not yet reached a terminal event (Network.responseReceived
 	// or Network.loadingFailed). A request still pending when the capture
@@ -349,10 +419,11 @@ type captureTracker struct {
 
 func newCaptureTracker() *captureTracker {
 	return &captureTracker{
-		requestURL: make(map[string]string),
-		resources:  make(map[string]Resource),
-		failures:   make(map[string]string),
-		pending:    make(map[string]struct{}),
+		requestURL:    make(map[string]string),
+		requestMethod: make(map[string]string),
+		resources:     make(map[string]Resource),
+		failures:      make(map[string]string),
+		pending:       make(map[string]struct{}),
 	}
 }
 
@@ -365,16 +436,24 @@ func isIgnoredCaptureURL(url string) bool {
 	return strings.HasPrefix(url, "blob:") || strings.HasPrefix(url, "data:")
 }
 
-func (t *captureTracker) recordResource(url string, status int, contentType, redirectTo string, headers map[string]string) {
+func (t *captureTracker) recordResource(url string, status int, contentType, redirectTo string, headers map[string]string, method string) {
 	if url == "" || isIgnoredCaptureURL(url) {
 		return
 	}
+	key := resourceKey(method, url)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if _, exists := t.resources[url]; !exists {
-		t.order = append(t.order, url)
+	if _, exists := t.resources[key]; !exists {
+		t.order = append(t.order, key)
 	}
-	t.resources[url] = Resource{URL: url, Status: status, ContentType: contentType, RedirectTo: redirectTo, Headers: headers}
+	// Method is stored as "" for GET (see Resource.Method's doc), never
+	// the resourceKey's normalized/uppercased form, so the on-disk record
+	// stays free of redundant text for the overwhelmingly common case.
+	storedMethod := ""
+	if normalized := strings.ToUpper(method); normalized != "" && normalized != go_http.MethodGet {
+		storedMethod = normalized
+	}
+	t.resources[key] = Resource{URL: url, Status: status, ContentType: contentType, RedirectTo: redirectTo, Headers: headers, Method: storedMethod}
 }
 
 func (t *captureTracker) recordFailure(url, reason string) {
@@ -397,10 +476,11 @@ func (t *captureTracker) recordFailure(url, reason string) {
 // previous hop's responseReceived, so this re-marking is what keeps the
 // invariant "pending means the CURRENT url has no terminal event yet" true
 // throughout the chain.
-func (t *captureTracker) trackRequest(requestID, url string) {
+func (t *captureTracker) trackRequest(requestID, url, method string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.requestURL[requestID] = url
+	t.requestMethod[requestID] = method
 	t.pending[requestID] = struct{}{}
 }
 
@@ -408,6 +488,15 @@ func (t *captureTracker) urlForRequest(requestID string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.requestURL[requestID]
+}
+
+// methodForRequest returns the method most recently tracked for
+// requestID — see requestMethod's doc for why callers must read this
+// before a same-event trackRequest call would overwrite it.
+func (t *captureTracker) methodForRequest(requestID string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.requestMethod[requestID]
 }
 
 // resolveRequest marks requestID as having reached a terminal event
@@ -420,17 +509,20 @@ func (t *captureTracker) resolveRequest(requestID string) {
 }
 
 // snapshot returns copies of the tracker's state for lock-free use after
-// the observation window closes. pendingURLs is sorted for deterministic
-// Coverage.Reason ordering (map iteration order is not); it excludes
-// blob:/data: URLs for the same reason recordResource/recordFailure do —
-// those schemes never reach a Network terminal event since they resolve
-// in-page, so treating one as "still pending" would be a permanent false
-// incompleteness on every capture rather than a real signal.
+// the observation window closes. The first return value is resourceKeys
+// (not plain URLs — see resources' doc) in first-seen order, for
+// deterministic Resource ordering in the final record. pendingURLs is
+// sorted for deterministic Coverage.Reason ordering (map iteration order
+// is not); it excludes blob:/data: URLs for the same reason
+// recordResource/recordFailure do — those schemes never reach a Network
+// terminal event since they resolve in-page, so treating one as "still
+// pending" would be a permanent false incompleteness on every capture
+// rather than a real signal.
 func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]string, []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	urls := append([]string{}, t.order...)
+	resourceKeys := append([]string{}, t.order...)
 	resources := make(map[string]Resource, len(t.resources))
 	for k, v := range t.resources {
 		resources[k] = v
@@ -446,5 +538,5 @@ func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]s
 		}
 	}
 	sort.Strings(pendingURLs)
-	return urls, resources, failures, pendingURLs
+	return resourceKeys, resources, failures, pendingURLs
 }

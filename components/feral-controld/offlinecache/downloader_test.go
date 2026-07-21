@@ -225,6 +225,85 @@ func TestDownloader_Close_TearsDownAndRejectsFurtherAcquire(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrDownloaderClosed)
 }
 
+// TestDownloader_Acquire_WaitsForPriorGenerationReapBeforeStartingReplacement
+// pins the fix for a port/profile-lock race: once stopLocked (idle
+// teardown here) has sent the kill signal and cleared cmd, a concurrent
+// Acquire must not start a replacement Chromium on the same fixed
+// --remote-debugging-port/--user-data-dir until the prior generation's
+// cmd.Wait() has actually returned. gen1's Wait() is deliberately held
+// open (independent of its context's cancellation) so the test can pin
+// exactly that window.
+func TestDownloader_Acquire_WaitsForPriorGenerationReapBeforeStartingReplacement(t *testing.T) {
+	ts := setupDownloader(t, 20*time.Millisecond)
+	defer ts.ctrl.Finish()
+	defer func() { _ = ts.downloader.Close() }()
+
+	releaseGen1 := make(chan struct{})
+	gen1Cmd := mocks.NewMockExecCmd(ts.ctrl)
+	gen1Cmd.EXPECT().Start().Return(nil).Times(1)
+	gen1Cmd.EXPECT().Wait().DoAndReturn(func() error {
+		<-releaseGen1
+		return nil
+	}).Times(1)
+
+	var gen2Ctx context.Context
+	gen2Cmd := mocks.NewMockExecCmd(ts.ctrl)
+	gen2Cmd.EXPECT().Start().Return(nil).Times(1)
+	gen2Cmd.EXPECT().Wait().DoAndReturn(func() error {
+		<-gen2Ctx.Done()
+		return context.Canceled
+	}).AnyTimes()
+
+	callCount := 0
+	ts.mockExec.EXPECT().
+		CommandContext(gomock.Any(), "/usr/bin/chromium", gomock.Any()).
+		DoAndReturn(func(ctx context.Context, name string, args ...string) wrapper.ExecCmd {
+			callCount++
+			if callCount == 1 {
+				return gen1Cmd
+			}
+			gen2Ctx = ctx
+			return gen2Cmd
+		}).Times(2)
+
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:9223/json/version", nil)
+	require.NoError(t, err)
+	ts.mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9223/json/version", nil).Return(req, nil).AnyTimes()
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("")),
+	}, nil).Times(2)
+
+	_, err = ts.downloader.Acquire(context.Background())
+	require.NoError(t, err)
+	ts.downloader.Release() // schedules idle teardown after 20ms
+
+	// Give the idle teardown time to run stopLocked (kill signal sent,
+	// cmd cleared) — gen1 is NOT yet reaped: its Wait() is still blocked
+	// on releaseGen1.
+	time.Sleep(80 * time.Millisecond)
+
+	acquireDone := make(chan struct{})
+	go func() {
+		_, err := ts.downloader.Acquire(context.Background())
+		assert.NoError(t, err)
+		close(acquireDone)
+	}()
+
+	select {
+	case <-acquireDone:
+		t.Fatal("Acquire must wait for the prior generation to be reaped before starting a replacement")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseGen1) // let gen1's Wait() return, completing the reap
+	select {
+	case <-acquireDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire did not proceed once the prior generation was reaped")
+	}
+}
+
 func TestDownloader_Acquire_ContextCanceledWhileWaitingForSlot(t *testing.T) {
 	ts := setupDownloader(t, time.Hour)
 	defer ts.ctrl.Finish()

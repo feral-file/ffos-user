@@ -1394,8 +1394,13 @@ Common error codes across this command family:
   neither `playlistUrl` nor `dp1_call` was supplied.
 - `resolve_failed`: DP1 playlist resolution failed (bad URL, fetch failure,
   malformed `dp1_call`); `retryable: true`.
-- `not_found`: the requested `itemId` was not found in the resolved playlist,
-  or the item/playlist being cleared or queried is not cached.
+- `not_found`: the requested `itemId` was not found in the resolved
+  playlist (`downloadPlaylistItem`), or the item/playlist being *cleared*
+  is not cached (`clearPlaylistItemCache`/`clearPlaylistCache`).
+  `getOfflineCacheStatus` never returns `not_found` for an unrecognized
+  `itemId` — it always answers `ok: true` with that item reported as
+  `state: "not_cached"` (see below), since querying an item that simply
+  has no cache yet is not itself an error condition.
 - `unsupported_media`: the item's source does not classify as software (see
   `classify.go`); this item can never be cached offline, so
   `retryable: false`.

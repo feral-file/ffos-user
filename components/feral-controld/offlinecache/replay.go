@@ -103,10 +103,14 @@ type replayer struct {
 
 	mu      sync.RWMutex
 	session CDPSession
-	// resources is the flat url->resource lookup for every item currently
-	// in scope, i.e. the union of each enabled item's Resources. A flat
-	// map (rather than per-item scoping) is what lets EnableForPlaylist
-	// serve a multi-item playlist correctly: nil when disabled.
+	// resources is the flat resourceKey(method,url)->resource lookup for
+	// every item currently in scope, i.e. the union of each enabled
+	// item's Resources. A flat map (rather than per-item scoping) is what
+	// lets EnableForPlaylist serve a multi-item playlist correctly: nil
+	// when disabled. Keyed by method as well as URL — see
+	// Resource.Method's doc for why a paused request must never be
+	// fulfilled from a resource captured for a different method to the
+	// same URL.
 	resources map[string]Resource
 	// mixedScope mirrors EnableForPlaylist's mixed parameter for the
 	// currently-enabled scope; read alongside resources under the same
@@ -158,7 +162,7 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixe
 			return fmt.Errorf("offline cache replay: load item %s: %w", itemID, err)
 		}
 		for _, res := range rec.Resources {
-			resources[res.URL] = res
+			resources[resourceKey(res.Method, res.URL)] = res
 		}
 	}
 
@@ -240,7 +244,8 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 	var evt struct {
 		RequestID string `json:"requestId"`
 		Request   struct {
-			URL string `json:"url"`
+			URL    string `json:"url"`
+			Method string `json:"method"`
 		} `json:"request"`
 	}
 	if err := r.json.Unmarshal(params, &evt); err != nil {
@@ -269,7 +274,10 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 
 	// Looking up a key on a nil map is safe in Go (returns zero value,
 	// ok=false), so no explicit nil-check is needed here when disabled.
-	resource, found := resources[evt.Request.URL]
+	// Keyed by method+URL, not URL alone — see resources' doc for why a
+	// paused request must only ever match a resource captured for the
+	// SAME method.
+	resource, found := resources[resourceKey(evt.Request.Method, evt.Request.URL)]
 	if !found {
 		r.handleMiss(ctx, session, evt.RequestID, mixed)
 		return

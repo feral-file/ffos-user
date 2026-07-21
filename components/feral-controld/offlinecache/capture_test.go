@@ -201,6 +201,149 @@ func TestCapturer_Capture_FiltersResponseHeadersToReplayableAllowlist(t *testing
 	}, res.Headers)
 }
 
+// TestCapturer_Capture_NonRedirectErrorStatusMarksIncomplete pins that a
+// 4xx/5xx response the page's own request observed live is not silently
+// recorded as if it were a normal successful resource: without a stored
+// body, replay would treat it as an honest miss (see replay.go's
+// onRequestPaused default case), so Coverage must say so too rather than
+// reporting Complete=true for a resource that can never faithfully
+// replay as this status offline.
+func TestCapturer_Capture_NonRedirectErrorStatusMarksIncomplete(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+	// No NewRequest/Do expectations: a non-2xx, non-redirect resource must
+	// never trigger fetchAndStoreBody's re-fetch.
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/missing.js"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://example.com/missing.js", "status": 404, "mimeType": "text/plain",
+			},
+		})
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-404", Source: "https://example.com/missing.js"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	res := rec.Resources[0]
+	assert.Equal(t, 404, res.Status)
+	assert.Empty(t, res.SHA256)
+	assert.False(t, rec.Coverage.Complete)
+	assert.Contains(t, rec.Coverage.Reason, "http_error(404):https://example.com/missing.js")
+}
+
+// TestCapturer_Capture_UnsafeMethodSuccessMarksIncompleteWithoutRefetching
+// pins two things at once: capture never re-issues a POST/PUT/DELETE/...
+// request merely to read its bytes (that would risk re-triggering the
+// exact side effect — a mutation, an analytics/provenance call — the
+// original request caused), and it does not silently claim
+// Coverage.Complete=true for a resource it chose not to fetch.
+func TestCapturer_Capture_UnsafeMethodSuccessMarksIncompleteWithoutRefetching(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+	// No NewRequest/Do expectations for the POST URL: gomock's strict
+	// mode will fail the test if fetchAndStoreBody is called for it.
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/api/report", "method": "POST"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://example.com/api/report", "status": 200, "mimeType": "application/json",
+			},
+		})
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-post", Source: "https://example.com/api/report"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	res := rec.Resources[0]
+	assert.Equal(t, "POST", res.Method)
+	assert.Equal(t, 200, res.Status)
+	assert.Empty(t, res.SHA256, "an unsafe method's bytes must never be fetched")
+	assert.False(t, rec.Coverage.Complete)
+	assert.Contains(t, rec.Coverage.Reason, "unsupported_method(POST):https://example.com/api/report")
+}
+
+// TestCapturer_Capture_CORSPreflightAndActualRequestDoNotCollide pins
+// that an OPTIONS CORS preflight and its paired actual (non-GET) request
+// to the identical URL are captured as two distinct Resource entries
+// (keyed by method, not URL alone) rather than one clobbering the other
+// — see Resource.Method's doc for the mis-replay this closes.
+func TestCapturer_Capture_CORSPreflightAndActualRequestDoNotCollide(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodOptions, "https://api.example.com/data", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusNoContent,
+		Body:       io.NopCloser(strings.NewReader("")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-preflight",
+			"request":   map[string]interface{}{"url": "https://api.example.com/data", "method": "OPTIONS"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-preflight",
+			"response": map[string]interface{}{
+				"url": "https://api.example.com/data", "status": 204,
+			},
+		})
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-actual",
+			"request":   map[string]interface{}{"url": "https://api.example.com/data", "method": "PUT"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-actual",
+			"response": map[string]interface{}{
+				"url": "https://api.example.com/data", "status": 200, "mimeType": "application/json",
+			},
+		})
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-cors-preflight", Source: "https://api.example.com/data"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 2, "the preflight and the actual request must be two distinct entries")
+	byMethod := map[string]offlinecache.Resource{}
+	for _, r := range rec.Resources {
+		byMethod[r.Method] = r
+	}
+
+	preflight := byMethod["OPTIONS"]
+	assert.Equal(t, 204, preflight.Status)
+	require.NotEmpty(t, preflight.SHA256, "OPTIONS is safe to re-issue and cache")
+
+	actual := byMethod["PUT"]
+	assert.Equal(t, 200, actual.Status)
+	assert.Empty(t, actual.SHA256, "PUT must never be re-fetched")
+
+	assert.False(t, rec.Coverage.Complete)
+	assert.Contains(t, rec.Coverage.Reason, "unsupported_method(PUT):https://api.example.com/data")
+}
+
 func TestCapturer_Capture_RedirectChain(t *testing.T) {
 	h := setupCapture(t)
 	defer h.ctrl.Finish()
@@ -254,6 +397,74 @@ func TestCapturer_Capture_RedirectChain(t *testing.T) {
 
 	final := byURL["https://example.com/lib@2.0/lib.min.js"]
 	assert.Equal(t, 200, final.Status)
+	require.NotEmpty(t, final.SHA256)
+}
+
+// TestCapturer_Capture_RedirectMethodChangeAttributesOriginalHopMethod
+// pins that the redirected-from hop's Resource.Method reflects the
+// method of ITS OWN requestWillBeSent event (the original request),
+// never the post-redirect hop's method — even when a redirect changes
+// the method (e.g. a 303 turning a POST into a GET), which is exactly
+// the ordering hazard attachHandlers' Network.requestWillBeSent doc
+// comment calls out: methodForRequest must be read for a requestId
+// BEFORE that same event's trackRequest call overwrites it.
+func TestCapturer_Capture_RedirectMethodChangeAttributesOriginalHopMethod(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://example.com/result", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("ok")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/submit", "method": "POST"},
+		})
+		// The 303 hop: request.method here is the POST-REDIRECT method
+		// (GET), which must not be mistaken for the redirected-from
+		// hop's (POST) own method.
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/result", "method": "GET"},
+			"redirectResponse": map[string]interface{}{
+				"url": "https://example.com/submit", "status": 303,
+			},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://example.com/result", "status": 200, "mimeType": "text/plain",
+			},
+		})
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-redirect-method-change", Source: "https://example.com/submit"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 2)
+	byURL := map[string]offlinecache.Resource{}
+	for _, r := range rec.Resources {
+		byURL[r.URL] = r
+	}
+
+	redirect := byURL["https://example.com/submit"]
+	assert.Equal(t, 303, redirect.Status)
+	assert.Equal(t, "https://example.com/result", redirect.RedirectTo)
+	assert.Equal(t, "POST", redirect.Method,
+		"the redirected-from hop's method must be its OWN original method, not the post-redirect hop's method")
+
+	final := byURL["https://example.com/result"]
+	assert.Equal(t, 200, final.Status)
+	assert.Empty(t, final.Method, "GET is the empty-string convention — see Resource.Method's doc")
 	require.NotEmpty(t, final.SHA256)
 }
 

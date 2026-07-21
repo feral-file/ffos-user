@@ -83,10 +83,12 @@ parsing; it always runs the code and observes.
 bounded capture window (`offlineCache.captureWindowMs`) after navigating to
 the item's `source`. For each distinct URL:
 
-- **Found on a successful response** → fetch the exact bytes via an
-  out-of-band `http.Client` request (see §4 for why not
-  `Network.getResponseBody`), hash into the blob store, record the
-  resource. The response body is streamed straight from the HTTP
+- **Found on a successful (2xx) response, captured via a safe method
+  (`GET`/`HEAD`/`OPTIONS`)** → fetch the exact bytes via an out-of-band
+  `http.Client` request using that SAME method (see §4 for why not
+  `Network.getResponseBody`, and §4.7 for why method matters at all),
+  hash into the blob store, record the resource. The response body is
+  streamed straight from the HTTP
   connection into a temp file on disk while it is hashed —
   `store.WriteBlob` never buffers a whole body in memory first — since a
   single resource can be gigabyte-scale (§4.3's 1.1 GB video) and
@@ -113,6 +115,12 @@ the item's `source`. For each distinct URL:
   distinguished from "requested and failed" in `Coverage.Reason` (as
   `loading_failed(<errorText>):<url>`, or `csp_blocked` for the CSP case in
   §4.5).
+- **Successful (2xx) but an unsafe method** (`POST`/`PUT`/`PATCH`/`DELETE`/
+  ...) → left unfetched and recorded as `unsupported_method(<method>):<url>`
+  instead. See §4.7.
+- **Non-2xx and not a valid redirect** (a 4xx/5xx, or a 304 the page's own
+  request observed via HTTP cache revalidation) → recorded as
+  `http_error(<status>):<url>`. See §4.7.
 
 `downloader.go` runs one capture job at a time and tears the headless
 Chromium down when idle — the device already carries OOM pressure from the
@@ -122,6 +130,20 @@ delegates to it, and `Service.Stop()` calls that once the worker goroutine
 has fully exited, so daemon shutdown (`main.go`) reaches this second
 Chromium process without needing its own direct handle to the downloader
 (it is private to `bootstrap.go`'s wiring).
+
+Tearing down and starting a replacement both target the SAME fixed
+`--remote-debugging-port`/`--user-data-dir`, so `Acquire` must never start
+a replacement while a prior process is still exiting: the two could
+momentarily race for that port/profile lock, and `waitForDebugEndpoint`
+could observe the OLD (dying) process's endpoint as "ready" instead of
+the new one's. `downloader.go` closes this with a generation-tracked
+`procDone` channel that `stopLocked` deliberately leaves set (only
+`cmd`/`procCancel` are cleared) for the whole window between "kill signal
+sent" and "the reaper's `cmd.Wait()` actually returned" — `Acquire` waits
+on that channel before deciding whether to start anything, and the reaper
+itself only clears shared state if no newer generation has since replaced
+it (an identity check, guarding against this goroutine waking up late and
+clobbering a replacement it knows nothing about).
 
 ## 4. Validated edge cases
 
@@ -181,7 +203,8 @@ ceiling) from a loopback `http.Server` instead, and `replay.go` redirects
 large assets to it. Because the large asset is still fully captured and
 servable (just through a different path), this alone does not mark the
 item's `Coverage.Complete` false; the capturer records incompleteness
-only for genuine failures — see §4.5's `csp_blocked` and the free-text
+only for genuine failures — see §4.5's `csp_blocked`, §4.7's
+`http_error(...)`/`unsupported_method(...)`, and the free-text
 `loading_failed(...)`/`fetch_failed:...`/`unresolved_at_deadline:...`
 reasons `capture.go` actually emits (`types.go`'s `Coverage.Reason` doc
 comment and `docs/controld-inbound-controller-messages.md`'s
@@ -252,6 +275,58 @@ small, curated allowlist of CORS/cross-origin-relevant headers
 (`Resource.Headers`, populated by `filterReplayableHeaders`) all the way
 from capture through both replay paths — see §5's `Resource.Headers` bullet
 and §6's per-path bullets for the mechanics.
+
+### 4.7 A resource's identity is method+URL, not URL alone
+
+A non-`GET`/`HEAD`/`OPTIONS` request (a `POST`/`PUT`/`PATCH`/`DELETE`
+call, e.g. an analytics beacon or a stateful API call an artwork happens
+to make) and a CORS preflight (`OPTIONS`) both share the SAME URL as
+whatever "actual" request they precede or accompany. Two correctness
+problems follow if capture and replay only ever key on the URL:
+
+1. **Cross-contamination.** If the URL is captured once as a `GET` (say,
+   because some OTHER page load hit it with `GET`) and later a `POST` to
+   the identical URL is paused during replay, a URL-only lookup would
+   serve the `GET`'s cached bytes for the `POST` — the wrong response for
+   a method-sensitive endpoint, with `Coverage.Complete` still reporting
+   the item as faithfully cached.
+2. **Collision.** An `OPTIONS` preflight response (small/empty body,
+   `Access-Control-Allow-*` headers) and its paired actual request's
+   response would overwrite each other in a URL-only map, silently
+   losing whichever one lost the race to be recorded last.
+
+`types.go`'s `Resource.Method` (empty means `GET`, the overwhelmingly
+common case, so the on-disk record stays free of redundant text) and the
+shared `resourceKey(method, url)` helper close both: `capture.go`'s
+tracker and `replay.go`'s replayer both index resources by that composite
+key, never by URL alone, and `Fetch.requestPaused`'s own `request.method`
+(not just `request.url`) is what replay matches against.
+
+This does not mean every method is captured faithfully, though.
+`resolveResources` only re-issues the byte-fetch for `GET`/`HEAD`/
+`OPTIONS` — HTTP's own safe/idempotent methods, which cannot have a
+server-side side effect from being re-issued purely to read their bytes.
+A successful (2xx) `POST`/`PUT`/`PATCH`/`DELETE`/... response is
+deliberately left unfetched and reported as `unsupported_method(<method>):
+<url>` in `Coverage.Reason` instead: re-issuing it here to inspect its
+bytes would risk re-triggering the exact side effect (a mutation, an
+analytics/provenance call) the original request caused, which capture
+must never do just to build an offline cache. On replay this resource has
+no `SHA256`, so it falls through to the normal miss path (`Fetch.
+failRequest` under `fail_closed`, or pass-through under `pass_through`/
+mixed scope) — an honest degradation rather than either a side effect or
+a silently wrong replay.
+
+A non-2xx, non-redirect response (a 4xx/5xx, or a `304` the page's own
+request observed via HTTP cache revalidation) is likewise left unfetched
+and reported as `http_error(<status>):<url>`: `fetchAndStoreBody`'s
+unconditional re-request cannot reproduce a conditional-request `304`,
+and there is no body to faithfully store for most of these short of
+capturing the exact live error response — which offline replay would
+otherwise need to fulfill from a byte-for-byte error body rather than
+just a status code. Recording it as incomplete rather than silently
+promising `Coverage.Complete=true` keeps that promise honest; replay
+treats it the same honest-miss way described above.
 
 ---
 
@@ -353,9 +428,14 @@ There is deliberately **no** top-level manifest, no separate
   body. `size` is not persisted — it derives from the blob file's own size
   on disk. Capture-time diagnostics collapse into `Coverage.{Complete,Reason}`
   (free text — `csp_blocked`, `loading_failed(<errorText>):<url>`,
-  `fetch_failed:<url>`, `unresolved_at_deadline:<url>`; see §4.3/§4.5 and
+  `fetch_failed:<url>`, `unresolved_at_deadline:<url>`, `http_error(<status>):
+  <url>`, `unsupported_method(<method>):<url>`; see §4.3/§4.5/§4.7 and
   `types.go`'s `ReasonCSPBlocked` doc comment) rather than a separate
   `failedRequests` list.
+- `Resource.Method` (omitted for `GET`, the common case) is part of this
+  resource's identity, not just a descriptive field — see §4.7 for why a
+  paused request must only ever be fulfilled from a `Resource` captured
+  for the SAME method, never matched on URL alone.
 - `Resource.Headers` (omitted entirely when empty) holds a curated
   allowlist of response headers (`types.go`'s
   `replayableResponseHeaders`): `Access-Control-Allow-{Origin,
@@ -658,8 +738,9 @@ identical cache state.
   production content (fired unconditionally by first-party code on load,
   distinct from third-party analytics); such calls are recorded as a normal
   capture miss/failure like any other unreachable-offline request rather
-  than special-cased, and artworks that degrade gracefully when it is
-  unavailable are unaffected.
+  than special-cased (if it is a `POST`/similar unsafe method, specifically
+  as `unsupported_method(<method>):<url>` — see §4.7), and artworks that
+  degrade gracefully when it is unavailable are unaffected.
 - **Headless GPU rendering path is not identical to the kiosk's.**
   `downloader.go` launches headless Chromium with GPU acceleration enabled
   (`--ignore-gpu-blocklist`/`--enable-gpu-rasterization`, no

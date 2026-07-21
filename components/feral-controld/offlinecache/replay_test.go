@@ -90,9 +90,23 @@ func awaitSend(t *testing.T, done chan map[string]interface{}) map[string]interf
 
 func requestPausedEvent(t *testing.T, requestID, url string) json.RawMessage {
 	t.Helper()
+	return requestPausedEventWithMethod(t, requestID, url, "")
+}
+
+// requestPausedEventWithMethod is requestPausedEvent with an explicit
+// method, for tests that need to pin method-sensitive matching (see
+// Resource.Method's doc). An empty method (requestPausedEvent's case)
+// omits the field entirely, matching what a plain GET fetch/CDP event
+// looks like on the wire.
+func requestPausedEventWithMethod(t *testing.T, requestID, url, method string) json.RawMessage {
+	t.Helper()
+	request := map[string]interface{}{"url": url}
+	if method != "" {
+		request["method"] = method
+	}
 	data, err := json.Marshal(map[string]interface{}{
 		"requestId": requestID,
-		"request":   map[string]interface{}{"url": url},
+		"request":   request,
 	})
 	require.NoError(t, err)
 	return data
@@ -249,6 +263,67 @@ func TestReplayer_EnableForPlaylist_NonMixedScopeMissStillFailsClosed(t *testing
 	done := ts.expectSend("Fetch.failRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/unrelated.js"))
 	awaitSend(t, done)
+}
+
+// TestReplayer_ProcessRequestPaused_MethodMismatchIsTreatedAsMiss pins
+// that a resource captured for one method (GET) is never fulfilled for a
+// paused request using a DIFFERENT method (POST) to the identical URL —
+// see Resource.Method's doc for why method is part of a resource's
+// identity, not just a descriptive field.
+func TestReplayer_ProcessRequestPaused_MethodMismatchIsTreatedAsMiss(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload") // seeded with an implicit GET Resource
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	// A GET to the exact same URL still hits, proving the cached entry is
+	// reachable at all.
+	getDone := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-get", res.URL, "GET"))
+	awaitSend(t, getDone)
+
+	// A POST to the same URL must miss (fail closed here), never be
+	// fulfilled from the GET's cached bytes.
+	postDone := ts.expectSend("Fetch.failRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-post", res.URL, "POST"))
+	awaitSend(t, postDone)
+}
+
+// TestReplayer_ProcessRequestPaused_DistinctMethodsToSameURLServeIndependently
+// pins that two Resources for the identical URL but different methods
+// (as capture.go now records for a CORS preflight/actual-request pair)
+// each replay from their own entry rather than one being lost to a map
+// collision.
+func TestReplayer_ProcessRequestPaused_DistinctMethodsToSameURLServeIndependently(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	url := "https://api.example.com/data"
+	getHash := writeBlobString(t, ts.store, "GET body")
+	optionsHash := writeBlobString(t, ts.store, "")
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		ItemID: "item-multi-method",
+		Item:   dp1playlist.PlaylistItem{ID: "item-multi-method", Source: url},
+		Entry:  url,
+		Resources: []offlinecache.Resource{
+			{URL: url, Status: 200, SHA256: getHash, ContentType: "application/json"},
+			{URL: url, Status: 204, SHA256: optionsHash, Method: "OPTIONS"},
+		},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-multi-method"))
+
+	getDone := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-get", url, "GET"))
+	getParams := awaitSend(t, getDone)
+	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("GET body")), getParams["body"])
+
+	optionsDone := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-options", url, "OPTIONS"))
+	optionsParams := awaitSend(t, optionsDone)
+	assert.EqualValues(t, 204, optionsParams["responseCode"])
 }
 
 func TestReplayer_Disable_DisablesFetchAndClearsScope(t *testing.T) {
