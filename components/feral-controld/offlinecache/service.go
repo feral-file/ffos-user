@@ -741,18 +741,29 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	s.mu.Unlock()
 	s.queue.removeItems(itemIDs)
 
+	// Every step below (each item's delete, the playlist record's own
+	// delete, and GC) still runs even if an earlier one failed — one bad
+	// item, or a GC hiccup, must not leave everything else undeleted too
+	// — but every failure is collected rather than logged-and-swallowed.
+	// store.DeleteItem already treats "record does not exist" as success
+	// (Remove-if-exists), so any error it returns here is a genuine
+	// deletion failure (permissions, I/O); reporting ok:true to the
+	// caller while that item's record (and therefore its blobs) may
+	// still be on disk would misreport what this call actually did.
+	var errs []error
 	for _, item := range playlist.Items {
 		if err := s.store.DeleteItem(item.ID); err != nil {
-			s.logger.Warn("offline cache: failed to delete playlist item, continuing",
-				zap.String("playlist_id", playlistID), zap.String("item_id", item.ID), zap.Error(err))
+			errs = append(errs, fmt.Errorf("delete item %s: %w", item.ID, err))
 		}
 	}
-
 	if err := s.store.DeletePlaylist(playlistID); err != nil {
-		return fmt.Errorf("offline cache: delete playlist %s: %w", playlistID, err)
+		errs = append(errs, fmt.Errorf("delete playlist record: %w", err))
 	}
 	if _, _, err := s.gc(); err != nil {
-		return fmt.Errorf("offline cache: GC after clearing playlist %s: %w", playlistID, err)
+		errs = append(errs, fmt.Errorf("GC: %w", err))
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("offline cache: clear playlist %s: %w", playlistID, errors.Join(errs...))
 	}
 	return nil
 }

@@ -237,6 +237,22 @@ failure alongside a CSP one keeps the more general `partial` classification,
 since a mix of failure types is closer to an ordinary incomplete capture
 than a fully broken page.
 
+### 4.6 Cross-origin resources need their CORS headers replayed, not just their bytes
+
+Some artworks load a cross-origin dependency (a CDN-hosted module script
+with `crossorigin=""`, a font, or a `fetch()`/XHR request in `cors` mode)
+whose response only carries the correct bytes/status *because* the origin
+also sent CORS headers (`Access-Control-Allow-Origin` and friends).
+Fulfilling such a request offline with the right body but only a
+`Content-Type` header — capture's original behavior — replays the bytes
+correctly but Chromium's own CORS enforcement then rejects the response
+anyway, since it has no way to tell the fulfilled response apart from a
+same-origin server that forgot to send CORS headers. The fix threads a
+small, curated allowlist of CORS/cross-origin-relevant headers
+(`Resource.Headers`, populated by `filterReplayableHeaders`) all the way
+from capture through both replay paths — see §5's `Resource.Headers` bullet
+and §6's per-path bullets for the mechanics.
+
 ---
 
 ## 5. On-disk format (simplified, no redundancy)
@@ -264,6 +280,8 @@ offline-artworks/
   "entry":   "https://host/index.html",
   "resources": [
     { "url": "https://host/app.js",  "status": 200, "sha256": "ab12…", "contentType": "application/javascript" },
+    { "url": "https://cdn.example.com/lib.js", "status": 200, "sha256": "cd34…", "contentType": "application/javascript",
+      "headers": { "Access-Control-Allow-Origin": "https://host" } },
     { "url": "https://host/mv.min.js", "status": 302, "redirectTo": "https://host/mv@1.2/mv.min.js" }
   ],
   "coverage": { "complete": true, "reason": "" },
@@ -338,6 +356,29 @@ There is deliberately **no** top-level manifest, no separate
   `fetch_failed:<url>`, `unresolved_at_deadline:<url>`; see §4.3/§4.5 and
   `types.go`'s `ReasonCSPBlocked` doc comment) rather than a separate
   `failedRequests` list.
+- `Resource.Headers` (omitted entirely when empty) holds a curated
+  allowlist of response headers (`types.go`'s
+  `replayableResponseHeaders`): `Access-Control-Allow-{Origin,
+  Credentials, Methods, Headers}`, `Access-Control-Expose-Headers`,
+  `Cross-Origin-{Resource-Policy, Embedder-Policy}`, and
+  `Timing-Allow-Origin`. These are exactly the headers Chromium's own
+  CORS/cross-origin enforcement checks against a *fetched* resource —
+  without them, a captured cross-origin module script, font, or
+  `fetch()`/XHR response could replay with the correct status and body
+  bytes yet still be rejected by the browser's own CORS check, silently
+  breaking offline an artwork that worked fine online. The allowlist
+  deliberately excludes hop-by-hop/transport headers
+  (`Content-Length`/`Content-Encoding`/`Transfer-Encoding`/`Connection`):
+  capture always re-fetches with a plain unranged GET and stores the
+  fully-decoded body (`fetchAndStoreBody`), so persisting the *original*
+  transfer's framing headers would describe a transfer that never
+  actually happens on replay. It also never persists `Set-Cookie` — doing
+  so would let an offline replay silently set stale/foreign cookies for
+  the artwork's origin. `capture.go`'s `filterReplayableHeaders` applies
+  this allowlist (case-insensitively, canonicalizing the header name) to
+  both `Network.responseReceived` and each hop's `redirectResponse`, since
+  a `cors`-mode `fetch()` CORS-checks every hop of a cross-origin redirect
+  chain, not only the final response.
 - `WriteBlob` streams into a temp file and renames it into place, the
   same atomicity pattern every other write in this store already uses,
   but two-step: the content-addressed final name is only known once the
@@ -386,6 +427,19 @@ There is deliberately **no** top-level manifest, no separate
   queue; `ClearPlaylist` checks every item in the playlist for this before
   deleting anything, so the outcome is all-or-nothing rather than leaving
   one item partially cleared.
+- `ClearPlaylist`'s deletion sweep itself (each item's `store.DeleteItem`,
+  the playlist record's own `DeletePlaylist`, and `GC()`) is best-effort
+  *per step* — one bad item, or a `GC()` hiccup, does not stop the rest
+  of the sweep from still running — but every failure along the way is
+  collected (`errors.Join`) and returned together rather than logged and
+  swallowed. This matters because `store.DeleteItem` already treats
+  "record does not exist" as success (`Remove`-if-exists), so any error
+  it does return here is a genuine deletion failure (permissions, I/O);
+  reporting `ok:true` to the caller while an item's record — and
+  therefore its blobs — may still be on disk would misreport what the
+  call actually did. `commandrouter`'s `offlineCacheErrorResponse` maps
+  the aggregated error through its generic `offline_cache_error`
+  (retryable) fallback, same as any other unclassified `Service` error.
 
 ## 6. Replay: hybrid `Fetch` interception + static-file fallback
 
@@ -422,19 +476,31 @@ On every `Fetch.requestPaused` event, keyed on the **exact original URL**
 (never a rewritten relative path — this is what makes replay work for
 absolute and cross-origin URLs without touching the artwork's own code):
 
-- **Redirect resource** → `Fetch.fulfillRequest` with the recorded status
-  and `Location` header, no body (§4.1).
+- **Redirect resource** → `Fetch.fulfillRequest` with the recorded status,
+  `Location` header, and the resource's captured `Headers` (below), no
+  body (§4.1). Headers are threaded through this redirect hop, not only
+  its eventual target, because a `cors`-mode `fetch()` CORS-checks every
+  hop of a cross-origin redirect chain.
 - **Small resource (under 200 MB)** → `Fetch.fulfillRequest` with the
-  blob's bytes read from `blobs/<sha256>` directly. `replay.go` uses a
-  200 MB threshold rather than pushing all the way to the ~400 MB
-  ceiling found in §4.3 — comfortably under it so the CDP path never gets
-  close to the actual V8 string-length limit. A stored `206` status is
-  normalized to `200` on this path — see §4.4 for why.
+  blob's bytes read from `blobs/<sha256>` directly, plus `Content-Type`
+  and any captured `Headers`. `replay.go` uses a 200 MB threshold rather
+  than pushing all the way to the ~400 MB ceiling found in §4.3 —
+  comfortably under it so the CDP path never gets close to the actual V8
+  string-length limit. A stored `206` status is normalized to `200` on
+  this path — see §4.4 for why.
 - **Large resource (200 MB or over)** → redirect the request to
   `staticserver.go`'s loopback `http.Server`
   (`offlineCache.staticServerAddr`, default `127.0.0.1:8082`), which streams
   the blob (with real `Range` support for the 206 case, §4.4) instead of
-  base64-encoding it through CDP.
+  base64-encoding it through CDP. `StaticServer.URLFor` embeds the
+  resource's captured `Headers` as repeated `h=Name=Value` query params
+  (rather than one JSON blob, to stay eyeball-legible in logs), and
+  `handleBlob` echoes them back on the actual served response — so the
+  redirect *and* the final loopback response both carry the same
+  Access-Control-* headers, matching the redirect-resource bullet above.
+  `handleBlob` re-validates each decoded header name against the same
+  allowlist as defense in depth, since this loopback endpoint has no
+  authentication of its own.
 - **Miss** (URL not in the currently-enabled scope's resource set) →
   governed by `offlineCache.missPolicy` (`MissPolicy` in `replay.go`) when
   the scope is a single item or a playlist whose every item is cached:
@@ -456,6 +522,23 @@ Replay is only enabled while a cached item is on screen:
 item IDs before/after the CDP display call, which enables `Fetch`
 interception scoped to whichever of those IDs are actually cached
 (`EnableForPlaylist` in `replay.go`) and disables it entirely when none are.
+`commandrouter`'s `displayPlaylist` handler calls `SyncPlaylist` for the
+*new* playlist **before** asking CDP to actually display it — deliberately,
+so `Fetch` interception is already scoped correctly by the time the kiosk
+starts requesting that playlist's resources, rather than racing the first
+few requests against a scope switch that has not happened yet. If the CDP
+send itself then fails, or the player rejects the command (`ok:false`),
+the kiosk never actually switched — it is still genuinely showing whatever
+it displayed before — so that early scope switch left replay pointed at a
+playlist that never loaded. `Process`'s `CMD_DISPLAY_PLAYLIST` branch
+reverts this in its own deferred failure/rejection handling by calling
+`resyncKioskReplayScopeToCurrentDisplay` (below), which re-queries the
+player's actual current status live and re-syncs scope to that instead.
+Like the clear-time resync it shares an implementation with, this revert
+is itself best-effort: if the revert's own `FetchPlayerStatus` call also
+fails, scope is simply left stale until the next periodic
+`playlist-refresher` pass corrects it — the same bounded-staleness
+trade-off already accepted for that path.
 `Replayer.Disable` only clears its local resources/scope AFTER the
 underlying `Fetch.disable` CDP call actually succeeds — if that call
 itself fails, the previous scope is left in place but with its miss
@@ -503,16 +586,26 @@ the original live-resolution error, not a confusing "no cached copy"
 error about a fallback the caller never asked for.
 
 `resolveDisplayedPlaylist` (`commandrouter/offlinecache.go`), used by
-`resyncKioskReplayScopeAfterClear` to re-sync replay scope right after a
-`clearPlaylistItemCache`/`clearPlaylistCache` call, reuses this exact same
-`loadCachedPlaylistForURL` fallback for its own `PlaylistURL` branch. An
-earlier revision resolved only via live `ProcessPlaylistURL` here, which
-meant a device that was offline and already displaying a playlist through
-the fallback above would never successfully resync scope after a clear —
-the resolve would fail every time with no cache alternative, silently
-skipping the resync (best-effort, so the clear itself still succeeded, but
-replay's Fetch-interception scope could keep stale entries for the
-just-cleared item). Sharing the same fallback here closes that gap.
+`resyncKioskReplayScopeToCurrentDisplay` to re-sync replay scope against
+whatever the player actually reports as currently displayed, reuses this
+exact same `loadCachedPlaylistForURL` fallback for its own `PlaylistURL`
+branch. An earlier revision resolved only via live `ProcessPlaylistURL`
+here, which meant a device that was offline and already displaying a
+playlist through the fallback above would never successfully resync scope
+after a clear — the resolve would fail every time with no cache
+alternative, silently skipping the resync (best-effort, so the clear
+itself still succeeded, but replay's Fetch-interception scope could keep
+stale entries for the just-cleared item). Sharing the same fallback here
+closes that gap.
+`resyncKioskReplayScopeToCurrentDisplay` has two call sites:
+`handleClearPlaylistItemCache`/`handleClearPlaylistCache` (immediately
+after a successful clear) and `Process`'s `CMD_DISPLAY_PLAYLIST` branch's
+deferred failure/rejection handling (immediately above). Both react to
+replay's scope having drifted from what the player is actually showing,
+for different reasons (a clear invalidating the currently-scoped
+resources vs. a display command that never actually took effect), so both
+resolve through the same live `FetchPlayerStatus` → `resolveDisplayedPlaylist`
+→ `SyncPlaylist` shape rather than each reimplementing it.
 
 `playlist-refresher`'s own `processPlayingPlaylist` — the periodic re-sync
 pass, and the one path `main.go`'s CDP `onConnect` hook actually drives via

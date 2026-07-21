@@ -38,8 +38,14 @@ type StaticServer interface {
 	// URLFor returns the loopback URL replay should redirect the kiosk to
 	// for sha256Hex. contentType (if known) is embedded as a query
 	// parameter and echoed back as the response's Content-Type, since the
-	// server itself has no item metadata to look it up from.
-	URLFor(sha256Hex, contentType string) string
+	// server itself has no item metadata to look it up from. headers
+	// (the captured Resource.Headers subset — see
+	// filterReplayableHeaders' doc) is embedded the same way and echoed
+	// back verbatim by handleBlob, so a large cross-origin asset served
+	// through this loopback fallback still carries the CORS headers
+	// Chromium's own enforcement checks against the FINAL response of a
+	// redirect chain.
+	URLFor(sha256Hex, contentType string, headers map[string]string) string
 	// BaseURL returns "http://<addr>" so replay.go can recognize requests
 	// aimed at this server (the follow-up request Chromium makes after a
 	// 302 replay itself issued) and let them pass through Fetch
@@ -127,15 +133,25 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (s *staticServer) URLFor(sha256Hex, contentType string) string {
+func (s *staticServer) URLFor(sha256Hex, contentType string, headers map[string]string) string {
 	u := url.URL{
 		Scheme: "http",
 		Host:   s.addr,
 		Path:   blobsRoutePrefix + sha256Hex,
 	}
+	q := url.Values{}
 	if contentType != "" {
-		q := url.Values{}
 		q.Set("ct", contentType)
+	}
+	// Each header is its own repeated "h=Name=Value" query entry (rather
+	// than one JSON-encoded blob) so the URL stays easy to eyeball in
+	// logs; url.Values.Encode() handles percent-encoding the value half,
+	// and handleBlob only ever splits on the FIRST "=" when decoding, so
+	// a "=" inside the value itself round-trips correctly.
+	for name, value := range headers {
+		q.Add("h", name+"="+value)
+	}
+	if len(q) > 0 {
 		u.RawQuery = q.Encode()
 	}
 	return u.String()
@@ -175,6 +191,18 @@ func (s *staticServer) handleBlob(w go_http.ResponseWriter, r *go_http.Request) 
 
 	if ct := r.URL.Query().Get("ct"); ct != "" {
 		w.Header().Set("Content-Type", ct)
+	}
+	// Re-validate against the same allowlist URLFor's caller (replay.go)
+	// already filtered through — defense in depth against this handler
+	// ever echoing an unexpected header if URLFor's contract is bypassed
+	// or a URL is somehow crafted by hand, since this is a bare loopback
+	// endpoint with no other authentication of its own.
+	for _, pair := range r.URL.Query()["h"] {
+		name, value, ok := strings.Cut(pair, "=")
+		if !ok || !isReplayableHeaderName(name) {
+			continue
+		}
+		w.Header().Set(name, value)
 	}
 
 	info, err := f.Stat()

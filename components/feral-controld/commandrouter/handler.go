@@ -140,12 +140,28 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			defer func() {
 				if err != nil {
 					status.RecordPlaybackFailure()
+					// SyncPlaylist below already switched replay's live
+					// Fetch-interception scope to the NEW playlist before
+					// this CDP send ran (see that call site's doc for why
+					// that ordering is required). Since the send itself
+					// failed, the kiosk never actually switched — it is
+					// still showing whatever it displayed before — so
+					// leaving scope pointed at the new playlist would
+					// misclassify the still-on-screen old playlist's own
+					// requests as misses. Re-syncing to the player's
+					// actual current status reverts that.
+					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
 					return
 				}
 				h.logger.Info("result from CDP", zap.Any("result", result))
 				if !isPlayerResponseOk(result) {
 					h.logger.Warn("Playback verification failed: player did not respond with ok")
 					status.RecordPlaybackFailure()
+					// Same rationale as the err != nil branch above: the
+					// send succeeded at the transport level but the
+					// player itself rejected the command, so it is still
+					// displaying whatever it had before.
+					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
 				}
 			}()
 			switch {

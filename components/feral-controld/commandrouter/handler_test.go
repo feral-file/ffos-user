@@ -454,6 +454,96 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 	assert.NotNil(t, result)
 }
 
+// TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplayScope
+// is the regression test pinning that SyncPlaylist's pre-CDP-send scope
+// switch to the NEW playlist is reverted when the CDP send itself fails:
+// the kiosk never actually displayed the new playlist, so replay's scope
+// must be re-synced back to whatever the player reports it is still
+// showing, rather than being left pointed at a playlist load that never
+// happened.
+func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplayScope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	newURL := "https://example.com/new.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+	}}
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, newURL, true).Return(newPlaylist, nil).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, errors.New("cdp send failed")).
+		Times(1)
+
+	oldURL := "https://example.com/old.json"
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+	}}
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &oldURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-old"}).Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": newURL},
+	})
+
+	assert.Error(t, err)
+	assert.Nil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskReplayScope
+// mirrors the CDP-send-failure regression above for the other failure
+// shape: the CDP send itself succeeds, but the player replies ok:false
+// (rejecting the command), which must revert scope the same way.
+func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskReplayScope(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	newURL := "https://example.com/new.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+	}}
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, newURL, true).Return(newPlaylist, nil).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(playerNotOkResponse(), nil).
+		Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	oldURL := "https://example.com/old.json"
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+	}}
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &oldURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-old"}).Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": newURL},
+	})
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
 // TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOffline
 // is the regression test pinning that displayPlaylist with playlistUrl
 // must be able to use the downloaded cache when offline: a playlist

@@ -348,7 +348,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 }
 
 // TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlaylist
-// pins that resyncKioskReplayScopeAfterClear is a no-op (no SyncPlaylist
+// pins that resyncKioskReplayScopeToCurrentDisplay is a no-op (no SyncPlaylist
 // call at all) when the player is not currently on a displayPlaylist
 // command — nothing to resync.
 func TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlaylist(t *testing.T) {

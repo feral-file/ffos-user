@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	go_http "net/http"
+	"sort"
 	"strings"
 	"sync"
 
@@ -276,7 +277,7 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 
 	switch {
 	case resource.IsRedirect():
-		r.fulfill(ctx, session, evt.RequestID, statusOrDefault(resource.Status, go_http.StatusFound), "", nil, resource.RedirectTo)
+		r.fulfill(ctx, session, evt.RequestID, statusOrDefault(resource.Status, go_http.StatusFound), "", nil, resource.RedirectTo, resource.Headers)
 	case resource.SHA256 != "":
 		r.fulfillFromBlob(ctx, session, evt.RequestID, resource, mixed)
 	default:
@@ -303,8 +304,13 @@ func (r *replayer) fulfillFromBlob(ctx context.Context, session CDPSession, requ
 	}
 
 	if size > largeAssetThreshold {
-		location := r.staticServer.URLFor(resource.SHA256, resource.ContentType)
-		r.fulfill(ctx, session, requestID, go_http.StatusFound, "", nil, location)
+		location := r.staticServer.URLFor(resource.SHA256, resource.ContentType, resource.Headers)
+		// The 302 fulfilled here is itself one hop of a redirect chain a
+		// cors-mode fetch() will CORS-check independently of the final
+		// static-server response (see filterReplayableHeaders' doc) —
+		// resource.Headers is threaded through both so neither hop is
+		// missing the headers Chromium's own enforcement needs.
+		r.fulfill(ctx, session, requestID, go_http.StatusFound, "", nil, location, resource.Headers)
 		return
 	}
 
@@ -315,7 +321,7 @@ func (r *replayer) fulfillFromBlob(ctx context.Context, session CDPSession, requ
 		r.handleMiss(ctx, session, requestID, mixed)
 		return
 	}
-	r.fulfill(ctx, session, requestID, inlineFulfillStatus(resource.Status), resource.ContentType, data, "")
+	r.fulfill(ctx, session, requestID, inlineFulfillStatus(resource.Status), resource.ContentType, data, "", resource.Headers)
 }
 
 // inlineFulfillStatus normalizes a captured resource's status for the
@@ -339,14 +345,30 @@ func inlineFulfillStatus(status int) int {
 // fulfill issues Fetch.fulfillRequest. body/location are mutually
 // exclusive in practice (a redirect has no body; a served asset has no
 // Location), but both are threaded through one helper to keep the CDP
-// params-building logic in a single place.
-func (r *replayer) fulfill(ctx context.Context, session CDPSession, requestID string, status int, contentType string, body []byte, location string) {
+// params-building logic in a single place. extraHeaders is the captured
+// Resource.Headers subset (see filterReplayableHeaders' doc) — carrying
+// it through here rather than only setting Content-Type/Location is what
+// lets a replayed cross-origin resource still pass Chromium's own CORS
+// enforcement.
+func (r *replayer) fulfill(ctx context.Context, session CDPSession, requestID string, status int, contentType string, body []byte, location string, extraHeaders map[string]string) {
 	var headers []map[string]interface{}
 	if contentType != "" {
 		headers = append(headers, map[string]interface{}{"name": "Content-Type", "value": contentType})
 	}
 	if location != "" {
 		headers = append(headers, map[string]interface{}{"name": "Location", "value": location})
+	}
+	// Sorted so the emitted header order (and therefore this call's CDP
+	// params) is deterministic across runs — map iteration order is not,
+	// which would otherwise make test assertions on the exact params
+	// flaky for no functional reason.
+	names := make([]string, 0, len(extraHeaders))
+	for name := range extraHeaders {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		headers = append(headers, map[string]interface{}{"name": name, "value": extraHeaders[name]})
 	}
 
 	params := map[string]interface{}{

@@ -117,7 +117,7 @@ func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[str
 	if err := h.offlineCache.ClearItem(itemID); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
-	h.resyncKioskReplayScopeAfterClear(ctx)
+	h.resyncKioskReplayScopeToCurrentDisplay(ctx)
 	return map[string]any{"ok": true, "itemId": itemID}, nil
 }
 
@@ -129,33 +129,48 @@ func (h *handler) handleClearPlaylistCache(ctx context.Context, args map[string]
 	if err := h.offlineCache.ClearPlaylist(playlistID); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
-	h.resyncKioskReplayScopeAfterClear(ctx)
+	h.resyncKioskReplayScopeToCurrentDisplay(ctx)
 	return map[string]any{"ok": true, "playlistId": playlistID}, nil
 }
 
-// resyncKioskReplayScopeAfterClear re-syncs replay's live Fetch-
-// interception scope with whichever items are still cached, immediately
-// after a successful clear. Without this, ClearItem/ClearPlaylist only
-// touch the store (see their docs) — if the item just cleared is the one
-// currently displayed, replayer's in-memory resources map keeps stale
-// entries pointing at now-deleted blobs until the next displayPlaylist
-// command or playlist-refresher's periodic pass (up to
-// refresher.PLAYLIST_REFRESH_INTERVAL later), during which every request
-// for it is a miss instead of either serving correctly or falling back to
-// the network cleanly.
+// resyncKioskReplayScopeToCurrentDisplay re-syncs replay's live Fetch-
+// interception scope with whatever the player actually reports itself as
+// currently displaying (via a live FetchPlayerStatus call, not any
+// locally-held state). It has two call sites, each reacting to a
+// different way replay's scope can drift from reality:
 //
-// Best-effort and fire-and-forget: a resync failure here must never turn a
-// successful clear into a reported error, since the clear itself already
-// fully succeeded against the store. Mirrors the same
-// FetchPlayerStatus->resolve->SyncPlaylist shape Process's
-// CMD_DISPLAY_PLAYLIST branch and playlist-refresher's own
-// processPlayingPlaylist independently implement for their own inputs
-// (RPC command arguments vs. polled player status respectively) —
-// commandrouter and playlist-refresher intentionally do not depend on each
-// other (see AGENTS.md's service-boundary guidance), so this is kept as
-// its own small instance of that shape rather than reaching across the
-// package boundary for it.
-func (h *handler) resyncKioskReplayScopeAfterClear(ctx context.Context) {
+//   - handleClearPlaylistItemCache/handleClearPlaylistCache, immediately
+//     after a successful clear. Without this, ClearItem/ClearPlaylist only
+//     touch the store (see their docs) — if the item just cleared is the
+//     one currently displayed, replayer's in-memory resources map keeps
+//     stale entries pointing at now-deleted blobs until the next
+//     displayPlaylist command or playlist-refresher's periodic pass (up to
+//     refresher.PLAYLIST_REFRESH_INTERVAL later), during which every
+//     request for it is a miss instead of either serving correctly or
+//     falling back to the network cleanly.
+//   - Process's CMD_DISPLAY_PLAYLIST branch, when the display command
+//     itself fails (CDP send error) or is rejected (player replies
+//     ok:false). That branch calls SyncPlaylist for the NEW playlist
+//     before asking CDP to display it (see that call site's own doc for
+//     why), so a failure there leaves replay's scope pointed at a
+//     playlist the player never actually switched to while the kiosk is
+//     still genuinely showing the old one. Re-querying and re-syncing to
+//     whatever the player reports right now is what reverts that
+//     mistakenly-applied new scope back to the truth.
+//
+// Both are best-effort and fire-and-forget: a resync failure here must
+// never turn an already-decided outcome (a successful clear, or an
+// already-failed/rejected display command) into something reported
+// differently to the caller, and a failure here just leaves scope stale
+// until the next periodic playlist-refresher pass — the same bounded-
+// staleness trade-off already accepted for the clear-time case. Mirrors
+// the same FetchPlayerStatus->resolve->SyncPlaylist shape playlist-
+// refresher's own processPlayingPlaylist independently implements for its
+// own input (polled player status) — commandrouter and playlist-refresher
+// intentionally do not depend on each other (see AGENTS.md's
+// service-boundary guidance), so this is kept as its own small instance
+// of that shape rather than reaching across the package boundary for it.
+func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	if h.kioskReplay == nil || h.statusPoller == nil {
 		return
 	}

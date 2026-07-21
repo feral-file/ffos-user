@@ -255,8 +255,9 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 				URL string `json:"url"`
 			} `json:"request"`
 			RedirectResponse *struct {
-				URL    string `json:"url"`
-				Status int    `json:"status"`
+				URL     string            `json:"url"`
+				Status  int               `json:"status"`
+				Headers map[string]string `json:"headers"`
 			} `json:"redirectResponse"`
 		}
 		if err := c.json.Unmarshal(params, &evt); err != nil {
@@ -267,9 +268,14 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		// status; the new URL for the same requestId is this event's
 		// request.url — capturing that pairing here is the only way to
 		// reconstruct a redirect chain, since CDP does not send a separate
-		// "final" event naming the hop that was skipped.
+		// "final" event naming the hop that was skipped. Its headers are
+		// captured too (not just the final response's): a cors-mode
+		// fetch() applies its CORS check to EVERY hop of a cross-origin
+		// redirect chain, not only the final response, so replay must be
+		// able to serve the same allowlisted headers back on the
+		// redirect fulfill itself (see replay.go's onRequestPaused).
 		if evt.RedirectResponse != nil {
-			tracker.recordResource(evt.RedirectResponse.URL, evt.RedirectResponse.Status, "", evt.Request.URL)
+			tracker.recordResource(evt.RedirectResponse.URL, evt.RedirectResponse.Status, "", evt.Request.URL, filterReplayableHeaders(evt.RedirectResponse.Headers))
 		}
 		tracker.trackRequest(evt.RequestID, evt.Request.URL)
 	})
@@ -278,16 +284,17 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		var evt struct {
 			RequestID string `json:"requestId"`
 			Response  struct {
-				URL      string `json:"url"`
-				Status   int    `json:"status"`
-				MimeType string `json:"mimeType"`
+				URL      string            `json:"url"`
+				Status   int               `json:"status"`
+				MimeType string            `json:"mimeType"`
+				Headers  map[string]string `json:"headers"`
 			} `json:"response"`
 		}
 		if err := c.json.Unmarshal(params, &evt); err != nil {
 			c.logger.Debug("offline cache capture: failed to parse responseReceived", zap.Error(err))
 			return
 		}
-		tracker.recordResource(evt.Response.URL, evt.Response.Status, evt.Response.MimeType, "")
+		tracker.recordResource(evt.Response.URL, evt.Response.Status, evt.Response.MimeType, "", filterReplayableHeaders(evt.Response.Headers))
 		tracker.resolveRequest(evt.RequestID)
 	})
 
@@ -358,7 +365,7 @@ func isIgnoredCaptureURL(url string) bool {
 	return strings.HasPrefix(url, "blob:") || strings.HasPrefix(url, "data:")
 }
 
-func (t *captureTracker) recordResource(url string, status int, contentType, redirectTo string) {
+func (t *captureTracker) recordResource(url string, status int, contentType, redirectTo string, headers map[string]string) {
 	if url == "" || isIgnoredCaptureURL(url) {
 		return
 	}
@@ -367,7 +374,7 @@ func (t *captureTracker) recordResource(url string, status int, contentType, red
 	if _, exists := t.resources[url]; !exists {
 		t.order = append(t.order, url)
 	}
-	t.resources[url] = Resource{URL: url, Status: status, ContentType: contentType, RedirectTo: redirectTo}
+	t.resources[url] = Resource{URL: url, Status: status, ContentType: contentType, RedirectTo: redirectTo, Headers: headers}
 }
 
 func (t *captureTracker) recordFailure(url, reason string) {

@@ -149,6 +149,58 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 	assert.Equal(t, rec.Resources, saved.Resources)
 }
 
+// TestCapturer_Capture_FiltersResponseHeadersToReplayableAllowlist pins
+// two things at once: a cross-origin resource's CORS-relevant headers
+// (present here in a mix of casings, since origin servers are free to
+// send any) are captured onto Resource.Headers, canonicalized; and a
+// header outside replayableResponseHeaders (Set-Cookie) is dropped
+// rather than persisted to disk.
+func TestCapturer_Capture_FiltersResponseHeadersToReplayableAllowlist(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://cdn.example.com/module.js", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("export default 1;")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://cdn.example.com/module.js"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://cdn.example.com/module.js", "status": 200, "mimeType": "application/javascript",
+				"headers": map[string]interface{}{
+					"access-control-allow-origin": "https://example.com", // lowercase, as some origins send it
+					"Timing-Allow-Origin":         "*",
+					"Set-Cookie":                  "session=abc", // must never be captured/persisted
+					"Content-Length":              "18",          // transport header, must not be captured either
+				},
+			},
+		})
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-cors", Source: "https://cdn.example.com/module.js"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	res := rec.Resources[0]
+	assert.Equal(t, map[string]string{
+		"Access-Control-Allow-Origin": "https://example.com",
+		"Timing-Allow-Origin":         "*",
+	}, res.Headers)
+}
+
 func TestCapturer_Capture_RedirectChain(t *testing.T) {
 	h := setupCapture(t)
 	defer h.ctrl.Finish()

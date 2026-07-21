@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,11 +19,24 @@ func TestStaticServer_URLFor(t *testing.T) {
 	store, _ := newTestStore(t)
 	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
 
-	url := server.URLFor("abc123", "video/mp4")
+	url := server.URLFor("abc123", "video/mp4", nil)
 	assert.Equal(t, "http://127.0.0.1:8082/blobs/abc123?ct=video%2Fmp4", url)
 
-	urlNoContentType := server.URLFor("abc123", "")
+	urlNoContentType := server.URLFor("abc123", "", nil)
 	assert.Equal(t, "http://127.0.0.1:8082/blobs/abc123", urlNoContentType)
+}
+
+// TestStaticServer_URLFor_EmbedsHeaders pins that headers is encoded into
+// the URL as repeated "h=Name=Value" query entries, round-trippable by
+// handleBlob (see TestStaticServer_ServesBlobWithCORSHeaders).
+func TestStaticServer_URLFor_EmbedsHeaders(t *testing.T) {
+	store, _ := newTestStore(t)
+	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+
+	rawURL := server.URLFor("abc123", "", map[string]string{"Access-Control-Allow-Origin": "https://example.com"})
+	parsed, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Access-Control-Allow-Origin=https://example.com"}, parsed.Query()["h"])
 }
 
 func TestStaticServer_ServesBlobWithContentType(t *testing.T) {
@@ -43,6 +57,56 @@ func TestStaticServer_ServesBlobWithContentType(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "large asset payload", string(body))
+}
+
+// TestStaticServer_ServesBlobWithCORSHeaders is the regression test for
+// the large-asset replay path's CORS gap: a cross-origin resource served
+// through this loopback fallback (see staticServer's doc) must still
+// carry the captured Access-Control-* headers on the FINAL response, or
+// Chromium's own CORS enforcement rejects it even though the bytes are
+// correct — this is what URLFor's "h" query params round-trip into.
+func TestStaticServer_ServesBlobWithCORSHeaders(t *testing.T) {
+	store, _ := newTestStore(t)
+	hash := writeBlobString(t, store, "large cross-origin asset payload")
+
+	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	target := server.URLFor(hash, "text/plain", map[string]string{
+		"Access-Control-Allow-Origin":  "https://example.com",
+		"Cross-Origin-Resource-Policy": "cross-origin",
+	})
+	parsed, err := url.Parse(target)
+	require.NoError(t, err)
+
+	resp, err := http.Get(ts.URL + "/blobs/" + hash + "?" + parsed.RawQuery)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "https://example.com", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "cross-origin", resp.Header.Get("Cross-Origin-Resource-Policy"))
+}
+
+// TestStaticServer_IgnoresNonAllowlistedHeaderQueryParam pins handleBlob's
+// defense-in-depth re-check: a "h" query param naming a header outside
+// replayableResponseHeaders must never be echoed back, even though
+// URLFor itself (the only production caller) would never construct one.
+func TestStaticServer_IgnoresNonAllowlistedHeaderQueryParam(t *testing.T) {
+	store, _ := newTestStore(t)
+	hash := writeBlobString(t, store, "payload")
+
+	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/blobs/" + hash + "?h=" + url.QueryEscape("Set-Cookie=session=evil"))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get("Set-Cookie"))
 }
 
 func TestStaticServer_SupportsRangeRequests(t *testing.T) {

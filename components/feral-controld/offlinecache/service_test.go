@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -744,6 +745,63 @@ func TestService_ClearPlaylist_RemovesPlaylistAndItsItems(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 	_, err = ts.store.LoadPlaylist("playlist-1")
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+}
+
+// removeFailingOS wraps the real wrapper.OS and fails Remove for any path
+// containing failPathSubstr, simulating a genuine deletion failure
+// (permissions, I/O) rather than store.DeleteItem's own already-handled
+// "does not exist" case — see TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails.
+type removeFailingOS struct {
+	wrapper.OS
+	failPathSubstr string
+}
+
+func (o removeFailingOS) Remove(path string) error {
+	if strings.Contains(path, o.failPathSubstr) {
+		return errors.New("permission denied (simulated)")
+	}
+	return o.OS.Remove(path)
+}
+
+// TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails is the
+// regression test pinning that ClearPlaylist must not report ok:true
+// (nil error) when one of its per-item store.DeleteItem calls genuinely
+// fails: store.DeleteItem already treats "does not exist" as success, so
+// any error it returns here is a real deletion failure, and silently
+// continuing to report success would leave the caller believing the
+// whole playlist was cleared while item-2's record (and its blobs) is
+// still on disk. The rest of the sweep (item-1, the playlist record, GC)
+// must still run — a caller retrying the clear should not have to
+// re-clear things that already succeeded — but the failure must surface.
+func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
+	root := t.TempDir()
+	logger := zaptest.NewLogger(t)
+	failingOS := removeFailingOS{OS: wrapper.NewOS(), failPathSubstr: "item-2.json"}
+	store := offlinecache.NewStore(root, failingOS, wrapper.NewJSON(), logger)
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	svc := offlinecache.NewService(store, mocks.NewMockOfflineCacheClassifier(ctrl), mockCapturer, wrapper.NewJSON(), 5000, 0, nil, logger)
+
+	seedItemWithCapturedAt(t, store, "item-1", "payload-1", time.Now())
+	seedItemWithCapturedAt(t, store, "item-2", "payload-2", time.Now())
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1",
+		"items": []map[string]interface{}{{"id": "item-1", "source": "x"}, {"id": "item-2", "source": "y"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.SavePlaylist("playlist-1", raw))
+
+	err = svc.ClearPlaylist("playlist-1")
+	assert.Error(t, err, "a genuine per-item delete failure must not be swallowed into a successful clear")
+
+	_, loadErr := store.LoadItem("item-1")
+	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "item-1's delete succeeded and must still take effect")
+	_, loadErr = store.LoadItem("item-2")
+	assert.NoError(t, loadErr, "item-2's record must remain since its delete genuinely failed")
 }
 
 func TestService_ClearPlaylist_NotFound(t *testing.T) {

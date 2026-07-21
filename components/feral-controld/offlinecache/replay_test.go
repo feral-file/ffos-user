@@ -367,6 +367,97 @@ func TestReplayer_ProcessRequestPaused_PartialContentBlobNormalizedTo200(t *test
 	assert.Equal(t, "audio-bytes", string(decoded))
 }
 
+// TestReplayer_ProcessRequestPaused_InlineFulfillReplaysCORSHeaders is the
+// regression test for the CORS-header gap: a captured cross-origin
+// resource (e.g. a module script or font requested with crossorigin=""),
+// well under largeAssetThreshold so it takes the inline-fulfill path,
+// must replay with the same allowlisted Access-Control-* headers it was
+// captured with — replaying only Content-Type/status would still be
+// rejected by Chromium's own CORS enforcement even though the body bytes
+// are correct.
+func TestReplayer_ProcessRequestPaused_InlineFulfillReplaysCORSHeaders(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	hash := writeBlobString(t, ts.store, "export default 1;")
+	rec := &offlinecache.ItemRecord{
+		ItemID: "item-cors",
+		Resources: []offlinecache.Resource{
+			{
+				URL: "https://cdn.example.com/module.js", Status: 200, SHA256: hash, ContentType: "application/javascript",
+				Headers: map[string]string{
+					"Access-Control-Allow-Origin": "https://example.com",
+					"Timing-Allow-Origin":         "*",
+				},
+			},
+		},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}
+	require.NoError(t, ts.store.SaveItem(rec))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-cors"))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", "https://cdn.example.com/module.js"))
+	params := awaitSend(t, done)
+
+	origin, ok := headerValue(t, params, "Access-Control-Allow-Origin")
+	require.True(t, ok)
+	assert.Equal(t, "https://example.com", origin)
+	timing, ok := headerValue(t, params, "Timing-Allow-Origin")
+	require.True(t, ok)
+	assert.Equal(t, "*", timing)
+}
+
+// TestReplayer_ProcessRequestPaused_LargeAssetRedirectPassesCORSHeadersToStaticServer
+// pins that the large-asset path threads the captured headers through to
+// StaticServer.URLFor (not just the 302 fulfill itself), since a
+// cors-mode fetch() CORS-checks the FINAL response of a redirect chain
+// against the static server's own loopback origin.
+func TestReplayer_ProcessRequestPaused_LargeAssetRedirectPassesCORSHeadersToStaticServer(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
+	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
+	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
+	mockSession := mocks.NewMockCDPSession(ctrl)
+
+	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+
+	var handler func(json.RawMessage)
+	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)
+	rp.Attach(mockSession)
+
+	corsHeaders := map[string]string{"Access-Control-Allow-Origin": "https://example.com"}
+	rec := &offlinecache.ItemRecord{
+		ItemID: "item-large-cors",
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/movie.mp4", Status: 200, SHA256: "deadbeef", ContentType: "video/mp4", Headers: corsHeaders},
+		},
+	}
+	mockStore.EXPECT().LoadItem("item-large-cors").Return(rec, nil).Times(1)
+	mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	require.NoError(t, rp.EnableForItem(context.Background(), "item-large-cors"))
+
+	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
+	mockStatic.EXPECT().URLFor("deadbeef", "video/mp4", corsHeaders).Return(testStaticBaseURL + "/blobs/deadbeef?ct=video%2Fmp4").Times(1)
+
+	done := make(chan map[string]interface{}, 1)
+	mockSession.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, params map[string]interface{}) (json.RawMessage, error) {
+			done <- params
+			return json.RawMessage(`{}`), nil
+		}).Times(1)
+
+	handler(requestPausedEvent(t, "req-1", "https://example.com/movie.mp4"))
+	params := awaitSend(t, done)
+
+	origin, ok := headerValue(t, params, "Access-Control-Allow-Origin")
+	require.True(t, ok)
+	assert.Equal(t, "https://example.com", origin)
+}
+
 func TestReplayer_ProcessRequestPaused_RedirectResource(t *testing.T) {
 	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
 	defer ts.ctrl.Finish()
@@ -424,7 +515,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectsToStatic(t *testing.T)
 	require.NoError(t, rp.EnableForItem(context.Background(), "item-large"))
 
 	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
-	mockStatic.EXPECT().URLFor("deadbeef", "video/mp4").Return(testStaticBaseURL + "/blobs/deadbeef?ct=video%2Fmp4").Times(1)
+	mockStatic.EXPECT().URLFor("deadbeef", "video/mp4", gomock.Nil()).Return(testStaticBaseURL + "/blobs/deadbeef?ct=video%2Fmp4").Times(1)
 
 	done := make(chan map[string]interface{}, 1)
 	mockSession.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).

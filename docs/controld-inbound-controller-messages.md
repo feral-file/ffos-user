@@ -344,6 +344,17 @@ failing the command — see `offline-artwork-capture.md` §6. This is a
 "last known good" copy: it will not reflect anything republished at that
 URL since it was downloaded.
 
+If offline caching is enabled, this command also switches the kiosk's
+live offline-replay `Fetch`-interception scope to the newly-requested
+playlist's cached items *before* the CDP send below (so replay is ready
+before the player starts requesting the new playlist's resources — see
+`offline-artwork-capture.md` §6). If the CDP send then fails, or the
+player rejects the command (`ok:false`), that scope switch is reverted:
+the command re-queries whatever the player actually reports as currently
+displayed and re-syncs replay scope to that, since the kiosk never
+actually switched away from it. This revert is itself best-effort and
+does not change the error/response shape below in any way.
+
 Current error cases:
 
 - Missing both `playlistUrl` and `dp1_call`: command failure with
@@ -1542,7 +1553,12 @@ Error cases: `invalid_request` (missing `playlistId`), `not_found` (playlist
 is not cached), `busy` (retryable — one of the playlist's items is
 currently mid-capture; the whole clear is rejected rather than clearing
 everything else and leaving that one item to reappear once its capture
-finishes — retry once it completes), `offline_cache_error`.
+finishes — retry once it completes), `offline_cache_error` (also covers a
+genuine per-item deletion failure partway through the sweep — e.g. a
+permissions/I/O error deleting one item's on-disk record; every item that
+*did* delete successfully, plus the playlist record and GC, still ran
+before this is reported, so a retry only needs to contend with whatever
+actually failed).
 
 ### getOfflineCacheStatus
 
