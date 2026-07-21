@@ -1506,7 +1506,9 @@ Success response:
 ```
 
 Error cases: `invalid_request` (missing `itemId`), `not_found` (item is not
-cached), `offline_cache_error`.
+cached), `busy` (retryable — `itemId` is the one item currently mid-capture;
+retry once its in-flight download finishes, typically within a few seconds
+up to the configured capture window), `offline_cache_error`.
 
 ### clearPlaylistCache
 
@@ -1537,7 +1539,10 @@ Success response:
 ```
 
 Error cases: `invalid_request` (missing `playlistId`), `not_found` (playlist
-is not cached), `offline_cache_error`.
+is not cached), `busy` (retryable — one of the playlist's items is
+currently mid-capture; the whole clear is rejected rather than clearing
+everything else and leaving that one item to reappear once its capture
+finishes — retry once it completes), `offline_cache_error`.
 
 ### getOfflineCacheStatus
 
@@ -1665,6 +1670,21 @@ deadline is dropped as a failed write and closed, same as any other write
 error; the queued/downloading captures behind it in the worker's queue
 are unaffected. Clients that need a definitive current state should still
 poll `getOfflineCacheStatus`.
+
+This notification is attempt-level, not cache-level: it reports the
+outcome of one specific capture attempt for `itemId`, which is not always
+the same thing as whether that item is currently playable offline. The
+one case where they diverge: re-downloading an item that already has a
+successful cached copy (`downloadPlaylistItem` on an already-`ready` item)
+and that re-download fails. This notification fires `state: "failed"` for
+the attempt, but the earlier successful capture's blobs and record on
+disk were never touched by the failed attempt, so a `getOfflineCacheStatus`
+call made right after (or the next `offline_cache_status` notification for
+an unrelated event) will still report `ready`/`partial` for that same
+`itemId` — the old cached copy remains valid and playable offline the
+entire time. Clients should treat this notification as "this attempt's
+result", and use `getOfflineCacheStatus` as the source of truth for
+"is this item currently cached" when the two might disagree.
 
 ## Response Shape Recommendation for New Inbound Commands
 

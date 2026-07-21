@@ -192,10 +192,26 @@ func (h *handler) resyncKioskReplayScopeAfterClear(ctx context.Context) {
 // status carried neither a URL nor an inline playlist (as opposed to an
 // error resolving one it did carry), which the caller treats as "nothing
 // to resync."
+//
+// The PlaylistURL branch falls back to loadCachedPlaylistForURL on live
+// DP-1 failure, the same way Process's CMD_DISPLAY_PLAYLIST branch does
+// (handler.go) — a device that is offline and already displaying a
+// playlist via that same fallback would otherwise never resync replay
+// scope after a clear, since resolving the currently-displayed playlist
+// here would fail every time with no cache alternative.
 func (h *handler) resolveDisplayedPlaylist(ctx context.Context, playerStatus *status.PlayerStatus) (*dp1.Playlist, error) {
 	switch {
 	case playerStatus.PlaylistURL != nil:
-		return h.dp1.ProcessPlaylistURL(ctx, *playerStatus.PlaylistURL, false)
+		url := *playerStatus.PlaylistURL
+		playlist, err := h.dp1.ProcessPlaylistURL(ctx, url, false)
+		if err != nil {
+			cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
+			if cacheErr != nil {
+				return nil, err
+			}
+			return cachedPlaylist, nil
+		}
+		return playlist, nil
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
 			return playerStatus.Playlist, nil
@@ -352,6 +368,12 @@ func offlineCacheErrorResponse(err error) map[string]any {
 	}
 	if errors.Is(err, offlinecache.ErrItemNotFound) || errors.Is(err, offlinecache.ErrPlaylistNotFound) {
 		return errorResponse("not_found", err.Error(), false)
+	}
+	if errors.Is(err, offlinecache.ErrItemBusy) {
+		// Retryable: the clear will succeed once the in-flight capture
+		// finishes (a few seconds to captureWindowMs at most) — see
+		// ErrItemBusy's doc.
+		return errorResponse("busy", err.Error(), true)
 	}
 	return errorResponse("offline_cache_error", err.Error(), true)
 }

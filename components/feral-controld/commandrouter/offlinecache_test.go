@@ -425,6 +425,126 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 	assert.Equal(t, "playlist-1", resp["playlistId"])
 }
 
+// TestCommandHandler_ClearPlaylistItemCache_ActiveCaptureReturnsBusy is
+// the RPC-shape regression test for offlineCacheErrorResponse's new
+// ErrItemBusy mapping (PR #229 review): the mobile app must see a
+// distinct, retryable "busy" code rather than the generic
+// "offline_cache_error" bucket, so it knows to retry shortly instead of
+// treating this like an unexpected/non-retryable failure.
+func TestCommandHandler_ClearPlaylistItemCache_ActiveCaptureReturnsBusy(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("item-1").Return(offlinecache.ErrItemBusy).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "busy")
+	assert.Equal(t, true, resp["error"].(map[string]any)["retryable"])
+}
+
+func TestCommandHandler_ClearPlaylistCache_ActiveCaptureReturnsBusy(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(offlinecache.ErrItemBusy).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_CACHE,
+		Arguments: map[string]any{"playlistId": "playlist-1"},
+	})
+
+	require.NoError(t, err)
+	assertErrorResponse(t, result, "busy")
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWhenOffline
+// is the regression test for resolveDisplayedPlaylist's cached-URL
+// fallback (PR #229 review): a device offline and displaying a playlist
+// through displayPlaylist's own playlistUrl->cache fallback must still be
+// able to resync replay scope after a clear, instead of resyncing
+// silently failing every time because live ProcessPlaylistURL always
+// errors while offline.
+func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWhenOffline(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+
+	playlistURL := "https://example.com/playlist.json"
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &playlistURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		Return(nil, assertError("no network")).Times(1)
+
+	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1"},{"id":"item-2"}]}`)
+	cachedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID:    "playlist-1",
+		Items: []dp1playlist.PlaylistItem{{ID: "item-1"}, {ID: "item-2"}},
+	}}
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
+	ts.mockJSON.EXPECT().
+		Unmarshal(cachedRawBytes, gomock.Any()).
+		DoAndReturn(func(_ []byte, v interface{}) error {
+			p := v.(**dp1.Playlist)
+			*p = cachedPlaylist
+			return nil
+		}).
+		Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEither
+// pins the "give up quietly" side of the same fallback: if there is
+// nothing cached for the URL either (or offline caching support for it
+// otherwise fails), the resync must still not touch SyncPlaylist and must
+// still not turn the already-successful clear into an error response.
+func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEither(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+
+	playlistURL := "https://example.com/playlist.json"
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &playlistURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		Return(nil, assertError("no network")).Times(1)
+	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).
+		Return(json.RawMessage(nil), offlinecache.ErrPlaylistNotFound).Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	// No SyncPlaylist expectation: gomock fails the test if one occurs.
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+}
+
 func TestCommandHandler_ClearPlaylistCache_NotFound(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()

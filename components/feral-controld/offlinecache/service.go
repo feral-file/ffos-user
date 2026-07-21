@@ -33,6 +33,21 @@ var ErrUnsupportedMediaClass = errors.New("offline cache: item is not software-b
 // app.
 var ErrServiceNotStarted = errors.New("offline cache: service is not started")
 
+// ErrItemBusy is returned by ClearItem/ClearPlaylist when itemID is the
+// one job currently inside capturer.Capture (state == StateDownloading —
+// see notify's doc). Earlier revisions let a clear proceed unconditionally
+// in this case: it would delete the on-disk record and dequeue nothing
+// (there was nothing left to dequeue, since the job is no longer in
+// s.queue), but the in-flight Capture would still save a fresh record
+// once it finished, making the just-cleared item "legitimately reappear"
+// moments later — reported as a real correctness bug across multiple PR
+// #229 reviews, since a caller that received ok:true from clear has no
+// way to know the item silently came back. Rejecting the clear instead
+// (retryable — see offlineCacheErrorResponse's "busy" mapping) is
+// simpler and safer than canceling the in-flight capture, which would
+// need per-job cancellation plumbed through the single-worker queue.
+var ErrItemBusy = errors.New("offline cache: item is currently downloading and cannot be cleared until it finishes")
+
 // ItemStatus is one entry of a Status snapshot, shaped for the
 // getOfflineCacheStatus command and offline_cache_status notification.
 type ItemStatus struct {
@@ -611,6 +626,24 @@ func (s *service) gc() (int, int64, error) {
 	return s.store.GC()
 }
 
+// isDownloading reports whether itemID is the one job currently past
+// jobQueue.pop() and inside capturer.Capture. notify sets s.state[itemID]
+// to StateDownloading as the first thing process() does, before
+// captureMu.Lock() / Capture even start, and only clears it (to a
+// terminal state) after Capture returns — so this check's window fully
+// covers the actual capture work. There is a much narrower, effectively
+// unclosable gap between jobQueue.pop() removing the job and process()
+// setting StateDownloading a few instructions later on the same
+// goroutine; ClearItem/ClearPlaylist's queue.removeItems call already
+// closes the far larger "still sitting in the queue" window, so this
+// residual gap only matters if a clear call's own state read lands in
+// that few-instruction slice, which is not realistically observable.
+func (s *service) isDownloading(itemID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state[itemID] == StateDownloading
+}
+
 func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 	ids, err := s.store.ListItemIDs()
 	if err != nil {
@@ -647,15 +680,16 @@ func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 // Any job for itemID still sitting in the queue (not yet started) is
 // dropped so it cannot silently resurrect the record this call just
 // deleted once it eventually runs. A capture for itemID that is already
-// ACTIVE (past the queue, inside capturer.Capture) is a narrower,
-// accepted edge case: this call's GC still waits for it via captureMu
-// (so it can never corrupt that capture's blobs), but the capture is not
-// canceled, so its record will legitimately reappear once it finishes.
-// Canceling an in-flight capture would need per-job cancellation plumbed
-// through the single-worker queue, which is a larger change than this
-// fix's scope; the corruption bug (an unrelated capture's blobs getting
-// GC'd out from under it) is what captureMu closes.
+// ACTIVE (past the queue, inside capturer.Capture) is rejected outright
+// with ErrItemBusy instead — see that error's doc for why: this call's
+// GC would otherwise still wait for the active capture via captureMu (so
+// it could never corrupt that capture's blobs), but the capture itself
+// is not canceled, so a delete-then-let-GC-run approach would let the
+// item's record legitimately reappear once the capture finishes.
 func (s *service) ClearItem(itemID string) error {
+	if s.isDownloading(itemID) {
+		return fmt.Errorf("offline cache: clear item %s: %w", itemID, ErrItemBusy)
+	}
 	if _, err := s.store.LoadItem(itemID); err != nil {
 		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
 	}
@@ -676,7 +710,12 @@ func (s *service) ClearItem(itemID string) error {
 
 // ClearPlaylist deletes a cached playlist's record and every one of its
 // items, GCing shared blobs. See ClearItem's doc for the queued-job and
-// active-capture semantics, which apply per item here too.
+// active-capture semantics, which apply per item here too: if any item in
+// the playlist is currently downloading, the whole call is rejected with
+// ErrItemBusy before anything is deleted, rather than clearing everything
+// else and leaving one item partially cleared (deleted here, then
+// resurrected once its capture finishes) — an all-or-nothing outcome is
+// far easier for a caller to reason about and retry than a partial one.
 func (s *service) ClearPlaylist(playlistID string) error {
 	raw, err := s.store.LoadPlaylist(playlistID)
 	if err != nil {
@@ -686,6 +725,12 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	var playlist dp1playlist.Playlist
 	if err := s.json.Unmarshal(raw, &playlist); err != nil {
 		return fmt.Errorf("offline cache: parse playlist %s: %w", playlistID, err)
+	}
+
+	for _, item := range playlist.Items {
+		if s.isDownloading(item.ID) {
+			return fmt.Errorf("offline cache: clear playlist %s: item %s: %w", playlistID, item.ID, ErrItemBusy)
+		}
 	}
 
 	itemIDs := make(map[string]bool, len(playlist.Items))

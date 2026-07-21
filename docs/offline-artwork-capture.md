@@ -374,11 +374,19 @@ There is deliberately **no** top-level manifest, no separate
   risking deleting its not-yet-referenced blobs. `ClearItem`/`ClearPlaylist`
   additionally drop any same-item job still sitting in the (single-worker)
   capture queue, so a clear cannot be silently undone by a re-download that
-  was merely queued, not yet running. Canceling a capture that is already
-  *active* for the exact item being cleared is an accepted, narrower edge
-  case this does not cover: that capture's record will legitimately
-  reappear once it finishes, since only the queued case is preventable
-  without threading per-job cancellation through the worker.
+  was merely queued, not yet running. A capture that is already *active*
+  for the item(s) being cleared (`state == StateDownloading`) is rejected
+  outright with `ErrItemBusy` (RPC `busy`, retryable) instead of being
+  allowed to proceed and delete-then-let-GC-run: an earlier revision let
+  that case through, but the active capture would still save a fresh
+  record once it finished, making the just-cleared item "legitimately
+  reappear" moments later with no signal to the caller — a real
+  correctness bug flagged across multiple PR #229 reviews. Rejecting the
+  clear is simpler and safer than canceling the in-flight capture, which
+  would need per-job cancellation threaded through the single-worker
+  queue; `ClearPlaylist` checks every item in the playlist for this before
+  deleting anything, so the outcome is all-or-nothing rather than leaving
+  one item partially cleared.
 
 ## 6. Replay: hybrid `Fetch` interception + static-file fallback
 
@@ -469,6 +477,18 @@ since cleared — `LoadPlaylistIDForURL` intentionally is not kept in
 lockstep with `DeletePlaylist`, see its doc), `displayPlaylist` reports
 the original live-resolution error, not a confusing "no cached copy"
 error about a fallback the caller never asked for.
+
+`resolveDisplayedPlaylist` (`commandrouter/offlinecache.go`), used by
+`resyncKioskReplayScopeAfterClear` to re-sync replay scope right after a
+`clearPlaylistItemCache`/`clearPlaylistCache` call, reuses this exact same
+`loadCachedPlaylistForURL` fallback for its own `PlaylistURL` branch. An
+earlier revision resolved only via live `ProcessPlaylistURL` here, which
+meant a device that was offline and already displaying a playlist through
+the fallback above would never successfully resync scope after a clear —
+the resolve would fail every time with no cache alternative, silently
+skipping the resync (best-effort, so the clear itself still succeeded, but
+replay's Fetch-interception scope could keep stale entries for the
+just-cleared item). Sharing the same fallback here closes that gap.
 
 ## 7. Relationship to the DP-1 spec
 

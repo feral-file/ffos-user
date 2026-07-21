@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -616,6 +617,112 @@ func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
 	}, 200*time.Millisecond, 10*time.Millisecond, "the cleared item's queued recapture must not resurrect its record")
 }
 
+// TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting
+// is the regression test for ErrItemBusy: PR #229 review flagged that an
+// earlier revision let ClearItem proceed unconditionally even when
+// itemID's own re-download was actively in flight (as opposed to merely
+// queued, which TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns
+// already covers) — the clear returned success, but the in-flight
+// capture would still save a fresh record afterward, making the item
+// "legitimately reappear" with no signal to the caller. ClearItem must
+// now reject immediately (without touching the store or blocking on
+// captureMu/GC) instead.
+func TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "old payload", time.Now())
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	captureStarted := make(chan struct{})
+	proceed := make(chan struct{})
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			close(captureStarted)
+			<-proceed
+			rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+	<-captureStarted // item-1's recapture is now active, past the queue.
+
+	err := ts.service.ClearItem("item-1")
+	assert.ErrorIs(t, err, offlinecache.ErrItemBusy)
+
+	rec, loadErr := ts.store.LoadItem("item-1")
+	require.NoError(t, loadErr, "the rejected clear must leave the old record untouched")
+	blob, err := ts.store.ReadBlob(rec.Resources[0].SHA256)
+	require.NoError(t, err, "the old blob must survive a rejected clear too")
+	assert.Equal(t, "old payload", string(blob))
+
+	close(proceed)
+	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	// waitForState only proves the *disk* record is ready (SaveItem runs
+	// inside the mocked Capture above, before process() calls notify());
+	// s.state's StateDownloading->StateReady transition happens slightly
+	// later, once Capture actually returns to process(). isDownloading
+	// reads s.state, so ClearItem can still see busy for a brief instant
+	// after the disk write lands — retry until that transition catches
+	// up, rather than asserting a fixed one-shot call here.
+	require.Eventually(t, func() bool {
+		err := ts.service.ClearItem("item-1")
+		return err == nil
+	}, time.Second, 5*time.Millisecond, "clear must succeed once the capture that made it busy has finished")
+}
+
+// TestService_ClearPlaylist_ActiveCaptureOfMemberItemReturnsBusyWithoutPartialClear
+// covers the same busy rejection at the playlist level: the whole call
+// must fail before deleting anything if any member item is actively
+// capturing, rather than clearing the rest of the playlist and leaving
+// just the busy item to be resurrected once its capture finishes.
+func TestService_ClearPlaylist_ActiveCaptureOfMemberItemReturnsBusyWithoutPartialClear(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "payload-1", time.Now())
+	seedItemWithCapturedAt(t, ts.store, "item-2", "payload-2", time.Now())
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1",
+		"items": []map[string]interface{}{{"id": "item-1", "source": "x"}, {"id": "item-2", "source": "y"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
+
+	item2 := dp1playlist.PlaylistItem{ID: "item-2", Source: "y"}
+	captureStarted := make(chan struct{})
+	proceed := make(chan struct{})
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item2.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item2, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			close(captureStarted)
+			<-proceed
+			rec := &offlinecache.ItemRecord{ItemID: "item-2", Item: item2, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item2))
+	<-captureStarted
+
+	err = ts.service.ClearPlaylist("playlist-1")
+	assert.ErrorIs(t, err, offlinecache.ErrItemBusy)
+
+	_, loadErr := ts.store.LoadItem("item-1")
+	assert.NoError(t, loadErr, "a rejected playlist clear must not partially delete an unrelated, idle sibling item")
+	_, loadErr = ts.store.LoadPlaylist("playlist-1")
+	assert.NoError(t, loadErr, "a rejected playlist clear must leave the playlist record itself untouched too")
+
+	close(proceed)
+	waitForState(t, ts.service, "item-2", offlinecache.StateReady)
+}
+
 func TestService_ClearPlaylist_RemovesPlaylistAndItsItems(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
@@ -808,4 +915,64 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 	assert.Equal(t, []offlinecache.ItemState{
 		offlinecache.StateQueued, offlinecache.StateDownloading, offlinecache.StateReady,
 	}, seen)
+}
+
+// TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskStatus
+// pins the intentional attempt-level-vs-cache-level split covered in PR
+// #229 review: a failed *re*-capture of an item that was already cached
+// must still notify state:"failed" for that one attempt (so the mobile
+// app's in-flight progress UI resolves), while itemStatus's own doc
+// ("a record on disk always wins over in-memory state") means
+// getOfflineCacheStatus/Status must keep reporting the earlier
+// successful capture's ready/partial state, since the failed attempt
+// never touched the still-valid old record or blob. Without this test,
+// a future edit that made itemStatus prefer in-memory state over disk
+// (e.g. to "fix" this exact-looking divergence) would silently make
+// Status flicker to failed for an item that is still fully playable
+// offline.
+func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskStatus(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store, _ := newTestStore(t)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	seedItemWithCapturedAt(t, store, "item-1", "already cached payload", time.Now())
+
+	var seenFailed atomic.Bool
+	done := make(chan struct{})
+	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
+		if status.State == offlinecache.StateFailed {
+			seenFailed.Store(true)
+			close(done)
+		}
+	}).AnyTimes()
+
+	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).Return(nil, assertError("recapture failed")).Times(1)
+
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+	defer svc.Stop()
+
+	require.NoError(t, svc.DownloadItem(context.Background(), item))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the observer to see the failed recapture attempt")
+	}
+	require.True(t, seenFailed.Load())
+
+	// The notification said "failed", but the disk-backed status must
+	// still say "ready": the old record/blob were never touched.
+	snap, err := svc.Status([]string{"item-1"})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+	assert.Equal(t, offlinecache.StateReady, snap.Items[0].State,
+		"getOfflineCacheStatus must keep reporting the earlier successful capture, not the failed re-download attempt")
+	assert.Equal(t, 100, snap.Items[0].Percent)
 }
