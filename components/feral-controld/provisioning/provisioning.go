@@ -552,6 +552,14 @@ func (m *Machine) applyRescan(ctx context.Context) {
 	m.mu.Unlock()
 
 	m.logger.Info("provisioning: rescan requested; bouncing setup AP")
+	// Flip the screen to "scanning" IMMEDIATELY: the AP teardown below takes
+	// seconds, and leaving the join QR up through it reads as a stalled button
+	// press. ensureAPUp re-announces the same state when the fresh scan
+	// actually starts; setupui coalesces the duplicate.
+	m.notify(StateAPActive, Detail{
+		Reason:  "scanning",
+		Message: "Looking for nearby Wi-Fi networks",
+	})
 	m.ensureAPDown(ctx)
 	// State is still StateAPActive, so reconcile re-raises via ensureAPUp: it
 	// narrates the scan on-screen, completes a fresh scan pass, then brings the

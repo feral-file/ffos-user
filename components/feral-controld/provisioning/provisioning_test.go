@@ -173,6 +173,7 @@ func (p *fakePortal) Stop(context.Context) error {
 
 type fakeNotifier struct {
 	mu    sync.Mutex
+	rec   *recorder
 	calls []struct {
 		State  State
 		Detail Detail
@@ -186,6 +187,11 @@ func (n *fakeNotifier) OnStateChange(s State, d Detail) {
 		Detail Detail
 	}{s, d})
 	n.mu.Unlock()
+	// Mirror into the shared recorder so tests can assert notify ordering
+	// against AP/portal operations in one timeline.
+	if n.rec != nil {
+		n.rec.add("notify:" + string(s) + ":" + d.Reason)
+	}
 }
 func (n *fakeNotifier) states() []State {
 	n.mu.Lock()
@@ -220,7 +226,7 @@ func newHarness(t *testing.T) *harness {
 		wifi:     &fakeWifi{rec: rec},
 		conn:     &fakeConn{},
 		clk:      newFakeClock(),
-		notifier: &fakeNotifier{},
+		notifier: &fakeNotifier{rec: rec},
 	}
 	h.m = New(Config{
 		AP:            h.ap,
@@ -732,4 +738,30 @@ func TestRescanNarratesScanningThenQR(t *testing.T) {
 	require.NotEqual(t, -1, scanIdx, "rescan must narrate scanning")
 	require.NotEqual(t, -1, qrIdx, "rescan must re-narrate the QR after the bounce")
 	assert.Less(t, scanIdx, qrIdx)
+}
+
+// TestRescanFlipsToScanningBeforeTeardown: the button press must repaint the
+// screen to "scanning" BEFORE the seconds-long AP teardown, not after it —
+// otherwise the stale join QR (or, on players without the scanning renderer,
+// a blank overlay) reads as a stalled press.
+func TestRescanFlipsToScanningBeforeTeardown(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.m.applyRescan(ctx)
+
+	// Between the initial raise (first ap.Up) and the bounce's ap.Down there
+	// must be a scanning announcement — the immediate button-press repaint.
+	list := h.rec.list()
+	firstUp := indexOf(list, "ap.Up")
+	down := indexOf(list, "ap.Down")
+	require.NotEqual(t, -1, firstUp)
+	require.NotEqual(t, -1, down)
+	seg := list[firstUp:down]
+	assert.NotEqual(t, -1, indexOf(seg, "notify:ap_active:scanning"),
+		"rescan must flip to scanning before teardown: %v", list)
 }
