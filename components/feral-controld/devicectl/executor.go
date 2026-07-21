@@ -392,9 +392,43 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 	// unrelated overlay.
 	if !wasClaimed {
 		e.setupUI().Hide()
+		// First pair: put artwork on screen immediately instead of leaving the
+		// player idle until the cloud gets around to sending content. The claim
+		// QR only paints after the relayer topic-wait, so the device is online
+		// and the player's playlist fetch will succeed. Best-effort: the claim
+		// itself already landed and must not fail on a player hiccup.
+		if err := e.sendDisplayDefaultPlaylist(); err != nil {
+			e.logger.Warn("Failed to start default playlist after first pair",
+				zap.Error(err))
+		}
 	}
 
 	return CmdOK, nil
+}
+
+// sendDisplayDefaultPlaylist forwards the displayDefaultPlaylist command to the
+// player over CDP — the same command OOM recovery uses to restore playback.
+func (e *executor) sendDisplayDefaultPlaylist() error {
+	if e.cdp == nil {
+		return fmt.Errorf("cdp client is not configured")
+	}
+
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+		Arguments: map[string]any{},
+	}
+	payload, err := command.JSON()
+	if err != nil {
+		return fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+	}
+
+	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
+		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+	})
+	if err != nil {
+		return fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
+	}
+	return nil
 }
 
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {

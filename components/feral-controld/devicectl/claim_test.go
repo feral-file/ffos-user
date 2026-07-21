@@ -13,6 +13,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -201,9 +203,10 @@ func TestPairingConfirmationSettlesAutoClaim(t *testing.T) {
 
 // TestConnectClaimTransitionHidesOverlay: the claim landing is the moment the
 // claim QR's job ends — connect() must clear the overlay itself rather than
-// depending on the separate cloud confirmation command; and a RE-connect to an
-// already-claimed device must NOT hide (it could wipe an unrelated live
-// narration such as updating).
+// depending on the separate cloud confirmation command, and start default
+// playback so the first-pair screen never sits blank; a RE-connect to an
+// already-claimed device must do NEITHER (it could wipe an unrelated live
+// narration such as updating, or stomp already-playing content).
 func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -213,8 +216,20 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 	sm.EXPECT().GetState().Return(st).AnyTimes()
 	sm.EXPECT().Save(gomock.Any()).Return(nil).Times(2)
 
+	// Exactly ONE displayDefaultPlaylist reaches the player: sent on the claim
+	// transition, not on the re-connect.
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(method string, params map[string]any) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST))
+			return nil, nil
+		}).
+		Times(1)
+
 	spy := &narratorSpy{}
-	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON()}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP}
 
 	args := []byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`)
 
@@ -228,6 +243,31 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls, "a re-connect must not hide again")
+}
+
+// TestConnectClaimTransitionPlayerDownDoesNotFailClaim: the default-playlist
+// kick is best-effort — a player hiccup at claim time must not fail the connect
+// (the claim already landed and the app is waiting on the OK).
+func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+	sm.EXPECT().Save(gomock.Any()).Return(nil)
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, errors.New("player not connected"))
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, json: wrapper.NewJSON(), cdp: mockCDP}
+
+	res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+	require.NoError(t, err)
+	assert.Equal(t, CmdOK, res)
+	assert.Equal(t, []string{"hide"}, spy.calls)
 }
 
 // TestMaybeShowClaimQROnOnline_NoTopicWithholds: without a relayer topic the
