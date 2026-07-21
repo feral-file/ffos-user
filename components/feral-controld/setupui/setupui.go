@@ -494,7 +494,7 @@ func validateSetupDisplayContract(path string) error {
 	}
 	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
 	if err != nil {
-		return fmt.Errorf("%w: %v", errContractUnreadable, err)
+		return fmt.Errorf("%w: %w", errContractUnreadable, err)
 	}
 	var manifest playerContractManifest
 	if err := json.Unmarshal(raw, &manifest); err != nil {
