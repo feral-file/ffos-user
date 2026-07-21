@@ -233,8 +233,7 @@ func (r *refresher) processPlayingPlaylist() error {
 	var playlist *dp1.Playlist
 	// skipCDPResend preserves the original "a static inline playlist never
 	// changes, so do not re-send it to CDP every refresh pass" behavior.
-	// It must NOT also skip the offline-cache resync below (see the PR
-	// #229 review regression this guards against): a background
+	// It must NOT also skip the offline-cache resync below: a background
 	// downloadPlaylistItem/downloadPlaylist can finish, or a cache can be
 	// cleared, while this exact static playlist keeps looping on screen,
 	// and the periodic refresher is the only thing that would ever notice

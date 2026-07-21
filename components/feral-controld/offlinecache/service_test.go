@@ -918,8 +918,8 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 }
 
 // TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskStatus
-// pins the intentional attempt-level-vs-cache-level split covered in PR
-// #229 review: a failed *re*-capture of an item that was already cached
+// pins the intentional attempt-level-vs-cache-level split: a failed
+// *re*-capture of an item that was already cached
 // must still notify state:"failed" for that one attempt (so the mobile
 // app's in-flight progress UI resolves), while itemStatus's own doc
 // ("a record on disk always wins over in-memory state") means

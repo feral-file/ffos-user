@@ -40,8 +40,7 @@ var ErrServiceNotStarted = errors.New("offline cache: service is not started")
 // (there was nothing left to dequeue, since the job is no longer in
 // s.queue), but the in-flight Capture would still save a fresh record
 // once it finished, making the just-cleared item "legitimately reappear"
-// moments later — reported as a real correctness bug across multiple PR
-// #229 reviews, since a caller that received ok:true from clear has no
+// moments later — a caller that received ok:true from clear has no
 // way to know the item silently came back. Rejecting the clear instead
 // (retryable — see offlineCacheErrorResponse's "busy" mapping) is
 // simpler and safer than canceling the in-flight capture, which would

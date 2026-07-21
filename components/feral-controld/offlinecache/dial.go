@@ -14,8 +14,8 @@ import (
 // defaultDialTimeout bounds the whole targets-fetch + websocket-dial
 // sequence below, on top of whatever deadline the caller's ctx already
 // carries. main.go's CDP onConnect hook calls kioskReplay.AttachOnReconnect
-// (-> here) with the daemon's own long-lived lifetime context — see PR
-// #229 review — so without this ceiling, a kiosk DevTools HTTP endpoint
+// (-> here) with the daemon's own long-lived lifetime context, so without
+// this ceiling, a kiosk DevTools HTTP endpoint
 // or websocket upgrade that hangs (accepts the connection but never
 // completes it) would wedge that onConnect callback forever, which runs
 // synchronously on cdp.CDP's connect-loop goroutine and would therefore
