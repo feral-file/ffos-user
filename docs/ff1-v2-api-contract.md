@@ -75,6 +75,10 @@ This specification uses:
   and the AsyncAPI MQTT binding;
 - [mDNS (RFC 6762)](https://www.rfc-editor.org/rfc/rfc6762.html) and
   [DNS-SD (RFC 6763)](https://www.rfc-editor.org/rfc/rfc6763.html);
+- [IEEE 802.11-2024](https://standards.ieee.org/ieee/802.11/10548/),
+  including Simultaneous Authentication of Equals (SAE), Robust Security
+  Network (RSN) key establishment, and Protected Management Frames (PMF,
+  originally standardized by IEEE 802.11w);
 - [The WebSocket Protocol (RFC 6455)](https://www.rfc-editor.org/rfc/rfc6455.html); and
 - [W3C UI Events `KeyboardEvent.code`](https://www.w3.org/TR/uievents-code/).
 
@@ -2472,18 +2476,46 @@ runtime API.
 
 FF1 starts a client-isolated SoftAP with no forwarding to other interfaces. The
 SSID is `FF1-<last-six-serial-characters>` and each setup session has a new
-random 128-bit WPA2/WPA3 transition-mode passphrase. The screen shows a Wi-Fi
-join QR and `http://192.168.4.1/#s=<256-bit-base64url-secret>`. The fragment is
-not sent in an HTTP request. Portal JavaScript places it in
+passphrase containing at least 128 bits of CSPRNG entropy, encoded as 8..63
+ASCII characters. The SoftAP is a strict WPA3-Personal profile: its RSN
+information advertises and accepts only the SAE AKM, uses CCMP-128 for pairwise
+and group data confidentiality, and requires PMF by setting both MFPC and MFPR.
+It MUST NOT advertise or accept WPA2-PSK, a WPA2/WPA3 transition or
+compatibility mode, TKIP, a PMF-optional association, or an open network. An
+association or downgrade attempt outside that profile fails closed and MUST
+NOT cause FF1 to start a weaker fallback network.
+
+The screen explicitly states that WPA3-Personal is required, and the Wi-Fi join
+QR contains only the SSID and session passphrase. A client without SAE support
+cannot join: setup remains in its current setup epoch, the FF1 screen directs
+the user to an SAE-capable client, and no alternate WPA2 or open SSID is
+offered. Starting a new setup session rotates both the SoftAP passphrase and
+the setup capability; merely retrying with a supported client does not rotate
+the setup epoch.
+
+The screen shows the Wi-Fi join QR and
+`http://192.168.4.1/#s=<256-bit-base64url-secret>`. The fragment is not sent in
+an HTTP request. Portal JavaScript places it in
 `Authorization: FF-Setup <secret>` for API calls. The portal accepts only its
 fixed Host and Origin, never places the secret in a cookie or URL, and sets
-`Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
+`Referrer-Policy: no-referrer` and `Cache-Control: no-store`. Every
+`/ff/setup/v2` request except retrieval of the fixed portal document and its
+static assets requires this header. A missing, malformed, guessed, wrong-epoch,
+stale, or expired capability receives the same 401 RFC 9457 response with
+`code: "unauthenticated"` and causes no state change.
 
 HTTP rather than HTTPS is a documented bootstrap exception: a browser cannot
-silently trust a device-generated certificate before enrollment. Confidentiality
-comes from the per-session encrypted Wi-Fi link; authorization comes from the
-screen secret. This does not meet the runtime LAN security profile and exposes no
-playback/control API.
+silently trust a device-generated certificate before enrollment. SAE derives a
+distinct PMK for each station association and the 4-Way Handshake derives
+per-station pairwise keys; possession of the SoftAP passphrase plus a capture
+of another station's SAE exchange, 4-Way Handshake, and encrypted frames is
+insufficient to derive that station's pairwise keys. Client isolation prevents
+the AP from forwarding traffic between associated stations, and per-station
+replay counters reject captured encrypted-frame replay. The encrypted Wi-Fi
+link therefore provides confidentiality against another associated participant
+in this threat model. It does not grant API authority: authorization comes only
+from the independent screen setup capability. This bootstrap does not meet the
+runtime LAN security profile and exposes no playback/control API.
 
 All setup paths begin `/ff/setup/v2`. Success JSON is closed and errors use RFC
 9457 `application/problem+json` with the stable codes from section 6.3.
@@ -2599,4 +2631,4 @@ identity registry commit and durable local cleanup both complete.
 | Controller enrollment and guest sessions | Standard MQTT 5 CONNECT/request-response and Enhanced Authentication plus JWT/JWS/JWE, RFC 7800 confirmation keys, and controller-key proof. FF customizes the Authentication Method data, invitation, scope, session-state, and ACL profile. The same one-time QR claim creates a persistent enrollment or a bounded guest session. |
 | Offline LAN time capability | Required FF `transports.lanOfflineAfterPowerLoss` capability and fail-closed operational rule for constrained devices; it does not change certificate or token wire formats. |
 | TCP 443 least-privilege front end | FF OS deployment customization using a system socket and raw `systemd-socket-proxyd`; it does not change TLS, HTTP, WebSocket, or application bytes. |
-| SoftAP portal | FF bootstrap exception because browser-first provisioning precedes trusted TLS and MQTT identity. |
+| SoftAP link and portal | Link cryptography uses the IEEE 802.11 SAE, RSN/CCMP-128, and mandatory-PMF mechanisms as a WPA3-Personal SAE-only profile, without an FF security exchange or downgrade mode. Client isolation, no forwarding, the HTTP portal, and the independent `FF-Setup` capability are FF bootstrap-profile constraints because browser-first provisioning precedes trusted TLS and MQTT identity. |

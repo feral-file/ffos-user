@@ -877,9 +877,25 @@ release-ledger marker.
    the runtime certificate registration and publisher generation, deletes the
    old local certificate, and reaches `completed` only after durable local
    cleanup.
-12. Run the SoftAP/captive-portal spike on the required phone matrix and measure
-   wrong-password recovery, AP/client concurrency, and auto-open behavior. Its
-   closed-schema fixtures include both pending reset states, conditional
+12. Run the SoftAP/captive-portal spike on the required SAE-capable phone matrix
+   and measure wrong-password recovery, AP/client concurrency, and auto-open
+   behavior. Inspect the advertised RSN profile and association behavior: it
+   offers only SAE with CCMP-128 and mandatory PMF, rejects WPA2-PSK,
+   WPA2/WPA3 transition or compatibility mode, PMF-optional/non-capable
+   association, and downgrade attempts, and never starts an open or weaker
+   fallback. Verify that a client without SAE cannot join, the screen explains
+   that WPA3-Personal is required, setup remains in the current epoch, and FF1
+   does not weaken the network. Associate a target client and a second
+   participant that knows the session SoftAP passphrase but does not know the
+   target's screen setup capability. Give the second participant captures of
+   the target's SAE exchange, 4-Way Handshake, and encrypted HTTP frames. Prove
+   it cannot derive the target's PMK or pairwise keys, recover `FF-Setup`,
+   decrypt or inject target traffic, or replay captured encrypted frames past
+   per-station keys and replay counters; also prove client isolation prevents
+   direct inter-station traffic. Direct requests with a missing, malformed,
+   guessed, wrong-epoch, stale, or expired setup capability all return the same
+   401 `unauthenticated` Problem Details response and make no state change. The
+   closed-schema fixtures also include both pending reset states, conditional
    `barrierOperationId`/`identityOperationId` fields, the required cleanup
    object, the completed response only after identity commit and local cleanup,
    rejection of the erased setup secret, and blocked owner enrollment in both
@@ -1055,6 +1071,15 @@ Minimum acceptance checks are:
   exact full image, while `false` proves same-boot brokerless LAN followed by
   pre-NTP mTLS failure after power loss and recovery only after NTP; no image
   advertises `true` without linked executable hardware evidence;
+- SoftAP advertises and accepts only SAE with CCMP-128 and mandatory PMF, never
+  starts a WPA2, transition, PMF-optional, or open fallback, and fails closed
+  with a clear screen instruction when a client lacks SAE; a second associated
+  participant that knows the SoftAP passphrase but not the screen capability
+  cannot use a captured target SAE exchange, 4-Way Handshake, and data frames
+  to derive target keys, recover `FF-Setup`, decrypt, inject, or replay target
+  traffic, and every missing,
+  guessed, wrong-epoch, stale, or expired capability request fails identically
+  without a state change;
 - `LAN_443_FULL_IMAGE` passes: the public 443 socket/proxy path boots from the
   coordinated full image and
   passes IPv4, IPv6, TLS 1.3, mTLS allow/deny, HTTPS, WebSocket,
@@ -1100,7 +1125,7 @@ Minimum acceptance checks are:
 | Mobile keyboard/touchpad remote control | API section 11.3 |
 | Unified enrolled and guest controller access without relayer or per-session auth service | Controller authentication profile; API sections 7.4, 9, 11.7, and 12.7 |
 | Persistent one-scan mobile/CLI authorization with multiple independent controllers | Controller authentication sections 4.2, 5.1, 5.3, and 14; API sections 7.2, 8, and 9 |
-| Setup/claim recovery boundary | API section 14 |
+| Setup/claim recovery boundary, SAE-only SoftAP, and capability isolation | API section 14; plan section 3 gate 12 and minimum acceptance checks |
 | Offline/cache readiness | API section 12.5 |
 | MoMA delivery/connection diagnosis | API sections 4.2 and 12.5; plan section 2.5 |
 | Executable client/firmware matrix and negative OTA gates | Plan section 2.1 |
