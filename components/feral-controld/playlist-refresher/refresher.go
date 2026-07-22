@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -40,6 +44,7 @@ type refresher struct {
 	cdp          cdp.CDP
 	statusPoller status.Poller
 	dp1          dp1.DP1
+	scheduler    playlistschedule.Scheduler
 
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -53,6 +58,7 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	cdp cdp.CDP,
+	scheduler playlistschedule.Scheduler,
 	clock wrapper.Clock,
 	logger *zap.Logger,
 ) Refresher {
@@ -61,6 +67,7 @@ func New(
 		cdp:          cdp,
 		statusPoller: statusPoller,
 		dp1:          dp1,
+		scheduler:    scheduler,
 		clock:        clock,
 		logger:       logger,
 		done:         make(chan struct{}),
@@ -180,7 +187,7 @@ func (r *refresher) processPlayingPlaylist() error {
 	case playerStatus.PlaylistURL != nil:
 		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
 		if err != nil {
-			return err
+			return r.handleRefreshError(err, "playlist URL")
 		}
 	case playerStatus.Playlist != nil:
 		if !playerStatus.Playlist.HasDynamicContent() {
@@ -190,10 +197,14 @@ func (r *refresher) processPlayingPlaylist() error {
 
 		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
 		if err != nil {
-			return err
+			return r.handleRefreshError(err, "dynamic playlist")
 		}
 	default:
 		return errors.New("player status has no playlist URL or playlist")
+	}
+
+	if r.scheduler != nil {
+		playlist = r.scheduler.Prepare(playlist)
 	}
 
 	// Send playlist to CDP
@@ -205,11 +216,65 @@ func (r *refresher) processPlayingPlaylist() error {
 		},
 	}
 
-	if _, err := r.sendCDPRequest(command); err != nil {
-		return err
+	sendErr := error(nil)
+	send := func() {
+		_, sendErr = r.sendCDPRequest(command)
 	}
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(send)
+	} else {
+		send()
+	}
+	return sendErr
+}
 
-	return nil
+// handleRefreshError degrades to the displayAt cache only for transient fetch
+// failures. Schema/parse/logic errors must surface so a bad feed cannot pin the
+// device on a stale active set forever.
+func (r *refresher) handleRefreshError(err error, kind string) error {
+	if r.scheduler != nil && r.scheduler.HasCache() && isTransientPlaylistRefreshError(err) {
+		r.logger.Warn("Playlist refresh failed transiently; recomputing from displayAt cache",
+			zap.String("kind", kind),
+			zap.Error(err))
+		r.scheduler.RecomputeNow(r.context)
+		return nil
+	}
+	return err
+}
+
+// isTransientPlaylistRefreshError reports transport / upstream-availability
+// failures where retrying from the cached byDisplayAt playlist is safe.
+// Deterministic data/config errors (malformed JSON, invalid dynamicQuery,
+// permanent DNS, non-timeout URL failures) return false.
+func isTransientPlaylistRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		// Prefer DNSError fields over deprecated net.Error.Temporary().
+		return dnsErr.IsTemporary || dnsErr.IsTimeout
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		// Timeouts are the well-defined transient class; Temporary() is
+		// deprecated (SA1019) and not reliable across net implementations.
+		return netErr.Timeout()
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		// url.Error wraps both transport blips and permanent config mistakes
+		// (bad scheme, invalid URL). Only the inner error decides.
+		return isTransientPlaylistRefreshError(urlErr.Err)
+	}
+	// dp1.fetchPlaylist wraps non-2xx as "fetch playlist failed: <Status>".
+	// Treat 5xx / 429 as temporary upstream unavailability; 4xx stays hard-fail.
+	msg := err.Error()
+	if strings.Contains(msg, "fetch playlist failed: 5") ||
+		strings.Contains(msg, "fetch playlist failed: 429") {
+		return true
+	}
+	return false
 }
 
 // sendCDPRequest marshals payload and sends to CDP

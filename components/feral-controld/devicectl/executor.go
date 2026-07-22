@@ -132,6 +132,13 @@ type executor struct {
 	// give-up on the OLD panel never sticks to a NEW one — the next tick
 	// re-drives the panel leg instead of waiting for the next schedule boundary.
 	sleepPanelGen uint64
+
+	// onAwake is an optional hook fired after a successful transition into the
+	// awake state. Used by displayAt scheduling to recompute the active set
+	// immediately on wake (a timer that fired while sleeping must not leave a
+	// stale playlist on screen). Not part of the exported Executor interface so
+	// mocks stay unchanged; wire via SetOnAwake.
+	onAwake func(context.Context)
 }
 
 func New(

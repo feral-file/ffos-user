@@ -33,6 +33,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
@@ -77,6 +78,7 @@ type app struct {
 	StatusPoller      status.Poller
 	Watchdog          watchdog.Watchdog
 	PlaylistRefresher playlist_refresher.Refresher
+	PlaylistScheduler playlistschedule.Scheduler
 	MintPairing       mintpairing.Service
 	Hub               hub.Hub
 }
@@ -262,6 +264,10 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.PlaylistRefresher.Start()
 	defer app.PlaylistRefresher.Stop()
 
+	if app.PlaylistScheduler != nil {
+		defer app.PlaylistScheduler.Stop()
+	}
+
 	if app.MintPairing != nil {
 		app.MintPairing.Start(ctx)
 		defer app.MintPairing.Stop()
@@ -282,8 +288,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// invalidate the sleep tracker's player leg so the schedule loop re-drives it (the old
 	// PartOf=chromium-ready.target design got this for free by restarting controld), then
 	// force a status re-poll so upstream re-syncs to what a fresh boot would produce.
+	// Recompute displayAt from the in-memory cache as well: after a kiosk restart the
+	// player no longer holds the last filtered list, and a threshold may have crossed
+	// while CDP was down.
 	app.CDP.Start(ctx, func() {
 		devicectl.InvalidatePlayerSleepState(app.Executor, app.Logger)
+		if app.PlaylistScheduler != nil {
+			app.PlaylistScheduler.RecomputeNow(ctx)
+		}
 		app.StatusPoller.ForceRefresh()
 	})
 	defer app.CDP.Close()
@@ -460,6 +472,11 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
+	// displayAt scheduler: filters byDisplayAt playlists before CDP and advances
+	// them on timer / wake / CDP reconnect from an in-memory full-playlist cache.
+	playlistScheduler := playlistschedule.New(context, cdp, clock, nil, logger)
+	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)
+
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
@@ -469,7 +486,7 @@ func initializeApp(
 	// wrapped with command-storm protection so both paths share one set of
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
-	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, json, logger)
+	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, playlistScheduler, json, logger)
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -482,7 +499,7 @@ func initializeApp(
 	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
-	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, clock, logger)
+	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, playlistScheduler, clock, logger)
 
 	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
 	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)
@@ -516,6 +533,7 @@ func initializeApp(
 		StatusPoller:      poller,
 		Watchdog:          watchdog,
 		PlaylistRefresher: playlistRefresher,
+		PlaylistScheduler: playlistScheduler,
 		MintPairing:       mintPairing,
 		Hub:               hub,
 	}

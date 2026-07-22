@@ -11,6 +11,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -27,6 +28,7 @@ type handler struct {
 	json         wrapper.JSON
 	statusPoller status.Poller
 	mintPairing  mintpairing.Service
+	scheduler    playlistschedule.Scheduler
 	logger       *zap.Logger
 }
 
@@ -36,6 +38,7 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	mintPairing mintpairing.Service,
+	scheduler playlistschedule.Scheduler,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
@@ -45,6 +48,7 @@ func New(
 		dp1:          dp1,
 		statusPoller: statusPoller,
 		mintPairing:  mintPairing,
+		scheduler:    scheduler,
 		json:         json,
 		logger:       logger,
 	}
@@ -171,6 +175,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
+			// Filter byDisplayAt playlists to the active set before the player
+			// sees them. The scheduler keeps the full list for timer/wake updates.
+			if h.scheduler != nil {
+				playlist = h.scheduler.Prepare(playlist)
+			}
 			command.Arguments["dp1_call"] = playlist
 
 		}
@@ -182,8 +191,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
-		// Forward to CDP (final, full data)
-		result, err = h.sendCDPRequest(command)
+		// Forward to CDP (final, full data). displayPlaylist sends are serialized
+		// against displayAt timer/wake pushes so a stale recompute cannot land
+		// after Prepare has already handed a newer active set to this path.
+		if commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil {
+			h.scheduler.WithPlayerPush(func() {
+				result, err = h.sendCDPRequest(command)
+			})
+		} else {
+			result, err = h.sendCDPRequest(command)
+		}
 		if err != nil {
 			return nil, err
 		}
