@@ -867,6 +867,26 @@ just because it happens to share a CDP target with a cached item.
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.
 
+`Replayer.Attach`'s `Fetch.requestPaused` handler is bound (via closure)
+to the exact session it was registered on, and `processRequestPaused`
+answers every request using that bound session, never by re-reading the
+replayer's current session field. A prior version re-read the current
+session, which meant a `Fetch.requestPaused` event already dispatched
+from an OLD, about-to-be-superseded connection's read pump — but not yet
+processed by the time a reconnect swapped in a replacement — would
+answer using the NEW connection's `Send`, carrying a `requestId` that
+only ever existed on the old one; CDP's DevTools protocol has no
+cross-connection request-ID namespace, so that call would at best fail
+silently. `Attach` and `EnableForPlaylist`/`EnableForItem`/`Disable` are
+additionally serialized against each other by a dedicated
+`transitionMu` (deliberately separate from the fast, per-request
+session/resources lock): without it, `EnableForPlaylist` could read the
+current session, then have a concurrent `Attach` swap and close that
+exact session before `EnableForPlaylist`'s own `Fetch.enable` call ran —
+silently leaving the replacement session's `Fetch` domain never actually
+enabled even though local scope bookkeeping said interception should be
+active.
+
 **`displayPlaylist` by `playlistUrl` falls back to the cached copy when
 offline.** `commandrouter`'s `displayPlaylist` handler calls
 `dp1.ProcessPlaylistURL` first; if that fails (most commonly: no

@@ -102,6 +102,24 @@ type replayer struct {
 	json         wrapper.JSON
 	logger       *zap.Logger
 
+	// transitionMu serializes Attach (which swaps and closes CDP
+	// sessions on kiosk reconnect) against EnableForPlaylist/Disable's
+	// own read-session-then-Send sequences. It is a SEPARATE, coarser
+	// lock from mu below — deliberately, so a slow Fetch.enable/disable
+	// round-trip (bounded by cdpsession's own send timeout, but still up
+	// to several seconds) here never blocks mu's fast, always-brief hot
+	// path (processRequestPaused's per-request session/resources read).
+	// Without this lock, EnableForPlaylist/Disable could read r.session
+	// under mu, release mu, and then have a concurrent Attach swap AND
+	// close that exact session before this call's own Fetch.enable/
+	// disable Send runs — the Send then fails against an already-dying
+	// session while r.resources/r.mixedScope (already committed) still
+	// claim a scope is active, silently leaving the NEW session's Fetch
+	// domain never actually enabled. Holding transitionMu across the
+	// whole read-session-through-Send sequence in both Attach and
+	// EnableForPlaylist/Disable closes that window.
+	transitionMu sync.Mutex
+
 	mu      sync.RWMutex
 	session CDPSession
 	// resources is the flat resourceKey(method,url)->resource lookup for
@@ -131,11 +149,32 @@ func NewReplayer(store Store, staticServer StaticServer, missPolicy MissPolicy, 
 }
 
 func (r *replayer) Attach(session CDPSession) {
+	// See transitionMu's doc: held for this whole swap so a concurrent
+	// EnableForPlaylist/Disable cannot be caught mid-flight holding a
+	// reference to the session this call is about to supersede/close.
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+
 	r.mu.Lock()
 	previous := r.session
 	r.session = session
 	r.mu.Unlock()
-	session.On("Fetch.requestPaused", r.onRequestPaused)
+
+	// The handler closes over session (this call's specific argument),
+	// not r.session, and processRequestPaused uses that bound value for
+	// every Fetch.fulfillRequest/continueRequest/failRequest it sends —
+	// see processRequestPaused's doc. This guarantees a
+	// Fetch.requestPaused event delivered on THIS session's read pump
+	// is always answered on THIS SAME session, even if a later Attach
+	// has since swapped r.session to a different one before this
+	// event's handler goroutine gets to run. Binding to r.session
+	// instead (as an earlier version of this method did) let a delayed
+	// event from a superseded connection call Fetch.fulfillRequest/
+	// continueRequest/failRequest on the REPLACEMENT connection using a
+	// requestId that only ever existed on the old one.
+	session.On("Fetch.requestPaused", func(params json.RawMessage) {
+		r.onRequestPaused(session, params)
+	})
 
 	// A reconnect (kiosk restart, including OOM recovery) calls Attach
 	// again with a freshly-dialed session. The old session's own
@@ -166,6 +205,17 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixe
 			resources[resourceKey(res.Method, res.URL)] = res
 		}
 	}
+
+	// See transitionMu's doc: held across the ENTIRE read-session
+	// through Fetch.enable Send below so a concurrent Attach cannot
+	// swap/close r.session in between — otherwise this call could send
+	// Fetch.enable to a connection already being torn down while
+	// r.resources/r.mixedScope (committed moments later, unaffected by
+	// this lock) claim a scope is active on whatever session is
+	// actually current, silently leaving that session without
+	// interception enabled.
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
 
 	r.mu.Lock()
 	session := r.session
@@ -202,6 +252,13 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixe
 // SyncPlaylist) propagates the error so it can be logged and retried on
 // the next sync pass.
 func (r *replayer) Disable(ctx context.Context) error {
+	// See transitionMu's doc: same reasoning as EnableForPlaylist —
+	// held across the read-session-through-Fetch.disable-Send sequence
+	// so a concurrent Attach cannot swap/close the session this call is
+	// about to send Fetch.disable to.
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+
 	r.mu.RLock()
 	session := r.session
 	r.mu.RUnlock()
@@ -231,17 +288,30 @@ func (r *replayer) Disable(ctx context.Context) error {
 	return nil
 }
 
-// onRequestPaused is registered as a CDPSession event handler, which runs
-// on the session's read-pump goroutine. It must not call session.Send
+// onRequestPaused is registered (bound to a specific session — see
+// Attach's doc) as a CDPSession event handler, which runs on that
+// session's read-pump goroutine. It must not call session.Send
 // synchronously (see cdpsession.go's On doc: the pump could not then
 // deliver that Send's own reply, deadlocking against itself), so the
 // actual response decision — which itself calls Send — is handed off to a
 // new goroutine per paused request.
-func (r *replayer) onRequestPaused(params json.RawMessage) {
-	go r.processRequestPaused(params)
+func (r *replayer) onRequestPaused(session CDPSession, params json.RawMessage) {
+	go r.processRequestPaused(session, params)
 }
 
-func (r *replayer) processRequestPaused(params json.RawMessage) {
+// processRequestPaused always responds using session — the SAME CDP
+// connection this specific event was delivered on (bound by Attach's
+// closure) — never by re-reading r.session, which a concurrent Attach
+// may have already swapped to a different (replacement) connection by
+// the time this goroutine runs. An earlier version re-read r.session
+// here, which meant a Fetch.requestPaused event delayed just long
+// enough to still be in flight when a kiosk reconnect swapped sessions
+// would answer using the NEW connection's Send, carrying a requestId
+// that only ever existed on the OLD connection — Chromium's DevTools
+// protocol has no cross-connection request-ID namespace, so that call
+// would at best fail silently and at worst (if IDs happened to collide)
+// resolve the wrong in-flight request on the new connection.
+func (r *replayer) processRequestPaused(session CDPSession, params json.RawMessage) {
 	var evt struct {
 		RequestID string `json:"requestId"`
 		Request   struct {
@@ -255,11 +325,20 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 	}
 
 	r.mu.RLock()
-	session := r.session
+	current := r.session
 	resources := r.resources
 	mixed := r.mixedScope
 	r.mu.RUnlock()
-	if session == nil {
+	// Drop the event outright once session is no longer the current
+	// one: a reconnect has superseded it (Attach already called
+	// previous.Close() — see its doc), so the page this request
+	// belonged to is gone and responding on the dead connection would
+	// only ever fail. This is a pure efficiency short-circuit, not the
+	// correctness fix itself — session is already the bound value every
+	// Send below uses, so even without this check a stale event could
+	// never reach the WRONG (new) connection; it would just attempt,
+	// and benignly fail on, its own closed one.
+	if session != current {
 		return
 	}
 

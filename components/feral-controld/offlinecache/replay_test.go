@@ -160,6 +160,111 @@ func TestReplayer_Attach_ClosesPreviouslyAttachedSession(t *testing.T) {
 	ts.replayer.Attach(newSession)
 }
 
+// TestReplayer_ProcessRequestPaused_DelayedEventFromSupersededSessionIsDropped
+// is the regression test for the "stale request ID on a new CDP session"
+// finding: an earlier version of processRequestPaused re-read r.session
+// instead of using the session its handler closure was bound to, so a
+// Fetch.requestPaused event already dispatched from an OLD session's
+// read pump — but not yet processed — would answer on whatever session
+// a concurrent Attach had since swapped in, sending
+// Fetch.fulfillRequest/continueRequest/failRequest with a requestId that
+// only ever existed on the OLD connection. Neither mock session has a
+// Send expectation registered below: the fix drops the event outright
+// once its bound session is no longer current (see processRequestPaused's
+// doc), so NEITHER session should ever see a Send call as a result of
+// firing oldHandler after the reconnect. A regression that resurrects
+// the "answer on r.session" behavior would call newSession.Send(...)
+// here, which gomock fails as an unexpected call the instant it happens.
+func TestReplayer_ProcessRequestPaused_DelayedEventFromSupersededSessionIsDropped(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	// oldHandler is bound (via Attach's closure) to ts.mockSession — the
+	// OLD session, about to be superseded below.
+	oldHandler := ts.handler
+
+	newSession := mocks.NewMockCDPSession(ts.ctrl)
+	newSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+	ts.mockSession.EXPECT().Close().Return(nil).Times(1)
+	ts.replayer.Attach(newSession)
+
+	// Fires the OLD session's bound handler directly, mirroring a real
+	// CDPSession read pump delivering an event that was already queued
+	// before Attach ran. processRequestPaused runs this on its own
+	// goroutine (see onRequestPaused's doc); the sleep below gives that
+	// goroutine a chance to run — and, if the bug regressed, to hit
+	// gomock's unexpected-call failure — before ctrl.Finish() below.
+	oldHandler(requestPausedEvent(t, "req-1", res.URL))
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestReplayer_EnableForPlaylist_SerializesAgainstConcurrentAttach is the
+// regression test for the second half of the "stale CDP session" finding:
+// EnableForPlaylist/EnableForItem used to read r.session, release the
+// lock, and only THEN call Fetch.enable on the captured value — leaving a
+// window where a concurrent Attach (kiosk reconnect) could swap AND close
+// that exact session before the Send ran. The Send would then fail
+// against an already-dying connection while r.resources/r.mixedScope
+// (committed moments earlier) still claimed a scope was active, silently
+// leaving the NEW session's Fetch domain never enabled. transitionMu (see
+// its doc) closes this by making Attach block until EnableForItem's own
+// in-flight Fetch.enable completes: this test proves that ordering
+// directly rather than only checking the eventual outcome.
+func TestReplayer_EnableForPlaylist_SerializesAgainstConcurrentAttach(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedItem(t, ts.store, "item-1", "software payload")
+
+	sendStarted := make(chan struct{})
+	releaseSend := make(chan struct{})
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).
+		DoAndReturn(func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
+			close(sendStarted)
+			<-releaseSend
+			return json.RawMessage(`{}`), nil
+		}).Times(1)
+
+	enableDone := make(chan error, 1)
+	go func() {
+		enableDone <- ts.replayer.EnableForItem(context.Background(), "item-1")
+	}()
+
+	select {
+	case <-sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("EnableForItem's Fetch.enable Send never started")
+	}
+
+	newSession := mocks.NewMockCDPSession(ts.ctrl)
+	attachDone := make(chan struct{})
+	go func() {
+		newSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+		ts.mockSession.EXPECT().Close().Return(nil).Times(1)
+		ts.replayer.Attach(newSession)
+		close(attachDone)
+	}()
+
+	// Attach must NOT proceed while EnableForItem's Fetch.enable Send is
+	// still blocked above: if it did, it would be free to swap/close
+	// ts.mockSession out from under that still-in-flight Send.
+	select {
+	case <-attachDone:
+		t.Fatal("Attach must not proceed while EnableForItem's Fetch.enable is still in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseSend)
+	select {
+	case <-attachDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Attach did not proceed once Fetch.enable completed")
+	}
+	require.NoError(t, <-enableDone)
+}
+
 func TestReplayer_Attach_FirstCallDoesNotCloseAnything(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
