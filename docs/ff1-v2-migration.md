@@ -67,7 +67,7 @@ probation window returns the device to the signed v1 image.
 | V2 ff-app | Legacy adapter plus target-bound pre-OTA eligibility acknowledgment | Persistent controller enrollment with silent MQTT/WSS access-session issuance, plus enrolled HTTPS and `ff-control.v2` LAN | Legacy preflight fixture; then post-boot one-time enrollment, no-prompt renewal, two independently enrolled mobile installations, offline-LAN command/push, reconnect, and DP-1 fixture run |
 | Released/current ff1-cli | Existing supported path | Unsupported; normal OTA MUST reject this client/firmware combination | Pinned released-CLI smoke test plus `old_cli_v2_ota_denied` eligibility test |
 | V2 ff1-cli or installed integration | Legacy adapter plus target-bound pre-OTA eligibility acknowledgment where supported | Enrolled MQTT/WSS 443 plus HTTPS and `ff-control.v2` LAN when available | Legacy preflight fixture plus post-boot CLI conformance, enrollment, access-session renewal, and LAN parity suite |
-| Web client | Legacy temporary-access handoff where supported | One-time QR claim of a non-renewable MQTT guest session; no LAN certificate | Guest invitation, origin binding, MQTT claim, expiry, revocation, and scope-negative fixtures |
+| Web client | Legacy temporary-access handoff where supported | One-time QR claim of a non-renewable MQTT guest session; no LAN certificate | Guest invitation, browser-only WSS Origin comparison, MQTT claim, expiry, revocation, and scope-negative fixtures |
 | Temporary agent or integration | Legacy temporary-access handoff where supported | One-time QR claim of a non-renewable MQTT guest session plus optional session-bounded LAN certificate | Guest invitation, key proof, MQTT claim, optional CSR and LAN mTLS/HTTPS/WSS, expiry, revocation, and scope-negative fixtures |
 | Independent reference client | Not required | Enrolled or guest advertised subset | Separate minimal client passes published schemas and fixtures without private FF transport code |
 
@@ -207,7 +207,7 @@ v2 readiness. Factory reset is not presented as a substitute for recovery.
 | `closeMintPairingSession` | `sessions.close-invitation` |
 | `mintPairingApprovalDecision` | removed; v2 has no second approval exchange after an enrolled controller creates a guest invitation |
 | relayer temporary-session list/revoke | retained `state/sessions` plus `sessions.revoke`; FF1 owns expiry and revocation |
-| legacy web-client HTTP relay request | an origin-bound web guest session publishes normal v2 commands through the shared controller contract |
+| legacy web-client HTTP relay request | a web guest session with browser-only WSS Origin checking publishes normal v2 commands through the shared controller contract |
 | no v1 equivalent | `diagnostics.ping`, the read-only v2 transport fixture |
 | no v1 equivalent | `input.pointer-cancel`, explicit release for a streamed long drag |
 | no v1 equivalent | `playlist.get-document` and `playlist.read-chunk` recover a cached signed DP-1 Playlist without retaining credentials |
@@ -401,8 +401,9 @@ rollback at every fleet gate:
    service, one-time invitation consumption, access-session broker challenge
    and controller-key proof, JWE delivery, silent enrolled-session and
    enrollment-credential renewal,
-   multiple independent controller enrollments, WebSocket Origin binding for
-   web guests, exact ACLs, expiry, revocation, and normal `playlist.display`
+   multiple independent controller enrollments, browser-only WebSocket Origin
+   defense-in-depth checks for web guests, exact ACLs, expiry, revocation, and
+   normal `playlist.display`
    through a guest session. Direct broker validation of the registered FF1
    issuer is a gate.
 6. Add authenticated LAN HTTPS/WebSocket/mDNS and run one shared protocol

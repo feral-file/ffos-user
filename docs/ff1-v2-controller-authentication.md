@@ -389,9 +389,9 @@ and it has no unprotected header. Its payload has these required claims:
 | `ff_invitation_digest` | base64url SHA-256 of JCS(`ControllerInvitation` with `credential` omitted) |
 | `scope` | exactly `invitation:claim` |
 
-The digest binds the broker URI and audience, issuer JWK, LAN URI and SPKI pin,
-IDs, client kind, label, origin, role, scope ceiling, guest lifetime, and
-expiry without duplicating those fields in the JWS. The complete
+The digest covers the broker URI and audience, issuer JWK, LAN URI and SPKI pin,
+IDs, client kind, label, declared web origin, role, scope ceiling, guest
+lifetime, and expiry without duplicating those fields in the JWS. The complete
 `ff1-control:` URI MUST be no more than 2331 UTF-8 bytes. Producers reject an
 invitation that cannot meet that bound; labels are omitted before any required
 field is shortened or removed.
@@ -597,7 +597,7 @@ no unprotected header. Its payload has these required claims:
 | `ff_role` | `owner\|delegate` for enrolled sessions; omitted for guest |
 | `scope` | space-delimited granted scopes in lexical order |
 | `cnf.jwk` | controller signing public JWK |
-| `ff_origin` | normalized HTTPS origin for web clients; otherwise omitted |
+| `ff_origin` | normalized HTTPS origin used only for the web MQTT-over-WSS browser defense in depth; otherwise omitted |
 
 `cnf.jwk` follows RFC 7800. It is the closed public JWK
 `{"kty":"EC","crv":"P-256","x":"<base64url>","y":"<base64url>"}` and
@@ -632,10 +632,12 @@ Authentication Data, and all Reason Codes retain their MQTT 5 meanings.
 
 The broker validates the registered FF1 issuer, ES256 signature, audience,
 `iat`, `nbf`, `exp`, exact User Name, exact Client Identifier, device ID,
-session type, origin when present, `cnf.jwk`, and ACL mapping before issuing a
-challenge. It rejects an access credential whose controller or session fields
-conflict, whose `cnf` object has any confirmation member other than `jwk`, or
-whose public JWK is not the key recorded by FF1 in the signed credential.
+session type, `cnf.jwk`, and ACL mapping before issuing a challenge. For a web
+access session over MQTT-over-WSS, it additionally applies the exact Origin
+comparison in section 10 as browser-only defense in depth. It rejects an access
+credential whose controller or session fields conflict, whose `cnf` object has
+any confirmation member other than `jwk`, or whose public JWK is not the key
+recorded by FF1 in the signed credential.
 
 ### 7.2 Enhanced Authentication exchange
 
@@ -728,7 +730,8 @@ The broker uses these exact MQTT 5 outcomes before successful CONNACK:
 | Condition | Broker outcome |
 |---|---|
 | Authentication Method is unsupported or not exactly `FF1-JWT-ES256-PoP` | CONNACK `0x8C` (Bad authentication method), then close the Network Connection |
-| Required profile field is absent, Password is present, Authentication Data is not the required closed JSON, or the access credential, claims, key, origin, or ACL mapping is invalid | CONNACK `0x87` (Not authorized), then close the Network Connection |
+| Required profile field is absent, Password is present, Authentication Data is not the required closed JSON, or the access credential, claims, key, or ACL mapping is invalid | CONNACK `0x87` (Not authorized), then close the Network Connection |
+| A web access session omits WebSocket Origin or the presented value does not exactly equal `ff_origin` | CONNACK `0x87` (Not authorized), then close the Network Connection |
 | Challenge expires, proof validation fails, or a challenge or proof `jti` is replayed | CONNACK `0x87` (Not authorized), then close the Network Connection |
 | CONNECT is malformed | CONNACK `0x81` (Malformed Packet) when a valid CONNACK can be encoded, then close the Network Connection |
 | CONNECT causes an MQTT Protocol Error | CONNACK `0x82` (Protocol Error) when a valid CONNACK can be encoded, then close the Network Connection |
@@ -913,10 +916,19 @@ guest-eligible scope requires the inviting controller to request it explicitly
 and to hold the same scope. A guest never obtains broader scopes than its
 inviting controller.
 
-A web guest's broker ACL and FF1 authorization both require the presented
-WebSocket Origin to equal `ff_origin`. An agent guest has no origin claim and is
-bound by its signing and encryption keys, exact session, device, scopes, and
-expiry.
+For a web access session over MQTT-over-WSS, the broker MUST retain the Origin
+value from the WebSocket opening handshake, require it to be present, and
+compare its RFC 6454 ASCII serialization exactly with `ff_origin`. A missing or
+mismatched value MUST be rejected as specified in section 7.4. This comparison
+is browser-only defense in depth against cross-origin use of a credential.
+Origin is client-supplied and can be forged by a non-browser client; it MUST NOT
+be treated as proof of identity or key possession, a scope or ACL authorization
+boundary, or a substitute for the `FF1-JWT-ES256-PoP` proof. Authorization MUST
+depend on the signed credential, proof-of-possession key, exact session, device,
+and Client Identifier, granted scopes, expiry, revocation state, and broker
+Topic Name ACL. An agent guest has no origin claim and uses the same
+credential, proof-of-possession, session, scope, expiry, revocation, and ACL
+authorization model.
 
 ## 11. Session state and events
 

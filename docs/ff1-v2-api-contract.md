@@ -33,8 +33,8 @@ The contract covers:
 - DP-1 Playlist display and playback control;
 - display, panel, audio, sleep, settings, update, power, support, and SSH;
 - mobile remote control, including keyboard and relative touchpad input;
-- enrolled mobile, CLI, and integration controllers plus origin-bound web and
-  temporary-agent guest sessions;
+- enrolled mobile, CLI, and integration controllers plus web guest sessions
+  with browser-only WebSocket Origin checks and temporary-agent guest sessions;
 - unprovisioned SoftAP setup and recovery as a deliberately separate bootstrap
   profile.
 
@@ -510,9 +510,12 @@ certificate without device access receives 403; a wrong device path receives
 
 Native clients omit `Origin`. If a client sends `Origin`, it MUST equal the
 HTTPS origin named by the request Host; otherwise the server returns 403. The
-server negotiates no WebSocket extension, including compression. One complete
-application message is one UTF-8 JSON Text Message; RFC 6455 fragmentation may
-carry it, but the reassembled message is limited to 262144 UTF-8 bytes. Binary
+comparison is browser-only defense in depth and is not client authentication or
+authorization; LAN authorization remains the mTLS identity and scope grant.
+The server negotiates no WebSocket extension, including compression. One
+complete application message is one UTF-8 JSON Text Message; RFC 6455
+fragmentation may carry it, but the reassembled message is limited to 262144
+UTF-8 bytes. Binary
 Message closes with status 1003, invalid UTF-8 or JSON with 1007, and an
 oversized Message with 1009. Normal server shutdown uses 1001. At the earlier
 of the client certificate's `notAfter` and the connection-local LAN
