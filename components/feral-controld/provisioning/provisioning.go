@@ -584,11 +584,25 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
 	if err == nil {
 		m.mu.Lock()
 		m.status = portal.Status{State: portal.JoinSucceeded, SSID: ssid, Message: "Connected to " + ssid}
-		m.offlineSince = time.Time{}
 		m.mu.Unlock()
 		m.logger.Info("provisioning: wifi join succeeded", zap.String("ssid", ssid))
-		// AP stays down; the device is online.
-		m.transition(ctx, StateOnline, Detail{SSID: ssid, Message: "Connected to " + ssid})
+		// Association is NOT reachability: joining a network with a dead
+		// upstream must not park the machine in StateOnline — the device was
+		// offline before the join and stays offline after it, so sys-monitord
+		// emits no change event and nothing would ever correct the state (AP
+		// down, offline window cleared, setup stranded). Route the outcome
+		// through the same assessment the loop's startup uses: online confirms
+		// StateOnline; offline files the device as provisioned-but-offline,
+		// arming the sustained-offline window so the AP comes back if the
+		// network stays dark. The /status outcome above stays JoinSucceeded
+		// either way — the association DID succeed, which is the portal's
+		// contract.
+		online, oerr := m.conn.Online(ctx)
+		if oerr != nil {
+			m.logger.Warn("provisioning: post-join connectivity query failed; assuming offline", zap.Error(oerr))
+			online = false
+		}
+		m.onConnectivity(ctx, online)
 		return
 	}
 

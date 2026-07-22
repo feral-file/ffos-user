@@ -377,6 +377,9 @@ func TestSuccessfulJoinGoesOnlineAndLeavesAPDown(t *testing.T) {
 	require.Equal(t, StateAPActive, h.m.State())
 
 	h.wifi.joinErr = nil
+	// The join brings real reachability: the post-join assessment sees online.
+	h.conn.online = true
+	h.wifi.setProfile(true)
 	h.m.applyJoin(ctx, "HomeNet", "correct-pw")
 
 	assert.Equal(t, StateOnline, h.m.State())
@@ -417,8 +420,49 @@ func TestJoinAbortsWhenAPTeardownFails(t *testing.T) {
 
 	// Backend recovers: the user's retry joins normally.
 	h.ap.downErr = nil
+	h.conn.online = true
+	h.wifi.setProfile(true)
 	h.m.applyJoin(ctx, "HomeNet", "pw")
 	assert.Equal(t, 1, h.rec.count("wifi.Join:HomeNet"))
+	assert.Equal(t, StateOnline, h.m.State())
+}
+
+// TestJoinSucceedsButStillOfflineArmsRecovery: a successful nmcli association
+// to a network with no upstream must NOT park the machine in StateOnline —
+// sys-monitord emits no change event (offline before, offline after), so
+// nothing would ever correct it. The post-join assessment files the device as
+// provisioned-but-offline, and the sustained-offline window brings the AP
+// back if the network stays dark.
+func TestJoinSucceedsButStillOfflineArmsRecovery(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	// Association succeeds; reachability stays false; the join persisted a
+	// profile.
+	h.wifi.joinErr = nil
+	h.conn.online = false
+	h.wifi.setProfile(true)
+	h.m.applyJoin(ctx, "DeadUplink", "pw")
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"association without reachability must land in provisioned-offline, not Online")
+	st := h.m.Status()
+	assert.Equal(t, portal.JoinSucceeded, st.State, "the association itself DID succeed")
+	assert.Equal(t, 1, h.rec.count("ap.Up"), "AP stays down while NM retries")
+
+	// The network stays dark past the sustained-offline window: the setup AP
+	// must come back.
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 2, h.rec.count("ap.Up"), "recovery AP re-raised after the window")
+
+	// And if reachability arrives instead, the machine settles Online.
+	h.m.onConnectivity(ctx, true)
 	assert.Equal(t, StateOnline, h.m.State())
 }
 
@@ -635,15 +679,17 @@ func TestFreshAPRaiseResetsStaleJoinStatus(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	// Full successful setup.
+	// Full successful setup: the join brings real reachability.
 	h.m.onConnectivity(ctx, false)
 	require.Equal(t, StateAPActive, h.m.State())
+	h.conn.online = true
+	h.wifi.setProfile(true)
 	h.m.applyJoin(ctx, "HomeNet", "pw")
 	require.Equal(t, StateOnline, h.m.State())
 	require.Equal(t, portal.JoinSucceeded, h.m.Status().State)
 
 	// Weeks later: provisioned but sustained-offline past the window.
-	h.wifi.setProfile(true)
+	h.conn.online = false
 	h.m.onConnectivity(ctx, false)
 	h.clk.advance(6 * time.Minute)
 	h.m.onTick(ctx)
