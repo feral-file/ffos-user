@@ -115,6 +115,7 @@ run_ready_server() {
   FF_PLAYER_STATIC_PORT="$port" \
   FF_PLAYER_READY_TIMEOUT_SECONDS=5 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}" \
+  FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT="${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT:-1}" \
   FF_PLAYER_TEST_ROOT="$root_dir" \
   FF_PLAYER_TEST_PORT="$port" \
   FF_PLAYER_TEST_PID_FILE="$pid_file" \
@@ -128,11 +129,51 @@ run_ready_server() {
   [ -s "$pid_file" ] || fail "expected fake darkhttpd pid file to be written"
 }
 
+# The setupDisplay contract is required BY DEFAULT: SoftAP onboarding narrates
+# through it, and a bundle without it must not reach READY silently.
 rm -f "$root_dir/ffos-player-contract.json"
+setup_missing_output="$tmp_dir/setup-display-missing.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  bash "$script_under_test" >"$setup_missing_output" 2>&1; then
+  fail "expected missing setupDisplay player contract to fail by default"
+fi
+assert_contains "$setup_missing_output" "serve-feral-player: missing player contract manifest"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}
+EOF
+setup_absent_output="$tmp_dir/setup-display-absent.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  bash "$script_under_test" >"$setup_absent_output" 2>&1; then
+  fail "expected manifest without setupDisplay to fail by default"
+fi
+assert_contains "$setup_absent_output" "serve-feral-player: invalid setupDisplay player contract"
+
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"setupDisplay":{"version":1,"requestKey":"request","states":["softap_qr","joining"],"acceptedResponse":{"ok":true}}}}
+EOF
+setup_states_output="$tmp_dir/setup-display-states.log"
+if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  bash "$script_under_test" >"$setup_states_output" 2>&1; then
+  fail "expected setupDisplay contract with missing states to fail by default"
+fi
+assert_contains "$setup_states_output" "serve-feral-player: invalid setupDisplay player contract"
+
+# A complete setupDisplay v1 contract passes the default gate.
+cat >"$root_dir/ffos-player-contract.json" <<'EOF'
+{"contracts":{"setupDisplay":{"version":1,"requestKey":"request","states":["softap_qr","joining","join_failed","updating","claim_qr","ready","hidden"],"acceptedResponse":{"ok":true}}}}
+EOF
 run_ready_server bash "$script_under_test"
 
+# The dev/legacy escape hatch: setupDisplay validation off, no manifest at all.
+rm -f "$root_dir/ffos-player-contract.json"
+FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 run_ready_server bash "$script_under_test"
+
+# Mint-pairing-gate scenarios run with the setupDisplay gate disabled so each
+# assertion isolates the mint-pairing validation path.
 contract_output="$tmp_dir/missing-contract.log"
 if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
   bash "$script_under_test" >"$contract_output" 2>&1; then
   fail "expected missing mint-pairing player contract to fail when validation is required"
@@ -144,6 +185,7 @@ cat >"$root_dir/ffos-player-contract.json" <<'EOF'
 EOF
 missing_python_output="$tmp_dir/missing-python.log"
 if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
   PATH="$bin_dir" \
   /bin/bash "$script_under_test" >"$missing_python_output" 2>&1; then
@@ -156,6 +198,7 @@ cat >"$root_dir/ffos-player-contract.json" <<'EOF'
 EOF
 wrong_path_output="$tmp_dir/wrong-contract-path.log"
 if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
   bash "$script_under_test" >"$wrong_path_output" 2>&1; then
   fail "expected wrong-path mint-pairing player contract to fail when validation is required"
@@ -167,6 +210,7 @@ cat >"$root_dir/ffos-player-contract.json" <<'EOF'
 EOF
 missing_state_output="$tmp_dir/missing-state-contract.log"
 if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
   bash "$script_under_test" >"$missing_state_output" 2>&1; then
   fail "expected missing-state mint-pairing player contract to fail when validation is required"
@@ -178,14 +222,16 @@ cat >"$root_dir/ffos-player-contract.json" <<'EOF'
 EOF
 wrong_response_output="$tmp_dir/wrong-response-contract.log"
 if FF_PLAYER_STATIC_ROOT="$root_dir" \
+  FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 \
   bash "$script_under_test" >"$wrong_response_output" 2>&1; then
   fail "expected wrong-response mint-pairing player contract to fail when validation is required"
 fi
 assert_contains "$wrong_response_output" "serve-feral-player: invalid player contract manifest"
 
+# Image-shaped manifest: both contracts present, both gates on.
 cat >"$root_dir/ffos-player-contract.json" <<'EOF'
-{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}
+{"contracts":{"setupDisplay":{"version":1,"requestKey":"request","states":["softap_qr","joining","join_failed","updating","claim_qr","ready","hidden"],"acceptedResponse":{"ok":true}},"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}}}
 EOF
 FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 run_ready_server bash "$script_under_test"
 
