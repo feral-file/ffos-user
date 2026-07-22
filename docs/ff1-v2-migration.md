@@ -354,6 +354,397 @@ unit revisions together. A package-only release is forbidden. This docs-only
 contract PR changes neither shipping rail and therefore MUST NOT add an
 implementation release entry.
 
+#### Future executable gate
+
+The LAN implementation MUST add the reusable workflow
+`feral-file/ffos/.github/workflows/lan-443-full-image-conformance.yml`. Its
+required producer job ID is `produce_lan_443_attestation`. The existing
+`build-image-to-cf.yml` workflow MUST call it only after the candidate image is
+immutable and MUST pass these outputs from its trusted build job, not
+operator-entered replacements:
+
+- `version`;
+- `ffos_commit`, the complete 40-character Git commit that built the image;
+- `ffos_user_ref`, the complete 40-character `ffos-user` Git commit embedded in
+  the image;
+- `image_uri` and `image_sha256`, identifying the same immutable image bytes;
+  and
+- `lan_offline_after_power_loss`, the value the image advertises as
+  `transports.lanOfflineAfterPowerLoss`.
+
+The producer MUST download and hash the image independently, flash those exact
+bytes to a lab-managed FF1, reboot it, and bind every test to a fresh run nonce.
+Before testing the API, it MUST verify the installed-image measurement against
+the build's measurement manifest and verify a nonce-bound TPM quote from the
+FF1. The quote evidence MUST bind the measured boot state, the hardware
+inventory identity for model and revision, and the installed image measurement.
+An input digest, version string, device-reported version, VM, container, or
+mocked listener is not proof that the subject image ran on FF1 hardware.
+
+The hardware trust anchor is the offline **Feral File FF1 Hardware Inventory
+Root**, not a test-run key or a self-asserted model string. The implementation
+MUST add its certificate and SPKI SHA-256 pin to the verifier's versioned trust
+policy; changing that policy is security-review-only, triggers this gate, and
+invalidates evidence issued under a removed root. The root signs a DSSE/in-toto
+hardware-inventory statement whose subject is the TPM Endorsement Key public
+key SHA-256 and whose closed predicate contains `model: "FF1"`, `revision`, a
+random non-serial `inventoryId`, `ekPublicKeySha256`, `akName`,
+`akPublicKeySha256`, and `issuedAt`. Issuance requires proof of possession of
+the Endorsement Key and Attestation Key and validation of the Endorsement Key
+certificate against the trust policy's TCG manufacturer-CA allowlist. The raw
+serial number MUST NOT enter release evidence.
+
+The test quote MUST be signed by that inventory statement's Attestation Key
+over the SHA-256 PCR bank and PCR selection `0,2,4,7,11,15`. PCR 15 is the FF
+OS image measurement extended by the measured early-boot chain with the
+builder's subject image SHA-256; this is an FF OS measured-boot customization.
+The quote's `qualifyingData` is exactly SHA-256 over the UTF-8 label
+`LAN_443_FULL_IMAGE`, one zero byte, the raw run-nonce bytes, the hardware-
+inventory-statement SHA-256, the measurement-manifest SHA-256, and the subject
+image SHA-256, in that order. The verifier checks the quote signature, PCR
+selection and values, freshness, inventory signature and claims, Endorsement
+Key chain, Attestation Key binding, and replay nonce.
+
+The measurement manifest is itself a Sigstore bundle with in-toto predicate
+type `https://feralfile.com/attestations/ffos-measurement-manifest/v1`, signed
+by the protected-ref GitHub OIDC identity for
+`feral-file/ffos/.github/workflows/build-image-to-cf.yml`. Its single subject
+is the same image SHA-256; its closed predicate contains `pcrBank: "sha256"`,
+`pcrSelection: [0,2,4,7,11,15]`, an `expectedPcrs` object with one lowercase
+64-hex value per selected PCR, and `eventLogSha256`. The verifier hashes this
+bundle to `measurementManifestSha256`, verifies its signature and subject,
+replays the measured-boot event log to the quoted PCRs, and requires PCR 15's
+image event to contain the subject digest. A differently signed manifest,
+unselected PCR, missing event, or self-reported digest fails the gate.
+
+The future `ffos-user` implementation MUST also extend
+`.github/workflows/release-guardrail.yaml` with required job ID
+`lan_443_full_image` and display name `LAN_443_FULL_IMAGE`, running on every PR
+into `staging` or `release`. It invokes
+`scripts/verify-lan-443-full-image-release.sh <base-ref>`. The LAN
+implementation PR MUST add the verifier and its watched-path manifest before it
+enables the endpoint; the manifest MUST include the `feral-controld` LAN edge,
+the socket/proxy units and their image-install inputs. A change to the manifest
+itself also triggers the gate. A required run that is skipped, neutral,
+cancelled, or unable to obtain evidence fails closed.
+
+#### Signed conformance artifact
+
+On success, the producer publishes one immutable
+`lan-443-full-image-conformance.v1.sigstore.json` and one content-addressed
+evidence bundle. The first is a
+[Sigstore bundle](https://docs.sigstore.dev/about/bundle/) containing a
+DSSE-signed [in-toto Statement v1](https://in-toto.io/Statement/v1). Its
+`predicateType` is
+`https://feralfile.com/attestations/lan-443-full-image-conformance/v1`; the
+single subject is the exact FF OS image and its SHA-256 digest. The keyless
+signature identity MUST be a GitHub Actions OIDC identity for
+`feral-file/ffos/.github/workflows/lan-443-full-image-conformance.yml` at a
+protected release ref. The bundle MUST carry the certificate chain,
+transparency-log inclusion material, and signed timestamp needed for offline
+policy verification. A signature from a developer, another repository,
+another workflow, a pull-request ref, or a rerun with a different subject does
+not satisfy the gate.
+
+The signed statement has this closed logical shape; lowercase SHA-256 values
+are exactly 64 hexadecimal characters, Git commits are exactly 40 lowercase
+hexadecimal characters, IDs are decimal strings, and times are UTC RFC 3339
+timestamps:
+
+```json
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "ffos://image/2.0.0",
+      "digest": {
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    }
+  ],
+  "predicateType": "https://feralfile.com/attestations/lan-443-full-image-conformance/v1",
+  "predicate": {
+    "gate": "LAN_443_FULL_IMAGE",
+    "result": "pass",
+    "version": "2.0.0",
+    "startedAt": "2026-07-22T00:00:00Z",
+    "finishedAt": "2026-07-22T00:20:00Z",
+    "runNonce": "019c0000-0000-7000-8000-000000000001",
+    "ffos": {
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "workflow": ".github/workflows/lan-443-full-image-conformance.yml",
+      "runId": "1234567890",
+      "runAttempt": "1"
+    },
+    "ffosUser": {
+      "ref": "89abcdef0123456789abcdef0123456789abcdef",
+      "runtimeTreeSha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    },
+    "hardware": {
+      "model": "FF1",
+      "revision": "1",
+      "inventoryStatementSha256": "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+      "tpmQuoteSha256": "23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
+      "measurementManifestSha256": "3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef012"
+    },
+    "capabilities": {
+      "lanOfflineAfterPowerLoss": false
+    },
+    "evidence": {
+      "uri": "https://conformance.example.invalid/sha256/456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123",
+      "sha256": "456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"
+    },
+    "tests": [
+      {
+        "id": "image.boot_measurement",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/image.boot_measurement.json"
+        ]
+      },
+      {
+        "id": "listener.ipv4.public_443",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/listener.ipv4.public_443.json"
+        ]
+      },
+      {
+        "id": "listener.ipv6.public_443",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/listener.ipv6.public_443.json"
+        ]
+      },
+      {
+        "id": "tls.version_1_3",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/tls.version_1_3.json"
+        ]
+      },
+      {
+        "id": "mtls.authorized",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/mtls.authorized.json"
+        ]
+      },
+      {
+        "id": "mtls.unauthorized",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/mtls.unauthorized.json"
+        ]
+      },
+      {
+        "id": "https.command",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/https.command.json"
+        ]
+      },
+      {
+        "id": "websocket.subscription",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/websocket.subscription.json"
+        ]
+      },
+      {
+        "id": "mdns.readiness_withdrawal",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/mdns.readiness_withdrawal.json"
+        ]
+      },
+      {
+        "id": "privilege.controld_unprivileged",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/privilege.controld_unprivileged.json"
+        ]
+      },
+      {
+        "id": "privilege.proxy_hardened",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/privilege.proxy_hardened.json"
+        ]
+      },
+      {
+        "id": "reset.pending_broker_cleanup",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/reset.pending_broker_cleanup.json"
+        ]
+      },
+      {
+        "id": "reset.pending_identity_rotation",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/reset.pending_identity_rotation.json"
+        ]
+      },
+      {
+        "id": "reset.completed_identity_rotation",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/reset.completed_identity_rotation.json"
+        ]
+      },
+      {
+        "id": "brokerless.same_boot_control_push",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/brokerless.same_boot_control_push.json"
+        ]
+      },
+      {
+        "id": "power_loss.pre_ntp_fail_closed",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/power_loss.pre_ntp_fail_closed.json"
+        ]
+      },
+      {
+        "id": "power_loss.ntp_recovery",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/power_loss.ntp_recovery.json"
+        ]
+      }
+    ]
+  }
+}
+```
+
+`tests` MUST contain exactly one passing entry for each of:
+
+- `image.boot_measurement`;
+- `listener.ipv4.public_443` and `listener.ipv6.public_443`;
+- `tls.version_1_3`, `mtls.authorized`, and `mtls.unauthorized`;
+- `https.command`, `websocket.subscription`, and `mdns.readiness_withdrawal`;
+- `privilege.controld_unprivileged` and `privilege.proxy_hardened`;
+- `reset.pending_broker_cleanup`, `reset.pending_identity_rotation`, and
+  `reset.completed_identity_rotation`; and
+- `brokerless.same_boot_control_push` for both capability values; then either
+  `power_loss.rtc_advancement_nonrollback`,
+  `power_loss.pre_ntp_control_push`, `power_loss.certificate_expiry`, and
+  `power_loss.authorization_lease_expiry` when `lanOfflineAfterPowerLoss` is
+  `true`, or both `power_loss.pre_ntp_fail_closed` and
+  `power_loss.ntp_recovery` when it is `false`.
+
+The evidence URI MUST be content-addressed, immutable, and retained for at
+least the supported lifetime of the image. Its bytes hash to `evidence.sha256`
+and contain a closed `manifest.json` with `schemaVersion: "1"`, the gate,
+subject image digest, run nonce, FF OS and `ffos-user` commits, hardware
+inventory-attestation path, TPM quote path, measurement-manifest path, and a
+`files` array. Each file entry has only `path`, `mediaType`, `sizeBytes`, and
+`sha256`; paths are unique, relative, and cannot traverse out of the bundle.
+Every `tests[].evidencePaths` value MUST name a manifest entry.
+
+Each referenced test JSON is a closed object containing only
+`schemaVersion: "1"`, `testId`, `runNonce`, `imageSha256`, `startedAt`,
+`finishedAt`, `assertions`, `result`, and `evidencePaths`. `assertions` is a
+non-empty array of closed objects containing only `id`, `operator`, `expected`,
+`observed`, `result`, and `evidencePaths`. `expected` and `observed` are a JSON
+null, boolean, signed 64-bit integer, string of at most 4,096 bytes, or a
+lexically sorted array of unique strings, or a numerically sorted array of
+unique signed 64-bit integers. The operator is exactly
+`equals|set_equals|greater_than_or_equal|less_than_or_equal`. `equals` requires
+identical JSON types and values; `set_equals` requires two sorted unique-string
+or unique-integer arrays with identical element types and members; the
+comparison operators accept signed 64-bit integers only. No operator reads an
+untyped log to decide its result.
+Every evidence path names a manifest entry. A test passes only when its image
+and nonce equal the signed predicate, its assertion-ID set exactly matches the
+registry below, the verifier independently applies each registered operator to
+the typed expected and observed values, every assertion passes, and the test's
+result is `pass`. Unknown or duplicate assertions, an unregistered operator,
+missing evidence, or a top-level result inconsistent with an assertion fails
+the gate.
+
+Registry tuples below are `id / operator / operand type / expected`. A literal
+is used as written. `$subject.imageSha256` resolves from the verified signed
+statement; `$derived.qualifyingData` is recomputed by the exact concatenation
+rule above; `$policy.pcrSelection` is `[0,2,4,7,11,15]`; and
+`$fixture.<name>` resolves only from closed `fixtures.json` in the
+content-addressed evidence manifest. The resolved value is stored in
+`expected`. There are no other variables or implicit assertions.
+
+| Test | Exact required assertion tuples |
+|---|---|
+| `image.boot_measurement` | `inventory_signature_valid / equals / boolean / true`; `inventory_claims_valid / equals / boolean / true`; `ek_manufacturer_chain_valid / equals / boolean / true`; `ak_binding_valid / equals / boolean / true`; `qualifying_data / equals / string / $derived.qualifyingData`; `pcr_bank / equals / string / "sha256"`; `pcr_selection / set_equals / integer[] / $policy.pcrSelection`; `event_log_replay_valid / equals / boolean / true`; `pcr15_image_sha256 / equals / string / $subject.imageSha256` |
+| `listener.ipv4.public_443` | `address_family / equals / string / "ipv4"`; `public_port / equals / integer / 443`; `proxy_destination / equals / string / "127.0.0.1:8443"`; `end_to_end_tls_succeeded / equals / boolean / true` |
+| `listener.ipv6.public_443` | `address_family / equals / string / "ipv6"`; `public_port / equals / integer / 443`; `proxy_destination / equals / string / "127.0.0.1:8443"`; `end_to_end_tls_succeeded / equals / boolean / true` |
+| `tls.version_1_3` | `negotiated_version / equals / string / "TLSv1.3"`; `tls12_rejected / equals / boolean / true`; `tls11_rejected / equals / boolean / true` |
+| `mtls.authorized` | `certificate_chain_valid / equals / boolean / true`; `device_binding / equals / string / $fixture.mtls.deviceId`; `controller_binding / equals / string / $fixture.mtls.controllerId`; `session_binding / equals / string / $fixture.mtls.sessionId`; `lease_valid / equals / boolean / true`; `scope_set / set_equals / string[] / $fixture.mtls.scopes`; `request_succeeded / equals / boolean / true` |
+| `mtls.unauthorized` | `absent_certificate_rejected_pre_application / equals / boolean / true`; `revoked_certificate_rejected_pre_application / equals / boolean / true`; `expired_certificate_rejected_pre_application / equals / boolean / true`; `wrong_device_rejected_pre_application / equals / boolean / true`; `out_of_scope_rejected_pre_application / equals / boolean / true` |
+| `https.command` | `request_sha256 / equals / string / $fixture.https.requestSha256`; `response_sha256 / equals / string / $fixture.https.responseSha256`; `effect_count / equals / integer / 1`; `result_revision / equals / integer / $fixture.https.resultRevision` |
+| `websocket.subscription` | `upgrade_succeeded / equals / boolean / true`; `snapshot_sha256 / equals / string / $fixture.websocket.snapshotSha256`; `event_sha256 / equals / string / $fixture.websocket.eventSha256`; `out_of_scope_rejected / equals / boolean / true` |
+| `mdns.readiness_withdrawal` | `absent_before_readiness / equals / boolean / true`; `ready_spki / equals / string / $fixture.mdns.activeSpki`; `absent_after_listener_loss / equals / boolean / true`; `absent_pending_broker_cleanup / equals / boolean / true`; `absent_pending_identity_rotation / equals / boolean / true` |
+| `privilege.controld_unprivileged` | `uid_is_nonzero / equals / boolean / true`; `effective_cap_net_bind_service / equals / boolean / false`; `permitted_cap_net_bind_service / equals / boolean / false`; `ambient_cap_net_bind_service / equals / boolean / false`; `bounding_cap_net_bind_service / equals / boolean / false`; `listener_address / equals / string / "127.0.0.1:8443"` |
+| `privilege.proxy_hardened` | `uid_is_nonzero / equals / boolean / true`; `no_new_privileges / equals / boolean / true`; `effective_capabilities / set_equals / string[] / []`; `permitted_capabilities / set_equals / string[] / []`; `ambient_capabilities / set_equals / string[] / []`; `bounding_capabilities / set_equals / string[] / []`; `proxy_destination / equals / string / "127.0.0.1:8443"` |
+| `reset.pending_broker_cleanup` | `state / equals / string / "pending_broker_cleanup"`; `mdns_absent / equals / boolean / true`; `public_listener_rejected / equals / boolean / true`; `owner_enrollment_rejected / equals / boolean / true`; `broker_cleanup_acked / equals / boolean / false` |
+| `reset.pending_identity_rotation` | `state / equals / string / "pending_identity_rotation"`; `mdns_absent / equals / boolean / true`; `public_listener_rejected / equals / boolean / true`; `owner_enrollment_rejected / equals / boolean / true`; `old_publisher_fenced / equals / boolean / true`; `old_authorization_fenced / equals / boolean / true`; `new_identity_active / equals / boolean / false` |
+| `reset.completed_identity_rotation` | `state / equals / string / "completed"`; `cleanup_acked / equals / boolean / true`; `identity_acked / equals / boolean / true`; `old_identity_rejected / equals / boolean / true`; `certificate_changed / equals / boolean / true`; `publisher_generation_changed / equals / boolean / true`; `authorized_mtls_before_mdns / equals / boolean / true` |
+| `brokerless.same_boot_control_push` | `broker_route_unreachable / equals / boolean / true`; `trusted_ntp_in_current_boot / equals / boolean / true`; `https_command_succeeded / equals / boolean / true`; `websocket_snapshot_succeeded / equals / boolean / true`; `websocket_event_succeeded / equals / boolean / true`; `lease_expiry_rejected / equals / boolean / true` |
+| `power_loss.rtc_advancement_nonrollback` | `power_removed / equals / boolean / true`; `rtc_advance_error_ms_nonnegative / greater_than_or_equal / integer / 0`; `rtc_advance_error_ms_maximum / less_than_or_equal / integer / 5000`; `authenticated_rollback_rejected / equals / boolean / true`; `expiry_clock_rollback_ms / equals / integer / 0` |
+| `power_loss.pre_ntp_control_push` | `ntp_route_unreachable / equals / boolean / true`; `mtls_succeeded_before_ntp / equals / boolean / true`; `https_command_succeeded / equals / boolean / true`; `websocket_snapshot_succeeded / equals / boolean / true`; `websocket_event_succeeded / equals / boolean / true` |
+| `power_loss.certificate_expiry` | `ntp_route_unreachable / equals / boolean / true`; `pre_expiry_mtls_succeeded / equals / boolean / true`; `post_expiry_mtls_rejected / equals / boolean / true`; `post_expiry_application_requests / equals / integer / 0` |
+| `power_loss.authorization_lease_expiry` | `ntp_route_unreachable / equals / boolean / true`; `pre_expiry_http_succeeded / equals / boolean / true`; `pre_expiry_websocket_succeeded / equals / boolean / true`; `post_expiry_http_rejected / equals / boolean / true`; `post_expiry_websocket_rejected / equals / boolean / true` |
+| `power_loss.pre_ntp_fail_closed` | `ntp_route_unreachable / equals / boolean / true`; `mtls_rejected_pre_application / equals / boolean / true`; `http_application_requests / equals / integer / 0`; `websocket_application_requests / equals / integer / 0`; `recovery_softap_available / equals / boolean / true` |
+| `power_loss.ntp_recovery` | `closed_before_authenticated_ntp / equals / boolean / true`; `authenticated_ntp_succeeded / equals / boolean / true`; `https_command_succeeded / equals / boolean / true`; `websocket_snapshot_succeeded / equals / boolean / true`; `websocket_event_succeeded / equals / boolean / true`; `new_qr_claim_count / equals / integer / 0` |
+
+Endpoint values, certificate fingerprints, process credentials, capability
+sets, clock samples, reset projections, packet results, and fixture digests are
+recorded as assertion observations plus redacted raw evidence. The evidence
+must be sufficient to reproduce the pass decision without credentials,
+controller private keys, device serial numbers, or unredacted input data.
+
+#### Release-ledger linkage and verifier behavior
+
+The implementation release adds exactly one machine-readable comment inside
+its `RELEASES.md` version section, after the existing human-readable full-image
+declaration:
+
+```text
+<!-- LAN_443_FULL_IMAGE: {"version":"2.0.0","attestationUri":"https://conformance.example.invalid/sha256/56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234","attestationSha256":"56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234","imageSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","ffosCommit":"0123456789abcdef0123456789abcdef01234567","ffosUserRef":"89abcdef0123456789abcdef0123456789abcdef","workflowRunId":"1234567890","workflowRunAttempt":"1","lanOfflineAfterPowerLoss":false} -->
+```
+
+The JSON object is closed; the verifier rejects missing, duplicate, or unknown
+fields and requires exactly one newly added marker for the release. It then:
+
+1. downloads the allowlisted immutable URI without accepting a mutable tag,
+   hashes the exact Sigstore-bundle bytes, and compares
+   `attestationSha256`;
+2. verifies the Sigstore trust root, transparency inclusion, signing time,
+   repository, workflow path, protected ref, and signed in-toto payload;
+3. requires every ledger value to equal the signed predicate, requires the
+   subject and build output to equal `imageSha256`, and requires the version to
+   equal the surrounding `RELEASES.md` heading;
+4. requires the attested `ffosUserRef` to be the exact source commit used by
+   the image build; after that commit, only the evidence-only `RELEASES.md`
+   addition may differ in `ffos-user`, otherwise the image is rebuilt and the
+   hardware run repeated;
+5. verifies the evidence-bundle digest and manifest, the TPM quote's nonce and
+   inventory chain, the measured-boot values against the signed measurement
+   manifest for the subject image, every required test ID and evidence path,
+   the conditional power-loss branch, and `result: "pass"`; and
+6. queries the named workflow run and attempt with a read-only GitHub App token
+   and requires a completed successful producer job whose immutable build
+   outputs match the statement. Missing access, expired evidence, digest or
+   field mismatch, an incomplete test set, a failed assertion, or a superseded
+   run fails the required check.
+
+The implementation release cannot merge into `staging` or `release`, enable
+the public listener, publish mDNS for it, or advertise LAN capability until
+this verifier succeeds. The generic full-image rail check remains necessary
+but is not evidence that `LAN_443_FULL_IMAGE` passed. This design-only PR adds
+none of the future workflow, verifier, watched-path manifest, artifacts, or
+release-ledger marker.
+
 1. On one real FF1 and ff-app, provision the TPM device identity, complete one
    owner-enrollment QR claim, request an enrolled-controller access session,
    and connect to managed EMQX using MQTT 5 over WSS on port 443. Prove device
@@ -594,8 +985,10 @@ Minimum acceptance checks are:
   coordinated full image and
   passes IPv4, IPv6, TLS 1.3, mTLS allow/deny, HTTPS, WebSocket,
   readiness-withdrawal, and reset tests without root or
-  `CAP_NET_BIND_SERVICE` on `feral-controld`; the release has a matching
-  `RELEASES.md` full-image declaration and `ffos` image-build record;
+  `CAP_NET_BIND_SERVICE` on `feral-controld`; the required release job verifies
+  the Sigstore/in-toto subject, workflow identity, TPM-bound actual-hardware
+  evidence, complete test set, image/source digests, and the exact
+  `RELEASES.md` marker for the successful `ffos` run and attempt;
 - every `state/sessions` invitation and session variant passes closed-schema
   and terminal-removal fixtures; restart fixtures invalidate open invitations
   but restore unexpired sessions and pending-revocation markers without
