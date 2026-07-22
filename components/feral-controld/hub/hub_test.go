@@ -206,6 +206,46 @@ func TestStart_ListenAndServeError_Retries(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestUnmatchedRouteGoesThroughMiddleware: the mux's default 404 must NOT
+// serve unmatched paths bare — they have to pass the same chokepoint as real
+// routes (storm cap, logging, the future LAN-auth seam). Proven by showing an
+// unmatched request is shed with 429 when every slot is held: a bypass would
+// return 404 regardless of saturation.
+func TestUnmatchedRouteGoesThroughMiddleware(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mux := http.NewServeMux()
+	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
+
+	h := New(context.Background(), mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+	hh := h.(*hub)
+
+	// Unsaturated: unmatched path 404s (served through the middleware).
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+
+	// Saturated: every slot held -> the unmatched request must be shed by the
+	// storm cap, not slip past it to a bare 404.
+	for i := 0; i < MAX_INFLIGHT_REQUESTS; i++ {
+		hh.reqSlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < MAX_INFLIGHT_REQUESTS; i++ {
+			<-hh.reqSlots
+		}
+	}()
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+}
+
 func TestStart_ListenRetryStopsOnContextCancel(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -340,12 +380,26 @@ func TestHub_Start_ListenAndServeError(t *testing.T) {
 		Close().
 		AnyTimes()
 
-	// Mock HTTPServer ListenAndServe to return an error
+	// Compresses the package-level backoff seam; do not add t.Parallel() to
+	// hub tests while this mutation pattern is in use.
+	oldBase := listenRetryBase
+	listenRetryBase = time.Millisecond
+	defer func() { listenRetryBase = oldBase }()
+
+	// One transient error, then the retry loop observes the closed server and
+	// exits. Bounding the sequence keeps the retry goroutine from outliving
+	// the test (an unbounded Times(1) raced the retry's backoff before).
 	expectedErr := errors.New("server error")
-	ts.mockServer.EXPECT().
-		ListenAndServe().
-		Return(expectedErr).
-		Times(1)
+	gomock.InOrder(
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			Return(expectedErr).
+			Times(1),
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			Return(http.ErrServerClosed).
+			AnyTimes(),
+	)
 
 	// Mock Stop to be called when ListenAndServe fails
 	ts.mockServer.EXPECT().

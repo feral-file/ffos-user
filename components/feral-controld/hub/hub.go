@@ -94,6 +94,17 @@ func (h *hub) routes() {
 	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
 	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
 	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
+
+	// Chokepoint completeness: without this, the ServeMux serves unmatched
+	// paths its own bare 404 — bypassing the storm cap, request logging, and
+	// the future LAN-auth seam entirely. "/" is ServeMux's catch-all, so
+	// registering it through the same middleware guarantees every request
+	// that resolves to a handler passes withMiddleware, matched route or not.
+	// (ServeMux's own path-cleaning 301s still happen before dispatch — an
+	// inherent net/http behavior that consumes no handler resources.)
+	mux.HandleFunc("/", h.withMiddleware("unmatched", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
 }
 
 // Listener retry backoff bounds. Vars rather than consts so tests can compress
