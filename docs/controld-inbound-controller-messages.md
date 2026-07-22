@@ -766,10 +766,14 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### uploadLogs
 
-Purpose: upload device logs. Handled in-process by `feral-controld`: it zips the
-device logs and uploads them via a presigned POST to the FF1 log-submissions
-endpoint followed by a PUT to S3. The optional support bundle id is included in
-the submission request.
+Purpose: upload device logs. Handled in-process by `feral-controld` and
+**fire-and-forget** (see [`api-design.md`](api-design.md)): the command
+validates the request, schedules the upload, and ACKs immediately; a detached
+worker then zips the device logs and submits them (JSON pre-sign request to the
+FF1 log-submissions endpoint returning a pre-signed S3 URL, then a PUT of the
+zip), bounded by a 10-minute budget and single-flighted — a duplicate command
+while an upload is running is ACKed and ignored. The optional support bundle id
+is included in the submission request.
 
 Example:
 
@@ -790,12 +794,15 @@ Example:
 
 Current success response: `{"ok": true}`.
 
-Current error cases:
+Current error cases (returned to the caller — only pre-schedule validation can
+fail the command):
 
 - Invalid request shape.
 - Missing `userId`, `apiKey`, or `title`.
-- Bundled upload payload cannot be marshaled.
-- Obtaining the presigned URL or uploading the zip fails.
+
+Failures after the ACK (zipping, obtaining the presigned URL, or uploading the
+zip) are logged on-device by the detached worker and are **not** surfaced to
+the caller.
 
 Current relayer error response: none standardized; command failure is logged.
 
