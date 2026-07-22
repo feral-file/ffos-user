@@ -435,6 +435,53 @@ func TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError(t *test
 		"the playlist body itself must also not be persisted on a total classification failure")
 }
 
+// TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork is the
+// regression test for the review round's "enqueues captures before
+// persisting the playlist" finding: if SavePlaylist itself fails (a
+// rare but real I/O error path — full disk, permissions), NO item may
+// have already been enqueued/started downloading by the time this
+// method returns its error. Uses a mocked Store (rather than
+// setupService's real fsStore) specifically so SavePlaylist can be
+// made to fail; mockCapturer has no Capture expectation at all, so
+// gomock's strict controller fails this test outright if the fix
+// regresses and DownloadPlaylist enqueues the classified item before
+// persisting.
+func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
+	mockStore.EXPECT().ListItemIDs().Return(nil, nil).Times(1)
+
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+	defer svc.Stop()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items": []map[string]interface{}{
+			{"id": "item-1", "source": "https://example.com/a.html"},
+		},
+	})
+	require.NoError(t, err)
+
+	mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/a.html").Return(offlinecache.ClassSoftware, nil).Times(1)
+	mockStore.EXPECT().SavePlaylist("playlist-1", json.RawMessage(raw)).Return(assertError("disk full")).Times(1)
+	// Deliberately no SavePlaylistURLIndex or Capture expectation: a
+	// SavePlaylist failure must short-circuit before either the URL
+	// index write or any item's capture job ever starts.
+
+	queued, total, downloadErr := svc.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/playlists/playlist-1")
+	require.Error(t, downloadErr)
+	assert.Zero(t, queued, "no item may be reported as queued when the playlist itself failed to persist")
+	assert.Equal(t, 1, total)
+}
+
 // TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccesses
 // pins that a classify failure for SOME items must not discard the items
 // that classified successfully: the caller already got real, correctly
@@ -839,7 +886,7 @@ func TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting(t *
 	// waitForState only proves the *disk* record is ready (SaveItem runs
 	// inside the mocked Capture above, before process() calls notify());
 	// s.state's StateDownloading->StateReady transition happens slightly
-	// later, once Capture actually returns to process(). isDownloading
+	// later, once Capture actually returns to process(). reserveForClear
 	// reads s.state, so ClearItem can still see busy for a brief instant
 	// after the disk write lands — retry until that transition catches
 	// up, rather than asserting a fixed one-shot call here.
@@ -847,6 +894,71 @@ func TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting(t *
 		err := ts.service.ClearItem("item-1")
 		return err == nil
 	}, time.Second, 5*time.Millisecond, "clear must succeed once the capture that made it busy has finished")
+}
+
+// TestService_ClearItem_ForcedRaceAgainstWorkerDequeueNeverResurrectsAfterSuccess
+// is the black-box counterpart to the whitebox
+// TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive:
+// rather than calling the private methods directly, it drives the real
+// public Service API and deliberately releases the worker and calls
+// ClearItem at the same moment (no artificial ordering), relying on
+// reserveForClear/dequeueForProcessing's shared lock to arbitrate which
+// one actually goes first. Run under -race across many iterations, this
+// is the test that would have caught the bug empirically even without
+// knowing the exact two-step-vs-one-step internals: whichever side wins
+// must be self-consistent — a successful clear must never be followed by
+// a resurrected record, and a busy rejection must always be followed by
+// the capture actually completing.
+func TestService_ClearItem_ForcedRaceAgainstWorkerDequeueNeverResurrectsAfterSuccess(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		ts := setupService(t, 0, nil)
+		seedItemWithCapturedAt(t, ts.store, "item-1", "old payload", time.Now())
+
+		busyItem := dp1playlist.PlaylistItem{ID: "busy-item", Source: "https://example.com/busy-item"}
+		item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+		busyStarted := make(chan struct{})
+		proceedBusy := make(chan struct{})
+
+		ts.mockClassifier.EXPECT().Classify(gomock.Any(), busyItem.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+		ts.mockCapturer.EXPECT().Capture(gomock.Any(), busyItem, 5000).DoAndReturn(
+			func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+				close(busyStarted)
+				<-proceedBusy
+				return &offlinecache.ItemRecord{ItemID: busyItem.ID, Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
+			}).Times(1)
+		ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+		// MaxTimes(1), not Times(1): whether the worker ever gets to
+		// call this at all depends on which side wins the race below.
+		ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).MaxTimes(1).DoAndReturn(
+			func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+				rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+				require.NoError(t, ts.store.SaveItem(rec))
+				return rec, nil
+			})
+
+		require.NoError(t, ts.service.Start(context.Background()))
+		require.NoError(t, ts.service.DownloadItem(context.Background(), busyItem))
+		<-busyStarted
+		require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+
+		clearDone := make(chan error, 1)
+		go func() { clearDone <- ts.service.ClearItem("item-1") }()
+		close(proceedBusy) // frees the worker to race ClearItem for item-1's queued job
+
+		if err := <-clearDone; err == nil {
+			require.Never(t, func() bool {
+				_, loadErr := ts.store.LoadItem("item-1")
+				return loadErr == nil
+			}, 150*time.Millisecond, 5*time.Millisecond,
+				"iteration %d: a clear that reported success must never be followed by a resurrected record", i)
+		} else {
+			require.ErrorIs(t, err, offlinecache.ErrItemBusy, "iteration %d: the only way ClearItem may fail here is busy", i)
+			waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+		}
+
+		ts.service.Stop()
+		ts.ctrl.Finish()
+	}
 }
 
 // TestService_ClearPlaylist_ActiveCaptureOfMemberItemReturnsBusyWithoutPartialClear

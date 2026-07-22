@@ -3,6 +3,7 @@ package offlinecache_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -36,6 +37,15 @@ type captureTestHarness struct {
 }
 
 func setupCapture(t *testing.T) *captureTestHarness {
+	return setupCaptureWithMaxDiskBytes(t, 0)
+}
+
+// setupCaptureWithMaxDiskBytes is setupCapture's general form: maxDiskBytes
+// is threaded straight through to NewCapturer as its per-Capture-call
+// disk budget (see captureDiskBudget's doc), letting tests exercise the
+// cumulative-across-resources budget behavior that maxDiskBytes==0
+// (unlimited, setupCapture's default) never triggers.
+func setupCaptureWithMaxDiskBytes(t *testing.T, maxDiskBytes int64) *captureTestHarness {
 	ctrl := gomock.NewController(t)
 	mockDownloader := mocks.NewMockOfflineCacheDownloader(ctrl)
 	mockDialer := mocks.NewMockWebSocketDialer(ctrl)
@@ -61,7 +71,7 @@ func setupCapture(t *testing.T) *captureTestHarness {
 
 	capturer := offlinecache.NewCapturer(
 		mockDownloader, mockDialer, mockHTTP, store,
-		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, logger,
+		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), maxDiskBytes, logger,
 	)
 
 	return &captureTestHarness{
@@ -166,6 +176,140 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 	saved, err := h.store.LoadItem("item-1")
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources)
+}
+
+// TestCapturer_Capture_CumulativeDiskBudgetCapsLaterResourceEvenBelowPerResourceLimit
+// is the regression test for the multi-resource disk-budget overshoot: a
+// per-resource cap alone (bounded independently at the WHOLE configured
+// maxDiskBytes on every call, as capture.go did before captureDiskBudget
+// existed) lets each of several resources individually reach up to the
+// full budget, so a 3-resource item could transiently write up to 3x
+// maxDiskBytes to disk before enforceDiskLimit's post-capture eviction
+// ever runs. With a 12-byte budget and three 5-byte resources, the third
+// resource's write must be capped to whatever budget the first two
+// left behind (2 bytes) rather than the full 12-byte per-resource
+// ceiling — so it fails as an honest capture miss instead of ever
+// letting total blob bytes on disk exceed the configured budget.
+func TestCapturer_Capture_CumulativeDiskBudgetCapsLaterResourceEvenBelowPerResourceLimit(t *testing.T) {
+	h := setupCaptureWithMaxDiskBytes(t, 12)
+	defer h.ctrl.Finish()
+
+	for _, url := range []string{
+		"https://example.com/a.bin", "https://example.com/b.bin", "https://example.com/c.bin",
+	} {
+		h.mockHTTP.EXPECT().
+			NewRequest(http.MethodGet, url, nil).
+			DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+				return http.NewRequest(method, url, body)
+			}).Times(1)
+	}
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("aaaaa")), // 5 bytes
+	}, nil).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("bbbbb")), // 5 bytes
+	}, nil).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ccccc")), // 5 bytes, but only 2 remain
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		for i, url := range []string{
+			"https://example.com/a.bin", "https://example.com/b.bin", "https://example.com/c.bin",
+		} {
+			reqID := fmt.Sprintf("req-%d", i)
+			h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+				"requestId": reqID,
+				"request":   map[string]interface{}{"url": url},
+			})
+			h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+				"requestId": reqID,
+				"response":  map[string]interface{}{"url": url, "status": 200, "mimeType": "application/octet-stream"},
+			})
+		}
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-budget", Source: "https://example.com/a.bin"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 3)
+	byURL := map[string]offlinecache.Resource{}
+	for _, r := range rec.Resources {
+		byURL[r.URL] = r
+	}
+	require.NotEmpty(t, byURL["https://example.com/a.bin"].SHA256)
+	require.NotEmpty(t, byURL["https://example.com/b.bin"].SHA256)
+	assert.Empty(t, byURL["https://example.com/c.bin"].SHA256,
+		"the third resource must be rejected once the first two exhausted the item's cumulative budget")
+
+	assert.False(t, rec.Coverage.Complete)
+	assert.Contains(t, rec.Coverage.Reason, "fetch_failed:https://example.com/c.bin")
+
+	usage, err := h.store.DiskUsage()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, usage, int64(12),
+		"total bytes written across every resource in this single capture must never exceed maxDiskBytes")
+}
+
+// TestCapturer_Capture_DiskBudgetExhaustedSkipsFetchEntirely pins the
+// OTHER half of captureDiskBudget's contract: once the cumulative
+// budget is fully exhausted (not merely reduced) by earlier resources,
+// a later resource must be skipped WITHOUT ever calling the HTTP
+// client at all — passing WriteBlob a 0 cap at that point would be
+// misread as "unlimited" (WriteBlob's own <=0 convention) rather than
+// "none left", so resolveResources must catch this before attempting
+// the fetch, not rely on WriteBlob's own size check to reject it.
+func TestCapturer_Capture_DiskBudgetExhaustedSkipsFetchEntirely(t *testing.T) {
+	h := setupCaptureWithMaxDiskBytes(t, 5)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://example.com/a.bin", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("aaaaa")), // exactly 5 bytes: fills the budget
+	}, nil).Times(1)
+	// Deliberately no NewRequest/Do expectation for b.bin: gomock's
+	// strict controller fails this test if resolveResources still
+	// tries to fetch it once the budget is exhausted.
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-0",
+			"request":   map[string]interface{}{"url": "https://example.com/a.bin"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-0",
+			"response":  map[string]interface{}{"url": "https://example.com/a.bin", "status": 200, "mimeType": "application/octet-stream"},
+		})
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/b.bin"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response":  map[string]interface{}{"url": "https://example.com/b.bin", "status": 200, "mimeType": "application/octet-stream"},
+		})
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-budget-exhausted", Source: "https://example.com/a.bin"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	byURL := map[string]offlinecache.Resource{}
+	for _, r := range rec.Resources {
+		byURL[r.URL] = r
+	}
+	require.NotEmpty(t, byURL["https://example.com/a.bin"].SHA256)
+	assert.Empty(t, byURL["https://example.com/b.bin"].SHA256)
+	assert.Contains(t, rec.Coverage.Reason, "over_disk_budget:https://example.com/b.bin")
 }
 
 // TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort

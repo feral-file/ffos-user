@@ -419,5 +419,13 @@ func offlineCacheErrorResponse(err error) map[string]any {
 		// ErrItemBusy's doc.
 		return errorResponse("busy", err.Error(), true)
 	}
+	if errors.Is(err, offlinecache.ErrQueueFull) {
+		// Retryable: the backlog drains as the single capture worker
+		// works through it — see ErrQueueFull's doc. Same "busy" shape
+		// as ErrItemBusy above (a condition that resolves on its own
+		// given time, not one the caller can fix by changing the
+		// request), just a different underlying cause.
+		return errorResponse("busy", err.Error(), true)
+	}
 	return errorResponse("offline_cache_error", err.Error(), true)
 }

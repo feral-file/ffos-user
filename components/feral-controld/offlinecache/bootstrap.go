@@ -36,9 +36,11 @@ const (
 	// software-artwork assets (see docs/offline-artwork-capture.md's
 	// 1.1GB video case) on disk-constrained embedded devices, so a
 	// config that merely omits maxDiskBytes must not silently mean
-	// "fill the disk." 2 GiB comfortably holds a handful of
-	// video-heavy artworks while still bounding runaway growth.
-	DefaultMaxDiskBytes = 2 << 30 // 2 GiB
+	// "fill the disk." 10 GiB comfortably holds a full DP-1 playlist's
+	// worth (up to 1024 items per the DP-1 spec) of video-heavy
+	// artworks while still bounding runaway growth — operators on
+	// smaller devices can still tighten this via offlineCache.maxDiskBytes.
+	DefaultMaxDiskBytes = 10 << 30 // 10 GiB
 )
 
 // Options bundles every offlinecache tunable, mirroring

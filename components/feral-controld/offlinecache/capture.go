@@ -75,17 +75,71 @@ type capturer struct {
 	// straight into the store instead, see maxResourceBytes below.
 	io    wrapper.IO
 	clock wrapper.Clock
-	// maxResourceBytes bounds each individual resource's stream-to-disk
-	// write (see fetchAndStoreBody/store.WriteBlob), mirroring
-	// service.maxDiskBytes's "<=0 means unlimited" semantics. It exists
-	// so a single pathological resource cannot silently consume more
-	// disk than the entire configured budget before
-	// service.enforceDiskLimit ever gets a chance to run — that
-	// post-capture eviction loop can only reclaim space by deleting
-	// *other* items, which is not possible if one resource alone
-	// already exceeds the whole budget.
+	// maxResourceBytes is the whole cache's configured disk budget
+	// (service.maxDiskBytes, "<=0 means unlimited"), reused here as the
+	// ceiling a single Capture call's resource fetches are cumulatively
+	// bounded by — see newCaptureDiskBudget's doc for why a per-resource-
+	// only cap (each individual WriteBlob call bounded by this same
+	// value independently) is not sufficient on its own.
 	maxResourceBytes int64
 	logger           *zap.Logger
+}
+
+// captureDiskBudget bounds the TOTAL bytes one Capture call is allowed to
+// stream to disk across every resource it fetches, not just each
+// individual resource independently. Without this, a per-resource cap
+// alone (WriteBlob's own maxBytes argument, bounded at
+// capturer.maxResourceBytes) still lets a multi-resource artwork write
+// several budget-sized blobs before service.enforceDiskLimit's
+// post-capture eviction ever runs — e.g. three resources each just under
+// maxDiskBytes would let a single item transiently occupy nearly 3x the
+// configured budget on disk, exactly the "disk-constrained embedded
+// device" failure mode maxDiskBytes exists to prevent (see
+// OptionsFromConfig's DefaultMaxDiskBytes doc). Scoping the budget to
+// "this item's own total" rather than "the whole store's current usage"
+// deliberately preserves the existing, separately-reviewed cross-item
+// design in enforceDiskLimit: a new capture is still allowed to run to
+// completion up to its own item's fair share of the whole budget, with
+// STALE items evicted afterward to make room for it, rather than a
+// nearly-full cache from OLDER items silently starving new downloads
+// before they even get a chance to capture.
+type captureDiskBudget struct {
+	limit int64 // <=0 means unlimited, mirroring maxResourceBytes/maxDiskBytes
+	used  int64 // cumulative bytes this Capture call has already written
+}
+
+func newCaptureDiskBudget(limit int64) *captureDiskBudget {
+	return &captureDiskBudget{limit: limit}
+}
+
+// reserve returns the maxBytes a caller should pass to the next
+// WriteBlob call: capBytes is the remaining room (0 meaning "unlimited",
+// WriteBlob's own convention, when the budget itself is disabled), and
+// ok is false once the budget is already exhausted — the caller must
+// skip the write entirely in that case rather than pass a 0 cap, which
+// WriteBlob would otherwise read as "unlimited" instead of "none left".
+func (b *captureDiskBudget) reserve() (capBytes int64, ok bool) {
+	if b.limit <= 0 {
+		return 0, true
+	}
+	remaining := b.limit - b.used
+	if remaining <= 0 {
+		return 0, false
+	}
+	return remaining, true
+}
+
+// record charges size bytes against the budget after a write succeeds.
+// Called with the blob's actual on-disk size (via Store.BlobSize), not
+// the reserved cap, so a resource smaller than its reservation does not
+// spuriously starve the resources fetched after it. A resource that
+// turned out to be a store-level dedup of an already-existing blob still
+// charges its full size here rather than zero: this capturer has no way
+// to learn "was this actually new bytes on disk" from WriteBlob's return
+// value alone, and charging the (possibly-redundant) full size is the
+// conservative direction to err in for a hard disk-budget guarantee.
+func (b *captureDiskBudget) record(size int64) {
+	b.used += size
 }
 
 func NewCapturer(
@@ -161,7 +215,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 		return nil, err
 	}
 
-	resources, coverage := c.resolveResources(ctx, tracker)
+	resources, coverage := c.resolveResources(ctx, tracker, newCaptureDiskBudget(c.maxResourceBytes))
 
 	// resetTargetState above only reaches item.Source's OWN origin,
 	// which cannot cover an origin this navigation redirects to or
@@ -322,8 +376,10 @@ var safeIdempotentMethods = map[string]bool{
 // final Resource list, fetching bytes for every successful (2xx) resource
 // captured via a safe method and building the Coverage summary from
 // anything that failed, returned a non-2xx/non-redirect status, or used a
-// method resolveResources will not re-issue.
-func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker) ([]Resource, Coverage) {
+// method resolveResources will not re-issue. budget caps the TOTAL bytes
+// fetched across every resource in this call — see captureDiskBudget's
+// doc.
+func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker, budget *captureDiskBudget) ([]Resource, Coverage) {
 	keys, resources, failures, pendingURLs := tracker.snapshot()
 
 	result := make([]Resource, 0, len(keys))
@@ -390,11 +446,25 @@ func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker
 				res.SHA256 = hash
 			}
 		case res.SHA256 == "":
-			hash, fetchErr := c.fetchAndStoreBody(ctx, res.URL, method)
+			capBytes, ok := budget.reserve()
+			if !ok {
+				// The cumulative per-item budget is already exhausted by
+				// earlier resources in this same capture — skip the
+				// fetch entirely rather than pass WriteBlob a 0 cap,
+				// which it would read as "unlimited" instead of "none
+				// left" (see captureDiskBudget.reserve's doc). Left
+				// unfetched and reported incomplete, same shape as
+				// fetch_failed, so replay treats it as an honest miss.
+				failureReasons = append(failureReasons, fmt.Sprintf("over_disk_budget:%s", res.URL))
+				result = append(result, res)
+				continue
+			}
+			hash, size, fetchErr := c.fetchAndStoreBody(ctx, res.URL, method, capBytes)
 			if fetchErr != nil {
 				failureReasons = append(failureReasons, fmt.Sprintf("fetch_failed:%s", res.URL))
 			} else {
 				res.SHA256 = hash
+				budget.record(size)
 			}
 		}
 		result = append(result, res)
@@ -421,27 +491,44 @@ func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker
 	return result, coverage
 }
 
-func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string) (string, error) {
+// fetchAndStoreBody fetches url's body and streams it to the store,
+// bounded by capBytes (the caller's per-call reservation from a
+// captureDiskBudget — see its doc for why this is no longer simply
+// c.maxResourceBytes on every call). It returns the blob's actual
+// on-disk size alongside its hash so the caller can charge the budget
+// for the real bytes written, not the (possibly much larger) reserved
+// cap.
+func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, capBytes int64) (string, int64, error) {
 	req, err := c.httpClient.NewRequest(method, url, nil)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	resp, err := c.httpClient.Do(req.WithContext(ctx))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < go_http.StatusOK || resp.StatusCode >= go_http.StatusMultipleChoices {
-		return "", fmt.Errorf("unexpected status %d fetching %s", resp.StatusCode, url)
+		return "", 0, fmt.Errorf("unexpected status %d fetching %s", resp.StatusCode, url)
 	}
 	// resp.Body is streamed straight into the store (hashed while it is
-	// copied to disk, never buffered whole in memory first) — see
-	// maxResourceBytes's doc for why this call also bounds the write.
-	hash, err := c.store.WriteBlob(resp.Body, c.maxResourceBytes)
+	// copied to disk, never buffered whole in memory first).
+	hash, err := c.store.WriteBlob(resp.Body, capBytes)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return hash, nil
+	size, err := c.store.BlobSize(hash)
+	if err != nil {
+		// The write itself already succeeded; a stat failure here is a
+		// bookkeeping problem, not a fetch failure — fall back to
+		// charging capBytes (the conservative, over-estimating
+		// direction) against the budget rather than losing accounting
+		// for this resource's contribution entirely.
+		c.logger.Warn("offline cache capture: failed to stat written blob for disk-budget accounting",
+			zap.String("url", url), zap.String("sha256", hash), zap.Error(err))
+		return hash, capBytes, nil
+	}
+	return hash, size, nil
 }
 
 // attachHandlers wires the Network domain events capture needs. Handlers

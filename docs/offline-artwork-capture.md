@@ -209,7 +209,7 @@ skipped; the unconditional cache flush still runs.
 
 `offlineCache.maxDiskBytes` deliberately does NOT default to "unlimited"
 the way most `OfflineCacheConfig` fields default to "off"/"unset" —
-`OptionsFromConfig` falls back to `DefaultMaxDiskBytes` (2 GiB) whenever
+`OptionsFromConfig` falls back to `DefaultMaxDiskBytes` (10 GiB) whenever
 config omits or zeroes it. This feature exists specifically to cache
 potentially gigabyte-scale software-artwork assets (§4.3's 1.1 GB video)
 on disk-constrained embedded devices; a config that merely flips

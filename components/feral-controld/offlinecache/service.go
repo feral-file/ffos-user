@@ -47,6 +47,42 @@ var ErrServiceNotStarted = errors.New("offline cache: service is not started")
 // need per-job cancellation plumbed through the single-worker queue.
 var ErrItemBusy = errors.New("offline cache: item is currently downloading and cannot be cleared until it finishes")
 
+// ErrQueueFull is returned by DownloadItem/DownloadPlaylist when the
+// single-worker capture queue (jobQueue) is already at maxQueueLen.
+// jobQueue is deliberately an unbounded-length FIFO in the sense that
+// push itself never blocks a caller waiting for room (see its doc), but
+// "never blocks" is not the same as "never bounded": distinct playlists
+// downloaded in a burst all enqueue independently of the storm gate,
+// which only throttles concurrently in-FLIGHT admin commands, not the
+// backlog those commands can leave behind for the one serial capture
+// worker to work through — without a cap here, that backlog (each
+// entry holding a full dp1playlist.PlaylistItem) could grow without
+// bound in memory and accumulate arbitrarily stale queued work with no
+// way for a caller to know the size of the pile it just added to.
+// Retryable — see offlineCacheErrorResponse's "busy"-shaped mapping for
+// the same reasoning applied here.
+var ErrQueueFull = errors.New("offline cache: download queue is full, try again later")
+
+// defaultMaxQueueLen bounds jobQueue's length (see ErrQueueFull's doc).
+// Not currently exposed via config: unlike maxDiskBytes (a real
+// per-device hardware constraint operators need to tune), this is a
+// pure software safety valve against unbounded backlog growth, not a
+// limit callers are meant to ever actually hit in normal use.
+//
+// The DP-1 playlist spec caps a single playlist at 1024 items, so one
+// DownloadPlaylist call — in the worst case where every item classifies
+// as software — can enqueue up to 1024 jobs in one shot. Sized at 4x
+// that (4096) so a full-size all-software playlist, plus a reasonable
+// burst of other DownloadItem/DownloadPlaylist calls queued behind it
+// before the single serial worker drains them, is never rejected with
+// ErrQueueFull under realistic use. Each queued captureJob only holds
+// item metadata (dp1playlist.PlaylistItem), never resource bytes, so
+// even 4096 entries is a small, bounded amount of memory — this cap
+// exists purely to stop a truly pathological backlog (e.g. a caller
+// bug that re-enqueues in a loop) from growing without bound, not to
+// meaningfully constrain legitimate traffic.
+const defaultMaxQueueLen = 4096
+
 // ItemStatus is one entry of a Status snapshot, shaped for the
 // getOfflineCacheStatus command and offline_cache_status notification.
 type ItemStatus struct {
@@ -237,6 +273,14 @@ func (q *jobQueue) pop() (captureJob, bool) {
 	return j, true
 }
 
+// len reports how many jobs are currently queued (not yet popped) —
+// used by enqueue's capacity check (see ErrQueueFull's doc).
+func (q *jobQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
+}
+
 // removeItems drops any not-yet-started job for one of ids. Used by
 // ClearItem/ClearPlaylist so a clear that races an item still sitting in
 // the queue (as opposed to actively capturing — see service.captureMu)
@@ -263,6 +307,7 @@ type service struct {
 
 	captureWindowMs int
 	maxDiskBytes    int64 // <=0 means unlimited
+	maxQueueLen     int   // see ErrQueueFull's doc
 	observer        ProgressObserver
 
 	queue *jobQueue
@@ -326,6 +371,7 @@ func NewService(
 		logger:          logger,
 		captureWindowMs: captureWindowMs,
 		maxDiskBytes:    maxDiskBytes,
+		maxQueueLen:     defaultMaxQueueLen,
 		observer:        observer,
 		queue:           newJobQueue(),
 		state:           make(map[string]ItemState),
@@ -396,7 +442,7 @@ func (s *service) Stop() {
 func (s *service) run(ctx context.Context) {
 	defer close(s.doneCh)
 	for {
-		j, ok := s.queue.pop()
+		j, ok := s.dequeueForProcessing()
 		if !ok {
 			select {
 			case <-s.queue.wake:
@@ -417,7 +463,7 @@ func (s *service) run(ctx context.Context) {
 				// will error quickly) instead of sitting stranded in
 				// StateQueued forever with no worker left to drain it.
 				for {
-					j, ok := s.queue.pop()
+					j, ok := s.dequeueForProcessing()
 					if !ok {
 						return
 					}
@@ -427,6 +473,63 @@ func (s *service) run(ctx context.Context) {
 		}
 		s.process(ctx, j)
 	}
+}
+
+// dequeueForProcessing pops the next queued job and marks it
+// StateDownloading in the SAME s.mu critical section — never as two
+// separate steps. reserveForClear (ClearItem/ClearPlaylist's guard)
+// takes this identical lock around its own busy-check-then-cancel
+// sequence, so whichever of the two critical sections runs first is
+// authoritative: either this dequeue wins and reserveForClear then
+// correctly observes StateDownloading and rejects with ErrItemBusy, or
+// reserveForClear wins and removes the job from the queue before this
+// function could ever have popped it. Splitting the pop and the state
+// write into two separate steps (as an earlier revision did, with
+// process() setting StateDownloading a few instructions later) left a
+// window where a clear's busy-check could observe the job still
+// StateQueued, and this dequeue could then happen — and the queue
+// removal that follows the busy-check would find nothing left to
+// remove — letting the clear report success while the now-active
+// capture "resurrects" the record it just deleted (see ClearItem's
+// doc).
+func (s *service) dequeueForProcessing() (captureJob, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.queue.pop()
+	if !ok {
+		return captureJob{}, false
+	}
+	s.state[j.itemID] = StateDownloading
+	return j, true
+}
+
+// reserveForClear is dequeueForProcessing's counterpart on the
+// clear side — see that function's doc for why both must share this
+// exact lock and why the check-then-mutate sequence below must be one
+// critical section, not two. If ANY id in itemIDs is already
+// StateDownloading, nothing is mutated and that id is returned
+// alongside ErrItemBusy (map iteration order is unspecified, so which
+// one is named when several are busy simultaneously is not guaranteed
+// — every caller's contract only promises all-or-nothing, never a
+// specific culprit). err is returned as exactly ErrItemBusy, not
+// wrapped with busyItemID baked in, so each caller can format its own
+// itemID/playlistID-scoped message the same way it already did before
+// this shared helper existed. Otherwise every id's queued job (if any)
+// is dropped and its tracked state cleared, atomically with the check
+// that just passed.
+func (s *service) reserveForClear(itemIDs map[string]bool) (busyItemID string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range itemIDs {
+		if s.state[id] == StateDownloading {
+			return id, ErrItemBusy
+		}
+	}
+	for id := range itemIDs {
+		delete(s.state, id)
+	}
+	s.queue.removeItems(itemIDs)
+	return "", nil
 }
 
 // stateFromCoverage classifies a finished capture's Coverage into an
@@ -485,11 +588,10 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	// racing this call could tear the worker down in between. enqueue
 	// re-checks started under the same lock Stop uses to flip it, so
 	// this is the authoritative check that actually prevents pushing a
-	// job onto a queue nobody will ever drain.
-	if !s.enqueue(item) {
-		return ErrServiceNotStarted
-	}
-	return nil
+	// job onto a queue nobody will ever drain. It also returns
+	// ErrQueueFull if the queue is already at capacity — see that
+	// error's doc.
+	return s.enqueue(item)
 }
 
 func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
@@ -504,9 +606,15 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		return 0, 0, errors.New("offline cache: playlist has no id")
 	}
 
+	// Classification only decides WHICH items are eligible — it must
+	// never itself start any work. Enqueuing is deliberately deferred
+	// to its own loop below, after the playlist is safely persisted,
+	// so a SavePlaylist failure (rare, but a real I/O error path) can
+	// never leave already-accepted capture jobs running in the
+	// background for a call this method is about to report as failed.
 	total := len(playlist.Items)
-	queued := 0
 	classifyFailed := 0
+	toQueue := make([]dp1playlist.PlaylistItem, 0, total)
 	for _, item := range playlist.Items {
 		if item.ID == "" || item.Source == "" {
 			continue
@@ -521,14 +629,9 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		if class != ClassSoftware {
 			continue
 		}
-		if !s.enqueue(item) {
-			// Stop() raced in mid-loop; the remaining items would fail
-			// the same way, so stop trying rather than log once per item.
-			break
-		}
-		queued++
+		toQueue = append(toQueue, item)
 	}
-	if queued == 0 && classifyFailed > 0 {
+	if len(toQueue) == 0 && classifyFailed > 0 {
 		// Distinguish "classification itself is broken" from "this
 		// playlist genuinely has no software items" — the latter is a
 		// normal, successful ok:true/softwareCount:0 outcome, but the
@@ -548,7 +651,33 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	}
 
 	if err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL); err != nil {
-		return queued, total, err
+		// Nothing has been enqueued yet at this point — a save failure
+		// here starts no background work at all, matching this error
+		// return exactly.
+		return 0, total, err
+	}
+
+	queued := 0
+	for _, item := range toQueue {
+		if err := s.enqueue(item); err != nil {
+			if errors.Is(err, ErrServiceNotStarted) {
+				// Stop() raced in mid-loop; the remaining items would
+				// fail the same way, so stop trying rather than log
+				// once per item. The playlist/URL index are already
+				// durably saved above, and whatever DID get queued
+				// before the race is real work already in flight, so
+				// this is reported as success (matching the pre-
+				// existing "Stop() raced" tolerance), not an error.
+				break
+			}
+			// ErrQueueFull (or any other unexpected enqueue error): the
+			// caller needs to know the remaining items were NOT queued
+			// — unlike the Stop()-raced case above, this is an ongoing
+			// condition a retry can plausibly resolve, so it must not
+			// be silently swallowed into a success report.
+			return queued, total, fmt.Errorf("offline cache: queue playlist %s items: %w", playlist.ID, err)
+		}
+		queued++
 	}
 	return queued, total, nil
 }
@@ -592,11 +721,13 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 }
 
 // enqueue is idempotent: an item already queued or downloading is left
-// alone rather than double-scheduled. Returns false without touching the
-// queue if the service was stopped concurrently — see the started field's
-// doc comment for why the fresh check in phase 2 below (rather than the
-// caller's earlier started.Load(), or even this function's own advisory
-// check up front) is the one that actually matters.
+// alone rather than double-scheduled. Returns ErrServiceNotStarted
+// without touching the queue if the service was stopped concurrently —
+// see the started field's doc comment for why the fresh check in phase
+// 2 below (rather than the caller's earlier started.Load(), or even
+// this function's own advisory check up front) is the one that actually
+// matters. Returns ErrQueueFull if the queue is already at maxQueueLen
+// — see that error's doc.
 //
 // This runs in two locked phases with the observer notification in
 // between, rather than one critical section covering everything, for two
@@ -612,15 +743,28 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 //     so notifying in between the phases — rather than after phase 2, as
 //     an earlier version of this function did — guarantees that ordering
 //     by construction instead of by coincidence.
-func (s *service) enqueue(item dp1playlist.PlaylistItem) bool {
+//
+// The queue-full check is duplicated in both phases for the same reason
+// the started check is: phase 1's read is only advisory (racing an
+// unbounded number of concurrent callers all past phase 1 at once could
+// still let more than maxQueueLen through if it were the only check),
+// so it exists purely to skip the observer's spurious "queued"
+// notification in the COMMON case where the queue is nowhere near full,
+// not to be the authoritative guard. Phase 2's check, taken under the
+// same lock as the actual push, is what actually enforces the bound.
+func (s *service) enqueue(item dp1playlist.PlaylistItem) error {
 	if !s.started.Load() {
-		return false
+		return ErrServiceNotStarted
 	}
 	s.mu.RLock()
 	st, tracked := s.state[item.ID]
+	queueFull := s.queue.len() >= s.maxQueueLen
 	s.mu.RUnlock()
 	if tracked && (st == StateQueued || st == StateDownloading) {
-		return true
+		return nil
+	}
+	if queueFull {
+		return ErrQueueFull
 	}
 
 	if s.observer != nil {
@@ -644,20 +788,29 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem) bool {
 	s.mu.Lock()
 	if !s.started.Load() {
 		s.mu.Unlock()
-		return false
+		return ErrServiceNotStarted
 	}
 	if st, ok := s.state[item.ID]; ok && (st == StateQueued || st == StateDownloading) {
 		s.mu.Unlock()
-		return true
+		return nil
+	}
+	if s.queue.len() >= s.maxQueueLen {
+		s.mu.Unlock()
+		return ErrQueueFull
 	}
 	s.state[item.ID] = StateQueued
 	s.queue.push(captureJob{itemID: item.ID, item: item})
 	s.mu.Unlock()
-	return true
+	return nil
 }
 
 func (s *service) process(ctx context.Context, j captureJob) {
-	s.notify(j.itemID, StateDownloading, Coverage{})
+	// s.state[j.itemID] is already StateDownloading — dequeueForProcessing
+	// set it atomically with the pop that produced j (see that
+	// function's doc). Only the observer notification remains to do
+	// here, and it deliberately runs without s.mu held (see notify's
+	// doc on why the observer call is never made under that lock).
+	s.notifyObserver(j.itemID, StateDownloading, Coverage{})
 
 	// Held for the full Capture call, not just its final SaveItem — see
 	// captureMu's doc on why the whole blob-writing window must be
@@ -751,24 +904,6 @@ func (s *service) gc() (int, int64, error) {
 	return s.store.GC()
 }
 
-// isDownloading reports whether itemID is the one job currently past
-// jobQueue.pop() and inside capturer.Capture. notify sets s.state[itemID]
-// to StateDownloading as the first thing process() does, before
-// captureMu.Lock() / Capture even start, and only clears it (to a
-// terminal state) after Capture returns — so this check's window fully
-// covers the actual capture work. There is a much narrower, effectively
-// unclosable gap between jobQueue.pop() removing the job and process()
-// setting StateDownloading a few instructions later on the same
-// goroutine; ClearItem/ClearPlaylist's queue.removeItems call already
-// closes the far larger "still sitting in the queue" window, so this
-// residual gap only matters if a clear call's own state read lands in
-// that few-instruction slice, which is not realistically observable.
-func (s *service) isDownloading(itemID string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.state[itemID] == StateDownloading
-}
-
 func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 	ids, err := s.store.ListItemIDs()
 	if err != nil {
@@ -803,17 +938,30 @@ func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 // already checks via LoadPlaylist.
 //
 // Any job for itemID still sitting in the queue (not yet started) is
-// dropped so it cannot silently resurrect the record this call just
-// deleted once it eventually runs. A capture for itemID that is already
-// ACTIVE (past the queue, inside capturer.Capture) is rejected outright
-// with ErrItemBusy instead — see that error's doc for why: this call's
-// GC would otherwise still wait for the active capture via captureMu (so
-// it could never corrupt that capture's blobs), but the capture itself
-// is not canceled, so a delete-then-let-GC-run approach would let the
-// item's record legitimately reappear once the capture finishes.
+// dropped, atomically with the busy check, so it cannot silently
+// resurrect the record this call just deleted once it eventually runs
+// — see reserveForClear's doc for why the busy check and the queue
+// removal must be one critical section rather than two separate steps.
+// A capture for itemID that is already ACTIVE (past the queue, inside
+// capturer.Capture) is rejected outright with ErrItemBusy instead — see
+// that error's doc for why: this call's GC would otherwise still wait
+// for the active capture via captureMu (so it could never corrupt that
+// capture's blobs), but the capture itself is not canceled, so a
+// delete-then-let-GC-run approach would let the item's record
+// legitimately reappear once the capture finishes.
+//
+// reserveForClear runs BEFORE the LoadItem existence check below,
+// unconditionally: for an itemID this service has never heard of, that
+// is a harmless no-op (nothing tracked, nothing queued), and for one
+// whose only trace is a not-yet-started first-time download (no record
+// on disk yet, so the LoadItem check right after will still report
+// ErrItemNotFound), it has the desirable side effect of also canceling
+// that queued job — closing a related gap where such an item could
+// never be canceled via ClearItem at all before, only a re-download of
+// an item that already has a record.
 func (s *service) ClearItem(itemID string) error {
-	if s.isDownloading(itemID) {
-		return fmt.Errorf("offline cache: clear item %s: %w", itemID, ErrItemBusy)
+	if _, err := s.reserveForClear(map[string]bool{itemID: true}); err != nil {
+		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
 	}
 	if _, err := s.store.LoadItem(itemID); err != nil {
 		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
@@ -821,11 +969,6 @@ func (s *service) ClearItem(itemID string) error {
 	if err := s.store.DeleteItem(itemID); err != nil {
 		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
 	}
-
-	s.mu.Lock()
-	delete(s.state, itemID)
-	s.mu.Unlock()
-	s.queue.removeItems(map[string]bool{itemID: true})
 
 	if _, _, err := s.gc(); err != nil {
 		return fmt.Errorf("offline cache: GC after clearing item %s: %w", itemID, err)
@@ -841,6 +984,12 @@ func (s *service) ClearItem(itemID string) error {
 // else and leaving one item partially cleared (deleted here, then
 // resurrected once its capture finishes) — an all-or-nothing outcome is
 // far easier for a caller to reason about and retry than a partial one.
+// The busy check and the queue removal below both go through
+// reserveForClear as ONE call across every member item, not a
+// check-loop followed by a separate mutate-loop: see that function's
+// doc for why splitting them would leave a window where the worker
+// could dequeue and start capturing one of these exact items in
+// between, after this call's own check already passed.
 func (s *service) ClearPlaylist(playlistID string) error {
 	raw, err := s.store.LoadPlaylist(playlistID)
 	if err != nil {
@@ -852,20 +1001,13 @@ func (s *service) ClearPlaylist(playlistID string) error {
 		return fmt.Errorf("offline cache: parse playlist %s: %w", playlistID, err)
 	}
 
-	for _, item := range playlist.Items {
-		if s.isDownloading(item.ID) {
-			return fmt.Errorf("offline cache: clear playlist %s: item %s: %w", playlistID, item.ID, ErrItemBusy)
-		}
-	}
-
 	itemIDs := make(map[string]bool, len(playlist.Items))
-	s.mu.Lock()
 	for _, item := range playlist.Items {
-		delete(s.state, item.ID)
 		itemIDs[item.ID] = true
 	}
-	s.mu.Unlock()
-	s.queue.removeItems(itemIDs)
+	if busyID, err := s.reserveForClear(itemIDs); err != nil {
+		return fmt.Errorf("offline cache: clear playlist %s: item %s: %w", playlistID, busyID, err)
+	}
 
 	// Every step below (each item's delete, the playlist record's own
 	// delete, and GC) still runs even if an earlier one failed — one bad
@@ -1029,7 +1171,19 @@ func (s *service) notify(itemID string, state ItemState, coverage Coverage) {
 	s.mu.Lock()
 	s.state[itemID] = state
 	s.mu.Unlock()
+	s.notifyObserver(itemID, state, coverage)
+}
 
+// notifyObserver is notify's callout-only half, split out so
+// dequeueForProcessing/process can write s.state atomically (in
+// dequeueForProcessing's own critical section, paired with the queue
+// pop) and still send the exact same observer notification notify
+// would have sent, without notify's redundant second state write.
+// Never called while s.mu is held: the observer may be a websocket
+// send with no bound on how long it takes, and holding s.mu across
+// that would block every other state read/write (reserveForClear,
+// dequeueForProcessing, ...) for as long as it runs.
+func (s *service) notifyObserver(itemID string, state ItemState, coverage Coverage) {
 	if s.observer == nil {
 		return
 	}
