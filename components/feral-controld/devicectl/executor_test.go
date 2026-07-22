@@ -4599,9 +4599,57 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 		CombinedOutput().
 		Return([]byte(""), nil)
 
+	// The live relayer session is revoked as part of the reset boundary.
+	relayerClosed := false
+	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
+
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
+	assert.True(t, relayerClosed, "factory reset must close the live relayer session")
+}
+
+// TestExecutor_FactoryReset_UnitFailureStillRevokesSession: set-factory-boot
+// only STAGES a reboot, and its start can fail — the reset boundary (persisted
+// topic cleared + live relayer session closed) must hold BEFORE that outcome,
+// so a failed or delayed reset still leaves the former owner's control channel
+// revoked (the fail-safe direction).
+func TestExecutor_FactoryReset_UnitFailureStillRevokesSession(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_FACTORY_RESET,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(`{}`), nil)
+
+	ts.mockStateManager.EXPECT().
+		GetState().
+		Return(&state.State{Relayer: &state.RelayerState{TopicID: "old-topic"}})
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			assert.Equal(t, "", s.Relayer.TopicID)
+			return nil
+		})
+
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
+		Return(ts.mockExecCmd)
+	ts.mockExecCmd.EXPECT().
+		CombinedOutput().
+		Return([]byte("Failed to start set-factory-boot.service"), errors.New("exit status 1"))
+
+	relayerClosed := false
+	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
+
+	_, err := ts.executor.Execute(ts.ctx, cmd)
+	require.Error(t, err)
+	assert.True(t, relayerClosed, "a failed reset unit must still leave the relayer session revoked")
 }
 
 func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {

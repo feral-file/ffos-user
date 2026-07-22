@@ -87,6 +87,18 @@ func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
 }
 
+// SetRelayerCloser mocks base method.
+func (m *MockExecutor) SetRelayerCloser(close func()) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetRelayerCloser", close)
+}
+
+// SetRelayerCloser indicates an expected call of SetRelayerCloser.
+func (mr *MockExecutorMockRecorder) SetRelayerCloser(close interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRelayerCloser", reflect.TypeOf((*MockExecutor)(nil).SetRelayerCloser), close)
+}
+
 // MocksetupNarrator is a mock of setupNarrator interface.
 type MocksetupNarrator struct {
 	ctrl     *gomock.Controller

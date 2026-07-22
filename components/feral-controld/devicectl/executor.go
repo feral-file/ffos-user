@@ -69,6 +69,12 @@ type Executor interface {
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
 	// lazy setupUI() fallback still covers tests that do not inject.
 	SetSetupUI(ui *setupui.Service)
+	// SetRelayerCloser injects the function that closes the LIVE relayer
+	// session (relayer.Close). Factory reset calls it so revoking the former
+	// owner's control channel does not depend on the staged reboot actually
+	// happening — the seam keeps devicectl from importing relayer. Set once at
+	// wiring time.
+	SetRelayerCloser(close func())
 }
 
 type executor struct {
@@ -83,6 +89,11 @@ type executor struct {
 	// claimObserver, when set, is notified on claim-state transitions. Set once
 	// at wiring time before commands are served, so it needs no lock.
 	claimObserver func(claimed bool)
+
+	// relayerCloser, when set, closes the live relayer session (see
+	// SetRelayerCloser). Same single-writer wiring-time contract as
+	// claimObserver, so it needs no lock.
+	relayerCloser func()
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -263,6 +274,12 @@ func (e *executor) SetSetupUI(ui *setupui.Service) {
 	e.setupNarratorOnce.Do(func() {
 		e.setupNarrator = ui
 	})
+}
+
+// SetRelayerCloser wires the live-session revocation used by factoryReset. See
+// the Executor interface doc.
+func (e *executor) SetRelayerCloser(close func()) {
+	e.relayerCloser = close
 }
 
 func (e *executor) SaveLastSysMetrics(metrics []byte) {
@@ -1945,6 +1962,22 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// commandable via the saved topic. Clear the persisted topic here so that
 	// window is closed.
 	e.clearPersistedRelayerTopic()
+
+	// Revoke the LIVE control channel too, not just the persisted topic: the
+	// reset unit only STAGES a reboot, and until that reboot actually happens
+	// (it can be delayed, or the unit start below can fail) the former owner's
+	// established relayer WebSocket would keep delivering commands. Closing it
+	// now bounds the reset: any later reconnect runs with the topic already
+	// cleared, so the server assigns a FRESH topic the old controller does not
+	// know. Deliberately BEFORE the unit start so a failed reset still leaves
+	// the old session revoked — the fail-safe direction. Accepted trade-off:
+	// the command's own CmdOK ack can no longer be delivered over the closed
+	// socket (the mediator's Send fails gracefully). Sending it first would
+	// reopen the revocation window this exists to close; controllers must
+	// treat factory reset as fire-and-forget.
+	if e.relayerCloser != nil {
+		e.relayerCloser()
+	}
 
 	// controld runs the reset in-process: start the system reset unit directly.
 	return e.factoryResetInProcess(ctx)
