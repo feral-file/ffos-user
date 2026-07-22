@@ -59,6 +59,18 @@ func (mr *MockMediatorMockRecorder) SetClaimed(claimed interface{}) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimed", reflect.TypeOf((*MockMediator)(nil).SetClaimed), claimed)
 }
 
+// SetTopicObserver mocks base method.
+func (m *MockMediator) SetTopicObserver(observer func()) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetTopicObserver", observer)
+}
+
+// SetTopicObserver indicates an expected call of SetTopicObserver.
+func (mr *MockMediatorMockRecorder) SetTopicObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetTopicObserver", reflect.TypeOf((*MockMediator)(nil).SetTopicObserver), observer)
+}
+
 // Start mocks base method.
 func (m *MockMediator) Start() {
 	m.ctrl.T.Helper()

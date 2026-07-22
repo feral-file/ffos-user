@@ -262,7 +262,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		zap.Bool("relayer_ready", s.Relayer.IsReady()),
 		zap.String("topic_id", s.Relayer.TopicID),
 	)
-	if connected && s.Relayer.IsReady() {
+	// Gate on reachability ONLY, never on IsReady(): connecting with an empty
+	// topic is the designed topic-ASSIGNMENT path (relayer.Connect omits the
+	// topicID query param and the server answers with a MESSAGE_ID_SYSTEM
+	// carrying the assigned topic, which the mediator persists). Gating on
+	// IsReady() stranded factory-fresh devices that boot already online: no
+	// connectivity CHANGE event ever fires on them, so the mediator's
+	// restore handler never runs either, no topic is ever assigned, and the
+	// auto-claim flow times out waiting for one.
+	if connected {
 		app.Logger.Info("Connecting relayer during startup")
 		err = app.Relayer.Connect(ctx)
 		if err != nil {
@@ -272,8 +280,8 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			// unconditional-start model exists to remove (.start-services.sh starts us
 			// --no-block precisely because pre-READY failure can happen). Retry in the
 			// background instead; the mediator's
-			// connectivity-restored handler and the GetRelayerInfo D-Bus path also
-			// re-attempt the connection, and RetryableConnect tolerates racing them
+			// connectivity-restored handler also
+			// re-attempts the connection, and RetryableConnect tolerates racing them
 			// (ErrAlreadyConnected is success).
 			app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
 			go func() {
@@ -562,6 +570,13 @@ func initializeApp(
 	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context}
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
+		// Topic assignment re-triggers the claim flow: a factory-fresh device
+		// connects with no topic and may receive its system topic AFTER the
+		// flow's bounded topic wait expired — with no further online
+		// transition, nothing else would ever re-run it. The flow itself
+		// no-ops when settled or already in flight, so a spurious fire is
+		// harmless.
+		mediator.SetTopicObserver(func() { go ac.MaybeShowClaimQROnOnline(context) })
 	}
 	provMachine := provisioning.New(provisioning.Config{
 		AP:           softAP,

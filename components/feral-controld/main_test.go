@@ -324,6 +324,47 @@ func TestApp_Run_Success(t *testing.T) {
 			},
 		},
 		{
+			// Factory-fresh boot: online with NO topic. The startup connect must
+			// fire anyway — connecting with an empty topic is the designed
+			// topic-assignment path, and a device that boots already online never
+			// gets the connectivity-change event the mediator's restore handler
+			// needs, so this gate is its only trigger.
+			name: "online with empty topic connects for topic assignment",
+			setupFunc: func(ts *testSetup) {
+				ts.config.EnableHub = boolPtr(false)
+
+				ts.mockStateManager.EXPECT().
+					Load(ts.logger).
+					Return(&state.State{
+						Relayer: &state.RelayerState{TopicID: ""},
+					}, nil)
+
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+				ts.mockCDP.EXPECT().Close()
+				ts.mockWatchdog.EXPECT().Start(gomock.Any())
+				ts.mockWatchdog.EXPECT().Stop()
+				ts.mockDBus.EXPECT().Start().Return(nil)
+				ts.mockDBus.EXPECT().Stop().Return(nil)
+				ts.mockMediator.EXPECT().Start()
+				ts.mockMediator.EXPECT().Stop()
+				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+				ts.mockStatusPoller.EXPECT().Stop()
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+
+				// Online...
+				ts.mockDBus.EXPECT().
+					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+					Return([]interface{}{true}, nil)
+
+				// ...must connect despite the empty topic.
+				ts.mockRelayer.EXPECT().Connect(gomock.Any()).Return(nil)
+				ts.mockRelayer.EXPECT().Close()
+			},
+		},
+		{
 			name: "successful startup with hub disabled",
 			setupFunc: func(ts *testSetup) {
 				ts.config.EnableHub = boolPtr(false)

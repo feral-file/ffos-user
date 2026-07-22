@@ -631,6 +631,56 @@ func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {
 	assert.Nil(t, result)
 }
 
+// TestMediator_TopicAssignmentFiresObserver: the empty->non-empty system-topic
+// persist must fire the topic observer (the factory-fresh re-trigger for the
+// auto-claim flow, whose bounded topic wait may already have expired), and a
+// topic ROTATION on a device that already had one must not.
+func TestMediator_TopicAssignmentFiresObserver(t *testing.T) {
+	cases := []struct {
+		name      string
+		prevTopic string
+		wantFired bool
+	}{
+		{name: "first assignment fires", prevTopic: "", wantFired: true},
+		{name: "rotation does not re-fire", prevTopic: "old-topic", wantFired: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			fired := false
+			ts.mediator.SetTopicObserver(func() { fired = true })
+
+			ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
+			s := &state.State{Relayer: &state.RelayerState{TopicID: tc.prevTopic}}
+			mockStateManager := mocks.NewMockStateManager(ts.ctrl)
+			mockStateManager.EXPECT().GetState().Return(s).Times(1)
+			mockStateManager.EXPECT().Save(s).Return(nil).Times(1)
+			state.InjectStateManagerForTesting(mockStateManager)
+
+			var capturedHandler relayer.Handler
+			ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
+			ts.mockRelayer.EXPECT().
+				OnRelayerMessage(gomock.Any()).DoAndReturn(func(handler relayer.Handler) {
+				capturedHandler = handler
+			}).Times(1)
+			ts.mediator.Start()
+
+			topicID := "assigned-topic"
+			err := capturedHandler(ts.ctx, relayer.Payload{
+				MessageID: relayer.MESSAGE_ID_SYSTEM,
+				Message:   relayer.Message{TopicID: &topicID},
+			})
+			state.ResetForTesting()
+
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantFired, fired)
+			assert.Equal(t, topicID, s.Relayer.TopicID, "topic persisted before/regardless of observer")
+		})
+	}
+}
+
 func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 	tests := []struct {
 		name      string

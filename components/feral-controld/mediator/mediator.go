@@ -35,6 +35,12 @@ type Mediator interface {
 	// LAN even with no upstream internet.
 	InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState)
 	SetClaimed(claimed bool)
+	// SetTopicObserver registers a callback invoked when the relayer assigns
+	// this device its system topic (empty -> non-empty transition). Wired once
+	// at composition time, before Start; main uses it to re-trigger the
+	// auto-claim flow, whose topic wait may already have expired by the time
+	// the assignment arrives.
+	SetTopicObserver(observer func())
 }
 
 type mediator struct {
@@ -46,6 +52,12 @@ type mediator struct {
 	logger     *zap.Logger
 	refresher  playlist_refresher.Refresher
 	json       wrapper.JSON
+
+	// topicObserver, when set, fires on the empty->non-empty system-topic
+	// assignment (see Mediator.SetTopicObserver). Set once before Start, read
+	// on the relayer-message goroutine; no lock by the same single-writer
+	// argument as the executor's claimObserver.
+	topicObserver func()
 
 	mdnsMu         sync.Mutex
 	mdnsAdvertiser mdns.Advertiser
@@ -150,6 +162,12 @@ func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceIn
 	if link != nil && link.HasLink(context.Background()) {
 		m.startMDNSLocked()
 	}
+}
+
+// SetTopicObserver registers the topic-assignment callback. See the Mediator
+// interface doc.
+func (m *mediator) SetTopicObserver(observer func()) {
+	m.topicObserver = observer
 }
 
 // SetClaimed updates the advertised claim state. Because zeroconf only publishes
@@ -326,11 +344,22 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 
 		// Save state
 		s := state.GetState()
+		hadTopic := strings.TrimSpace(s.Relayer.TopicID) != ""
 		s.Relayer.TopicID = *topicID
 		err := s.Save()
 		if err != nil {
 			m.logger.Error("Failed to persist state", zap.Error(err))
 			return err
+		}
+		// First assignment (empty -> set) is the factory-fresh moment the
+		// auto-claim flow may have given up waiting for (its topic wait is
+		// bounded and only an online TRANSITION re-triggers it, which a device
+		// that stays online never produces). Notify AFTER the persist so the
+		// observer's own state reads see the topic. Edge-gated: a topic
+		// rotation on an already-claimed device must not re-fire.
+		if !hadTopic && strings.TrimSpace(*topicID) != "" && m.topicObserver != nil {
+			m.logger.Info("Relayer system topic assigned; notifying topic observer")
+			m.topicObserver()
 		}
 
 	default:
