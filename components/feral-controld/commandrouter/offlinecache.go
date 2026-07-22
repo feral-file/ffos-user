@@ -217,6 +217,16 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	if h.kioskReplay == nil || h.statusPoller == nil {
 		return
 	}
+	// Sample the authoritative-display generation BEFORE reading the
+	// kiosk's current playlist below: that read (FetchPlayerStatus +
+	// resolveDisplayedPlaylist) is network-bound and runs OUTSIDE the
+	// playback lock, so a concurrent displayPlaylist can switch the kiosk
+	// to a different playlist while it is in flight. After acquiring the
+	// lock we re-check this generation and bail if it advanced, so this
+	// corrective resync can never install a stale playlist's scope over a
+	// newer authoritative one — see KioskReplay.PlaybackGeneration's doc.
+	genBeforeResolve := h.kioskReplay.PlaybackGeneration()
+
 	playerStatus, err := h.statusPoller.FetchPlayerStatus(ctx)
 	if err != nil {
 		h.logger.Warn("offline cache: failed to fetch player status to resync replay scope after clear", zap.Error(err))
@@ -248,6 +258,14 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	// before this deferred resync runs.
 	h.kioskReplay.LockPlayback()
 	defer h.kioskReplay.UnlockPlayback()
+	// An authoritative displayPlaylist/refresher pass committed a new
+	// scope between our pre-resolve sample and here: its scope is fresher
+	// and matches what is actually on screen now, so applying our stale
+	// snapshot would be the exact "install A's scope over B" regression
+	// this guard exists to prevent (see KioskReplay.PlaybackGeneration).
+	if h.kioskReplay.PlaybackGeneration() != genBeforeResolve {
+		return
+	}
 	if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
 		h.logger.Warn("offline cache: failed to sync kiosk replay scope after clear", zap.Error(syncErr))
 	}

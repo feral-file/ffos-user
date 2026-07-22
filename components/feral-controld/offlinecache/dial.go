@@ -84,15 +84,30 @@ func dialPageSessionWithTimeout(
 		return nil, fmt.Errorf("parse targets: %w", err)
 	}
 
+	// Require EXACTLY one page target rather than taking the first one:
+	// DevTools /json target ordering is not stable, and a second page
+	// (a popup, a background page, an about:blank the runtime opened)
+	// would otherwise make this attach to a nondeterministic page —
+	// replay could scope Fetch interception to the wrong kiosk page, and
+	// capture could navigate the wrong headless page. This mirrors the
+	// cdp package's own dialPageTarget (ErrNoPageTargetFound /
+	// ErrMultiplePageTargetsFound); it is duplicated rather than imported
+	// only because dial.go is deliberately decoupled from that client's
+	// request/reply + reconnect-supervisor lifecycle (see this file's
+	// package doc), not because the single-page invariant differs.
 	var wsURL string
+	pageTargets := 0
 	for _, t := range targets {
 		if t.Type == "page" {
+			pageTargets++
 			wsURL = t.WebSocketDebuggerURL
-			break
 		}
 	}
-	if wsURL == "" {
+	if pageTargets == 0 {
 		return nil, fmt.Errorf("no page target found at %s", endpoint)
+	}
+	if pageTargets > 1 {
+		return nil, fmt.Errorf("multiple page targets found at %s (%d); refusing to attach to a nondeterministic one", endpoint, pageTargets)
 	}
 
 	conn, _, err := dialer.DialContext(ctx, wsURL, nil)

@@ -415,6 +415,8 @@ func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1", "item2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -454,9 +456,13 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	lock := mockKioskReplay.EXPECT().LockPlayback().Times(1)
 	sync := mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1"}).Return(nil).Times(1)
+	// MarkPlaybackChanged must be announced UNDER the lock, after the sync
+	// and before the unlock, so a concurrent resync defers to this
+	// authoritative scope change (see KioskReplay.PlaybackGeneration).
+	mark := mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
 	send := ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
 	unlock := mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
-	gomock.InOrder(lock, sync, send, unlock)
+	gomock.InOrder(lock, sync, mark, send, unlock)
 
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -484,7 +490,17 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1"}).Return(errors.New("dial failed")).Times(1)
+	// The authoritative generation bump MUST still fire even though the
+	// SyncPlaylist above errored: this display path is authoritative for
+	// what SHOULD be on screen, so a concurrent corrective resync must
+	// defer to it (see KioskReplay.PlaybackGeneration). Pinned to Times(1)
+	// — not AnyTimes — so a future change that drops the bump on the sync-
+	// error branch fails here instead of silently weakening the TOCTOU
+	// guard. The display itself succeeds here, so the failure-path resync
+	// (the only other MarkPlaybackChanged-adjacent caller) never runs.
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 
 	command := commands.Command{
@@ -518,6 +534,8 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -563,6 +581,8 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 

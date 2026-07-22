@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	go_http "net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -267,7 +268,14 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 	// The static server's own URL is replay's own follow-up (a large-asset
 	// 302 target): it must always pass through, or intercepting it too
 	// (Fetch.enable's pattern is "*") would loop back into this handler.
-	if r.staticServer != nil && strings.HasPrefix(evt.Request.URL, r.staticServer.BaseURL()) {
+	// Pass-through here means Fetch.continueRequest — i.e. the request
+	// escapes offline isolation and hits the real loopback socket — so the
+	// match MUST be an exact loopback-origin + /blobs/ path check, never a
+	// prefix test: a crafted URL like http://127.0.0.1:8082@evil.example/
+	// has BaseURL() as a string prefix yet resolves (per RFC 3986 userinfo
+	// parsing) to host evil.example, which a prefix test would wrongly wave
+	// through under fail_closed. See isStaticServerFollowUp.
+	if r.staticServer != nil && r.isStaticServerFollowUp(evt.Request.URL) {
 		r.continueRequest(ctx, session, evt.RequestID)
 		return
 	}
@@ -293,6 +301,41 @@ func (r *replayer) processRequestPaused(params json.RawMessage) {
 		// time) — nothing to serve, so treat exactly like a miss.
 		r.handleMiss(ctx, session, evt.RequestID, mixed)
 	}
+}
+
+// isStaticServerFollowUp reports whether rawURL is genuinely one of
+// replay's own static-server redirect targets (URLFor emits
+// http://<loopback-addr>/blobs/<sha>?...), and therefore safe to pass
+// through untouched instead of being intercepted. It exists to replace a
+// naive strings.HasPrefix(rawURL, BaseURL()) test, which is unsafe as a
+// TRUST gate: HasPrefix matches any string that merely starts with the
+// base URL, including one where "127.0.0.1:8082" is actually the RFC 3986
+// userinfo of a different host (http://127.0.0.1:8082@evil.example/...).
+// Because a match here yields Fetch.continueRequest — the one branch that
+// lets a paused request leave the offline sandbox and reach the network —
+// this validates the parsed components instead:
+//   - the URL must parse,
+//   - its scheme+host must EQUAL the static server's (url.Host excludes
+//     userinfo, so the lookalike above is rejected: its Host is
+//     evil.example, not the loopback addr), and
+//   - its path must be under the blobs route the server actually serves.
+//
+// Anything failing these falls through to normal interception (miss /
+// blob fulfillment), which is the safe default — the worst case for a
+// false negative is replay intercepting its own redirect and treating it
+// as a miss, never a request silently escaping to an attacker-chosen host.
+func (r *replayer) isStaticServerFollowUp(rawURL string) bool {
+	base, err := url.Parse(r.staticServer.BaseURL())
+	if err != nil {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == base.Scheme &&
+		u.Host == base.Host &&
+		strings.HasPrefix(u.Path, blobsRoutePrefix)
 }
 
 func statusOrDefault(status, fallback int) int {

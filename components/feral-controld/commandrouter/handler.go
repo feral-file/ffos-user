@@ -268,6 +268,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
 					h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
 				}
+				// Announce this authoritative scope change (under the
+				// lock) so a concurrent corrective resync that sampled
+				// the generation earlier will defer to it instead of
+				// clobbering it with a stale playlist's scope — see
+				// KioskReplay.PlaybackGeneration's doc. Bumped even if the
+				// sync above logged an error: this path is authoritative
+				// for what SHOULD be on screen, and the resync must not
+				// override that intent with an older snapshot.
+				h.kioskReplay.MarkPlaybackChanged()
 			}
 		}
 

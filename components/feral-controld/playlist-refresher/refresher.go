@@ -303,6 +303,11 @@ func (r *refresher) processPlayingPlaylist() error {
 		if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
 			r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))
 		}
+		// Announce this authoritative scope change (under the lock) so a
+		// concurrent corrective resync defers to it rather than clobbering
+		// it with a stale playlist's scope — see
+		// KioskReplay.PlaybackGeneration's doc.
+		r.kioskReplay.MarkPlaybackChanged()
 	}
 
 	if skipCDPResend {

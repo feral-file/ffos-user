@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -63,6 +64,33 @@ type KioskReplay interface {
 	// the send-path unlock, never nested inside it).
 	LockPlayback()
 	UnlockPlayback()
+	// PlaybackGeneration returns a counter that advances every time an
+	// AUTHORITATIVE display path (a displayPlaylist command or a
+	// playlist-refresher pass) commits a new replay scope via
+	// MarkPlaybackChanged. It exists to close a TOCTOU that LockPlayback
+	// alone cannot: the corrective resync
+	// (commandrouter.resyncKioskReplayScopeToCurrentDisplay) must read the
+	// kiosk's current playlist OUTSIDE the lock (that read is network-
+	// bound and does not touch scope), then apply the derived scope INSIDE
+	// the lock. Between those two steps a concurrent displayPlaylist can
+	// switch the kiosk to a different playlist under the lock; the stale
+	// resync would then install the OLD playlist's scope over the new one.
+	// The resync samples this generation before its status read and
+	// re-checks it after acquiring the lock — a change means a newer
+	// authoritative display already set scope, so the resync skips rather
+	// than clobbering it. The value is meaningful only for equality across
+	// one resync's own before/after samples; its magnitude is opaque.
+	//
+	// Implemented lock-free (atomic) so it is safe to call both with and
+	// without LockPlayback held (the resync does both), without
+	// reentrancy.
+	PlaybackGeneration() uint64
+	// MarkPlaybackChanged advances PlaybackGeneration. Authoritative
+	// display paths call it while holding LockPlayback, right after their
+	// SyncPlaylist, to announce "the on-screen playlist's scope is now
+	// mine." The corrective resync deliberately does NOT call it: it is a
+	// restore-to-truth action, not a new authoritative change.
+	MarkPlaybackChanged()
 }
 
 type kioskReplay struct {
@@ -77,6 +105,10 @@ type kioskReplay struct {
 	// playbackMu serializes scope-sync + kiosk-navigation sequences
 	// across every caller — see LockPlayback's doc.
 	playbackMu sync.Mutex
+	// playbackGen backs PlaybackGeneration/MarkPlaybackChanged — see
+	// PlaybackGeneration's doc. Atomic so the resync can read it both
+	// outside and inside playbackMu without reentrancy.
+	playbackGen atomic.Uint64
 }
 
 // NewKioskReplay constructs a KioskReplay. endpoint is the kiosk
@@ -170,3 +202,13 @@ func (k *kioskReplay) LockPlayback() { k.playbackMu.Lock() }
 // UnlockPlayback releases the playback coordinator acquired by
 // LockPlayback.
 func (k *kioskReplay) UnlockPlayback() { k.playbackMu.Unlock() }
+
+// PlaybackGeneration returns the current authoritative-display generation
+// — see the interface doc for the resync TOCTOU it closes.
+func (k *kioskReplay) PlaybackGeneration() uint64 { return k.playbackGen.Load() }
+
+// MarkPlaybackChanged advances the generation. Callers hold LockPlayback
+// (this is announced from within their sync+send critical section), so the
+// atomic add is ordered before their UnlockPlayback and therefore visible
+// to any resync that later acquires the lock — see the interface doc.
+func (k *kioskReplay) MarkPlaybackChanged() { k.playbackGen.Add(1) }

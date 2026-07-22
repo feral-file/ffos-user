@@ -85,3 +85,29 @@ func (mr *MockOfflineCacheKioskReplayMockRecorder) UnlockPlayback() *gomock.Call
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UnlockPlayback", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).UnlockPlayback))
 }
+
+// PlaybackGeneration mocks base method.
+func (m *MockOfflineCacheKioskReplay) PlaybackGeneration() uint64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PlaybackGeneration")
+	ret0, _ := ret[0].(uint64)
+	return ret0
+}
+
+// PlaybackGeneration indicates an expected call of PlaybackGeneration.
+func (mr *MockOfflineCacheKioskReplayMockRecorder) PlaybackGeneration() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PlaybackGeneration", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).PlaybackGeneration))
+}
+
+// MarkPlaybackChanged mocks base method.
+func (m *MockOfflineCacheKioskReplay) MarkPlaybackChanged() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "MarkPlaybackChanged")
+}
+
+// MarkPlaybackChanged indicates an expected call of MarkPlaybackChanged.
+func (mr *MockOfflineCacheKioskReplayMockRecorder) MarkPlaybackChanged() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkPlaybackChanged", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).MarkPlaybackChanged))
+}

@@ -718,3 +718,50 @@ func TestReplayer_ProcessRequestPaused_StaticServerURLAlwaysPassesThrough(t *tes
 	ts.handler(requestPausedEvent(t, "req-1", testStaticBaseURL+"/blobs/deadbeef?ct=video%2Fmp4"))
 	awaitSend(t, done)
 }
+
+// TestReplayer_ProcessRequestPaused_StaticServerLookalikeURLsAreNotPassedThrough
+// is the regression test for the static-server trust bypass: the
+// pass-through gate must validate the parsed loopback origin + /blobs/
+// path, never a naive strings.HasPrefix against BaseURL(). Each URL below
+// has testStaticBaseURL ("http://127.0.0.1:8082") as a raw string prefix
+// yet does NOT actually target the loopback blobs endpoint, so continuing
+// it would let a crafted request escape offline isolation to the real
+// network. Under fail_closed with no scope active, the correct outcome is
+// Fetch.failRequest (a miss), never Fetch.continueRequest.
+func TestReplayer_ProcessRequestPaused_StaticServerLookalikeURLsAreNotPassedThrough(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{
+			// "127.0.0.1:8082" is RFC 3986 userinfo here; the real host
+			// is evil.example. url.Host excludes userinfo, so the origin
+			// check rejects it.
+			name: "userinfo lookalike targets a different host",
+			url:  "http://127.0.0.1:8082@evil.example/blobs/deadbeef",
+		},
+		{
+			// A different host that merely begins with the base URL text.
+			name: "host suffix lookalike",
+			url:  "http://127.0.0.1:8082.evil.example/blobs/deadbeef",
+		},
+		{
+			// Correct loopback origin but NOT under the /blobs/ route the
+			// static server serves — replay never emits these, so it must
+			// not blanket-trust the whole origin.
+			name: "correct origin but non-blobs path",
+			url:  testStaticBaseURL + "/etc/passwd",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+			defer ts.ctrl.Finish()
+			done := ts.expectSend("Fetch.failRequest")
+			ts.handler(requestPausedEvent(t, "req-1", tc.url))
+			params := awaitSend(t, done)
+			assert.Equal(t, "Failed", params["errorReason"],
+				"a static-server lookalike URL must be treated as a miss, never passed through to the network")
+		})
+	}
+}

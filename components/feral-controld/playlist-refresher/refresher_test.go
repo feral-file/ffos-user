@@ -400,6 +400,8 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	mockTicker := mocks.NewMockTicker(ctrl)
@@ -505,6 +507,13 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 		Do(func(_ context.Context, _ []string) { observeLockHeld("SyncPlaylist") }).
 		Return(nil).
 		MinTimes(1)
+	// MarkPlaybackChanged must also run under the lock (it announces the
+	// scope change the resync must defer to — see
+	// KioskReplay.PlaybackGeneration), so assert lock-held for it too.
+	mockKioskReplay.EXPECT().
+		MarkPlaybackChanged().
+		Do(func() { observeLockHeld("MarkPlaybackChanged") }).
+		MinTimes(1)
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
 		Do(func(_ string, _ map[string]interface{}) { observeLockHeld("CDP send") }).
@@ -543,6 +552,8 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	// A ticker channel that never delivers a tick: without ForceRefresh,
@@ -634,6 +645,8 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
@@ -751,6 +764,7 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	mockTicker := mocks.NewMockTicker(ctrl)
@@ -772,6 +786,14 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 	mockKioskReplay.EXPECT().
 		SyncPlaylist(ctx, []string{"item1"}).
 		Return(errors.New("dial failed")).
+		MinTimes(1)
+	// The authoritative generation bump must still fire even when the
+	// SyncPlaylist above errors (see KioskReplay.PlaybackGeneration).
+	// Pinned to MinTimes(1) — not AnyTimes — so dropping the bump on the
+	// refresher's sync-error branch fails here rather than silently
+	// weakening the resync TOCTOU guard.
+	mockKioskReplay.EXPECT().
+		MarkPlaybackChanged().
 		MinTimes(1)
 	// The refresh must still proceed to CDP despite the sync failure.
 	mockCDP.EXPECT().
@@ -896,6 +918,8 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	mockTicker := mocks.NewMockTicker(ctrl)
