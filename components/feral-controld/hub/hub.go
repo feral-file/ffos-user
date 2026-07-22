@@ -96,17 +96,39 @@ func (h *hub) routes() {
 	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
 }
 
-// Start starts the HTTP server
+// Listener retry backoff bounds. Vars rather than consts so tests can compress
+// the schedule.
+var (
+	listenRetryBase = time.Second
+	listenRetryMax  = 30 * time.Second
+)
+
+// Start starts the HTTP server. The listener goroutine retries ListenAndServe
+// with capped exponential backoff rather than giving up: this hub is the
+// BLE-replacement LAN recovery channel, so a transient bind failure at startup
+// (e.g. a lingering :1111 holder) must not silently disable it until an
+// unrelated daemon restart. Retrying ends when the server reports
+// ErrServerClosed (Stop ran) or the hub context is canceled.
 func (h *hub) Start() {
 	h.logger.Info("Starting HTTP server", zap.String("addr", HUB_ADDRESS))
 
 	// Start server in a goroutine
 	go func() {
-		if err := h.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			h.logger.Error("HTTP server error", zap.Error(err))
-			// FIXME should restart the server instead of stopping it
-			if e := h.Stop(); e != nil {
-				h.logger.Error("Failed to stop HTTP server", zap.Error(e))
+		backoff := listenRetryBase
+		for {
+			err := h.server.ListenAndServe()
+			if err == nil || errors.Is(err, http.ErrServerClosed) {
+				return
+			}
+			h.logger.Error("HTTP server error; retrying listener",
+				zap.Error(err), zap.Duration("backoff", backoff))
+			select {
+			case <-h.ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff *= 2; backoff > listenRetryMax {
+				backoff = listenRetryMax
 			}
 		}
 	}()

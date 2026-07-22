@@ -153,23 +153,40 @@ func TestStart_Success(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestStart_ListenAndServeError(t *testing.T) {
+func TestStart_ListenAndServeError_Retries(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+
+	// Compresses the package-level backoff seam; do not add t.Parallel() to
+	// hub tests while this mutation pattern is in use.
+	oldBase := listenRetryBase
+	listenRetryBase = time.Millisecond
+	defer func() { listenRetryBase = oldBase }()
 
 	// Mock WS Close - may be called due to context cancellation
 	ts.mockWS.EXPECT().
 		Close().
 		MinTimes(1)
 
-	// Mock HTTPServer ListenAndServe to return an error
-	expectedErr := errors.New("server error")
-	ts.mockServer.EXPECT().
-		ListenAndServe().
-		Return(expectedErr).
-		Times(1)
+	// A transient bind failure must be retried, not abandoned: the hub is the
+	// LAN recovery channel and a one-shot listener would stay dead until an
+	// unrelated daemon restart. Two failures, then the server reports closed.
+	served := make(chan struct{})
+	bindErr := errors.New("listen tcp 0.0.0.0:1111: bind: address already in use")
+	gomock.InOrder(
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			Return(bindErr).
+			Times(2),
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			DoAndReturn(func() error {
+				close(served)
+				return http.ErrServerClosed
+			}).
+			Times(1),
+	)
 
-	// Mock Stop to be called when ListenAndServe fails
 	ts.mockServer.EXPECT().
 		Shutdown(gomock.Any()).
 		Return(nil).
@@ -178,12 +195,58 @@ func TestStart_ListenAndServeError(t *testing.T) {
 	// Start the hub
 	ts.hub.Start()
 
-	// Give it a moment to process
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-served:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener was not retried after bind failures")
+	}
 
 	// Stop the hub
 	err := ts.hub.Stop()
 	assert.NoError(t, err)
+}
+
+func TestStart_ListenRetryStopsOnContextCancel(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+
+	// One failing attempt; the default 1s backoff leaves ample room to cancel
+	// before a second attempt, and ctrl.Finish asserts exactly one call.
+	attempted := make(chan struct{})
+	mockServer.EXPECT().
+		ListenAndServe().
+		DoAndReturn(func() error {
+			close(attempted)
+			return errors.New("listen tcp 0.0.0.0:1111: bind: address already in use")
+		}).
+		Times(1)
+	mockWS.EXPECT().Close().AnyTimes()
+	mockServer.EXPECT().Shutdown(gomock.Any()).Return(nil).AnyTimes()
+
+	h.Start()
+
+	select {
+	case <-attempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener was never attempted")
+	}
+	cancel()
+
+	// Give the retry goroutine a moment to observe cancellation; ctrl.Finish
+	// then asserts ListenAndServe was not called again.
+	time.Sleep(50 * time.Millisecond)
 }
 
 func TestStop(t *testing.T) {
