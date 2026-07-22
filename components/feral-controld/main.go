@@ -260,13 +260,16 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		app.Mediator.InitializeMDNS(advertiser, deviceInfo, connected)
 	}
 
-	// Start Playlist Refresher
-	app.PlaylistRefresher.Start()
-	defer app.PlaylistRefresher.Stop()
-
+	// Register scheduler Stop before refresher Stop so LIFO shutdown stops the
+	// refresher first — otherwise a late Prepare could re-arm a timer after
+	// the scheduler already cleared on Stop.
 	if app.PlaylistScheduler != nil {
 		defer app.PlaylistScheduler.Stop()
 	}
+
+	// Start Playlist Refresher
+	app.PlaylistRefresher.Start()
+	defer app.PlaylistRefresher.Stop()
 
 	if app.MintPairing != nil {
 		app.MintPairing.Start(ctx)

@@ -98,6 +98,7 @@ type trackingScheduler struct {
 	inner        playlistschedule.Scheduler
 	pushCalls    int
 	clearCalls   int
+	clearThenFn  int
 	lastPrepared *dp1.Playlist
 }
 
@@ -109,6 +110,10 @@ func (t *trackingScheduler) RecomputeNow(ctx context.Context) { t.inner.Recomput
 func (t *trackingScheduler) Clear() {
 	t.clearCalls++
 	t.inner.Clear()
+}
+func (t *trackingScheduler) ClearThenWithPlayerPush(fn func()) {
+	t.clearThenFn++
+	t.inner.ClearThenWithPlayerPush(fn)
 }
 func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
@@ -213,7 +218,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 		Arguments: map[string]interface{}{},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 1, track.clearCalls)
+	assert.Equal(t, 1, track.clearThenFn, "default playlist must ClearThenWithPlayerPush")
 	assert.False(t, track.HasCache())
 
 	// Recompute after default must not resurrect the old Daily cast.

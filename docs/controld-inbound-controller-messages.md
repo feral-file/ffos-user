@@ -266,7 +266,9 @@ computes an active set (`max(displayAt <= now)` items plus items without
 Controld keeps the full playlist in memory to arm the next `displayAt`
 transition and to recompute after wake or CDP reconnect. A later
 `displayDefaultPlaylist` clears that cache so a scheduled push cannot overwrite
-the default player state.
+the default player state. Clear and the default CDP send share the same
+serialization lock as timed recomputes so an in-flight push cannot land after
+default playback takes over.
 
 Playlist URL example:
 

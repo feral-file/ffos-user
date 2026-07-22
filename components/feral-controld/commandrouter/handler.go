@@ -121,13 +121,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		return result, nil
 	} else {
-		// Leaving displayPlaylist (e.g. displayDefaultPlaylist / OOM recovery)
-		// must drop the byDisplayAt cache; otherwise a later timer, wake, or CDP
-		// reconnect would push the old Daily active set over the new player state.
-		if commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil {
-			h.scheduler.Clear()
-		}
-
 		var playlist *dp1.Playlist
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
@@ -198,14 +191,21 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
-		// Forward to CDP (final, full data). displayPlaylist sends are serialized
-		// against displayAt timer/wake pushes so a stale recompute cannot land
-		// after Prepare has already handed a newer active set to this path.
-		if commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil {
+		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
+		// scheduler push lock with RecomputeNow so a stale timed push cannot
+		// land after a newer cast or after default playback takes over.
+		switch {
+		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
+			// Clear + CDP under one pushMu hold: Clear alone is not enough if
+			// RecomputeNow already snapshotted and is waiting to push.
+			h.scheduler.ClearThenWithPlayerPush(func() {
+				result, err = h.sendCDPRequest(command)
+			})
+		case commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
 				result, err = h.sendCDPRequest(command)
 			})
-		} else {
+		default:
 			result, err = h.sendCDPRequest(command)
 		}
 		if err != nil {

@@ -2,6 +2,7 @@ package playlistschedule_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -428,4 +429,93 @@ func TestClear_StopsTimerAndDropsCache(t *testing.T) {
 
 	cdpMock.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 	sched.RecomputeNow(context.Background())
+}
+
+func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	enteredSend := make(chan struct{})
+	releaseSend := make(chan struct{})
+	var mu sync.Mutex
+	var enteredOnce sync.Once
+	var pushedIDs []string
+
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case strings.Contains(expr, `"id":"old"`):
+				pushedIDs = append(pushedIDs, "old")
+				enteredOnce.Do(func() { close(enteredSend) })
+				<-releaseSend
+			case strings.Contains(expr, "displayDefaultPlaylist"):
+				pushedIDs = append(pushedIDs, "default")
+			default:
+				pushedIDs = append(pushedIDs, "other")
+			}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.Prepare(byDisplayAtPlaylist(item("old", "2026-07-22T00:00:00Z")))
+
+	doneRecompute := make(chan struct{})
+	go func() {
+		sched.RecomputeNow(context.Background())
+		close(doneRecompute)
+	}()
+	<-enteredSend
+
+	// While recompute holds pushMu inside Send, clear+default must wait, then
+	// run after — and recompute must not push again after clear.
+	defaultDone := make(chan struct{})
+	go func() {
+		sched.ClearThenWithPlayerPush(func() {
+			// Simulate displayDefaultPlaylist CDP under the same lock.
+			_, _ = cdpMock.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+				"expression": `window.handleCDPRequest({"command":"displayDefaultPlaylist","request":{}})`,
+			})
+		})
+		close(defaultDone)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(releaseSend)
+
+	select {
+	case <-doneRecompute:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recompute did not finish")
+	}
+	select {
+	case <-defaultDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ClearThenWithPlayerPush did not finish")
+	}
+
+	assert.False(t, sched.HasCache())
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, pushedIDs)
+	assert.Equal(t, "default", pushedIDs[len(pushedIDs)-1], "default must win after clear")
 }

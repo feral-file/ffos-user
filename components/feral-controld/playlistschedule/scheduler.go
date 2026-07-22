@@ -34,9 +34,14 @@ type Scheduler interface {
 	// usable cache. No-op when nothing is cached.
 	RecomputeNow(ctx context.Context)
 	// Clear drops the cached byDisplayAt playlist and cancels the transition
-	// timer. Call when playback leaves displayPlaylist (e.g. displayDefaultPlaylist)
-	// so wake/reconnect/timer cannot resurrect the previous scheduled cast.
+	// timer under the player-push lock so an in-flight RecomputeNow cannot
+	// start a new push after the clear. Prefer ClearThenWithPlayerPush when
+	// the clear must be paired with a CDP send (displayDefaultPlaylist).
 	Clear()
+	// ClearThenWithPlayerPush clears the cache and runs fn while still holding
+	// the player-push lock. Used for displayDefaultPlaylist so a stale
+	// RecomputeNow cannot overwrite the default player state after Clear.
+	ClearThenWithPlayerPush(fn func())
 	// WithPlayerPush serializes CDP playlist updates against timer/wake
 	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
 	// send so a stale RecomputeNow cannot overwrite a newer cast mid-flight.
@@ -109,6 +114,29 @@ func (s *scheduler) WithPlayerPush(fn func()) {
 	fn()
 }
 
+func (s *scheduler) Clear() {
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	s.mu.Lock()
+	s.clearLocked()
+	s.mu.Unlock()
+}
+
+// ClearThenWithPlayerPush clears under pushMu then runs fn before releasing,
+// so displayDefaultPlaylist CDP cannot race an in-flight RecomputeNow push.
+func (s *scheduler) ClearThenWithPlayerPush(fn func()) {
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	s.mu.Lock()
+	s.clearLocked()
+	s.mu.Unlock()
+	fn()
+}
+
+func (s *scheduler) Stop() {
+	s.Clear()
+}
+
 func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 	if playlist == nil {
 		return nil
@@ -169,16 +197,6 @@ func (s *scheduler) RecomputeNow(ctx context.Context) {
 		}
 		s.logger.Debug("displayAt cache changed during push; pushing again")
 	}
-}
-
-func (s *scheduler) Clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.clearLocked()
-}
-
-func (s *scheduler) Stop() {
-	s.Clear()
 }
 
 func (s *scheduler) clearLocked() {
