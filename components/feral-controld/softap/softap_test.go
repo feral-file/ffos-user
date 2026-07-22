@@ -84,6 +84,27 @@ func TestNumericPSK(t *testing.T) {
 	}
 }
 
+// TestUpFailsWhenCleanupFails: `device wifi hotspot` always CREATES a profile,
+// so proceeding past a failed pre-create cleanup stacks a same-name duplicate
+// and breaks the "con-name pins exactly one profile" assumption Down/Status
+// rely on. A failed cleanup must abort the raise before the create runs.
+func TestUpFailsWhenCleanupFails(t *testing.T) {
+	b, exec := newBackend("a1b2c3", func(argv []string) ([]byte, error) {
+		if len(argv) > 2 && argv[1] == "connection" && argv[2] == "delete" {
+			return []byte("Error: Connection deletion failed"), fakeExitError{msg: "exit status 1"}
+		}
+		return nil, nil
+	})
+
+	_, err := b.Up(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cleanup of existing")
+	for _, call := range exec.recorded() {
+		assert.NotContains(t, strings.Join(call, " "), "device wifi hotspot",
+			"hotspot create must not run after a failed cleanup")
+	}
+}
+
 // TestUpFailureErrorNeverContainsPSK: hotspot creation passes the WPA2 PSK on
 // the nmcli command line, and run() folds args + captured output into its
 // error, which callers log. A failed raise must redact the key from both.

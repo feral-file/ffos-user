@@ -408,6 +408,7 @@ func TestJoinAbortsWhenAPTeardownFails(t *testing.T) {
 	require.Equal(t, StateAPActive, h.m.State())
 
 	h.ap.downErr = errors.New("nmcli connection delete timed out")
+	scansBefore := h.rec.count("wifi.RefreshScanCache")
 	h.m.applyJoin(ctx, "HomeNet", "pw")
 
 	assert.Equal(t, 0, h.rec.count("wifi.Join:HomeNet"), "join must not run while the AP teardown failed")
@@ -416,15 +417,64 @@ func TestJoinAbortsWhenAPTeardownFails(t *testing.T) {
 	assert.Equal(t, portal.JoinFailed, st.State)
 	assert.Equal(t, "ap-teardown-failed", st.Reason)
 	assert.Equal(t, "HomeNet", st.SSID)
-	assert.Equal(t, 2, h.rec.count("ap.Up"), "re-raise replaces the leftover profile")
+	// The re-raise is GATED on the pending teardown: while the old profile
+	// cannot be deleted there must be no scan (the leftover AP may still own
+	// the radio) and no second raise (duplicate-profile hazard).
+	assert.Equal(t, 1, h.rec.count("ap.Up"), "no re-raise while the teardown is pending")
+	assert.Equal(t, scansBefore, h.rec.count("wifi.RefreshScanCache"), "no scan while the teardown is pending")
 
-	// Backend recovers: the user's retry joins normally.
+	// Backend recovers: the tick deletes the leftover FIRST, then scans, then
+	// re-raises — the ordering the single radio requires.
 	h.ap.downErr = nil
+	h.m.onTick(ctx)
+	assert.Equal(t, 2, h.rec.count("ap.Up"), "recovered tick re-raises the AP")
+	events := h.rec.list()
+	lastIdx := func(s string) int {
+		last := -1
+		for i, e := range events {
+			if e == s {
+				last = i
+			}
+		}
+		return last
+	}
+	assert.Less(t, lastIdx("ap.Down"), lastIdx("wifi.RefreshScanCache"),
+		"pending deletion must complete before the pre-AP scan: %v", events)
+	assert.Less(t, lastIdx("wifi.RefreshScanCache"), lastIdx("ap.Up"),
+		"pre-AP scan must complete before the re-raise: %v", events)
+
+	// And the user's retry now joins normally.
 	h.conn.online = true
 	h.wifi.setProfile(true)
 	h.m.applyJoin(ctx, "HomeNet", "pw")
 	assert.Equal(t, 1, h.rec.count("wifi.Join:HomeNet"))
 	assert.Equal(t, StateOnline, h.m.State())
+}
+
+// TestRescanTeardownFailureGatesReRaise: the rescan bounce shares the gate —
+// if the AP teardown fails mid-bounce, no scan and no re-raise may happen
+// until the pending deletion succeeds (single radio; duplicate-profile
+// hazard). The tick converges once the backend recovers.
+func TestRescanTeardownFailureGatesReRaise(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.ap.downErr = errors.New("nmcli connection delete timed out")
+	scansBefore := h.rec.count("wifi.RefreshScanCache")
+	h.m.applyRescan(ctx)
+
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"), "no re-raise while the teardown is pending")
+	assert.Equal(t, scansBefore, h.rec.count("wifi.RefreshScanCache"), "no scan while the teardown is pending")
+
+	h.ap.downErr = nil
+	h.m.onTick(ctx)
+	assert.Equal(t, 2, h.rec.count("ap.Up"), "recovered tick completes the bounce")
+	assert.Greater(t, h.rec.count("wifi.RefreshScanCache"), scansBefore, "fresh scan ran before the re-raise")
 }
 
 // TestJoinSucceedsButStillOfflineArmsRecovery: a successful nmcli association

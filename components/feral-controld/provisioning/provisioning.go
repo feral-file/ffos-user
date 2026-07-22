@@ -696,6 +696,18 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		return nil
 	}
 
+	// A pending teardown means the previous hotspot profile may still exist —
+	// possibly still owning the radio. Resolve it BEFORE anything else: the
+	// pre-AP scan needs station mode (constraint 1), and softap.Up refuses to
+	// create over an undeletable leftover (the duplicate-profile hazard), so
+	// scanning or raising before the deletion succeeds is wasted work at best
+	// and a radio-mode violation at worst. apUp is false here, so this call
+	// only retries the outstanding deletion; the tick retries this whole raise
+	// until it converges.
+	if !m.ensureAPDown(ctx) {
+		return errors.New("previous setup AP teardown still pending; deferring raise")
+	}
+
 	// Announce the scan before it starts so the narration surface can show a
 	// "looking for networks" state for however long the scan takes. Reason
 	// "scanning" is the discriminator (see setupNotifier.OnStateChange); the
@@ -729,11 +741,6 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// A successful Up replaced the persisted profile (softap.Up deletes any
-	// leftover before creating), so a pending teardown retry is moot now.
-	m.mu.Lock()
-	m.apDownPending = false
-	m.mu.Unlock()
 
 	srv := m.newPortal(portal.Config{
 		Addr:   m.portalAddr,

@@ -109,9 +109,13 @@ func (b *nmBackend) Up(ctx context.Context) (Info, error) {
 	// A leftover profile from an ungraceful previous run — or from a raise
 	// whose compensating Down failed — would accumulate a duplicate on every
 	// re-raise, breaking the "con-name pins exactly one profile" assumption
-	// Down and Status rely on. Best-effort: Down tolerates a missing profile.
+	// Down and Status rely on. That is why a failed cleanup is FATAL for this
+	// raise, not best-effort: creating over an undeletable leftover is exactly
+	// the duplicate-stacking hazard, and the provisioning machine retries the
+	// whole raise on its tick, so refusing here is safe. Down itself still
+	// tolerates a missing profile (that is the common case).
 	if err := b.Down(ctx); err != nil {
-		b.logger.Warn("softap: pre-create cleanup of existing profile failed; proceeding", zap.Error(err))
+		return Info{}, fmt.Errorf("cleanup of existing %s profile before create: %w", conName, err)
 	}
 
 	// `device wifi hotspot` creates an AP-mode connection with shared IPv4 in
