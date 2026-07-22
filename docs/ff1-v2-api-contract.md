@@ -1,15 +1,23 @@
 # FF1 communication API v2
 
-- Status: proposed normative contract
-- Contract version: `2.0.0`
+- Status: design draft; not conformance-ready
+- Target contract version: `2.0.0`
 - Primary transport: MQTT 5.0 over TLS 1.3
 - LAN adapter: HTTPS plus authenticated WebSocket local push over TLS 1.3 with the same JSON representations
 - Authentication profile: [FF1 v2 controller authentication and access sessions](ff1-v2-controller-authentication.md)
-- Non-normative rollout plan: [FF1 API v2 migration and implementation plan](ff1-v2-migration.md)
+- Companion rollout plan: [FF1 API v2 migration and implementation plan](ff1-v2-migration.md)
+
+This prose is a proposed protocol profile, not a normative conformance
+artifact. The capitalized requirement keywords state the intended v2 design.
+Before `2.0.0` becomes normative, the repository MUST publish the complete JSON
+Schema 2020-12 bundle, AsyncAPI document, OpenAPI document, positive and
+negative fixtures, and automated MQTT/LAN parity validation described in the
+migration plan. No implementation may claim FF1 API v2 conformance from these
+prose documents alone.
 
 ## 1. Purpose and scope
 
-This document normatively defines the public FF1 device communication boundary
+This document defines the proposed public FF1 device communication boundary
 for the Feral File mobile app, CLI clients, and explicitly authorized
 institutional controllers. MQTT is the authoritative transport model. LAN HTTPS
 and WebSocket bindings carry the same JSON contract.
@@ -43,9 +51,10 @@ This specification uses:
 - the [DP-1 core v1.1.0 specification](https://github.com/display-protocol/dp1/blob/main/core/v1.1.0/spec.md)
   and its normative JSON Schema;
 - [MQTT 5.0](https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html),
-  including Response Topic, Correlation Data, Message Expiry Interval, Session
-  Expiry Interval, Will Delay Interval, Content Type, Payload Format Indicator,
-  Maximum Packet Size, and reason codes;
+  including Enhanced Authentication, the AUTH Control Packet, Authentication
+  Method, Authentication Data, Response Topic, Correlation Data, Message
+  Expiry Interval, Session Expiry Interval, Will Delay Interval, Content Type,
+  Payload Format Indicator, Maximum Packet Size, and Reason Codes;
 - [TLS 1.3 (RFC 8446)](https://www.rfc-editor.org/rfc/rfc8446.html),
   [X.509 (RFC 5280)](https://www.rfc-editor.org/rfc/rfc5280.html), and the
   [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
@@ -53,6 +62,7 @@ This specification uses:
 - [JWS (RFC 7515)](https://www.rfc-editor.org/rfc/rfc7515.html),
   [JWE (RFC 7516)](https://www.rfc-editor.org/rfc/rfc7516.html),
   [JWA (RFC 7518)](https://www.rfc-editor.org/rfc/rfc7518.html),
+  [JWT confirmation (RFC 7800)](https://www.rfc-editor.org/rfc/rfc7800.html),
   [JWK thumbprints (RFC 7638)](https://www.rfc-editor.org/rfc/rfc7638.html), and
   [Web Origin (RFC 6454)](https://www.rfc-editor.org/rfc/rfc6454.html);
 - [JSON Schema 2020-12](https://json-schema.org/draft/2020-12),
@@ -80,10 +90,13 @@ This specification uses:
   the authentication profile.
 - The JSON media type is `application/json`; MQTT publishes set Payload Format
   Indicator to `1` and Content Type to `application/json`.
-- JSON Schema 2020-12 is normative. Every FF-defined object has
-  `additionalProperties: false` unless it is an explicitly namespaced
-  `extensions` object. Embedded DP-1 documents are governed by the official DP-1
-  schemas and are not made stricter recursively by the FF envelope.
+- The eventual machine-readable JSON Schema 2020-12 bundle is the normative
+  authority for FF-defined JSON. It MUST encode every FF-defined object with
+  `additionalProperties: false` unless the object is an explicitly namespaced
+  `extensions` object. Until that bundle is published, the closed shapes in
+  this draft are strict design requirements but are not sufficient to test or
+  claim conformance. Embedded DP-1 documents remain governed by the official
+  DP-1 schemas and are not made stricter recursively by the FF envelope.
 - Compatible additions go under `extensions[reverseDnsName]`. A new base field,
   changed meaning, enum removal, or changed constraint requires a new contract
   version and capability negotiation. This makes the base contract strict
@@ -161,13 +174,13 @@ from its source of truth even when no controller is connected.
 
 - Protocol: MQTT 5.0 only, over TLS 1.3.
 - Remote URI: `wss://<control-host>:443/mqtt`. Native MQTT TLS on port 8883 MAY
-  also be exposed. Every conforming remote endpoint MUST provide WSS on port
+  also be exposed. Every v2 remote endpoint MUST provide WSS on port
   443; clients MUST NOT depend on port 8883.
 - Device Client Identifier: `ff-device-<deviceId>`.
 - Access-session Client Identifier: `ff-session-<sessionId>`. Each controller
   has its own key and each access session has its own Client Identifier.
 - Invitation and enrollment-only Client Identifiers are defined by the
-  normative controller-authentication profile linked above.
+  controller-authentication profile linked above.
 - Clean Start is `1`; Session Expiry Interval is `0`. Commands are never queued
   for an offline device. Will Delay Interval is `0`; with Session Expiry
   Interval zero, a larger Will Delay cannot postpone publication beyond Session
@@ -195,16 +208,28 @@ The device sets Will Flag `1`, Will QoS `1`, and Will Retain `1`. Its Will
 Properties are Will Delay Interval `0`, Payload Format Indicator `1`, Message
 Expiry Interval `86400`, and Content Type `application/json`; its Will Topic and
 Will Payload are the presence Topic Name and disconnected JSON from section
-4.3. A controller sets Will Flag `0`. The device authenticates at TLS and omits
-User Name, Password, Authentication Method, and Authentication Data. A
-controller sets User Name and Password as the controller-authentication profile
-specifies. Invitation claimants and enrollment-only clients use the same MQTT
-fields with their restricted credentials. All clients omit Authentication
-Method and Authentication Data. V2 does not send the AUTH Control Packet or use
-MQTT Enhanced Authentication.
+4.3. A controller sets Will Flag `0`.
+
+Authentication fields and Control Packets depend on the connection profile:
+
+| Client profile | CONNECT authentication | AUTH exchange |
+|---|---|---|
+| FF1 device | TLS client-certificate authentication; omit User Name, Password, Authentication Method, and Authentication Data | prohibited |
+| invitation claimant | restricted User Name and Password from the controller-authentication profile; omit Authentication Method and Authentication Data | prohibited |
+| enrollment-only controller | restricted User Name and Password from the controller-authentication profile; omit Authentication Method and Authentication Data | prohibited |
+| access-session controller | User Name is `sessionId`; omit Password; Authentication Method is `FF1-JWT-ES256-PoP`; Authentication Data carries the access credential | required challenge/response before CONNACK |
+
+The access-session exchange uses the MQTT 5 Authentication Method and
+Authentication Data properties and AUTH Control Packets exactly as specified
+in the controller-authentication profile. `FF1-JWT-ES256-PoP` and the JSON
+semantics of its Authentication Data are FF customizations built on standard
+MQTT 5 Enhanced Authentication. They do not change any MQTT Control Packet,
+property, or Reason Code.
 
 The connection is usable only when CONNACK has Reason Code `0x00` (Success) and
-Session Present `0`. An absent CONNACK property has the MQTT 5 default. The
+Session Present `0`. For an access-session connection, that successful CONNACK
+MUST also contain Authentication Method `FF1-JWT-ES256-PoP`, matching CONNECT.
+An absent CONNACK property has the MQTT 5 default. The
 effective broker profile MUST provide Maximum QoS at least `1`, Retain Available
 `1`, Wildcard Subscription Available `1`, and a Maximum Packet Size at least
 `262144`; a client treats a lower advertised value as an incompatible endpoint
@@ -252,7 +277,7 @@ The managed broker choice remains conditional on proving the required WSS/443
 endpoint; no client may depend on a vendor's nonstandard public port.
 
 Invitation and enrolled-session Topic Names, credentials, exact subscriptions,
-and lifecycle state are normative in the controller-authentication profile.
+and lifecycle state are specified in the controller-authentication profile.
 Normal access sessions use the common controller Topic Names below.
 
 ### 4.2 Topics and delivery rules
@@ -417,7 +442,8 @@ payload. `status: disconnected` is therefore decisive regardless of its age.
   Playlist wrapper fit that body limit. Larger DP-1 Playlists must use an HTTPS URI. The
   full MQTT packet limit is 262144 bytes.
 - Rate limits are token buckets and are fully represented in
-  `capabilities.state.limits.rateLimits`; the advertised values are normative,
+  `capabilities.state.limits.rateLimits`; the advertised values are
+  authoritative at runtime,
   not lower-than-hidden defaults. `pointer` covers `input.pointer` and cancel;
   `keyboardText` covers keyboard and text; `playlist` covers
   `playlist.display`, `playlist.cancel-scheduled`, and
@@ -684,7 +710,7 @@ application Messages, sends Close 1008 with reason `backpressure` through the
 WebSocket control-frame path, and terminates the connection. This destroys all
 subscriptions; the client reconnects, creates new subscriptions with
 `sendInitial: true`, and converges from authoritative snapshots. ETag polling
-remains a conformant client fallback, but the WebSocket push endpoint is a
+remains a supported client fallback, but the WebSocket push endpoint is a
 required FF1 v2 device capability.
 
 ## 6. Request, response, and error envelopes
@@ -793,12 +819,12 @@ ID. Renewal uses the existing TPM key or an attested replacement key.
 The broker authenticates the device with standard TLS client-certificate
 authentication and maps the certificate identity to an ACL. TPM attestation is
 an enrollment concern; it is not placed in MQTT JSON and does not create a
-custom MQTT authentication algorithm. MQTT Enhanced Authentication is not
-required in v2.
+custom device MQTT authentication algorithm. The device profile does not use
+MQTT Enhanced Authentication; controller access-session connections do.
 
 ### 7.2 Controller identity
 
-The normative identity, QR invitation, enrollment, access-session, guest-session,
+The proposed identity, QR invitation, enrollment, access-session, guest-session,
 credential, and revocation rules are defined in
 [FF1 v2 controller authentication and access sessions](ff1-v2-controller-authentication.md).
 
@@ -816,17 +842,29 @@ Each installation scans once, stores its own enrollment material, and obtains
 access sessions silently. Expiry of an access session never requires a QR scan
 or invalidates another controller.
 
-Normal remote access uses standard MQTT CONNECT authentication:
+Normal remote access uses MQTT 5 Enhanced Authentication:
 
 - User Name (UTF-8 Encoded String) = `sessionId`;
-- Password (Binary Data) = the ASCII bytes of the FF1-issued access-session JWS;
+- Password is absent;
+- Authentication Method (UTF-8 Encoded String) = `FF1-JWT-ES256-PoP`;
+- CONNECT Authentication Data (Binary Data) = UTF-8 JSON containing the
+  FF1-issued access-session JWS;
 - server-authenticated TLS 1.3; and
 - Client Identifier = `ff-session-<sessionId>` and equal to the token claim.
+
+The broker then sends an unpredictable challenge in an AUTH Control Packet
+with Reason Code `0x18` (Continue authentication). The controller responds in
+an AUTH Control Packet with Reason Code `0x18` and an ES256 proof signed by the
+private key corresponding to the credential's RFC 7800 `cnf.jwk`. The proof is
+bound to the broker audience, device, access session, exact Client Identifier,
+and challenge. The broker sends successful CONNACK only after validating and
+atomically consuming that challenge. Section 7 of the authentication profile
+defines the exact Authentication Data and failure mapping.
 
 Invitation claimants and enrolled controllers requesting a new access session
 also use standard MQTT User Name and Password fields, but broker ACLs restrict
 those credentials to their exact claim or session-issuance Topic Names. They
-cannot read device state or execute a control command. V2 does not use MQTT
+cannot read device state or execute a control command and do not use MQTT
 Enhanced Authentication.
 
 The broker schedules a forced disconnect at the access credential's `exp` with
@@ -957,7 +995,7 @@ per-principal filtered after subscription.
 
 ## 8. Controller enrollment and access sessions
 
-The normative protocol is
+The proposed protocol is
 [FF1 v2 controller authentication and access sessions](ff1-v2-controller-authentication.md).
 It defines one QR invitation and claim protocol for:
 
@@ -1169,7 +1207,7 @@ For contract version 2.0.0, `transports.lanPush` is required and closed:
 provide this channel does not advertise v2 LAN conformance; client polling is a
 fallback behavior, not permission for the device to omit push.
 
-`controllerAccess` is required and validates against the normative controller
+`controllerAccess` is required and validates against the proposed controller
 authentication and access-session profile. A client MUST NOT infer invitation
 types, credential issuer, session limits, or guest permissions from firmware
 version or broker vendor. `primaryInvitationTransport` is always `mqtt`;
@@ -2031,7 +2069,7 @@ controller enrollments remain in `state/controllers`.
 
 MQTT credentials, invitation QR data, JWE, JWK coordinates, key thumbprints,
 user agents, DP-1 Playlist URIs, and DP-1 Playlist documents are forbidden.
-The underlying authorization records and invalidation rules are normative in
+The underlying authorization records and invalidation rules are defined in
 the controller-authentication profile. `state/controllers` was defined in
 section 8.
 
@@ -2188,7 +2226,7 @@ uses MQTT over WSS/443; FF1 never reuses the setup secret.
 |---|---|
 | MQTT request/response | Standard MQTT 5 Response Topic, Correlation Data, QoS 1, expiry, content type, and reason codes. No broker-specific RPC. |
 | Device authentication | Standard TLS 1.3 mutual X.509; the private key is TPM-backed. TPM attestation is used at enrollment, not invented as an MQTT AUTH exchange. |
-| Controller authentication | Standard MQTT User Name/Password fields carry FF1-signed invitation, enrollment-only, or access-session credentials; LAN uses standard mTLS. No MQTT AUTH exchange is added. |
+| Controller authentication | Invitation and enrollment-only connections use standard MQTT User Name and Password fields with restricted FF1-signed credentials. Access-session connections use standard MQTT 5 Enhanced Authentication and AUTH Control Packets; `FF1-JWT-ES256-PoP` and its JSON challenge/proof semantics are an FF customization. LAN uses standard mTLS. |
 | Playlist | Exact DP-1 core v1.1.0 and capability-gated registered/draft DP-1 extensions. `playlist.display`, `displayAt`, the 2 MiB admission limit, and JSON pull-chunk retrieval are FF control-profile extensions outside DP-1. FF commands do not mutate or wrap signed DP-1 fields. |
 | JSON/signatures/time/errors | JSON Schema 2020-12, JCS, SHA-256, and RFC 3339. Runtime errors reuse RFC 9457 members inside the common FF envelope; SoftAP uses top-level RFC 9457. |
 | Discovery | mDNS/DNS-SD standard service discovery. |
@@ -2198,6 +2236,6 @@ uses MQTT over WSS/443; FF1 never reuses the setup secret.
 | Topic/resource names | FF customization; broker-neutral and mechanically mapped to HTTPS reads/commands and LAN WebSocket subscriptions. |
 | Command/state envelopes and revision epochs | FF customization needed for strict cross-transport parity, deduplication, and reconnect ordering. |
 | Relative pointer batch | FF customization; DP-1 only standardizes whether click/scroll/drag/hover are permitted. |
-| Controller enrollment and guest sessions | Standard MQTT 5 CONNECT/request-response plus JWT/JWS/JWE and controller-key proof. FF customizes the invitation, scope, session-state, and ACL profile. The same one-time QR claim creates a persistent enrollment or a bounded guest session. |
+| Controller enrollment and guest sessions | Standard MQTT 5 CONNECT/request-response and Enhanced Authentication plus JWT/JWS/JWE, RFC 7800 confirmation keys, and controller-key proof. FF customizes the Authentication Method data, invitation, scope, session-state, and ACL profile. The same one-time QR claim creates a persistent enrollment or a bounded guest session. |
 | Persisted-time fallback | FF operational rule needed for constrained offline devices; it does not change certificate or token wire formats. |
 | SoftAP portal | FF bootstrap exception because browser-first provisioning precedes trusted TLS and MQTT identity. |

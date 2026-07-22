@@ -1,6 +1,6 @@
 # FF1 API v2 migration and implementation plan
 
-- Status: proposed companion plan
+- Status: design-draft companion plan; not conformance-ready
 - API contract: [FF1 communication API v2](ff1-v2-api-contract.md)
 - Authentication profile: [FF1 v2 controller authentication and access sessions](ff1-v2-controller-authentication.md)
 
@@ -8,6 +8,12 @@ This document contains the current-state analysis, client and firmware
 compatibility strategy, rollout and rollback gates, implementation sequence,
 and release evidence for API v2. It does not define wire behavior. If this plan
 conflicts with the API contract, the API contract governs protocol semantics.
+
+The linked prose documents define a proposed profile only. Before target
+version `2.0.0` becomes normative, the repository MUST publish the complete
+JSON Schema 2020-12 bundle, AsyncAPI document, OpenAPI document, positive and
+negative fixtures, and automated MQTT/LAN parity validation. No implementation
+or release gate may claim FF1 API v2 conformance from prose alone.
 
 ## 1. Current flow and target boundary
 
@@ -310,10 +316,12 @@ boxed to ten working days once staffed, uses a bought/managed EMQX service
 1. On one real FF1 and ff-app, provision the TPM device identity, complete one
    owner-enrollment QR claim, request an enrolled-controller access session,
    and connect to managed EMQX using MQTT 5 over WSS on port 443. Prove device
-   mTLS, invitation/enrollment/access User Name and Password authentication,
-   per-principal ACLs, retained messages, the Will Message, Message Expiry, and
-   packet limits. An unproven vendor-supported WSS/443 front door fails the
-   spike and requires a different managed offering/vendor.
+   mTLS, invitation/enrollment User Name and Password authentication, and
+   access-session MQTT Enhanced Authentication using `FF1-JWT-ES256-PoP`, a
+   broker challenge, RFC 7800 `cnf.jwk`, and an ES256 controller proof. Also
+   prove per-principal ACLs, retained messages, the Will Message, Message
+   Expiry, and packet limits. An unproven vendor-supported WSS/443 front door
+   fails the spike and requires a different managed offering/vendor.
 2. On that connection, publish retained capabilities/current state and retained
    connected presence, then prove the broker publishes the retained
    disconnected Will Message after forced connection loss.
@@ -351,7 +359,10 @@ boxed to ten working days once staffed, uses a bought/managed EMQX service
    document that enrolled LAN mTLS fails closed after offline reboot until NTP.
 11. Register the TPM-backed FF1 controller-issuer public key with the broker,
    validate FF1-signed invitation, enrollment-only, and access-session
-   credentials without a per-session control-plane lookup, then test immediate
+   credentials without a per-session control-plane lookup, validate the access
+   credential's `cnf.jwk` and `FF1-JWT-ES256-PoP` challenge response, reject a
+   wrong key, binding mismatch, expired challenge, replayed challenge, and
+   replayed proof with the specified MQTT Reason Codes, then test immediate
    device rejection and broker disconnect on controller or session revocation.
 12. Run the SoftAP/captive-portal spike on the required phone matrix and measure
    wrong-password recovery, AP/client concurrency, and auto-open behavior.
@@ -366,11 +377,14 @@ No implementation is part of this contract-definition change. When separately
 authorized, the future sequence must preserve cached-art playback and permit
 rollback at every fleet gate:
 
-1. Publish the normative JSON Schema bundle, AsyncAPI 3.0 document, and OpenAPI
-   3.1.1 adapter from this contract. CI validates every example and rejects
-   schema drift between MQTT and HTTPS. Schemas, fixtures, generated types, and
-   the minimal reference client are published under the repository's
-   Apache-2.0 license without private Feral File transport dependencies.
+1. Publish the complete JSON Schema 2020-12 bundle, AsyncAPI 3.0 document, and
+   OpenAPI 3.1.1 adapter from this draft. Their publication, together with the
+   positive and negative fixtures and automated MQTT/LAN parity suite, is the
+   gate that makes target version `2.0.0` normative. CI validates every example
+   and rejects schema drift between MQTT and HTTPS. Schemas, fixtures,
+   generated types, and the minimal reference client are published under the
+   repository's Apache-2.0 license without private Feral File transport
+   dependencies.
 2. Implement protocol types and conformance tests in both repositories without
    changing production transport. Add golden vectors for JCS hashes, UUID
    correlation bytes, expiry, RFC 9457 errors, and every command/state/event.
@@ -384,8 +398,9 @@ rollback at every fleet gate:
    rate limiting, clean restart, and duplicate QoS 1 delivery.
 5. Prove the unified controller-authentication profile against the managed
    broker: device-signed JWT validation without a per-session authentication
-   service, one-time invitation consumption, controller-key proof, JWE
-   delivery, silent enrolled-session and enrollment-credential renewal,
+   service, one-time invitation consumption, access-session broker challenge
+   and controller-key proof, JWE delivery, silent enrolled-session and
+   enrollment-credential renewal,
    multiple independent controller enrollments, WebSocket Origin binding for
    web guests, exact ACLs, expiry, revocation, and normal `playlist.display`
    through a guest session. Direct broker validation of the registered FF1
@@ -470,7 +485,7 @@ Minimum acceptance checks are:
 | Capability discovery; no firmware guessing | API section 9 |
 | Packet limits, rate limits, restricted commands | API sections 4.4, 7.4, 9, and 11 |
 | Per-device/controller identity, TPM, rotation, revocation, ACLs | API sections 7 and 8 |
-| MQTT User Name/Password or mTLS without custom AUTH | API sections 4.1.1 and 7 |
+| MQTT device mTLS; restricted invitation/enrollment credentials; sender-constrained access sessions | API sections 4.1.1 and 7; authentication section 7 |
 | Brokerless authenticated LAN HTTPS using the same contract | API sections 5, 7, and 8 |
 | Authenticated realtime LAN state/event push with polling fallback | API section 5 |
 | mDNS discovery and rejection of unenrolled clients | API sections 5, 7, and 8 |

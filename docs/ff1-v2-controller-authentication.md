@@ -1,8 +1,16 @@
 # FF1 v2 controller authentication and access sessions
 
-- Status: proposed normative profile
-- Contract version: `2.0.0`
+- Status: design draft; not conformance-ready
+- Target contract version: `2.0.0`
 - Parent contract: [FF1 communication API v2](ff1-v2-api-contract.md)
+
+This prose is a proposed security profile, not a normative conformance
+artifact. The capitalized requirement keywords state the intended v2 design.
+Before `2.0.0` becomes normative, the repository MUST publish the
+machine-readable schemas and API descriptions, positive and negative security
+fixtures, and automated transport-parity tests required by the parent contract
+and migration plan. No broker, FF1, or controller may claim FF1 API v2
+conformance from this prose document alone.
 
 ## 1. Scope
 
@@ -34,15 +42,17 @@ and Session Expiry Interval semantics. The persistent relationship is a
 **controller enrollment**, not an MQTT Session or non-expiring bearer token.
 
 The keywords MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are used as
-described by RFC 2119 and RFC 8174.
+described by RFC 2119 and RFC 8174 to express intended requirements for the
+eventual normative profile.
 
 ## 2. Standards
 
 This profile uses:
 
 - [MQTT 5.0](https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html),
-  including User Name, Password, Response Topic, Correlation Data, Message
-  Expiry Interval, and reason codes;
+  including User Name, Password, Enhanced Authentication, the AUTH Control
+  Packet, Authentication Method, Authentication Data, Response Topic,
+  Correlation Data, Message Expiry Interval, and Reason Codes;
 - [TLS 1.3 (RFC 8446)](https://www.rfc-editor.org/rfc/rfc8446.html),
   [X.509 (RFC 5280)](https://www.rfc-editor.org/rfc/rfc5280.html), and the
   [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
@@ -50,19 +60,25 @@ This profile uses:
   [JWS (RFC 7515)](https://www.rfc-editor.org/rfc/rfc7515.html),
   [JWE (RFC 7516)](https://www.rfc-editor.org/rfc/rfc7516.html), and
   [JWK thumbprints (RFC 7638)](https://www.rfc-editor.org/rfc/rfc7638.html);
+- [JWT confirmation (RFC 7800)](https://www.rfc-editor.org/rfc/rfc7800.html);
 - [Bearer Token Usage (RFC 6750)](https://www.rfc-editor.org/rfc/rfc6750.html);
 - [Web Origin (RFC 6454)](https://www.rfc-editor.org/rfc/rfc6454.html);
 - [JSON Canonicalization Scheme (RFC 8785)](https://www.rfc-editor.org/rfc/rfc8785.html);
   and
 - [PKCS #10 (RFC 2986)](https://www.rfc-editor.org/rfc/rfc2986.html).
 
-No client sends an MQTT AUTH Control Packet. Invitation, enrollment, and access
-credentials use the MQTT 5 User Name and Password fields. The profile does not
-define a custom MQTT authentication exchange.
+Invitation and enrollment-only connections use MQTT 5 User Name and Password
+fields and do not send an AUTH Control Packet. Access-session connections use
+MQTT 5 Enhanced Authentication and the AUTH Control Packet to prove possession
+of the controller signing key. The exact Authentication Method
+`FF1-JWT-ES256-PoP` and the JSON semantics assigned to Authentication Data are
+FF customizations built on the standard MQTT exchange; they do not add or
+change an MQTT Control Packet, property, or Reason Code.
 
 MQTT 5 defines those fields but does not define JWT validation, FF1 issuer-key
 registration, or the ACL vocabulary in this profile. Those are FF protocol
-customizations built from the listed standards. A broker is conforming only if
+customizations built from the listed standards. A broker selected for the
+final profile is acceptable only if
 it can validate the registered FF1 issuer and enforce the exact Topic Name ACLs
 without changing the MQTT wire protocol.
 
@@ -186,7 +202,7 @@ Enrollment credentials expire after at most 366 days, but rotation is silent
 and does not repeat enrollment. An active controller MAY invoke
 `controllers.renew-credential` at any time, no more than once in 24 hours, and
 SHOULD rotate when fewer than 90 days remain. FF1 issues the replacement before
-invalidating the prior credential. A conforming mobile app or CLI performs this
+invalidating the prior credential. A mobile app or CLI performs this
 rotation without user interaction.
 
 If an installation remains unused until its enrollment credential expires, it
@@ -223,7 +239,10 @@ Its required claims are:
 
 The broker validates the credential signature and claims but does not treat
 `ff_scope_ceiling` as a control ACL. The only broker ACL is the exact
-session-request and response pair for that controller.
+session-request and response pair for that controller. This restricted CONNECT
+uses the credential as a bearer value; `cnf.jkt` is enforced by FF1 through the
+signed controller proof on every session request in section 8.1. It is not
+treated as proof of possession at CONNECT.
 
 ### 5.2 Access session
 
@@ -264,7 +283,7 @@ one non-renewable access session.
 Access-session issuance and renewal are transport maintenance, not a user login
 or approval step. A controller requests a new session when it becomes active
 and, while continuously connected, before the current session expires. This
-split limits the value of a stolen bearer token while letting all enrolled
+split limits the value of a stolen access credential while letting all enrolled
 mobile apps, CLIs, and integrations reconnect for the life of their enrollment,
 subject only to silent credential rotation, without repeating the QR ceremony.
 
@@ -577,14 +596,162 @@ no unprotected header. Its payload has these required claims:
 | `ff_mqtt_client_id` | `ff-session-<sessionId>` |
 | `ff_role` | `owner\|delegate` for enrolled sessions; omitted for guest |
 | `scope` | space-delimited granted scopes in lexical order |
-| `cnf.jkt` | controller signing-key JWK thumbprint |
+| `cnf.jwk` | controller signing public JWK |
 | `ff_origin` | normalized HTTPS origin for web clients; otherwise omitted |
 
-The MQTT User Name is `sessionId`; Password is the ASCII JWS; Client Identifier
-is `ff_mqtt_client_id`. The broker validates the registered device issuer,
-signature, audience, time, exact Client Identifier, device ID, session type,
-origin when present, and ACL mapping. It disconnects the client at `exp` with
-Reason Code `0x87` (Not authorized).
+`cnf.jwk` follows RFC 7800. It is the closed public JWK
+`{"kty":"EC","crv":"P-256","x":"<base64url>","y":"<base64url>"}` and
+MUST NOT contain `d` or any other member. It is the public key corresponding to
+the controller signing private key accepted during invitation claim or
+enrollment. Supplying the public JWK, instead of only its thumbprint, lets a
+broker validate proof of possession from the FF1-signed credential without a
+per-session authentication service.
+
+### 7.1 Access-session CONNECT
+
+An access-session controller sends CONNECT with:
+
+- Client Identifier = the credential's exact `ff_mqtt_client_id`;
+- User Name = `sessionId`;
+- Password absent;
+- Authentication Method = the exact case-sensitive UTF-8 string
+  `FF1-JWT-ES256-PoP`; and
+- Authentication Data = the UTF-8 encoding of this closed JSON object:
+
+```json
+{
+  "accessCredential": "eyJhbGciOiJFUzI1NiIsImtpZCI6IkZGMT..."
+}
+```
+
+Authentication Data is MQTT Binary Data but its value in this profile MUST be
+well-formed UTF-8 JSON with no byte-order mark. `FF1-JWT-ES256-PoP` is an
+FF-defined Authentication Method. Its name and the JSON objects in this section
+are the only custom semantics; CONNECT, AUTH, CONNACK, Authentication Method,
+Authentication Data, and all Reason Codes retain their MQTT 5 meanings.
+
+The broker validates the registered FF1 issuer, ES256 signature, audience,
+`iat`, `nbf`, `exp`, exact User Name, exact Client Identifier, device ID,
+session type, origin when present, `cnf.jwk`, and ACL mapping before issuing a
+challenge. It rejects an access credential whose controller or session fields
+conflict, whose `cnf` object has any confirmation member other than `jwk`, or
+whose public JWK is not the key recorded by FF1 in the signed credential.
+
+### 7.2 Enhanced Authentication exchange
+
+The access-session connection uses this single-round MQTT 5 Enhanced
+Authentication exchange:
+
+1. After accepting the access credential provisionally, the broker sends AUTH
+   with Reason Code `0x18` (Continue authentication), Authentication Method
+   `FF1-JWT-ES256-PoP`, and Authentication Data containing this closed UTF-8
+   JSON object:
+
+   ```json
+   {
+     "challenge": "wb8pZq5qQkDYXrVhC5J2Qqx4vtBWFjkbGvk3GvMIbTo",
+     "audience": "https://control.example.org/mqtt",
+     "expiresAt": "2026-07-21T08:15:30.000Z"
+   }
+   ```
+
+2. The controller verifies that Authentication Method is unchanged, `audience`
+   equals both its configured broker audience and the access credential's exact
+   `aud`, and `expiresAt` has not passed. It then sends AUTH with Reason Code
+   `0x18`, the same Authentication Method, and Authentication Data containing
+   this closed UTF-8 JSON object:
+
+   ```json
+   {
+     "proof": "eyJhbGciOiJFUzI1NiIsInR5cCI6ImZmMS1tcXR0LWF1dGgrand0In0.eyJpc3MiOiIuLi4ifQ.MEUCIQ..."
+   }
+   ```
+
+3. The broker validates the proof and atomically consumes the challenge. On
+   success it sends CONNACK with Reason Code `0x00` (Success), Session Present
+   `0`, and Authentication Method `FF1-JWT-ES256-PoP`. Authentication Data is
+   absent from the successful CONNACK. The broker installs the credential's
+   exact Topic Name ACL only after this validation succeeds.
+
+A provisional connection does not take ownership of its Client Identifier.
+When an authenticated Network Connection already uses the same Client
+Identifier, the broker MUST leave that existing Network Connection, MQTT
+Session, and ACL unchanged until the new connection's proof succeeds. Only
+after proof succeeds may the broker apply the MQTT Client Identifier collision
+rule, send the existing client DISCONNECT `0x8E` (Session taken over), and
+accept the new connection. A failed provisional connection MUST NOT disconnect
+or otherwise mutate the existing connection, Session, or ACL.
+
+The controller MUST send no Control Packet other than the required AUTH or a
+DISCONNECT between CONNECT and CONNACK. The broker MUST send no second challenge
+for this method. The controller MUST NOT use AUTH Reason Code `0x19`
+(Re-authenticate); access renewal creates a new access session and Network
+Connection.
+
+The challenge is 32 cryptographically random octets encoded base64url without
+padding. It is unpredictable, belongs to exactly one Network Connection and
+access-credential `jti`, expires no later than 30 seconds after issuance and no
+later than the access credential, and becomes invalid when the connection
+closes. The broker stores enough state until expiry to reject reuse and MUST
+atomically mark the challenge consumed before sending successful CONNACK. A
+proof `jti` also MUST NOT be accepted more than once.
+
+### 7.3 Controller proof
+
+`proof` is a compact ES256 JWS signed by the private key corresponding to the
+access credential's `cnf.jwk`. Its protected header is the closed object
+`{"alg":"ES256","typ":"ff1-mqtt-auth+jwt"}`. It has no unprotected header.
+Its payload is a closed JWT Claims Set with these required claims:
+
+| Claim | Value or constraint |
+|---|---|
+| `iss` | `urn:ff:controller:<controllerId>` using the access credential's controller ID |
+| `sub` | `urn:ff:session:<sessionId>` |
+| `aud` | exact broker audience from both the access credential and challenge |
+| `iat` | NumericDate no more than 5 seconds in the future |
+| `exp` | NumericDate later than `iat`, no more than 30 seconds after `iat`, and no later than the challenge or access credential expiry |
+| `jti` | a new UUIDv7 |
+| `ff_device_id` | exact access-credential device ID |
+| `ff_session_id` | exact access-credential session ID |
+| `ff_mqtt_client_id` | exact CONNECT Client Identifier |
+| `ff_auth_challenge` | exact base64url challenge string received from the broker |
+
+The broker verifies the JWS with only `cnf.jwk`, requires every binding above,
+and rejects extra protected-header or payload members. The access credential is
+therefore sender-constrained: possessing the JWS without the controller signing
+private key is insufficient to establish an access-session connection.
+
+### 7.4 Failure and completion
+
+The broker uses these exact MQTT 5 outcomes before successful CONNACK:
+
+| Condition | Broker outcome |
+|---|---|
+| Authentication Method is unsupported or not exactly `FF1-JWT-ES256-PoP` | CONNACK `0x8C` (Bad authentication method), then close the Network Connection |
+| Required profile field is absent, Password is present, Authentication Data is not the required closed JSON, or the access credential, claims, key, origin, or ACL mapping is invalid | CONNACK `0x87` (Not authorized), then close the Network Connection |
+| Challenge expires, proof validation fails, or a challenge or proof `jti` is replayed | CONNACK `0x87` (Not authorized), then close the Network Connection |
+| CONNECT is malformed | CONNACK `0x81` (Malformed Packet) when a valid CONNACK can be encoded, then close the Network Connection |
+| CONNECT causes an MQTT Protocol Error | CONNACK `0x82` (Protocol Error) when a valid CONNACK can be encoded, then close the Network Connection |
+| AUTH is malformed | CONNACK `0x81` (Malformed Packet) when a valid CONNACK can be encoded, then close the Network Connection |
+| AUTH omits or changes Authentication Method, uses a Reason Code other than `0x18`, repeats a single-use property, or violates the exchange order | CONNACK `0x82` (Protocol Error) when a valid CONNACK can be encoded, then close the Network Connection |
+
+These failures occur before successful CONNACK, so the broker MUST NOT send a
+DISCONNECT Control Packet. If malformed input prevents the broker from encoding
+a valid failure CONNACK, it closes the Network Connection without sending an
+MQTT Control Packet.
+
+An access-session client treats any CONNACK other than `0x00`, or a successful
+CONNACK without the exact Authentication Method, as connection failure and
+closes the Network Connection. It never publishes or subscribes before
+successful CONNACK. A client abort MAY send DISCONNECT before closing as MQTT 5
+allows. Reason String and User Property are diagnostic only and never alter the
+outcome above.
+
+After connection, the broker disconnects the client at access credential `exp`
+with DISCONNECT Reason Code `0x87` (Not authorized). If a client nevertheless
+sends AUTH `0x19`, the broker sends DISCONNECT `0x87` and closes the Network
+Connection. FF1 independently rejects a revoked, expired, or otherwise inactive
+session for every delivered command.
 
 The credential's publish ACL is the exact prefix
 `ff/v2/devices/{deviceId}/sessions/{sessionId}/commands/`; its subscribe ACLs
@@ -933,9 +1100,10 @@ invitation. Network commands cannot silently replace the final owner.
    disconnection. Creating another guest session requires a new invitation
    from an enrolled controller.
 
-## 15. Required security checks
+## 15. Required pre-normative security checks
 
-A conforming implementation MUST prove:
+Before target version `2.0.0` becomes normative, its machine-readable
+conformance suite MUST prove:
 
 1. a QR invitation can be consumed exactly once;
 2. different controller keys cannot use a captured claim or credential
@@ -966,4 +1134,12 @@ A conforming implementation MUST prove:
     valid, and an active enrollment reconnects without a QR; and
 15. every retained invitation/session projection variant validates as a closed
     object, terminal transitions remove it atomically, and restart publishes no
-    previously open invitation or active session.
+    previously open invitation or active session;
+16. a captured access credential cannot complete MQTT authentication without
+    the private key corresponding to its RFC 7800 `cnf.jwk`;
+17. wrong-key, audience, device, session, Client Identifier, expired-challenge,
+    challenge-replay, and proof-replay cases install no ACL and produce the
+    section 7.4 MQTT Reason Code; and
+18. the JSON Schema, AsyncAPI, OpenAPI, positive fixtures, negative security
+    fixtures, and MQTT/LAN parity tests are published and executable, so no
+    prose-only implementation is reported as conformant.
