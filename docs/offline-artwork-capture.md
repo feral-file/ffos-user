@@ -777,6 +777,21 @@ absolute and cross-origin URLs without touching the artwork's own code):
   redirect (or, worse, a redirect to whatever unrelated service now owns
   that port) with no indication in the replay path itself that the
   static server was never actually serving.
+  `staticServerAddr` may configure port `0` to request an OS-assigned
+  ephemeral port (e.g. to avoid a fixed-port collision); `Listen()`
+  updates the address `URLFor`/`BaseURL` build against to the REAL bound
+  `listener.Addr()` once binding succeeds, so a `:0` config never leaks
+  into an unusable redirect target.
+  Because `handleBlob` serves `BlobPath` directly rather than through
+  `Store.ReadBlob` (which hash-verifies but reads the whole blob into
+  memory — unusable for gigabyte-scale assets), it re-verifies the
+  content hash itself via `verifyBlobContent` before serving. A
+  successful verification is cached for this process's lifetime (never a
+  failed one) so a `Range` request scrubbing through a large cached video
+  is not forced to re-hash the entire file on every request — the
+  accepted trade-off being that corruption introduced strictly after a
+  blob's first successful verification in this process's lifetime would
+  not be caught by a later request.
 - **Miss** (URL not in the currently-enabled scope's resource set) →
   governed by `offlineCache.missPolicy` (`MissPolicy` in `replay.go`) when
   the scope is a single item or a playlist whose every item is cached:

@@ -2,8 +2,11 @@ package offlinecache
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	go_http "net/http"
 	"net/url"
@@ -98,7 +101,13 @@ type StaticServer interface {
 }
 
 type staticServer struct {
-	addr   string // host:port this server listens on and that URLFor builds URLs against
+	// addr is the host:port URLFor/BaseURL build URLs against. Starts as
+	// the CONFIGURED address, but Listen overwrites it with the actual
+	// bound listener.Addr() once binding succeeds (see Listen's doc) —
+	// guarded by mu because it is read by URLFor/BaseURL from arbitrary
+	// goroutines (replay.go's request-handling path) potentially
+	// concurrently with Listen's write during daemon startup.
+	addr   string
 	store  Store
 	os     wrapper.OS
 	server wrapper.HTTPServer
@@ -107,6 +116,13 @@ type staticServer struct {
 	mu       sync.RWMutex
 	listener net.Listener // set once by a successful Listen; Shutdown never clears this (see Shutdown's doc)
 	closed   bool         // flipped true by Shutdown; IsListening consults this instead of listener==nil
+
+	// verifiedBlobs remembers, for this process's lifetime, every blob
+	// hash handleBlob has already confirmed matches its content-addressed
+	// name — see verifyBlobContent's doc for why this cache exists at all
+	// rather than re-verifying on every request.
+	verifyMu      sync.Mutex
+	verifiedBlobs map[string]struct{}
 }
 
 // NewStaticServer builds a StaticServer bound to addr (expected a loopback
@@ -118,7 +134,7 @@ type staticServer struct {
 // Serve (or ListenAndServe for the combined, non-observable form).
 func NewStaticServer(addr string, store Store, osWrapper wrapper.OS, logger *zap.Logger) StaticServer {
 	addr = safeLoopbackAddr(addr, logger)
-	s := &staticServer{addr: addr, store: store, os: osWrapper, logger: logger}
+	s := &staticServer{addr: addr, store: store, os: osWrapper, logger: logger, verifiedBlobs: make(map[string]struct{})}
 	mux := go_http.NewServeMux()
 	mux.HandleFunc(blobsRoutePrefix, s.handleBlob)
 	s.server = wrapper.NewHTTPServer(&go_http.Server{
@@ -178,7 +194,7 @@ func isLoopbackHost(host string) bool {
 func (s *staticServer) URLFor(sha256Hex, contentType string, headers map[string]string) string {
 	u := url.URL{
 		Scheme: "http",
-		Host:   s.addr,
+		Host:   s.currentAddr(),
 		Path:   blobsRoutePrefix + sha256Hex,
 	}
 	q := url.Values{}
@@ -231,6 +247,19 @@ func (s *staticServer) handleBlob(w go_http.ResponseWriter, r *go_http.Request) 
 		}
 	}()
 
+	// This path serves the raw blob file directly rather than going
+	// through Store.ReadBlob (which hash-verifies but reads the WHOLE
+	// blob into memory — unusable here, see the package doc on why this
+	// server exists at all) — so verifyBlobContent is what keeps a
+	// corrupted large blob from being served as if it were valid, the
+	// same guarantee ReadBlob gives the small/inline path.
+	if err := s.verifyBlobContent(sha256Hex, f); err != nil {
+		s.logger.Error("offline cache static server: blob failed content-hash verification, refusing to serve",
+			zap.String("sha256", sha256Hex), zap.Error(err))
+		go_http.Error(w, "asset failed integrity check", go_http.StatusInternalServerError)
+		return
+	}
+
 	if ct := r.URL.Query().Get("ct"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
@@ -258,8 +287,68 @@ func (s *staticServer) handleBlob(w go_http.ResponseWriter, r *go_http.Request) 
 	go_http.ServeContent(w, r, sha256Hex, info.ModTime(), f)
 }
 
+// verifyBlobContent confirms f's actual bytes hash to hexSum, exactly
+// once per unique hash for this process's lifetime, then rewinds f to
+// its start so the caller's subsequent Stat/ServeContent see the whole
+// file from byte 0.
+//
+// Re-hashing the ENTIRE file on every request (rather than caching a
+// success) would defeat the whole point of this endpoint: a Range
+// request seeking a few KB into a gigabyte-scale video would still have
+// to read and hash the full file first, every time, before serving even
+// one byte of the actual response. Caching success bounds that cost to
+// once per unique blob rather than once per request.
+//
+// This does mean a blob that becomes corrupted AFTER its first
+// successful verification in this process's lifetime (e.g. a failing
+// disk silently flipping bits later) would not be caught by a later
+// request — that trade-off is unique to this large-asset path;
+// Store.ReadBlob's small/inline path re-verifies on every call because
+// its blobs are cheap enough to re-hash each time. A FAILED verification
+// is deliberately never cached: it always fails closed again on the
+// next request rather than being remembered as permanently broken,
+// since there is no successful-serve outcome to protect the cost of
+// re-checking for in that case anyway.
+func (s *staticServer) verifyBlobContent(hexSum string, f io.ReadSeeker) error {
+	s.verifyMu.Lock()
+	_, alreadyVerified := s.verifiedBlobs[hexSum]
+	s.verifyMu.Unlock()
+	if alreadyVerified {
+		return nil
+	}
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return fmt.Errorf("hash blob for verification: %w", err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind blob after verification: %w", err)
+	}
+	if hex.EncodeToString(hasher.Sum(nil)) != hexSum {
+		return ErrBlobHashMismatch
+	}
+
+	s.verifyMu.Lock()
+	s.verifiedBlobs[hexSum] = struct{}{}
+	s.verifyMu.Unlock()
+	return nil
+}
+
 func (s *staticServer) BaseURL() string {
-	return "http://" + s.addr
+	return "http://" + s.currentAddr()
+}
+
+// currentAddr returns the address URLFor/BaseURL should build URLs
+// against: the actual bound listener address once Listen has succeeded
+// (see Listen's doc for why this can differ from the configured addr —
+// most notably staticServerAddr's port being 0, requesting an OS-chosen
+// ephemeral port), or the pre-bind configured address otherwise. Reading
+// under mu because Listen writes s.addr concurrently with these calls
+// being reachable from request-handling goroutines during startup.
+func (s *staticServer) currentAddr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.addr
 }
 
 func (s *staticServer) Handler() go_http.Handler {
@@ -278,6 +367,15 @@ func (s *staticServer) Listen() error {
 	}
 	s.listener = l
 	s.closed = false
+	// net.Listen resolves a configured port of 0 to an OS-assigned
+	// ephemeral port — l.Addr() reflects the REAL bound address,
+	// which s.addr must be updated to, or URLFor/BaseURL would keep
+	// building URLs against port 0 (unusable: nothing listens there)
+	// for as long as this process runs. This also naturally covers the
+	// (much rarer) case of a configured non-zero port that the OS
+	// nonetheless remapped for any other reason — l.Addr() is always
+	// the ground truth for what was actually bound, never the request.
+	s.addr = l.Addr().String()
 	return nil
 }
 

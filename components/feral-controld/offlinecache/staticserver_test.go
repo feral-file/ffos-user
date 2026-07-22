@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,6 +252,109 @@ func TestStaticServer_Serve_BeforeListenReturnsError(t *testing.T) {
 	server := offlinecache.NewStaticServer("127.0.0.1:0", store, wrapper.NewOS(), zaptest.NewLogger(t))
 
 	assert.Error(t, server.Serve())
+}
+
+// TestStaticServer_Listen_URLForUsesActualBoundEphemeralPort is the
+// regression test for the config-accepted "127.0.0.1:0" case (see
+// bootstrap_test.go's TestBootstrap_WiresEveryComponent, which already
+// exercises this exact address): a staticServerAddr of port 0 asks the OS
+// for an arbitrary free ephemeral port, but URLFor/BaseURL previously kept
+// building URLs against the LITERAL configured ":0" host:port forever
+// after — a redirect target nothing is ever listening on. Listen must
+// update the address URLFor/BaseURL build against to the REAL bound
+// address so a large-asset redirect (replay.go's fulfillFromBlob) is
+// actually reachable.
+func TestStaticServer_Listen_URLForUsesActualBoundEphemeralPort(t *testing.T) {
+	store, _ := newTestStore(t)
+	hash := writeBlobString(t, store, "payload")
+
+	server := offlinecache.NewStaticServer("127.0.0.1:0", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	require.NoError(t, server.Listen())
+	defer func() { _ = server.Shutdown(context.Background()) }()
+
+	base := server.BaseURL()
+	assert.NotContains(t, base, ":0", "BaseURL must reflect the OS-assigned ephemeral port, not the configured wildcard 0")
+
+	go func() { _ = server.Serve() }()
+
+	// End-to-end proof, not just a string check: URLFor's own output
+	// (built from the same updated address) must actually be reachable
+	// once Listen has bound a real port.
+	resp, err := http.Get(server.URLFor(hash, "", nil))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestStaticServer_ServesBlobs_CorruptedLargeBlobFailsClosed is the
+// regression test for the large-asset streaming path bypassing
+// Store.ReadBlob's hash verification: handleBlob opens BlobPath directly
+// (ReadBlob would buffer the whole file into memory, unusable for
+// gigabyte-scale assets — see the package doc) after only a BlobSize
+// existence/size check, which on its own would happily stream corrupted
+// bytes back as a 200. verifyBlobContent must catch the mismatch and fail
+// closed instead of silently serving the wrong content.
+func TestStaticServer_ServesBlobs_CorruptedLargeBlobFailsClosed(t *testing.T) {
+	store, _ := newTestStore(t)
+	hash := writeBlobString(t, store, "the correct, original payload")
+
+	// Overwrite the blob's on-disk bytes directly, keeping its
+	// content-addressed filename unchanged — simulating disk-level
+	// corruption (bit rot, a partial/failed write some layer beneath
+	// the store's own atomic rename did not catch) rather than going
+	// through WriteBlob, which would simply compute a DIFFERENT hash for
+	// different content.
+	require.NoError(t, os.WriteFile(store.BlobPath(hash), []byte("corrupted bytes, wrong content"), 0o600))
+
+	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/blobs/" + hash)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode,
+		"a blob whose on-disk content no longer matches its hash must fail closed, not be served as if it were valid")
+}
+
+// TestStaticServer_ServesBlobs_VerificationSuccessIsCachedAcrossRequests
+// pins the accepted trade-off documented on verifyBlobContent: a
+// successful verification is remembered for this process's lifetime so a
+// Range request scrubbing through a large cached video is not forced to
+// re-hash the ENTIRE file on every single request. The direct, deliberate
+// consequence — corruption introduced strictly AFTER the first
+// successful request is not caught by a later one — is exactly what this
+// test documents, so a future change to that trade-off shows up here
+// rather than silently regressing either direction.
+func TestStaticServer_ServesBlobs_VerificationSuccessIsCachedAcrossRequests(t *testing.T) {
+	store, _ := newTestStore(t)
+	hash := writeBlobString(t, store, "the correct, original payload")
+
+	server := offlinecache.NewStaticServer("127.0.0.1:8082", store, wrapper.NewOS(), zaptest.NewLogger(t))
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	firstResp, err := http.Get(ts.URL + "/blobs/" + hash)
+	require.NoError(t, err)
+	firstBody, err := io.ReadAll(firstResp.Body)
+	require.NoError(t, err)
+	_ = firstResp.Body.Close()
+	require.Equal(t, http.StatusOK, firstResp.StatusCode)
+	require.Equal(t, "the correct, original payload", string(firstBody))
+
+	require.NoError(t, os.WriteFile(store.BlobPath(hash), []byte("corrupted after the first verification"), 0o600))
+
+	secondResp, err := http.Get(ts.URL + "/blobs/" + hash)
+	require.NoError(t, err)
+	secondBody, err := io.ReadAll(secondResp.Body)
+	require.NoError(t, err)
+	_ = secondResp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, secondResp.StatusCode,
+		"a hash already verified once this process's lifetime must not be re-checked on a later request")
+	assert.True(t, strings.HasPrefix(string(secondBody), "corrupted"),
+		"the cached-success path serves whatever is currently on disk without re-hashing it")
 }
 
 func TestStaticServer_MethodNotAllowed(t *testing.T) {
