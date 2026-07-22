@@ -25,6 +25,34 @@ import (
 // Coverage reflects that.
 const captureWindowDefault = 20 * time.Second
 
+// captureFinalizeWindowDefault bounds resolveResources' finalization
+// phase: fetching bytes for every resource the observation window
+// discovered, one at a time, over real outbound HTTP. Unlike
+// captureWindowDefault (which only bounds PASSIVE CDP observation),
+// finalization makes ACTIVE network calls, each able to block for up to
+// the shared HTTP client's own per-request timeout
+// (wrapper.HTTPClientTimeout, 30s) before failing. With no deadline of
+// its own, finalization was running on the caller's unbounded daemon-
+// lifetime ctx, so a page whose observation window ends with many
+// stalled/slow-responding resources still pending could make this phase
+// take (stalled resource count) x (up to 30s) — and since capture holds
+// the single download worker's slot for its ENTIRE duration (see
+// service.go's captureMu), that could monopolize it far beyond
+// captureWindowMs, starving every other queued download indefinitely.
+//
+// Deriving a bounded child context here caps the worst case at this
+// constant regardless of how many resources are still outstanding: once
+// it elapses, resolveResources' own ctx.Err() check (see its doc) stops
+// attempting further fetches and marks whatever remains as an explicitly
+// incomplete/partial part of the record, rather than letting the loop
+// keep blocking. A resource-COUNT cap was considered instead of/alongside
+// a time cap, but is unnecessary: that same ctx.Err() check short-
+// circuits BEFORE any per-resource network attempt, so the remaining
+// loop iterations after the deadline are pure bookkeeping (no I/O) no
+// matter how many resources are left — bounding time alone is sufficient
+// to bound total wall-clock cost.
+const captureFinalizeWindowDefault = 60 * time.Second
+
 // Capturer drives one headless-Chromium capture of a playlist item's
 // source URL and writes the result to the Store.
 //
@@ -267,7 +295,17 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 		return nil, err
 	}
 
-	resources, coverage := c.resolveResources(ctx, tracker, c.newDiskBudget())
+	// finalizeCtx bounds the fetch-bodies phase below independently of
+	// the (already-elapsed) observation window — see
+	// captureFinalizeWindowDefault's doc for why finalization needs its
+	// own deadline rather than running on ctx, the caller's unbounded
+	// daemon-lifetime context, unmodified. Derived from ctx (not
+	// context.Background()) so a real shutdown/cancellation still
+	// propagates through it immediately rather than waiting out the
+	// full finalize window.
+	finalizeCtx, finalizeCancel := context.WithTimeout(ctx, captureFinalizeWindowDefault)
+	defer finalizeCancel()
+	resources, coverage := c.resolveResources(finalizeCtx, tracker, c.newDiskBudget())
 
 	// resetTargetState above only reaches item.Source's OWN origin,
 	// which cannot cover an origin this navigation redirects to or
@@ -439,6 +477,21 @@ func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker
 	for _, key := range keys {
 		res, ok := resources[key]
 		if !ok {
+			continue
+		}
+		// ctx is finalizeCtx (see Capture's doc): once its deadline
+		// elapses, stop attempting further fetches entirely rather than
+		// letting fetchAndStoreBody try and fail one-by-one for the same
+		// underlying reason — this is what keeps a page with many
+		// stalled/slow resources from monopolizing the worker beyond
+		// captureFinalizeWindowDefault (see its doc). Checked before
+		// EVERY resource, not once before the loop, so whatever was
+		// already fetched before the deadline hit is kept; only the
+		// remainder becomes an explicit, distinctly-labeled incomplete
+		// entry.
+		if ctx.Err() != nil {
+			failureReasons = append(failureReasons, fmt.Sprintf("finalization_deadline_exceeded:%s", res.URL))
+			result = append(result, res)
 			continue
 		}
 		method := res.EffectiveMethod()

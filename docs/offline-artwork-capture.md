@@ -150,6 +150,29 @@ the item's `source`. For each distinct URL:
   request observed via HTTP cache revalidation) → recorded as
   `http_error(<status>):<url>`. See §4.7.
 
+The out-of-band fetches above (everything in the first bullet, plus the
+206 fallback) happen AFTER `captureWindowMs` closes, in a second,
+separate phase ("finalization") that is itself bounded by its own fixed
+internal deadline (`captureFinalizeWindowDefault`, 60s), independent of
+`captureWindowMs`. `captureWindowMs` only bounds *passive* CDP
+observation; finalization makes *active* outbound HTTP requests, one
+resource at a time, each of which can itself block for up to the shared
+HTTP client's own per-request timeout before failing. Without a
+finalization-phase deadline, a page whose observation window closes with
+many stalled/slow-responding resources still outstanding could keep
+`capture.go` — and therefore the single download worker slot it holds for
+the ENTIRE capture — busy far longer than `captureWindowMs` alone would
+suggest. Once the finalization deadline elapses, every resource whose turn had
+not yet started when the check next runs is left unfetched and recorded
+as `finalization_deadline_exceeded:<url>`; anything already fetched
+before that point keeps its result. (A fetch already in flight when the
+deadline hits is a separate, pre-existing case: its outbound HTTP
+request is itself bound to the same deadline via `req.WithContext`, so
+the transport typically cancels it and it fails through the ordinary
+`fetch_failed:<url>` path — this fix does not change that.) Either way,
+the record `Capture` saves is an honestly PARTIAL one
+(`Coverage.Complete: false`), never a hang.
+
 `downloader.go` runs one capture job at a time and tears the headless
 Chromium down when idle — the device already carries OOM pressure from the
 kiosk Chromium, so a second one is not left resident. `Downloader.Close()`
