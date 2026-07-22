@@ -203,10 +203,38 @@ func numericPSK(id string) string {
 func (b *nmBackend) run(ctx context.Context, args ...string) ([]byte, error) {
 	out, err := b.exec.CommandContext(ctx, nmcliBin, args...).CombinedOutput()
 	if err != nil {
+		// The error string travels up to callers that log it (ensureAPUp/Down),
+		// and the hotspot-create args carry the WPA2 PSK after "password" —
+		// nmcli's own error output can echo the command line too. Redact the
+		// secret from both the arg list and the captured output so a failed
+		// raise can never leak the key into logs.
 		return out, fmt.Errorf("nmcli %s: %w: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			strings.Join(redactPassword(args), " "), err,
+			strings.TrimSpace(redactSecrets(string(out), args)))
 	}
 	return out, nil
+}
+
+// redactPassword returns a copy of args with every value following a
+// "password" argument replaced by a placeholder.
+func redactPassword(args []string) []string {
+	out := append([]string(nil), args...)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] == "password" {
+			out[i+1] = "[redacted]"
+		}
+	}
+	return out
+}
+
+// redactSecrets removes every password value present in args from s.
+func redactSecrets(s string, args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "password" && args[i+1] != "" {
+			s = strings.ReplaceAll(s, args[i+1], "[redacted]")
+		}
+	}
+	return s
 }
 
 func readEtcHostname() (string, error) {

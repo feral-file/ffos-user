@@ -84,6 +84,26 @@ func TestNumericPSK(t *testing.T) {
 	}
 }
 
+// TestUpFailureErrorNeverContainsPSK: hotspot creation passes the WPA2 PSK on
+// the nmcli command line, and run() folds args + captured output into its
+// error, which callers log. A failed raise must redact the key from both.
+func TestUpFailureErrorNeverContainsPSK(t *testing.T) {
+	psk := numericPSK("a1b2c3")
+	b, _ := newBackend("a1b2c3", func(argv []string) ([]byte, error) {
+		if argv[1] == "connection" {
+			return nil, nil // pre-create cleanup Down succeeds
+		}
+		// nmcli error output can echo the offending command line, PSK included.
+		return []byte("Error: hotspot create failed for password " + psk),
+			fakeExitError{msg: "exit status 1"}
+	})
+
+	_, err := b.Up(context.Background())
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), psk, "PSK must never appear in the error: %s", err)
+	assert.Contains(t, err.Error(), "[redacted]")
+}
+
 func TestCredentials(t *testing.T) {
 	b, _ := newBackend("  a1b2c3  ", nil) // whitespace trimmed from /etc/hostname
 	info, err := b.credentials()
