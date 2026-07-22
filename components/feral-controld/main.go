@@ -55,7 +55,13 @@ var (
 
 type app struct {
 	// Basic components
-	Ctx    context.Context
+	Ctx context.Context
+	// Cancel cancels Ctx. Long-lived components built in initializeApp (the hub
+	// shutdown watcher, the claim flow's claimCtx, the playlist refresher) hold
+	// Ctx directly, so shutdown must cancel at this root — canceling a child
+	// context derived later would leave those paths running on a live context.
+	// Nil in the test app, which passes its own ctx.
+	Cancel context.CancelFunc
 	Logger *zap.Logger
 
 	// Wrappers
@@ -145,8 +151,9 @@ func main() {
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
 		})
 
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(app.Ctx)
+	// Graceful shutdown cancels the app-lifetime context created in
+	// initializeApp (see app.Cancel).
+	ctx, cancel := app.Ctx, app.Cancel
 	defer cancel()
 
 	// Handle signals for graceful shutdown
@@ -423,8 +430,10 @@ func initializeApp(
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
-	// Basic components
-	context := context.Background()
+	// Basic components. This is the daemon-lifetime context: it flows into every
+	// long-lived component built below, and main cancels it (app.Cancel) on
+	// SIGTERM so those components observe shutdown.
+	context, cancelApp := context.WithCancel(context.Background())
 
 	// Wrappers
 	clock := wrapper.NewClock()
@@ -577,6 +586,7 @@ func initializeApp(
 
 	return &app{
 		Ctx:               context,
+		Cancel:            cancelApp,
 		Logger:            logger,
 		Clock:             clock,
 		OS:                os,

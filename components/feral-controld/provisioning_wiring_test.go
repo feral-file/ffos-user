@@ -107,6 +107,33 @@ func TestSetupNotifierTriggersAutoClaimWhenReachable(t *testing.T) {
 	}
 }
 
+// TestSetupNotifierClaimContextObservesShutdown: the claim flow's waits (topic,
+// OTA gate, retry backoff) run on the context the notifier hands it; that must
+// be a cancelable daemon-lifetime context, so cancellation reaches the spawned
+// goroutine. The regression was claimCtx being a never-canceled Background.
+func TestSetupNotifierClaimContextObservesShutdown(t *testing.T) {
+	spy := &spyNarrationUI{}
+	ctx, cancel := context.WithCancel(context.Background())
+	unblocked := make(chan struct{})
+	n := &setupNotifier{
+		ui:       spy,
+		claimCtx: ctx,
+		claim: func(c context.Context) {
+			<-c.Done()
+			close(unblocked)
+		},
+	}
+
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
+	cancel()
+
+	select {
+	case <-unblocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("claim flow did not observe daemon-context cancellation")
+	}
+}
+
 // stubHubStatusBase is a minimal hub.StatusProvider for wrapper tests.
 type stubHubStatusBase struct{ info hub.StatusInfo }
 

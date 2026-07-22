@@ -747,6 +747,23 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app)
 	assert.Equal(t, logger, app.Logger)
 	assert.NotNil(t, app.Ctx)
+
+	// The app context is the daemon-lifetime context handed to long-lived
+	// components (hub, claim flow); Cancel must cancel exactly it, or those
+	// paths outlive shutdown on a never-canceled Background context.
+	require.NotNil(t, app.Cancel)
+	select {
+	case <-app.Ctx.Done():
+		t.Fatal("app context canceled prematurely")
+	default:
+	}
+	app.Cancel()
+	select {
+	case <-app.Ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("app.Cancel did not cancel app.Ctx")
+	}
+
 	assert.NotNil(t, app.CDP)
 	assert.NotNil(t, app.Relayer)
 	assert.NotNil(t, app.DBus)
