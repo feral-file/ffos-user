@@ -66,8 +66,19 @@ func (c *Connectivity) Start() {
 
 func (c *Connectivity) restart() {
 	c.Stop()
-	c.doneChan = make(chan struct{})
+	c.resetDone()
 	c.Start()
+}
+
+// resetDone replaces the generation channel under the lock: notifyHandlers'
+// goroutines and background's capture read c.doneChan, so an unlocked swap
+// here is a data race with them. Split from restart so the swap is
+// individually exercisable in the concurrency regression test without
+// spawning the real ping loop.
+func (c *Connectivity) resetDone() {
+	c.Lock()
+	defer c.Unlock()
+	c.doneChan = make(chan struct{})
 }
 
 func (c *Connectivity) Stop() {
@@ -103,9 +114,15 @@ func (c *Connectivity) RemoveConnectivityChange(h ConnectivityHandler) {
 
 // notifyHandlers notifies all registered handlers about connectivity status
 func (c *Connectivity) notifyHandlers(ctx context.Context, connected bool) {
+	// Capture the generation channel under the same lock as the handlers copy:
+	// restart() swaps c.doneChan (via resetDone), so the spawned goroutines
+	// must not read the mutable field directly — that is a data race, and a
+	// notification from the OLD generation gating on the NEW channel would
+	// also outlive the stop it belongs to.
 	c.Lock()
 	handlers := make([]ConnectivityHandler, len(c.handlers))
 	copy(handlers, c.handlers)
+	done := c.doneChan
 	c.Unlock()
 
 	for _, handler := range handlers {
@@ -113,7 +130,7 @@ func (c *Connectivity) notifyHandlers(ctx context.Context, connected bool) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-c.doneChan:
+			case <-done:
 				return
 			default:
 				h(ctx, connected)
