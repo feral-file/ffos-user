@@ -43,6 +43,17 @@ const (
 // their base names.
 var defaultExtraLogs = []string{"/var/log/updaterd.log", "/var/log/auto-updaterd.log"}
 
+// maxLogArchiveInputBytes bounds the total bytes zipLogs reads into memory.
+// The in-memory port holds both the raw file map and the zip buffer at once,
+// so peak memory is roughly input + compressed ≤ 2× this budget. The bound
+// exists because nothing else enforces one: log rotation keeps a healthy
+// device far below it, but controld is now the sole provisioning/recovery
+// daemon and an unrotated or runaway log must degrade to a partial archive
+// (skipped files are logged at Warn), never OOM the process. Files are sized
+// via Stat/DirEntry.Info BEFORE reading so an oversized file is never pulled
+// into memory at all.
+const maxLogArchiveInputBytes = 128 << 20
+
 // logUploadBuildInfo carries the device identity/build metadata the pre-sign
 // request reports. In feral-setupd these come from AppState (device_id from
 // /etc/hostname, branch/version from the FF1 build descriptor); controld gathers
@@ -63,7 +74,11 @@ type logUploader struct {
 	logsDir   string
 	extraLogs []string
 	apiURL    string
-	logger    *zap.Logger
+	// maxInputBytes is the zipLogs input budget (maxLogArchiveInputBytes in
+	// production); a struct field so tests can exercise the cap without
+	// gigabyte fixtures.
+	maxInputBytes int64
+	logger        *zap.Logger
 }
 
 // logUploaderIface is the seam the executor drives; overridable in tests so the
@@ -77,13 +92,14 @@ func newLogUploader(httpClient wrapper.HTTPClient, osw wrapper.OS, jsonw wrapper
 		logger = zap.NewNop()
 	}
 	return &logUploader{
-		http:      httpClient,
-		os:        osw,
-		json:      jsonw,
-		logsDir:   defaultLogsDir,
-		extraLogs: defaultExtraLogs,
-		apiURL:    logUploadAPIURL,
-		logger:    logger,
+		http:          httpClient,
+		os:            osw,
+		json:          jsonw,
+		logsDir:       defaultLogsDir,
+		extraLogs:     defaultExtraLogs,
+		apiURL:        logUploadAPIURL,
+		maxInputBytes: maxLogArchiveInputBytes,
+		logger:        logger,
 	}
 }
 
@@ -141,11 +157,31 @@ func (u *logUploader) Upload(ctx context.Context, apiKey, source string, info lo
 // to an in-memory buffer). An empty archive is an error, matching the Rust
 // "No log files found".
 func (u *logUploader) zipLogs() ([]byte, error) {
+	// remaining is the input budget shared by the log dir walk and the extra
+	// logs. Direct struct construction (tests) may leave maxInputBytes zero;
+	// fall back to the production bound rather than collecting nothing.
+	remaining := u.maxInputBytes
+	if remaining <= 0 {
+		remaining = maxLogArchiveInputBytes
+	}
+
 	files := map[string][]byte{}
-	if err := u.collectDir(u.logsDir, "", files); err != nil {
+	if err := u.collectDir(u.logsDir, "", files, &remaining); err != nil {
 		return nil, err
 	}
 	for _, path := range u.extraLogs {
+		info, err := u.os.Stat(path)
+		if err != nil {
+			if !u.os.IsNotExist(err) {
+				u.logger.Debug("Skipping unreadable extra log", zap.String("path", path), zap.Error(err))
+			}
+			continue
+		}
+		if info.Size() > remaining {
+			u.logger.Warn("Log archive budget exhausted; skipping extra log",
+				zap.String("path", path), zap.Int64("size", info.Size()), zap.Int64("remaining", remaining))
+			continue
+		}
 		data, err := u.os.ReadFile(path) //nolint:gosec // fixed in-image log paths, never user input
 		if err != nil {
 			if !u.os.IsNotExist(err) {
@@ -153,6 +189,7 @@ func (u *logUploader) zipLogs() ([]byte, error) {
 			}
 			continue
 		}
+		remaining -= int64(len(data))
 		files[filepath.Base(path)] = data
 	}
 
@@ -187,8 +224,13 @@ func (u *logUploader) zipLogs() ([]byte, error) {
 
 // collectDir recursively reads dir into files, keyed by path relative to the
 // original root (prefix accumulates the sub-path). A missing directory is not an
-// error — a device may not have produced logs yet.
-func (u *logUploader) collectDir(dir, prefix string, files map[string][]byte) error {
+// error — a device may not have produced logs yet. remaining is the shared
+// input budget: files are sized via DirEntry.Info BEFORE reading so an
+// oversized file never lands in memory, and every skip is logged at Warn so a
+// truncated support archive is diagnosable (a file that grows between Info and
+// ReadFile can overshoot by the growth only — acceptable slack for a hard cap
+// without opening file handles through the wrapper seam).
+func (u *logUploader) collectDir(dir, prefix string, files map[string][]byte, remaining *int64) error {
 	entries, err := u.os.ReadDir(dir)
 	if err != nil {
 		if u.os.IsNotExist(err) {
@@ -203,9 +245,19 @@ func (u *logUploader) collectDir(dir, prefix string, files map[string][]byte) er
 			rel = prefix + "/" + entry.Name()
 		}
 		if entry.IsDir() {
-			if err := u.collectDir(full, rel, files); err != nil {
+			if err := u.collectDir(full, rel, files, remaining); err != nil {
 				return err
 			}
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			u.logger.Debug("Skipping unstat-able log file", zap.String("path", full), zap.Error(err))
+			continue
+		}
+		if info.Size() > *remaining {
+			u.logger.Warn("Log archive budget exhausted; skipping log file",
+				zap.String("path", full), zap.Int64("size", info.Size()), zap.Int64("remaining", *remaining))
 			continue
 		}
 		data, err := u.os.ReadFile(full) //nolint:gosec // walking the fixed in-image log dir
@@ -213,6 +265,7 @@ func (u *logUploader) collectDir(dir, prefix string, files map[string][]byte) er
 			u.logger.Debug("Skipping unreadable log file", zap.String("path", full), zap.Error(err))
 			continue
 		}
+		*remaining -= int64(len(data))
 		files[rel] = data
 	}
 	return nil

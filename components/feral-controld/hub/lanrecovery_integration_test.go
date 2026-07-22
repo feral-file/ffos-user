@@ -170,6 +170,7 @@ func offlineStatus() StatusInfo {
 func permissiveOSReads(m *mocks.MockOS) {
 	m.EXPECT().ReadFile(gomock.Any()).Return(nil, errLANNotExist).AnyTimes()
 	m.EXPECT().ReadDir(gomock.Any()).Return(nil, errLANNotExist).AnyTimes()
+	m.EXPECT().Stat(gomock.Any()).Return(nil, errLANNotExist).AnyTimes()
 	m.EXPECT().IsNotExist(gomock.Any()).Return(true).AnyTimes()
 }
 

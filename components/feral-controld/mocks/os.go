@@ -49,6 +49,21 @@ func (mr *MockOSMockRecorder) Exit(code interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Exit", reflect.TypeOf((*MockOS)(nil).Exit), code)
 }
 
+// Stat mocks base method.
+func (m *MockOS) Stat(path string) (os.FileInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Stat", path)
+	ret0, _ := ret[0].(os.FileInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Stat indicates an expected call of Stat.
+func (mr *MockOSMockRecorder) Stat(path interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stat", reflect.TypeOf((*MockOS)(nil).Stat), path)
+}
+
 // IsNotExist mocks base method.
 func (m *MockOS) IsNotExist(err error) bool {
 	m.ctrl.T.Helper()

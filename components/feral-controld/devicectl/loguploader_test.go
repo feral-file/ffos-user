@@ -29,14 +29,61 @@ import (
 func newTestUploader(t *testing.T, logsDir, apiURL string, extraLogs []string) *logUploader {
 	t.Helper()
 	return &logUploader{
-		http:      wrapper.NewHTTPClient(),
-		os:        wrapper.NewOS(),
-		json:      wrapper.NewJSON(),
-		logsDir:   logsDir,
-		extraLogs: extraLogs,
-		apiURL:    apiURL,
-		logger:    zap.NewNop(),
+		http:          wrapper.NewHTTPClient(),
+		os:            wrapper.NewOS(),
+		json:          wrapper.NewJSON(),
+		logsDir:       logsDir,
+		extraLogs:     extraLogs,
+		apiURL:        apiURL,
+		maxInputBytes: maxLogArchiveInputBytes,
+		logger:        zap.NewNop(),
 	}
+}
+
+// TestZipLogs_InputBudgetSkipsOversizedFiles: the in-memory zip must stay
+// bounded — a file that does not fit the remaining budget is skipped (never
+// read into memory), smaller files still make it in, and the partial archive
+// is still produced. Guards the OOM regression on the now-central controld.
+func TestZipLogs_InputBudgetSkipsOversizedFiles(t *testing.T) {
+	logsDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(logsDir, "big.log"), bytes.Repeat([]byte("x"), 300), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(logsDir, "small.log"), []byte("small"), 0o600))
+
+	extraDir := t.TempDir()
+	extraBig := filepath.Join(extraDir, "updaterd.log")
+	require.NoError(t, os.WriteFile(extraBig, bytes.Repeat([]byte("y"), 300), 0o600))
+	extraSmall := filepath.Join(extraDir, "auto-updaterd.log")
+	require.NoError(t, os.WriteFile(extraSmall, []byte("tiny"), 0o600))
+
+	u := newTestUploader(t, logsDir, "http://unused.invalid", []string{extraBig, extraSmall})
+	u.maxInputBytes = 100 // fits small.log + auto-updaterd.log, not the 300-byte files
+
+	archive, err := u.zipLogs()
+	require.NoError(t, err)
+
+	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	require.NoError(t, err)
+	var names []string
+	for _, f := range zr.File {
+		names = append(names, f.Name)
+	}
+	assert.ElementsMatch(t, []string{"small.log", "auto-updaterd.log"}, names,
+		"oversized files must be skipped, in-budget files kept")
+}
+
+// TestZipLogs_AllFilesOverBudgetIsError: when the budget excludes everything,
+// zipLogs must fail with the existing "no log files found" contract rather
+// than uploading an empty archive.
+func TestZipLogs_AllFilesOverBudgetIsError(t *testing.T) {
+	logsDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(logsDir, "big.log"), bytes.Repeat([]byte("x"), 300), 0o600))
+
+	u := newTestUploader(t, logsDir, "http://unused.invalid", nil)
+	u.maxInputBytes = 10
+
+	_, err := u.zipLogs()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no log files found")
 }
 
 func TestLogUploader_Upload_RequestShape(t *testing.T) {
