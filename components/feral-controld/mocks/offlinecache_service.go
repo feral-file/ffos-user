@@ -145,18 +145,32 @@ func (mr *MockOfflineCacheServiceMockRecorder) DownloadPlaylist(ctx, playlistRaw
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DownloadPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).DownloadPlaylist), ctx, playlistRaw, sourceURL)
 }
 
-// IndexPlaylistForOfflineDisplay mocks base method.
-func (m *MockOfflineCacheService) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string) error {
+// CurrentPlaylistClearGeneration mocks base method.
+func (m *MockOfflineCacheService) CurrentPlaylistClearGeneration(playlistID string) uint64 {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "IndexPlaylistForOfflineDisplay", playlistRaw, sourceURL)
+	ret := m.ctrl.Call(m, "CurrentPlaylistClearGeneration", playlistID)
+	ret0, _ := ret[0].(uint64)
+	return ret0
+}
+
+// CurrentPlaylistClearGeneration indicates an expected call of CurrentPlaylistClearGeneration.
+func (mr *MockOfflineCacheServiceMockRecorder) CurrentPlaylistClearGeneration(playlistID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CurrentPlaylistClearGeneration", reflect.TypeOf((*MockOfflineCacheService)(nil).CurrentPlaylistClearGeneration), playlistID)
+}
+
+// IndexPlaylistForOfflineDisplay mocks base method.
+func (m *MockOfflineCacheService) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "IndexPlaylistForOfflineDisplay", playlistRaw, sourceURL, sampledEpoch)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // IndexPlaylistForOfflineDisplay indicates an expected call of IndexPlaylistForOfflineDisplay.
-func (mr *MockOfflineCacheServiceMockRecorder) IndexPlaylistForOfflineDisplay(playlistRaw, sourceURL interface{}) *gomock.Call {
+func (mr *MockOfflineCacheServiceMockRecorder) IndexPlaylistForOfflineDisplay(playlistRaw, sourceURL, sampledEpoch interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IndexPlaylistForOfflineDisplay", reflect.TypeOf((*MockOfflineCacheService)(nil).IndexPlaylistForOfflineDisplay), playlistRaw, sourceURL)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IndexPlaylistForOfflineDisplay", reflect.TypeOf((*MockOfflineCacheService)(nil).IndexPlaylistForOfflineDisplay), playlistRaw, sourceURL, sampledEpoch)
 }
 
 // Start mocks base method.

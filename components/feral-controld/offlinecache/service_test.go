@@ -600,7 +600,10 @@ func TestService_IndexPlaylistForOfflineDisplay_MakesPlaylistRecoverableByURL(t 
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL))
+	// sampledEpoch matches the current (never-cleared) generation, so the
+	// clear-race guard passes and the index is written.
+	gen := ts.service.CurrentPlaylistClearGeneration("playlist-1")
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, gen))
 
 	cached, err := ts.service.CachedPlaylistForURL(sourceURL)
 	require.NoError(t, err)
@@ -610,6 +613,50 @@ func TestService_IndexPlaylistForOfflineDisplay_MakesPlaylistRecoverableByURL(t 
 	// classified or captured just because the playlist was indexed.
 	_, loadErr := ts.store.LoadItem("item-1")
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
+}
+
+// TestService_IndexPlaylistForOfflineDisplay_StaleEpochDoesNotResurrect is
+// the deterministic regression test for the playlist-record resurrection
+// hazard on the single-item download path: IndexPlaylistForOfflineDisplay
+// must refuse to (re)write a playlist record when the sampledEpoch it was
+// given is older than the current clear-generation — i.e. a ClearPlaylist
+// landed since the caller sampled. Here the caller samples gen BEFORE
+// anything, the playlist is then cleared (bumping the generation and
+// deleting the record), and a later index call carrying the STALE gen must
+// leave the record deleted rather than bringing it back as an empty
+// offline fallback. See Service.CurrentPlaylistClearGeneration and
+// savePlaylistAndURLIndex's docs.
+func TestService_IndexPlaylistForOfflineDisplay_StaleEpochDoesNotResurrect(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t",
+		"items": []map[string]interface{}{{"id": "item-1", "source": "https://example.com/a.html"}},
+	})
+	require.NoError(t, err)
+	sourceURL := "https://feed.example.com/playlists/playlist-1"
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	// Sample the generation as a caller would, before its download work.
+	staleGen := ts.service.CurrentPlaylistClearGeneration("playlist-1")
+
+	// Establish the record, then clear the playlist: this bumps the
+	// clear-generation past staleGen and deletes the record.
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen))
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+	_, err = ts.service.CachedPlaylistForURL(sourceURL)
+	require.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound, "sanity: the clear must have removed the record")
+
+	// A late index write still carrying the pre-clear generation must be
+	// refused (no error — a clear winning is not a failure), leaving the
+	// record deleted.
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen))
+	_, err = ts.service.CachedPlaylistForURL(sourceURL)
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound,
+		"an index write carrying a pre-clear generation must not resurrect the cleared playlist record")
 }
 
 // TestService_IndexPlaylistForOfflineDisplay_EmptySourceURLIsNotIndexed
@@ -627,7 +674,7 @@ func TestService_IndexPlaylistForOfflineDisplay_EmptySourceURLIsNotIndexed(t *te
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, ""))
+	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, "", 0))
 
 	_, err = ts.service.CachedPlaylistForURL("https://feed.example.com/playlists/playlist-1")
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
@@ -639,7 +686,7 @@ func TestService_IndexPlaylistForOfflineDisplay_BeforeStartReturnsNotStarted(t *
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"id":"playlist-1"}`), "https://example.com/p.json")
+	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"id":"playlist-1"}`), "https://example.com/p.json", 0)
 	assert.ErrorIs(t, err, offlinecache.ErrServiceNotStarted)
 }
 
@@ -652,7 +699,7 @@ func TestService_IndexPlaylistForOfflineDisplay_MissingIDErrors(t *testing.T) {
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"title":"no id"}`), "https://example.com/p.json")
+	err := ts.service.IndexPlaylistForOfflineDisplay(json.RawMessage(`{"title":"no id"}`), "https://example.com/p.json", 0)
 	assert.Error(t, err)
 }
 
@@ -959,6 +1006,123 @@ func TestService_ClearItem_ForcedRaceAgainstWorkerDequeueNeverResurrectsAfterSuc
 		ts.service.Stop()
 		ts.ctrl.Finish()
 	}
+}
+
+// TestService_ClearItem_DuringBlockedClassificationDoesNotResurrect is the
+// deterministic regression test for the clear-vs-classify race: a download
+// classifies its source (network I/O) BEFORE it registers any
+// queued/downloading state, so for that whole window the item is untracked
+// and a concurrent ClearItem sails through reserveForClear, deletes the
+// on-disk record, and reports success — after which the download must NOT
+// finish classifying, enqueue, capture, and write the record back. The
+// classifier is blocked mid-call so the clear is guaranteed to land inside
+// the classify window (no timing chance); the download must then abort at
+// enqueue on the epoch mismatch. mockCapturer has NO Capture expectation,
+// so gomock's strict controller fails the test if the aborted download
+// ever reaches the worker and captures anyway.
+func TestService_ClearItem_DuringBlockedClassificationDoesNotResurrect(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	// A record already on disk from a prior download, so the racing clear
+	// has something real to delete and report success for.
+	seedItemWithCapturedAt(t, ts.store, "item-1", "old payload", time.Now())
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	classifyEntered := make(chan struct{})
+	releaseClassify := make(chan struct{})
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).DoAndReturn(
+		func(context.Context, string) (offlinecache.MediaClass, error) {
+			close(classifyEntered)
+			<-releaseClassify
+			return offlinecache.ClassSoftware, nil
+		}).Times(1)
+	// Deliberately no Capture expectation: reaching the worker is the bug.
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	dlDone := make(chan error, 1)
+	go func() { dlDone <- ts.service.DownloadItem(context.Background(), item) }()
+
+	<-classifyEntered
+	require.NoError(t, ts.service.ClearItem("item-1"),
+		"the clear must succeed: during classification item-1 is untracked, so nothing is busy")
+	close(releaseClassify)
+
+	require.NoError(t, <-dlDone,
+		"the download must return cleanly after aborting at enqueue, not error")
+
+	_, err := ts.store.LoadItem("item-1")
+	require.Error(t, err, "the cleared record must stay deleted")
+	require.Never(t, func() bool {
+		_, loadErr := ts.store.LoadItem("item-1")
+		return loadErr == nil
+	}, 150*time.Millisecond, 5*time.Millisecond,
+		"a clear that reported success must never be followed by a resurrected record")
+}
+
+// TestService_ClearPlaylist_DuringBlockedClassificationDoesNotResurrect is
+// the playlist-level twin of the clear-vs-classify regression above. It
+// pins BOTH halves of the playlist fix: (1) member items must not be
+// captured back (per-item epoch, downloadEpoch), and (2) the playlist
+// RECORD itself must not be re-saved as an empty offline fallback
+// (playlistClearEpoch) — DownloadPlaylist persists that record only after
+// its classify loop, so a ClearPlaylist landing mid-classification would
+// otherwise see the record deleted and then resurrected. The classifier is
+// blocked mid-call so the clear is guaranteed to land in the window;
+// mockCapturer has no Capture expectation, so no member item may capture.
+func TestService_ClearPlaylist_DuringBlockedClassificationDoesNotResurrect(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	seedItemWithCapturedAt(t, ts.store, "item-1", "old payload", time.Now())
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t",
+		"items": []map[string]interface{}{
+			{"id": "item-1", "source": "https://example.com/item-1"},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
+
+	classifyEntered := make(chan struct{})
+	releaseClassify := make(chan struct{})
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/item-1").DoAndReturn(
+		func(context.Context, string) (offlinecache.MediaClass, error) {
+			close(classifyEntered)
+			<-releaseClassify
+			return offlinecache.ClassSoftware, nil
+		}).Times(1)
+	// Deliberately no Capture expectation.
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	dlDone := make(chan error, 1)
+	go func() {
+		queued, _, dlErr := ts.service.DownloadPlaylist(context.Background(), raw, "https://feed.example.com/p1")
+		assert.Zero(t, queued, "no item may be queued once the playlist is cleared mid-classification")
+		dlDone <- dlErr
+	}()
+
+	<-classifyEntered
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"),
+		"the clear must succeed: during classification no member item is busy")
+	close(releaseClassify)
+
+	require.NoError(t, <-dlDone, "the download must return cleanly, not error")
+
+	_, err = ts.store.LoadItem("item-1")
+	require.Error(t, err, "the cleared member item record must stay deleted")
+	_, err = ts.store.LoadPlaylist("playlist-1")
+	require.Error(t, err, "the cleared playlist record must not be resurrected as an empty offline fallback")
+	require.Never(t, func() bool {
+		_, itemErr := ts.store.LoadItem("item-1")
+		_, plErr := ts.store.LoadPlaylist("playlist-1")
+		return itemErr == nil || plErr == nil
+	}, 150*time.Millisecond, 5*time.Millisecond,
+		"neither the member item nor the playlist record may reappear after a successful clear")
 }
 
 // TestService_ClearPlaylist_ActiveCaptureOfMemberItemReturnsBusyWithoutPartialClear

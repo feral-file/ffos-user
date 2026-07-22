@@ -230,7 +230,25 @@ type Service interface {
 	// swallowed exactly like DownloadPlaylist's own best-effort index
 	// write, since the playlist body itself is what CachedPlaylistForURL
 	// needs most and is already durably saved by the time indexing runs.
-	IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string) error
+	//
+	// sampledEpoch must be the value CurrentPlaylistClearGeneration
+	// returned for the resolved playlist's ID BEFORE the caller's
+	// resolve+download sequence began. If a ClearPlaylist for that
+	// playlist lands during that sequence, this write is skipped rather
+	// than resurrecting the cleared record — see
+	// CurrentPlaylistClearGeneration and playlistRecordMu's docs.
+	IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) error
+	// CurrentPlaylistClearGeneration returns an opaque, monotonically
+	// increasing counter for playlistID that advances every time that
+	// playlist is cleared (ClearPlaylist). A caller that will resolve and
+	// download a playlist and then index it for offline display
+	// (handleDownloadPlaylistItem) samples this BEFORE that sequence and
+	// passes it back to IndexPlaylistForOfflineDisplay, so a ClearPlaylist
+	// racing the sequence is honored (the index write is skipped) instead
+	// of silently resurrecting the just-cleared playlist fallback record.
+	// The value is meaningful only for equality against a later sample of
+	// the SAME playlist ID; its absolute magnitude carries no meaning.
+	CurrentPlaylistClearGeneration(playlistID string) uint64
 }
 
 type captureJob struct {
@@ -328,8 +346,76 @@ type service struct {
 	// simply waits for it to finish saving before sweeping.
 	captureMu sync.Mutex
 
+	// playlistRecordMu serializes writes to the playlist INDEX record (the
+	// offline displayPlaylist-by-URL fallback) against ClearPlaylist's
+	// deletion of it. The record is written by savePlaylistAndURLIndex
+	// (from DownloadPlaylist after its classify loop, and from
+	// IndexPlaylistForOfflineDisplay on the single-item path) and deleted
+	// by ClearPlaylist. playlistClearEpoch alone is not enough: reading
+	// the epoch and writing the record are two steps, and a ClearPlaylist
+	// landing between them would bump-then-delete, then the stale writer
+	// would re-save — resurrecting a cleared record. Both the writer's
+	// (epoch re-check + SavePlaylist) and ClearPlaylist's (epoch bump +
+	// DeletePlaylist) run under this mutex, so they cannot interleave:
+	// whichever acquires it first is authoritative, exactly as the
+	// item-level dequeueForProcessing/reserveForClear pair does under
+	// s.mu. Deliberately a SEPARATE, narrow mutex rather than s.mu: it is
+	// held only across a small playlist-metadata store write (never blob
+	// bytes), and folding that I/O under s.mu would stall every unrelated
+	// in-memory state read/write for its duration.
+	//
+	// Lock ordering: whenever both are held, playlistRecordMu is always
+	// acquired BEFORE s.mu (the epoch read/bump nested inside), never the
+	// reverse — no other path takes them in the opposite order, so there
+	// is no cycle.
+	playlistRecordMu sync.Mutex
+
 	mu    sync.RWMutex
 	state map[string]ItemState // itemID -> last-known state, seeded from disk on Start
+
+	// downloadEpoch[itemID] increments every time that item is cleared
+	// (ClearItem/ClearPlaylist, via reserveForClear). It exists solely to
+	// close the one download window the state map cannot: a download
+	// classifies its source (network I/O, up to the shared HTTP client
+	// timeout) BEFORE it registers any StateQueued/StateDownloading, so
+	// for that whole span the item is untracked and a concurrent clear
+	// sails through reserveForClear (nothing downloading, nothing queued),
+	// deletes the on-disk record, and reports success — after which the
+	// download would finish classifying, enqueue, capture, and SaveItem
+	// the record right back, silently undoing a clear the caller was told
+	// succeeded. DownloadItem/DownloadPlaylist sample this epoch under mu
+	// before classifying and re-check it under mu at the enqueue commit
+	// point; a mismatch means a clear landed in between, so the download
+	// aborts instead of resurrecting the item. All post-enqueue windows
+	// (StateQueued dequeue race, active StateDownloading capture) are
+	// already covered by reserveForClear/dequeueForProcessing sharing mu,
+	// so this only guards the pre-enqueue classify window.
+	//
+	// Grows by one uint64 per distinct item ID ever cleared and is never
+	// pruned: an entry must outlive any in-flight download that sampled
+	// it, and pruning would reopen the very race it closes. The footprint
+	// is negligible for realistic device item counts, and this is the
+	// deliberate trade-off (a few KB of long-lived counters vs. a
+	// contract-violating resurrection).
+	downloadEpoch map[string]uint64
+
+	// playlistClearEpoch is downloadEpoch's playlist-scoped twin, keyed by
+	// playlist ID. It closes the same classify-window race for the
+	// playlist RECORD (the offline displayPlaylist-by-URL fallback index):
+	// DownloadPlaylist persists that record only AFTER its per-item
+	// classify loop, so a ClearPlaylist landing during classification
+	// deletes the record and reports success, then DownloadPlaylist
+	// re-saves it — resurrecting a cleared playlist as an empty offline
+	// fallback (its items all correctly abort via downloadEpoch, but the
+	// index itself would linger). DownloadPlaylist samples this before
+	// classifying and re-checks it before the save; a mismatch means a
+	// ClearPlaylist intervened, so the save is skipped. Kept a SEPARATE
+	// map from downloadEpoch rather than sharing one keyed by either id:
+	// item and playlist IDs are distinct DP-1 namespaces, and a stray
+	// collision must not let one invalidate the other. Same
+	// grow-without-pruning trade-off as downloadEpoch, for the same
+	// reason.
+	playlistClearEpoch map[string]uint64
 
 	// started gates DownloadItem/DownloadPlaylist on the worker
 	// goroutine actually running — see ErrServiceNotStarted's doc. Three
@@ -364,17 +450,19 @@ func NewService(
 	logger *zap.Logger,
 ) Service {
 	return &service{
-		store:           store,
-		classifier:      classifier,
-		capturer:        capturer,
-		json:            jsonWrapper,
-		logger:          logger,
-		captureWindowMs: captureWindowMs,
-		maxDiskBytes:    maxDiskBytes,
-		maxQueueLen:     defaultMaxQueueLen,
-		observer:        observer,
-		queue:           newJobQueue(),
-		state:           make(map[string]ItemState),
+		store:              store,
+		classifier:         classifier,
+		capturer:           capturer,
+		json:               jsonWrapper,
+		logger:             logger,
+		captureWindowMs:    captureWindowMs,
+		maxDiskBytes:       maxDiskBytes,
+		maxQueueLen:        defaultMaxQueueLen,
+		observer:           observer,
+		queue:              newJobQueue(),
+		state:              make(map[string]ItemState),
+		downloadEpoch:      make(map[string]uint64),
+		playlistClearEpoch: make(map[string]uint64),
 	}
 }
 
@@ -527,9 +615,56 @@ func (s *service) reserveForClear(itemIDs map[string]bool) (busyItemID string, e
 	}
 	for id := range itemIDs {
 		delete(s.state, id)
+		// Invalidate any download of this id that is still in its
+		// pre-enqueue classify window: bumping the epoch here (under the
+		// same mu enqueue commits under) is what a racing
+		// DownloadItem/DownloadPlaylist observes as "a clear landed after
+		// I sampled," making it abort rather than resurrect this record
+		// once classification finishes — see downloadEpoch's doc. Done
+		// only after the busy check above passed, so a rejected
+		// (ErrItemBusy) clear never perturbs an in-flight download's
+		// epoch.
+		s.downloadEpoch[id]++
 	}
 	s.queue.removeItems(itemIDs)
 	return "", nil
+}
+
+// currentEpoch reads an item's clear-epoch under mu. Callers sample it
+// before the network-bound Classify step and hand the sample to enqueue,
+// which re-reads and compares under the commit lock — see downloadEpoch's
+// doc for the resurrection race this closes.
+func (s *service) currentEpoch(itemID string) uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.downloadEpoch[itemID]
+}
+
+// currentPlaylistEpoch is currentEpoch's playlist-scoped twin — see
+// playlistClearEpoch's doc. DownloadPlaylist samples it before its
+// classify loop and re-checks before persisting the playlist record.
+func (s *service) currentPlaylistEpoch(playlistID string) uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.playlistClearEpoch[playlistID]
+}
+
+// CurrentPlaylistClearGeneration is the exported sampling entry point for
+// callers that resolve+download+index a playlist across the Service
+// boundary (handleDownloadPlaylistItem) — see its interface doc. It is
+// just currentPlaylistEpoch under its contract-facing name.
+func (s *service) CurrentPlaylistClearGeneration(playlistID string) uint64 {
+	return s.currentPlaylistEpoch(playlistID)
+}
+
+// markPlaylistCleared bumps a playlist's clear-epoch so a DownloadPlaylist
+// still in its classify window will not resurrect the record this clear is
+// about to delete — see playlistClearEpoch's doc. Under the same mu
+// DownloadPlaylist re-checks the sampled epoch under.
+func (s *service) markPlaylistCleared(playlistID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.playlistClearEpoch[playlistID]++
 }
 
 // stateFromCoverage classifies a finished capture's Coverage into an
@@ -575,6 +710,13 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 		return errors.New("offline cache: item must have an id and a source")
 	}
 
+	// Sample the clear-epoch BEFORE the (network-bound) classify below,
+	// then hand it to enqueue: a ClearItem/ClearPlaylist for this id that
+	// lands anywhere in the classify window bumps the epoch, so enqueue
+	// aborts instead of resurrecting a record the clear just deleted and
+	// reported success for — see downloadEpoch's doc.
+	epoch := s.currentEpoch(item.ID)
+
 	class, err := s.classifier.Classify(ctx, item.Source)
 	if err != nil {
 		return fmt.Errorf("offline cache: classify %s: %w", item.Source, err)
@@ -591,7 +733,7 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	// job onto a queue nobody will ever drain. It also returns
 	// ErrQueueFull if the queue is already at capacity — see that
 	// error's doc.
-	return s.enqueue(item)
+	return s.enqueue(item, epoch)
 }
 
 func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
@@ -606,6 +748,12 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		return 0, 0, errors.New("offline cache: playlist has no id")
 	}
 
+	// Sample the playlist's clear-epoch before the classify loop so a
+	// ClearPlaylist landing during classification is detected before the
+	// save below and cannot resurrect the cleared playlist record — see
+	// playlistClearEpoch's doc.
+	plEpoch := s.currentPlaylistEpoch(playlist.ID)
+
 	// Classification only decides WHICH items are eligible — it must
 	// never itself start any work. Enqueuing is deliberately deferred
 	// to its own loop below, after the playlist is safely persisted,
@@ -614,11 +762,20 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	// background for a call this method is about to report as failed.
 	total := len(playlist.Items)
 	classifyFailed := 0
-	toQueue := make([]dp1playlist.PlaylistItem, 0, total)
+	// Pair each queued item with the clear-epoch sampled just before its
+	// classify, so a ClearItem/ClearPlaylist landing during this (per
+	// item, network-bound) loop or the SavePlaylist below is detected at
+	// enqueue and cannot be silently undone — see downloadEpoch's doc.
+	type queuedItem struct {
+		item  dp1playlist.PlaylistItem
+		epoch uint64
+	}
+	toQueue := make([]queuedItem, 0, total)
 	for _, item := range playlist.Items {
 		if item.ID == "" || item.Source == "" {
 			continue
 		}
+		epoch := s.currentEpoch(item.ID)
 		class, err := s.classifier.Classify(ctx, item.Source)
 		if err != nil {
 			classifyFailed++
@@ -629,7 +786,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 		if class != ClassSoftware {
 			continue
 		}
-		toQueue = append(toQueue, item)
+		toQueue = append(toQueue, queuedItem{item: item, epoch: epoch})
 	}
 	if len(toQueue) == 0 && classifyFailed > 0 {
 		// Distinguish "classification itself is broken" from "this
@@ -650,16 +807,28 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 			playlist.ID, classifyFailed, total)
 	}
 
-	if err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL); err != nil {
+	// savePlaylistAndURLIndex re-checks plEpoch under playlistRecordMu and
+	// skips the write if a ClearPlaylist for this exact playlist landed
+	// since plEpoch was sampled (the check and the write are one critical
+	// section, so a clear cannot slip between them — see
+	// playlistRecordMu's doc). saved==false is that "clear won" case:
+	// nothing has been enqueued yet and the per-item epoch checks in the
+	// enqueue loop below would abort every item anyway, so it is reported
+	// as a clean 0-queued/no-error outcome.
+	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, plEpoch)
+	if err != nil {
 		// Nothing has been enqueued yet at this point — a save failure
 		// here starts no background work at all, matching this error
 		// return exactly.
 		return 0, total, err
 	}
+	if !saved {
+		return 0, total, nil
+	}
 
 	queued := 0
-	for _, item := range toQueue {
-		if err := s.enqueue(item); err != nil {
+	for _, q := range toQueue {
+		if err := s.enqueue(q.item, q.epoch); err != nil {
 			if errors.Is(err, ErrServiceNotStarted) {
 				// Stop() raced in mid-loop; the remaining items would
 				// fail the same way, so stop trying rather than log
@@ -686,9 +855,25 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 // and IndexPlaylistForOfflineDisplay both need — the only difference
 // between the two callers is whether classification/queuing happens
 // around it, not this part.
-func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.RawMessage, sourceURL string) error {
+//
+// sampledEpoch is the playlist's clear-generation the caller read BEFORE
+// the network-bound work (classify / DP-1 resolution) that preceded this
+// save. Under playlistRecordMu, this re-reads the current generation and,
+// if it advanced, skips the write entirely (saved=false, err=nil): a
+// ClearPlaylist landed since the caller committed to this download, and
+// re-saving would resurrect the record it deleted. Holding
+// playlistRecordMu across the re-check AND the store writes is what makes
+// it a genuine guard rather than a racy check-then-write — see that
+// mutex's doc. saved=true means the record was persisted.
+func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) (bool, error) {
+	s.playlistRecordMu.Lock()
+	defer s.playlistRecordMu.Unlock()
+
+	if s.currentPlaylistEpoch(playlistID) != sampledEpoch {
+		return false, nil
+	}
 	if err := s.store.SavePlaylist(playlistID, playlistRaw); err != nil {
-		return fmt.Errorf("offline cache: save playlist %s: %w", playlistID, err)
+		return false, fmt.Errorf("offline cache: save playlist %s: %w", playlistID, err)
 	}
 	if sourceURL != "" {
 		// Best-effort: the playlist itself is already safely saved above
@@ -700,13 +885,18 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 				zap.String("playlist_id", playlistID), zap.Error(err))
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // IndexPlaylistForOfflineDisplay: see the Service interface doc for why
 // this exists (downloadPlaylistItem's single-item scope) and what it
-// deliberately does NOT do (classify or queue anything).
-func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string) error {
+// deliberately does NOT do (classify or queue anything). sampledEpoch is
+// the playlist's clear-generation the CALLER read (via
+// CurrentPlaylistClearGeneration) before the resolve+download sequence
+// this index write follows, so a ClearPlaylist racing that sequence is
+// honored rather than undone here — see savePlaylistAndURLIndex and
+// playlistRecordMu's docs.
+func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, sourceURL string, sampledEpoch uint64) error {
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
@@ -717,7 +907,10 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	if playlist.ID == "" {
 		return errors.New("offline cache: playlist has no id")
 	}
-	return s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL)
+	// saved==false (a ClearPlaylist won the race) is not an error for this
+	// best-effort index path — the caller only logs failures.
+	_, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, sampledEpoch)
+	return err
 }
 
 // enqueue is idempotent: an item already queued or downloading is left
@@ -752,15 +945,24 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 // notification in the COMMON case where the queue is nowhere near full,
 // not to be the authoritative guard. Phase 2's check, taken under the
 // same lock as the actual push, is what actually enforces the bound.
-func (s *service) enqueue(item dp1playlist.PlaylistItem) error {
+func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64) error {
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
 	s.mu.RLock()
 	st, tracked := s.state[item.ID]
 	queueFull := s.queue.len() >= s.maxQueueLen
+	cleared := s.downloadEpoch[item.ID] != epoch
 	s.mu.RUnlock()
 	if tracked && (st == StateQueued || st == StateDownloading) {
+		return nil
+	}
+	// A clear landed since this download sampled its epoch (see
+	// downloadEpoch's doc): honor the clear and abort rather than
+	// resurrect the record it deleted. Advisory here (RLock) purely to
+	// skip the observer's spurious "queued" notification in the common
+	// case; phase 2 below re-checks under the commit lock authoritatively.
+	if cleared {
 		return nil
 	}
 	if queueFull {
@@ -791,6 +993,17 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem) error {
 		return ErrServiceNotStarted
 	}
 	if st, ok := s.state[item.ID]; ok && (st == StateQueued || st == StateDownloading) {
+		s.mu.Unlock()
+		return nil
+	}
+	// Authoritative clear check: this read and the queue.push below are
+	// one critical section under the same mu reserveForClear bumps the
+	// epoch under, so a clear either fully precedes this push (epoch
+	// mismatch → abort, record stays deleted) or fully follows it (item
+	// is now StateQueued → reserveForClear removes the queued job). There
+	// is no interleaving that both passes this check and leaves a job the
+	// clear failed to remove — see downloadEpoch's doc.
+	if s.downloadEpoch[item.ID] != epoch {
 		s.mu.Unlock()
 		return nil
 	}
@@ -1024,9 +1237,21 @@ func (s *service) ClearPlaylist(playlistID string) error {
 			errs = append(errs, fmt.Errorf("delete item %s: %w", item.ID, err))
 		}
 	}
-	if err := s.store.DeletePlaylist(playlistID); err != nil {
-		errs = append(errs, fmt.Errorf("delete playlist record: %w", err))
-	}
+	// Bump the playlist clear-epoch and delete the record as ONE critical
+	// section under playlistRecordMu, so a DownloadPlaylist /
+	// IndexPlaylistForOfflineDisplay still in its classify/resolve window
+	// cannot slip its (epoch-check + SavePlaylist) between the bump and
+	// the delete and resurrect the record — see playlistRecordMu's doc.
+	// The per-item reserveForClear above already invalidated the items
+	// themselves; this covers the playlist index record.
+	func() {
+		s.playlistRecordMu.Lock()
+		defer s.playlistRecordMu.Unlock()
+		s.markPlaylistCleared(playlistID)
+		if err := s.store.DeletePlaylist(playlistID); err != nil {
+			errs = append(errs, fmt.Errorf("delete playlist record: %w", err))
+		}
+	}()
 	if _, _, err := s.gc(); err != nil {
 		errs = append(errs, fmt.Errorf("GC: %w", err))
 	}

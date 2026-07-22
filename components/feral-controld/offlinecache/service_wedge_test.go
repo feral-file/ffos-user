@@ -31,7 +31,7 @@ func TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive(t *
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
 
 	t.Run("dequeue wins: reserveForClear must see busy and must not touch the queue or state", func(t *testing.T) {
-		s := &service{queue: newJobQueue(), state: make(map[string]ItemState)}
+		s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64)}
 		s.state["item-1"] = StateQueued
 		s.queue.push(captureJob{itemID: "item-1", item: item})
 
@@ -50,7 +50,7 @@ func TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive(t *
 	})
 
 	t.Run("clear wins: dequeueForProcessing must find nothing once reserveForClear already canceled the job", func(t *testing.T) {
-		s := &service{queue: newJobQueue(), state: make(map[string]ItemState)}
+		s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64)}
 		s.state["item-1"] = StateQueued
 		s.queue.push(captureJob{itemID: "item-1", item: item})
 
@@ -74,17 +74,20 @@ func TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive(t *
 // defaultMaxQueueLen's doc), so this is necessarily a whitebox test
 // constructing *service directly to set a small cap.
 func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *testing.T) {
-	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), maxQueueLen: 2}
+	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64), maxQueueLen: 2}
 	s.started.Store(true)
 
 	item1 := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
 	item2 := dp1playlist.PlaylistItem{ID: "item-2", Source: "https://example.com/item-2"}
 	item3 := dp1playlist.PlaylistItem{ID: "item-3", Source: "https://example.com/item-3"}
 
-	require.NoError(t, s.enqueue(item1))
-	require.NoError(t, s.enqueue(item2))
+	// epoch 0 for every call: no item is cleared in this test, so the
+	// sampled-vs-current epoch always matches and the clear-abort path is
+	// never taken (see downloadEpoch's doc).
+	require.NoError(t, s.enqueue(item1, 0))
+	require.NoError(t, s.enqueue(item2, 0))
 
-	err := s.enqueue(item3)
+	err := s.enqueue(item3, 0)
 	assert.ErrorIs(t, err, ErrQueueFull, "a third distinct item must be rejected once the queue is already at its 2-item cap")
 	assert.Equal(t, 2, s.queue.len(), "a rejected enqueue must not have touched the queue")
 	_, tracked := s.state[item3.ID]
@@ -92,7 +95,7 @@ func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *tes
 
 	_, ok := s.dequeueForProcessing() // drains item1, freeing one slot
 	require.True(t, ok)
-	assert.NoError(t, s.enqueue(item3), "capacity freed by a dequeue must admit a new item")
+	assert.NoError(t, s.enqueue(item3, 0), "capacity freed by a dequeue must admit a new item")
 }
 
 // TestService_Enqueue_IdempotentReenqueueDoesNotCountAgainstCapacity pins
@@ -102,11 +105,11 @@ func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *tes
 // ErrQueueFull just because capacity happens to be exhausted by OTHER
 // items, since it was never going to consume a new queue slot anyway.
 func TestService_Enqueue_IdempotentReenqueueDoesNotCountAgainstCapacity(t *testing.T) {
-	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), maxQueueLen: 1}
+	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64), maxQueueLen: 1}
 	s.started.Store(true)
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
 
-	require.NoError(t, s.enqueue(item))
-	assert.NoError(t, s.enqueue(item), "re-enqueuing an already-queued item must be a no-op, not rejected as queue-full")
+	require.NoError(t, s.enqueue(item, 0))
+	assert.NoError(t, s.enqueue(item, 0), "re-enqueuing an already-queued item must be a no-op, not rejected as queue-full")
 	assert.Equal(t, 1, s.queue.len(), "the idempotent re-enqueue must not have pushed a second entry")
 }

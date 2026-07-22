@@ -83,10 +83,18 @@ func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
+	// The exact generation sampled BEFORE the download must be threaded
+	// UNCHANGED into the index write, so the service can detect a
+	// ClearPlaylist that raced this download+index sequence — see
+	// Service.CurrentPlaylistClearGeneration's doc. A distinctive value
+	// (not 0) pins that the handler passes the sampled generation through
+	// rather than a hardcoded/default one.
+	const sampledGen = uint64(7)
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(sampledGen).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL).Return(nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen).Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
@@ -146,9 +154,10 @@ func TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess(
 	marshaled := []byte(`{"id":"playlist-1"}`)
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
 	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
-	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL).
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
 		Return(offlinecache.ErrServiceNotStarted).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -213,6 +222,9 @@ func TestCommandHandler_DownloadPlaylistItem_ServiceNotStarted(t *testing.T) {
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	// Sampled (playlistUrl present) before the download even though the
+	// download fails below and no index write ever happens.
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrServiceNotStarted).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -236,6 +248,9 @@ func TestCommandHandler_DownloadPlaylistItem_UnsupportedMediaClass(t *testing.T)
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{item}}}
 
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	// This playlist has no ID; the handler still samples (playlistUrl is
+	// present) before the download fails below.
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("").Return(uint64(0)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrUnsupportedMediaClass).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{

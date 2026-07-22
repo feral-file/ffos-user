@@ -74,36 +74,50 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		return errorResponse("not_found", "itemId not found in playlist", false), nil
 	}
 
+	// Only a playlistUrl-resolved download has a URL to index for the
+	// offline fallback; an inline dp1_call has none (same as
+	// DownloadPlaylist). When there IS one, sample the playlist's
+	// clear-generation BEFORE the download so a ClearPlaylist racing this
+	// whole download+index sequence is honored (the index write is
+	// skipped) rather than silently resurrecting the cleared playlist
+	// fallback record — see Service.CurrentPlaylistClearGeneration's doc.
+	// Sampled here (just after resolve, before DownloadItem) for the same
+	// reason DownloadPlaylist samples right after it has the playlist
+	// body: it is the earliest point the playlist ID is known.
+	sourceURL, indexByURL := stringArg(args["playlistUrl"])
+	var clearGen uint64
+	if indexByURL {
+		clearGen = h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
+	}
+
 	if err := h.offlineCache.DownloadItem(ctx, item); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
 
 	// Best-effort, and deliberately after the queue above already
-	// succeeded: index the resolved playlist by its playlistUrl (if
-	// that is how this item was resolved) for the SAME
-	// displayPlaylist-by-URL offline fallback DownloadPlaylist's
+	// succeeded: index the resolved playlist by its playlistUrl for the
+	// SAME displayPlaylist-by-URL offline fallback DownloadPlaylist's
 	// sourceURL already provides — see
-	// Service.IndexPlaylistForOfflineDisplay's doc for why a
-	// single-item download would otherwise leave that URL with no
-	// offline fallback at all, even though this one item is now
-	// genuinely cached. A failure here must never turn an
-	// already-successful item queue into an error response, since the
-	// item itself is queued/cached either way.
-	if sourceURL, ok := stringArg(args["playlistUrl"]); ok {
-		h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL)
+	// Service.IndexPlaylistForOfflineDisplay's doc for why a single-item
+	// download would otherwise leave that URL with no offline fallback at
+	// all, even though this one item is now genuinely cached. A failure
+	// here must never turn an already-successful item queue into an error
+	// response, since the item itself is queued/cached either way.
+	if indexByURL {
+		h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen)
 	}
 
 	return map[string]any{"ok": true, "status": "queued", "itemId": itemID}, nil
 }
 
-func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string) {
+func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) {
 	raw, err := h.json.Marshal(playlist)
 	if err != nil {
 		h.logger.Warn("offline cache: failed to marshal resolved playlist for URL indexing",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
 		return
 	}
-	if err := h.offlineCache.IndexPlaylistForOfflineDisplay(raw, sourceURL); err != nil {
+	if err := h.offlineCache.IndexPlaylistForOfflineDisplay(raw, sourceURL, clearGen); err != nil {
 		h.logger.Warn("offline cache: failed to index playlist for offline display fallback",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
 	}
