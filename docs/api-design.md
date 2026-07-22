@@ -22,8 +22,8 @@ contract without hiding command policy in transport code. `feral-setupd`
 continues to own setup and recovery UX, including recovery SoftAP. Cross-service
 setup and reset coordination uses an explicitly versioned D-Bus interface:
 `feral-controld` owns external admission, confirmation records, broker cleanup,
-identity rotation, and protocol completion; `feral-setupd` owns physical
-confirmation and durable local reset execution.
+identity rotation, controller-authority bootstrap, and protocol completion;
+`feral-setupd` owns physical confirmation and durable local reset execution.
 
 The v1 relayer envelope, Mint handoff, port-1111 Hub, and
 `GetRelayerTopicID` remain unchanged only through the migration compatibility
@@ -34,8 +34,8 @@ infrastructure remain until the remaining legacy fleet passes its separate
 infrastructure-retirement gate. The v2 `_ff1-control._tcp.local` lifecycle is
 independent of the broker, internet, and `enableHub`: advertise only when a
 LAN-usable interface and the complete TLS backend are ready; withdraw on
-listener unavailability and before either pending-reset lifecycle. mDNS is
-discovery, never proof of identity or authority.
+listener unavailability and before any of the three pending-reset lifecycles.
+mDNS is discovery, never proof of identity or authority.
 
 The FF OS deployment binding for v2 public TCP 443 is a system-level
 `ff1-control.socket` plus hardened `systemd-socket-proxyd`, forwarding an

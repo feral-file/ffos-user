@@ -27,10 +27,11 @@ The v2 target preserves these service boundaries:
   versioned D-Bus contract.
 - For reset, `feral-controld` owns external command admission, protocol-visible
   confirmation state, the broker authorization barrier, runtime-identity
-  rotation, and final protocol status. `feral-setupd` owns the on-device
-  confirmation UX and local reset execution. Neither service writes the
-  other's state, and reset cannot report completion before remote cleanup ACKs
-  and durable local cleanup both finish.
+  rotation, controller-authority bootstrap, and final protocol status.
+  `feral-setupd` owns the on-device confirmation UX and local reset execution.
+  Neither service writes the other's state, and reset cannot report completion
+  before the broker-barrier, identity-registry, and authority-registration ACKs
+  plus durable local authority activation and cleanup finish.
 
 The current relayer, Mint pairing handoff, optional port-1111 Hub, and
 `GetRelayerTopicID` exist only behind migration compatibility gates. They are
@@ -46,8 +47,8 @@ connectivity, internet connectivity, and legacy `enableHub`. `feral-controld`
 advertises it only while a LAN-usable interface exists and the complete v2 TLS
 backend is ready. It withdraws the record whenever the listener path is
 unavailable and before entering `pending_broker_cleanup` or
-`pending_identity_rotation`. Discovery is an endpoint hint, never
-authentication or authorization.
+`pending_identity_rotation` or `pending_authority_bootstrap`. Discovery is an
+endpoint hint, never authentication or authorization.
 
 ### V2 TCP 443 deployment boundary
 
@@ -66,10 +67,10 @@ bounding capabilities, and may connect only to the loopback backend.
 An active socket unit is not readiness. The mDNS record is published only
 after the public 443 -> raw proxy -> loopback TLS path and the active identity
 are ready. Reset withdrawal happens before the TLS backend is quiesced; while
-either pending-reset lifecycle is active, the front end fails closed and no
+any pending-reset lifecycle is active, the front end fails closed and no
 advertisement is present. Advertisement resumes only after identity rotation,
-local cleanup, and a successful end-to-end readiness check, using the active
-identity's SPKI fingerprint.
+authority activation, local cleanup, and a successful end-to-end readiness
+check, using the active identity's SPKI fingerprint.
 
 This front end is an FF OS deployment customization. It does not change the v2
 wire protocol or expose a second application endpoint.

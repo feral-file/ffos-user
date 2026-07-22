@@ -339,14 +339,16 @@ unprivileged identity with no ambient or bounding capabilities, and
 Listener activation alone is not readiness, and mDNS remains withdrawn until
 the public proxy path, TLS identity, authorization store, and LAN interface pass
 the end-to-end readiness check. Reset withdraws mDNS before quiescing the
-backend and keeps the path fail-closed through both pending-reset lifecycles.
+backend and keeps the path fail-closed through all three pending-reset
+lifecycles.
 
 This target crosses component-binary and user/system-unit release rails. The
 `LAN_443_FULL_IMAGE` gate does not pass, and the LAN implementation step cannot
 be enabled or called executable, until a
 coordinated full-image candidate boots on actual FF1 hardware and passes IPv4,
 IPv6, TLS 1.3, mTLS allow/deny, HTTPS, WebSocket, listener-loss withdrawal,
-power-cycle, and both pending-reset lifecycle tests through public port 443.
+power-cycle, and all three pending-reset lifecycle tests through public port
+443.
 The release PR MUST add the matching full-image declaration to `RELEASES.md`,
 including the version and exact `ffos` `build-image-to-cf.yml` dispatch
 parameters, and that matching `ffos` image build MUST carry the component and
@@ -601,10 +603,24 @@ timestamps:
         ]
       },
       {
-        "id": "reset.completed_identity_rotation",
+        "id": "reset.pending_authority_bootstrap",
         "result": "pass",
         "evidencePaths": [
-          "tests/reset.completed_identity_rotation.json"
+          "tests/reset.pending_authority_bootstrap.json"
+        ]
+      },
+      {
+        "id": "reset.authority_bootstrap_idempotency",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/reset.authority_bootstrap_idempotency.json"
+        ]
+      },
+      {
+        "id": "reset.completed_authority_bootstrap",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/reset.completed_authority_bootstrap.json"
         ]
       },
       {
@@ -641,8 +657,10 @@ timestamps:
   `tls.server_identity_negative`, `mtls.authorized`, and `mtls.unauthorized`;
 - `https.command`, `websocket.subscription`, and `mdns.readiness_withdrawal`;
 - `privilege.controld_unprivileged` and `privilege.proxy_hardened`;
-- `reset.pending_broker_cleanup`, `reset.pending_identity_rotation`, and
-  `reset.completed_identity_rotation`; and
+- `reset.pending_broker_cleanup`, `reset.pending_identity_rotation`,
+  `reset.pending_authority_bootstrap`,
+  `reset.authority_bootstrap_idempotency`, and
+  `reset.completed_authority_bootstrap`; and
 - `brokerless.same_boot_control_push` for both capability values; then either
   `power_loss.rtc_advancement_nonrollback`,
   `power_loss.pre_ntp_control_push`, `power_loss.certificate_expiry`, and
@@ -689,7 +707,7 @@ content-addressed evidence manifest. The resolved value is stored in
 `expected`. There are no other variables or implicit assertions.
 
 `fixtures.json` is a closed object containing exactly `tls`, `mtls`, `https`,
-`websocket`, and `mdns`. `tls` is closed and contains exactly `deviceUriSan`:
+`websocket`, `mdns`, and `reset`. `tls` is closed and contains exactly `deviceUriSan`:
 the canonical `urn:ff:device:<deviceId>`, `dnsSan`: the canonical
 `<deviceId>.local`, and `lanSpkiSha256`: 43-character unpadded base64url
 SHA-256 of the active leaf DER SubjectPublicKeyInfo, plus
@@ -700,7 +718,18 @@ unique `scopes`. `https` is closed and contains exactly lowercase 64-character
 `requestSha256`, lowercase 64-character `responseSha256`, and signed 64-bit
 integer `resultRevision`. `websocket` is closed and contains exactly lowercase
 64-character `snapshotSha256` and `eventSha256`. `mdns` is closed and contains
-exactly `activeSpki`, equal to `tls.lanSpkiSha256`. The verifier rejects a
+exactly `activeSpki`, equal to `tls.lanSpkiSha256`. `reset` is closed and
+contains exactly `deviceId`, UUIDv7 `replacementRuntimeRegistrationId`,
+lowercase 64-character `replacementCertificateSha256`, UUIDv7
+`publisherGeneration`, `authorityOperationId`, `authorityGeneration`, and
+`authorityRegistrationId`, 43-character unpadded base64url `oldIssuerKid` and
+`newIssuerKid`, 43-character unpadded base64url `oldCaSpkiSha256` and
+`newCaSpkiSha256`, lowercase 64-character `oldCaCertificateSha256` and
+`newCaCertificateSha256`, and `controllerCaUriSan`. The verifier requires
+`reset.deviceId` equal `mtls.deviceId`, old and new issuer kids unequal, old
+and new CA SPKI hashes unequal, old and new CA certificate hashes unequal, and
+`controllerCaUriSan` equal `urn:ff:device:` + `reset.deviceId` +
+`:controller-ca:` + `reset.authorityGeneration`. The verifier rejects a
 missing, extra, malformed, or unequal field before resolving any assertion. It
 also derives and requires `tls.deviceUriSan` equal to
 `urn:ff:device:` concatenated with `mtls.deviceId` and `tls.dnsSan` equal to
@@ -719,12 +748,14 @@ self-consistent device identity.
 | `mtls.unauthorized` | `absent_certificate_rejected_pre_application / equals / boolean / true`; `revoked_certificate_rejected_pre_application / equals / boolean / true`; `expired_certificate_rejected_pre_application / equals / boolean / true`; `wrong_device_rejected_pre_application / equals / boolean / true`; `out_of_scope_rejected_pre_application / equals / boolean / true` |
 | `https.command` | `request_sha256 / equals / string / $fixture.https.requestSha256`; `response_sha256 / equals / string / $fixture.https.responseSha256`; `effect_count / equals / integer / 1`; `result_revision / equals / integer / $fixture.https.resultRevision` |
 | `websocket.subscription` | `upgrade_succeeded / equals / boolean / true`; `snapshot_sha256 / equals / string / $fixture.websocket.snapshotSha256`; `event_sha256 / equals / string / $fixture.websocket.eventSha256`; `out_of_scope_rejected / equals / boolean / true` |
-| `mdns.readiness_withdrawal` | `absent_before_readiness / equals / boolean / true`; `ready_spki / equals / string / $fixture.mdns.activeSpki`; `absent_after_listener_loss / equals / boolean / true`; `absent_pending_broker_cleanup / equals / boolean / true`; `absent_pending_identity_rotation / equals / boolean / true` |
+| `mdns.readiness_withdrawal` | `absent_before_readiness / equals / boolean / true`; `ready_spki / equals / string / $fixture.mdns.activeSpki`; `absent_after_listener_loss / equals / boolean / true`; `absent_pending_broker_cleanup / equals / boolean / true`; `absent_pending_identity_rotation / equals / boolean / true`; `absent_pending_authority_bootstrap / equals / boolean / true` |
 | `privilege.controld_unprivileged` | `uid_is_nonzero / equals / boolean / true`; `effective_cap_net_bind_service / equals / boolean / false`; `permitted_cap_net_bind_service / equals / boolean / false`; `ambient_cap_net_bind_service / equals / boolean / false`; `bounding_cap_net_bind_service / equals / boolean / false`; `listener_address / equals / string / "127.0.0.1:8443"` |
 | `privilege.proxy_hardened` | `uid_is_nonzero / equals / boolean / true`; `no_new_privileges / equals / boolean / true`; `effective_capabilities / set_equals / string[] / []`; `permitted_capabilities / set_equals / string[] / []`; `ambient_capabilities / set_equals / string[] / []`; `bounding_capabilities / set_equals / string[] / []`; `proxy_destination / equals / string / "127.0.0.1:8443"` |
 | `reset.pending_broker_cleanup` | `state / equals / string / "pending_broker_cleanup"`; `mdns_absent / equals / boolean / true`; `public_listener_rejected / equals / boolean / true`; `owner_enrollment_rejected / equals / boolean / true`; `broker_cleanup_acked / equals / boolean / false` |
 | `reset.pending_identity_rotation` | `state / equals / string / "pending_identity_rotation"`; `mdns_absent / equals / boolean / true`; `public_listener_rejected / equals / boolean / true`; `owner_enrollment_rejected / equals / boolean / true`; `old_publisher_fenced / equals / boolean / true`; `old_authorization_fenced / equals / boolean / true`; `new_identity_active / equals / boolean / false` |
-| `reset.completed_identity_rotation` | `state / equals / string / "completed"`; `cleanup_acked / equals / boolean / true`; `identity_acked / equals / boolean / true`; `old_identity_rejected / equals / boolean / true`; `certificate_changed / equals / boolean / true`; `publisher_generation_changed / equals / boolean / true`; `authorized_mtls_before_mdns / equals / boolean / true` |
+| `reset.pending_authority_bootstrap` | `state / equals / string / "pending_authority_bootstrap"`; `device_id / equals / string / $fixture.reset.deviceId`; `runtime_registration_id / equals / string / $fixture.reset.replacementRuntimeRegistrationId`; `runtime_certificate_sha256 / equals / string / $fixture.reset.replacementCertificateSha256`; `publisher_generation / equals / string / $fixture.reset.publisherGeneration`; `authority_operation_id / equals / string / $fixture.reset.authorityOperationId`; `authority_generation / equals / string / $fixture.reset.authorityGeneration`; `candidate_issuer_kid / equals / string / $fixture.reset.newIssuerKid`; `candidate_ca_spki_sha256 / equals / string / $fixture.reset.newCaSpkiSha256`; `candidate_ca_certificate_sha256 / equals / string / $fixture.reset.newCaCertificateSha256`; `candidate_ca_subject_empty / equals / boolean / true`; `candidate_ca_uri_san / equals / string / $fixture.reset.controllerCaUriSan`; `candidate_ca_san_count / equals / integer / 1`; `candidate_ca_san_critical / equals / boolean / true`; `candidate_ca_self_signature_valid / equals / boolean / true`; `candidate_ca_signature_algorithm / equals / string / "ecdsa-with-SHA256"`; `candidate_ca_basic_constraints_ca / equals / boolean / true`; `candidate_ca_basic_constraints_critical / equals / boolean / true`; `candidate_ca_path_length / equals / integer / 0`; `candidate_ca_key_usage / set_equals / string[] / ["cRLSign","keyCertSign"]`; `candidate_ca_key_usage_critical / equals / boolean / true`; `candidate_ca_extended_key_usage / set_equals / string[] / []`; `identity_acked / equals / boolean / true`; `new_identity_active / equals / boolean / true`; `authority_registration_acked / equals / boolean / false`; `issuer_tpm_proof_valid / equals / boolean / true`; `ca_tpm_proof_spki_sha256 / equals / string / $fixture.reset.newCaSpkiSha256`; `ca_tpm_proof_valid / equals / boolean / true`; `old_issuer_rejected / equals / boolean / true`; `reset_completion_attempted / equals / boolean / true`; `reset_completion_rejected / equals / boolean / true`; `owner_invitation_display_attempted / equals / boolean / true`; `owner_invitation_display_rejected / equals / boolean / true`; `owner_claim_attempted / equals / boolean / true`; `owner_claim_rejected / equals / boolean / true`; `controller_credential_issue_attempted / equals / boolean / true`; `controller_credential_issue_rejected / equals / boolean / true`; `access_session_issue_attempted / equals / boolean / true`; `access_session_issue_rejected / equals / boolean / true`; `lan_certificate_issue_attempted / equals / boolean / true`; `lan_certificate_issue_rejected / equals / boolean / true`; `publisher_reconnect_attempted / equals / boolean / true`; `publisher_reconnect_rejected / equals / boolean / true`; `status_projection_closed_schema / equals / boolean / true`; `registry_retryable_failure_projection_valid / equals / boolean / true`; `registry_conflict_projection_valid / equals / boolean / true`; `registry_terminal_failure_projection_valid / equals / boolean / true`; `tpm_failure_projection_valid / equals / boolean / true`; `operation_ids_unchanged_after_failure / equals / boolean / true`; `mdns_absent / equals / boolean / true`; `public_listener_rejected / equals / boolean / true` |
+| `reset.authority_bootstrap_idempotency` | `crash_after_candidate_seal_recovered / equals / boolean / true`; `lost_registration_ack_recovered / equals / boolean / true`; `crash_after_registration_ack_before_activation_recovered / equals / boolean / true`; `tpm_activation_failure_remained_pending / equals / boolean / true`; `crash_after_activation_before_completion_projection_recovered / equals / boolean / true`; `offline_softap_network_restore_same_operation / equals / boolean / true`; `authority_operation_id / equals / string / $fixture.reset.authorityOperationId`; `authority_generation / equals / string / $fixture.reset.authorityGeneration`; `issuer_kid / equals / string / $fixture.reset.newIssuerKid`; `ca_spki_sha256 / equals / string / $fixture.reset.newCaSpkiSha256`; `ca_certificate_sha256 / equals / string / $fixture.reset.newCaCertificateSha256`; `authority_registration_id / equals / string / $fixture.reset.authorityRegistrationId`; `registration_ack_byte_equivalent / equals / boolean / true`; `conflicting_replay_rejected / equals / boolean / true`; `acked_pending_state_observed / equals / boolean / true`; `candidate_issuance_disabled_after_ack / equals / boolean / true`; `active_authority_registrations / equals / integer / 1`; `old_issuer_rejected / equals / boolean / true` |
+| `reset.completed_authority_bootstrap` | `state / equals / string / "completed"`; `device_id / equals / string / $fixture.reset.deviceId`; `runtime_registration_id / equals / string / $fixture.reset.replacementRuntimeRegistrationId`; `runtime_certificate_sha256 / equals / string / $fixture.reset.replacementCertificateSha256`; `publisher_generation / equals / string / $fixture.reset.publisherGeneration`; `authority_operation_id / equals / string / $fixture.reset.authorityOperationId`; `authority_generation / equals / string / $fixture.reset.authorityGeneration`; `authority_registration_id / equals / string / $fixture.reset.authorityRegistrationId`; `active_issuer_kid / equals / string / $fixture.reset.newIssuerKid`; `active_ca_spki_sha256 / equals / string / $fixture.reset.newCaSpkiSha256`; `active_ca_certificate_sha256 / equals / string / $fixture.reset.newCaCertificateSha256`; `cleanup_acked / equals / boolean / true`; `identity_acked / equals / boolean / true`; `authority_registration_acked / equals / boolean / true`; `local_authority_activation_acked / equals / boolean / true`; `old_identity_rejected / equals / boolean / true`; `old_issuer_kid / equals / string / $fixture.reset.oldIssuerKid`; `old_issuer_rejected / equals / boolean / true`; `old_ca_spki_sha256 / equals / string / $fixture.reset.oldCaSpkiSha256`; `old_ca_certificate_sha256 / equals / string / $fixture.reset.oldCaCertificateSha256`; `old_ca_rejected / equals / boolean / true`; `active_authority_registrations / equals / integer / 1`; `active_local_issuers / equals / integer / 1`; `active_local_controller_cas / equals / integer / 1`; `publisher_reconnect_after_authority_activation / equals / boolean / true`; `owner_invitation_after_authority_activation / equals / boolean / true`; `authorized_mtls_before_mdns / equals / boolean / true` |
 | `brokerless.same_boot_control_push` | `broker_route_unreachable / equals / boolean / true`; `trusted_ntp_in_current_boot / equals / boolean / true`; `https_command_succeeded / equals / boolean / true`; `websocket_snapshot_succeeded / equals / boolean / true`; `websocket_event_succeeded / equals / boolean / true`; `lease_expiry_rejected / equals / boolean / true` |
 | `power_loss.rtc_advancement_nonrollback` | `power_removed / equals / boolean / true`; `rtc_advance_error_ms_nonnegative / greater_than_or_equal / integer / 0`; `rtc_advance_error_ms_maximum / less_than_or_equal / integer / 5000`; `authenticated_rollback_rejected / equals / boolean / true`; `expiry_clock_rollback_ms / equals / integer / 0` |
 | `power_loss.pre_ntp_control_push` | `ntp_route_unreachable / equals / boolean / true`; `mtls_succeeded_before_ntp / equals / boolean / true`; `https_command_succeeded / equals / boolean / true`; `websocket_snapshot_succeeded / equals / boolean / true`; `websocket_event_succeeded / equals / boolean / true` |
@@ -802,9 +833,9 @@ release-ledger marker.
    authentication prompt occurs. A `feral-controld` restart invalidates open
    invitations but restores TPM-sealed, unexpired access sessions with their
    original IDs, pending-revocation markers, and absolute expiries. The
-   `pending_broker_cleanup` and `pending_identity_rotation` lifecycles are the
-   exceptions: restore no controller authorization and run only the matching
-   cleanup recovery phase.
+   `pending_broker_cleanup`, `pending_identity_rotation`, and
+   `pending_authority_bootstrap` lifecycles are the exceptions: restore no
+   controller authorization and run only the matching cleanup recovery phase.
 5. Redeliver an identical QoS 1 side-effecting command and prove one effect and
    the byte-equivalent cached response; send the same `requestId` with a
    different body and prove `duplicate_conflict`.
@@ -827,7 +858,8 @@ release-ledger marker.
    reset leaves no unauthenticated port-1111 surface or controller
    authorization. Prove an offline screen reset remains
    `pending_broker_cleanup`, blocks owner enrollment, and cannot report
-   completion before both remote ACKs and durable local cleanup. Verify pre-
+   completion before the broker-barrier, identity-registry, and authority-
+   registration ACKs plus durable local authority activation/cleanup. Verify pre-
    erasure deletes the old runtime certificate, issuer/CA, enrollments,
    invitations, sessions, cached credentials, user/network data, and event
    outbox while preserving only the stable TPM device-identity key and signed
@@ -838,7 +870,12 @@ release-ledger marker.
    status to `pending_identity_rotation`, not `completed`; the idempotent
    identity transaction revokes the old runtime-certificate registration,
    activates a replacement certificate with a fresh serial/registration and
-   publisher generation, and commits before public reconnect or owner claim.
+   publisher generation, and transitions to `pending_authority_bootstrap`, not
+   `completed`. Prove the authority transaction seals one fresh TPM issuer/CA
+   candidate under a durable operation and generation, binds its issuer `kid`
+   to the exact replacement runtime identity and publisher generation, receives
+   an idempotent registry ACK, and atomically activates that issuer and CA
+   locally before public reconnect or owner claim.
    Run this broker-loss case after NTP in the current boot for every device.
    Then power-cycle with NTP still blocked. A device advertising
    `lanOfflineAfterPowerLoss: true` MUST immediately repeat the authenticated
@@ -847,7 +884,9 @@ release-ledger marker.
    recovery SoftAP available, and restore LAN only after NTP succeeds.
 10. Verify the actual FF1 TPM supports the selected P-256 key lifecycle,
    attestation evidence, key renewal, secure deletion, and factory reset
-   behavior. Separately test whether the shipping hardware and full image have
+   behavior, including idempotent creation and sealing of a fresh issuer/CA
+   candidate pair under one durable authority operation. Separately test
+   whether the shipping hardware and full image have
    a trusted RTC that persists, advances, rejects rollback, and enforces
    certificate and LAN-lease expiry across power loss. Advertise
    `lanOfflineAfterPowerLoss: true` only when that executable evidence passes;
@@ -873,10 +912,14 @@ release-ledger marker.
    quiescence, event-outbox discard, and normal public-device DISCONNECT, and
    prove the separately authenticated management barrier runs only afterward.
    After barrier ACK, prove `pending_identity_rotation` resumes the same durable
-   `identityOperationId` across lost responses and crashes, atomically switches
-   the runtime certificate registration and publisher generation, deletes the
-   old local certificate, and reaches `completed` only after durable local
-   cleanup.
+   `identityOperationId` across lost responses and crashes and atomically
+   switches the runtime certificate registration and publisher generation.
+   Prove the identity ACK transitions to `pending_authority_bootstrap`; repeated
+   crashes and lost ACKs then preserve one `authorityOperationId`,
+   `authorityGeneration`, issuer `kid`, CA certificate, and authority
+   registration, while candidates issue no credential or LAN certificate.
+   Reach `completed` only after authority-registration ACK and atomic local
+   issuer/CA activation plus cleanup.
 12. Run the SoftAP/captive-portal spike on the required SAE-capable phone matrix
    and measure wrong-password recovery, AP/client concurrency, and auto-open
    behavior. Inspect the advertised RSN profile and association behavior: it
@@ -895,11 +938,13 @@ release-ledger marker.
    direct inter-station traffic. Direct requests with a missing, malformed,
    guessed, wrong-epoch, stale, or expired setup capability all return the same
    401 `unauthenticated` Problem Details response and make no state change. The
-   closed-schema fixtures also include both pending reset states, conditional
-   `barrierOperationId`/`identityOperationId` fields, the required cleanup
-   object, the completed response only after identity commit and local cleanup,
-   rejection of the erased setup secret, and blocked owner enrollment in both
-   pending phases.
+   closed-schema fixtures also include all three pending-reset states,
+   conditional `barrierOperationId`/`identityOperationId`/
+   `authorityOperationId`/`authorityGeneration` fields, the required cleanup
+   object and exact phase failures, the completed response only after authority
+   registration and local authority activation/cleanup, rejection of the erased
+   setup secret, and blocked owner enrollment and issuance in every pending
+   phase.
 13. Verify the fixed DP-1 trust profile against real Feral File feeds, institution trust
    roots, key rotation/revocation, and expired-trust offline cache fixtures.
 14. Define the support service's device-bound upload-grant exchange. The public
@@ -932,6 +977,7 @@ rollback at every fleet gate:
    old-device-publisher generation fencing, pending-Will/queued-publish
    cancellation, retained Application Message purge, idempotent runtime-
    certificate registration replacement, fresh publisher-generation activation,
+   idempotent controller-authority registration and TPM issuer/CA activation,
    NTP loss, packet limits, rate limiting, clean restart, restored unexpired
    access sessions, and duplicate QoS 1 delivery.
 5. Prove the unified controller-authentication profile against the managed
@@ -944,7 +990,8 @@ rollback at every fleet gate:
    atomic scope-reduction ceiling generations/barriers and their complete
    MQTT/LAN negative matrix, and normal `playlist.display`
    through a guest session. Direct broker validation of the registered FF1
-   issuer is a gate.
+   issuer, including its exact runtime-identity/publisher-generation binding and
+   prior-generation denial, is a gate.
 6. Add authenticated LAN HTTPS/WebSocket/mDNS with the sole approved port-443
    topology: system-level `ff1-control.socket` and hardened raw
    `systemd-socket-proxyd` forwarding to unprivileged `feral-controld` on
@@ -1050,12 +1097,19 @@ Minimum acceptance checks are:
 - offline reset remains `pending_broker_cleanup` and cannot enroll a new owner;
   barrier ACK transitions to `pending_identity_rotation`, not `completed`;
   identity commit atomically revokes the old runtime-certificate registration
-  and activates its replacement with a fresh publisher generation; only durable
-  local cleanup permits completion, public reconnect, or owner claim;
+  and activates its replacement with a fresh publisher generation, then
+  transitions to `pending_authority_bootstrap`, not `completed`; authority
+  registration binds one fresh TPM-backed issuer generation to that exact
+  runtime identity/publisher generation, and only atomic local issuer/CA
+  activation plus cleanup permits completion, public reconnect, or owner claim;
 - publisher fencing prevents an old Will Message, reconnect, or queued publish
   from recreating purged state, and completed reset leaves every old issuer,
   certificate registration, credential, retained message, and queued delivery
   unusable or absent;
+- authority-bootstrap retry, lost-ACK, and crash fixtures preserve one operation
+  ID, authority generation, issuer `kid`, CA certificate, and registry binding;
+  candidates issue nothing before commit, the prior issuer stays denied, and
+  exactly one issuer and one controller CA are active after completion;
 - certificate expiry/rotation and last-owner protection are tested end-to-end;
 - every LAN handshake validates TLS 1.3 proof, certificate time and the exact
   runtime-device profile, exact `<deviceId>.local` DNS SAN, and the QR-bound
@@ -1093,7 +1147,7 @@ Minimum acceptance checks are:
   except unclaimable invitations selected by a pending scope reduction, and
   restore unexpired sessions, pending-revocation markers, and pending
   scope-reduction targets without
-  changing their absolute expiry, except either pending reset lifecycle restores
+  changing their absolute expiry, except any pending-reset lifecycle restores
   no controller authorization and resumes its durable operation ID;
 - v1 weekday sleep selections survive migration exactly, including the
   missing-field daily default and non-daily subsets; and

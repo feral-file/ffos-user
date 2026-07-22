@@ -502,8 +502,9 @@ The service is advertised as `_ff1-control._tcp.local` using mDNS/DNS-SD only
 while a LAN-usable interface exists and the complete public 443 -> raw proxy ->
 loopback TLS path is ready. An active socket unit alone is not readiness. FF1
 withdraws the record on listener or proxy unavailability and before entering
-`pending_broker_cleanup` or `pending_identity_rotation`. It advertises again
-only after identity rotation, durable local cleanup, and an end-to-end
+`pending_broker_cleanup`, `pending_identity_rotation`, or
+`pending_authority_bootstrap`. It advertises again only after identity
+rotation, authority activation, durable local cleanup, and an end-to-end
 readiness check succeed; the new advertisement carries the active identity's
 SPKI fingerprint. This lifecycle is independent of internet, broker state, and
 legacy `enableHub`. The section 7.3 trusted-time prerequisite is part of backend
@@ -860,9 +861,14 @@ DP-1 errors preserve the specification names under an explicit namespace:
 
 ### 7.1 Device identity
 
-At manufacture or first secure boot, FF1 generates distinct ECDSA P-256
-hardware device-identity, controller-credential issuer, and device-local
-controller-CA private keys inside TPM 2.0. The private keys are non-exportable.
+At manufacture or first secure boot, FF1 generates an ECDSA P-256 hardware
+device-identity private key inside TPM 2.0. It also creates the initial
+controller-authority generation, consisting of distinct ECDSA P-256
+controller-credential issuer and device-local controller-CA private keys. Each
+factory reset creates a fresh controller-authority generation under the
+idempotent bootstrap transaction in section 11.5. All three private keys are
+non-exportable, and candidate authority keys cannot issue a credential or
+certificate before that transaction activates them.
 Enrollment proves possession of the hardware device-identity key and issues a
 runtime X.509 device certificate that binds that identity to the exact MQTT
 Client ID and is also the LAN server certificate. Its private key is the
@@ -1082,13 +1088,15 @@ unauthenticated access.
 Factory reset always requires an on-screen physical confirmation. Its broker
 barrier clears controller authorization and retained Application Messages; its
 post-barrier identity transaction revokes and replaces the runtime device
-certificate and registration. The completed reset has also cleared the
-controller CA, controller-credential issuer key, enrollments, invitations,
-access-session records, cached access tokens, Wi-Fi credentials, owner
-enrollment, DP-1 cache, and local support bundles. The TPM hardware device-
-identity key may remain as the cleanup and attestation anchor. SSH is
-LAN-only, owner-only, and capped at one hour. Support upload never accepts a
-service API key from a controller payload.
+certificate and registration. A subsequent authority-bootstrap transaction
+registers and activates one fresh controller-credential issuer and one fresh
+device-local controller CA before the reset can complete. The completed reset
+has cleared the prior controller CA, prior controller-credential issuer key,
+enrollments, invitations, access-session records, cached access tokens, Wi-Fi
+credentials, owner enrollment, DP-1 cache, and local support bundles. The TPM
+hardware device-identity key may remain as the cleanup, attestation, and
+rebootstrap anchor. SSH is LAN-only, owner-only, and capped at one hour.
+Support upload never accepts a service API key from a controller payload.
 
 State Topic Name ACLs are the union of the table grants: `device` requires
 `state:read|device:settings`; `playback` requires
@@ -1125,9 +1133,10 @@ the fence prevents an old publisher action from recreating purged state.
 The adapter ACK, not a disconnect request or MQTT PUBACK, is the barrier
 completion boundary. It is the terminal remote boundary for ordinary
 revocation, but only the first remote boundary for factory reset; reset then
-enters `pending_identity_rotation` under section 11.5. FF1 rejects a pending
-target locally, but MUST NOT publish a terminal revocation projection or event
-or return revocation success before that ACK.
+enters `pending_identity_rotation` and subsequently
+`pending_authority_bootstrap` under section 11.5. FF1 rejects a pending target
+locally, but MUST NOT publish a terminal revocation projection or event or
+return revocation success before that ACK.
 Failure to obtain it returns `dependency_unavailable`, `retryable: true`, with
 exact details
 `{"dependency":"broker_authorization_barrier","pending":true}`; FF1 retains
@@ -1934,11 +1943,61 @@ replacement registration with a fresh `publisherGeneration`. Repeating the
 operation ID returns the same
 certificate identity, generation, and registry commit ACK.
 
-Only after registry commit ACK does FF1 delete any local old runtime
-certificate, finish erasing remaining controller identities and user data, and
-durably commit cleanup completion. Only after that local commit may it clear
-the tombstone, report `completed`, reconnect the public publisher with the new
-certificate/generation, or display or accept a new owner invitation.
+The identity-registry ACK does not complete reset. FF1 atomically persists the
+ACK, transitions to `pending_authority_bootstrap`, and assigns both
+`authorityOperationId`: UUIDv7 and `authorityGeneration`: UUIDv7 exactly once.
+The replacement certificate registration and `publisherGeneration` are active
+at the registry, but the public publisher remains disconnected.
+
+Under that operation FF1 creates a candidate controller-authority generation:
+one fresh non-exportable TPM ECDSA P-256 controller-credential issuer key and
+one fresh non-exportable TPM ECDSA P-256 device-local controller-CA key and CA
+certificate. Before any remote request, it durably seals one closed candidate
+record containing the operation and generation IDs, TPM object references,
+the issuer public JWK and RFC 7638 `kid`, the controller-CA certificate and its
+complete-DER and SubjectPublicKeyInfo SHA-256 fingerprints, and the replacement
+runtime certificate registration ID and `publisherGeneration`. Incomplete,
+never-registered TPM objects may be discarded after a crash, but one durable
+candidate record is immutable. Every
+retry for its operation reuses that record and generation.
+
+Candidate keys are not active authorization keys. Before local activation the
+issuer MUST NOT sign an invitation, enrollment credential, or access
+credential, and the controller CA MUST NOT issue a LAN client certificate.
+Only TPM proof of possession for the authority-registration request is
+permitted. Every invitation display/acceptance, controller or session
+issuance path, and LAN client-certificate issuance path remains unavailable.
+
+Using the separately authenticated management/registry path, FF1 submits the
+candidate issuer public JWK and `kid` with the exact `deviceId`, replacement
+runtime certificate registration ID and SHA-256 certificate fingerprint,
+`publisherGeneration`, `authorityGeneration`, and
+`authorityOperationId`. The registry authenticates the stable hardware device
+identity, verifies candidate-issuer proof of possession, and idempotently
+binds exactly that issuer to that runtime identity and publisher generation.
+Its ACK contains the same operation ID, authority generation, issuer `kid`,
+and one `authorityRegistrationId`: UUIDv7. Repeating an identical operation
+returns the byte-equivalent committed ACK; reusing its operation ID with any
+different binding returns `conflict`. The registry permits only one active
+authority registration for that runtime registration and publisher
+generation, and a lost ACK, retry, or crash cannot activate a second issuer.
+The prior issuer-generation deny tombstone remains effective and the old
+issuer cannot be registered again.
+
+Only after the authority-registration ACK does one durable local transaction
+activate both candidate-key references as the sole issuer and sole controller
+CA for `authorityGeneration`, persist the ACK, delete any local old runtime
+certificate, finish erasing prior controller identities and user data, and
+commit cleanup completion. A crash before this transaction leaves both
+candidates unable to issue; recovery repeats the same authority operation and
+then the same activation transaction. A crash after it observes the already
+active generation and cannot create or activate another issuer or CA.
+
+Only after that local transaction may FF1 clear the cleanup tombstone, report
+`completed`, reconnect the public publisher with the replacement certificate
+and generation, or display or accept a new owner invitation. The first owner
+invitation and every resulting credential or LAN certificate use the newly
+active authority generation.
 On denial or expiry it first updates the entry to `rejected` or `expired`, emits
 `system.confirmation-resolved`, and does nothing else.
 
@@ -1965,9 +2024,13 @@ retained Application Messages are purged. FF1 MUST NOT reconnect the public
 device publisher or flush an old event outbox before ACK. Recovery from
 `pending_identity_rotation` resumes the same durable `identityOperationId` and
 registry transaction without restoring controller authorization or the public
-publisher. A completed reset requires both remote ACKs and the durable local
-cleanup commit and has no readable retained or queued data from the prior
-controller-issuer generation.
+publisher. Recovery from `pending_authority_bootstrap` resumes the same sealed
+candidate record, `authorityOperationId`, `authorityGeneration`, registration
+request, and activation transaction. It never restores old controller
+authorization or reconnects the public publisher. A completed reset requires
+the broker-barrier, identity-registry, and authority-registration ACKs plus the
+durable local authority activation and cleanup commit, and has no readable
+retained or queued data from the prior controller-issuer generation.
 
 ### 11.6 Controller administration
 
@@ -2277,16 +2340,21 @@ asset required for autonomous playback are locally readable. `update.status` is
 non-idle update also has `operationId`, optional `targetVersion`, and
 `progressPercent` int[0..100]. `factoryResetConfirmations` is required and is a
 newest-first array of 0..16 entries keyed by unique `confirmationId`. An entry
-has `status: pending|pending_broker_cleanup|pending_identity_rotation|rejected|expired`,
+has `status: pending|pending_broker_cleanup|pending_identity_rotation|pending_authority_bootstrap|rejected|expired`,
 `requestedAt`, and `expiresAt`; `resolvedAt` is forbidden for `pending` and
-required for every other status. At most one entry has `pending` or either
+required for every other status. `barrierOperationId` is required in every
+pending-reset status; `identityOperationId` is additionally required in
+`pending_identity_rotation` and `pending_authority_bootstrap`; and
+`authorityOperationId` plus `authorityGeneration` are additionally required
+only in `pending_authority_bootstrap`. At most one entry has `pending` or a
 pending-reset status. `pending_broker_cleanup` remains until the device-wide
-barrier ACK;
-`pending_identity_rotation` then remains until identity registry commit and
-durable local cleanup. Reset is incomplete and controller authorization and
-new owner enrollment remain blocked in both lifecycles. The barrier purges the
-old retained Application Message, so the post-barrier lifecycle is exposed by
-the recovery SetupStatus rather than republished by the fenced old publisher.
+barrier ACK; `pending_identity_rotation` then remains until identity-registry
+commit; and `pending_authority_bootstrap` remains until authority-registration
+ACK and durable local activation/cleanup. Reset is incomplete and controller
+authorization, public-publisher reconnect, and new owner enrollment remain
+blocked in all three lifecycles. The barrier purges the old retained
+Application Message, so the post-barrier lifecycle is exposed by the recovery
+SetupStatus rather than republished by the fenced old publisher.
 Rejected and expired entries remain for 24 hours; there is no post-reset
 controller continuity to recover.
 If the sixteen-entry bound is reached, a new reset request returns `busy` until
@@ -2394,9 +2462,10 @@ durable pending scope reduction remains projected open but is unclaimable until
 the barrier ACK closes it. TPM-sealed, unexpired active sessions are
 restored with their same ID, scopes, status, and absolute expiry and remain in
 the snapshot; persistent controller enrollments remain in `state/controllers`.
-When lifecycle is `pending_broker_cleanup` or `pending_identity_rotation`, this
-restoration rule does not apply: no controller or access-session authorization
-is restored. Only the corresponding reset recovery phase executes.
+When lifecycle is `pending_broker_cleanup`, `pending_identity_rotation`, or
+`pending_authority_bootstrap`, this restoration rule does not apply: no
+controller or access-session authorization is restored. Only the corresponding
+reset recovery phase executes.
 
 MQTT credentials, invitation QR data, JWE, JWK coordinates, key thumbprints,
 user agents, DP-1 Playlist URIs, and DP-1 Playlist documents are forbidden.
@@ -2532,30 +2601,61 @@ All setup paths begin `/ff/setup/v2`. Success JSON is closed and errors use RFC
 | `GET /support-bundles/{supportBundleId}` | no body | `status`: `collecting\|ready\|failed`; when ready, `downloadPath` on the same origin and `sha256` |
 | `GET /support-bundles/{supportBundleId}/download` | no body | when ready, `application/zip` bytes whose digest equals the status `sha256` |
 | `POST /factory-reset-requests` | `{}` | 202: `confirmationId`, `expiresAt`, `statusUrl` |
-| `GET /factory-reset-requests/{confirmationId}` | no body | `confirmationId`; `status`: `pending\|pending_broker_cleanup\|pending_identity_rotation\|completed\|rejected\|expired`; `barrierOperationId` required for either pending-cleanup status; `identityOperationId` required only for `pending_identity_rotation`; `completedAt` required only for `completed` |
+| `GET /factory-reset-requests/{confirmationId}` | no body | `confirmationId`; `status`: `pending\|pending_broker_cleanup\|pending_identity_rotation\|pending_authority_bootstrap\|completed\|rejected\|expired`; conditional operation IDs, completion time, and failure are defined below |
 
 The reset-status response is closed. `barrierOperationId` is required if and
-only if status is `pending_broker_cleanup` or `pending_identity_rotation` and
-forbidden otherwise. `identityOperationId` is required if and only if status is
-`pending_identity_rotation`; `completedAt` is required if and only if status is
-`completed`. Each is forbidden otherwise.
+only if status is one of the three pending-reset states and forbidden
+otherwise. `identityOperationId` is required if and only if status is
+`pending_identity_rotation` or `pending_authority_bootstrap`.
+`authorityOperationId` and `authorityGeneration` are required if and only if
+status is `pending_authority_bootstrap`. `completedAt` is required if and only
+if status is `completed`. Each conditional field is a UUIDv7 except the
+timestamp. Optional `lastFailure` is permitted only in a pending-reset state
+and has the exact shape defined below; all other fields are forbidden.
 
 `SetupStatus` is the closed object `deviceId`, `serialSuffix`, `setupEpoch`:
 UUIDv7, `state`, `firmwareVersion`, `clockStatus`, optional `attempt`, and
 optional `update` and `cleanup`. `state` is
-`awaiting_network|scanning|testing_network|online_unclaimed|online_claimed|recovery|pending_broker_cleanup|pending_identity_rotation|updating|error`.
+`awaiting_network|scanning|testing_network|online_unclaimed|online_claimed|recovery|pending_broker_cleanup|pending_identity_rotation|pending_authority_bootstrap|updating|error`.
 
 `cleanup` is required only and always when `state` is
-`pending_broker_cleanup` or `pending_identity_rotation`. It is the closed object
-`confirmationId`: UUIDv7, `barrierOperationId`: UUIDv7, `status`: exactly equal
-to `state`, `networkRequired`: boolean, optional `lastAttemptAt`: timestamp, and
-conditional `identityOperationId`: UUIDv7. `identityOperationId` is required
-only and always for `pending_identity_rotation`. Both states mean reset is
-incomplete; the public publisher, controller authorization, and owner
-invitation or claim are unavailable. If `networkRequired` is true, the recovery
-portal permits only `/status`, network discovery/configuration and attempt
-status, provisional time, and factory-reset cleanup status until a management
-path exists.
+`pending_broker_cleanup`, `pending_identity_rotation`, or
+`pending_authority_bootstrap`. It is the closed object `confirmationId`:
+UUIDv7, `barrierOperationId`: UUIDv7, `status`: exactly equal to `state`,
+`networkRequired`: boolean, optional `lastAttemptAt`: timestamp, optional
+`lastFailure`, and conditional operation fields. `identityOperationId` is
+required only and always for `pending_identity_rotation` and
+`pending_authority_bootstrap`; `authorityOperationId` and
+`authorityGeneration` are required only and always for
+`pending_authority_bootstrap`. All operation and generation values are UUIDv7.
+All three states mean reset is incomplete; the public publisher, controller
+authorization, owner invitation or claim, controller/session issuance, and LAN
+client-certificate issuance are unavailable. If `networkRequired` is true, the
+recovery portal permits only `/status`, network discovery/configuration and
+attempt status, provisional time, and factory-reset cleanup status until a
+management path exists.
+
+`lastFailure` is the same closed object in the reset-status response and
+`SetupStatus.cleanup`: `phase`:
+`broker_cleanup|identity_rotation|authority_bootstrap`, `code`:
+`dependency_unavailable|conflict|internal_error`, `dependency`:
+`broker_authorization_barrier|device_identity_registry|controller_authority_registry|tpm`,
+`retryable`: boolean, and `occurredAt`: timestamp. The only valid remote
+failure tuples are each matching phase with `dependency_unavailable`, its
+corresponding broker or registry dependency, and `retryable: true`. An
+authority operation-ID/binding or second-generation conflict is
+`authority_bootstrap`/`conflict`/`controller_authority_registry`/`false`; another
+terminal authority-registry rejection is
+`authority_bootstrap`/`internal_error`/
+`controller_authority_registry`/`false`. A local TPM generation, sealing, or
+activation failure is `internal_error`/`tpm`/`retryable: false` in the identity
+or authority phase.
+No-network waiting sets `networkRequired: true` and is not itself a failure.
+Every failure leaves the same pending lifecycle and operation IDs durable; it
+never falls through to `completed` or allocates a replacement operation.
+Retryable failures are retried automatically. A non-retryable failure remains
+fail-closed and requires signed recovery or service intervention; the recovery
+portal continues to expose status and support-bundle operations.
 
 `attempt` is the closed object `attemptId`: UUIDv7, `ssid`, `status`:
 `testing|connected|internet_verified|failed`, `startedAt`, `updatedAt`, and
@@ -2585,12 +2685,15 @@ the recovery SoftAP with a new setup epoch and secret; that fresh authorization
 can observe `pending_broker_cleanup`, configure a network, and read the matching
 reset status, but cannot authorize a controller or owner. After barrier ACK,
 the status changes to `pending_identity_rotation` with the durable
-`identityOperationId`; it MUST NOT become `completed`. Only after registry
-commit ACK and durable local cleanup does the reset-status route return
-`completed` with `completedAt` for the remainder of that new setup session and
-`SetupStatus.state` become `online_unclaimed` or `recovery`. Setup completion
-clears the new secret. An unresumable setup always shows a new QR and epoch
-rather than accepting an old secret.
+`identityOperationId`; it MUST NOT become `completed`. After identity-registry
+commit ACK it changes to `pending_authority_bootstrap` with the same identity
+operation plus the durable `authorityOperationId` and
+`authorityGeneration`; it still MUST NOT become `completed`. Only after the
+authority-registration ACK and durable local authority activation/cleanup does
+the reset-status route return `completed` with `completedAt` for the remainder
+of that new setup session and `SetupStatus.state` become `online_unclaimed` or
+`recovery`. Setup completion clears the new secret. An unresumable setup always
+shows a new QR and epoch rather than accepting an old secret.
 
 A network is persisted only after DHCP succeeds and either internet/NTP is
 verified or the screen user explicitly chooses LAN-only mode. A failed attempt
@@ -2605,11 +2708,12 @@ bundle download requires the live setup authorization header, expires after 15
 minutes, and is allowed only after a screen action starts recovery support.
 After internet is established, FF1 closes the setup server and displays an
 `owner_enrollment` QR from the controller-authentication profile. The claimant
-uses MQTT over WSS/443; FF1 never reuses the setup secret. In either
-`pending_broker_cleanup` or `pending_identity_rotation`, internet establishment
-runs the corresponding
+uses MQTT over WSS/443; FF1 never reuses the setup secret. In
+`pending_broker_cleanup`, `pending_identity_rotation`, or
+`pending_authority_bootstrap`, internet establishment runs the corresponding
 management transaction first; the owner invitation is not displayed until the
-identity registry commit and durable local cleanup both complete.
+identity and authority registry commits plus durable local authority activation
+and cleanup complete.
 
 ## 15. Standard use versus FF customization
 
@@ -2619,6 +2723,7 @@ identity registry commit and durable local cleanup both complete.
 | Device authentication | Standard TLS 1.3 and X.509 with one TPM-backed runtime certificate profiled for MQTT `clientAuth` and LAN `serverAuth`, exact URI and DNS SANs, RFC 9525 hostname verification, and an enrollment-bound leaf-SPKI pin. The hardware key may remain the reset-stable PoP/attestation anchor, while the runtime certificate and broker registration are reset-scoped and replaced before completion. Stable-SPKI renewal and QR-bound pinning are FF profile constraints; TPM attestation is used at enrollment, not invented as an MQTT AUTH exchange. |
 | Controller authentication | Invitation and enrollment-only connections use standard MQTT User Name and Password fields with restricted FF1-signed credentials. Access-session connections use standard MQTT 5 Enhanced Authentication and AUTH Control Packets; `FF1-JWT-ES256-PoP` and its JSON challenge/proof semantics are an FF customization. LAN uses standard mTLS. |
 | Broker authorization barrier | MQTT 5 has no ACL-mutation or barrier API. A broker-management adapter customized to the chosen vendor MUST provide the vendor-neutral durable deny/ceiling generation, queue/subscription removal, disconnect, reconnect denial, old-publisher fencing, pending-Will cancellation, retained-delivery denial or reset purge, and ACK semantics in section 7.5 without changing public MQTT packets or reason codes. |
+| Controller-authority bootstrap | MQTT 5 has no device-issuer registration API. The separately authenticated registry transaction in section 11.5 is an FF control-plane customization that binds one TPM-backed issuer generation to the exact device runtime registration and publisher generation; it adds no MQTT Control Packet, property, Topic Name, or Reason Code. |
 | Playlist | Exact DP-1 core v1.1.0 and capability-gated registered/draft DP-1 extensions. `playlist.display`, `displayAt`, the 2 MiB admission limit, and JSON pull-chunk retrieval are FF control-profile extensions outside DP-1. FF commands do not mutate or wrap signed DP-1 fields. |
 | JSON/signatures/time/errors | JSON Schema 2020-12, JCS, SHA-256, and RFC 3339. Runtime errors reuse RFC 9457 members inside the common FF envelope; SoftAP uses top-level RFC 9457. |
 | Discovery | Standard mDNS/DNS-SD endpoint discovery. The FF `fp` TXT value is only an optimization for comparison with the invitation/enrollment-bound SPKI pin; it is never TOFU or a pin-update source. |

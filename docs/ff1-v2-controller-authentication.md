@@ -110,25 +110,34 @@ operation names and JSON use `enrollment`, `invitation`, and `session`.
 
 ### 4.1 FF1 keys
 
-FF1 has three distinct non-exportable ECDSA P-256 keys:
+An active FF1 authorization generation has three distinct non-exportable ECDSA
+P-256 keys:
 
 1. a TPM-backed hardware device-identity and proof-of-possession key;
 2. a TPM-backed controller-credential issuer key; and
 3. a device-local controller CA key for LAN client certificates.
 
-The keys MUST NOT be reused across purposes. The device registry binds the
-credential-issuer public key and its `kid` to the TPM-attested device identity.
-The MQTT broker validates FF1-issued JWS credentials from this registered public
-key without a per-session authentication callback to FF1 or a control-plane
-session lookup.
+The keys MUST NOT be reused across purposes. The hardware identity key is the
+stable TPM anchor. The controller issuer and controller CA belong to one
+`authorityGeneration`: UUIDv7 and are replaced together by every factory
+reset. The device registry binds the active credential-issuer public key and
+its RFC 7638 `kid` to the exact TPM-attested device identity, runtime
+certificate registration, and broker `publisherGeneration`. The MQTT broker
+validates FF1-issued JWS credentials from this registered public key without a
+per-session authentication callback to FF1 or a control-plane session lookup.
+It MUST reject an issuer from a prior or otherwise unregistered authority
+generation. A newly registered issuer can be known to the broker before FF1's
+local activation transaction, but the candidate private-key interface remains
+incapable of issuing a credential until that local commit.
 
 The hardware device-identity key MAY survive factory reset as the stable TPM
-proof-of-possession and attestation anchor; this profile preserves it through
-reset cleanup. Its runtime X.509 device certificate and broker certificate
-registration are separate, reset-scoped credentials. Factory reset MUST revoke
-and replace that certificate and registration even when the underlying TPM key
-is retained. The retained key alone cannot open the public device MQTT Network
-Connection.
+proof-of-possession, attestation, and authority-rebootstrap anchor; this profile
+preserves it through reset cleanup. Its runtime X.509 device certificate and
+broker certificate registration are separate, reset-scoped credentials.
+Factory reset MUST revoke and replace that certificate and registration, then
+register and activate a fresh issuer/CA generation, even when the underlying
+TPM key is retained. The retained key alone cannot open the public device MQTT
+Network Connection or issue controller authority.
 
 The single runtime device certificate is also FF1's LAN server certificate.
 Parent API section 7.1 defines its closed X.509 v3 profile: the same TPM P-256
@@ -1279,12 +1288,14 @@ selected MQTT session to local authorization, issue above the proposed ceiling,
 publish the terminal projections/events, or expose the old ceiling as
 effective authorization while the ACK is pending.
 
-The exceptions are lifecycles `pending_broker_cleanup` and
-`pending_identity_rotation`. In either lifecycle restart restores no controller
-enrollment or access-session authorization and accepts no controller command or
-new owner claim. Broker-cleanup recovery executes only the device-wide barrier;
-identity-rotation recovery executes only the post-barrier identity transaction
-in section 13.5.
+The exceptions are lifecycles `pending_broker_cleanup`,
+`pending_identity_rotation`, and `pending_authority_bootstrap`. In any of these
+lifecycles restart restores no controller enrollment or access-session
+authorization and accepts no controller command or new owner claim.
+Broker-cleanup recovery executes only the device-wide barrier;
+identity-rotation recovery executes only the post-barrier identity transaction;
+and authority-bootstrap recovery executes only the sealed-candidate,
+registration, and activation transaction in section 13.5.
 
 ### 13.4 Authorization reduction and revocation
 
@@ -1463,13 +1474,84 @@ identity-commit boundary. Repeating `identityOperationId` MUST return the same
 replacement certificate identity, publisher generation, and committed ACK;
 neither an ambiguous response nor a crash may create two active registrations.
 
-Only after the identity-commit ACK may FF1 delete any local old runtime
-certificate, finish erasing the prior controller issuer and controller CA,
-enrollments, invitations, access sessions, cached credentials and user data,
-and durably commit cleanup completion. Only after that local commit may it
-clear the cleanup tombstone, report reset `completed`, connect the public MQTT
-device publisher with the replacement certificate and generation, or display
-or accept a new `owner_enrollment` invitation.
+The identity-commit ACK does not complete reset. FF1 atomically persists it,
+transitions to `pending_authority_bootstrap`, and assigns one UUIDv7
+`authorityOperationId` and one UUIDv7 `authorityGeneration`. The replacement
+runtime registration and `publisherGeneration` are active remotely, but FF1
+MUST NOT reconnect its public publisher yet.
+
+FF1 uses `authorityOperationId` to create and durably seal one immutable
+candidate-authority record before contacting the authority registry. The
+record contains the operation and generation IDs, non-exportable TPM object
+references for one fresh ECDSA P-256 controller-credential issuer key and one
+fresh ECDSA P-256 controller-CA key, the issuer public JWK and RFC 7638 `kid`,
+the new controller-CA certificate and its complete-DER and SubjectPublicKeyInfo
+SHA-256 fingerprints, and the exact
+replacement runtime registration ID and `publisherGeneration`. The controller
+CA certificate is a self-signed X.509 v3 certificate for that candidate key,
+has critical Basic Constraints `CA=true` with path length zero, critical Key
+Usage containing exactly `keyCertSign` and `cRLSign`, no Extended Key Usage,
+and an empty Subject plus one critical URI SAN
+`urn:ff:device:<deviceId>:controller-ca:<authorityGeneration>`. Its signature
+algorithm is ECDSA with SHA-256. It is a device-local trust anchor and is never
+accepted as a controller leaf.
+
+Candidate keys are not active authority. Before the local activation commit,
+the issuer signing interface MUST reject invitation, enrollment-credential,
+and access-credential issuance, and the CA interface MUST reject LAN client-
+certificate issuance. The issuer key may sign only the proof of possession for
+its authority-registration request. Incomplete unregistered TPM objects may be
+discarded after a crash, but once the closed candidate record is durable every
+retry reuses it. The same operation therefore retains one authority generation,
+issuer `kid`, CA certificate, and TPM object pair across process restart,
+device reboot, request retry, and lost ACK.
+
+Over the separately authenticated broker-management/registry path, FF1 proves
+possession of the stable hardware device-identity key and candidate issuer key,
+then submits exactly `authorityOperationId`, `authorityGeneration`, `deviceId`,
+the replacement runtime certificate registration ID and SHA-256 certificate
+fingerprint, `publisherGeneration`, and the candidate issuer public JWK and
+`kid`. The registry verifies both proofs and binds that issuer to exactly that
+device/runtime/publisher tuple. Its committed ACK contains the same operation
+ID, authority generation, and issuer `kid`, plus one UUIDv7
+`authorityRegistrationId`. An identical replay returns the byte-equivalent
+ACK. The same operation ID with different input returns `conflict`, and a
+second authority generation for the same runtime registration and publisher
+generation is rejected. The prior issuer-generation tombstone installed by the
+barrier remains effective and the old issuer cannot be reactivated.
+
+An unavailable authority registry leaves the lifecycle and operation IDs
+unchanged and sets the parent API section 14 `lastFailure` tuple to
+`authority_bootstrap`/`dependency_unavailable`/
+`controller_authority_registry`/`true`. Reuse of the operation ID with a
+different binding or a second-generation conflict sets
+`authority_bootstrap`/`conflict`/`controller_authority_registry`/`false`.
+Another terminal registry rejection sets
+`authority_bootstrap`/`internal_error`/
+`controller_authority_registry`/`false`. A TPM candidate-generation, sealing,
+or activation failure sets
+`authority_bootstrap`/`internal_error`/`tpm`/`false`. A retryable failure is
+retried with the same operation. A non-retryable failure stays fail-closed in
+`pending_authority_bootstrap`, exposes recovery/support guidance through the
+SoftAP, and requires signed recovery or service intervention; it never creates
+another generation. No failure exposes an issuance path.
+
+The authority-registration ACK is not alone an authorization boundary. After
+receiving it, one durable local transaction persists that ACK, switches both
+active TPM references to the candidate issuer and candidate CA, records exactly
+one active `authorityGeneration`, finishes erasing the old runtime certificate,
+prior authority and controller records, cached credentials and user data, and
+commits cleanup completion. A crash before that transaction leaves candidate
+issuance disabled and retries the same remote operation; a crash after it
+observes the already-active generation and cannot activate a second issuer or
+CA.
+
+Only after the authority-registration ACK and that local activation/cleanup
+commit may FF1 clear the cleanup tombstone, report reset `completed`, connect
+the public MQTT device publisher with the replacement certificate and
+generation, display or accept a new `owner_enrollment` invitation, issue a
+controller or access-session credential, or issue a LAN client certificate.
+The first new owner invitation is signed by the newly active issuer.
 
 An offline screen-initiated reset is the sole pre-ACK erasure exception. It
 deletes the local prior runtime device certificate, controller issuer and
@@ -1490,12 +1572,14 @@ action. It fences the prior publisher generation before purging its retained
 Application Messages; FF1 MUST NOT reconnect the public device publisher or
 flush an old event outbox before the ACK. Recovery from
 `pending_identity_rotation` instead resumes the same idempotent
-`identityOperationId` and completes the registry switch and local cleanup; it
-does not restore controller authorization or reconnect the public publisher.
-If a crash occurs after either remote ACK, the durable tombstone identifies the
-completed boundary so the corresponding operation is not reversed or
-duplicated. No controller authorization or queued or retained controller data
-survives a completed reset.
+`identityOperationId` and completes only the registry switch. Recovery from
+`pending_authority_bootstrap` resumes the same sealed candidate,
+`authorityOperationId`, authority-registration request, and local activation
+transaction. Neither phase restores controller authorization or reconnects the
+public publisher. If a crash occurs after any remote ACK, the durable tombstone
+and operation records identify the completed boundary so no operation is
+reversed or duplicated. No controller authorization or queued or retained
+controller data survives a completed reset.
 
 Owner transfer is a physical ceremony. It revokes the former owner enrollment
 and all derived sessions before FF1 displays a new `owner_enrollment`
@@ -1573,14 +1657,16 @@ conformance suite MUST prove:
    user interaction;
 10. FF1 restart invalidates open invitations, restores TPM-sealed unexpired
     access sessions, and preserves active enrollments without extending any
-    absolute expiry, except that either pending-reset lifecycle restores no
+    absolute expiry, except that any pending-reset lifecycle restores no
     controller or session authorization and a pending scope reduction restores
     its selected invitations only as unclaimable until barrier completion;
-11. offline reset cannot complete or enroll a new owner before both the broker
-    barrier and identity-commit ACK; barrier ACK transitions to
-    `pending_identity_rotation`, and completion requires old runtime-certificate
-    deregistration, replacement-certificate activation, a fresh publisher
-    generation, and durable local cleanup;
+11. offline reset cannot complete or enroll a new owner before the broker
+    barrier, identity-commit, and authority-registration ACKs; barrier ACK
+    transitions to `pending_identity_rotation`, identity commit transitions to
+    `pending_authority_bootstrap`, and completion requires old runtime-
+    certificate deregistration, replacement-certificate activation, a fresh
+    publisher generation, one fresh registered issuer/CA generation, and
+    durable local authority activation and cleanup;
 12. one controller cannot subscribe to another controller's response Topic
     Name or another device subtree;
 13. logs, state, events, and diagnostics contain no invitation credential,
@@ -1593,7 +1679,7 @@ conformance suite MUST prove:
 15. every retained invitation/session projection variant validates as a closed
     object, terminal transitions remove it atomically, and restart publishes no
     previously open invitation while restoring every unexpired active session
-    and pending-revocation marker unless reset is in either pending-reset
+    and pending-revocation marker unless reset is in any pending-reset
     lifecycle;
 16. a captured access credential cannot complete MQTT authentication without
     the private key corresponding to its RFC 7800 `cnf.jwk`;
@@ -1607,9 +1693,11 @@ conformance suite MUST prove:
     self-controller scope replacement fail with `interaction_not_allowed`
     before creating a barrier operation; and
 20. crash recovery in each pending-reset lifecycle resumes the same durable
-    operation ID, never activates two runtime certificate registrations, and
-    cannot report `completed`, reconnect the publisher, or enroll an owner
-    before identity commit and durable local cleanup;
+    operation ID, never activates two runtime certificate registrations, issuer
+    registrations, authority generations, or controller CAs, and cannot report
+    `completed`, reconnect the publisher, enroll an owner, issue a controller or
+    session credential, or issue a LAN client certificate before authority
+    registration ACK and durable local authority activation/cleanup;
 21. with `lanOfflineAfterPowerLoss: true`, an NTP-synchronized FF1 is power
     cycled with internet and broker blocked, its trusted RTC advances without
     rollback, and an enrolled controller completes LAN mTLS, a command, initial
