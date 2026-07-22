@@ -413,6 +413,8 @@ func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing
 	expectDisplayPlaylistSuccess(ts, playlistURL, mockPlaylist)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1", "item2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -422,6 +424,46 @@ func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing
 	}
 
 	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+}
+
+// TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSend
+// is the regression test for the "replay scope and kiosk navigation are
+// not serialized" hazard: the displayPlaylist path must hold the playback
+// coordinator across BOTH the replay-scope sync AND the CDP navigation
+// send, so a concurrent display command or playlist-refresher pass cannot
+// interleave its own sync+send between them and leave the on-screen
+// playlist and the Fetch interception scope disagreeing (see
+// offlinecache.KioskReplay.LockPlayback's doc). gomock.InOrder pins the
+// exact Lock -> Sync -> Send -> Unlock sequence: a future edit that moves
+// the lock acquisition after the sync, releases it before the send, or
+// drops it entirely fails here.
+func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	mockPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
+	}}
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, true).Return(mockPlaylist, nil).Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	lock := mockKioskReplay.EXPECT().LockPlayback().Times(1)
+	sync := mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1"}).Return(nil).Times(1)
+	send := ts.mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil).Times(1)
+	unlock := mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
+	gomock.InOrder(lock, sync, send, unlock)
+
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
 
 	assert.NoError(t, err)
 	assert.NotNil(t, result)
@@ -440,6 +482,8 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 	expectDisplayPlaylistSuccess(ts, playlistURL, mockPlaylist)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1"}).Return(errors.New("dial failed")).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -472,6 +516,8 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, newURL, true).Return(newPlaylist, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -515,6 +561,8 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, newURL, true).Return(newPlaylist, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
 

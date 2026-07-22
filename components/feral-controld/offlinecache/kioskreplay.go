@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -36,6 +37,32 @@ type KioskReplay interface {
 	// SyncPlaylist scopes replay to whichever of itemIDs are already
 	// cached, disabling interception entirely if none are.
 	SyncPlaylist(ctx context.Context, itemIDs []string) error
+	// LockPlayback/UnlockPlayback serialize a full "sync replay scope
+	// then navigate/refresh the kiosk" sequence against every other such
+	// sequence. Replay scope and kiosk navigation are two separate
+	// operations (SyncPlaylist here + the CDP display send in
+	// commandrouter/playlist-refresher), and BOTH the commandrouter's
+	// displayPlaylist path and playlist-refresher's periodic pass run
+	// them independently, concurrently (the storm gate admits multiple
+	// heavy displayPlaylist commands at once, and the refresher ticks on
+	// its own goroutine). Without serialization the two halves can
+	// interleave as Sync(A) -> Sync(B) -> send(A), leaving playlist A on
+	// screen but Fetch interception scoped to B — under fail_closed, A's
+	// own requests are then misclassified as misses and fail offline.
+	//
+	// Callers must hold this lock across BOTH their scope sync and the
+	// corresponding navigation/refresh send (but NOT across slow DP-1
+	// resolution, which does not touch scope — acquire it only just
+	// before syncing). This is the single process-wide playback
+	// coordinator: it lives here because KioskReplay is the one shared
+	// dependency both the commandrouter handler and playlist-refresher
+	// already inject, and neither depends on the other (see AGENTS.md's
+	// service-boundary guidance). It is a plain non-reentrant mutex —
+	// no caller acquires it twice on one goroutine (the displayPlaylist
+	// failure/rejection resync runs from a deferred handler only AFTER
+	// the send-path unlock, never nested inside it).
+	LockPlayback()
+	UnlockPlayback()
 }
 
 type kioskReplay struct {
@@ -47,6 +74,9 @@ type kioskReplay struct {
 	json       wrapper.JSON
 	io         wrapper.IO
 	logger     *zap.Logger
+	// playbackMu serializes scope-sync + kiosk-navigation sequences
+	// across every caller — see LockPlayback's doc.
+	playbackMu sync.Mutex
 }
 
 // NewKioskReplay constructs a KioskReplay. endpoint is the kiosk
@@ -130,3 +160,13 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error 
 	mixed := len(cachedIDs) < total
 	return k.replayer.EnableForPlaylist(ctx, cachedIDs, mixed)
 }
+
+// LockPlayback acquires the process-wide playback coordinator. See the
+// KioskReplay interface doc for the interleaving hazard this prevents and
+// the caller contract (hold across scope sync + navigation, not DP-1
+// resolution).
+func (k *kioskReplay) LockPlayback() { k.playbackMu.Lock() }
+
+// UnlockPlayback releases the playback coordinator acquired by
+// LockPlayback.
+func (k *kioskReplay) UnlockPlayback() { k.playbackMu.Unlock() }

@@ -398,6 +398,8 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	mockTicker := mocks.NewMockTicker(ctrl)
@@ -431,6 +433,95 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 	r.Stop()
 }
 
+// TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend
+// is the refresher-side regression test for the "replay scope and kiosk
+// navigation are not serialized" hazard (its commandrouter twin lives in
+// handler_test.go). Rather than pin an exact InOrder sequence — the
+// refresher runs on a background goroutine that may take multiple passes —
+// it records lock depth around every scope sync and CDP send and asserts
+// the safety invariant directly: the playback lock (see
+// offlinecache.KioskReplay.LockPlayback) is ALWAYS held (depth == 1) while
+// this refresher pass syncs replay scope and re-sends the playlist, for
+// every pass. A future edit that syncs or sends outside the lock trips
+// the recorded violation regardless of how many passes run.
+func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	playlistURL := "http://example.com/playlist.json"
+	mockPlaylist := createMockPlaylist()
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
+
+	// held tracks the playback lock depth; violation records the first
+	// time a scope sync or CDP send observed the lock NOT held. Guarded
+	// by mu because the assertion (in the main goroutine) reads them
+	// while the refresher goroutine's mock callbacks write them.
+	var mu sync.Mutex
+	held := 0
+	violation := ""
+	observeLockHeld := func(op string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if held != 1 && violation == "" {
+			violation = op + " ran while the playback lock was not held"
+		}
+	}
+
+	mockKioskReplay.EXPECT().LockPlayback().Do(func() {
+		mu.Lock()
+		held++
+		mu.Unlock()
+	}).MinTimes(1)
+	mockKioskReplay.EXPECT().UnlockPlayback().Do(func() {
+		mu.Lock()
+		held--
+		mu.Unlock()
+	}).MinTimes(1)
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item1"}).
+		Do(func(_ context.Context, _ []string) { observeLockHeld("SyncPlaylist") }).
+		Return(nil).
+		MinTimes(1)
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Do(func(_ string, _ map[string]interface{}) { observeLockHeld("CDP send") }).
+		Return("success", nil).
+		MinTimes(1)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, violation, "scope sync and CDP send must both run under the playback lock")
+	assert.Zero(t, held, "every LockPlayback must be balanced by an UnlockPlayback")
+}
+
 // TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick is the
 // regression test pinning that offline-cache replay scope must not only
 // ever be re-synced by the next displayPlaylist command or the next
@@ -450,6 +541,8 @@ func TestRefresher_ForceRefresh_TriggersImmediateSyncBeforeNextTick(t *testing.T
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	// A ticker channel that never delivers a tick: without ForceRefresh,
@@ -539,6 +632,8 @@ func TestRefresher_ProcessPlayingPlaylist_FallsBackToCachedPlaylistWhenOffline(t
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
@@ -654,6 +749,8 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	mockTicker := mocks.NewMockTicker(ctrl)
@@ -797,6 +894,8 @@ func TestRefresher_ProcessPlayingPlaylist_StaticInlinePlaylistStillSyncsKioskRep
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	mockTicker := mocks.NewMockTicker(ctrl)

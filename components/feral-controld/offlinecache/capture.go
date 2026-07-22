@@ -76,50 +76,76 @@ type capturer struct {
 	io    wrapper.IO
 	clock wrapper.Clock
 	// maxResourceBytes is the whole cache's configured disk budget
-	// (service.maxDiskBytes, "<=0 means unlimited"), reused here as the
-	// ceiling a single Capture call's resource fetches are cumulatively
-	// bounded by — see newCaptureDiskBudget's doc for why a per-resource-
-	// only cap (each individual WriteBlob call bounded by this same
-	// value independently) is not sufficient on its own.
+	// (service.maxDiskBytes, "<=0 means unlimited"). Each Capture call's
+	// resource fetches are cumulatively bounded so that this capture's
+	// bytes PLUS what is already on disk never exceed it — see
+	// newDiskBudget and captureDiskBudget's docs for why both the
+	// per-resource cap AND the existing-usage subtraction are required
+	// to make this a genuine hard bound rather than a best-effort hint.
 	maxResourceBytes int64
 	logger           *zap.Logger
 }
 
 // captureDiskBudget bounds the TOTAL bytes one Capture call is allowed to
-// stream to disk across every resource it fetches, not just each
-// individual resource independently. Without this, a per-resource cap
-// alone (WriteBlob's own maxBytes argument, bounded at
-// capturer.maxResourceBytes) still lets a multi-resource artwork write
-// several budget-sized blobs before service.enforceDiskLimit's
-// post-capture eviction ever runs — e.g. three resources each just under
-// maxDiskBytes would let a single item transiently occupy nearly 3x the
-// configured budget on disk, exactly the "disk-constrained embedded
-// device" failure mode maxDiskBytes exists to prevent (see
-// OptionsFromConfig's DefaultMaxDiskBytes doc). Scoping the budget to
-// "this item's own total" rather than "the whole store's current usage"
-// deliberately preserves the existing, separately-reviewed cross-item
-// design in enforceDiskLimit: a new capture is still allowed to run to
-// completion up to its own item's fair share of the whole budget, with
-// STALE items evicted afterward to make room for it, rather than a
-// nearly-full cache from OLDER items silently starving new downloads
-// before they even get a chance to capture.
+// stream to disk across every resource it fetches, measured against the
+// WHOLE store's configured maxDiskBytes ceiling INCLUDING what other
+// already-cached items are currently consuming — not just this one
+// capture's own fetches in isolation.
+//
+// Two layers of undercounting had to be closed to make maxDiskBytes a
+// genuine hard bound rather than a post-hoc "try to make room" heuristic:
+//
+//  1. A per-resource cap alone (WriteBlob's own maxBytes argument) lets a
+//     multi-resource artwork write several budget-sized blobs before
+//     service.enforceDiskLimit's post-capture eviction ever runs — three
+//     resources each just under maxDiskBytes would transiently occupy ~3x
+//     the budget. The cumulative `used` accounting here fixes that within
+//     a single capture.
+//
+//  2. Seeding `limit` at the full maxDiskBytes ignored bytes ALREADY on
+//     disk from other items. A store sitting at 9.9GB of a 10GB budget
+//     could still admit an 8GB capture (nothing in THIS capture exceeds
+//     10GB on its own), pushing the filesystem to ~17.9GB before eviction
+//     runs. `limit` is therefore seeded at maxDiskBytes MINUS current
+//     DiskUsage (see Capture), so the budget reflects real remaining room.
+//
+// enforceDiskLimit's cross-item eviction still runs afterward and remains
+// the mechanism that reclaims space from STALE items; this budget only
+// guarantees a single in-flight capture can never itself push total
+// on-disk usage past the ceiling before that eviction gets a chance to.
+// Counting existing usage is deliberately conservative (a re-capture of an
+// item whose old blobs are about to be replaced/GC'd is charged for both
+// briefly), which errs toward staying under budget — the safe direction.
 type captureDiskBudget struct {
-	limit int64 // <=0 means unlimited, mirroring maxResourceBytes/maxDiskBytes
-	used  int64 // cumulative bytes this Capture call has already written
+	// unlimited mirrors maxDiskBytes <= 0 ("no ceiling configured"). Kept
+	// as an explicit flag rather than overloading limit<=0, because a
+	// bounded budget legitimately reaches limit-used == 0 remaining (store
+	// already full), which must reject further writes — NOT be misread as
+	// "unlimited" the way a raw 0 would be.
+	unlimited bool
+	limit     int64 // remaining room at capture start (maxDiskBytes - existing usage), clamped >= 0
+	used      int64 // cumulative bytes this Capture call has already written
 }
 
-func newCaptureDiskBudget(limit int64) *captureDiskBudget {
-	return &captureDiskBudget{limit: limit}
+// newCaptureDiskBudget builds a budget with `remaining` bytes of room. A
+// non-positive remaining is a real "store already at/over budget" state
+// for a bounded budget (reserve then rejects every write) — pass
+// unlimited=true explicitly for the "no ceiling configured" case instead.
+func newCaptureDiskBudget(remaining int64, unlimited bool) *captureDiskBudget {
+	if remaining < 0 {
+		remaining = 0
+	}
+	return &captureDiskBudget{unlimited: unlimited, limit: remaining}
 }
 
 // reserve returns the maxBytes a caller should pass to the next
 // WriteBlob call: capBytes is the remaining room (0 meaning "unlimited",
-// WriteBlob's own convention, when the budget itself is disabled), and
-// ok is false once the budget is already exhausted — the caller must
+// WriteBlob's own convention, only when the budget itself is disabled),
+// and ok is false once the budget is already exhausted — the caller must
 // skip the write entirely in that case rather than pass a 0 cap, which
 // WriteBlob would otherwise read as "unlimited" instead of "none left".
 func (b *captureDiskBudget) reserve() (capBytes int64, ok bool) {
-	if b.limit <= 0 {
+	if b.unlimited {
 		return 0, true
 	}
 	remaining := b.limit - b.used
@@ -140,6 +166,32 @@ func (b *captureDiskBudget) reserve() (capBytes int64, ok bool) {
 // conservative direction to err in for a hard disk-budget guarantee.
 func (b *captureDiskBudget) record(size int64) {
 	b.used += size
+}
+
+// newDiskBudget builds the per-capture disk budget for one Capture call,
+// seeded with the store's REMAINING room (maxResourceBytes minus what is
+// already on disk) so the ceiling is a true whole-store bound — see
+// captureDiskBudget's doc for why current usage must be subtracted. A
+// DiskUsage read failure is treated as "assume the store is full" (zero
+// remaining) rather than "assume empty": a bounded cache must fail safe
+// toward not overfilling the disk when it cannot confirm how full it
+// already is. maxResourceBytes <= 0 means no ceiling was configured, so
+// the budget is genuinely unlimited regardless of current usage.
+//
+// Safe to call DiskUsage here without extra locking: the service runs
+// captures one at a time under captureMu (see service.process), so no
+// other capture is writing blobs concurrently while this reads usage.
+func (c *capturer) newDiskBudget() *captureDiskBudget {
+	if c.maxResourceBytes <= 0 {
+		return newCaptureDiskBudget(0, true)
+	}
+	used, err := c.store.DiskUsage()
+	if err != nil {
+		c.logger.Warn("offline cache capture: disk usage check failed, treating store as full for this capture's budget",
+			zap.Error(err))
+		return newCaptureDiskBudget(0, false)
+	}
+	return newCaptureDiskBudget(c.maxResourceBytes-used, false)
 }
 
 func NewCapturer(
@@ -215,7 +267,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 		return nil, err
 	}
 
-	resources, coverage := c.resolveResources(ctx, tracker, newCaptureDiskBudget(c.maxResourceBytes))
+	resources, coverage := c.resolveResources(ctx, tracker, c.newDiskBudget())
 
 	// resetTargetState above only reaches item.Source's OWN origin,
 	// which cannot cover an origin this navigation redirects to or

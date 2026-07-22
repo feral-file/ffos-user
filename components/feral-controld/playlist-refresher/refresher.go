@@ -285,7 +285,17 @@ func (r *refresher) processPlayingPlaylist() error {
 	// refresh passes. Best-effort: never let a sync failure block the
 	// actual refresh, since offline replay is a strict enhancement over
 	// the live path this loop exists to maintain.
+	//
+	// The playback coordinator is held across BOTH this scope sync and
+	// the CDP re-send below (or the skipCDPResend early return), so this
+	// refresher pass cannot interleave its sync+send with a concurrent
+	// displayPlaylist command's own sync+send and leave scope pointing
+	// at a different playlist than the one actually on screen (see
+	// KioskReplay.LockPlayback's doc). Acquired only now, after the
+	// network-bound DP-1 resolution above, which does not touch scope.
 	if r.kioskReplay != nil {
+		r.kioskReplay.LockPlayback()
+		defer r.kioskReplay.UnlockPlayback()
 		itemIDs := make([]string, 0, len(playlist.Items))
 		for _, item := range playlist.Items {
 			itemIDs = append(itemIDs, item.ID)

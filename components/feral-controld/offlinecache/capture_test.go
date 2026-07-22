@@ -312,6 +312,61 @@ func TestCapturer_Capture_DiskBudgetExhaustedSkipsFetchEntirely(t *testing.T) {
 	assert.Contains(t, rec.Coverage.Reason, "over_disk_budget:https://example.com/b.bin")
 }
 
+// TestCapturer_Capture_BudgetSubtractsExistingStoreUsage is the regression
+// test for the "maxDiskBytes is not a hard bound while a capture is in
+// progress" hazard: the per-capture budget must be seeded with the store's
+// REMAINING room (maxDiskBytes minus bytes already on disk from other
+// items), not the full ceiling every time. Here the store is pre-seeded to
+// exactly the 10-byte budget by an unrelated blob, so a fresh capture has
+// zero room and must skip its resource's fetch entirely — WITHOUT ever
+// calling the HTTP client. Before existing usage was subtracted, this same
+// capture would have seen a full 10-byte budget and happily fetched,
+// pushing total on-disk usage to 15 bytes past a 10-byte hard bound.
+func TestCapturer_Capture_BudgetSubtractsExistingStoreUsage(t *testing.T) {
+	h := setupCaptureWithMaxDiskBytes(t, 10)
+	defer h.ctrl.Finish()
+
+	// Seed the store to exactly the budget with a blob unrelated to the
+	// item about to be captured (DiskUsage counts every non-.tmp blob,
+	// referenced or not — see fsStore.DiskUsage).
+	_, err := h.store.WriteBlob(strings.NewReader("0123456789"), 0) // 10 bytes == full budget
+	require.NoError(t, err)
+
+	// Deliberately no NewRequest/Do expectation: gomock's strict
+	// controller fails the test if resolveResources tries to fetch once
+	// the store is already at budget.
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-0",
+			"request":   map[string]interface{}{"url": "https://example.com/a.bin"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-0",
+			"response":  map[string]interface{}{"url": "https://example.com/a.bin", "status": 200, "mimeType": "application/octet-stream"},
+		})
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-store-already-full", Source: "https://example.com/a.bin"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	byURL := map[string]offlinecache.Resource{}
+	for _, r := range rec.Resources {
+		byURL[r.URL] = r
+	}
+	assert.Empty(t, byURL["https://example.com/a.bin"].SHA256,
+		"a capture starting against an already-full store must fetch nothing")
+	assert.Contains(t, rec.Coverage.Reason, "over_disk_budget:https://example.com/a.bin")
+
+	usage, err := h.store.DiskUsage()
+	require.NoError(t, err)
+	assert.EqualValues(t, 10, usage,
+		"total on-disk usage must stay at the seeded budget; the capture must not have added any blob bytes")
+}
+
 // TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort
 // pins clearObservedOriginsStorage's best-effort contract: it runs AFTER
 // the record this capture produced is already final (see its doc), so

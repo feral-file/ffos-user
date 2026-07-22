@@ -407,6 +407,8 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -434,6 +436,8 @@ func TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlayl
 	}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	// No SyncPlaylist expectation: gomock fails the test if one occurs.
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -457,6 +461,8 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFailureDoesNotBlockResponse
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(nil, assertError("cdp not ready")).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -485,6 +491,8 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 	}, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-a"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -572,6 +580,8 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 		Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
 
@@ -606,6 +616,8 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEi
 		Return(json.RawMessage(nil), offlinecache.ErrPlaylistNotFound).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	// No SyncPlaylist expectation: gomock fails the test if one occurs.
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, ts.mockJSON, ts.logger)
 

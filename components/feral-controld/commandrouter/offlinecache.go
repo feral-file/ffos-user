@@ -225,6 +225,15 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	for _, item := range playlist.Items {
 		itemIDs = append(itemIDs, item.ID)
 	}
+	// Serialize this scope resync against any concurrent displayPlaylist
+	// sync+send (see KioskReplay.LockPlayback's doc). Acquired only around
+	// the SyncPlaylist call, not the FetchPlayerStatus/resolve above,
+	// which is network-bound and does not touch scope. This never nests
+	// inside the displayPlaylist send-path lock: the display-failure
+	// caller releases that lock (its deferred unlock runs first, LIFO)
+	// before this deferred resync runs.
+	h.kioskReplay.LockPlayback()
+	defer h.kioskReplay.UnlockPlayback()
 	if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
 		h.logger.Warn("offline cache: failed to sync kiosk replay scope after clear", zap.Error(syncErr))
 	}

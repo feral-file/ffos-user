@@ -164,6 +164,23 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
 				}
 			}()
+			// heldPlaybackLock records whether this path acquired the
+			// playback coordinator (only when it actually syncs replay
+			// scope below). Releasing it is deferred so the lock spans
+			// BOTH the scope sync and the CDP send at the end of this
+			// branch, making that pair atomic against concurrent
+			// displayPlaylist commands and playlist-refresher passes (see
+			// KioskReplay.LockPlayback's doc). Registered AFTER the
+			// failure/rejection resync defer above so it runs BEFORE it
+			// (defers are LIFO): that resync re-acquires this same
+			// non-reentrant lock, so this path must have released it
+			// first.
+			var heldPlaybackLock bool
+			defer func() {
+				if heldPlaybackLock {
+					h.kioskReplay.UnlockPlayback()
+				}
+			}()
 			switch {
 			case command.Arguments["playlistUrl"] != nil:
 				url, ok := command.Arguments["playlistUrl"].(string)
@@ -236,6 +253,14 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// failure must never block the actual display command, since
 			// offline replay is a strict enhancement over the live path.
 			if h.kioskReplay != nil && playlist != nil {
+				// Acquire the playback coordinator here and hold it (via
+				// the deferred unlock above) across the CDP send below,
+				// so scope-sync + navigation cannot interleave with
+				// another display/refresh's own sync+send. Deliberately
+				// acquired AFTER the (possibly slow, network-bound) DP-1
+				// resolution above, which does not touch scope.
+				h.kioskReplay.LockPlayback()
+				heldPlaybackLock = true
 				itemIDs := make([]string, 0, len(playlist.Items))
 				for _, item := range playlist.Items {
 					itemIDs = append(itemIDs, item.ID)
