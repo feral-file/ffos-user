@@ -211,6 +211,13 @@ type Machine struct {
 	apInfo       softap.Info
 	portalSrv    PortalServer
 	offlineSince time.Time
+	// apDownPending records a failed softap.Down: the persisted hotspot profile
+	// may still exist (possibly still broadcasting) even though apUp is false.
+	// ensureAPDown retries the deletion on every reconcile until it succeeds,
+	// and a successful softap.Up clears it (Up replaces the profile). Without
+	// this flag a Down failure during the join bounce left the profile behind
+	// until the next daemon boot's sweep.
+	apDownPending bool
 }
 
 type eventKind int
@@ -314,6 +321,28 @@ func (m *Machine) RestartCount() int64 { return m.sup.restartCount() }
 // in tests, are invoked directly), so state mutation is serialized without a
 // per-transition lock; mu guards only the fields external goroutines read.
 func (m *Machine) loop(ctx context.Context) {
+	// Reset AP/portal bookkeeping before anything else. On the first run this is
+	// a no-op, but the supervisor reruns loop after a recovered panic with
+	// whatever in-memory state the previous run left behind: with a stale
+	// apUp=true the sweep below would delete the actual hotspot while every
+	// future ensureAPUp early-returns on the flag — a dead AP the machine
+	// believes is up, unrecoverable while the device stays offline. Stop any
+	// portal listener the prior run still references and forget the raised AP so
+	// this run rebuilds AP+portal from scratch.
+	m.mu.Lock()
+	leftoverSrv := m.portalSrv
+	m.apUp = false
+	m.portalSrv = nil
+	m.apInfo = softap.Info{}
+	m.mu.Unlock()
+	if leftoverSrv != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), portalStopTimeout)
+		if err := leftoverSrv.Stop(stopCtx); err != nil {
+			m.logger.Warn("provisioning: stopping portal left over from a recovered run failed", zap.Error(err))
+		}
+		cancel()
+	}
+
 	// Sweep any leftover setup AP from a previous daemon life. An ungraceful
 	// exit (SIGKILL, panic, power cut) leaves the persisted ff1-softap NM
 	// profile behind — possibly still broadcasting — while this process boots
@@ -322,6 +351,13 @@ func (m *Machine) loop(ctx context.Context) {
 	// the first pre-AP scan so the radio is back in station mode (constraint 1).
 	if err := m.ap.Down(ctx); err != nil {
 		m.logger.Warn("provisioning: boot-time sweep of leftover setup AP failed", zap.Error(err))
+		m.mu.Lock()
+		m.apDownPending = true
+		m.mu.Unlock()
+	} else {
+		m.mu.Lock()
+		m.apDownPending = false
+		m.mu.Unlock()
 	}
 
 	unsub := m.conn.Subscribe(func(online bool) {
@@ -523,8 +559,26 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
 	m.mu.Unlock()
 	m.notify(StateJoining, Detail{SSID: ssid, Message: "Connecting to " + ssid})
 
-	// Constraint 2: AP (and its portal) down before the station-mode join.
-	m.ensureAPDown(ctx)
+	// Constraint 2: AP (and its portal) down before the station-mode join. A
+	// failed teardown aborts the attempt: joining with the hotspot possibly
+	// still holding the radio violates the single-radio sequencing, and a
+	// success would strand the leftover profile with nothing retrying its
+	// deletion. Re-raising via StateAPActive self-heals instead — softap.Up
+	// replaces the profile — and the phone polls /status for this outcome.
+	if !m.ensureAPDown(ctx) {
+		outcome := portal.Status{
+			State:   portal.JoinFailed,
+			SSID:    ssid,
+			Reason:  "ap-teardown-failed",
+			Message: "The device could not release its setup hotspot. Please try again.",
+		}
+		m.mu.Lock()
+		m.status = outcome
+		m.mu.Unlock()
+		m.logger.Warn("provisioning: join aborted, setup AP teardown failed", zap.String("ssid", ssid))
+		m.transition(ctx, StateAPActive, Detail{SSID: ssid, Reason: outcome.Reason, Message: outcome.Message})
+		return
+	}
 
 	err := m.wifi.Join(ctx, ssid, psk)
 	if err == nil {
@@ -661,6 +715,11 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A successful Up replaced the persisted profile (softap.Up deletes any
+	// leftover before creating), so a pending teardown retry is moot now.
+	m.mu.Lock()
+	m.apDownPending = false
+	m.mu.Unlock()
 
 	srv := m.newPortal(portal.Config{
 		Addr:   m.portalAddr,
@@ -682,6 +741,9 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		m.logger.Error("provisioning: portal failed to start; tearing setup AP back down", zap.Error(err))
 		if derr := m.ap.Down(ctx); derr != nil {
 			m.logger.Warn("provisioning: setup AP down after portal failure also failed", zap.Error(derr))
+			m.mu.Lock()
+			m.apDownPending = true
+			m.mu.Unlock()
 		}
 		return err
 	}
@@ -709,14 +771,32 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	return nil
 }
 
-// ensureAPDown tears the portal + AP down if up. Best-effort and idempotent.
-func (m *Machine) ensureAPDown(ctx context.Context) {
+// ensureAPDown tears the portal + AP down if up, and reports whether the AP
+// side is known clean (profile deleted or never up). Idempotent. A failed
+// softap.Down still clears apUp/portalSrv — the portal IS stopped and the pair
+// must be re-raised together — but latches apDownPending so the next call
+// (every reconcile hits one) retries the profile deletion until it succeeds.
+func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.mu.Lock()
 	up := m.apUp
 	srv := m.portalSrv
+	pending := m.apDownPending
 	m.mu.Unlock()
 	if !up {
-		return
+		if !pending {
+			return true
+		}
+		// A prior teardown failed with the portal already stopped: only the
+		// profile deletion is outstanding. Retry just that.
+		if err := m.ap.Down(ctx); err != nil {
+			m.logger.Warn("provisioning: retry of setup AP profile deletion failed", zap.Error(err))
+			return false
+		}
+		m.mu.Lock()
+		m.apDownPending = false
+		m.mu.Unlock()
+		m.logger.Info("provisioning: leftover setup AP profile deleted on retry")
+		return true
 	}
 
 	if srv != nil {
@@ -726,16 +806,22 @@ func (m *Machine) ensureAPDown(ctx context.Context) {
 		}
 		cancel()
 	}
+	downOK := true
 	if err := m.ap.Down(ctx); err != nil {
-		m.logger.Warn("provisioning: setup AP down failed", zap.Error(err))
+		m.logger.Warn("provisioning: setup AP down failed; will retry deletion", zap.Error(err))
+		downOK = false
 	}
 
 	m.mu.Lock()
 	m.apUp = false
 	m.portalSrv = nil
 	m.apInfo = softap.Info{}
+	m.apDownPending = !downOK
 	m.mu.Unlock()
-	m.logger.Info("provisioning: setup AP torn down")
+	if downOK {
+		m.logger.Info("provisioning: setup AP torn down")
+	}
+	return downOK
 }
 
 // -----------------------------------------------------------------------------

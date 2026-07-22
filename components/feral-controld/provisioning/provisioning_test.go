@@ -88,12 +88,25 @@ type fakeWifi struct {
 	// scanErrs is consumed one per RefreshScanCache call; nil entries and calls
 	// beyond the script succeed.
 	scanErrs []error
+	// panicNext makes the next HasSavedProfile call panic (once), injecting a
+	// loop-goroutine panic for supervisor-recovery tests.
+	panicNext bool
 }
 
 func (w *fakeWifi) HasSavedProfile(context.Context) (bool, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.panicNext {
+		w.panicNext = false
+		panic("injected: saved-profile check exploded")
+	}
 	return w.hasProfile, w.profileErr
+}
+
+func (w *fakeWifi) armPanic() {
+	w.mu.Lock()
+	w.panicNext = true
+	w.mu.Unlock()
 }
 func (w *fakeWifi) RefreshScanCache(context.Context) ([]string, error) {
 	w.rec.add("wifi.RefreshScanCache")
@@ -378,6 +391,69 @@ func TestSuccessfulJoinGoesOnlineAndLeavesAPDown(t *testing.T) {
 	assert.Less(t, indexOf(list, "ap.Down"), indexOf(list, "wifi.Join:HomeNet"))
 }
 
+// TestJoinAbortsWhenAPTeardownFails: constraint 2 requires the AP down before
+// the station join; if softap.Down fails the join must NOT proceed (the hotspot
+// may still hold the radio, and a success would strand the leftover profile).
+// The machine reports the outcome on /status and re-raises the AP — softap.Up
+// replaces the profile, self-healing the failed teardown — so a retry works.
+func TestJoinAbortsWhenAPTeardownFails(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.ap.downErr = errors.New("nmcli connection delete timed out")
+	h.m.applyJoin(ctx, "HomeNet", "pw")
+
+	assert.Equal(t, 0, h.rec.count("wifi.Join:HomeNet"), "join must not run while the AP teardown failed")
+	assert.Equal(t, StateAPActive, h.m.State(), "machine re-enters APActive for retry")
+	st := h.m.Status()
+	assert.Equal(t, portal.JoinFailed, st.State)
+	assert.Equal(t, "ap-teardown-failed", st.Reason)
+	assert.Equal(t, "HomeNet", st.SSID)
+	assert.Equal(t, 2, h.rec.count("ap.Up"), "re-raise replaces the leftover profile")
+
+	// Backend recovers: the user's retry joins normally.
+	h.ap.downErr = nil
+	h.m.applyJoin(ctx, "HomeNet", "pw")
+	assert.Equal(t, 1, h.rec.count("wifi.Join:HomeNet"))
+	assert.Equal(t, StateOnline, h.m.State())
+}
+
+// TestOnlineRecoveryRetriesFailedAPTeardown: a Down failure while leaving
+// APActive (e.g. connectivity restored) must not orphan the persisted hotspot
+// profile until the next daemon boot — apDownPending makes every subsequent
+// reconcile retry the deletion until it succeeds.
+func TestOnlineRecoveryRetriesFailedAPTeardown(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	// Reachability returns while the AP teardown fails.
+	h.ap.downErr = errors.New("nmcli connection delete timed out")
+	h.wifi.setProfile(true)
+	h.m.onConnectivity(ctx, true)
+	require.Equal(t, StateOnline, h.m.State())
+	downsAfterFailure := h.rec.count("ap.Down")
+	require.GreaterOrEqual(t, downsAfterFailure, 1)
+
+	// While the failure persists, ticks keep retrying the profile deletion.
+	h.m.onTick(ctx)
+	assert.Greater(t, h.rec.count("ap.Down"), downsAfterFailure, "tick must retry the failed deletion")
+
+	// Backend recovers: one more retry deletes the profile, then retries stop.
+	h.ap.downErr = nil
+	h.m.onTick(ctx)
+	settled := h.rec.count("ap.Down")
+	h.m.onTick(ctx)
+	assert.Equal(t, settled, h.rec.count("ap.Down"), "no further Down calls once the deletion succeeded")
+}
+
 func TestJoinIgnoredWhenNotAPActive(t *testing.T) {
 	h := newHarness(t)
 	h.wifi.setProfile(true)
@@ -471,6 +547,42 @@ func TestConnectivityRecoveryThroughLoop(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return h.m.State() == StateOnline && h.rec.count("ap.Down") >= 1
 	}, 2*time.Second, 5*time.Millisecond)
+}
+
+// TestRecoveredPanicRebuildsActiveAP: the supervisor reruns loop after a panic
+// with whatever in-memory state the previous run left. With a stale apUp=true
+// the restarted run's boot sweep would delete the real hotspot while every
+// ensureAPUp early-returns on the flag — a dead AP the machine believes is up.
+// The loop-entry reset must stop the leftover portal, clear the AP bookkeeping,
+// and rebuild AP + portal from scratch.
+func TestRecoveredPanicRebuildsActiveAP(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.conn.online = false // unprovisioned + offline -> AP on start
+
+	h.m.Start(context.Background())
+	defer h.m.Stop()
+
+	require.Eventually(t, func() bool {
+		return h.m.State() == StateAPActive && h.rec.count("portal.Start") == 1
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// Panic on the loop goroutine while the AP is up, triggered by the next
+	// connectivity event.
+	h.wifi.armPanic()
+	h.conn.push(false)
+
+	// The recovered run must tear down the stale portal and re-raise the pair;
+	// a run that trusts the stale apUp would never call ap.Up or portal.Start
+	// again. (Assert via the recorder only: h.portals is appended on the loop
+	// goroutine.)
+	require.Eventually(t, func() bool {
+		return h.m.RestartCount() == 1 &&
+			h.rec.count("portal.Stop") >= 1 &&
+			h.rec.count("ap.Up") >= 2 &&
+			h.rec.count("portal.Start") >= 2
+	}, 2*time.Second, 5*time.Millisecond, "restarted loop must rebuild AP+portal, got: %v", h.rec.list())
+	assert.Equal(t, StateAPActive, h.m.State())
 }
 
 // TestPortalBindFailureTearsAPBackDown is the orphaned-AP regression: if the
