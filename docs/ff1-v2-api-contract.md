@@ -465,8 +465,32 @@ runtime REST or WebSocket route requires a valid enrolled-controller or
 session-bounded client certificate and enforces its device, controller, session,
 and scope binding. Only the invitation claim and acknowledgement routes in the
 controller-authentication profile accept an absent client certificate; they
-require the QR credential and pinned server SPKI. The service is advertised as
-`_ff1-control._tcp.local` using mDNS/DNS-SD. TXT keys are
+require the QR credential and pinned server SPKI.
+
+The FF OS deployment profile binds public TCP 443 with the system-level
+`ff1-control.socket` and a hardened `ff1-control-proxy.service` running
+`systemd-socket-proxyd`. The socket listens on LAN-usable IPv4 and IPv6
+addresses. The proxy forwards the unmodified raw TCP stream to the loopback-only
+`127.0.0.1:8443` listener owned by `feral-controld` and parses or terminates no
+TLS, HTTP, WebSocket, or application data. Unprivileged `feral-controld` owns
+TLS 1.3, mTLS, HTTPS, WebSocket, authentication, and authorization; it MUST NOT
+run as root or receive `CAP_NET_BIND_SERVICE`. This least-privilege front end is
+an FF OS deployment customization and does not change the public protocol.
+The system manager performs the privileged bind. The proxy service runs under
+a dedicated unprivileged identity with `NoNewPrivileges`, no ambient or
+bounding capabilities, and permission to connect only to the loopback backend.
+
+The service is advertised as `_ff1-control._tcp.local` using mDNS/DNS-SD only
+while a LAN-usable interface exists and the complete public 443 -> raw proxy ->
+loopback TLS path is ready. An active socket unit alone is not readiness. FF1
+withdraws the record on listener or proxy unavailability and before entering
+`pending_broker_cleanup` or `pending_identity_rotation`. It advertises again
+only after identity rotation, durable local cleanup, and an end-to-end
+readiness check succeed; the new advertisement carries the active identity's
+SPKI fingerprint. This lifecycle is independent of internet, broker state, and
+legacy `enableHub`. The section 7.3 trusted-time prerequisite is part of backend
+readiness, so a `lanOfflineAfterPowerLoss: false` device does not advertise the
+runtime service after a power-loss reboot until NTP succeeds. TXT keys are
 `id=<deviceId>`, `api=2`, `auth=mtls`, and
 `fp=<base64url-sha256-spki>`.
 Discovery is only a hint; identity comes from the authenticated certificate.
@@ -901,12 +925,29 @@ MQTT-only in v2.0.0.
 The device synchronizes NTP before remote token or certificate authentication
 is enabled. It persists a last-known-good UTC floor and never moves trusted time
 backward. During the same boot, trusted time advances from the last NTP sample
-using a monotonic clock. Across power loss, offline certificate validation is
-allowed only if the platform provides a trusted advancing RTC at or above the
-persisted floor; otherwise it fails closed until NTP succeeds.
-`state/device.clock.status` reports `unsynchronized`, remote MQTT remains
-disconnected, and new enrollment, session, and LAN-certificate issuance is
-blocked. Runtime LAN mTLS fails during the
+using a monotonic clock. The required
+`capabilities.state.transports.lanOfflineAfterPowerLoss` boolean declares the
+power-loss behavior:
+
+- `true` requires a trusted advancing RTC that persists across power loss,
+  starts at or above the persisted UTC floor, and can enforce certificate and
+  authorization-lease expiry before NTP. FF1 MUST make authenticated LAN mTLS
+  available immediately after an offline reboot.
+- `false` permits brokerless authenticated LAN only after trusted time has been
+  established by NTP in the current boot. After power loss, runtime LAN mTLS
+  MUST fail closed until NTP succeeds, even if cached state or a non-qualified
+  wall clock is present.
+
+FF1 MUST NOT advertise `true` without executable hardware evidence for the
+shipping full image proving RTC persistence, advancement, non-rollback, and
+certificate/lease-expiry enforcement across power loss.
+Before NTP on a qualifying `true` device,
+`state/device.clock.status` is `degraded`; existing valid enrolled-controller
+or session-bounded LAN authorization is available, but remote MQTT and new
+enrollment, session, and LAN-certificate issuance remain blocked. When trusted
+time is unavailable,
+`state/device.clock.status` is `unsynchronized`, remote MQTT remains
+disconnected, and all such issuance is blocked. Runtime LAN mTLS fails during the
 TLS handshake with an appropriate certificate/time alert, before any HTTP
 `clock_unsynchronized` response can be sent. SoftAP recovery remains available.
 This preserves RFC 5280 validity checks rather than treating a stale floor as
@@ -1059,9 +1100,9 @@ public JWK, broker URI and audience, device ID, invitation ID, claim ID, Client 
 client kind, scope ceiling, and intended result.
 It is sufficient to submit one MQTT claim without LAN discovery or a Feral
 File-specific handoff service. The same claim has a pinned HTTPS adapter for an
-explicitly trusted or offline LAN. FF1 atomically consumes the first valid claim
-across both bindings and delivers credentials in JWE encrypted to the claimant's
-controller encryption key.
+explicitly trusted LAN when section 7.3 trusted time is available. FF1
+atomically consumes the first valid claim across both bindings and delivers
+credentials in JWE encrypted to the claimant's controller encryption key.
 
 An enrollment is the persistent, revocable public-key authorization for both
 controller keys. It survives app and FF1 restart, access-session expiry, and
@@ -1149,6 +1190,7 @@ operations and DP-1 extensions rather than infer support from firmware version.
     "transports": {
       "mqtt": {"wss443": true, "maxPacketBytes": 262144},
       "lanHttps": true,
+      "lanOfflineAfterPowerLoss": false,
       "lanPush": {
         "webSocket": true,
         "subprotocol": "ff-control.v2",
@@ -1257,6 +1299,15 @@ For contract version 2.0.0, `transports.lanPush` is required and closed:
 `maxMessageBytes` is 262144, and `maxSubscriptions` is 16. A device that cannot
 provide this channel does not advertise v2 LAN conformance; client polling is a
 fallback behavior, not permission for the device to omit push.
+
+`transports.lanOfflineAfterPowerLoss` is a required boolean. It describes only
+whether authenticated LAN can start before NTP after a power-loss reboot; it
+does not make LAN depend on broker availability. `false` devices remain v2 LAN
+conformant and provide brokerless LAN after NTP establishes trusted time in the
+current boot. `true` devices additionally satisfy the RTC and executable-proof
+requirements in section 7.3. Clients MUST NOT infer this capability from a
+model name, TPM presence, firmware version, cached prior value, or successful
+LAN use before a reboot.
 
 `controllerAccess` is required and validates against the proposed controller
 authentication and access-session profile. A client MUST NOT infer invitation
@@ -2381,5 +2432,6 @@ identity registry commit and durable local cleanup both complete.
 | Command/state envelopes and revision epochs | FF customization needed for strict cross-transport parity, deduplication, and reconnect ordering. |
 | Relative pointer batch | FF customization; DP-1 only standardizes whether click/scroll/drag/hover are permitted. |
 | Controller enrollment and guest sessions | Standard MQTT 5 CONNECT/request-response and Enhanced Authentication plus JWT/JWS/JWE, RFC 7800 confirmation keys, and controller-key proof. FF customizes the Authentication Method data, invitation, scope, session-state, and ACL profile. The same one-time QR claim creates a persistent enrollment or a bounded guest session. |
-| Persisted-time fallback | FF operational rule needed for constrained offline devices; it does not change certificate or token wire formats. |
+| Offline LAN time capability | Required FF `transports.lanOfflineAfterPowerLoss` capability and fail-closed operational rule for constrained devices; it does not change certificate or token wire formats. |
+| TCP 443 least-privilege front end | FF OS deployment customization using a system socket and raw `systemd-socket-proxyd`; it does not change TLS, HTTP, WebSocket, or application bytes. |
 | SoftAP portal | FF bootstrap exception because browser-first provisioning precedes trusted TLS and MQTT identity. |

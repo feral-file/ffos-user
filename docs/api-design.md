@@ -5,6 +5,49 @@ Agents should treat these rules as stable constraints when adding, changing, or 
 
 ---
 
+## Version posture and API v2 transition
+
+Unless explicitly marked v2, the registries and wire shapes below document the
+currently deployed v1 interfaces. The proposed target is the
+[FF1 communication API v2](ff1-v2-api-contract.md) and its
+[controller-authentication profile](ff1-v2-controller-authentication.md); its
+compatibility gates and coordinated removal sequence live in the
+[migration plan](ff1-v2-migration.md). V2 remains a design draft, not a
+second production contract.
+
+For v2, `feral-controld` remains the only runtime external-control owner. It
+initiates MQTT 5 connections and owns the LAN HTTPS/WebSocket adapter, while
+focused protocol, state, and authentication packages implement the shared
+contract without hiding command policy in transport code. `feral-setupd`
+continues to own setup and recovery UX, including recovery SoftAP. Cross-service
+setup and reset coordination uses an explicitly versioned D-Bus interface:
+`feral-controld` owns external admission, confirmation records, broker cleanup,
+identity rotation, and protocol completion; `feral-setupd` owns physical
+confirmation and durable local reset execution.
+
+The v1 relayer envelope, Mint handoff, port-1111 Hub, and
+`GetRelayerTopicID` remain unchanged only through the migration compatibility
+gates. They are removed together from each successfully promoted v2 device
+image and are never alternative v2 semantics. A rolled-back, below-minimum, or
+current-v1 device keeps all four paths. The hosted relayer and other v1
+infrastructure remain until the remaining legacy fleet passes its separate
+infrastructure-retirement gate. The v2 `_ff1-control._tcp.local` lifecycle is
+independent of the broker, internet, and `enableHub`: advertise only when a
+LAN-usable interface and the complete TLS backend are ready; withdraw on
+listener unavailability and before either pending-reset lifecycle. mDNS is
+discovery, never proof of identity or authority.
+
+The FF OS deployment binding for v2 public TCP 443 is a system-level
+`ff1-control.socket` plus hardened `systemd-socket-proxyd`, forwarding an
+unmodified raw TCP stream from LAN-usable IPv4 and IPv6 addresses to
+unprivileged `feral-controld` on loopback `127.0.0.1:8443`. `feral-controld`
+owns TLS/mTLS and HTTP/WebSocket, runs neither as root nor with
+`CAP_NET_BIND_SERVICE`, and advertises mDNS only after an end-to-end readiness
+check. This least-privilege front end is deployment customization, not a new
+protocol binding.
+
+---
+
 ## D-Bus Naming and Versioning Conventions
 
 ### Bus name pattern
@@ -75,7 +118,7 @@ Signals carry either:
 
 Do not add ad-hoc fields to signal bodies without updating all consumers. Prefer the byte-slice JSON pattern for structured payloads so the schema can evolve with additive fields.
 
-### Relayer WebSocket protocol
+### Current-v1 relayer WebSocket protocol
 
 All messages are JSON. The message envelope is:
 
@@ -207,7 +250,12 @@ This format is a contract between `feral-setupd` and the mobile app. The sixth f
 
 ---
 
-## Backward-Compatibility Posture
+## Current-v1 backward-compatibility posture
+
+These rules preserve every device running the current-v1 or rollback image.
+They do not require permanent v1/v2 dual semantics in a successfully promoted
+v2 device image; device-image removal and hosted-infrastructure retirement
+follow the separate explicit gates above and in the migration plan.
 
 1. **Additive changes are always safe.** Add new D-Bus methods, new JSON fields, new BLE commands, or new relayer command types without breaking existing callers.
 2. **Never rename or remove existing methods or fields** without a version bump or a coordinated multi-service release that updates all callers simultaneously.

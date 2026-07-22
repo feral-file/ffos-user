@@ -45,7 +45,9 @@ LAN WebSocket carries subscription control from client to device and resource/
 event push from device to client; it accepts no device-control commands and is
 not a second command language. SoftAP bootstrap is the one intentional REST-only
 exception because an unprovisioned device has no broker route or controller
-credential.
+credential. LAN is broker-independent after trusted time exists in the current
+boot; pre-NTP LAN after a power-loss reboot is available only when the required
+`transports.lanOfflineAfterPowerLoss` capability is `true`.
 
 ## 2. V1-to-v2 migration
 
@@ -64,7 +66,7 @@ probation window returns the device to the signed v1 image.
 | Client artifact | Current/v1 firmware | FF OS v2 firmware | Required executable proof |
 |---|---|---|---|
 | Released/current ff-app | Existing relayer and current LAN | Unsupported; normal OTA MUST reject this client/firmware combination | Pinned released-app regression on v1 plus `old_app_v2_ota_denied` eligibility test |
-| V2 ff-app | Legacy adapter plus target-bound pre-OTA eligibility acknowledgment | Persistent controller enrollment with silent MQTT/WSS access-session issuance, plus enrolled HTTPS and `ff-control.v2` LAN | Legacy preflight fixture; then post-boot one-time enrollment, no-prompt renewal, two independently enrolled mobile installations, offline-LAN command/push, reconnect, and DP-1 fixture run |
+| V2 ff-app | Legacy adapter plus target-bound pre-OTA eligibility acknowledgment | Persistent controller enrollment with silent MQTT/WSS access-session issuance, plus enrolled HTTPS and `ff-control.v2` LAN | Legacy preflight fixture; then post-boot one-time enrollment, no-prompt renewal, two independently enrolled mobile installations, brokerless same-boot LAN command/push, capability-conditioned post-power-loss LAN, reconnect, and DP-1 fixture run |
 | Released/current ff1-cli | Existing supported path | Unsupported; normal OTA MUST reject this client/firmware combination | Pinned released-CLI smoke test plus `old_cli_v2_ota_denied` eligibility test |
 | V2 ff1-cli or installed integration | Legacy adapter plus target-bound pre-OTA eligibility acknowledgment where supported | Enrolled MQTT/WSS 443 plus HTTPS and `ff-control.v2` LAN when available | Legacy preflight fixture plus post-boot CLI conformance, enrollment, access-session renewal, and LAN parity suite |
 | Web client | Legacy temporary-access handoff where supported | One-time QR claim of a non-renewable MQTT guest session; no LAN certificate | Guest invitation, browser-only WSS Origin comparison, MQTT claim, expiry, revocation, and scope-negative fixtures |
@@ -136,6 +138,14 @@ thumbprint, current LAN SPKI pin, timestamp, and unused nonce before accepting
 `network_unreachable`, then consumes the nonce. A missing, invalid, or replayed
 proof, or a reachable-route TLS, pin, mTLS, HTTPS, or WSS failure, is a
 candidate failure and triggers rollback.
+The closed promotion record also contains required boolean
+`lanOfflineAfterPowerLoss`, exactly equal to the advertised capability and the
+signed `LAN_443_FULL_IMAGE` release-conformance record for the running image.
+`true` is accepted only when that record links executable, real-hardware
+power-cycle evidence for the exact full-image digest; `false` is accepted only
+when the fail-closed pre-NTP negative case and same-boot brokerless positive
+case pass. A candidate cannot promote with a missing, inferred, or mismatched
+value.
 `network_unreachable` does not block promotion because LAN discovery is not an
 ownership prerequisite; full LAN parity remains a release-level conformance
 gate. The update service promotes the slot only after validating this record,
@@ -245,10 +255,14 @@ notification or decision command follows.
 
 V1 Mint Pairing Broker channels, relayer session tokens, approval requests, and
 active temporary sessions are not converted into v2 credentials. They remain
-available only to v1 firmware during the compatibility window. After a device
-migrates, a requester scans a new FF1 guest invitation and receives an
-FF1-issued session. The player overlay may be reused as presentation code, but
-its protocol state is only invitation open, claimed, closed, or expired.
+available only to v1 firmware during the compatibility window. A successfully
+promoted v2 device image contains none of those paths; a rolled-back,
+below-minimum, or current-v1 device keeps all of them. Hosted v1 services remain
+available until the remaining legacy fleet passes its separate
+infrastructure-retirement gate. After a device promotes, a requester scans a
+new FF1 guest invitation and receives an FF1-issued session. The player overlay
+may be reused as presentation code, but its protocol state is only invitation
+open, claimed, closed, or expired.
 
 ### 2.4 App architecture
 
@@ -313,6 +327,33 @@ modify wire behavior. The MQTT vertical spike is time-
 boxed to ten working days once staffed, uses a bought/managed EMQX service
 (target EMQX Cloud), and does not permit a self-hosted broker substitute.
 
+### `LAN_443_FULL_IMAGE` gate
+
+The only accepted FF OS LAN deployment target is the system-level
+`ff1-control.socket` plus hardened `systemd-socket-proxyd` raw TCP front end on
+443, forwarding to unprivileged `feral-controld`'s loopback-only TLS listener
+at `127.0.0.1:8443`. The proxy terminates no TLS and parses no application data;
+the system manager performs the privileged bind, the proxy has a dedicated
+unprivileged identity with no ambient or bounding capabilities, and
+`feral-controld` receives neither root privilege nor `CAP_NET_BIND_SERVICE`.
+Listener activation alone is not readiness, and mDNS remains withdrawn until
+the public proxy path, TLS identity, authorization store, and LAN interface pass
+the end-to-end readiness check. Reset withdraws mDNS before quiescing the
+backend and keeps the path fail-closed through both pending-reset lifecycles.
+
+This target crosses component-binary and user/system-unit release rails. The
+`LAN_443_FULL_IMAGE` gate does not pass, and the LAN implementation step cannot
+be enabled or called executable, until a
+coordinated full-image candidate boots on actual FF1 hardware and passes IPv4,
+IPv6, TLS 1.3, mTLS allow/deny, HTTPS, WebSocket, listener-loss withdrawal,
+power-cycle, and both pending-reset lifecycle tests through public port 443.
+The release PR MUST add the matching full-image declaration to `RELEASES.md`,
+including the version and exact `ffos` `build-image-to-cf.yml` dispatch
+parameters, and that matching `ffos` image build MUST carry the component and
+unit revisions together. A package-only release is forbidden. This docs-only
+contract PR changes neither shipping rail and therefore MUST NOT add an
+implementation release entry.
+
 1. On one real FF1 and ff-app, provision the TPM device identity, complete one
    owner-enrollment QR claim, request an enrolled-controller access session,
    and connect to managed EMQX using MQTT 5 over WSS on port 443. Prove device
@@ -371,11 +412,20 @@ boxed to ten working days once staffed, uses a bought/managed EMQX service
    identity transaction revokes the old runtime-certificate registration,
    activates a replacement certificate with a fresh serial/registration and
    publisher generation, and commits before public reconnect or owner claim.
+   Run this broker-loss case after NTP in the current boot for every device.
+   Then power-cycle with NTP still blocked. A device advertising
+   `lanOfflineAfterPowerLoss: true` MUST immediately repeat the authenticated
+   LAN command/push/expiry cases from trusted RTC time. A device advertising
+   `false` MUST fail runtime mTLS before HTTP or WebSocket processing, keep
+   recovery SoftAP available, and restore LAN only after NTP succeeds.
 10. Verify the actual FF1 TPM supports the selected P-256 key lifecycle,
-   attestation evidence, key renewal, secure deletion, factory reset behavior,
-   and a trusted advancing RTC across power loss. If the last item is absent,
-   document that enrolled LAN mTLS fails closed after offline reboot until NTP.
-   Distinguish the reset-stable hardware device-identity/PoP key from its
+   attestation evidence, key renewal, secure deletion, and factory reset
+   behavior. Separately test whether the shipping hardware and full image have
+   a trusted RTC that persists, advances, rejects rollback, and enforces
+   certificate and LAN-lease expiry across power loss. Advertise
+   `lanOfflineAfterPowerLoss: true` only when that executable evidence passes;
+   otherwise advertise `false` and pass the required fail-closed case in gate
+   9. Distinguish the reset-stable hardware device-identity/PoP key from its
    reset-scoped runtime X.509 certificate and broker registration.
 11. Register the TPM-backed FF1 controller-issuer public key with the broker,
    validate FF1-signed invitation, enrollment-only, and access-session
@@ -451,14 +501,21 @@ rollback at every fleet gate:
    normal `playlist.display`
    through a guest session. Direct broker validation of the registered FF1
    issuer is a gate.
-6. Add authenticated LAN HTTPS/WebSocket/mDNS and run one shared protocol
-   conformance suite against MQTT and LAN. The same command vector must produce
-   the same response and final state revision, and both subscription bindings
-   must deliver schema-equivalent snapshots/events.
+6. Add authenticated LAN HTTPS/WebSocket/mDNS with the sole approved port-443
+   topology: system-level `ff1-control.socket` and hardened raw
+   `systemd-socket-proxyd` forwarding to unprivileged `feral-controld` on
+   `127.0.0.1:8443`. Coordinate the component and user/system-unit changes as a
+   full-image release, add its `RELEASES.md` declaration only in that release
+   PR, build the matching `ffos` image, and pass `LAN_443_FULL_IMAGE` before
+   enabling the endpoint. Then run one shared protocol conformance suite
+   against MQTT and LAN. The same command vector must produce the same response
+   and final state revision, and both subscription bindings must deliver
+   schema-equivalent snapshots/events.
 7. Add ff-app v2 transport/protocol/control implementations and legacy routing.
    Exercise one-time owner enrollment, silent enrolled-session and credential
    renewal, a second mobile enrollment, a concurrent CLI enrollment, guest
-   invitation and claim, remote and offline-LAN Playlist display, sleep,
+   invitation and claim, remote Playlist display, brokerless same-boot LAN
+   display, capability-conditioned post-power-loss LAN display, sleep,
    update, recovery, keyboard, tap, double tap, long press, drag, wheel/pinch,
    guest expiry and revocation, self-revocation rejection, reconnect, and stale
    presence.
@@ -468,10 +525,14 @@ rollback at every fleet gate:
    promote the slot only after the closed post-boot record validates. A blocked
    LAN records `network_unreachable` and does not prevent MQTT-based ownership;
    failure to complete required promotion checks triggers rollback.
-9. Remove the shared API key, old relayer, Mint Pairing Broker, port-1111 hub,
-   JSON-body GET commands,
-   legacy `DP1Intent`/`dynamicQueries`, and BLE only after fleet-specific rollback
-   thresholds and the SoftAP gate pass.
+9. For each successfully promoted v2 device image, remove the shared API key,
+   old relayer, Mint Pairing Broker, port-1111 hub, `GetRelayerTopicID`,
+   JSON-body GET commands, legacy `DP1Intent`/`dynamicQueries`, and BLE together
+   after the device migration, rollback, and SoftAP gates pass. A device that
+   rolls back, is below the minimum upgrade version, or remains on current v1
+   keeps its complete v1 code paths. Keep the hosted relayer and other v1
+   infrastructure until the remaining legacy fleet passes a separate
+   infrastructure-retirement gate.
 
 Already claimed devices do not preserve a v1 topic credential or temporary
 session as v2 authorization. The pre-OTA acknowledgment proves only controller
@@ -493,8 +554,10 @@ Minimum acceptance checks are:
   response; same ID/different body fails;
 - state converges after process restart, network flap, broker loss, and out-of-
   order event delivery using epoch/revision rules;
-- cached verified DP-1 playback and authenticated LAN control work with no
-  internet or broker;
+- cached verified DP-1 playback works with no internet or broker;
+  authenticated LAN control works brokerlessly after NTP in the current boot,
+  and works before NTP after a power-loss reboot only when the advertised
+  `lanOfflineAfterPowerLoss` capability is `true`;
 - DP-1 invalid/signature/license/repro/source failures preserve their namespaced
   errors and never render an unverified Playlist;
 - pointer/keyboard input is blocked unless the active DP-1 PlaylistItem permits it, is
@@ -522,6 +585,17 @@ Minimum acceptance checks are:
 - enrolled LAN HTTP and local push expire at the issued authorization-lease
   deadline, bounded to at most 900 seconds, even when the client certificate is
   still valid, followed by a silent mutually authenticated reconnect;
+- both required power-loss capability cases pass: `true` proves trusted RTC
+  advancement plus immediate pre-NTP LAN mTLS and expiry enforcement on the
+  exact full image, while `false` proves same-boot brokerless LAN followed by
+  pre-NTP mTLS failure after power loss and recovery only after NTP; no image
+  advertises `true` without linked executable hardware evidence;
+- `LAN_443_FULL_IMAGE` passes: the public 443 socket/proxy path boots from the
+  coordinated full image and
+  passes IPv4, IPv6, TLS 1.3, mTLS allow/deny, HTTPS, WebSocket,
+  readiness-withdrawal, and reset tests without root or
+  `CAP_NET_BIND_SERVICE` on `feral-controld`; the release has a matching
+  `RELEASES.md` full-image declaration and `ffos` image-build record;
 - every `state/sessions` invitation and session variant passes closed-schema
   and terminal-removal fixtures; restart fixtures invalidate open invitations
   but restore unexpired sessions and pending-revocation markers without
@@ -549,9 +623,10 @@ Minimum acceptance checks are:
 | Packet limits, rate limits, restricted commands | API sections 4.4, 7.4, 9, and 11 |
 | Per-device/controller identity, TPM, rotation, revocation barriers, ACLs | API sections 7 and 8; authentication section 13 |
 | MQTT device mTLS; restricted invitation/enrollment credentials; sender-constrained access sessions | API sections 4.1.1 and 7; authentication section 7 |
-| Brokerless authenticated LAN HTTPS using the same contract | API sections 5, 7, and 8 |
+| Brokerless authenticated LAN HTTPS using the same contract, with explicit power-loss time capability | API sections 5, 7, 8, and 9; authentication sections 12, 13.2, and 15; plan section 3 |
 | Authenticated realtime LAN state/event push with polling fallback | API section 5 |
 | mDNS discovery and rejection of unenrolled clients | API sections 5, 7, and 8 |
+| Least-privilege public TCP 443 and coordinated full-image release | API section 5; architecture and API-direction v2 transition sections; plan gate `LAN_443_FULL_IMAGE` and section 4 |
 | DP-1 v1.1.0 Playlist validation, trust, and offline cache | API sections 10, 11.1, and 12.3 |
 | Mobile keyboard/touchpad remote control | API section 11.3 |
 | Unified enrolled and guest controller access without relayer or per-session auth service | Controller authentication profile; API sections 7.4, 9, 11.7, and 12.7 |

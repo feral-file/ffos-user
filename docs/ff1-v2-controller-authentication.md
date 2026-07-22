@@ -31,7 +31,8 @@ A LAN connection instead uses mutual TLS plus a connection-local LAN
 authorization lease; a guest LAN lease remains bounded by its underlying guest
 access session. MQTT is the primary invitation and control binding; an HTTPS
 invitation adapter preserves the same ceremony when the broker or internet is
-unavailable.
+unavailable, subject to the trusted-time and
+`lanOfflineAfterPowerLoss` rules in sections 12 and 13.2.
 
 Persistent authorization is REQUIRED for enrolled controllers. A user scans
 the enrollment QR once for each app or CLI installation; access-session expiry,
@@ -1009,10 +1010,15 @@ certificate whose `notAfter` equals its session expiry. A `web` guest is
 MQTT-only because v2 does not depend on browser client-certificate installation.
 
 An enrolled controller can remain usable over LAN while the internet and broker
-are unavailable. FF1 evaluates enrollment revocation locally. A controller
-certificate has a maximum validity of 366 days and is renewed before expiry by
-an active enrolled controller. Apart from the QR-authorized invitation routes,
-there is no unauthenticated LAN fallback.
+are unavailable after FF1 has established trusted time for the current boot.
+After a power-loss reboot, pre-NTP LAN availability is guaranteed only when the
+required parent-contract capability
+`capabilities.state.transports.lanOfflineAfterPowerLoss` is `true`. When it is
+`false`, FF1 rejects runtime LAN mTLS until NTP succeeds. FF1 evaluates
+enrollment revocation locally. A controller certificate has a maximum validity
+of 366 days and is renewed before expiry by an active enrolled controller.
+Apart from the QR-authorized invitation routes, there is no unauthenticated LAN
+fallback.
 
 A native controller stores both its MQTT and LAN connection profiles. It uses
 LAN only on an explicitly trusted SSID or equivalent trusted-network rule. If
@@ -1037,9 +1043,28 @@ session.
 
 FF1 MUST have trusted, non-decreasing time before it issues or accepts a
 time-bounded credential. It persists a last-known-good UTC floor and advances
-time from a monotonic source during a boot. If trusted time cannot be
-established after power loss, FF1 fails closed for remote session issuance and
-reports `clock_unsynchronized`; SoftAP recovery remains available.
+time from a monotonic source during a boot. The required parent-contract
+capability `capabilities.state.transports.lanOfflineAfterPowerLoss` is the only
+declaration of pre-NTP runtime LAN behavior after power loss:
+
+- `true` requires a trusted advancing RTC that persists across power loss,
+  starts at or above the persisted UTC floor, and enforces certificate and LAN
+  authorization-lease expiry. FF1 MUST accept authenticated LAN mTLS immediately
+  after an offline reboot.
+- `false` requires runtime LAN mTLS to fail closed after power loss until NTP
+  establishes trusted time in that boot. Brokerless LAN remains available
+  after that synchronization and continues from monotonic time if the broker
+  or internet later disappears.
+
+FF1 MUST NOT advertise `true` unless executable evidence on the shipping FF1
+hardware and full image proves RTC persistence, advancement, non-rollback, and
+expiry enforcement across a power cycle. Before NTP on a qualifying `true`
+device, only existing valid enrolled-controller or session-bounded runtime LAN
+authorization is available; remote MQTT and new credential, session, or
+LAN-certificate issuance remain blocked and clock status is `degraded`. If
+trusted time is unavailable, FF1 also fails closed for runtime LAN and remote
+session issuance, reports `clock_unsynchronized`, and leaves SoftAP recovery
+available.
 
 ### 13.3 Restart
 
@@ -1211,7 +1236,8 @@ invitation. Network commands cannot silently replace the final owner.
 2. The mobile app creates its controller signing and encryption keys and scans
    the QR.
 3. The app claims through MQTT by default, or through the pinned HTTPS adapter
-   during explicit offline-LAN setup.
+   during explicit LAN setup when the section 13.2 trusted-time prerequisite is
+   satisfied.
 4. FF1 consumes the invitation once, creates the owner enrollment, and returns
    the enrollment credential plus the first access-session credential encrypted
    to the mobile key.
@@ -1307,4 +1333,15 @@ conformance suite MUST prove:
 20. crash recovery in each pending-reset lifecycle resumes the same durable
     operation ID, never activates two runtime certificate registrations, and
     cannot report `completed`, reconnect the publisher, or enroll an owner
-    before identity commit and durable local cleanup.
+    before identity commit and durable local cleanup;
+21. with `lanOfflineAfterPowerLoss: true`, an NTP-synchronized FF1 is power
+    cycled with internet and broker blocked, its trusted RTC advances without
+    rollback, and an enrolled controller completes LAN mTLS, a command, initial
+    local-push snapshots, and lease/certificate-expiry rejection before NTP;
+22. with `lanOfflineAfterPowerLoss: false`, brokerless LAN works after NTP in
+    the current boot, then a power cycle with NTP blocked causes runtime mTLS to
+    fail before HTTP or WebSocket authorization while SoftAP recovery remains
+    available; LAN becomes available again only after NTP succeeds; and
+23. a device image lacking the executable RTC proof in check 21 cannot
+    advertise `lanOfflineAfterPowerLoss: true`, while advertising `false` does
+    not by itself fail v2 LAN conformance.
