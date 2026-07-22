@@ -35,6 +35,31 @@ var assets embed.FS
 
 var tmpl = template.Must(template.ParseFS(assets, "templates/*.html"))
 
+// Abuse bounds for the portal listener. The portal is unauthenticated by
+// design (a captive portal must be) and anything on the setup AP's subnet can
+// reach it, so the listener carries the same class of slow-client and
+// body-size bounds as the LAN hub: without them a client dribbling a POST
+// body retains a goroutine+connection indefinitely (only the header read was
+// bounded before). Timeouts are package vars so tests can compress them
+// without multi-second sleeps.
+var (
+	portalReadTimeout  = 30 * time.Second
+	portalWriteTimeout = 30 * time.Second
+	portalIdleTimeout  = 60 * time.Second
+)
+
+const (
+	// maxRequestBodyBytes bounds every request body via http.MaxBytesReader.
+	// The only bodies the portal legitimately receives are the /connect and
+	// /rescan form posts (an SSID and a passphrase), so 64 KiB is orders of
+	// magnitude above legitimate use.
+	maxRequestBodyBytes = 64 << 10
+	// maxInflightRequests caps concurrent requests (429 beyond it). A setup
+	// session is one phone, occasionally two; the cap exists purely so
+	// misbehaving clients cannot pile up handler goroutines.
+	maxInflightRequests = 32
+)
+
 // JoinState is the coarse lifecycle of the current or last credential submission,
 // serialized in GET /status and rendered on the portal page.
 type JoinState string
@@ -106,6 +131,8 @@ type Server struct {
 	cfg    Config
 	logger *zap.Logger
 	mux    *http.ServeMux
+	// reqSlots is the in-flight request cap (see maxInflightRequests).
+	reqSlots chan struct{}
 
 	mu   sync.Mutex
 	http *http.Server
@@ -119,13 +146,39 @@ func NewServer(cfg Config) *Server {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	s := &Server{cfg: cfg, logger: logger, mux: http.NewServeMux()}
+	s := &Server{
+		cfg:      cfg,
+		logger:   logger,
+		mux:      http.NewServeMux(),
+		reqSlots: make(chan struct{}, maxInflightRequests),
+	}
 	s.routes()
 	return s
 }
 
-// Handler exposes the routes for httptest without binding a socket.
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler exposes the routes for httptest without binding a socket. It returns
+// the limit-wrapped handler — the same one Start serves — so tests exercise
+// the body/in-flight bounds, not a bare mux.
+func (s *Server) Handler() http.Handler { return s.withLimits(s.mux) }
+
+// withLimits is the single chokepoint applying the request-level abuse bounds:
+// the in-flight cap (429 on saturation, non-blocking so a full portal degrades
+// loudly instead of queueing) and the body-size cap (MaxBytesReader makes any
+// oversized read fail inside the handler's ParseForm). Wire-level slow-client
+// bounds (Read/Write/Idle timeouts) live on the http.Server in Start.
+func (s *Server) withLimits(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.reqSlots <- struct{}{}:
+			defer func() { <-s.reqSlots }()
+		default:
+			http.Error(w, "busy", http.StatusTooManyRequests)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		next.ServeHTTP(w, r)
+	})
+}
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleRoot)
@@ -157,8 +210,11 @@ func (s *Server) Start() error {
 		return err
 	}
 	srv := &http.Server{
-		Handler:           s.mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       portalReadTimeout,
+		WriteTimeout:      portalWriteTimeout,
+		IdleTimeout:       portalIdleTimeout,
 	}
 	s.mu.Lock()
 	s.ln = ln

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -229,6 +231,123 @@ func TestStartStopBindsInjectableAddr(t *testing.T) {
 func TestStopWithoutStartIsSafe(t *testing.T) {
 	s := NewServer(Config{})
 	assert.NoError(t, s.Stop(context.Background()))
+}
+
+// TestConnectOversizedBodyRejected: the body-size cap must stop an oversized
+// form post inside ParseForm (400) without the submission ever reaching the
+// provisioning machine.
+func TestConnectOversizedBodyRejected(t *testing.T) {
+	joined := false
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-abc",
+		Join:   func(_, _ string) error { joined = true; return nil },
+	})
+
+	body := strings.NewReader("ssid=" + strings.Repeat("a", maxRequestBodyBytes+1024))
+	resp, err := client.Post(ts.URL+"/connect", "application/x-www-form-urlencoded", body)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.False(t, joined, "oversized submission must never reach JoinFunc")
+}
+
+// TestInflightCapRejectsExcessRequests: with every slot held by a blocked
+// handler, the next request must be shed with 429 instead of queueing a
+// goroutine.
+func TestInflightCapRejectsExcessRequests(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	releaseAll := func() { once.Do(func() { close(release) }) }
+	// LIFO cleanup ordering: this runs BEFORE the helper's ts.Close, so a
+	// failed test cannot leave blocked handlers hanging the server shutdown.
+	t.Cleanup(releaseAll)
+
+	started := make(chan struct{}, maxInflightRequests)
+	_, ts, client := newTestServer(t, Config{
+		APSSID: "FF1-abc",
+		Status: func() Status {
+			started <- struct{}{}
+			<-release
+			return Status{State: JoinIdle}
+		},
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < maxInflightRequests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.Get(ts.URL + "/status")
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+	// Every slot is provably held by a blocked handler before the probe fires.
+	for i := 0; i < maxInflightRequests; i++ {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handlers did not saturate the in-flight cap")
+		}
+	}
+
+	resp, err := client.Get(ts.URL + "/status")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+
+	releaseAll()
+	wg.Wait()
+}
+
+// TestSlowBodyClientIsDisconnected: wire-level slowloris guard. A client that
+// completes the headers but dribbles (or never sends) its POST body must be
+// cut off by the server's ReadTimeout instead of retaining the connection and
+// its handler goroutine — the pre-fix server bounded only the header read.
+func TestSlowBodyClientIsDisconnected(t *testing.T) {
+	// Compresses the package-level timeout seam; do not add t.Parallel() to
+	// portal tests while this mutation pattern is in use.
+	oldRead := portalReadTimeout
+	portalReadTimeout = 300 * time.Millisecond
+	defer func() { portalReadTimeout = oldRead }()
+
+	joined := make(chan struct{}, 1)
+	s := NewServer(Config{
+		Addr:   "127.0.0.1:0",
+		APSSID: "FF1-abc",
+		Join:   func(_, _ string) error { joined <- struct{}{}; return nil },
+	})
+	require.NoError(t, s.Start())
+	defer func() { _ = s.Stop(context.Background()) }()
+
+	conn, err := net.Dial("tcp", s.Addr())
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	// Headers complete; the promised body never arrives.
+	_, err = conn.Write([]byte("POST /connect HTTP/1.1\r\nHost: portal\r\n" +
+		"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 100\r\n\r\nssid="))
+	require.NoError(t, err)
+
+	// Drain until the server closes the connection. A read-deadline expiry here
+	// means the server left the connection open past its ReadTimeout — the bug.
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	buf := make([]byte, 1024)
+	for {
+		if _, err = conn.Read(buf); err != nil {
+			break
+		}
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		t.Fatal("server left the slow-body connection open past its ReadTimeout")
+	}
+	select {
+	case <-joined:
+		t.Fatal("partial submission must never reach JoinFunc")
+	default:
+	}
 }
 
 // -----------------------------------------------------------------------------
