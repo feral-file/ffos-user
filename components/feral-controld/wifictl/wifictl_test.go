@@ -139,22 +139,34 @@ func joinScanAware(ssids string, reply func(argv []string) ([]byte, error)) func
 
 func TestJoinSuccess(t *testing.T) {
 	c, exec, _ := newController(joinScanAware("Home\nOther", func(argv []string) ([]byte, error) {
+		if len(argv) > 2 && argv[len(argv)-2] == "connection" && argv[len(argv)-1] == "show" {
+			return nil, nil // no saved profiles: nothing to pre-delete
+		}
 		return []byte("Device 'wlan0' successfully activated"), nil
 	}))
 	err := c.Join(context.Background(), "Home", "supersecret")
 	require.NoError(t, err)
 
-	// Pre-delete, visibility scan, connect: three calls in that order.
+	// Pre-delete listing (no matches, so no delete), visibility scan, connect.
 	calls := exec.recorded()
 	require.Len(t, calls, 3)
-	assert.Equal(t, []string{"nmcli", "connection", "delete", "Home"}, calls[0])
+	assert.Equal(t, []string{"nmcli", "-t", "-f", "UUID,TYPE,NAME", "connection", "show"}, calls[0])
 	assert.Contains(t, strings.Join(calls[1], " "), "device wifi list --rescan yes")
 	assert.Contains(t, strings.Join(calls[2], " "), "device wifi connect Home password supersecret")
 }
 
 func TestJoinAuthFailureCleansUpProfile(t *testing.T) {
+	// The first profile listing (pre-delete) is empty; after the failed connect
+	// the half-created wifi profile shows up and must be deleted BY UUID.
+	listings := 0
 	c, exec, _ := newController(joinScanAware("Home", func(argv []string) ([]byte, error) {
-		// The connect attempt fails with an auth exit code; deletes succeed.
+		if len(argv) > 2 && argv[len(argv)-2] == "connection" && argv[len(argv)-1] == "show" {
+			listings++
+			if listings == 1 {
+				return nil, nil
+			}
+			return []byte("half-created-uuid:802-11-wireless:Home\n"), nil
+		}
 		if len(argv) >= 4 && argv[1] == "device" && argv[2] == "wifi" && argv[3] == "connect" {
 			return []byte("Error: Connection activation failed: (7) Secrets were required."),
 				fakeExitError{code: 4, msg: "exit status 4"}
@@ -169,11 +181,53 @@ func TestJoinAuthFailureCleansUpProfile(t *testing.T) {
 	require.ErrorAs(t, err, &je)
 	assert.Equal(t, JoinErrAuth, je.Kind)
 
-	// Pre-delete, visibility scan, connect (fails), post-failure cleanup delete
-	// = 4 calls, the last one removing the half-created broken profile.
+	// Pre-delete listing, visibility scan, connect (fails), cleanup listing,
+	// UUID-scoped delete of the half-created broken profile.
 	calls := exec.recorded()
-	require.Len(t, calls, 4)
-	assert.Equal(t, []string{"nmcli", "connection", "delete", "Home"}, calls[3])
+	require.Len(t, calls, 5)
+	assert.Equal(t, []string{"nmcli", "connection", "delete", "uuid", "half-created-uuid"}, calls[4])
+}
+
+// TestJoinCleanupSparesNonWifiProfiles: ssid is user input from the captive
+// portal, and nmcli deletes by connection ID match ANY profile type — a
+// submission named like the device's ethernet or VPN profile must never
+// delete it. Only the same-named 802-11-wireless profile may go, by UUID.
+func TestJoinCleanupSparesNonWifiProfiles(t *testing.T) {
+	c, exec, _ := newController(joinScanAware("Home", func(argv []string) ([]byte, error) {
+		if len(argv) > 2 && argv[len(argv)-2] == "connection" && argv[len(argv)-1] == "show" {
+			return []byte("eth-uuid:802-3-ethernet:Home\nwifi-uuid:802-11-wireless:Home\nvpn-uuid:vpn:Home\n"), nil
+		}
+		if len(argv) >= 4 && argv[1] == "device" && argv[2] == "wifi" && argv[3] == "connect" {
+			return []byte("Error: Connection activation failed."),
+				fakeExitError{code: 4, msg: "exit status 4"}
+		}
+		return nil, nil
+	}))
+
+	err := c.Join(context.Background(), "Home", "wrongpass")
+	require.Error(t, err)
+
+	deletes := [][]string{}
+	for _, call := range exec.recorded() {
+		if len(call) > 2 && call[1] == "connection" && call[2] == "delete" {
+			deletes = append(deletes, call)
+		}
+	}
+	// Pre-delete pass and post-failure pass each delete exactly the wifi UUID.
+	require.Len(t, deletes, 2)
+	for _, del := range deletes {
+		assert.Equal(t, []string{"nmcli", "connection", "delete", "uuid", "wifi-uuid"}, del,
+			"only the same-named WIFI profile may be deleted, never ethernet/VPN")
+	}
+}
+
+// TestUnescapeTerse pins the terse-mode unescaping both profile-listing
+// parsers (SavedProfiles, deleteWifiProfiles) depend on — NAME is the only
+// field that can carry escapes.
+func TestUnescapeTerse(t *testing.T) {
+	assert.Equal(t, "Cafe:5G", unescapeTerse(`Cafe\:5G`))
+	assert.Equal(t, `back\slash`, unescapeTerse(`back\\slash`))
+	assert.Equal(t, "plain", unescapeTerse("plain"))
 }
 
 func TestJoinSSIDNotFound(t *testing.T) {
@@ -398,11 +452,13 @@ func TestJoinFailureCleanupSurvivesCanceledContext(t *testing.T) {
 	err := c.Join(ctx, "Home", "pw123456")
 	require.Error(t, err)
 
-	// Pre-delete, scan, connect, post-failure cleanup: the cleanup delete must
-	// have run despite the canceled parent ctx, and on a live context.
+	// Pre-delete listing, scan, connect, post-failure cleanup listing: the
+	// cleanup pass must have run despite the canceled parent ctx, and on a
+	// live context. (The listing comes back empty here, so no delete follows —
+	// the listing call itself proves the cleanup pass ran.)
 	calls := exec.recorded()
 	require.Len(t, calls, 4)
-	assert.Equal(t, []string{"nmcli", "connection", "delete", "Home"}, calls[3])
+	assert.Equal(t, []string{"nmcli", "-t", "-f", "UUID,TYPE,NAME", "connection", "show"}, calls[3])
 	// The parent ctx was canceled during the connect call, so a cleanup issued
 	// on it would arrive already-dead. The captured ctx state proves the
 	// cleanup ran on a detached, live context instead.

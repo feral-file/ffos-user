@@ -229,10 +229,7 @@ func (e *JoinError) Unwrap() error { return e.err }
 //     never surfaces a broken saved network the device can't actually use.
 func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
 	// Pre-delete: best-effort, a missing profile is the normal case.
-	if _, _, err := c.run(ctx, "connection", "delete", ssid); err != nil {
-		c.logger.Debug("wifictl: pre-join profile delete failed (expected if none existed)",
-			zap.String("ssid", ssid), zap.Error(err))
-	}
+	c.deleteWifiProfiles(ctx, ssid)
 
 	// The AP-bounce join reaches here moments after the hotspot went down, with
 	// the radio freshly flipped from AP back to station mode and NM's BSS list
@@ -263,11 +260,40 @@ func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
 	// "provisioned" and defers the setup AP a full offline window.
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), joinCleanupTimeout)
 	defer cancel()
-	if _, _, delErr := c.run(cleanupCtx, "connection", "delete", ssid); delErr != nil {
-		c.logger.Debug("wifictl: post-failure profile cleanup failed",
-			zap.String("ssid", ssid), zap.Error(delErr))
-	}
+	c.deleteWifiProfiles(cleanupCtx, ssid)
 	return joinErr
+}
+
+// deleteWifiProfiles removes saved profiles named ssid, and ONLY Wi-Fi ones.
+// `nmcli connection delete <name>` matches ANY profile type by ID, and ssid is
+// user input from the captive portal — a submission equal to an unrelated
+// ethernet/VPN profile's name must never delete that profile. So: resolve the
+// name to UUIDs, filter to 802-11-wireless, delete by UUID. Best-effort like
+// the two call sites (pre-join stale-credential purge, post-failure cleanup of
+// the half-created profile): a listing failure just means no cleanup.
+func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
+	out, _, err := c.run(ctx, "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
+	if err != nil {
+		c.logger.Debug("wifictl: profile listing for cleanup failed",
+			zap.String("ssid", ssid), zap.Error(err))
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		// UUID and TYPE never contain colons, so the third field is NAME with
+		// terse-mode escaping intact.
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		uuid, typ, name := parts[0], parts[1], unescapeTerse(parts[2])
+		if typ != "802-11-wireless" || name != ssid {
+			continue
+		}
+		if _, _, delErr := c.run(ctx, "connection", "delete", "uuid", uuid); delErr != nil {
+			c.logger.Debug("wifictl: wifi profile delete failed",
+				zap.String("ssid", ssid), zap.String("uuid", uuid), zap.Error(delErr))
+		}
+	}
 }
 
 // waitForSSID blocks until ssid appears in a forced rescan or the wait window
