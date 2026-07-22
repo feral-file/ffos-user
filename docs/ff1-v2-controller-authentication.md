@@ -55,7 +55,8 @@ This profile uses:
   Packet, Authentication Method, Authentication Data, Response Topic,
   Correlation Data, Message Expiry Interval, and Reason Codes;
 - [TLS 1.3 (RFC 8446)](https://www.rfc-editor.org/rfc/rfc8446.html),
-  [X.509 (RFC 5280)](https://www.rfc-editor.org/rfc/rfc5280.html), and the
+  [X.509 (RFC 5280)](https://www.rfc-editor.org/rfc/rfc5280.html),
+  [service identity (RFC 9525)](https://www.rfc-editor.org/rfc/rfc9525.html), and the
   [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
 - [JWT (RFC 7519)](https://www.rfc-editor.org/rfc/rfc7519.html),
   [JWS (RFC 7515)](https://www.rfc-editor.org/rfc/rfc7515.html),
@@ -128,6 +129,16 @@ registration are separate, reset-scoped credentials. Factory reset MUST revoke
 and replace that certificate and registration even when the underlying TPM key
 is retained. The retained key alone cannot open the public device MQTT Network
 Connection.
+
+The single runtime device certificate is also FF1's LAN server certificate.
+Parent API section 7.1 defines its closed X.509 v3 profile: the same TPM P-256
+key proves both uses; the exact URI SAN identifies the MQTT device; the exact
+`<deviceId>.local` DNS SAN identifies the LAN service; Key Usage is
+`digitalSignature`; and Extended Key Usage is exactly `clientAuth` plus
+`serverAuth`. Normal renewal preserves that TPM key and therefore its DER
+SubjectPublicKeyInfo. A reset replaces the certificate and registration but
+MAY retain that same hardware key. A required key replacement is a distinct
+identity-replacement ceremony and never a transparent LAN renewal.
 
 FF1 is authoritative for invitation consumption, controller enrollment,
 access-session creation, expiry, and revocation. Broker validation is an outer
@@ -367,6 +378,20 @@ omitted otherwise. `grantedRole` is required and is
 `brokerAudience` is the exact StringOrURI audience configured by that broker;
 it is not inferred from the host name. Optional fields are omitted, never
 `null`.
+
+When present, `lanUri` is exactly
+`https://<deviceId>.local` in that canonical ASCII form, with implicit TCP 443
+and no userinfo, explicit port, path, query, or fragment. `lanSpkiSha256` is
+exactly 43 characters of unpadded base64url encoding of SHA-256 over the active
+runtime leaf certificate's complete DER SubjectPublicKeyInfo. The signed
+invitation digest binds both values. After a successful enrollment claim, the
+controller persists the exact `deviceId`, LAN DNS host, and
+`lanSpkiSha256` alongside that `controllerId` as enrollment-bound server trust
+material. It retains the binding across app restart, access-session renewal,
+LAN client-certificate renewal, runtime device-certificate renewal, and MQTT/
+LAN path changes. A guest keeps the same binding only through its guest-session
+lifetime. Neither type learns or updates a pin from mDNS, DNS, an observed TLS
+certificate, HTTP, or TOFU.
 
 The QR therefore contains everything required to reach the broker or the
 pinned LAN claim route and submit one claim. `brokerUri` is REQUIRED. `lanUri`
@@ -886,7 +911,7 @@ schemas are in parent sections 11.6 and 11.7.
 | `controllers.create-invitation` | `label`?: string(1..64); `clientKind`: `mobile\|cli\|integration`; `requestedScopes`: unique nonempty subset of the authenticated owner's current caller grant ceiling excluding `controllers:manage`; `expiresInSeconds`: int[60..300], default 300 | invitation ID, expiry, QR display status, sessions revision | enrolled owner with `controllers:manage`; broader grants fail with `scope_denied` |
 | `controllers.close-invitation` | `invitationId` | invitation ID, closed status, sessions revision | creator or owner with `controllers:manage` |
 | `controllers.renew-credential` | `controllerId`; new signing and encryption public JWKs; optional `lanCsrPem`; `oldKeyProof` and `newKeyProof` | new enrollment credential envelope, `credentialExpiresAt`, `controllers` revision, and LAN-certificate expiry if and only if `lanCsrPem` is present | same active controller; at most once per 24 hours |
-| `controllers.set-scopes` | `controllerId`; unique nonempty `scopes` | controller ID, scopes, controllers-state revision | owner with `controllers:manage`; subset of caller grant |
+| `controllers.set-scopes` | `controllerId`; unique nonempty `scopes` | controller ID, scopes, `status: updated\|already_current`, and either the current `controllers` revision or exact `controllers` plus `sessions` revisions when completion changes session state | owner with `controllers:manage`; subset of caller grant; target cannot be the authenticated caller (`interaction_not_allowed`); a removal succeeds only after the section 13.4 scope-reduction barrier ACK |
 | `controllers.revoke` | `controllerId`; `revokeCreatedGuestSessions`?: boolean, default false | after broker barrier ACK: controller ID, `status: revoked\|already_revoked`, and either the `controllers` revision alone or exact `controllers` plus `sessions` revisions when session state changed | owner with `controllers:manage`; not final owner; target cannot be the authenticated caller controller (`interaction_not_allowed`); `dependency_unavailable` while the durable barrier is pending |
 | `sessions.create-invitation` | `label`?: string(1..64); `clientKind`: `web\|agent\|integration`; `requestedScopes`: unique scope array; `sessionSeconds`: int[300..86400], default 3600; `origin`?: normalized HTTPS origin | invitation ID, expiry, guest lifetime, QR display status, sessions revision | enrolled controller with `sessions:manage` |
 | `sessions.close-invitation` | `invitationId` | invitation ID, closed status, sessions revision | creator or `sessions:manage` |
@@ -908,6 +933,17 @@ delegate. FF1 records the creator controller ID and revalidates at claim time
 that the creator remains an active owner with `controllers:manage` and still
 holds every scope in the invitation ceiling. If not, FF1 atomically closes the
 invitation and rejects the claim with `scope_denied`.
+
+An additions-only `controllers.set-scopes` change affects future access-session
+issuance and future LAN leases only; it does not widen an existing signed
+access credential or connection-local lease. If the replacement removes any
+scope, parent API section 7.5 and section 13.4 below apply the durable
+scope-reduction barrier. The authenticated caller cannot target itself, so
+neither its MQTT response subscription nor its LAN response connection is
+invalidated before the synchronous result. An over-ceiling target-derived
+access session or target-created guest session is revoked in full, and an
+over-ceiling open guest invitation is closed; FF1 never rewrites scopes inside
+an already signed access credential.
 
 For `controllers.renew-credential`, `params` is closed. `lanCsrPem` is optional.
 When present it is one RFC 7468 `CERTIFICATE REQUEST` block containing one DER
@@ -1070,6 +1106,7 @@ marker, if any, while leaving persistent controller enrollments intact.
 Events are:
 
 - `controllers.enrolled`;
+- `controllers.scopes-changed`;
 - `controllers.revoked`;
 - `sessions.invitation-closed`;
 - `sessions.claimed`;
@@ -1081,6 +1118,41 @@ Events contain identifiers, client kind, non-secret labels, scopes, outcome,
 and timestamps. They never contain credentials or the QR payload.
 
 ## 12. LAN binding
+
+FF1 presents the parent API section 7.1 runtime device certificate on every LAN
+TLS handshake. Before sending a QR bearer, client certificate, HTTP request, or
+WebSocket Upgrade, the controller MUST complete all of these checks:
+
+1. negotiate TLS 1.3 and validate FF1's CertificateVerify proof;
+2. validate `notBefore`, `notAfter`, the exact certificate profile, and any
+   configured issuing chain at the controller's trusted current time;
+3. match the requested canonical host `<deviceId>.local` only against the
+   certificate's sole DNS SAN according to RFC 9525, with no Common Name, URI,
+   wildcard, IP-address, or alternate-host fallback; and
+4. compare SHA-256 of the leaf's complete DER SubjectPublicKeyInfo byte-for-byte
+   with the enrollment- or invitation-bound `lanSpkiSha256`.
+
+The stored SPKI pin is mandatory even when a platform trust store accepts the
+chain. A matching pin cannot excuse a time, profile, hostname, signature, or
+proof failure. Any failure aborts TLS before application data, does not install
+or update trust, and causes a native controller to use MQTT when available and
+surface a local-identity error. An invitation claimant likewise sends no bearer
+and falls back to its QR MQTT claim. A controller MUST NOT offer an unsafe
+"continue", first-use, mDNS-fingerprint acceptance, or automatic pin-update
+path.
+
+Normal runtime certificate renewal uses the same TPM key and preserves the
+SPKI, DNS SAN, URI SAN, KU, and EKU; no controller pin update occurs. The leaf
+serial, validity interval, signature, and broker registration metadata may
+change. If FF1 must replace the TPM key, the new SPKI is deliberately rejected
+by every existing enrollment. FF1 withdraws mDNS before activation and does not
+restore LAN under the new SPKI for those controllers. Key replacement proceeds
+only through reset-scoped identity replacement and a physically displayed new
+owner-enrollment QR; that QR binds the new pin, and all controllers enroll
+again. Factory reset always revokes/replaces the runtime certificate and
+registration and clears controller authorization. Even when reset reuses the
+same TPM key and SPKI, the next owner must re-enroll and bind the pin from the
+new QR; an old pin never restores an erased enrollment.
 
 An enrollment claim MAY also return an X.509 LAN client certificate whose
 public key is the claimed controller signing key. LAN HTTPS and the authenticated local
@@ -1135,7 +1207,13 @@ A native controller stores both its MQTT and LAN connection profiles. It uses
 LAN only on an explicitly trusted SSID or equivalent trusted-network rule. If
 that rule does not match, network identity is unavailable, or the LAN endpoint
 cannot be reached promptly, the controller uses MQTT. mDNS is an endpoint hint,
-not an enrollment prerequisite or an authorization signal.
+not an enrollment prerequisite or an authorization signal. Its `fp` is the
+active leaf SPKI hash and normally remains stable across renewal. A controller
+MAY reject an mDNS candidate whose `id`, target host, or `fp` differs from its
+stored profile, but a match only permits attempting TLS. A mismatch, missing
+record, or later change never mutates the stored pin; the controller falls back
+to MQTT. Only a newly verified physical invitation may establish a replacement
+pin.
 
 ## 13. Expiry, restart, revocation, and reset
 
@@ -1181,14 +1259,25 @@ available.
 
 All invitation and access-session records are stored atomically and sealed to
 the TPM-backed device identity. A `feral-controld` restart invalidates every
-open invitation. It restores every unexpired access-session record, including
-guest and enrolled-controller sessions, with the same ID, status, scopes, and
-absolute expiry, and restores every durable pending-revocation marker. Except
+open invitation except any already selected by a durable pending scope
+reduction; each selected invitation remains unclaimable and is closed only with
+that operation's ACK commit. It restores every unexpired access-session record,
+including guest and enrolled-controller sessions, with the same ID, status,
+scopes, and absolute expiry, and restores every durable pending-revocation
+marker. Except
 for a target already blocked by such a marker, those sessions remain valid
 until their signed `exp` or an explicit revocation completes under section
 13.4. A pending target remains locally rejected and its barrier retry takes
 priority after restart. A restart MUST NOT create an implicit broker revocation
 or require a controller to obtain a replacement access session.
+
+A restart also restores a durable pending-scope-reduction marker, its proposed
+ceiling, `operationId`, and exact affected invitation/session ID set. FF1
+continues to enforce that proposed ceiling locally and terminates any restored
+stale LAN lease before retrying the same broker barrier. It MUST NOT restore a
+selected MQTT session to local authorization, issue above the proposed ceiling,
+publish the terminal projections/events, or expose the old ceiling as
+effective authorization while the ACK is pending.
 
 The exceptions are lifecycles `pending_broker_cleanup` and
 `pending_identity_rotation`. In either lifecycle restart restores no controller
@@ -1197,15 +1286,20 @@ new owner claim. Broker-cleanup recovery executes only the device-wide barrier;
 identity-rotation recovery executes only the post-barrier identity transaction
 in section 13.5.
 
-### 13.4 Revocation
+### 13.4 Authorization reduction and revocation
 
 FF1 and the broker authorization adapter implement a revocation barrier. A
 barrier request is authenticated as the TPM-backed FF1 device identity and is
 idempotently identified by a UUIDv7 `operationId`. Its target is exactly one of
 an access-session ID, a controller ID together with the exact derived session
-IDs being revoked, or a device-reset target containing the controller-issuer
-generation identified by the issuer JWS `kid`, current publisher generation,
-and every controller/session authorization ID. The adapter MUST, atomically and
+IDs being revoked, a controller scope-reduction target, or a device-reset
+target containing the controller-issuer generation identified by the issuer
+JWS `kid`, current publisher generation, and every controller/session
+authorization ID. A scope-reduction target contains the controller ID, UUIDv7
+replacement `ceilingGeneration`, exact replacement scope ceiling, and exact
+unexpired access-session IDs selected because their signed scopes are not a
+subset of that ceiling. The selected set includes sessions issued directly to
+the target and guest sessions created by it. The adapter MUST, atomically and
 durably before acknowledging the request:
 
 1. install a deny tombstone for every target identifier;
@@ -1216,6 +1310,20 @@ durably before acknowledging the request:
    delivery for the target; and
 5. disconnect every active target client with MQTT 5 DISCONNECT Reason Code
    `0x87` (Not authorized).
+
+For a scope-reduction target, the adapter additionally installs the
+`ceilingGeneration` as the maximum broker grant for every access credential
+whose `ff_controller_id` names the target, denies any credential scope outside
+it, tombstones every selected session ID through that credential's maximum
+possible lifetime, and applies the replacement ceiling before any concurrent
+CONNECT, PUBLISH, SUBSCRIBE, or outbound-delivery decision can use the previous
+ceiling. It removes the selected sessions' queued delivery and subscriptions,
+disconnects them, denies their reconnect, and suppresses retained delivery to
+them. Retained device Application Messages remain available to unrelated
+authorized principals. A target session already wholly within the replacement
+ceiling is not selected and remains valid. The broker ACL ceiling is an FF
+broker-management customization; it is not an MQTT property or public Topic
+Name.
 
 The adapter ACK is the barrier completion boundary. It is an acknowledgement
 from the broker's authenticated authorization-management interface, not an
@@ -1234,19 +1342,74 @@ revocation result. Only after the adapter ACK may FF1 commit `revoked`, update
 `state/sessions` and/or `state/controllers`, publish the corresponding event,
 and return success.
 
+When a scope reduction begins, FF1 serializes the authorization store, computes
+the selected session set above plus every target-created open
+`controller_enrollment` or `guest_session` invitation whose `scopeCeiling` is
+not a subset of the replacement, and durably
+commits one pending marker containing the proposed ceiling, IDs, operation ID,
+and ceiling generation. That commit is the local linearization point. FF1
+immediately uses the proposed ceiling for commands, reads, new session
+issuance, and invitation claims. A command not admitted before the commit is
+rejected before side effects; an over-ceiling claim returns `scope_denied` and
+creates nothing. The public retained projections continue to show the last
+completed grant and active objects until the remote barrier completes.
+
+At the same local cutoff FF1 invalidates all connection-local LAN authorization
+leases for the target controller and for every selected guest. It terminates
+their HTTP/TLS connections and stops local-push enqueueing before Close 1008
+and connection termination. A new target-controller connection may create a
+lease only from the proposed ceiling. A selected guest cannot create another
+lease. Thus neither a persistent client certificate nor an existing TCP
+connection preserves removed authority.
+
+The shared scope-reduction security cutoff is the broker adapter's atomic
+installation of the replacement ceiling and selected-session tombstones. FF1
+MUST commit and enforce its local marker before that installation, so its
+command, issuance, invitation-claim, HTTP, and local-push paths are already
+fail-closed when broker authorization linearizes. The adapter then quiesces the
+selected MQTT principals under that installed deny state: it removes their
+subscriptions and queued delivery, disconnects their Network Connections, and
+rechecks the deny state for every concurrent outbound or reconnect decision.
+Only after those steps may it ACK. Broker-side subscribe/live/retained-delivery
+guarantees begin at this broker cutoff; they are not claimed for the interval
+between the earlier local marker and broker installation.
+
+After ACK, one local transaction replaces the enrollment scopes, marks every
+selected access/guest session revoked, closes every selected invitation,
+advances `state/controllers` and `state/sessions` exactly when each changes,
+and commits the idempotent successful response. FF1 then publishes retained
+snapshots before `controllers.scopes-changed`, `sessions.revoked`, and
+`sessions.invitation-closed` events. Before ACK it publishes none of those
+terminal changes and never returns success. A barrier failure uses the exact
+pending `dependency_unavailable` response below and the proposed ceiling stays
+locally enforced.
+
+An identical `(principalId, requestId)` retry returns the stored in-progress or
+terminal response. A new request for the same target and proposed ceiling
+observes the same pending operation; while pending it returns the retryable
+dependency failure and does not allocate another operation. A different
+ceiling for that target returns `conflict`. After ACK, a new request for the
+current set returns `already_current` without changing a revision or emitting
+an event. An additions-only update needs no remote barrier, changes only the
+enrollment ceiling for future sessions/leases, and does not expand current
+sessions/leases.
+
 `controllers.revoke` MUST reject the authenticated caller's own controller ID,
-and `sessions.revoke` MUST reject the access-session ID carrying the command.
-Both failures are `interaction_not_allowed` and occur before any pending marker
-or barrier operation is created. This keeps the synchronous response path
-authorized until an other-controller or other-session revocation completes.
+`sessions.revoke` MUST reject the access-session ID carrying the command, and
+`controllers.set-scopes` MUST reject the authenticated caller's own controller
+ID. All failures are `interaction_not_allowed` and occur before any pending
+marker or barrier operation is created. This keeps the synchronous response
+path authorized until an other-controller, other-session, or other-controller
+scope change completes.
 
 If FF1 cannot obtain the ACK, the command returns `dependency_unavailable` with
 `retryable: true` and exact details
 `{"dependency":"broker_authorization_barrier","pending":true}`. The durable
-pending revocation remains locally enforced and FF1 retries it before it may
-authorize that target again. A later request for the same target returns the
-same retryable failure while the barrier is pending and the declared
-`already_revoked` result only after barrier completion.
+pending revocation or scope reduction remains locally enforced and FF1 retries
+it before it may authorize the target beyond that local restriction. A later
+request for the same revocation target returns the same retryable failure while
+the barrier is pending and the declared `already_revoked` result only after
+barrier completion; scope-reduction replay follows the rule above.
 
 Revoking an enrollment also revokes its enrollment credential, LAN certificate,
 and every active access session created from it. It does not revoke guest
@@ -1411,7 +1574,8 @@ conformance suite MUST prove:
 10. FF1 restart invalidates open invitations, restores TPM-sealed unexpired
     access sessions, and preserves active enrollments without extending any
     absolute expiry, except that either pending-reset lifecycle restores no
-    controller or session authorization;
+    controller or session authorization and a pending scope reduction restores
+    its selected invitations only as unclaimable until barrier completion;
 11. offline reset cannot complete or enroll a new owner before both the broker
     barrier and identity-commit ACK; barrier ACK transitions to
     `pending_identity_rotation`, and completion requires old runtime-certificate
@@ -1439,8 +1603,9 @@ conformance suite MUST prove:
 18. the JSON Schema, AsyncAPI, OpenAPI, positive fixtures, negative security
     fixtures, and MQTT/LAN parity tests are published and executable, so no
     prose-only implementation is reported as conformant;
-19. self-controller and current-access-session revocation fail with
-    `interaction_not_allowed` before creating a barrier operation; and
+19. self-controller revocation, current-access-session revocation, and
+    self-controller scope replacement fail with `interaction_not_allowed`
+    before creating a barrier operation; and
 20. crash recovery in each pending-reset lifecycle resumes the same durable
     operation ID, never activates two runtime certificate registrations, and
     cannot report `completed`, reconnect the publisher, or enroll an owner
@@ -1480,4 +1645,23 @@ conformance suite MUST prove:
     signing/encryption keys, live scopes/status, and a session expiry no later
     than that deadline. A new request at or after that deadline receives
     `error.code: "expired"` and no session fields even if the broker still
-    accepts the restricted self-contained JWS before its signed `exp`.
+    accepts the restricted self-contained JWS before its signed `exp`;
+27. every parent API section 7.5 scope-reduction matrix row passes: local
+    command/read/claim and LAN denial begins at the durable cutoff; selected
+    MQTT ACLs, subscriptions, queued delivery, retained delivery, connections,
+    and reconnect are denied before barrier ACK; selected LAN HTTP and push
+    connections terminate; and removed-scope HTTP/subscription attempts remain
+    forbidden after reconnect with zero protected data or side effect;
+28. after scope-reduction ACK, target-created over-ceiling guest sessions are
+    revoked, over-ceiling invitations are closed, state revisions and events
+    change atomically, a crash resumes the same pending operation, and a
+    response/event/success is never exposed before ACK; and
+29. every LAN server handshake validates TLS 1.3 proof, time, the complete
+    runtime-device certificate profile, the exact `<deviceId>.local` DNS SAN,
+    and the enrollment-bound leaf SPKI pin. Normal renewal preserves SPKI;
+    wrong/changed SPKI, wrong hostname, expired/not-yet-valid certificate,
+    wrong KU/EKU/SAN, an invalid configured chain, and matching-but-untrusted
+    mDNS `fp` all fail before credentials/application data, never update the
+    pin, and use MQTT fallback when available. A legitimate key replacement or
+    factory reset restores LAN only through a new physically verified owner
+    enrollment.

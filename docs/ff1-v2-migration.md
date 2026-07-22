@@ -524,6 +524,20 @@ timestamps:
         ]
       },
       {
+        "id": "tls.server_identity",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/tls.server_identity.json"
+        ]
+      },
+      {
+        "id": "tls.server_identity_negative",
+        "result": "pass",
+        "evidencePaths": [
+          "tests/tls.server_identity_negative.json"
+        ]
+      },
+      {
         "id": "mtls.authorized",
         "result": "pass",
         "evidencePaths": [
@@ -623,7 +637,8 @@ timestamps:
 
 - `image.boot_measurement`;
 - `listener.ipv4.public_443` and `listener.ipv6.public_443`;
-- `tls.version_1_3`, `mtls.authorized`, and `mtls.unauthorized`;
+- `tls.version_1_3`, `tls.server_identity`,
+  `tls.server_identity_negative`, `mtls.authorized`, and `mtls.unauthorized`;
 - `https.command`, `websocket.subscription`, and `mdns.readiness_withdrawal`;
 - `privilege.controld_unprivileged` and `privilege.proxy_hardened`;
 - `reset.pending_broker_cleanup`, `reset.pending_identity_rotation`, and
@@ -673,12 +688,33 @@ rule above; `$policy.pcrSelection` is `[0,2,4,7,11,15]`; and
 content-addressed evidence manifest. The resolved value is stored in
 `expected`. There are no other variables or implicit assertions.
 
+`fixtures.json` is a closed object containing exactly `tls`, `mtls`, `https`,
+`websocket`, and `mdns`. `tls` is closed and contains exactly `deviceUriSan`:
+the canonical `urn:ff:device:<deviceId>`, `dnsSan`: the canonical
+`<deviceId>.local`, and `lanSpkiSha256`: 43-character unpadded base64url
+SHA-256 of the active leaf DER SubjectPublicKeyInfo, plus
+`leafCertificateSha256`: lowercase 64-character SHA-256 of the complete active
+leaf DER certificate. `mtls` is closed and
+contains exactly `deviceId`, `controllerId`, `sessionId`, and lexically sorted
+unique `scopes`. `https` is closed and contains exactly lowercase 64-character
+`requestSha256`, lowercase 64-character `responseSha256`, and signed 64-bit
+integer `resultRevision`. `websocket` is closed and contains exactly lowercase
+64-character `snapshotSha256` and `eventSha256`. `mdns` is closed and contains
+exactly `activeSpki`, equal to `tls.lanSpkiSha256`. The verifier rejects a
+missing, extra, malformed, or unequal field before resolving any assertion. It
+also derives and requires `tls.deviceUriSan` equal to
+`urn:ff:device:` concatenated with `mtls.deviceId` and `tls.dnsSan` equal to
+`mtls.deviceId` concatenated with `.local`; fixtures cannot select a different
+self-consistent device identity.
+
 | Test | Exact required assertion tuples |
 |---|---|
 | `image.boot_measurement` | `inventory_signature_valid / equals / boolean / true`; `inventory_claims_valid / equals / boolean / true`; `ek_manufacturer_chain_valid / equals / boolean / true`; `ak_binding_valid / equals / boolean / true`; `qualifying_data / equals / string / $derived.qualifyingData`; `pcr_bank / equals / string / "sha256"`; `pcr_selection / set_equals / integer[] / $policy.pcrSelection`; `event_log_replay_valid / equals / boolean / true`; `pcr15_image_sha256 / equals / string / $subject.imageSha256` |
 | `listener.ipv4.public_443` | `address_family / equals / string / "ipv4"`; `public_port / equals / integer / 443`; `proxy_destination / equals / string / "127.0.0.1:8443"`; `end_to_end_tls_succeeded / equals / boolean / true` |
 | `listener.ipv6.public_443` | `address_family / equals / string / "ipv6"`; `public_port / equals / integer / 443`; `proxy_destination / equals / string / "127.0.0.1:8443"`; `end_to_end_tls_succeeded / equals / boolean / true` |
 | `tls.version_1_3` | `negotiated_version / equals / string / "TLSv1.3"`; `tls12_rejected / equals / boolean / true`; `tls11_rejected / equals / boolean / true` |
+| `tls.server_identity` | `certificate_verify_valid / equals / boolean / true`; `configured_chain_valid / equals / boolean / true`; `subject_empty / equals / boolean / true`; `device_id / equals / string / $fixture.mtls.deviceId`; `uri_san / equals / string / $fixture.tls.deviceUriSan`; `dns_san / equals / string / $fixture.tls.dnsSan`; `san_count / equals / integer / 2`; `basic_constraints_ca / equals / boolean / false`; `key_usage / set_equals / string[] / ["digitalSignature"]`; `extended_key_usage / set_equals / string[] / ["clientAuth","serverAuth"]`; `mqtt_leaf_certificate_sha256 / equals / string / $fixture.tls.leafCertificateSha256`; `lan_leaf_certificate_sha256 / equals / string / $fixture.tls.leafCertificateSha256`; `tpm_private_key_proof_valid / equals / boolean / true`; `qr_pin / equals / string / $fixture.tls.lanSpkiSha256`; `leaf_spki / equals / string / $fixture.tls.lanSpkiSha256`; `mdns_fp / equals / string / $fixture.tls.lanSpkiSha256`; `renewal_spki_unchanged / equals / boolean / true`; `renewal_profile_valid / equals / boolean / true` |
+| `tls.server_identity_negative` | `invalid_certificate_verify_rejected_pre_application / equals / boolean / true`; `invalid_configured_chain_rejected_pre_application / equals / boolean / true`; `wrong_spki_rejected_pre_application / equals / boolean / true`; `wrong_hostname_rejected_pre_application / equals / boolean / true`; `wrong_uri_san_rejected_pre_application / equals / boolean / true`; `wrong_dns_san_rejected_pre_application / equals / boolean / true`; `wrong_key_usage_rejected_pre_application / equals / boolean / true`; `wrong_extended_key_usage_rejected_pre_application / equals / boolean / true`; `expired_rejected_pre_application / equals / boolean / true`; `not_yet_valid_rejected_pre_application / equals / boolean / true`; `mdns_fp_mismatch_rejected / equals / boolean / true`; `mdns_fp_pin_update_count / equals / integer / 0`; `tls_observed_pin_update_count / equals / integer / 0`; `credential_bytes_sent / equals / integer / 0`; `mqtt_fallback_selected / equals / boolean / true`; `reset_requires_owner_reenrollment / equals / boolean / true`; `replacement_key_requires_owner_reenrollment / equals / boolean / true` |
 | `mtls.authorized` | `certificate_chain_valid / equals / boolean / true`; `device_binding / equals / string / $fixture.mtls.deviceId`; `controller_binding / equals / string / $fixture.mtls.controllerId`; `session_binding / equals / string / $fixture.mtls.sessionId`; `lease_valid / equals / boolean / true`; `scope_set / set_equals / string[] / $fixture.mtls.scopes`; `request_succeeded / equals / boolean / true` |
 | `mtls.unauthorized` | `absent_certificate_rejected_pre_application / equals / boolean / true`; `revoked_certificate_rejected_pre_application / equals / boolean / true`; `expired_certificate_rejected_pre_application / equals / boolean / true`; `wrong_device_rejected_pre_application / equals / boolean / true`; `out_of_scope_rejected_pre_application / equals / boolean / true` |
 | `https.command` | `request_sha256 / equals / string / $fixture.https.requestSha256`; `response_sha256 / equals / string / $fixture.https.responseSha256`; `effect_count / equals / integer / 1`; `result_revision / equals / integer / $fixture.https.resultRevision` |
@@ -888,8 +924,9 @@ rollback at every fleet gate:
    and controller-key proof, JWE delivery, silent enrolled-session and
    enrollment-credential renewal,
    multiple independent controller enrollments, browser-only WebSocket Origin
-   defense-in-depth checks for web guests, exact ACLs, expiry, revocation, and
-   normal `playlist.display`
+   defense-in-depth checks for web guests, exact ACLs, expiry, revocation,
+   atomic scope-reduction ceiling generations/barriers and their complete
+   MQTT/LAN negative matrix, and normal `playlist.display`
    through a guest session. Direct broker validation of the registered FF1
    issuer is a gate.
 6. Add authenticated LAN HTTPS/WebSocket/mDNS with the sole approved port-443
@@ -898,7 +935,11 @@ rollback at every fleet gate:
    `127.0.0.1:8443`. Coordinate the component and user/system-unit changes as a
    full-image release, add its `RELEASES.md` declaration only in that release
    PR, build the matching `ffos` image, and pass `LAN_443_FULL_IMAGE` before
-   enabling the endpoint. Then run one shared protocol conformance suite
+   enabling the endpoint. The gate must verify the exact dual-use runtime
+   certificate URI/DNS SAN, KU/EKU and TPM proof, stable-SPKI renewal,
+   QR/enrollment-bound pin and exact hostname validation, fail-closed
+   wrong-SPKI/hostname/profile/time cases, no mDNS/TOFU pin update, and MQTT
+   fallback. Then run one shared protocol conformance suite
    against MQTT and LAN. The same command vector must produce the same response
    and final state revision, and both subscription bindings must deliver
    schema-equivalent snapshots/events.
@@ -961,6 +1002,15 @@ Minimum acceptance checks are:
 - an owner cannot create a controller invitation with any scope outside its
   current authoritative caller grant ceiling, and reducing that grant before
   claim prevents the stale invitation from enrolling broader authority;
+- a `controllers.set-scopes` reduction is locally fail-closed at its durable
+  cutoff and succeeds only after the broker scope-reduction barrier ACK;
+  selected target/guest MQTT ACLs, subscriptions, queued/retained delivery,
+  connections, and reconnect are denied, selected LAN connections/leases are
+  terminated or recomputed, over-ceiling target-created guest sessions are
+  revoked, every target-created over-ceiling `controller_enrollment` or
+  `guest_session` invitation is closed, and every API section 7.5 negative-matrix
+  case produces no protected payload or side effect; self-target returns
+  `interaction_not_allowed` before a barrier;
 - credential renewal with a restricted PKCS #10 `lanCsrPem` returns a
   replacement certificate that matches the new signing key and completes
   mTLS; the previous certificate is accepted only during its ten-minute grace,
@@ -991,6 +1041,12 @@ Minimum acceptance checks are:
   certificate registration, credential, retained message, and queued delivery
   unusable or absent;
 - certificate expiry/rotation and last-owner protection are tested end-to-end;
+- every LAN handshake validates TLS 1.3 proof, certificate time and the exact
+  runtime-device profile, exact `<deviceId>.local` DNS SAN, and the QR-bound
+  leaf SPKI pin; normal runtime-certificate renewal preserves SPKI, while wrong
+  SPKI/hostname/profile/time and an untrusted mDNS `fp` fail closed without
+  TOFU or pin update and use MQTT fallback; reset or TPM key replacement
+  requires physical owner re-enrollment before a new pin is accepted;
 - enrolled LAN HTTP and local push expire at the issued authorization-lease
   deadline, bounded to at most 900 seconds, even when the client certificate is
   still valid, followed by a silent mutually authenticated reconnect;
@@ -1009,7 +1065,9 @@ Minimum acceptance checks are:
   `RELEASES.md` marker for the successful `ffos` run and attempt;
 - every `state/sessions` invitation and session variant passes closed-schema
   and terminal-removal fixtures; restart fixtures invalidate open invitations
-  but restore unexpired sessions and pending-revocation markers without
+  except unclaimable invitations selected by a pending scope reduction, and
+  restore unexpired sessions, pending-revocation markers, and pending
+  scope-reduction targets without
   changing their absolute expiry, except either pending reset lifecycle restores
   no controller authorization and resumes its durable operation ID;
 - v1 weekday sleep selections survive migration exactly, including the
