@@ -195,7 +195,61 @@ from its source of truth even when no controller is connected.
 - Shared subscriptions, wildcard publishes, retained commands, MQTT 3.x, and
   broker-specific RPC features are prohibited.
 
-#### 4.1.1 CONNECT and CONNACK profile
+#### 4.1.1 MQTT over WebSocket opening handshake
+
+The required WSS endpoint uses the RFC 6455 opening handshake at the exact
+configured request target `/mqtt`. TLS 1.3 and normal service-identity
+validation complete before the HTTP request. A TLS failure ends the connection
+before HTTP or MQTT. The client then sends an HTTP/1.1 WebSocket opening
+handshake whose request target is exactly `/mqtt`, with no query component,
+and whose `Sec-WebSocket-Protocol` field-value is exactly the single
+case-sensitive token `mqtt`. It sends no MQTT bytes before a successful
+opening handshake. Credentials belong only in the later MQTT CONNECT; a
+cookie, URI query, HTTP `Authorization` field, or vendor header MUST NOT be
+required.
+
+For a valid request, the server sends HTTP `101 Switching Protocols` with the
+RFC 6455 `Upgrade`, `Connection`, and `Sec-WebSocket-Accept` fields and
+`Sec-WebSocket-Protocol: mqtt`. The server MUST select and echo the exact
+`mqtt` subprotocol before either endpoint processes MQTT. It MUST interoperate
+without a WebSocket extension or broker-specific handshake field. The
+configured URI is an endpoint-routing constraint of this profile; as MQTT 5
+specifies, it does not change MQTT packet semantics.
+
+Opening-handshake failures have these exact transport outcomes:
+
+| Condition | Server behavior | Client behavior |
+|---|---|---|
+| Request target is not exactly `/mqtt` or contains a query component | HTTP `404 Not Found`, no Upgrade, then close | fail the WebSocket connection and send no MQTT bytes |
+| `Sec-WebSocket-Protocol` is absent, is not exactly the sole token `mqtt`, or cannot be selected | HTTP `400 Bad Request`, no Upgrade, then close | fail the WebSocket connection and send no MQTT bytes |
+| `Sec-WebSocket-Version` is not `13` | HTTP `426 Upgrade Required` with `Sec-WebSocket-Version: 13`, no Upgrade, then close | fail the WebSocket connection and send no MQTT bytes |
+| Another required RFC 6455 opening-handshake condition is malformed | HTTP `400 Bad Request`, no Upgrade, then close | fail the WebSocket connection and send no MQTT bytes |
+| A server returns `101` but omits `Sec-WebSocket-Protocol`, returns a value other than exact `mqtt`, or otherwise fails RFC 6455 client validation | server is nonconformant | fail the WebSocket connection, close the underlying connection, and send no MQTT bytes |
+
+Because MQTT has not started, none of these failures produces an MQTT CONNACK
+or DISCONNECT. An HTTP response body, if any, is diagnostic only and MUST NOT
+contain a credential or alter client behavior.
+
+After the successful `101`, MQTT Control Packet bytes are carried only in
+WebSocket Binary Messages. One WebSocket data frame may contain multiple or
+partial MQTT Control Packets; neither endpoint assumes packet alignment at a
+frame boundary. RFC 6455 continuation frames are permitted. If either endpoint
+receives a Text Message or another non-binary data message, it sends WebSocket
+Close `1003` (Unsupported Data) when possible and closes the Network
+Connection without an MQTT DISCONNECT. WebSocket Ping, Pong, and Close remain
+transport control frames and do not substitute for MQTT PINGREQ, PINGRESP, or
+DISCONNECT.
+
+Browser Origin handling is a separate, later authorization check. A browser
+sends its RFC 6454 Origin in the opening handshake; the WSS edge preserves that
+value unchanged for the access-session authentication decision in the
+controller-authentication profile. Selecting `mqtt`, completing TLS, or
+accepting the WebSocket does not authenticate or authorize that Origin. A
+missing or mismatched Origin for a web access session is therefore rejected by
+MQTT authentication with CONNACK `0x87` after CONNECT, while a subprotocol
+failure is rejected before MQTT and has no MQTT Reason Code.
+
+#### 4.1.2 CONNECT and CONNACK profile
 
 Every client sends Protocol Name `MQTT`, Protocol Version `5`, a nonempty Client
 Identifier above, Clean Start `1`, and these CONNECT properties:
@@ -251,7 +305,7 @@ another server) or `0x9D` (Server moved). It follows the reference only when it
 is an allowlisted `wss://` URI on port 443 with the expected trust domain;
 otherwise the connection fails visibly without redirection.
 
-#### 4.1.2 SUBSCRIBE and session profile
+#### 4.1.3 SUBSCRIBE and session profile
 
 Because Session Expiry Interval is zero, every client sends new SUBSCRIBE
 packets after each successful CONNACK and does not rely on stored subscriptions
@@ -264,7 +318,7 @@ Subscription Options are:
 | device | its own invitation claim/acknowledgement filters from the controller-authentication profile | 1 | 1 | 1 | 2 |
 | device | its own enrolled-session request filters from the controller-authentication profile | 1 | 1 | 1 | 2 |
 | controller | exact `presence`, exact `capabilities`, and one exact `state/{resource}` per authorized resource | 1 | 1 | 1 | 0 |
-| controller | its exact `responses/{controllerId}` and one exact `events/{class}/{name}` Topic Name per authorized event type | 1 | 1 | 1 | 2 |
+| controller access session | its exact `sessions/{sessionId}/responses` and one exact `events/{class}/{name}` Topic Name per authorized event type | 1 | 1 | 1 | 2 |
 
 Retain Handling `0` is required for current retained resources on a new
 subscription; `2` prevents retained delivery on command, response, and event
@@ -272,8 +326,9 @@ filters. Retain As Published `1` preserves the RETAIN flag so a receiver can
 reject a retained command. Each SUBACK entry MUST be Granted QoS 1 (`0x01`);
 Granted QoS 0 or any failure Reason Code makes that protocol function
 unavailable and is surfaced to the client. Topic Filters are authorized before
-SUBACK; a controller never subscribes to another controller's response Topic
-Name or another device subtree. `state/+` is allowed only to a principal
+SUBACK; an access session never subscribes to another session's response Topic
+Name, including another session of the same controller, or another device
+subtree. `state/+` is allowed only to a principal
 authorized for every state resource, and `events/+/+` only to a principal
 authorized for every event type; MQTT SUBACK cannot partially authorize the
 matches of one Topic Filter.
@@ -297,7 +352,7 @@ never contain `/`, `+`, `#`, percent escapes, or Unicode.
 | `ff/v2/devices/{deviceId}/capabilities` | device -> controllers | 1 | yes | 24 hours |
 | `ff/v2/devices/{deviceId}/state/{resource}` | device -> controllers | 1 | yes | 24 hours |
 | `ff/v2/devices/{deviceId}/sessions/{sessionId}/commands/{class}/{name}` | controller -> device | 1 | no | request TTL |
-| `ff/v2/devices/{deviceId}/responses/{controllerId}` | device -> controller | 1 | no | 60 seconds |
+| `ff/v2/devices/{deviceId}/sessions/{sessionId}/responses` | device -> controller access session | 1 | no | 60 seconds |
 | `ff/v2/devices/{deviceId}/events/{class}/{name}` | device -> controllers | 1 | no | event-specific, at most 1 hour |
 
 Every row is an MQTT Application Message carried in a PUBLISH Control Packet at
@@ -328,26 +383,42 @@ retained data indefinitely. Expired state is unknown, never assumed current.
 
 Command PUBLISH packets MUST additionally carry these MQTT 5 properties:
 
-- Response Topic = the authenticated controller's response topic;
+- Response Topic =
+  `ff/v2/devices/{deviceId}/sessions/{sessionId}/responses` for the
+  authenticated access session;
 - Correlation Data = the raw 16 UUID bytes of `requestId`;
 - Message Expiry Interval = `ceil(expiresAt - senderCurrentTime)` at PUBLISH;
 - Payload Format Indicator = `1`; and
 - Content Type = `application/json`.
 
-The Topic Name `sessionId` MUST equal the authenticated access credential's
-`ff_session_id`. The MQTT Server grants that credential only its exact session
-command prefix. FF1 extracts the session ID, requires the Response Topic's
-controller ID to match the local session record, and rechecks session status,
-expiry, and operation scope before dispatch.
+The command Topic Name `sessionId` MUST equal the authenticated access
+credential's `ff_session_id`. The MQTT Server grants that credential only its
+exact session command prefix and grants an exact subscribe ACL only for that
+same session's response Topic Name. As part of PUBLISH authorization, the
+broker also requires the Response Topic property to equal that exact Topic
+Name; a redirect to another session is rejected with PUBACK `0x87` (Not
+authorized) and is not delivered. FF1 independently extracts the session ID,
+requires it to resolve exactly one active authoritative local session record,
+requires Response Topic to equal the exact response Topic Name derived from
+that same session, and rechecks session status, expiry, and operation scope
+before dispatch. Standard MQTT delivery does not disclose the publisher's
+authenticated connection identity to FF1; the broker enforces the credential-
+to-command-Topic equality, while FF1's independent defense uses only the
+standard delivered PUBLISH and its local session record.
 
 Response Topic is a UTF-8 Topic Name with no wildcard; Correlation Data is MQTT
-Binary Data. The device rejects a missing or unauthorized Response Topic or a
-Correlation Data value that does not match the body. On receipt it defines the effective
+Binary Data. The device rejects a missing, different, or unauthorized Response
+Topic or a Correlation Data value that does not match the body. A Response
+Topic mismatch produces no command side effect and no response publication;
+FF1 emits only a sanitized security audit event because publishing an error to
+the supplied Topic Name would complete the attempted redirect. On receipt of
+valid transport metadata it defines the effective
 deadline as the earlier of JSON `expiresAt` and
 `receiverCurrentTime + receivedRemainingMessageExpiry`; this accounts for the
 broker decrementing Message Expiry in transit without comparing it to the
-original TTL. It also rejects any command with the RETAIN flag. Responses copy
-Correlation Data and do not set Response Topic. If an authorized Response Topic
+original TTL. It also rejects any command with the RETAIN flag. FF1 publishes
+the response only to the validated, exact response Topic Name for that session,
+copies Correlation Data, and does not set Response Topic. If an authorized Response Topic
 and a valid 16-byte UUID Correlation Data are present but JSON validation fails,
 the device uses that UUID as `requestId` in `schema_invalid`; otherwise it
 discards the message and emits only a sanitized security audit event.
@@ -1015,8 +1086,9 @@ The broker and LAN server enforce the same operation scopes. Guest sessions
 receive an explicit subset under the controller-authentication profile. Web
 guests are MQTT-only; agent and integration guests may receive a
 session-bounded LAN certificate. Every active MQTT access session may read the
-requested device's presence and capabilities and use its own response Topic
-Name. Every active LAN authorization lease may GET those two resources and
+requested device's presence and capabilities and use only its exact
+`sessions/{sessionId}/responses` Topic Name. Every active LAN authorization
+lease may GET those two resources and
 subscribe to them through local push; LAN has no response Topic Name. This
 authenticated baseline does not imply `state:read` and exposes no operational
 or other-controller state.
@@ -1039,13 +1111,38 @@ or other-controller state.
 | `sessions:manage` | create guest-session invitations and list or revoke guest sessions plus `sessions` state/events |
 
 An MQTT controller may publish only to its authorized devices and subscribe
-only to those devices' state/events and its own response Topic Name. Over MQTT,
+only to those devices' state/events and the authenticated access session's
+exact response Topic Name. Over MQTT,
 devices may subscribe only to their own access-session command,
 invitation-claim, and enrolled-session request subtrees and publish only to
 their own presence, capability, state, event, response, invitation, and
 session-response subtrees. The device repeats authorization after broker
 delivery; broker ACLs are not the only enforcement layer. LAN uses the scope-
 equivalent REST and local-push mappings from section 5.
+
+Response authorization is per access session, not per controller. When one
+controller concurrently holds sessions `sessionA` and `sessionB`, the broker
+installs two non-overlapping exact response subscriptions even if both access
+credentials contain the same `ff_controller_id`. Each session receives only
+the scopes in its own credential. For either session:
+
+- SUBSCRIBE to the other session's
+  `ff/v2/devices/{deviceId}/sessions/{sessionId}/responses` Topic Filter gets
+  SUBACK `0x87` (Not authorized) for that filter, and no retained or live
+  Application Message is delivered;
+- PUBLISH to the other session's command prefix gets PUBACK `0x87` and is not
+  delivered; and
+- PUBLISH to its own command Topic Name with the other session's Response Topic
+  gets PUBACK `0x87` and is not delivered. If a broker defect nevertheless
+  delivers the last case, FF1 rejects it before dispatch, publishes no
+  response to either Topic Name, and records only a sanitized security audit
+  event.
+
+These outcomes apply in both directions and prevent a less-privileged session
+from reading a more-privileged result or causing that result to be published
+into a Topic Name it controls. Invitation-claim responses and enrolled-session
+issuance responses remain the separate exact Topic Names in the controller-
+authentication profile; this access-session rule does not rename them.
 
 Event subscriptions use one exact Topic Name per granted event type. This is
 required because `system:update`, `system:power`, and `system:reset` authorize

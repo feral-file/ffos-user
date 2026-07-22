@@ -65,6 +65,7 @@ This profile uses:
 - [JWT confirmation (RFC 7800)](https://www.rfc-editor.org/rfc/rfc7800.html);
 - [Bearer Token Usage (RFC 6750)](https://www.rfc-editor.org/rfc/rfc6750.html);
 - [Web Origin (RFC 6454)](https://www.rfc-editor.org/rfc/rfc6454.html);
+- [The WebSocket Protocol (RFC 6455)](https://www.rfc-editor.org/rfc/rfc6455.html);
 - [JSON Canonicalization Scheme (RFC 8785)](https://www.rfc-editor.org/rfc/rfc8785.html);
   and
 - [PKCS #10 (RFC 2986)](https://www.rfc-editor.org/rfc/rfc2986.html) with
@@ -87,6 +88,16 @@ A broker selected for the final profile is acceptable only if it can validate
 the registered FF1 issuer, enforce the exact Topic Name ACLs, and provide the
 authorization-barrier semantics in section 13.4 without changing the public
 MQTT wire protocol.
+
+Every MQTT-over-WSS connection first completes the parent contract section
+4.1.1 opening handshake at `/mqtt`, with the client offering and the server
+selecting the exact `mqtt` WebSocket subprotocol. TLS failure, a missing or
+wrong subprotocol, a wrong request target, or an invalid server selection fails
+before MQTT and therefore produces no CONNACK or DISCONNECT. Only after the
+HTTP `101` has selected `mqtt` may the client send CONNECT in WebSocket Binary
+Messages. Browser Origin is carried by that handshake but remains the separate
+defense-in-depth check in sections 7.1, 7.4, and 10; selecting the `mqtt`
+subprotocol does not authenticate an Origin or controller.
 
 ## 3. Vocabulary
 
@@ -684,7 +695,12 @@ Authentication Data, and all Reason Codes retain their MQTT 5 meanings.
 
 The broker validates the registered FF1 issuer, ES256 signature, audience,
 `iat`, `nbf`, `exp`, exact User Name, exact Client Identifier, device ID,
-session type, `cnf.jwk`, and ACL mapping before issuing a challenge. For a web
+session type, `cnf.jwk`, and the ACL mapping derived from the exact session ID
+before issuing a challenge. That mapping grants the command prefix
+`ff/v2/devices/{deviceId}/sessions/{sessionId}/commands/` and the single exact
+response Topic Name
+`ff/v2/devices/{deviceId}/sessions/{sessionId}/responses`; it never grants a
+controller-wide response prefix. For a web
 access session over MQTT-over-WSS, it additionally applies the exact Origin
 comparison in section 10 as browser-only defense in depth. It rejects an access
 credential whose controller or session fields conflict, whose `cnf` object has
@@ -790,8 +806,11 @@ The broker uses these exact MQTT 5 outcomes before successful CONNACK:
 | AUTH is malformed | CONNACK `0x81` (Malformed Packet) when a valid CONNACK can be encoded, then close the Network Connection |
 | AUTH omits or changes Authentication Method, uses a Reason Code other than `0x18`, repeats a single-use property, or violates the exchange order | CONNACK `0x82` (Protocol Error) when a valid CONNACK can be encoded, then close the Network Connection |
 
-These failures occur before successful CONNACK, so the broker MUST NOT send a
-DISCONNECT Control Packet. If malformed input prevents the broker from encoding
+These failures occur after a valid WebSocket opening handshake but before
+successful CONNACK, so the broker MUST NOT send a DISCONNECT Control Packet.
+Failures of TLS or the WebSocket opening handshake instead use only the parent
+contract section 4.1.1 TLS/HTTP outcomes and send no MQTT Control Packet. If
+malformed input prevents the broker from encoding
 a valid failure CONNACK, it closes the Network Connection without sending an
 MQTT Control Packet.
 
@@ -810,9 +829,20 @@ session for every delivered command.
 
 The credential's publish ACL is the exact prefix
 `ff/v2/devices/{deviceId}/sessions/{sessionId}/commands/`; its subscribe ACLs
-are derived from the granted scopes and its exact controller response Topic
-Name. FF1 obtains the authoritative session ID from the command Topic Name and
-never from a controller-supplied JSON identity field.
+are derived from the granted scopes and its one exact response Topic Name,
+`ff/v2/devices/{deviceId}/sessions/{sessionId}/responses`. PUBLISH
+authorization also requires a command's Response Topic property to equal that
+exact Topic Name. FF1 obtains the authoritative session ID from the command
+Topic Name, resolves its authoritative local session record, requires Response
+Topic to bind to that same session ID, and never derives either authorization
+from a controller-supplied JSON identity field. The broker, which owns the
+publisher Network Connection, separately requires the command Topic session ID
+to equal the authenticated credential's `ff_session_id`. MQTT 5 does not
+forward that publisher identity to FF1; FF1's defense-in-depth check therefore
+uses the standard delivered PUBLISH and its local session record, without
+broker-specific metadata. Invitation responses and enrolled-session issuance
+responses remain separately authorized by their exact Topic Name pairs in
+sections 6.4 and 8.1.
 
 An access credential is delivered only in a JWE encrypted to the controller
 encryption key. Tokens MUST NOT be persisted by web or guest clients. Native enrolled
@@ -1667,8 +1697,15 @@ conformance suite MUST prove:
     certificate deregistration, replacement-certificate activation, a fresh
     publisher generation, one fresh registered issuer/CA generation, and
     durable local authority activation and cleanup;
-12. one controller cannot subscribe to another controller's response Topic
-    Name or another device subtree;
+12. two simultaneous access sessions belonging to the same controller, with
+    different scope sets, receive distinct exact
+    `sessions/{sessionId}/responses` ACLs: either session's subscription to the
+    other's response Topic Name gets SUBACK `0x87` with no Application Message,
+    its publish to the other's command prefix gets PUBACK `0x87`, and its own
+    command with the other's Response Topic gets PUBACK `0x87`; defense-in-
+    depth delivery of the last case is rejected by FF1 before dispatch with no
+    response publication or command side effect. The same isolation applies
+    across controllers and device subtrees;
 13. logs, state, events, and diagnostics contain no invitation credential,
     access credential, enrollment credential, JWE plaintext, private key, or QR
     payload;
@@ -1752,4 +1789,12 @@ conformance suite MUST prove:
     mDNS `fp` all fail before credentials/application data, never update the
     pin, and use MQTT fallback when available. A legitimate key replacement or
     factory reset restores LAN only through a new physically verified owner
-    enrollment.
+    enrollment; and
+30. the managed MQTT-over-WSS endpoint accepts exact `/mqtt` with the client
+    offering and server selecting only `mqtt`, then carries MQTT Control
+    Packets in binary data frames without assuming frame alignment. Missing,
+    wrong, or unselected subprotocol, wrong path, and malformed opening
+    handshake fail at HTTP with no CONNACK or DISCONNECT; an invalid server
+    `101` causes the client to send no MQTT bytes; Text Message input closes
+    with WebSocket `1003` and no MQTT DISCONNECT; and WebSocket subprotocol
+    success neither bypasses nor replaces the later web-guest Origin check.

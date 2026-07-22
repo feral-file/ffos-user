@@ -821,6 +821,21 @@ release-ledger marker.
    prove per-principal ACLs, retained messages, the Will Message, Message
    Expiry, and packet limits. An unproven vendor-supported WSS/443 front door
    fails the spike and requires a different managed offering/vendor.
+   The managed endpoint MUST pass the opening-handshake matrix without a
+   vendor header, cookie, query credential, custom subprotocol, or nonstandard
+   port: a request to exact `/mqtt` offering only
+   `Sec-WebSocket-Protocol: mqtt` receives HTTP `101` selecting exact `mqtt`,
+   then carries CONNECT and subsequent MQTT bytes in binary frames, including
+   multiple and partial MQTT Control Packets across frame boundaries. Missing,
+   wrong, or unselected subprotocol receives the parent contract HTTP failure
+   before MQTT and produces no CONNACK or DISCONNECT; wrong path, WebSocket
+   version, and malformed-handshake cases receive their specified HTTP
+   failures; a test client given a synthetic `101` with missing or wrong
+   subprotocol sends no MQTT bytes; and a Text Message after upgrade receives
+   Close `1003` with no MQTT DISCONNECT. A browser web guest additionally proves
+   that exact subprotocol selection does not bypass the later Origin
+   comparison: matching Origin completes Enhanced Authentication, while missing
+   or mismatched Origin reaches MQTT and receives CONNACK `0x87`.
 2. On that connection, publish retained capabilities/current state and retained
    connected presence, then prove the broker publishes the retained
    disconnected Will Message after forced connection loss.
@@ -840,8 +855,15 @@ release-ledger marker.
    the byte-equivalent cached response; send the same `requestId` with a
    different body and prove `duplicate_conflict`.
 6. Attempt unauthorized publish and SUBSCRIBE operations from the controller
-   and another device/controller identity. Record broker PUBACK/SUBACK or
-   DISCONNECT Reason Codes and sanitized control-plane evidence.
+   and another device/controller identity. Also create two concurrent access
+   sessions for one controller with different scopes. Prove each has only its
+   exact `sessions/{sessionId}/responses` subscribe ACL: cross-session response
+   SUBSCRIBE gets SUBACK `0x87` and no delivery, cross-session command PUBLISH
+   gets PUBACK `0x87`, and a command on its own prefix naming the other
+   session's Response Topic gets PUBACK `0x87`. Inject the redirect case behind
+   the broker boundary and prove FF1 independently performs no command effect
+   and publishes no response. Record broker PUBACK/SUBACK or DISCONNECT Reason
+   Codes and sanitized control-plane evidence.
 7. Record the MoMA evidence for matched/no-matching-subscriber PUBACK,
    disconnected/stale presence, device response, and expired-no-response so
    support can classify the failure without a device-log dive.
@@ -973,7 +995,9 @@ rollback at every fleet gate:
    execute and adding only the source-of-truth signals required by retained
    state.
 4. Complete TPM enrollment and broker spike, including WSS/443, Will Message,
-   ACL negative tests, the vendor-neutral authorization-barrier adapter,
+   the exact `/mqtt` plus `mqtt` WebSocket-subprotocol positive/negative
+   matrix, binary-frame handling, access-session-specific response ACL
+   negative tests, the vendor-neutral authorization-barrier adapter,
    old-device-publisher generation fencing, pending-Will/queued-publish
    cancellation, retained Application Message purge, idempotent runtime-
    certificate registration replacement, fresh publisher-generation activation,
@@ -986,7 +1010,8 @@ rollback at every fleet gate:
    and controller-key proof, JWE delivery, silent enrolled-session and
    enrollment-credential renewal,
    multiple independent controller enrollments, browser-only WebSocket Origin
-   defense-in-depth checks for web guests, exact ACLs, expiry, revocation,
+   defense-in-depth checks for web guests, exact per-session response ACLs,
+   expiry, revocation,
    atomic scope-reduction ceiling generations/barriers and their complete
    MQTT/LAN negative matrix, and normal `playlist.display`
    through a guest session. Direct broker validation of the registered FF1
@@ -1149,6 +1174,16 @@ Minimum acceptance checks are:
   scope-reduction targets without
   changing their absolute expiry, except any pending-reset lifecycle restores
   no controller authorization and resumes its durable operation ID;
+- the managed MQTT WSS/443 endpoint passes exact `/mqtt` routing, offers and
+  selects the standard `mqtt` subprotocol, carries MQTT only in binary data
+  frames without assuming frame/packet alignment, rejects missing/wrong/
+  unselected subprotocol before MQTT with no CONNACK or DISCONNECT, and requires
+  no vendor handshake field, query credential, cookie, nonstandard port, or custom
+  subprotocol;
+- two simultaneous differently scoped access sessions for one controller have
+  disjoint exact response Topic Name ACLs; cross-session SUBSCRIBE and PUBLISH
+  attempts return the specified `0x87` results with no protected delivery or
+  effect, and FF1 rejects an injected Response Topic redirect before dispatch;
 - v1 weekday sleep selections survive migration exactly, including the
   missing-field daily default and non-daily subsets; and
 - logs and all state/events pass secret, credential, PII, DP-1 source, and remote
@@ -1160,17 +1195,18 @@ Minimum acceptance checks are:
 |---|---|
 | One versioned open contract; stable resource names | API sections 1, 3, 4.2, and 9 |
 | MQTT 5 remote in the first compatibility epoch | API sections 4 and 7; plan sections 2.1 and 3 |
-| MQTT/WSS on port 443 hard gate | API section 4.1 and plan section 3 |
+| MQTT/WSS on port 443 hard gate, exact standard opening handshake | API section 4.1.1 and plan section 3 |
 | Typed commands, successes, errors, and correlation | API sections 4.2, 6, and 11 |
 | Creation time, expiry, and clock skew | API sections 3.2, 4.2, 4.4, and 7.3 |
-| QoS 1 duplicate safety and idempotency | API sections 4.1.2, 4.2, and 4.4 |
+| QoS 1 duplicate safety and idempotency | API sections 4.1.3, 4.2, and 4.4 |
 | QoS, retained, Session, and Will policy | API sections 4.1 through 4.3 |
 | Revision/order behavior after reconnect | API sections 3.3, 4.2, and 13 |
 | Connected/disconnected/stale/unknown presence | API section 4.3 |
 | Capability discovery; no firmware guessing | API section 9 |
 | Packet limits, rate limits, restricted commands | API sections 4.4, 7.4, 9, and 11 |
 | Per-device/controller identity, TPM, rotation, revocation barriers, ACLs | API sections 7 and 8; authentication section 13 |
-| MQTT device mTLS; restricted invitation/enrollment credentials; sender-constrained access sessions | API sections 4.1.1 and 7; authentication section 7 |
+| MQTT device mTLS; restricted invitation/enrollment credentials; sender-constrained access sessions | API sections 4.1.2 and 7; authentication section 7 |
+| Access-session-specific response Topic Names and redirect denial | API sections 4.2 and 7.4; authentication sections 7 and 15 |
 | Brokerless authenticated LAN HTTPS using the same contract, with explicit power-loss time capability | API sections 5, 7, 8, and 9; authentication sections 12, 13.2, and 15; plan section 3 |
 | Authenticated realtime LAN state/event push with polling fallback | API section 5 |
 | mDNS discovery and rejection of unenrolled clients | API sections 5, 7, and 8 |
