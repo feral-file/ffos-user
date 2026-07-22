@@ -55,7 +55,11 @@ for relayer topic assignment:
 
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
-  through CDP as `window.handleCDPRequest(...)`.
+  through CDP as `window.handleCDPRequest(...)`. When the playlist has
+  `schedule.byDisplayAt: true`, controld filters items to the current active
+  set before CDP, caches the full playlist, and advances the player on the next
+  `displayAt` (timer), sleep-schedule wake, or CDP reconnect. Playlists without
+  `byDisplayAt` are forwarded unchanged.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
@@ -255,6 +259,15 @@ Current relayer error response: none standardized; command failure is logged.
 
 Purpose: display a DP1 playlist on the FF1 player.
 
+When the resolved playlist includes `schedule.byDisplayAt: true`, controld
+computes an active set (`max(displayAt <= now)` items plus items without
+`displayAt`) and sends only that filtered playlist to Chromium. Timezone-less
+`displayAt` values use device local time; values with `Z`/offset are absolute.
+Controld keeps the full playlist in memory to arm the next `displayAt`
+transition and to recompute after wake or CDP reconnect. A later
+`displayDefaultPlaylist` clears that cache so a scheduled push cannot overwrite
+the default player state.
+
 Playlist URL example:
 
 ```json
@@ -352,7 +365,9 @@ command failure is logged.
 ### displayDefaultPlaylist
 
 Purpose: tell the player to resume or display its default playlist. This is
-forwarded to Chromium through CDP.
+forwarded to Chromium through CDP. Controld also clears any cached
+`byDisplayAt` playlist so timer/wake/reconnect recomputes cannot resurrect the
+previous scheduled cast after default playback starts (including OOM recovery).
 
 Example:
 

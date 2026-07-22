@@ -121,6 +121,13 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 		return result, nil
 	} else {
+		// Leaving displayPlaylist (e.g. displayDefaultPlaylist / OOM recovery)
+		// must drop the byDisplayAt cache; otherwise a later timer, wake, or CDP
+		// reconnect would push the old Daily active set over the new player state.
+		if commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil {
+			h.scheduler.Clear()
+		}
+
 		var playlist *dp1.Playlist
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()

@@ -370,3 +370,62 @@ func TestRecomputeNow_PushesNewerCacheWhenPrepareWinsPushLockRace(t *testing.T) 
 		t.Fatal("RecomputeNow did not return")
 	}
 }
+
+func TestPrepare_AllFutureNoEvergreen_EmptyActiveSet(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	active := sched.Prepare(byDisplayAtPlaylist(
+		item("future", "2026-07-22T00:00:00Z"),
+	))
+	require.NotNil(t, active)
+	assert.Empty(t, active.Items)
+	assert.True(t, sched.HasCache())
+}
+
+func TestClear_StopsTimerAndDropsCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.Prepare(byDisplayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+	require.True(t, sched.HasCache())
+
+	sched.Clear()
+	assert.False(t, sched.HasCache())
+
+	cdpMock.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+	sched.RecomputeNow(context.Background())
+}

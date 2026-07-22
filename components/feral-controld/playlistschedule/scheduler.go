@@ -33,6 +33,10 @@ type Scheduler interface {
 	// Used on wake, boot, and after a failed network refresh that still has a
 	// usable cache. No-op when nothing is cached.
 	RecomputeNow(ctx context.Context)
+	// Clear drops the cached byDisplayAt playlist and cancels the transition
+	// timer. Call when playback leaves displayPlaylist (e.g. displayDefaultPlaylist)
+	// so wake/reconnect/timer cannot resurrect the previous scheduled cast.
+	Clear()
 	// WithPlayerPush serializes CDP playlist updates against timer/wake
 	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
 	// send so a stale RecomputeNow cannot overwrite a newer cast mid-flight.
@@ -167,10 +171,14 @@ func (s *scheduler) RecomputeNow(ctx context.Context) {
 	}
 }
 
-func (s *scheduler) Stop() {
+func (s *scheduler) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.clearLocked()
+}
+
+func (s *scheduler) Stop() {
+	s.Clear()
 }
 
 func (s *scheduler) clearLocked() {
