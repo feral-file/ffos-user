@@ -196,6 +196,21 @@ itself only clears shared state if no newer generation has since replaced
 it (an identity check, guarding against this goroutine waking up late and
 clobbering a replacement it knows nothing about).
 
+`Release` frees the single-job capture slot only AFTER recording (under
+its mutex) whether an idle-teardown should be scheduled for the process
+it is releasing — never before. An earlier version freed the slot first;
+that left a window where a concurrent `Acquire` could take the
+newly-freed slot, see no pending teardown yet (there was nothing to
+cancel), and start reusing the process, while `Release` — resuming a
+moment later — would still go on to schedule that teardown anyway,
+unaware a new job had already claimed the process. The teardown's timer
+firing later would then kill Chromium out from under that active job.
+Recording the decision before freeing the slot closes the window: any
+`Acquire` that manages to take the slot is guaranteed (by the channel
+send/receive happens-before relationship) to observe `Release`'s
+teardown decision already made, and correctly cancels it via the
+existing reuse path instead of racing past it unaware.
+
 `Capture`'s bounded observation wait (`waitForObservationWindow`) blocks
 on a `select` between the per-navigation timeout (`navCtx`) and the
 caller's own `ctx`. Because `navCtx` is derived from `ctx` via

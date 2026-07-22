@@ -46,6 +46,11 @@ type Downloader interface {
 	Acquire(ctx context.Context) (endpoint string, err error)
 	// Release frees the capture slot for the next job. If no new Acquire
 	// arrives within the configured idle timeout, Chromium is torn down.
+	// The slot is deliberately freed only AFTER any idle-teardown for
+	// THIS release has been fully recorded (see Release's doc): a caller
+	// blocked in Acquire can therefore never observe the slot as free
+	// while a pending teardown for the process it is about to reuse is
+	// still unrecorded.
 	Release()
 	// Close tears Chromium down immediately and makes all pending/future
 	// Acquire calls fail. Called once, on daemon shutdown, via
@@ -171,14 +176,35 @@ func (d *downloader) Acquire(ctx context.Context) (string, error) {
 	return d.endpoint(), nil
 }
 
+// Release's semaphore drain (freeing the slot for the NEXT Acquire) must
+// happen strictly LAST, after the teardown decision below is fully
+// recorded under d.mu — hence the defer, rather than draining first as
+// an earlier version of this method did. That earlier ordering left a
+// window between freeing the slot and recording d.teardownCancel: a new
+// Acquire could take the now-free slot, see d.teardownCancel still nil,
+// and reuse the running process — and THIS Release call, resuming a
+// moment later, would then go on to set d.teardownCancel anyway (its own
+// d.cmd != nil check still holds; nothing has told it a new job is now
+// using that same process). scheduleTeardown's timer would later fire
+// and kill Chromium out from under that active job. Freeing the slot
+// only after teardownCancel is set (or the "nothing to tear down"
+// decision is made) closes the window: Go's memory model guarantees a
+// channel receive that unblocks because of this defer's send/close
+// happens after everything this function did beforehand, so any Acquire
+// that gets in is guaranteed to see this method's own teardownCancel
+// already recorded and can correctly cancel it (see Acquire's own
+// teardownCancel check) instead of racing past it.
 func (d *downloader) Release() {
-	select {
-	case <-d.sem:
-	default:
-		// Release without a matching Acquire should not happen in normal
-		// operation; tolerate it rather than panicking so a caller bug
-		// cannot wedge the semaphore for every subsequent job.
-	}
+	defer func() {
+		select {
+		case <-d.sem:
+		default:
+			// Release without a matching Acquire should not happen in
+			// normal operation; tolerate it rather than panicking so a
+			// caller bug cannot wedge the semaphore for every subsequent
+			// job.
+		}
+	}()
 
 	d.mu.Lock()
 	if d.closed || d.cmd == nil {

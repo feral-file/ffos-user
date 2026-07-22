@@ -304,6 +304,92 @@ func TestDownloader_Acquire_WaitsForPriorGenerationReapBeforeStartingReplacement
 	}
 }
 
+// TestDownloader_ConcurrentReleaseAndAcquire_NeverTearsDownReacquiredProcess
+// is the regression test for a Release/Acquire interleaving bug: Release
+// used to free the semaphore slot BEFORE recording its idle-teardown
+// decision under d.mu, leaving a window where a concurrent Acquire could
+// take the now-free slot, see d.teardownCancel still nil (nothing to
+// cancel), and reuse the running process — while Release, resuming a
+// moment later, would go on to schedule a teardown anyway (its own
+// d.cmd != nil check still holds) that nothing had told it was now moot.
+// That teardown's timer would eventually fire and kill Chromium out from
+// under the new job. See downloader.go's Release doc for the fix (the
+// slot is now freed strictly after the teardown decision is recorded).
+//
+// idleTeardown is set to 1ms (as tight as a duration can practically be)
+// specifically to make the buggy window's failure mode manifest almost
+// immediately rather than requiring luck on timing; many goroutines run
+// tight Acquire/Release loops with no delay between iterations, which is
+// exactly the shape needed to land in that window if it still exists.
+// This is a probabilistic stress test, not a hand-forced single
+// interleaving — Go's scheduler decides how much the race is actually
+// exercised — but it reliably reproduces the bug on the pre-fix code
+// (verified by hand before committing this test) and cannot produce a
+// false failure on the fixed code, since the fix's ordering guarantee
+// (via Go's channel memory-model semantics — see Release's doc) holds
+// unconditionally, not just usually.
+//
+// The regression is caught deterministically, not just observed as a
+// symptom: expectSuccessfulStart wires CommandContext to exactly
+// Times(1) for the whole test. Any wrongful teardown-and-restart cycle
+// calls CommandContext a second time, which gomock fails immediately —
+// so if this test passes at all, no teardown ever raced an active job.
+//
+// The wait below is deliberately bounded (rather than a plain
+// wg.Wait()): on the pre-fix code this test hangs rather than merely
+// failing an assertion — a teardown that wins the race tears down a
+// process a queued Acquire is still waiting to reuse, and the resulting
+// state corruption can leave that Acquire (and everything queued behind
+// it) blocked forever on the semaphore. A bounded wait turns "the whole
+// test binary hangs until CI kills the job" into a fast, clear failure.
+func TestDownloader_ConcurrentReleaseAndAcquire_NeverTearsDownReacquiredProcess(t *testing.T) {
+	ts := setupDownloader(t, time.Millisecond)
+	defer ts.ctrl.Finish()
+	defer func() { _ = ts.downloader.Close() }()
+	ts.expectSuccessfulStart(t) // Times(1): must never restart across the whole stress loop below
+
+	_, err := ts.downloader.Acquire(context.Background())
+	require.NoError(t, err)
+	ts.downloader.Release()
+
+	const goroutines = 8
+	const iterationsPerGoroutine = 300
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterationsPerGoroutine; j++ {
+				_, err := ts.downloader.Acquire(context.Background())
+				if !assert.NoError(t, err) {
+					return
+				}
+				ts.downloader.Release()
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stress loop did not finish: a teardown likely raced an active job and wedged the semaphore (see this test's doc)")
+	}
+
+	// A final Acquire confirms the SAME generation (endpoint identity is
+	// stable across restarts too, so this alone would not catch a
+	// restart — the Times(1) CommandContext expectation above is what
+	// actually pins that) is still reachable after the stress loop.
+	endpoint, err := ts.downloader.Acquire(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "http://127.0.0.1:9223", endpoint)
+	ts.downloader.Release()
+}
+
 func TestDownloader_Acquire_ContextCanceledWhileWaitingForSlot(t *testing.T) {
 	ts := setupDownloader(t, time.Hour)
 	defer ts.ctrl.Finish()
