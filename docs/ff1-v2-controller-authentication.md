@@ -66,7 +66,10 @@ This profile uses:
 - [Web Origin (RFC 6454)](https://www.rfc-editor.org/rfc/rfc6454.html);
 - [JSON Canonicalization Scheme (RFC 8785)](https://www.rfc-editor.org/rfc/rfc8785.html);
   and
-- [PKCS #10 (RFC 2986)](https://www.rfc-editor.org/rfc/rfc2986.html).
+- [PKCS #10 (RFC 2986)](https://www.rfc-editor.org/rfc/rfc2986.html) with
+  [PKIX textual encoding (RFC 7468)](https://www.rfc-editor.org/rfc/rfc7468.html),
+  [ECC subject-public-key encoding (RFC 5480)](https://www.rfc-editor.org/rfc/rfc5480.html),
+  and [ECDSA algorithm identifiers (RFC 5758)](https://www.rfc-editor.org/rfc/rfc5758.html).
 
 Invitation and enrollment-only connections use MQTT 5 User Name and Password
 fields and do not send an AUTH Control Packet. Access-session connections use
@@ -212,8 +215,9 @@ Enrollment credentials expire after at most 366 days, but rotation is silent
 and does not repeat enrollment. An active controller MAY invoke
 `controllers.renew-credential` at any time, no more than once in 24 hours, and
 SHOULD rotate when fewer than 90 days remain. FF1 issues the replacement before
-invalidating the prior credential. A mobile app or CLI performs this
-rotation without user interaction.
+ending the prior version's FF1 session-issuance grace. The restricted MQTT
+transport treatment of that prior self-contained JWS is defined in section 9.
+A mobile app or CLI performs this rotation without user interaction.
 
 If an installation remains unused until its enrollment credential expires, it
 cannot establish a new session. A delegate then returns through one new
@@ -559,7 +563,11 @@ remaining `session`, `deviceId`, `controllerId`, and `scopes` members have the
 same meanings. Either plaintext MAY contain a `lan` object when requested and
 available; it contains exactly `certificatePem`, `chainPem` as a nonempty
 string array, and `expiresAt`. The top-level success `expiresAt` is always the
-returned access session's expiry.
+returned access session's expiry. `certificatePem` is the leaf certificate.
+`chainPem` excludes that leaf and contains the issuing CA followed by each
+ancestor in certification-path order through the device-local trust anchor;
+it does not contain an unrelated or duplicate certificate. The `lan.expiresAt`
+timestamp equals the leaf certificate's `notAfter`.
 
 Failure is the same closed object with `status: "rejected"`, no credential
 envelope, and a required closed `error` object containing `code` and
@@ -875,9 +883,9 @@ schemas are in parent sections 11.6 and 11.7.
 
 | Operation | Request | Result | Required authorization |
 |---|---|---|---|
-| `controllers.create-invitation` | `label`?: string(1..64); `clientKind`: `mobile\|cli\|integration`; `requestedScopes`: unique scope array; `expiresInSeconds`: int[60..300], default 300 | invitation ID, expiry, QR display status, sessions revision | enrolled owner with `controllers:manage` |
+| `controllers.create-invitation` | `label`?: string(1..64); `clientKind`: `mobile\|cli\|integration`; `requestedScopes`: unique nonempty subset of the authenticated owner's current caller grant ceiling excluding `controllers:manage`; `expiresInSeconds`: int[60..300], default 300 | invitation ID, expiry, QR display status, sessions revision | enrolled owner with `controllers:manage`; broader grants fail with `scope_denied` |
 | `controllers.close-invitation` | `invitationId` | invitation ID, closed status, sessions revision | creator or owner with `controllers:manage` |
-| `controllers.renew-credential` | `controllerId`; new signing and encryption public JWKs; `oldKeyProof` and `newKeyProof` | new enrollment credential envelope, `credentialExpiresAt`, optional LAN-certificate expiry, and `controllers` revision | same active controller; at most once per 24 hours |
+| `controllers.renew-credential` | `controllerId`; new signing and encryption public JWKs; optional `lanCsrPem`; `oldKeyProof` and `newKeyProof` | new enrollment credential envelope, `credentialExpiresAt`, `controllers` revision, and LAN-certificate expiry if and only if `lanCsrPem` is present | same active controller; at most once per 24 hours |
 | `controllers.set-scopes` | `controllerId`; unique nonempty `scopes` | controller ID, scopes, controllers-state revision | owner with `controllers:manage`; subset of caller grant |
 | `controllers.revoke` | `controllerId`; `revokeCreatedGuestSessions`?: boolean, default false | after broker barrier ACK: controller ID, `status: revoked\|already_revoked`, and either the `controllers` revision alone or exact `controllers` plus `sessions` revisions when session state changed | owner with `controllers:manage`; not final owner; target cannot be the authenticated caller controller (`interaction_not_allowed`); `dependency_unavailable` while the durable barrier is pending |
 | `sessions.create-invitation` | `label`?: string(1..64); `clientKind`: `web\|agent\|integration`; `requestedScopes`: unique scope array; `sessionSeconds`: int[300..86400], default 3600; `origin`?: normalized HTTPS origin | invitation ID, expiry, guest lifetime, QR display status, sessions revision | enrolled controller with `sessions:manage` |
@@ -889,16 +897,116 @@ requester does not send a second approval request, and an enrolled controller
 does not receive or relay the requester's credential. QR possession, one-time
 claim, the preselected scope ceiling, and FF1 issuance form one ceremony.
 
-For `controllers.renew-credential`, both proof fields use section 6.5.1 over
-the complete command request envelope with both proof fields omitted. `oldKeyProof` is
-signed by the currently enrolled signing key; `newKeyProof` is signed by the
-submitted new signing key. The result envelope is encrypted to the submitted
-new encryption key and uses the enrollment-claim plaintext shape with no
-`session` member. FF1 commits the new credential and cached idempotent response
-before replying. The immediately previous credential and LAN certificate have
-a ten-minute rollover grace and are then invalidated; no older version is
-accepted. Renewal does not change the controller ID, role, scope ceiling, or
-other controllers' enrollments and sessions.
+For controller-administration commands, the **caller grant ceiling** is the
+authenticated caller's current authoritative enrollment `scopes` when FF1
+begins command execution. It is not taken from request JSON or a stale
+credential. Both `controllers.create-invitation` and
+`controllers.set-scopes` MUST reject `scope_denied` before changing state when
+the proposed grant is not a subset of that ceiling. A controller-enrollment
+invitation additionally excludes `controllers:manage`, because it creates a
+delegate. FF1 records the creator controller ID and revalidates at claim time
+that the creator remains an active owner with `controllers:manage` and still
+holds every scope in the invitation ceiling. If not, FF1 atomically closes the
+invitation and rejects the claim with `scope_denied`.
+
+For `controllers.renew-credential`, `params` is closed. `lanCsrPem` is optional.
+When present it is one RFC 7468 `CERTIFICATE REQUEST` block containing one DER
+PKCS #10 certification request whose version field is `0` (v1). The textual
+value has no leading or trailing whitespace outside its required final LF,
+uses LF line endings, uses 64-character base64 lines except for the final line,
+and ends with one LF after the end label. The CertificationRequestInfo subject
+is an empty RDNSequence and its attributes set is empty. An
+`extensionRequest`, requested SAN, `challengePassword`, nonempty subject, other
+attribute, extra PEM block, or trailing data is forbidden; FF1 derives the
+certificate subject and extensions only from its authoritative controller
+record and section 12. Its SubjectPublicKeyInfo uses `id-ecPublicKey`, the named
+curve `secp256r1`, and an uncompressed P-256 point at exactly the same affine
+coordinates as `newSigningKeyJwk`; explicit curve parameters are forbidden.
+Its signatureAlgorithm is `ecdsa-with-SHA256` with absent parameters, and its
+CSR signature validates with that public key. Malformed encoding, an
+unsupported algorithm or parameter encoding, an invalid signature, or a
+CSR/JWK key mismatch returns `invalid_claim` and changes no key, credential,
+certificate, or revision.
+
+Both proof fields use section 6.5.1 over the complete command request envelope
+with both proof fields omitted. Therefore the JCS payload includes
+`lanCsrPem`, as the exact JSON string received, when it is present; FF1 performs
+no PEM or line-ending normalization before proof verification. `oldKeyProof`
+is signed by the currently enrolled signing key and `newKeyProof` by the
+submitted new signing key.
+
+The successful command result is the closed object `controllerId`,
+`credentialEnvelope`, `credentialExpiresAt`, `revision`, and conditional
+`lanCertificateExpiresAt`. The conditional member is required if and only if
+`lanCsrPem` was present. `credentialEnvelope` is encrypted to the submitted new
+encryption key. Its plaintext is the closed enrollment-claim object from
+section 6.6 without `session`: it contains exactly `apiVersion`,
+`credentialType: "controller_enrollment"`, `deviceId`, `controllerId`, `role`,
+`scopes`, `enrollmentCredential`, and `credentialExpiresAt`, plus conditional
+`lan`. When `lanCsrPem` was present, `lan` is required and contains exactly the
+replacement leaf `certificatePem`, nonempty `chainPem`, and `expiresAt` from
+section 6.6; its expiry equals the outer `lanCertificateExpiresAt`, does not
+exceed `credentialExpiresAt`, and is no more than 366 days after issuance. When
+`lanCsrPem` was omitted, both `lan` and `lanCertificateExpiresAt` are forbidden
+and FF1 issues no replacement LAN certificate. A requested certificate that
+cannot be issued fails the entire command with `dependency_unavailable`; no
+partial credential rotation is committed.
+
+FF1 chooses the response `completedAt` as the rotation instant and atomically
+commits the new keys, credential, optional replacement LAN certificate, and
+cached idempotent response before replying. The immediately previous
+enrollment-credential version remains eligible for FF1 session issuance only
+until the earlier of its existing expiry and `completedAt + 600 seconds`. An
+immediately previous LAN certificate remains valid only until the earlier of
+its `notAfter` and that same deadline, whether or not a replacement was
+requested. During that interval FF1 accepts both the previous and the
+replacement certificate, if one was issued. At the deadline it rejects a new
+handshake using the previous certificate, rejects later HTTP requests on a
+connection authenticated with it, and closes its local-push WebSocket with
+status 1008. No older credential or certificate version is eligible for FF1
+session issuance or LAN authentication. Renewal does not change the controller
+ID, role, scopes, or other controllers' enrollments and sessions.
+
+The enrollment JWS is still the section 5.1 self-contained MQTT bearer for an
+exact restricted request/response Topic Name pair. Because this profile adds no
+per-version broker lookup or rotation barrier, the broker MUST continue to
+accept that JWS for its restricted transport CONNECT and PUBLISH until its
+signed `exp` only while every existing signature, claim, issuer-registration,
+and authorization-barrier check succeeds. A controller tombstone, a device-reset
+or issuer-generation tombstone, issuer deregistration, or any other section
+5.1/13.4 denial rejects it earlier. That transport acceptance never authorizes
+device control. At or after the FF1 grace deadline, a new session request using
+that previous credential receives the section 8.2 closed rejected response
+with `error.code: "expired"`, no `sessionId`, no `credentialEnvelope`, and no
+`expiresAt`. The only exception is the existing section 8.1 byte-equivalent
+idempotent replay while its already-issued session remains unexpired; such a
+session is itself capped at the grace deadline.
+
+Section 8.1 session issuance is credential-version aware during this grace. A
+request authenticated by the immediately previous enrollment credential MUST
+verify `proof` with that credential version's previous signing key, encrypt the
+session response to its matching previous encryption key, and bind the issued
+access credential's `cnf.jwk` to that previous signing key. Its expiry MUST NOT
+exceed the previous enrollment credential's grace deadline. FF1 still derives
+the role, current grant ceiling, active status, and pending-revocation state
+from the live enrollment record; claims in the previous credential cannot
+restore a removed scope or inactive authorization. A request authenticated by
+the replacement credential uses only the replacement keys.
+
+The rollover grace changes only which immediately previous credential or
+certificate version can prove the same live enrollment. It never overrides an
+inactive or pending-revocation enrollment, a scope denial, unsynchronized
+trusted time, certificate `notBefore` or `notAfter`, guest/session expiry, or
+an earlier connection-local LAN authorization-lease deadline. The earliest
+applicable denial or expiry wins.
+
+At the same commit, the authoritative `state/controllers` entry projects only
+the replacement signing and encryption key thumbprints and replacement
+credential expiry. If `lanCsrPem` was present, `lanCertificate` projects only
+the replacement certificate fingerprint and expiry; if it was omitted,
+`lanCertificate` is omitted immediately. A grace-only prior credential or
+certificate is never projected. Its later grace expiry causes no additional
+state revision or controller event.
 
 ## 10. Scope policy
 
@@ -991,7 +1099,10 @@ the device-local controller CA, and contains only the applicable URI SAN. It
 has critical Basic Constraints with `CA=false`, critical Key Usage containing
 only `digitalSignature`, and Extended Key Usage `clientAuth`. DNS, IP, email,
 wildcard, and additional URI SANs are forbidden. The certificate public key is
-the controller signing key from the accepted CSR.
+the controller signing key from the accepted CSR. Its Subject is the empty
+Name, so its Subject Alternative Name extension is critical and contains
+exactly the applicable URI SAN. FF1 never copies a CSR subject, attribute, or
+requested extension into the certificate.
 
 Opening an authenticated LAN connection creates a connection-local LAN
 authorization lease bounded by the controller certificate, enrollment or
@@ -1344,4 +1455,29 @@ conformance suite MUST prove:
     available; LAN becomes available again only after NTP succeeds; and
 23. a device image lacking the executable RTC proof in check 21 cannot
     advertise `lanOfflineAfterPowerLoss: true`, while advertising `false` does
-    not by itself fail v2 LAN conformance.
+    not by itself fail v2 LAN conformance;
+24. an owner cannot create a controller invitation whose scope ceiling exceeds
+    its current authoritative caller grant ceiling, and reducing or revoking
+    that creator's grant before claim prevents the stale invitation from
+    enrolling a broader controller; and
+25. credential renewal with `lanCsrPem` returns a replacement certificate
+    bound to `newSigningKeyJwk` and that certificate completes mTLS; the
+    immediately previous certificate works only inside its ten-minute grace
+    and is rejected afterward, including on an already-open HTTP or local-push
+    connection; a CSR/JWK mismatch returns `invalid_claim` without rotation;
+    and omitting `lanCsrPem` returns no certificate, permits only the same
+    prior-certificate grace, omits `lanCertificate` from the authoritative
+    controller projection immediately, and leaves no LAN certificate valid
+    after it; and
+26. renewal fixtures reject noncanonical or malformed PEM/DER, a nonempty
+    subject, any attribute or `extensionRequest`, an unsupported public-key or
+    signature algorithm/parameter encoding, an invalid CSR signature, a
+    CSR/JWK key mismatch, and any mutation of the exact `lanCsrPem` JSON string
+    after either proof was generated. Every case returns `invalid_claim`,
+    issues no certificate, and changes no key, credential, or revision. A
+    session request using the immediately previous enrollment credential
+    succeeds only before its grace deadline, uses the matching previous
+    signing/encryption keys, live scopes/status, and a session expiry no later
+    than that deadline. A new request at or after that deadline receives
+    `error.code: "expired"` and no session fields even if the broker still
+    accepts the restricted self-contained JWS before its signed `exp`.

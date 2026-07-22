@@ -1165,6 +1165,12 @@ optional; the latter requires SHA-256 `fingerprint` and `expiresAt`. Role is
 once. Each entry represents one installation and has independent keys, scopes,
 credential rotation, revocation, and access sessions. Revoked entries remain
 visible for audit until factory reset but their key is never accepted.
+Credential renewal atomically replaces the projected signing/encryption
+thumbprints and credential expiry. It projects only a newly issued
+`lanCertificate`; omission of the renewal `lanCsrPem` removes that member in
+the same revision. An immediately previous credential or LAN certificate that
+is accepted only for the authentication-profile rollover grace is never
+projected, and grace expiry does not create a second state revision or event.
 
 `state/sessions` is defined in section 12.7, with underlying authorization
 records and invalidation rules in the authentication profile. It contains only
@@ -1830,9 +1836,9 @@ controller-issuer generation.
 
 | Operation | Exact `params` | Exact successful `result` | Restrictions and failures |
 |---|---|---|---|
-| `controllers.create-invitation` | `label`?: string(1..64); `clientKind`: `mobile\|cli\|integration`; `requestedScopes`: unique subset of known controller scopes; `expiresInSeconds`: int[60..300], default 300 | `invitationId`, `expiresAt`, `qrDisplayed: true`, `revision` for `sessions` | owner plus `controllers:manage`; one active enrollment invitation; 32 active enrollments maximum; `busy`, `scope_denied` |
+| `controllers.create-invitation` | `label`?: string(1..64); `clientKind`: `mobile\|cli\|integration`; `requestedScopes`: unique nonempty subset of the authenticated owner's current caller grant ceiling, excluding `controllers:manage`; `expiresInSeconds`: int[60..300], default 300 | `invitationId`, `expiresAt`, `qrDisplayed: true`, `revision` for `sessions` | owner plus `controllers:manage`; FF1 resolves the ceiling from the live enrollment record, never the request or a stale credential; one active enrollment invitation; 32 active enrollments maximum; `busy`, `scope_denied` |
 | `controllers.close-invitation` | `invitationId`: UUIDv7 | same ID, `status: "closed\|already_closed"`, revision for `sessions` | creator or owner with `controllers:manage`; `not_found` only when the ID never belonged to this device |
-| `controllers.renew-credential` | `controllerId`: UUIDv7; `newSigningKeyJwk`: public ECDSA P-256 JWK; `newEncryptionKeyJwk`: public ECDH P-256 JWK; `oldKeyProof`: detached compact JWS by old signing key; `newKeyProof`: detached compact JWS by new signing key | `controllerId`, `credentialEnvelope`, `credentialExpiresAt`, optional `lanCertificateExpiresAt`, `revision` for `controllers` | same active controller; at most once per 24 hours; proof and envelope rules are in the authentication profile; `expired`, `invalid_claim`, `conflict`, `rate_limited` |
+| `controllers.renew-credential` | `controllerId`: UUIDv7; `newSigningKeyJwk`: public ECDSA P-256 JWK; `newEncryptionKeyJwk`: public ECDH P-256 JWK; optional `lanCsrPem`: the restricted PKCS #10 request defined by the authentication profile; `oldKeyProof`: detached compact JWS by old signing key; `newKeyProof`: detached compact JWS by new signing key | `controllerId`, `credentialEnvelope`, `credentialExpiresAt`, `revision` for `controllers`, plus `lanCertificateExpiresAt` if and only if `lanCsrPem` was present | same active controller; at most once per 24 hours; proof, CSR, atomic rotation, encrypted-result, ten-minute prior-version FF1 issuance, and certificate-grace rules are in the authentication profile; `expired`, `invalid_claim`, `conflict`, `rate_limited`, `dependency_unavailable` |
 | `controllers.set-scopes` | `controllerId`: UUIDv7; `scopes`: unique nonempty subset of controller scopes | `controllerId`, `scopes`, `revision` for `controllers` | owner with `controllers:manage`; cannot grant it to a delegate or remove either management scope from an owner; target must exist; grant must be within caller ceiling |
 | `controllers.revoke` | `controllerId`: UUIDv7; `revokeCreatedGuestSessions`?: boolean, default false | after broker barrier ACK: `controllerId`, `status: "revoked\|already_revoked"`; `revision` for `controllers` when no session projection changes, otherwise `revisions`: exactly `controllers` and `sessions` in lexical resource order | cannot revoke the last owner manager or authenticated caller controller; self-target returns `interaction_not_allowed` before creating a barrier; target commands and issuance are rejected while pending; `dependency_unavailable` until the barrier durably denies reconnect, discards queued delivery, and disconnects active sessions |
 
@@ -1845,6 +1851,13 @@ Only an owner may change or revoke another owner. No command can change a
 controller's role or remove/revoke the final active owner; owner-role transfer
 requires a new physical owner-enrollment invitation. These checks are based on
 the stored role and authenticated principal, never a request-body assertion.
+The caller grant ceiling used by both `controllers.create-invitation` and
+`controllers.set-scopes` is the authenticated caller's current authoritative
+enrollment `scopes` at command execution. A credential or request-body value
+cannot increase it. An invitation whose creator is no longer an active owner
+with `controllers:manage`, or whose ceiling is no longer a subset of that live
+grant, is atomically closed when claimed and that claim fails with
+`scope_denied`.
 
 ### 11.7 Guest-session administration
 

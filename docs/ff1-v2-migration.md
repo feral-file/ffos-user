@@ -958,6 +958,24 @@ Minimum acceptance checks are:
 - multiple enrolled mobile apps and CLIs can connect concurrently, renew
   independently, and survive another controller's expiry, rotation, or
   revocation without a QR prompt;
+- an owner cannot create a controller invitation with any scope outside its
+  current authoritative caller grant ceiling, and reducing that grant before
+  claim prevents the stale invitation from enrolling broader authority;
+- credential renewal with a restricted PKCS #10 `lanCsrPem` returns a
+  replacement certificate that matches the new signing key and completes
+  mTLS; the previous certificate is accepted only during its ten-minute grace,
+  then fails both new and already-open LAN use; CSR/JWK mismatch is atomic
+  `invalid_claim`, while omission returns no replacement and leaves the prior
+  certificate valid only for the same grace; the negative fixtures also cover
+  noncanonical or malformed PEM/DER, forbidden subject/attributes/extensions,
+  unsupported encodings, invalid CSR signature, and proof-covered PEM mutation
+  without any rotation or revision;
+- the immediately previous enrollment credential can create a session only
+  inside the same grace, using its matching previous proof/encryption keys,
+  the live enrollment grant/status, and an access expiry no later than the
+  grace deadline; a new request at or after that deadline receives `expired`
+  with no session fields even if the broker still accepts the self-contained
+  JWS only on its restricted transport topics before signed expiry;
 - after successful revocation barrier ACK, the target cannot reconnect or
   receive newly authorized, queued, or retained state/events; before ACK, no
   terminal revocation projection, event, or success result is exposed;
