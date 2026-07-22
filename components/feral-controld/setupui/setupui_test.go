@@ -468,9 +468,10 @@ func TestReadyThenHideDeliversBoth(t *testing.T) {
 }
 
 // TestSameStateBurstCoalesces keeps the flip side of the queue contract honest:
-// a rapid burst of the SAME state (OTA progress) replaces the queued entry in
-// place instead of queueing one send per tick, so a slow CDP link never builds
-// a backlog of stale percentages.
+// a CONTIGUOUS burst of the same state (OTA progress) collapses to one trailing
+// entry with the newest payload, so a slow CDP link never builds a backlog of
+// stale percentages — while a repeat AFTER intervening states must append, so
+// the screen ends on the newest state instead of a buried replacement.
 func TestSameStateBurstCoalesces(t *testing.T) {
 	svc := newTestService(t, newFakeCDP(), validContract)
 
@@ -478,16 +479,43 @@ func TestSameStateBurstCoalesces(t *testing.T) {
 	// deterministically.
 	svc.mu.Lock()
 	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 10})
-	svc.enqueueLocked(map[string]any{"state": stateHidden})
 	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 50})
+	svc.enqueueLocked(map[string]any{"state": stateHidden})
+	svc.enqueueLocked(map[string]any{"state": stateUpdating, "progress": 90})
 	queue := make([]map[string]any, len(svc.pending))
 	copy(queue, svc.pending)
 	svc.mu.Unlock()
 
-	require.Len(t, queue, 2)
+	require.Len(t, queue, 3)
 	assert.Equal(t, stateUpdating, queue[0]["state"])
-	assert.Equal(t, 50, queue[0]["progress"], "same-state push must replace in place with the newest payload")
+	assert.Equal(t, 50, queue[0]["progress"], "contiguous burst must coalesce to the newest payload")
 	assert.Equal(t, stateHidden, queue[1]["state"])
+	assert.Equal(t, stateUpdating, queue[2]["state"])
+	assert.Equal(t, 90, queue[2]["progress"], "a repeat after intervening states must append, not replace the buried entry")
+}
+
+// TestRepeatAfterInterveningStatesEndsOnNewest pins the delivery-order bug the
+// old replace-in-place rule caused: softap_qr→joining→join_failed queued, then
+// a fresh softap_qr (the re-raised AP). Replacing the buried first entry
+// delivered softap_qr(new)→joining→join_failed and left the player on an
+// obsolete failure screen while the AP was active. The queue must end on the
+// newest softap_qr.
+func TestRepeatAfterInterveningStatesEndsOnNewest(t *testing.T) {
+	svc := newTestService(t, newFakeCDP(), validContract)
+
+	svc.mu.Lock()
+	svc.enqueueLocked(map[string]any{"state": stateSoftAPQR, "ssid": "FF1-abc", "psk": "old"})
+	svc.enqueueLocked(map[string]any{"state": stateJoining})
+	svc.enqueueLocked(map[string]any{"state": stateJoinFailed})
+	svc.enqueueLocked(map[string]any{"state": stateSoftAPQR, "ssid": "FF1-abc", "psk": "new"})
+	queue := make([]map[string]any, len(svc.pending))
+	copy(queue, svc.pending)
+	svc.mu.Unlock()
+
+	require.Len(t, queue, 4)
+	assert.Equal(t, stateSoftAPQR, queue[3]["state"], "delivery must END on the re-raised QR")
+	assert.Equal(t, "new", queue[3]["psk"])
+	assert.Equal(t, "old", queue[0]["psk"], "the earlier QR keeps its original position and payload")
 }
 
 // TestUnreadableContractDefersWithoutLatching: a read failure (boot ordering,

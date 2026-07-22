@@ -269,16 +269,20 @@ func (s *Service) push(req map[string]any) {
 	go s.worker()
 }
 
-// enqueueLocked applies the coalescing rule: same-state entries are replaced in
-// place (newest payload, original queue position), distinct states append in
-// arrival order. Caller holds mu.
+// enqueueLocked applies the coalescing rule: a push matching the TRAILING
+// queued state replaces it in place (newest payload); everything else appends
+// in arrival order. Trailing-only is load-bearing: replacing a same-state
+// entry buried under LATER states would reorder narration — queued
+// softap_qr→joining→join_failed plus a fresh softap_qr would deliver the new
+// QR FIRST and leave the screen on the obsolete failure. The screen must
+// always END on the newest state, so a repeat after intervening states
+// re-appends. Bursts that matter for coalescing (OTA progress) are contiguous,
+// so they still collapse to one trailing entry. Caller holds mu.
 func (s *Service) enqueueLocked(req map[string]any) {
 	state := stringField(req, "state")
-	for i, queued := range s.pending {
-		if stringField(queued, "state") == state {
-			s.pending[i] = req
-			return
-		}
+	if n := len(s.pending); n > 0 && stringField(s.pending[n-1], "state") == state {
+		s.pending[n-1] = req
+		return
 	}
 	if len(s.pending) >= maxPendingStates {
 		s.pending = s.pending[1:]
