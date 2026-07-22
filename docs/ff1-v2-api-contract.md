@@ -812,12 +812,21 @@ DP-1 errors preserve the specification names under an explicit namespace:
 
 ### 7.1 Device identity
 
-At manufacture or first secure boot, FF1 generates distinct ECDSA P-256 device
-TLS, controller-credential issuer, and device-local controller-CA private keys
-inside TPM 2.0. The private keys are non-exportable. Enrollment proves
-possession, issues an X.509 device certificate whose SAN is
+At manufacture or first secure boot, FF1 generates distinct ECDSA P-256
+hardware device-identity, controller-credential issuer, and device-local
+controller-CA private keys inside TPM 2.0. The private keys are non-exportable.
+Enrollment proves possession of the hardware device-identity key and issues a
+runtime X.509 device certificate whose SAN is
 `URI:urn:ff:device:<deviceId>`, and binds that identity to the exact MQTT Client
 ID. Renewal uses the existing TPM key or an attested replacement key.
+
+The hardware device-identity key MAY survive factory reset as the stable TPM
+proof-of-possession and attestation anchor; the reset flow in section 11.5
+preserves it for cleanup. The runtime certificate, certificate serial, and
+broker certificate registration are reset-scoped. They MUST be revoked and
+replaced before reset completion even when the TPM key survives. The hardware
+key without an active runtime certificate registration cannot authenticate the
+public MQTT device publisher.
 
 The broker authenticates the device with standard TLS client-certificate
 authentication and maps the certificate identity to an ACL. TPM attestation is
@@ -872,8 +881,9 @@ Enhanced Authentication.
 
 The broker schedules a forced disconnect at the access credential's `exp` with
 DISCONNECT Reason Code `0x87` (Not authorized). FF1 independently checks the
-session record and expiry for every delivered command. Revocation therefore
-takes effect on FF1 even before broker disconnection completes.
+session record and expiry for every delivered command. When revocation begins,
+FF1 rejects the target locally at once; it does not report successful
+revocation until the broker authorization barrier in section 7.5 completes.
 
 V2 adds no general payload encryption above TLS. JWE is used only to deliver an
 enrollment or access credential to the controller encryption public key during the
@@ -977,12 +987,14 @@ An empty `scopes` array in a capability entry means the authenticated transport
 baseline—an active MQTT access session or LAN authorization lease—not
 unauthenticated access.
 
-Factory reset always requires an on-screen physical confirmation and clears the
-device certificate, controller CA, controller-credential issuer key,
-controller enrollments, invitations, access-session records, cached access
-tokens, Wi-Fi
-credentials, owner enrollment, DP-1 cache, local support bundles, and retained broker
-topics. SSH is
+Factory reset always requires an on-screen physical confirmation. Its broker
+barrier clears controller authorization and retained Application Messages; its
+post-barrier identity transaction revokes and replaces the runtime device
+certificate and registration. The completed reset has also cleared the
+controller CA, controller-credential issuer key, enrollments, invitations,
+access-session records, cached access tokens, Wi-Fi credentials, owner
+enrollment, DP-1 cache, and local support bundles. The TPM hardware device-
+identity key may remain as the cleanup and attestation anchor. SSH is
 LAN-only, owner-only, and capped at one hour. Support upload never accepts a
 service API key from a controller payload.
 
@@ -995,6 +1007,42 @@ State Topic Name ACLs are the union of the table grants: `device` requires
 `support:upload`; `controllers` requires `controllers:manage`; and `sessions`
 requires `sessions:manage|controllers:manage`. Resources are never
 per-principal filtered after subscription.
+
+### 7.5 Broker authorization barrier
+
+Revocation and factory reset require the vendor-neutral broker authorization
+barrier defined in section 13.4 of the controller-authentication profile. The
+TPM-authenticated FF1 submits an idempotent barrier operation targeting a
+session, a controller and its selected derived sessions, or a device reset.
+The reset target carries the prior issuer generation, all controller/session
+authorization IDs, and the management-plane
+`publisherGeneration` UUIDv7 bound to the device identity, device Client
+Identifier, and certificate registration; it is not an MQTT property. Before
+ACK, the broker adapter atomically installs durable deny
+tombstones, applies them before every CONNECT, publish, subscribe, and delivery
+authorization decision, removes target subscriptions and queued outbound state
+or event delivery, and disconnects active target clients with MQTT 5 Reason
+Code `0x87` (Not authorized). A device-wide reset barrier additionally fences
+the old device-publisher generation and any reconnect using it, cancels its
+pending Will Message and queued device publishes, and only then purges all
+retained Application Messages in the old device subtree. It MUST NOT ACK until
+the fence prevents an old publisher action from recreating purged state.
+
+The adapter ACK, not a disconnect request or MQTT PUBACK, is the barrier
+completion boundary. It is the terminal remote boundary for ordinary
+revocation, but only the first remote boundary for factory reset; reset then
+enters `pending_identity_rotation` under section 11.5. FF1 rejects a pending
+target locally, but MUST NOT publish a terminal revocation projection or event
+or return revocation success before that ACK.
+Failure to obtain it returns `dependency_unavailable`, `retryable: true`, with
+exact details
+`{"dependency":"broker_authorization_barrier","pending":true}`; FF1 retains
+and retries the durable pending operation before authorizing the target again.
+
+MQTT 5 defines no ACL-mutation or authorization-barrier API. The authenticated
+broker management adapter is therefore a required implementation
+customization. It adds no public MQTT Control Packet, property, or Reason Code,
+and all controller-visible MQTT traffic remains standard MQTT 5.
 
 ## 8. Controller enrollment and access sessions
 
@@ -1662,23 +1710,70 @@ retained health state. It next transmits the accepted response, displays the
 confirmation prompt, and emits `system.confirmation-requested`. A crash at any
 later boundary therefore restores the same response and pending confirmation.
 On physical approval the device first updates that retained entry to
-`approved`, then publishes `system.confirmation-resolved` with
+`pending_broker_cleanup`, then publishes `system.confirmation-resolved` with
 `decision: "approved"`, then publishes
-`system.factory-reset-starting`, clears retained MQTT resources by
-publishing zero-length retained messages, waits for PUBACKs up to two seconds,
-sends a normal MQTT DISCONNECT so the Will cannot recreate retained presence,
-then resets. On denial or expiry it first updates the entry to `rejected` or
-`expired`, emits `system.confirmation-resolved`, and does nothing else.
+`system.factory-reset-starting` at QoS 1. After the PUBLISH carrying that final
+Application Message receives its PUBACK, FF1 quiesces heartbeat and state
+publication, freezes and discards the old event outbox, and sends normal MQTT
+DISCONNECT on the public device Network Connection so its Will Message is not
+published. It
+then uses a separately TPM-authenticated broker-management connection for the
+device-wide section 7.5 barrier covering the prior issuer generation and every
+prior controller/session ACL. The barrier discards queued controller delivery,
+disconnects controllers with `0x87`, fences the old device-publisher generation
+and any reconnect, cancels its pending Will Message and queued publishes, and
+then purges the old subtree's retained Application Messages. It ACKs only when
+nothing from the old publisher generation can recreate them. Barrier ACK
+atomically transitions the durable reset lifecycle to
+`pending_identity_rotation` and assigns `identityOperationId`: UUIDv7; it does
+not complete reset.
+
+While `pending_identity_rotation`, the public MQTT device publisher,
+controller authentication, and owner invitation/claim remain blocked. Over the
+separately authenticated management path, FF1 proves possession of its stable
+TPM hardware device-identity key and idempotently requests a replacement
+runtime X.509 certificate under `identityOperationId`. The replacement has a
+fresh certificate serial, fingerprint, and registration ID and is securely
+installed but not used publicly. The registry atomically revokes and
+deregisters the old runtime certificate registration and activates the
+replacement registration with a fresh `publisherGeneration`. Repeating the
+operation ID returns the same
+certificate identity, generation, and registry commit ACK.
+
+Only after registry commit ACK does FF1 delete any local old runtime
+certificate, finish erasing remaining controller identities and user data, and
+durably commit cleanup completion. Only after that local commit may it clear
+the tombstone, report `completed`, reconnect the public publisher with the new
+certificate/generation, or display or accept a new owner invitation.
+On denial or expiry it first updates the entry to `rejected` or `expired`, emits
+`system.confirmation-resolved`, and does nothing else.
 
 External request IDs MUST NOT be interpreted as physical approval.
 
-If an offline, screen-initiated reset cannot reach the broker, local erasure
-still proceeds. Retained messages expire within 24 hours; the next device
-enrollment atomically revokes the prior identity and controller grants and
-purges the old device topic subtree before any new controller is authorized.
-For an online reset, the control plane records the confirmation event and
-performs the same identity revocation/topic purge even if the connection drops
-between a device tombstone and its clean DISCONNECT.
+The preceding sequence is the normal online ordering: local identity and user
+data remain intact until barrier ACK. An offline, screen-initiated reset is the
+only pre-ACK erasure exception. It deletes the prior controller issuer and
+controller CA, local prior runtime device certificate, enrollments, invitations,
+access sessions, cached credentials, user data, network credentials, and old
+event outbox. It preserves only the stable TPM-backed device identity and a
+durable tombstone signed by that identity containing the old device ID, prior
+runtime certificate serial and registration ID, issuer `kid`, authorization
+targets, publisher generation, reset `confirmationId`, and barrier
+`operationId`.
+
+The lifecycle remains `pending_broker_cleanup`: reset is not complete, no
+controller/session authorization is restored, and new owner authorization and
+invitations are blocked. If network credentials were erased, the screen starts
+the recovery SoftAP with a fresh setup epoch and authorization for network
+reconfiguration. On crash or offline recovery, the barrier is the first
+broker-management action; it fences the old publisher generation before its
+retained Application Messages are purged. FF1 MUST NOT reconnect the public
+device publisher or flush an old event outbox before ACK. Recovery from
+`pending_identity_rotation` resumes the same durable `identityOperationId` and
+registry transaction without restoring controller authorization or the public
+publisher. A completed reset requires both remote ACKs and the durable local
+cleanup commit and has no readable retained or queued data from the prior
+controller-issuer generation.
 
 ### 11.6 Controller administration
 
@@ -1688,7 +1783,7 @@ between a device tombstone and its clean DISCONNECT.
 | `controllers.close-invitation` | `invitationId`: UUIDv7 | same ID, `status: "closed\|already_closed"`, revision for `sessions` | creator or owner with `controllers:manage`; `not_found` only when the ID never belonged to this device |
 | `controllers.renew-credential` | `controllerId`: UUIDv7; `newSigningKeyJwk`: public ECDSA P-256 JWK; `newEncryptionKeyJwk`: public ECDH P-256 JWK; `oldKeyProof`: detached compact JWS by old signing key; `newKeyProof`: detached compact JWS by new signing key | `controllerId`, `credentialEnvelope`, `credentialExpiresAt`, optional `lanCertificateExpiresAt`, `revision` for `controllers` | same active controller; at most once per 24 hours; proof and envelope rules are in the authentication profile; `expired`, `invalid_claim`, `conflict`, `rate_limited` |
 | `controllers.set-scopes` | `controllerId`: UUIDv7; `scopes`: unique nonempty subset of controller scopes | `controllerId`, `scopes`, `revision` for `controllers` | owner with `controllers:manage`; cannot grant it to a delegate or remove either management scope from an owner; target must exist; grant must be within caller ceiling |
-| `controllers.revoke` | `controllerId`: UUIDv7; `revokeCreatedGuestSessions`?: boolean, default false | `controllerId`, `status: "revoked"`; `revision` for `controllers` when no session projection changes, otherwise `revisions`: exactly `controllers` and `sessions` in lexical resource order | cannot revoke the last owner manager; active MQTT sessions are disconnected |
+| `controllers.revoke` | `controllerId`: UUIDv7; `revokeCreatedGuestSessions`?: boolean, default false | after broker barrier ACK: `controllerId`, `status: "revoked\|already_revoked"`; `revision` for `controllers` when no session projection changes, otherwise `revisions`: exactly `controllers` and `sessions` in lexical resource order | cannot revoke the last owner manager or authenticated caller controller; self-target returns `interaction_not_allowed` before creating a barrier; target commands and issuance are rejected while pending; `dependency_unavailable` until the barrier durably denies reconnect, discards queued delivery, and disconnects active sessions |
 
 Listing is `state/controllers`, not a command. The invitation credential is
 shown only in the FF1 QR and is intentionally absent from the command response.
@@ -1712,7 +1807,7 @@ endpoint, Mint Pairing Broker, or relayer session token.
 |---|---|---|---|
 | `sessions.create-invitation` | `label`?: string(1..64); `clientKind`: `web\|agent\|integration`; `requestedScopes`: unique subset of guest-eligible scopes; `sessionSeconds`: int[300..86400], default 3600; `origin`?: normalized HTTPS origin, required for `web` | `invitationId`, `expiresAt`, `sessionSeconds`, `qrDisplayed: true`, revision for `sessions` | `capability_unavailable`, `busy`, `scope_denied`, `origin_denied` |
 | `sessions.close-invitation` | `invitationId`: UUIDv7 | same ID, `status: "closed\|already_closed"`, revision for `sessions` | `not_found` only when the ID never belonged to this device; creator or `sessions:manage` |
-| `sessions.revoke` | `sessionId`: UUIDv7 | same ID, `status: "revoked\|already_revoked"`, revision for `sessions` | `not_found` only when the ID never belonged to this device; creator or `sessions:manage` |
+| `sessions.revoke` | `sessionId`: UUIDv7 | after broker barrier ACK: same ID, `status: "revoked\|already_revoked"`, revision for `sessions` | `not_found` only when the ID never belonged to this device; creator or `sessions:manage`; current access-session target returns `interaction_not_allowed` before creating a barrier; target commands are rejected while pending; `dependency_unavailable` until the barrier durably denies reconnect, discards queued delivery, and disconnects the active session |
 
 Creating the invitation is the approval action. There is no later
 request/decision exchange. The claimant proves possession of its key, consumes
@@ -1972,11 +2067,18 @@ asset required for autonomous playback are locally readable. `update.status` is
 non-idle update also has `operationId`, optional `targetVersion`, and
 `progressPercent` int[0..100]. `factoryResetConfirmations` is required and is a
 newest-first array of 0..16 entries keyed by unique `confirmationId`. An entry
-has `status: pending|approved|rejected|expired`, `requestedAt`, and `expiresAt`;
-`resolvedAt` is forbidden for pending and required for every terminal status.
-At most one entry is pending. Rejected and expired entries remain for 24 hours.
-An approved entry remains until reset execution clears retained resources and
-the device identity; there is no post-reset controller continuity to recover.
+has `status: pending|pending_broker_cleanup|pending_identity_rotation|rejected|expired`,
+`requestedAt`, and `expiresAt`; `resolvedAt` is forbidden for `pending` and
+required for every other status. At most one entry has `pending` or either
+pending-reset status. `pending_broker_cleanup` remains until the device-wide
+barrier ACK;
+`pending_identity_rotation` then remains until identity registry commit and
+durable local cleanup. Reset is incomplete and controller authorization and
+new owner enrollment remain blocked in both lifecycles. The barrier purges the
+old retained Application Message, so the post-barrier lifecycle is exposed by
+the recovery SetupStatus rather than republished by the fenced old publisher.
+Rejected and expired entries remain for 24 hours; there is no post-reset
+controller continuity to recover.
 If the sixteen-entry bound is reached, a new reset request returns `busy` until
 the oldest rejected or expired entry reaches its retention boundary. The entry
 is committed before its requested/resolved event, making reconnect recovery
@@ -2062,13 +2164,20 @@ Every session entry requires `sessionId`, `sessionType`, `controllerId`,
 | `guest` | `createdBy`: controller UUIDv7; `clientKind: "web"\|"agent"\|"integration"`; `origin` only and always when `clientKind` is `web` | `role`; `origin` for non-web clients |
 
 Only open invitations and active sessions are retained. On claim, close,
-expiry, or revocation, FF1 atomically removes the terminal entry, advances the
-`sessions` revision, and emits the corresponding section 13 event. Terminal
+or expiry, FF1 atomically removes the terminal entry, advances the `sessions`
+revision, and emits the corresponding section 13 event. For revocation it does
+so only after the broker authorization barrier ACK. A pending-revocation entry
+remains in this public projection as `active`, although FF1 already rejects it
+locally; no terminal state or success is exposed before the barrier. Terminal
 underlying records use `claimed|closed|expired` for invitations and
 `expired|revoked` for sessions but never appear in this retained projection.
-After `feral-controld` restart, all previously open invitations and active
-sessions are invalidated and the first new snapshot omits them; persistent
-controller enrollments remain in `state/controllers`.
+After `feral-controld` restart, every previously open invitation is invalidated
+and the first new snapshot omits it. TPM-sealed, unexpired active sessions are
+restored with their same ID, scopes, status, and absolute expiry and remain in
+the snapshot; persistent controller enrollments remain in `state/controllers`.
+When lifecycle is `pending_broker_cleanup` or `pending_identity_rotation`, this
+restoration rule does not apply: no controller or access-session authorization
+is restored. Only the corresponding reset recovery phase executes.
 
 MQTT credentials, invitation QR data, JWE, JWK coordinates, key thumbprints,
 user agents, DP-1 Playlist URIs, and DP-1 Playlist documents are forbidden.
@@ -2123,7 +2232,7 @@ assumption.
 | `system.update-completed` | `operationId`: UUIDv7; `status`: `succeeded\|failed`; `installedVersion`?: semver; `errorCode`?: stable code | 1 hour |
 | `system.confirmation-requested` | `confirmationId`: UUIDv7; `action`: exactly `factory_reset`; `expiresAt`: timestamp | 2 minutes |
 | `system.confirmation-resolved` | `confirmationId`: UUIDv7; `decision`: `approved\|rejected\|expired` | 10 minutes |
-| `system.factory-reset-starting` | `confirmationId`: UUIDv7; `executeAt`: timestamp | 2 minutes |
+| `system.factory-reset-starting` | `confirmationId`: UUIDv7; `barrierOperationId`: UUIDv7; `status`: exactly `pending_broker_cleanup` | 2 minutes |
 | `system.power-starting` | `operationId`: UUIDv7; `action`: `shutdown\|reboot`; `executeAt`: timestamp | 2 minutes |
 | `support.progress` | `operationId`: UUIDv7; `supportBundleId`: UUIDv7; `status`: support status; `progressPercent`: int[0..100] | 1 hour |
 | `sessions.invitation-closed` | `invitationId`: UUIDv7; `invitationType`: `owner_enrollment\|controller_enrollment\|guest_session`; `outcome`: `claimed\|closed\|expired`; `resolvedAt`: timestamp | 10 minutes |
@@ -2175,12 +2284,30 @@ All setup paths begin `/ff/setup/v2`. Success JSON is closed and errors use RFC
 | `GET /support-bundles/{supportBundleId}` | no body | `status`: `collecting\|ready\|failed`; when ready, `downloadPath` on the same origin and `sha256` |
 | `GET /support-bundles/{supportBundleId}/download` | no body | when ready, `application/zip` bytes whose digest equals the status `sha256` |
 | `POST /factory-reset-requests` | `{}` | 202: `confirmationId`, `expiresAt`, `statusUrl` |
-| `GET /factory-reset-requests/{confirmationId}` | no body | `status`: `pending\|approved\|rejected\|expired` |
+| `GET /factory-reset-requests/{confirmationId}` | no body | `confirmationId`; `status`: `pending\|pending_broker_cleanup\|pending_identity_rotation\|completed\|rejected\|expired`; `barrierOperationId` required for either pending-cleanup status; `identityOperationId` required only for `pending_identity_rotation`; `completedAt` required only for `completed` |
+
+The reset-status response is closed. `barrierOperationId` is required if and
+only if status is `pending_broker_cleanup` or `pending_identity_rotation` and
+forbidden otherwise. `identityOperationId` is required if and only if status is
+`pending_identity_rotation`; `completedAt` is required if and only if status is
+`completed`. Each is forbidden otherwise.
 
 `SetupStatus` is the closed object `deviceId`, `serialSuffix`, `setupEpoch`:
 UUIDv7, `state`, `firmwareVersion`, `clockStatus`, optional `attempt`, and
-optional `update`. `state` is
-`awaiting_network|scanning|testing_network|online_unclaimed|online_claimed|recovery|updating|error`.
+optional `update` and `cleanup`. `state` is
+`awaiting_network|scanning|testing_network|online_unclaimed|online_claimed|recovery|pending_broker_cleanup|pending_identity_rotation|updating|error`.
+
+`cleanup` is required only and always when `state` is
+`pending_broker_cleanup` or `pending_identity_rotation`. It is the closed object
+`confirmationId`: UUIDv7, `barrierOperationId`: UUIDv7, `status`: exactly equal
+to `state`, `networkRequired`: boolean, optional `lastAttemptAt`: timestamp, and
+conditional `identityOperationId`: UUIDv7. `identityOperationId` is required
+only and always for `pending_identity_rotation`. Both states mean reset is
+incomplete; the public publisher, controller authorization, and owner
+invitation or claim are unavailable. If `networkRequired` is true, the recovery
+portal permits only `/status`, network discovery/configuration and attempt
+status, provisional time, and factory-reset cleanup status until a management
+path exists.
 
 `attempt` is the closed object `attemptId`: UUIDv7, `ssid`, `status`:
 `testing|connected|internet_verified|failed`, `startedAt`, `updatedAt`, and
@@ -2204,9 +2331,18 @@ its ID so cold-start clients do not create duplicate updates.
 The portal polls no faster than once per second. `setupEpoch` persists across
 planned Wi-Fi and update reboots until setup completes, so browser and native
 clients can distinguish resume from a different/reset device. The setup secret
-is TPM-sealed for that epoch, expires after 30 minutes, and is cleared on setup
-completion or factory reset. If it cannot be resumed, the screen shows a new QR and epoch rather than
-accepting an old secret.
+is TPM-sealed for that epoch and expires after 30 minutes. Offline reset
+pre-erasure immediately clears any old setup authorization. The screen starts
+the recovery SoftAP with a new setup epoch and secret; that fresh authorization
+can observe `pending_broker_cleanup`, configure a network, and read the matching
+reset status, but cannot authorize a controller or owner. After barrier ACK,
+the status changes to `pending_identity_rotation` with the durable
+`identityOperationId`; it MUST NOT become `completed`. Only after registry
+commit ACK and durable local cleanup does the reset-status route return
+`completed` with `completedAt` for the remainder of that new setup session and
+`SetupStatus.state` become `online_unclaimed` or `recovery`. Setup completion
+clears the new secret. An unresumable setup always shows a new QR and epoch
+rather than accepting an old secret.
 
 A network is persisted only after DHCP succeeds and either internet/NTP is
 verified or the screen user explicitly chooses LAN-only mode. A failed attempt
@@ -2221,15 +2357,20 @@ bundle download requires the live setup authorization header, expires after 15
 minutes, and is allowed only after a screen action starts recovery support.
 After internet is established, FF1 closes the setup server and displays an
 `owner_enrollment` QR from the controller-authentication profile. The claimant
-uses MQTT over WSS/443; FF1 never reuses the setup secret.
+uses MQTT over WSS/443; FF1 never reuses the setup secret. In either
+`pending_broker_cleanup` or `pending_identity_rotation`, internet establishment
+runs the corresponding
+management transaction first; the owner invitation is not displayed until the
+identity registry commit and durable local cleanup both complete.
 
 ## 15. Standard use versus FF customization
 
 | Area | Decision |
 |---|---|
 | MQTT request/response | Standard MQTT 5 Response Topic, Correlation Data, QoS 1, expiry, content type, and reason codes. No broker-specific RPC. |
-| Device authentication | Standard TLS 1.3 mutual X.509; the private key is TPM-backed. TPM attestation is used at enrollment, not invented as an MQTT AUTH exchange. |
+| Device authentication | Standard TLS 1.3 mutual X.509; the hardware identity key is TPM-backed and may remain the reset-stable PoP/attestation anchor, while the runtime certificate and broker registration are reset-scoped and replaced before completion. TPM attestation is used at enrollment, not invented as an MQTT AUTH exchange. |
 | Controller authentication | Invitation and enrollment-only connections use standard MQTT User Name and Password fields with restricted FF1-signed credentials. Access-session connections use standard MQTT 5 Enhanced Authentication and AUTH Control Packets; `FF1-JWT-ES256-PoP` and its JSON challenge/proof semantics are an FF customization. LAN uses standard mTLS. |
+| Broker authorization barrier | MQTT 5 has no ACL-mutation or barrier API. A broker-management adapter customized to the chosen vendor MUST provide the vendor-neutral durable deny, queue/subscription removal, disconnect, old-publisher fencing, pending-Will cancellation, retained Application Message purge, and ACK semantics in section 7.5 without changing public MQTT packets or reason codes. |
 | Playlist | Exact DP-1 core v1.1.0 and capability-gated registered/draft DP-1 extensions. `playlist.display`, `displayAt`, the 2 MiB admission limit, and JSON pull-chunk retrieval are FF control-profile extensions outside DP-1. FF commands do not mutate or wrap signed DP-1 fields. |
 | JSON/signatures/time/errors | JSON Schema 2020-12, JCS, SHA-256, and RFC 3339. Runtime errors reuse RFC 9457 members inside the common FF envelope; SoftAP uses top-level RFC 9457. |
 | Discovery | mDNS/DNS-SD standard service discovery. |

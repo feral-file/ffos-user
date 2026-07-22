@@ -331,7 +331,12 @@ boxed to ten working days once staffed, uses a bought/managed EMQX service
 4. Interrupt and recover separately from Wi-Fi loss, broker disconnect, device
    reboot, and ff-app restart. After each, resubscribe, recover retained state,
    pass the epoch/revision/event-watermark rules, and prove no QR or user-facing
-   authentication prompt occurs.
+   authentication prompt occurs. A `feral-controld` restart invalidates open
+   invitations but restores TPM-sealed, unexpired access sessions with their
+   original IDs, pending-revocation markers, and absolute expiries. The
+   `pending_broker_cleanup` and `pending_identity_rotation` lifecycles are the
+   exceptions: restore no controller authorization and run only the matching
+   cleanup recovery phase.
 5. Redeliver an identical QoS 1 side-effecting command and prove one effect and
    the byte-equivalent cached response; send the same `requestId` with a
    different body and prove `duplicate_conflict`.
@@ -352,20 +357,56 @@ boxed to ten working days once staffed, uses a bought/managed EMQX service
    socket reconnect and backpressure closure, reject an unenrolled client and
    out-of-scope resource, expose offline/cache readiness, and prove factory
    reset leaves no unauthenticated port-1111 surface or controller
-   authorization.
+   authorization. Prove an offline screen reset remains
+   `pending_broker_cleanup`, blocks owner enrollment, and cannot report
+   completion before both remote ACKs and durable local cleanup. Verify pre-
+   erasure deletes the old runtime certificate, issuer/CA, enrollments,
+   invitations, sessions, cached credentials, user/network data, and event
+   outbox while preserving only the stable TPM device-identity key and signed
+   cleanup tombstone. Reconfigure network through a fresh recovery-SoftAP setup
+   authorization. On recovery, prove the barrier first fences the old publisher
+   generation and cancels its pending Will Message/queued publishes, then
+   purges its retained Application Messages before ACK. Prove that ACK changes
+   status to `pending_identity_rotation`, not `completed`; the idempotent
+   identity transaction revokes the old runtime-certificate registration,
+   activates a replacement certificate with a fresh serial/registration and
+   publisher generation, and commits before public reconnect or owner claim.
 10. Verify the actual FF1 TPM supports the selected P-256 key lifecycle,
    attestation evidence, key renewal, secure deletion, factory reset behavior,
    and a trusted advancing RTC across power loss. If the last item is absent,
    document that enrolled LAN mTLS fails closed after offline reboot until NTP.
+   Distinguish the reset-stable hardware device-identity/PoP key from its
+   reset-scoped runtime X.509 certificate and broker registration.
 11. Register the TPM-backed FF1 controller-issuer public key with the broker,
    validate FF1-signed invitation, enrollment-only, and access-session
    credentials without a per-session control-plane lookup, validate the access
    credential's `cnf.jwk` and `FF1-JWT-ES256-PoP` challenge response, reject a
    wrong key, binding mismatch, expired challenge, replayed challenge, and
-   replayed proof with the specified MQTT Reason Codes, then test immediate
-   device rejection and broker disconnect on controller or session revocation.
+   replayed proof with the specified MQTT Reason Codes. Then prove the required
+   broker authorization adapter atomically installs durable target deny
+   tombstones, applies them before every authorization/delivery decision,
+   removes subscriptions and queued delivery, disconnects active clients with
+   `0x87`, and acknowledges only after that barrier. Before ACK, prove FF1
+   rejects the target but exposes no terminal revocation state, event, or
+   success result; after ACK, prove the target receives no newly authorized,
+   queued, or retained state/events and cannot reconnect. Prove revoking the
+   authenticated caller controller or current access session returns
+   `interaction_not_allowed` without creating a barrier. For online reset,
+   prove the final reset-starting PUBLISH receives PUBACK before heartbeat/state
+   quiescence, event-outbox discard, and normal public-device DISCONNECT, and
+   prove the separately authenticated management barrier runs only afterward.
+   After barrier ACK, prove `pending_identity_rotation` resumes the same durable
+   `identityOperationId` across lost responses and crashes, atomically switches
+   the runtime certificate registration and publisher generation, deletes the
+   old local certificate, and reaches `completed` only after durable local
+   cleanup.
 12. Run the SoftAP/captive-portal spike on the required phone matrix and measure
-   wrong-password recovery, AP/client concurrency, and auto-open behavior.
+   wrong-password recovery, AP/client concurrency, and auto-open behavior. Its
+   closed-schema fixtures include both pending reset states, conditional
+   `barrierOperationId`/`identityOperationId` fields, the required cleanup
+   object, the completed response only after identity commit and local cleanup,
+   rejection of the erased setup secret, and blocked owner enrollment in both
+   pending phases.
 13. Verify the fixed DP-1 trust profile against real Feral File feeds, institution trust
    roots, key rotation/revocation, and expired-trust offline cache fixtures.
 14. Define the support service's device-bound upload-grant exchange. The public
@@ -393,9 +434,13 @@ rollback at every fleet gate:
    the internal factory-reset D-Bus contract for prepare/physical-decision/
    execute and adding only the source-of-truth signals required by retained
    state.
-4. Complete TPM enrollment and broker spike, including WSS/443, Will Message, ACL
-   negative tests, revocation, certificate rotation, NTP loss, packet limits,
-   rate limiting, clean restart, and duplicate QoS 1 delivery.
+4. Complete TPM enrollment and broker spike, including WSS/443, Will Message,
+   ACL negative tests, the vendor-neutral authorization-barrier adapter,
+   old-device-publisher generation fencing, pending-Will/queued-publish
+   cancellation, retained Application Message purge, idempotent runtime-
+   certificate registration replacement, fresh publisher-generation activation,
+   NTP loss, packet limits, rate limiting, clean restart, restored unexpired
+   access sessions, and duplicate QoS 1 delivery.
 5. Prove the unified controller-authentication profile against the managed
    broker: device-signed JWT validation without a per-session authentication
    service, one-time invitation consumption, access-session broker challenge
@@ -415,7 +460,8 @@ rollback at every fleet gate:
    renewal, a second mobile enrollment, a concurrent CLI enrollment, guest
    invitation and claim, remote and offline-LAN Playlist display, sleep,
    update, recovery, keyboard, tap, double tap, long press, drag, wheel/pinch,
-   guest expiry and revocation, reconnect, and stale presence.
+   guest expiry and revocation, self-revocation rejection, reconnect, and stale
+   presence.
 8. Ship the v2-capable app first, then canary firmware. Current firmware records
    only the target-bound pre-OTA eligibility acknowledgment. Boot the v2 image
    once in probation, complete owner enrollment and MQTT promotion checks, and
@@ -458,13 +504,29 @@ Minimum acceptance checks are:
 - multiple enrolled mobile apps and CLIs can connect concurrently, renew
   independently, and survive another controller's expiry, rotation, or
   revocation without a QR prompt;
-- revocation, certificate expiry/rotation, factory reset, and last-owner
-  protection are tested end-to-end;
+- after successful revocation barrier ACK, the target cannot reconnect or
+  receive newly authorized, queued, or retained state/events; before ACK, no
+  terminal revocation projection, event, or success result is exposed;
+- controller self-revocation and current-access-session revocation return
+  `interaction_not_allowed` without creating a pending marker or barrier;
+- offline reset remains `pending_broker_cleanup` and cannot enroll a new owner;
+  barrier ACK transitions to `pending_identity_rotation`, not `completed`;
+  identity commit atomically revokes the old runtime-certificate registration
+  and activates its replacement with a fresh publisher generation; only durable
+  local cleanup permits completion, public reconnect, or owner claim;
+- publisher fencing prevents an old Will Message, reconnect, or queued publish
+  from recreating purged state, and completed reset leaves every old issuer,
+  certificate registration, credential, retained message, and queued delivery
+  unusable or absent;
+- certificate expiry/rotation and last-owner protection are tested end-to-end;
 - enrolled LAN HTTP and local push expire at the issued authorization-lease
   deadline, bounded to at most 900 seconds, even when the client certificate is
   still valid, followed by a silent mutually authenticated reconnect;
-- every `state/sessions` invitation and session variant passes closed-schema,
-  terminal-removal, and restart-invalidation fixtures;
+- every `state/sessions` invitation and session variant passes closed-schema
+  and terminal-removal fixtures; restart fixtures invalidate open invitations
+  but restore unexpired sessions and pending-revocation markers without
+  changing their absolute expiry, except either pending reset lifecycle restores
+  no controller authorization and resumes its durable operation ID;
 - v1 weekday sleep selections survive migration exactly, including the
   missing-field daily default and non-daily subsets; and
 - logs and all state/events pass secret, credential, PII, DP-1 source, and remote
@@ -485,7 +547,7 @@ Minimum acceptance checks are:
 | Connected/disconnected/stale/unknown presence | API section 4.3 |
 | Capability discovery; no firmware guessing | API section 9 |
 | Packet limits, rate limits, restricted commands | API sections 4.4, 7.4, 9, and 11 |
-| Per-device/controller identity, TPM, rotation, revocation, ACLs | API sections 7 and 8 |
+| Per-device/controller identity, TPM, rotation, revocation barriers, ACLs | API sections 7 and 8; authentication section 13 |
 | MQTT device mTLS; restricted invitation/enrollment credentials; sender-constrained access sessions | API sections 4.1.1 and 7; authentication section 7 |
 | Brokerless authenticated LAN HTTPS using the same contract | API sections 5, 7, and 8 |
 | Authenticated realtime LAN state/event push with polling fallback | API section 5 |

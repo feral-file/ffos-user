@@ -76,11 +76,12 @@ FF customizations built on the standard MQTT exchange; they do not add or
 change an MQTT Control Packet, property, or Reason Code.
 
 MQTT 5 defines those fields but does not define JWT validation, FF1 issuer-key
-registration, or the ACL vocabulary in this profile. Those are FF protocol
-customizations built from the listed standards. A broker selected for the
-final profile is acceptable only if
-it can validate the registered FF1 issuer and enforce the exact Topic Name ACLs
-without changing the MQTT wire protocol.
+registration, the ACL vocabulary in this profile, or a broker ACL revocation
+barrier. Those are FF protocol customizations built from the listed standards.
+A broker selected for the final profile is acceptable only if it can validate
+the registered FF1 issuer, enforce the exact Topic Name ACLs, and provide the
+authorization-barrier semantics in section 13.4 without changing the public
+MQTT wire protocol.
 
 ## 3. Vocabulary
 
@@ -106,7 +107,7 @@ operation names and JSON use `enrollment`, `invitation`, and `session`.
 
 FF1 has three distinct non-exportable ECDSA P-256 keys:
 
-1. a TPM-backed device TLS identity key;
+1. a TPM-backed hardware device-identity and proof-of-possession key;
 2. a TPM-backed controller-credential issuer key; and
 3. a device-local controller CA key for LAN client certificates.
 
@@ -115,6 +116,14 @@ credential-issuer public key and its `kid` to the TPM-attested device identity.
 The MQTT broker validates FF1-issued JWS credentials from this registered public
 key without a per-session authentication callback to FF1 or a control-plane
 session lookup.
+
+The hardware device-identity key MAY survive factory reset as the stable TPM
+proof-of-possession and attestation anchor; this profile preserves it through
+reset cleanup. Its runtime X.509 device certificate and broker certificate
+registration are separate, reset-scoped credentials. Factory reset MUST revoke
+and replace that certificate and registration even when the underlying TPM key
+is retained. The retained key alone cannot open the public device MQTT Network
+Connection.
 
 FF1 is authoritative for invitation consumption, controller enrollment,
 access-session creation, expiry, and revocation. Broker validation is an outer
@@ -869,10 +878,10 @@ schemas are in parent sections 11.6 and 11.7.
 | `controllers.close-invitation` | `invitationId` | invitation ID, closed status, sessions revision | creator or owner with `controllers:manage` |
 | `controllers.renew-credential` | `controllerId`; new signing and encryption public JWKs; `oldKeyProof` and `newKeyProof` | new enrollment credential envelope, `credentialExpiresAt`, optional LAN-certificate expiry, and `controllers` revision | same active controller; at most once per 24 hours |
 | `controllers.set-scopes` | `controllerId`; unique nonempty `scopes` | controller ID, scopes, controllers-state revision | owner with `controllers:manage`; subset of caller grant |
-| `controllers.revoke` | `controllerId`; `revokeCreatedGuestSessions`?: boolean, default false | controller ID, revoked status, and either the `controllers` revision alone or exact `controllers` plus `sessions` revisions when session state changed | owner with `controllers:manage`; not final owner |
+| `controllers.revoke` | `controllerId`; `revokeCreatedGuestSessions`?: boolean, default false | after broker barrier ACK: controller ID, `status: revoked\|already_revoked`, and either the `controllers` revision alone or exact `controllers` plus `sessions` revisions when session state changed | owner with `controllers:manage`; not final owner; target cannot be the authenticated caller controller (`interaction_not_allowed`); `dependency_unavailable` while the durable barrier is pending |
 | `sessions.create-invitation` | `label`?: string(1..64); `clientKind`: `web\|agent\|integration`; `requestedScopes`: unique scope array; `sessionSeconds`: int[300..86400], default 3600; `origin`?: normalized HTTPS origin | invitation ID, expiry, guest lifetime, QR display status, sessions revision | enrolled controller with `sessions:manage` |
 | `sessions.close-invitation` | `invitationId` | invitation ID, closed status, sessions revision | creator or `sessions:manage` |
-| `sessions.revoke` | `sessionId` | session ID, `status: revoked\|already_revoked`, sessions-state revision | creator or `sessions:manage` |
+| `sessions.revoke` | `sessionId` | after broker barrier ACK: session ID, `status: revoked\|already_revoked`, sessions-state revision | creator or `sessions:manage`; target cannot be the current access session (`interaction_not_allowed`); `dependency_unavailable` while the durable barrier is pending |
 
 Creating a guest invitation is the complete approval action. The invited
 requester does not send a second approval request, and an enrolled controller
@@ -945,8 +954,9 @@ guest-session variants are defined in parent API section 12.7. Retained state
 contains only open invitations and active sessions. Terminal invitation and
 session records remain internal authorization records; their public projection
 is removal in the next atomic `state/sessions` revision plus the applicable
-event below. Restart invalidation removes every open invitation and active
-session while leaving persistent controller enrollments intact.
+event below. Restart invalidation removes every open invitation, restores every
+TPM-sealed unexpired access session, and preserves its pending-revocation
+marker, if any, while leaving persistent controller enrollments intact.
 
 Events are:
 
@@ -1034,20 +1044,73 @@ reports `clock_unsynchronized`; SoftAP recovery remains available.
 ### 13.3 Restart
 
 All invitation and access-session records are stored atomically and sealed to
-the TPM-backed device identity. A `feral-controld` restart invalidates open
-invitations and active guest sessions. Enrolled-controller access sessions are
-also invalidated and are recreated through section 8. Controller enrollments
-survive restart.
+the TPM-backed device identity. A `feral-controld` restart invalidates every
+open invitation. It restores every unexpired access-session record, including
+guest and enrolled-controller sessions, with the same ID, status, scopes, and
+absolute expiry, and restores every durable pending-revocation marker. Except
+for a target already blocked by such a marker, those sessions remain valid
+until their signed `exp` or an explicit revocation completes under section
+13.4. A pending target remains locally rejected and its barrier retry takes
+priority after restart. A restart MUST NOT create an implicit broker revocation
+or require a controller to obtain a replacement access session.
 
-The broker MAY take time to observe a restart revocation. During that interval,
-FF1 rejects commands from the invalidated session. Access tokens remain short
-lived and cannot outlive their signed `exp`.
+The exceptions are lifecycles `pending_broker_cleanup` and
+`pending_identity_rotation`. In either lifecycle restart restores no controller
+enrollment or access-session authorization and accepts no controller command or
+new owner claim. Broker-cleanup recovery executes only the device-wide barrier;
+identity-rotation recovery executes only the post-barrier identity transaction
+in section 13.5.
 
 ### 13.4 Revocation
 
-Revoking an access session causes FF1 to reject it immediately, publish the new
-`state/sessions` revision, emit `sessions.revoked`, and request broker
-disconnection with MQTT Reason Code `0x87`.
+FF1 and the broker authorization adapter implement a revocation barrier. A
+barrier request is authenticated as the TPM-backed FF1 device identity and is
+idempotently identified by a UUIDv7 `operationId`. Its target is exactly one of
+an access-session ID, a controller ID together with the exact derived session
+IDs being revoked, or a device-reset target containing the controller-issuer
+generation identified by the issuer JWS `kid`, current publisher generation,
+and every controller/session authorization ID. The adapter MUST, atomically and
+durably before acknowledging the request:
+
+1. install a deny tombstone for every target identifier;
+2. apply that deny state before every CONNECT, PUBLISH, SUBSCRIBE, and outbound
+   delivery authorization decision;
+3. reject a later CONNECT or authorization attempt for a target credential;
+4. remove every target subscription and all queued outbound state or event
+   delivery for the target; and
+5. disconnect every active target client with MQTT 5 DISCONNECT Reason Code
+   `0x87` (Not authorized).
+
+The adapter ACK is the barrier completion boundary. It is an acknowledgement
+from the broker's authenticated authorization-management interface, not an
+MQTT PUBACK or another public MQTT packet. Repeating the same `operationId` and
+target MUST return the same completed ACK. A tombstone MUST remain effective
+for at least as long as any corresponding credential, broker Session, or
+queued delivery can exist; an issuer-generation tombstone remains effective
+until that issuer registration and all associated broker state have been
+deleted.
+
+When revocation begins, FF1 first durably marks the target as pending revocation
+and immediately rejects its commands and new session issuance locally. It MUST
+NOT yet report a successful revocation, remove the target from retained public
+state, emit `sessions.revoked` or `controllers.revoked`, or return a successful
+revocation result. Only after the adapter ACK may FF1 commit `revoked`, update
+`state/sessions` and/or `state/controllers`, publish the corresponding event,
+and return success.
+
+`controllers.revoke` MUST reject the authenticated caller's own controller ID,
+and `sessions.revoke` MUST reject the access-session ID carrying the command.
+Both failures are `interaction_not_allowed` and occur before any pending marker
+or barrier operation is created. This keeps the synchronous response path
+authorized until an other-controller or other-session revocation completes.
+
+If FF1 cannot obtain the ACK, the command returns `dependency_unavailable` with
+`retryable: true` and exact details
+`{"dependency":"broker_authorization_barrier","pending":true}`. The durable
+pending revocation remains locally enforced and FF1 retries it before it may
+authorize that target again. A later request for the same target returns the
+same retryable failure while the barrier is pending and the declared
+`already_revoked` result only after barrier completion.
 
 Revoking an enrollment also revokes its enrollment credential, LAN certificate,
 and every active access session created from it. It does not revoke guest
@@ -1057,9 +1120,83 @@ compromised controller.
 
 ### 13.5 Factory reset and owner transfer
 
-Factory reset clears the controller issuer key, controller CA, all enrollments,
-all invitations, every access session, cached credentials, and retained broker
-state. No controller authorization survives reset.
+Each device broker registration has a management-plane
+`publisherGeneration`: UUIDv7 bound to the TPM-authenticated device identity,
+device MQTT Client Identifier, and certificate registration. The broker permits
+device publishes and reconnect only while that generation is active. This
+value is broker authorization metadata, not an MQTT property or Application
+Message member.
+
+Factory reset uses a device-wide instance of the section 13.4 barrier. Its
+target contains the prior controller-issuer generation and every controller and
+access-session authorization plus the current `publisherGeneration`. In the
+normal online sequence, FF1 first obtains
+PUBACK for its final `system.factory-reset-starting` Application Message. It
+then quiesces heartbeat and state publication, freezes and discards the old
+event outbox, and sends a normal MQTT DISCONNECT on the public device Network
+Connection so the Will Message is not published. Only then does it use the
+separately TPM-authenticated broker-management connection for the barrier. No
+local identity or user-secret erasure begins before that ACK.
+
+Before ACK, the adapter MUST install the authorization deny tombstones, remove
+controller subscriptions and queued outbound deliveries, disconnect active
+controllers with `0x87`, fence the old device-publisher generation and any
+reconnect using it, cancel its pending Will Message and queued device
+publishes, and then purge every retained Application Message in the old device
+subtree. The adapter ACKs only when the fence prevents any old publisher action
+from recreating purged state.
+
+Barrier ACK does not complete reset. FF1 atomically persists that ACK and
+transitions to `pending_identity_rotation`, durably assigning a UUIDv7
+`identityOperationId`. In this lifecycle the public MQTT device publisher,
+controller authentication, and owner invitation or claim remain blocked. Over
+the separately authenticated management path, FF1 proves possession of the
+stable TPM hardware device-identity key and requests a replacement runtime
+X.509 device certificate under `identityOperationId`. The replacement MUST have
+a fresh certificate serial, certificate fingerprint, and certificate-
+registration ID and is securely installed locally but MUST NOT yet be used by
+the public publisher.
+
+The registry then performs one atomic switch: revoke and deregister the old
+runtime certificate registration, activate the replacement certificate
+registration, and bind it to a fresh `publisherGeneration`. Its ACK is the
+identity-commit boundary. Repeating `identityOperationId` MUST return the same
+replacement certificate identity, publisher generation, and committed ACK;
+neither an ambiguous response nor a crash may create two active registrations.
+
+Only after the identity-commit ACK may FF1 delete any local old runtime
+certificate, finish erasing the prior controller issuer and controller CA,
+enrollments, invitations, access sessions, cached credentials and user data,
+and durably commit cleanup completion. Only after that local commit may it
+clear the cleanup tombstone, report reset `completed`, connect the public MQTT
+device publisher with the replacement certificate and generation, or display
+or accept a new `owner_enrollment` invitation.
+
+An offline screen-initiated reset is the sole pre-ACK erasure exception. It
+deletes the local prior runtime device certificate, controller issuer and
+controller CA, enrollments, invitations, access sessions, cached credentials,
+user data, network credentials, and old event outbox. It preserves only the
+stable TPM-backed device identity and a durable tombstone signed by that
+identity containing the old device ID, runtime certificate serial and
+registration ID, controller-issuer `kid`, target authorization identifiers,
+publisher generation, reset `confirmationId`, and barrier `operationId`. The
+lifecycle is
+`pending_broker_cleanup`: reset is not complete, no controller/session
+authorization is restored, and new owner authorization is blocked. If network
+credentials were erased, network reconfiguration uses the recovery SoftAP with
+a fresh setup authorization.
+
+On crash or offline recovery, the barrier is the first broker-management
+action. It fences the prior publisher generation before purging its retained
+Application Messages; FF1 MUST NOT reconnect the public device publisher or
+flush an old event outbox before the ACK. Recovery from
+`pending_identity_rotation` instead resumes the same idempotent
+`identityOperationId` and completes the registry switch and local cleanup; it
+does not restore controller authorization or reconnect the public publisher.
+If a crash occurs after either remote ACK, the durable tombstone identifies the
+completed boundary so the corresponding operation is not reversed or
+duplicated. No controller authorization or queued or retained controller data
+survives a completed reset.
 
 Owner transfer is a physical ceremony. It revokes the former owner enrollment
 and all derived sessions before FF1 displays a new `owner_enrollment`
@@ -1108,9 +1245,10 @@ invitation. Network commands cannot silently replace the final owner.
 4. FF1 creates no controller enrollment. It returns one non-renewable guest
    access credential, and an optional session-bounded LAN certificate for an
    agent or integration.
-5. FF1 rejects the guest at expiry or revocation and requests broker
-   disconnection. Creating another guest session requires a new invitation
-   from an enrolled controller.
+5. FF1 rejects the guest at expiry. On revocation it rejects the guest locally
+   and reports success only after the broker authorization barrier disconnects
+   it and removes its queued delivery state. Creating another guest session
+   requires a new invitation from an enrolled controller.
 
 ## 15. Required pre-normative security checks
 
@@ -1123,8 +1261,9 @@ conformance suite MUST prove:
 3. an invitation cannot grant a role, scope, origin, device, or lifetime beyond
    the values signed by FF1;
 4. a guest cannot create another guest session or enroll a controller;
-5. a revoked or expired session cannot execute a command even before broker
-   disconnection completes;
+5. a pending-revocation session cannot execute a command, and after barrier ACK
+   it receives no newly authorized, queued, or retained state/event delivery
+   and cannot reconnect;
 6. an enrollment credential alone cannot read state or execute a command;
 7. access-session expiry, reconnect, app restart, and FF1 restart never require
    a new QR for an active controller enrollment;
@@ -1132,9 +1271,15 @@ conformance suite MUST prove:
    FF1 concurrently without sharing credentials or invalidating one another;
 9. enrollment-credential rotation preserves the enrollment and requires no
    user interaction;
-10. FF1 restart invalidates invitations and live access sessions but preserves
-   active enrollments;
-11. factory reset leaves no controller authorization or retained credential;
+10. FF1 restart invalidates open invitations, restores TPM-sealed unexpired
+    access sessions, and preserves active enrollments without extending any
+    absolute expiry, except that either pending-reset lifecycle restores no
+    controller or session authorization;
+11. offline reset cannot complete or enroll a new owner before both the broker
+    barrier and identity-commit ACK; barrier ACK transitions to
+    `pending_identity_rotation`, and completion requires old runtime-certificate
+    deregistration, replacement-certificate activation, a fresh publisher
+    generation, and durable local cleanup;
 12. one controller cannot subscribe to another controller's response Topic
     Name or another device subtree;
 13. logs, state, events, and diagnostics contain no invitation credential,
@@ -1143,15 +1288,23 @@ conformance suite MUST prove:
 14. an enrolled LAN connection rejects HTTP requests and closes local push at
     its issued LAN authorization-lease deadline, which is no later than 900
     seconds after authentication, even when the X.509 certificate remains
-    valid, and an active enrollment reconnects without a QR; and
+    valid, and an active enrollment reconnects without a QR;
 15. every retained invitation/session projection variant validates as a closed
     object, terminal transitions remove it atomically, and restart publishes no
-    previously open invitation or active session;
+    previously open invitation while restoring every unexpired active session
+    and pending-revocation marker unless reset is in either pending-reset
+    lifecycle;
 16. a captured access credential cannot complete MQTT authentication without
     the private key corresponding to its RFC 7800 `cnf.jwk`;
 17. wrong-key, audience, device, session, Client Identifier, expired-challenge,
     challenge-replay, and proof-replay cases install no ACL and produce the
-    section 7.4 MQTT Reason Code; and
+    section 7.4 MQTT Reason Code;
 18. the JSON Schema, AsyncAPI, OpenAPI, positive fixtures, negative security
     fixtures, and MQTT/LAN parity tests are published and executable, so no
-    prose-only implementation is reported as conformant.
+    prose-only implementation is reported as conformant;
+19. self-controller and current-access-session revocation fail with
+    `interaction_not_allowed` before creating a barrier operation; and
+20. crash recovery in each pending-reset lifecycle resumes the same durable
+    operation ID, never activates two runtime certificate registrations, and
+    cannot report `completed`, reconnect the publisher, or enroll an owner
+    before identity commit and durable local cleanup.
