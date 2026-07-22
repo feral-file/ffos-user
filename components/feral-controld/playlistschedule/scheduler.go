@@ -29,9 +29,12 @@ type Scheduler interface {
 	// player. Playlists without byDisplayAt clear any prior schedule and are
 	// returned unchanged.
 	Prepare(playlist *dp1.Playlist) *dp1.Playlist
-	// RecomputeNow re-filters the cached playlist and pushes it to the player.
-	// Used on wake, boot, and after a failed network refresh that still has a
-	// usable cache. No-op when nothing is cached.
+	// RecomputeNow re-filters the cached playlist and force-casts it to the
+	// player (now_display, not refresh). Used on timer fire, wake, CDP
+	// reconnect, and after a transient network refresh failure that still has
+	// a usable cache. Force-cast is required so a displayAt cutover is not
+	// deferred until the current artwork finishes its duration. No-op when
+	// nothing is cached.
 	RecomputeNow(ctx context.Context)
 	// Clear drops the cached byDisplayAt playlist and cancels the transition
 	// timer under the player-push lock so an in-flight RecomputeNow cannot
@@ -271,11 +274,17 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist) error {
 		return fmt.Errorf("cdp not connected")
 	}
 
+	// Force cast via now_display — never refresh:true. Player refreshPlaylist
+	// defers when the current item is absent from the new list (typical
+	// displayAt day/slot swap), which would miss the wall-clock threshold.
+	// URL/dynamic playlist-refresher keeps refresh:true on its own path.
 	command := commands.Command{
 		Type: commands.CMD_DISPLAY_PLAYLIST,
 		Arguments: map[string]interface{}{
+			"intent": map[string]interface{}{
+				"action": "now_display",
+			},
 			"dp1_call": playlist,
-			"refresh":  true,
 		},
 	}
 	payload, err := command.JSON()

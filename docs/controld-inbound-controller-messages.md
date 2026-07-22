@@ -58,8 +58,10 @@ for relayer topic assignment:
   through CDP as `window.handleCDPRequest(...)`. When the playlist has
   `schedule.byDisplayAt: true`, controld filters items to the current active
   set before CDP, caches the full playlist, and advances the player on the next
-  `displayAt` (timer), sleep-schedule wake, or CDP reconnect. Playlists without
-  `byDisplayAt` are forwarded unchanged.
+  `displayAt` (timer), sleep-schedule wake, or CDP reconnect with a force cast
+  (`intent.action=now_display`, not `refresh: true`) so cutover is not deferred
+  until the current artwork duration ends. URL / dynamic playlist refresh still
+  uses `refresh: true`. Playlists without `byDisplayAt` are forwarded unchanged.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
@@ -264,7 +266,11 @@ computes an active set (`max(displayAt <= now)` items plus items without
 `displayAt`) and sends only that filtered playlist to Chromium. Timezone-less
 `displayAt` values use device local time; values with `Z`/offset are absolute.
 Controld keeps the full playlist in memory to arm the next `displayAt`
-transition and to recompute after wake or CDP reconnect. A later
+transition and to recompute after wake or CDP reconnect. Timed / wake /
+reconnect pushes are force casts (`intent.action=now_display` without
+`refresh`) so the player applies the new active set immediately even if the
+current artwork still has remaining duration; the 5-minute URL/dynamic
+playlist-refresher path continues to use `refresh: true`. A later
 `displayDefaultPlaylist` clears that cache so a scheduled push cannot overwrite
 the default player state. Clear and the default CDP send share the same
 serialization lock as timed recomputes so an in-flight push cannot land after

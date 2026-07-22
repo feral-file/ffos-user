@@ -196,7 +196,11 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 	pushed := make(chan struct{}, 1)
 	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
 	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
-		func(_ string, _ map[string]interface{}) (interface{}, error) {
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.NotContains(t, expr, `"refresh":true`)
+			assert.Contains(t, expr, "day23")
 			pushed <- struct{}{}
 			return map[string]interface{}{"ok": true}, nil
 		},
@@ -226,7 +230,7 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 	}
 }
 
-func TestRecomputeNow_WakePathPushesFromCache(t *testing.T) {
+func TestRecomputeNow_WakePathForceCastsNowDisplay(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -243,7 +247,17 @@ func TestRecomputeNow_WakePathPushesFromCache(t *testing.T) {
 	).AnyTimes()
 
 	cdpMock.EXPECT().Initialized().Return(true).Times(1)
-	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]interface{}{"ok": true}, nil).Times(1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			// displayAt cutover must force-cast: now_display without refresh so
+			// the player does not defer until the current artwork duration ends.
+			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.NotContains(t, expr, `"refresh":true`)
+			assert.Contains(t, expr, "day22")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
 
 	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
 		return loc
