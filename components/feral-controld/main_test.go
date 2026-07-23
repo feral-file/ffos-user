@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -379,6 +380,69 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(nil, errors.New("DBusClient not started"))
 
 				// ...and the daemon still reaches READY.
+				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+			},
+		},
+		{
+			// The recovery half of the case above: after a failed initial Start
+			// (name-conflict style), the background retry must Start the client
+			// again while the rest of run() — including D-Bus consumers — is
+			// already live, and shutdown must still Stop the client that the
+			// retry brought up. The Start-vs-Call safety of that overlap is
+			// pinned down in dbus/restartable_test.go; this exercises the run()
+			// wiring: failed start → retry → success → shutdown.
+			name: "DBus start retry succeeds and shutdown stops the client",
+			setupFunc: func(ts *testSetup) {
+				ts.mockStateManager.EXPECT().
+					Load(ts.logger).
+					Return(&state.State{
+						Relayer: &state.RelayerState{TopicID: ""},
+					}, nil)
+
+				// Initial Start fails; the first backoff returns immediately so
+				// the retry fires inside the test window and succeeds; any later
+				// sleeps park until shutdown.
+				ts.mockDBus.EXPECT().
+					Start().
+					Return(errors.New("failed to request name: 3"))
+				ts.mockDBus.EXPECT().Start().Return(nil)
+				var sleeps int32
+				ts.mockClock.EXPECT().
+					SleepContext(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, _ time.Duration) error {
+						if atomic.AddInt32(&sleeps, 1) == 1 {
+							return nil
+						}
+						<-ctx.Done()
+						return ctx.Err()
+					}).
+					AnyTimes()
+				ts.mockDBus.EXPECT().Stop().Return(nil).AnyTimes()
+
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+				ts.mockCDP.EXPECT().Close()
+				ts.mockWatchdog.EXPECT().Start(gomock.Any())
+				ts.mockWatchdog.EXPECT().Stop()
+				ts.mockMediator.EXPECT().Start()
+				ts.mockMediator.EXPECT().Stop()
+				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+				ts.mockStatusPoller.EXPECT().Stop()
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+
+				ts.mockHub.EXPECT().Start()
+				ts.mockHub.EXPECT().Stop().Return(nil)
+				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
+				// The startup connectivity query may run before or after the
+				// retry lands; either way an error reads as offline, so no
+				// relayer connect is attempted and READY is still reached.
+				ts.mockDBus.EXPECT().
+					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+					Return(nil, errors.New("DBusClient not started"))
+
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 			},
 		},

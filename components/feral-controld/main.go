@@ -219,25 +219,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// Continue startup and retry in the background instead: every D-Bus
 	// consumer degrades gracefully until a retry succeeds (Call errors →
 	// provisioning's connUnknown discipline assumes offline and keeps
-	// re-querying, so the setup AP still raises; handler registration is an
-	// in-memory append that takes effect once the bus connects).
+	// re-querying, so the setup AP still raises; handler registrations are
+	// recorded by the Restartable wrapper and replayed onto the client that
+	// finally starts).
 	//
-	// Retries call Start() WITHOUT an interleaved Stop(): godbus's Stop closes
-	// its done channel permanently, so a Stop→Start cycle would leave the new
-	// signal-delivery goroutine stillborn. Known godbus limitations this retry
-	// accepts, all owed a godbus follow-up (generation handling + locking):
-	//  - A retry after a name-conflict failure re-registers the signal channel
-	//    on the shared session bus, and registrations are never removed: the
-	//    duplication is PERSISTENT and accumulates per such retry (Nx signal
-	//    delivery for the process lifetime). Tolerable because our handlers
-	//    are level-triggered/idempotent, and the common boot-race failure
-	//    (SessionBus itself failing) registers nothing, so it has zero
-	//    amplification.
-	//  - godbus Start() writes c.conn without its mutex while Call/Stop read
-	//    it under the mutex — dormant when Start ran once synchronously, a
-	//    formal data race now that the retry runs concurrently with live
-	//    Calls. Benign in practice (aligned pointer store, old-or-new value),
-	//    but it belongs in the same follow-up.
+	// Restart safety lives in dbus.Restartable, not here: each retry builds a
+	// FRESH underlying godbus client, started before publication, so retries
+	// never race live Call/Stop and never accumulate signal registrations on
+	// the shared bus (failed attempts are torn down with their connection).
+	// See dbus/restartable.go for the godbus hazards this design closes.
 	if err := app.DBus.Start(); err != nil {
 		app.Logger.Error("DBus start failed; continuing startup and retrying in background", zap.Error(err))
 		go func() {
@@ -520,8 +510,14 @@ func initializeApp(
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
 
-	// DBus
-	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
+	// DBus. Wrapped in a Restartable adapter so a failed Start (session bus not
+	// up yet, name still held by a dying predecessor) can be retried by run()
+	// without racing live consumers: each attempt builds a fresh underlying
+	// client and only publishes it once fully started — see dbus.Restartable
+	// for why a raw godbus client must not be re-Started in place.
+	dbusClient := dbus.NewRestartable(logger, func() dbus.DBus {
+		return godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
+	})
 
 	// DeviceStatus
 	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io, cdp)
