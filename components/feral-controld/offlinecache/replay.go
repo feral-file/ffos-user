@@ -182,8 +182,13 @@ type replayer struct {
 	// when disabled. Keyed by method as well as URL — see
 	// Resource.Method's doc for why a paused request must never be
 	// fulfilled from a resource captured for a different method to the
-	// same URL. Shared across every target: all targets of one displayed
-	// playlist replay from the same captured resource union.
+	// same URL. The one deliberate exception is processRequestPaused's
+	// HEAD fallback (fulfillHeadFromGet): a HEAD is answered from the
+	// SAME URL's GET resource, never a different URL's, because HEAD is
+	// itself defined as "GET without a body" — this substitutes method
+	// only, never risks serving the wrong resource. Shared across every
+	// target: all targets of one displayed playlist replay from the same
+	// captured resource union.
 	resources map[string]Resource
 	// mixedScope mirrors EnableForPlaylist's mixed parameter for the
 	// currently-enabled scope; read alongside resources under the same
@@ -593,6 +598,23 @@ func (r *replayer) processRequestPaused(sessionID string, session CDPSession, pa
 			resource, found = resources[resourceKey(evt.Request.Method, normalizedURL)]
 		}
 	}
+	// ff-player's content-type probe (see headProbeQueryParams' doc)
+	// issues a HEAD to the item's source before ever issuing the GET a
+	// native <img>/<video>/<audio> element actually renders from — a
+	// HEAD-keyed resource is never captured (capture.go/mediacapture.go
+	// only ever store a GET), so this is not a rare edge case but an
+	// UNCONDITIONAL miss on the two lookups above for every offline
+	// media item, every time. Answering it from the same URL's GET
+	// resource (headLookupURL strips the probe's own cache-busting
+	// params first) is what lets the player determine the correct
+	// Content-Type and select its native renderer instead of degrading
+	// to the iframe fallback — see docs/offline-artwork-capture.md §6.
+	if !found && evt.Request.Method == go_http.MethodHead {
+		if getResource, ok := resources[resourceKey(go_http.MethodGet, headLookupURL(evt.Request.URL))]; ok {
+			r.fulfillHeadFromGet(ctx, session, evt.RequestID, getResource, mixed)
+			return
+		}
+	}
 	if !found {
 		r.handleMiss(ctx, session, evt.RequestID, mixed)
 		return
@@ -663,8 +685,42 @@ func (r *replayer) isStaticServerFollowUp(rawURL string) bool {
 // mismatch class.
 var playerAppendedQueryParams = []string{"display_mode"}
 
+// headProbeQueryParams are the query params ff-player's own
+// getContentTypeFromURL appends to the HEAD request it issues to probe
+// a media item's Content-Type BEFORE choosing which native element
+// (<img>/<video>/<audio>/...) to render it with — never part of the
+// signed DP-1 item.Source, and never captured (mediacapture.go downloads
+// only the bare item.Source with a GET — see its doc). "v" is a
+// cache-busting timestamp that is by construction different on every
+// single probe, so a HEAD lookup against the exact live URL is
+// GUARANTEED to miss, unconditionally, exactly like
+// playerAppendedQueryParams' display_mode case is for a fresh software
+// item's first request (see that var's doc). Left unanswered, the
+// player's probe fails offline and it falls back to rendering the item
+// in a plain iframe instead of its correct native element. Stripped only
+// as part of headLookupURL's HEAD-specific retry (never for the
+// ordinary GET/exact-URL lookup path), since a genuine artwork query
+// param happening to be named "v" must still only ever miss for a GET,
+// never be silently dropped.
+var headProbeQueryParams = []string{"v", "x-request"}
+
 // stripPlayerAppendedParams removes any playerAppendedQueryParams pairs
-// from rawURL's query string, preserving everything else — scheme, host,
+// from rawURL's query string — see stripQueryParams' doc for the exact
+// preserved-encoding contract this and stripHeadProbeParams both rely
+// on.
+func stripPlayerAppendedParams(rawURL string) string {
+	return stripQueryParams(rawURL, playerAppendedQueryParams)
+}
+
+// stripHeadProbeParams removes any headProbeQueryParams pairs from
+// rawURL's query string — see headProbeQueryParams' doc for why these
+// are only ever stripped for a HEAD lookup retry, never a GET one.
+func stripHeadProbeParams(rawURL string) string {
+	return stripQueryParams(rawURL, headProbeQueryParams)
+}
+
+// stripQueryParams removes any pairs whose key is in params from
+// rawURL's query string, preserving everything else — scheme, host,
 // path, fragment, and the exact byte encoding/order of every surviving
 // query parameter — untouched. This deliberately avoids a
 // parse-then-net/url.Values.Encode() round trip: Values.Encode() sorts
@@ -672,8 +728,8 @@ var playerAppendedQueryParams = []string{"display_mode"}
 // reorder a URL like "?edition_number=0&blockchain=bitmark" (captured
 // verbatim, in DP-1 source order) and break the exact-string
 // resourceKey match this function exists to restore. Returns rawURL
-// unchanged if none of playerAppendedQueryParams are present.
-func stripPlayerAppendedParams(rawURL string) string {
+// unchanged if none of params are present.
+func stripQueryParams(rawURL string, params []string) string {
 	before, after, ok := strings.Cut(rawURL, "?")
 	if !ok {
 		return rawURL
@@ -694,7 +750,7 @@ func stripPlayerAppendedParams(rawURL string) string {
 		if eqIdx := strings.IndexByte(pair, '='); eqIdx >= 0 {
 			key = pair[:eqIdx]
 		}
-		if isPlayerAppendedQueryParam(key) {
+		if slices.Contains(params, key) {
 			changed = true
 			continue
 		}
@@ -707,10 +763,6 @@ func stripPlayerAppendedParams(rawURL string) string {
 		return base + fragment
 	}
 	return base + "?" + strings.Join(kept, "&") + fragment
-}
-
-func isPlayerAppendedQueryParam(key string) bool {
-	return slices.Contains(playerAppendedQueryParams, key)
 }
 
 func statusOrDefault(status, fallback int) int {
@@ -837,6 +889,48 @@ func (r *replayer) fulfill(ctx context.Context, session CDPSession, requestID st
 		r.logger.Warn("offline cache replay: Fetch.fulfillRequest failed",
 			zap.String("request_id", requestID), zap.Error(err))
 	}
+}
+
+// headLookupURL strips both playerAppendedQueryParams and
+// headProbeQueryParams from rawURL, for the HEAD-specific retry only
+// (see processRequestPaused's HEAD-fallback branch). Stripping both
+// (rather than just headProbeQueryParams) is defensive, not currently
+// load-bearing: display_mode is appended only ahead of a software
+// item's iframe navigation, never a media probe, but a HEAD lookup
+// paying for both strips costs nothing extra and keeps this in lockstep
+// automatically if that ever changes. Both stripXParams helpers are
+// no-ops when their params are absent, so this returns rawURL unchanged
+// when neither is present.
+func headLookupURL(rawURL string) string {
+	return stripHeadProbeParams(stripPlayerAppendedParams(rawURL))
+}
+
+// fulfillHeadFromGet answers a HEAD request using the SAME URL's GET
+// resource — see resources' doc for why this is the one deliberate
+// exception to the "never fulfill from a different method's resource"
+// rule: HEAD is itself defined as "GET without a body", so this
+// substitutes method only, never risks serving bytes for the wrong
+// resource. mixed is forwarded to handleMiss for the SHA256=="" case
+// below so that fallback's pass-through-vs-fail-closed behavior matches
+// every other miss the caller could have taken instead.
+func (r *replayer) fulfillHeadFromGet(ctx context.Context, session CDPSession, requestID string, resource Resource, mixed bool) {
+	if resource.IsRedirect() {
+		// A HEAD should observe the exact same redirect a GET to this
+		// URL would — no special-casing needed here beyond reusing the
+		// ordinary redirect fulfillment.
+		r.fulfill(ctx, session, requestID, statusOrDefault(resource.Status, go_http.StatusFound), "", nil, resource.RedirectTo, resource.Headers)
+		return
+	}
+	if resource.SHA256 == "" {
+		// The GET itself never got a body at capture time (its own
+		// fetch failed) — nothing to answer the probe with either.
+		r.handleMiss(ctx, session, requestID, mixed)
+		return
+	}
+	// Empty body is what makes this an honest HEAD response rather than
+	// a GET answered on the wrong method: status/Content-Type/headers
+	// mirror the stored GET resource exactly, but body is nil.
+	r.fulfill(ctx, session, requestID, statusOrDefault(resource.Status, go_http.StatusOK), resource.ContentType, nil, "", resource.Headers)
 }
 
 func (r *replayer) continueRequest(ctx context.Context, session CDPSession, requestID string) {

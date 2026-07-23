@@ -1,8 +1,13 @@
-# Capturing Web-Based Artwork for Offline Playback
+# Capturing DP-1 Artwork for Offline Playback
 
-This document describes how `feral-controld` captures a web-based
-(HTML+CSS+JS, canvas, WebGL, WASM) DP-1 artwork so `ff-player` can play it
-back with no network access, and how the result is stored and replayed.
+This document describes how `feral-controld` captures a DP-1 artwork —
+web-based (HTML+CSS+JS, canvas, WebGL, WASM) via a headless-Chromium
+capture, or any other single-file mime type (image, video, audio, SVG,
+`model/gltf`, PDF, and unrecognized-but-still-single-file types) via a
+browser-free direct HTTP download — so `ff-player` can play it back with
+no network access, and how the result is stored and replayed. Live/HLS
+streaming (`.m3u8`) is the one source type this pipeline does not
+support at all (§3.3, §8).
 
 **Status:** implemented in `components/feral-controld/offlinecache/`. This
 document is the living reference for that package; the original design
@@ -29,11 +34,33 @@ There is no manifest listing "every file this artwork needs" in the common
 case (DP-1's `repro.assetsSHA256` is a hash list for *verification*, not a
 fetchable manifest, and is optional). To cache such a work offline, the only
 reliable method is to **run the code and observe what it actually
-requests**, not to statically parse its HTML/CSS for references. Offline
-caching in `feral-controld` is therefore restricted to **software-based**
-items (`classify.go` distinguishes software from media by resolved
-`Content-Type`); media items (video/image/audio) do not need this pipeline
-at all and are rejected by the download commands.
+requests**, not to statically parse its HTML/CSS for references.
+
+Every other DP-1 item — image, video, audio, SVG, `model/gltf`, PDF, and
+anything else that resolves to a single-file `source` (including an
+empty/unrecognized `Content-Type`, treated as best-effort downloadable
+rather than rejected) — is the opposite case: the kiosk player renders it
+as a native element (`<img>`/`<video>`/`<audio>`/`<object>`/a
+non-scripted `<iframe>`) that requests the bare `source` URL directly, so
+there is exactly ONE dependency to cache: the file itself. Running a
+whole headless browser just to observe that one request would cost a
+second Chromium process and gigabyte-scale memory pressure for zero
+benefit, so `feral-controld` downloads these directly over HTTP instead
+(§3.3) — no browser involved at all.
+
+`classify.go` decides which path an item takes from its resolved
+`Content-Type` (falling back to a bounded ranged-`GET` probe when an
+origin rejects `HEAD` — see `ClassifyProbeRangeBytes`'s doc): `text/html`/
+`application/xhtml+xml`/JS content types are `ClassSoftware` (headless
+capture, this section); everything else is `ClassMedia`/`ClassUnknown`
+(direct download, §3.3) **except** an HLS/live manifest
+(`application/vnd.apple.mpegurl`/`application/x-mpegurl`/`audio/mpegurl`,
+or a `source` path ending in `.m3u8`, checked by URL extension BEFORE any
+network round trip), which classifies as `ClassStreaming` — the only
+class `DownloadItem`/`DownloadPlaylist` reject outright
+(`ErrUnsupportedMediaClass`), since a live/VOD manifest has no fixed
+byte-for-byte content a one-shot download or a static blob-store replay
+could faithfully serve (§3.3, §8).
 
 ## 2. Pipeline overview
 
@@ -44,14 +71,20 @@ Discover  →  Capture  →  Store  →  Replay
               bytes)       dedup)      no network)
 ```
 
-- **Discover + Capture**: `downloader.go` spawns a separate headless
-  Chromium (`:9223`, its own user-data-dir); `capture.go` attaches an
-  event-driven CDP session (`cdpsession.go`) to observe `Network` domain
-  events for a bounded window, then fetches each observed URL's exact
-  bytes out-of-band.
+- **Discover + Capture** (software only, `ClassSoftware`): `downloader.go`
+  spawns a separate headless Chromium (`:9223`, its own user-data-dir);
+  `capture.go` attaches an event-driven CDP session (`cdpsession.go`) to
+  observe `Network` domain events for a bounded window, then fetches each
+  observed URL's exact bytes out-of-band.
+- **Direct download** (everything else but `ClassStreaming`,
+  `ClassMedia`/`ClassUnknown`): `mediacapture.go`'s `MediaCapturer` issues
+  one plain HTTP `GET` for `item.Source` (redirects followed
+  transparently by the shared `http.Client`) and streams the response
+  straight into the blob store — no browser process at all. See §3.3.
 - **Store**: `store.go` content-addresses the bytes (sha256) into a shared
   blob store, deduplicated across items/playlists, plus one
-  `items/<itemId>.json` record per edition.
+  `items/<itemId>.json` record per edition — shared unchanged by both
+  capture paths above.
 - **Replay**: `replay.go` intercepts `Fetch.requestPaused` on the kiosk
   Chromium (`:9222`) and fulfills from the local blob store or a loopback
   static server, without rewriting a single byte of the artwork's own code
@@ -267,6 +300,66 @@ rather than leaving the cache permanently over budget. The caller sees
 this as the item transitioning to `not_cached` immediately after
 appearing to complete, with `Coverage.Reason` explaining that it alone
 exceeded the disk budget.
+
+### 3.3 Direct-download path for media and other single-file items
+
+`mediacapture.go`'s `MediaCapturer` is the browser-free counterpart to
+`capture.go`'s `Capturer` for every class but `ClassSoftware` and
+`ClassStreaming` (see §1 and `classify.go`'s `MediaClass` doc). It mirrors
+`Capturer`'s shape (`Capture(ctx, item) (*ItemRecord, error)`) closely
+enough to slot into `service.go`'s existing job queue/state machine
+unchanged — `service.captureForClass` is the one place that branches
+between the two, based on the `MediaClass` sampled once at classify time
+and carried on the queued job (`captureJob.class`), rather than
+re-classifying (a second network round trip) or risking a different
+answer the second time around.
+
+- **One fetch, one resource.** Unlike `capture.go`'s open-ended
+  dependency discovery, a `ClassMedia`/`ClassUnknown` item has exactly
+  one thing to cache: `item.Source` itself. `MediaCapturer.Capture` issues
+  a single `GET` via the shared `httpClient` (redirects followed
+  transparently — `http.Client`'s default behavior, never handled
+  manually here) and streams the response body straight into
+  `store.WriteBlob`, exactly like `capture.go`'s `fetchAndStoreBody` does,
+  so a gigabyte-scale video is never buffered whole in memory here
+  either.
+- **Stored under the ORIGINAL source URL, never a resolved redirect
+  target.** The resulting `Resource.URL` is always `item.Source` — even
+  though the underlying `*http.Response` may reflect a fully-resolved
+  redirect chain. This is safe (unlike capture.go's software path, which
+  must preserve each redirect hop as its own `Resource` — §4.1) because
+  the kiosk's native `<img>`/`<video>`/`<audio>` element only ever
+  requests the bare `item.Source`; there is no redirect hop for replay to
+  faithfully reproduce, so storing the final resolved bytes directly
+  under the request URL the kiosk will actually make is both correct and
+  simpler.
+- **CORS headers are captured the same allowlisted way** as `capture.go`
+  (`filterReplayableHeaders`, §4.6/§5's `Resource.Headers` bullet):
+  `ff-player`'s `<video crossOrigin="anonymous">` element CORS-checks its
+  response exactly like a cross-origin `fetch()`/XHR would, so an offline
+  replay missing those headers would still fail Chromium's own CORS
+  enforcement even with byte-correct status/body.
+- **A fetch failure is a hard error, not a partial-coverage record.**
+  Because there is only one resource, a failed `GET`
+  (`http_error(<status>)`, a transport-level `fetch_failed`, or the disk
+  budget already exhausted before the fetch is even attempted — next
+  bullet) means the WHOLE item failed to download; `Capture` returns an
+  error rather than saving a permanently-broken single-resource record,
+  the same way `capturer.Capture` already reports a failed
+  `Page.navigate` as a hard error rather than an honest-partial one — the
+  entry point itself never loaded either way.
+- **Reuses `capture.go`'s disk-budget machinery**, factored out as
+  `newDiskBudgetFromStore` (seeded with the store's REMAINING room —
+  `maxDiskBytes` minus current usage, never the full configured ceiling
+  — see that function's doc): a single `budget.reserve()` call covers the
+  item's one resource (no per-resource loop needed, unlike `capture.go`'s
+  multi-resource case), and `service.process`'s post-capture
+  `enforceDiskLimit` eviction runs unchanged afterward for both paths.
+- **Needs no `Downloader`/dialer at all** — `bootstrap.go` wires
+  `NewMediaCapturer` with just the shared `httpClient`, `store`, clock,
+  and `maxDiskBytes`; there is no second Chromium process, no CDP
+  session, and no `downloader.go` single-job-slot contention for this
+  path.
 
 ## 4. Validated edge cases
 
@@ -841,6 +934,33 @@ so a genuinely different URL can never be silently served the wrong
 cached bytes. If a future `ff-player` version starts appending another
 UI-only param, add it to `playerAppendedQueryParams` in `replay.go`.
 
+**The player's `HEAD` content-type probe is answered from the matching
+`GET` resource, not a separately-captured `HEAD` entry.** Before
+rendering a media item, `ff-player`'s `getContentTypeFromURL` issues a
+`HEAD` request to `source?v=<cache-busting-timestamp>&x-request=xhr` to
+decide which native element to render it with. Neither `capture.go` nor
+`mediacapture.go` ever issues or stores a `HEAD` resource (both only ever
+`GET` — §4.7's `Resource.Method` identity rule still holds: a paused
+request is never fulfilled from a different method's resource, with this
+one deliberate exception), and the cache-busting `v` param changes on
+every single probe, so this `HEAD` is an **unconditional** miss for every
+offline media item, exactly like the `display_mode` case above is for
+every software item's first request. Left unanswered, the probe fails
+offline and the player falls back to its `<iframe>` renderer instead of
+the correct native `<img>`/`<video>`/`<audio>` element. `replay.go`'s
+`processRequestPaused` retries a `HEAD` miss by stripping the probe's own
+`v`/`x-request` params (`headProbeQueryParams`, the same order/encoding-
+preserving stripping as `display_mode` above) and looking up the `GET`
+resource for that same URL; if found, it fulfills with that resource's
+status/`Content-Type`/allowlisted headers but an **empty body** — correct
+HTTP semantics for `HEAD`, and exactly what the probe needs to pick the
+right renderer. This substitutes method only, never URL, so it carries
+none of the "could serve the wrong bytes" risk a URL-based normalization
+would. Since native media elements render on the kiosk's TOP-LEVEL page
+(not inside a cross-origin iframe the way software artworks are — see
+§6.1), the existing top-level `Fetch` interception already covers them;
+no new per-target machinery was needed for this.
+
 - **Redirect resource** → `Fetch.fulfillRequest` with the recorded status,
   `Location` header, and the resource's captured `Headers` (below), no
   body (§4.1). Headers are threaded through this redirect hop, not only
@@ -1074,8 +1194,31 @@ identical cache state.
   are excluded by the `iframe` filter. Combined with the capture-side
   limitation above, content whose resources live two or more cross-origin
   levels deep, or behind a worker, is not covered end to end.
-- **WebSocket / streaming data** cannot be captured-and-replayed this way —
-  such items are out of scope for this pipeline (§3.2).
+- **WebSocket data** cannot be captured-and-replayed this way — such
+  requests are out of scope for this pipeline (§3.2).
+- **Live/VOD HLS streaming (`.m3u8`) is explicitly rejected up front, not
+  merely uncovered.** `classify.go` detects an HLS manifest by URL
+  extension (checked before any network round trip) or by
+  `Content-Type` (`application/vnd.apple.mpegurl`/`application/
+  x-mpegurl`/`audio/mpegurl`) and returns `ClassStreaming`, the only
+  class `DownloadItem`/`DownloadPlaylist` reject outright
+  (`ErrUnsupportedMediaClass`) rather than queuing — see §1/§3.3. A
+  manifest points at a set of segments fetched progressively during
+  playback, not one fixed byte sequence, so there is nothing a one-shot
+  download or a static blob-store replay could faithfully serve; this is
+  a deliberate scope boundary, not a gap left for a future revision to
+  close.
+- **SVG/`model/gltf` items that reference EXTERNAL subresources are only
+  partially covered by the direct-download path.** `MediaCapturer`
+  downloads exactly the one file at `item.Source` (§3.3); a self-contained
+  `.glb`/inline-everything SVG is fully cached, but an SVG with an
+  external `<image href="...">` or a `.gltf` (as opposed to binary
+  `.glb`) referencing separate external buffer/texture files has those
+  further dependencies silently uncached, since discovering them would
+  require the same "run the code and observe" approach §1 restricts to
+  `ClassSoftware`. This is a known, accepted limitation rather than a
+  special case worth the cost of routing these through the headless
+  browser.
 - **Personalized/authenticated responses** captured once may not be valid
   to replay for a different session; this pipeline does not attempt to
   detect or special-case per-session content beyond what URL-keying already
@@ -1123,7 +1266,10 @@ identical cache state.
 
 ## 9. See also
 
-- `components/feral-controld/offlinecache/` — the implementation.
+- `components/feral-controld/offlinecache/` — the implementation;
+  `classify.go` (routing), `capture.go` (software/headless path),
+  `mediacapture.go` (direct-download path, §3.3), `replay.go` (serving
+  both back to the kiosk, §6).
 - `docs/controld-inbound-controller-messages.md` — the 5 controller-visible
   commands (`downloadPlaylistItem`, `downloadPlaylist`,
   `clearPlaylistItemCache`, `clearPlaylistCache`, `getOfflineCacheStatus`)

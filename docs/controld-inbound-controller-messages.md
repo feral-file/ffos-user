@@ -1353,11 +1353,15 @@ The outcome must not include the browser session token.
 
 ## Offline Artwork Caching Inbound Messages
 
-`feral-controld` can download **software-based** DP-1 playlist items into a
-local cache so `ff-player` can play them back without internet access. This
-is a `commandrouter`-owned, pre-CDP command family (same precedent as
-mint-pairing): these commands never reach `window.handleCDPRequest(...)`.
-Media-based items (video/image) are rejected — see `classify.go`.
+`feral-controld` can download a DP-1 playlist item into a local cache so
+`ff-player` can play it back without internet access — a software
+(HTML/JS) item via a headless-Chromium capture, or any other single-file
+mime type (image/video/audio/SVG/`model/gltf`/PDF/unrecognized) via a
+browser-free direct HTTP download; see `docs/offline-artwork-capture.md`
+§1/§3.3. This is a `commandrouter`-owned, pre-CDP command family (same
+precedent as mint-pairing): these commands never reach
+`window.handleCDPRequest(...)`. Only a live/HLS streaming source
+(`.m3u8`) is rejected — see `classify.go`.
 
 The subsystem is opt-in through `offlineCache.enabled` in `feral-controld`
 config. When disabled (or the config is absent), every command below returns:
@@ -1401,16 +1405,17 @@ Common error codes across this command family:
   `itemId` — it always answers `ok: true` with that item reported as
   `state: "not_cached"` (see below), since querying an item that simply
   has no cache yet is not itself an error condition.
-- `unsupported_media`: the item's source does not classify as software (see
-  `classify.go`); this item can never be cached offline, so
-  `retryable: false`.
+- `unsupported_media`: the item's source classifies as live/HLS streaming
+  (see `classify.go`'s `ClassStreaming`); this item can never be cached
+  offline, so `retryable: false`. Every other class (software, media,
+  unknown) is queueable.
 - `offline_cache_error`: a store/disk/network failure inside the offline
   cache service; `retryable: true`.
 
 ### downloadPlaylistItem
 
-Purpose: resolve a playlist, verify one item is software-based, and queue it
-for offline capture.
+Purpose: resolve a playlist, verify one item is not a live/streaming
+source, and queue it for offline capture.
 
 Example:
 
@@ -1455,9 +1460,10 @@ item is genuinely queued either way.
 
 ### downloadPlaylist
 
-Purpose: resolve a playlist and queue every software-classified item it
-contains (up to `dp1.MAX_PLAYLIST_ITEMS_LIMIT` items); non-software items are
-silently skipped rather than failing the whole request.
+Purpose: resolve a playlist and queue every cacheable item it contains (up
+to `dp1.MAX_PLAYLIST_ITEMS_LIMIT` items) — every class except live/HLS
+streaming; streaming items are silently skipped rather than failing the
+whole request.
 
 Example:
 
@@ -1485,15 +1491,20 @@ Success response:
 ```
 
 `total` is every item in the resolved playlist; `softwareCount` is how many
-were actually queued. An item classified as non-software (or missing an
-`id`/`source`) is simply excluded from `softwareCount` with `ok: true` —
-that is the normal, successful shape for a playlist with few or no
-software items. If classification itself fails (e.g. a transient network
-error reaching the classify target) for every eligible item so nothing
-could be queued at all, this command instead fails with
-`offline_cache_error` rather than returning that same
+were actually queued — despite the name, this now counts EVERY queued
+item regardless of class (software captured via headless Chromium, media/
+unknown via direct download; see `docs/offline-artwork-capture.md` §3.3),
+not literally just `ClassSoftware` ones. The field name is kept as-is for
+mobile-app wire compatibility rather than renamed to something like
+`queuedCount`; only its meaning has broadened. An item classified as
+live/HLS streaming (or missing an `id`/`source`) is simply excluded from
+`softwareCount` with `ok: true` — that is the normal, successful shape for
+a playlist with few or no cacheable items. If classification itself fails
+(e.g. a transient network error reaching the classify target) for every
+eligible item so nothing could be queued at all, this command instead
+fails with `offline_cache_error` rather than returning that same
 `ok: true`/`softwareCount: 0` shape: a broken classifier must not look
-identical to "this playlist genuinely has no software items" to the
+identical to "this playlist genuinely has no cacheable items" to the
 controller. A classify failure for only *some* items still returns
 `ok: true` with `softwareCount` reflecting whatever did queue
 successfully; the skipped item(s) are logged server-side but not

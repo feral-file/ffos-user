@@ -22,34 +22,39 @@ import (
 )
 
 type serviceTestSetup struct {
-	ctrl           *gomock.Controller
-	store          offlinecache.Store
-	mockClassifier *mocks.MockOfflineCacheClassifier
-	mockCapturer   *mocks.MockOfflineCacheCapturer
-	service        offlinecache.Service
+	ctrl              *gomock.Controller
+	store             offlinecache.Store
+	mockClassifier    *mocks.MockOfflineCacheClassifier
+	mockCapturer      *mocks.MockOfflineCacheCapturer
+	mockMediaCapturer *mocks.MockOfflineCacheMediaCapturer
+	service           offlinecache.Service
 }
 
 // setupService wires a Service against a real fsStore (so item/blob/GC
-// round-trips are genuine, matching store_test.go's convention) plus mocked
-// Classifier/Capturer, since those are the seams that would otherwise
-// touch the network or a headless Chromium.
+// round-trips are genuine, matching store_test.go's convention) plus
+// mocked Classifier/Capturer/MediaCapturer, since those are the seams
+// that would otherwise touch the network or a headless Chromium.
 func setupService(t *testing.T, maxDiskBytes int64, observer offlinecache.ProgressObserver) *serviceTestSetup {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	store, _ := newTestStore(t)
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	// Stop() always closes the capturer (see service.go's Stop doc) —
 	// stubbed here rather than per-test since nearly every test defers
 	// Stop(); tests asserting the shutdown-close behavior itself set
 	// their own tighter expectation instead (see
-	// TestService_Stop_ClosesCapturer).
+	// TestService_Stop_ClosesCapturer). MediaCapturer has no Close (no
+	// browser process to tear down — see mediacapture.go's doc), so
+	// there is nothing to stub for it here.
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, observer, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, observer, zaptest.NewLogger(t))
 
 	return &serviceTestSetup{
-		ctrl: ctrl, store: store, mockClassifier: mockClassifier, mockCapturer: mockCapturer, service: svc,
+		ctrl: ctrl, store: store, mockClassifier: mockClassifier, mockCapturer: mockCapturer,
+		mockMediaCapturer: mockMediaCapturer, service: svc,
 	}
 }
 
@@ -100,18 +105,50 @@ func TestService_DownloadItem_QueuesAndCapturesSoftwareItem(t *testing.T) {
 	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
 }
 
-func TestService_DownloadItem_RejectsNonSoftware(t *testing.T) {
+func TestService_DownloadItem_RejectsStreaming(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/video.mp4"}
-	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassMedia, nil).Times(1)
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/live.m3u8"}
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassStreaming, nil).Times(1)
+	// No Capturer/MediaCapturer expectation: a rejected item must never
+	// reach either capture pipeline.
 
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
 	err := ts.service.DownloadItem(context.Background(), item)
 	assert.ErrorIs(t, err, offlinecache.ErrUnsupportedMediaClass)
+}
+
+// TestService_DownloadItem_QueuesAndCapturesMediaItem is the counterpart
+// to TestService_DownloadItem_QueuesAndCapturesSoftwareItem for the new
+// direct-download path: a ClassMedia item must route to mediaCapturer,
+// never capturer (the headless-Chromium pipeline is neither needed nor
+// invoked for a single-file media artwork — see classify.go's
+// MediaClass doc).
+func TestService_DownloadItem_QueuesAndCapturesMediaItem(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/video.mp4"}
+	rec := &offlinecache.ItemRecord{
+		ItemID: "item-1", Item: item, Entry: item.Source,
+		Coverage: offlinecache.Coverage{Complete: true},
+	}
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassMedia, nil).Times(1)
+	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), item).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem) (*offlinecache.ItemRecord, error) {
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
 }
 
 func TestService_DownloadItem_RequiresIDAndSource(t *testing.T) {
@@ -180,10 +217,11 @@ func TestService_DownloadItem_AfterStartFailureReturnsNotStarted(t *testing.T) {
 	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("permission denied")).Times(1)
 
-	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
 
 	err := svc.Start(context.Background())
 	require.Error(t, err)
@@ -344,7 +382,12 @@ func TestService_DownloadItem_CoverageClassification(t *testing.T) {
 	}
 }
 
-func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.T) {
+// TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim
+// pins the new mixed-class routing: a software item and a media item in
+// the SAME playlist must both be queued (only ClassStreaming is
+// excluded — see ErrUnsupportedMediaClass's doc), each routed to its own
+// capture pipeline.
+func TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
@@ -355,14 +398,22 @@ func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.
 		"items": []map[string]interface{}{
 			{"id": "item-software", "source": "https://example.com/index.html"},
 			{"id": "item-media", "source": "https://example.com/video.mp4"},
+			{"id": "item-live", "source": "https://example.com/live.m3u8"},
 		},
 	})
 	require.NoError(t, err)
 
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/index.html").Return(offlinecache.ClassSoftware, nil).Times(1)
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/video.mp4").Return(offlinecache.ClassMedia, nil).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/live.m3u8").Return(offlinecache.ClassStreaming, nil).Times(1)
 	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
 		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem) (*offlinecache.ItemRecord, error) {
 			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 			require.NoError(t, ts.store.SaveItem(rec))
 			return rec, nil
@@ -373,10 +424,11 @@ func TestService_DownloadPlaylist_FiltersToSoftwareAndStoresVerbatim(t *testing.
 
 	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
 	require.NoError(t, err)
-	assert.Equal(t, 1, queued)
-	assert.Equal(t, 2, total)
+	assert.Equal(t, 2, queued, "software and media items must both be queued; only the streaming item is excluded")
+	assert.Equal(t, 3, total)
 
 	waitForState(t, ts.service, "item-software", offlinecache.StateReady)
+	waitForState(t, ts.service, "item-media", offlinecache.StateReady)
 
 	stored, err := ts.store.LoadPlaylist("playlist-1")
 	require.NoError(t, err)
@@ -453,10 +505,11 @@ func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) 
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, nil).Times(1)
 
-	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -1232,7 +1285,8 @@ func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	defer ctrl.Finish()
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
-	svc := offlinecache.NewService(store, mocks.NewMockOfflineCacheClassifier(ctrl), mockCapturer, wrapper.NewJSON(), 5000, 0, nil, logger)
+	svc := offlinecache.NewService(store, mocks.NewMockOfflineCacheClassifier(ctrl), mockCapturer,
+		mocks.NewMockOfflineCacheMediaCapturer(ctrl), wrapper.NewJSON(), 5000, 0, nil, logger)
 
 	seedItemWithCapturedAt(t, store, "item-1", "payload-1", time.Now())
 	seedItemWithCapturedAt(t, store, "item-2", "payload-2", time.Now())
@@ -1305,10 +1359,11 @@ func TestService_Start_PropagatesListItemIDsError(t *testing.T) {
 	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("disk error")).Times(1)
 
-	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
 	err := svc.Start(context.Background())
 	assert.Error(t, err)
 }
@@ -1355,8 +1410,9 @@ func TestService_Stop_ClosesCapturer(t *testing.T) {
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockCapturer.EXPECT().Close().Return(nil).Times(1)
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	svc.Stop()
 }
@@ -1454,6 +1510,7 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
@@ -1475,7 +1532,7 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 			return rec, nil
 		}).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -1512,6 +1569,7 @@ func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskSta
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
@@ -1529,7 +1587,7 @@ func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskSta
 	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
 	mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).Return(nil, assertError("recapture failed")).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -1573,6 +1631,7 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockCapturer.EXPECT().Close().Return(nil).Times(1)
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
@@ -1601,7 +1660,7 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 			return nil, ctx.Err()
 		}).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 
 	require.NoError(t, svc.DownloadItem(context.Background(), item))

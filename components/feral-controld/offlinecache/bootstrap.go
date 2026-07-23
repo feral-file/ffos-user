@@ -157,10 +157,15 @@ func Bootstrap(
 		opts.HeadlessIdleTeardown, execWrapper, osWrapper, clockWrapper, httpClient, logger,
 	)
 	capturer := NewCapturer(downloader, dialer, httpClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
+	// mediaCapturer needs no Downloader/dialer — it downloads a
+	// non-software item's single-file source directly over HTTP, never
+	// spinning up the headless Chromium capturer/downloader owns (see
+	// mediacapture.go's package doc).
+	mediaCapturer := NewMediaCapturer(httpClient, store, clockWrapper, opts.MaxDiskBytes, logger)
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, jsonWrapper, logger)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
-	service := NewService(store, classifier, capturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, logger)
+	service := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, logger)
 	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, logger)
 
 	return Runtime{Service: service, KioskReplay: kioskReplay, StaticServer: staticServer}

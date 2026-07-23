@@ -38,6 +38,11 @@ func TestClassifier_Classify(t *testing.T) {
 		{name: "audio", contentType: "audio/mpeg", want: offlinecache.ClassMedia},
 		{name: "unknown binary", contentType: "application/octet-stream", want: offlinecache.ClassUnknown},
 		{name: "missing content-type", contentType: "", want: offlinecache.ClassUnknown},
+		{name: "svg image", contentType: "image/svg+xml", want: offlinecache.ClassMedia},
+		{name: "gltf model", contentType: "model/gltf-binary", want: offlinecache.ClassUnknown},
+		{name: "pdf document", contentType: "application/pdf", want: offlinecache.ClassUnknown},
+		{name: "apple hls manifest", contentType: "application/vnd.apple.mpegurl", want: offlinecache.ClassStreaming},
+		{name: "x-mpegurl hls manifest", contentType: "application/x-mpegurl; charset=utf-8", want: offlinecache.ClassStreaming},
 	}
 
 	for _, tt := range tests {
@@ -64,6 +69,39 @@ func TestClassifier_Classify(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestClassifier_Classify_M3U8URLIsStreamingWithoutNetworkCall pins that
+// a .m3u8 URL is classified as ClassStreaming purely from its extension,
+// before any HEAD/GET is ever issued — the mock has zero expectations
+// set, so gomock's strict controller would fail this test outright if a
+// future edit made isStreamingURL's check run AFTER (or conditional on)
+// a network round trip.
+func TestClassifier_Classify_M3U8URLIsStreamingWithoutNetworkCall(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	classifier := offlinecache.NewClassifier(mockHTTP)
+
+	got, err := classifier.Classify(context.Background(), "https://example.com/live/master.m3u8?token=abc123")
+	require.NoError(t, err)
+	assert.Equal(t, offlinecache.ClassStreaming, got)
+}
+
+// TestClassifier_Classify_M3U8URLIsCaseInsensitive pins that the
+// extension check is not defeated by an origin that happens to serve an
+// upper-cased path segment.
+func TestClassifier_Classify_M3U8URLIsCaseInsensitive(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	classifier := offlinecache.NewClassifier(mockHTTP)
+
+	got, err := classifier.Classify(context.Background(), "https://example.com/live/MASTER.M3U8")
+	require.NoError(t, err)
+	assert.Equal(t, offlinecache.ClassStreaming, got)
 }
 
 func TestClassifier_Classify_FallsBackToRangedGETWhenHEADRejected(t *testing.T) {

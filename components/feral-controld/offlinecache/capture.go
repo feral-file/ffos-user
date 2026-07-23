@@ -196,30 +196,45 @@ func (b *captureDiskBudget) record(size int64) {
 	b.used += size
 }
 
-// newDiskBudget builds the per-capture disk budget for one Capture call,
-// seeded with the store's REMAINING room (maxResourceBytes minus what is
-// already on disk) so the ceiling is a true whole-store bound — see
-// captureDiskBudget's doc for why current usage must be subtracted. A
-// DiskUsage read failure is treated as "assume the store is full" (zero
-// remaining) rather than "assume empty": a bounded cache must fail safe
-// toward not overfilling the disk when it cannot confirm how full it
-// already is. maxResourceBytes <= 0 means no ceiling was configured, so
-// the budget is genuinely unlimited regardless of current usage.
+// newDiskBudget builds the per-capture disk budget for one Capture call —
+// see newDiskBudgetFromStore's doc for the shared logic both this
+// (headless-browser, possibly many resources per item) and
+// mediaCapturer.Capture (mediacapture.go, exactly one resource per item)
+// build their budget with.
 //
 // Safe to call DiskUsage here without extra locking: the service runs
 // captures one at a time under captureMu (see service.process), so no
 // other capture is writing blobs concurrently while this reads usage.
 func (c *capturer) newDiskBudget() *captureDiskBudget {
-	if c.maxResourceBytes <= 0 {
+	return newDiskBudgetFromStore(c.store, c.maxResourceBytes, c.logger)
+}
+
+// newDiskBudgetFromStore builds a captureDiskBudget seeded with the
+// store's REMAINING room (maxDiskBytes minus what is already on disk) so
+// the ceiling is a true whole-store bound — see captureDiskBudget's doc
+// for why current usage must be subtracted rather than treating the full
+// maxDiskBytes as this call's own budget. A DiskUsage read failure is
+// treated as "assume the store is full" (zero remaining) rather than
+// "assume empty": a bounded cache must fail safe toward not overfilling
+// the disk when it cannot confirm how full it already is. maxDiskBytes
+// <= 0 means no ceiling was configured, so the budget is genuinely
+// unlimited regardless of current usage.
+//
+// Shared by both capture pipelines (capturer.newDiskBudget and
+// mediaCapturer.Capture) so a single item downloaded through either path
+// is bounded by the identical whole-store disk ceiling, computed the
+// same way.
+func newDiskBudgetFromStore(store Store, maxDiskBytes int64, logger *zap.Logger) *captureDiskBudget {
+	if maxDiskBytes <= 0 {
 		return newCaptureDiskBudget(0, true)
 	}
-	used, err := c.store.DiskUsage()
+	used, err := store.DiskUsage()
 	if err != nil {
-		c.logger.Warn("offline cache capture: disk usage check failed, treating store as full for this capture's budget",
+		logger.Warn("offline cache capture: disk usage check failed, treating store as full for this capture's budget",
 			zap.Error(err))
 		return newCaptureDiskBudget(0, false)
 	}
-	return newCaptureDiskBudget(c.maxResourceBytes-used, false)
+	return newCaptureDiskBudget(maxDiskBytes-used, false)
 }
 
 func NewCapturer(

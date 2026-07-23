@@ -510,6 +510,156 @@ func TestReplayer_ProcessRequestPaused_UnknownExtraParamStillMisses(t *testing.T
 	awaitSend(t, done)
 }
 
+// seedMediaItem saves a single-resource ItemRecord for a direct-download
+// (ClassMedia/ClassUnknown) item — mediacapture.go's shape: one GET
+// Resource keyed on the bare source URL, with an explicit ContentType
+// and an (optional) CORS header a native <video crossOrigin="anonymous">
+// element would check.
+func seedMediaItem(t *testing.T, store offlinecache.Store, itemID, sourceURL, contentType, blobContent string, headers map[string]string) offlinecache.Resource {
+	t.Helper()
+	hash := writeBlobString(t, store, blobContent)
+	res := offlinecache.Resource{URL: sourceURL, Status: 200, SHA256: hash, ContentType: contentType, Headers: headers}
+	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
+		ItemID:    itemID,
+		Item:      dp1playlist.PlaylistItem{ID: itemID, Source: sourceURL},
+		Entry:     sourceURL,
+		Resources: []offlinecache.Resource{res},
+		Coverage:  offlinecache.Coverage{Complete: true},
+	}))
+	return res
+}
+
+// TestReplayer_ProcessRequestPaused_AnswersHEADContentTypeProbeFromGETResource
+// is the regression test for ff-player's own pre-render content-type
+// probe (getContentTypeFromURL): before a native <img>/<video>/<audio>
+// element ever issues the GET it actually renders from, the player
+// issues a HEAD to the bare source with cache-busting query params
+// appended (see headProbeQueryParams' doc). capture.go/mediacapture.go
+// only ever store a GET resource, so without this HEAD-from-GET
+// fallback that probe misses unconditionally under fail_closed and the
+// player degrades to its iframe fallback renderer instead of the
+// correct native element — see docs/offline-artwork-capture.md §6.
+func TestReplayer_ProcessRequestPaused_AnswersHEADContentTypeProbeFromGETResource(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedMediaItem(t, ts.store, "item-media", "https://example.com/video.mp4", "video/mp4",
+		"fake video bytes", map[string]string{"Access-Control-Allow-Origin": "*"})
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-media"))
+
+	probeURL := res.URL + "?v=1234567890&x-request=xhr"
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-1", probeURL, "HEAD"))
+	params := awaitSend(t, done)
+
+	assert.EqualValues(t, 200, params["responseCode"])
+	_, hasBody := params["body"]
+	assert.False(t, hasBody, "a HEAD response must never carry a body")
+	ct, ok := headerValue(t, params, "Content-Type")
+	require.True(t, ok)
+	assert.Equal(t, "video/mp4", ct)
+	cors, ok := headerValue(t, params, "Access-Control-Allow-Origin")
+	require.True(t, ok, "the GET resource's allowlisted CORS headers must also be replayed on the HEAD answer")
+	assert.Equal(t, "*", cors)
+}
+
+// TestReplayer_ProcessRequestPaused_HEADProbeStripDoesNotReorderOtherParams
+// is headProbeQueryParams' analog to
+// TestReplayer_ProcessRequestPaused_StripsDisplayModeWithoutReorderingOtherParams:
+// stripping v/x-request must never go through a parse-then-Encode()
+// round trip that would reorder (and thus mismatch) a captured URL's
+// other query parameters.
+func TestReplayer_ProcessRequestPaused_HEADProbeStripDoesNotReorderOtherParams(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	capturedURL := "https://cdn.example.com/art/video.mp4?edition_number=0&blockchain=bitmark"
+	seedMediaItem(t, ts.store, "item-media", capturedURL, "video/mp4", "fake video bytes", nil)
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-media"))
+
+	// Exactly what ff-player's getContentTypeFromURL produces: the
+	// ORIGINAL query preserved, with "&v=...&x-request=xhr" appended.
+	probeURL := capturedURL + "&v=1699999999999&x-request=xhr"
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-1", probeURL, "HEAD"))
+	params := awaitSend(t, done)
+	assert.EqualValues(t, 200, params["responseCode"])
+}
+
+// TestReplayer_ProcessRequestPaused_HEADMissesWhenNoGETResourceCaptured
+// pins that the HEAD fallback only ever substitutes method for the
+// SAME URL (see resources' doc): a HEAD probe for a URL that was never
+// captured at all (no GET resource either) must still fail closed like
+// any other genuine miss, not be silently waved through.
+func TestReplayer_ProcessRequestPaused_HEADMissesWhenNoGETResourceCaptured(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedMediaItem(t, ts.store, "item-media", "https://example.com/video.mp4", "video/mp4", "fake video bytes", nil)
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-media"))
+
+	done := ts.expectSend("Fetch.failRequest")
+	probeURL := "https://example.com/never-captured.mp4?v=123&x-request=xhr"
+	ts.handler(requestPausedEventWithMethod(t, "req-1", probeURL, "HEAD"))
+	awaitSend(t, done)
+}
+
+// TestReplayer_ProcessRequestPaused_HEADFollowsGETResourceRedirect pins
+// that a HEAD probe to a URL whose GET resource is itself a redirect
+// hop observes that SAME redirect (matching real HTTP semantics for
+// HEAD), rather than the fallback special-casing redirects away.
+func TestReplayer_ProcessRequestPaused_HEADFollowsGETResourceRedirect(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		ItemID: "item-redirect",
+		Item:   dp1playlist.PlaylistItem{ID: "item-redirect", Source: "https://example.com/video.mp4"},
+		Entry:  "https://example.com/video.mp4",
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/video.mp4", Status: 302, RedirectTo: "https://cdn.example.com/video-v2.mp4"},
+		},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-redirect"))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	probeURL := "https://example.com/video.mp4?v=123&x-request=xhr"
+	ts.handler(requestPausedEventWithMethod(t, "req-1", probeURL, "HEAD"))
+	params := awaitSend(t, done)
+	assert.EqualValues(t, 302, params["responseCode"])
+	assert.Nil(t, params["body"], "a redirect hop has no body")
+	loc, ok := headerValue(t, params, "Location")
+	require.True(t, ok)
+	assert.Equal(t, "https://cdn.example.com/video-v2.mp4", loc)
+}
+
+// TestReplayer_ProcessRequestPaused_HEADMissesWhenGETResourceHasNoBody
+// pins the SHA256=="" case: a GET resource that was captured but whose
+// own fetch failed (an honest miss with no bytes to serve — see
+// Resource's doc) must not be answered as if it were a valid probe hit
+// either.
+func TestReplayer_ProcessRequestPaused_HEADMissesWhenGETResourceHasNoBody(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		ItemID: "item-broken",
+		Item:   dp1playlist.PlaylistItem{ID: "item-broken", Source: "https://example.com/video.mp4"},
+		Entry:  "https://example.com/video.mp4",
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/video.mp4", Status: 0}, // no SHA256: fetch failed at capture time
+		},
+		Coverage: offlinecache.Coverage{Complete: false, Reason: "fetch_failed:https://example.com/video.mp4"},
+	}))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-broken"))
+
+	done := ts.expectSend("Fetch.failRequest")
+	probeURL := "https://example.com/video.mp4?v=123&x-request=xhr"
+	ts.handler(requestPausedEventWithMethod(t, "req-1", probeURL, "HEAD"))
+	awaitSend(t, done)
+}
+
 func TestReplayer_Disable_DisablesFetchAndClearsScope(t *testing.T) {
 	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
 	defer ts.ctrl.Finish()

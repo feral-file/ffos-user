@@ -5,22 +5,43 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	go_url "net/url"
 	"strings"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// MediaClass is the coarse classification of a playlist item's source, used
-// to gate offline downloads to software-only items. The player already
-// handles native image/video/audio playback; the headless-capture pipeline
-// exists for interactive/software artworks that need a real browser to
-// render.
+// MediaClass is the coarse classification of a playlist item's source,
+// used to route offline downloads to the right capture pipeline (see
+// service.go's captureForClass):
+//
+//   - ClassSoftware (an HTML/JS entry document) can load an unenumerable,
+//     runtime-computed dependency graph, so it needs a real headless
+//     browser to run its code and observe what it actually requests
+//     (capture.go).
+//   - ClassMedia and ClassUnknown are both routed to the browser-free
+//     direct-download path (mediacapture.go): the kiosk player renders
+//     every one of these as a native element (<img>/<video>/<audio>/
+//     <object>/iframe-without-scripting) that requests the bare source
+//     URL directly, so the "dependency graph" is exactly one file — no
+//     browser is needed to discover dependencies that do not exist.
+//     ClassUnknown (an empty or unrecognized Content-Type) is treated
+//     the same as ClassMedia rather than rejected: the goal is offline
+//     caching for every single-file artwork, and a best-effort direct
+//     download degrades safely (an honest capture failure) if the
+//     resolved bytes turn out not to be a single self-contained file.
+//   - ClassStreaming (HLS/.m3u8 live or VOD manifests) is the one class
+//     offline caching does not support at all: a manifest points at a
+//     set of segments fetched progressively during playback, not a
+//     single fixed byte sequence, so there is nothing a one-shot
+//     download or a static blob-store replay could faithfully serve.
 type MediaClass string
 
 const (
-	ClassSoftware MediaClass = "software"
-	ClassMedia    MediaClass = "media"
-	ClassUnknown  MediaClass = "unknown"
+	ClassSoftware  MediaClass = "software"
+	ClassMedia     MediaClass = "media"
+	ClassStreaming MediaClass = "streaming"
+	ClassUnknown   MediaClass = "unknown"
 )
 
 //go:generate mockgen -source=classify.go -destination=../mocks/offlinecache_classify.go -package=mocks -mock_names=Classifier=MockOfflineCacheClassifier
@@ -38,8 +59,40 @@ func NewClassifier(httpClient wrapper.HTTPClient) Classifier {
 	return &classifier{httpClient: httpClient}
 }
 
-// mediaContentTypePrefixes are Content-Type prefixes the player already
-// handles natively; offline capture explicitly does not target these.
+// streamingURLSuffix identifies an HLS manifest by URL alone, checked
+// before any network round trip: some CDNs serve a .m3u8 manifest with a
+// generic or even missing Content-Type (e.g. behind a signed-URL proxy
+// that does not preserve it), so the URL's own extension is the more
+// reliable signal here, not merely a fallback for it.
+const streamingURLSuffix = ".m3u8"
+
+// isStreamingURL reports whether rawURL's path ends in streamingURLSuffix.
+// A parse failure falls back to a plain suffix check on the raw string —
+// item.Source is validated for real elsewhere (a malformed URL fails the
+// eventual fetch/navigate with a clearer error); this helper only needs
+// to be a reasonable best-effort signal, never a security boundary.
+func isStreamingURL(rawURL string) bool {
+	u, err := go_url.Parse(rawURL)
+	if err != nil {
+		return strings.HasSuffix(strings.ToLower(rawURL), streamingURLSuffix)
+	}
+	return strings.HasSuffix(strings.ToLower(u.Path), streamingURLSuffix)
+}
+
+// streamingContentTypePrefixes are the Content-Type values an HLS
+// manifest resolves to when an origin does set one; checked ahead of
+// mediaContentTypePrefixes/softwareContentTypePrefixes so a streaming
+// manifest is never misclassified as a downloadable media file.
+var streamingContentTypePrefixes = []string{
+	"application/vnd.apple.mpegurl",
+	"application/x-mpegurl",
+	"audio/mpegurl",
+}
+
+// mediaContentTypePrefixes are Content-Type prefixes the player renders
+// as a native <img>/<video>/<audio> element — see MediaClass's doc for
+// why these (and ClassUnknown) are downloaded directly rather than
+// routed through the headless-browser pipeline.
 var mediaContentTypePrefixes = []string{"image/", "video/", "audio/"}
 
 // softwareContentTypePrefixes are the shapes a browser-rendered artwork's
@@ -63,6 +116,11 @@ var softwareContentTypePrefixes = []string{
 const ClassifyProbeRangeBytes = 4096
 
 func (c *classifier) Classify(ctx context.Context, url string) (MediaClass, error) {
+	// Checked before any network round trip — see isStreamingURL's doc
+	// for why the URL's own extension is trusted ahead of a HEAD probe.
+	if isStreamingURL(url) {
+		return ClassStreaming, nil
+	}
 	// HEAD first (cheap, no body at all); some origins reject HEAD, so
 	// fall back to a range-bounded GET on a non-2xx/redirect status.
 	class, status, err := c.headClassify(ctx, url)
@@ -129,6 +187,11 @@ func (c *classifier) rangedGETClassify(ctx context.Context, url string) (MediaCl
 func classifyContentType(contentType string) MediaClass {
 	if contentType == "" {
 		return ClassUnknown
+	}
+	for _, prefix := range streamingContentTypePrefixes {
+		if strings.HasPrefix(contentType, prefix) {
+			return ClassStreaming
+		}
 	}
 	for _, prefix := range mediaContentTypePrefixes {
 		if strings.HasPrefix(contentType, prefix) {

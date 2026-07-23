@@ -18,9 +18,13 @@ import (
 )
 
 // ErrUnsupportedMediaClass is returned by DownloadItem when the item's
-// source does not classify as software (see classify.go): offline caching
-// only supports software-based DP-1 artworks per the plan's constraints.
-var ErrUnsupportedMediaClass = errors.New("offline cache: item is not software-based and cannot be downloaded offline")
+// source classifies as ClassStreaming (see classify.go): a live/VOD HLS
+// manifest has no fixed byte-for-byte content a one-shot download or a
+// static blob-store replay could faithfully serve, so it is the one
+// class offline caching rejects outright. Every other class (software,
+// media, or unknown-but-still-single-file) is downloadable — see
+// captureForClass's doc for how each is routed.
+var ErrUnsupportedMediaClass = errors.New("offline cache: item is a live/streaming source and cannot be cached offline")
 
 // ErrServiceNotStarted is returned by DownloadItem/DownloadPlaylist when
 // the worker goroutine that actually processes queued jobs is not
@@ -71,8 +75,9 @@ var ErrQueueFull = errors.New("offline cache: download queue is full, try again 
 //
 // The DP-1 playlist spec caps a single playlist at 1024 items, so one
 // DownloadPlaylist call — in the worst case where every item classifies
-// as software — can enqueue up to 1024 jobs in one shot. Sized at 4x
-// that (4096) so a full-size all-software playlist, plus a reasonable
+// as cacheable (anything but ClassStreaming, see ErrUnsupportedMediaClass's
+// doc) — can enqueue up to 1024 jobs in one shot. Sized at 4x that (4096)
+// so a full-size playlist with every item queued, plus a reasonable
 // burst of other DownloadItem/DownloadPlaylist calls queued behind it
 // before the single serial worker drains them, is never rejected with
 // ErrQueueFull under realistic use. Each queued captureJob only holds
@@ -128,8 +133,9 @@ type ProgressObserver interface {
 }
 
 // Service is the public API used by commandrouter: download one item or a
-// whole playlist (software items only), clear caches, and report status.
-// It owns a job queue that serializes captures to one at a time — the
+// whole playlist (every class but ClassStreaming, see
+// ErrUnsupportedMediaClass's doc), clear caches, and report status. It
+// owns a job queue that serializes captures to one at a time — the
 // device already carries OOM pressure from the kiosk Chromium, and
 // downloader.go itself only runs one headless Chromium job at a time, so
 // queueing here keeps that invariant visible at the API boundary too.
@@ -157,17 +163,18 @@ type Service interface {
 	DownloadItem(ctx context.Context, item dp1playlist.PlaylistItem) error
 	// DownloadPlaylist stores playlistRaw exactly as given by the caller
 	// (no further marshaling/unmarshaling happens here) and queues every
-	// software-classified item it contains. total counts all items in the
+	// item it contains that does not classify as ClassStreaming (see
+	// ErrUnsupportedMediaClass's doc). total counts all items in the
 	// playlist; queued counts only those actually enqueued.
 	//
 	// An item whose Classifier.Classify call itself errors (network
 	// blip, unreachable host, etc.) is logged and skipped exactly like a
-	// genuinely non-software item, with one exception: if EVERY eligible
+	// genuinely streaming item, with one exception: if EVERY eligible
 	// item hit a classify error (queued==0 but at least one classify
 	// call failed), that is materially different from "this playlist
-	// really has no software items" and is reported as an error instead
+	// really has no cacheable items" and is reported as an error instead
 	// of a false ok:true/softwareCount:0 — a transient classifier outage
-	// must not look identical to an all-hardware playlist to the
+	// must not look identical to an all-streaming playlist to the
 	// controller. A classify failure alongside at least one successful
 	// queue is still reported as success (queued reflects only the
 	// items that actually got scheduled); that partial case is logged
@@ -254,6 +261,12 @@ type Service interface {
 type captureJob struct {
 	itemID string
 	item   dp1playlist.PlaylistItem
+	// class is the MediaClass sampled at classify time (DownloadItem/
+	// DownloadPlaylist) and carried through the queue so process() can
+	// route to the right capture pipeline without re-classifying (a
+	// second network round trip) or risking a different answer the
+	// second time around — see captureForClass's doc.
+	class MediaClass
 }
 
 // jobQueue is an unbounded FIFO so DownloadItem/DownloadPlaylist never
@@ -317,11 +330,12 @@ func (q *jobQueue) removeItems(ids map[string]bool) {
 }
 
 type service struct {
-	store      Store
-	classifier Classifier
-	capturer   Capturer
-	json       wrapper.JSON
-	logger     *zap.Logger
+	store         Store
+	classifier    Classifier
+	capturer      Capturer
+	mediaCapturer MediaCapturer
+	json          wrapper.JSON
+	logger        *zap.Logger
 
 	captureWindowMs int
 	maxDiskBytes    int64 // <=0 means unlimited
@@ -330,16 +344,18 @@ type service struct {
 
 	queue *jobQueue
 
-	// captureMu fences store.GC() sweeps against an in-flight Capture.
+	// captureMu fences store.GC() sweeps against an in-flight Capture,
+	// from EITHER capture pipeline captureForClass can route a job to.
 	// capturer.Capture (capture.go) writes blobs to the store one
-	// resource at a time as it observes them, and only calls
-	// store.SaveItem once at the very end — so for the whole span of a
-	// capture there can be freshly-written blobs on disk that no saved
-	// item record yet references. GC() treats "not referenced by any
-	// saved item" as "orphan, delete it" (store.go), so a GC that runs
-	// concurrently with that window (from ClearItem/ClearPlaylist, called
-	// directly from commandrouter on a different goroutine than the
-	// single capture worker) can delete another, unrelated item's
+	// resource at a time as it observes them, and mediaCapturer.Capture
+	// (mediacapture.go) writes its one resource's blob, both calling
+	// store.SaveItem only once at the very end — so for the whole span
+	// of a capture there can be freshly-written blobs on disk that no
+	// saved item record yet references. GC() treats "not referenced by
+	// any saved item" as "orphan, delete it" (store.go), so a GC that
+	// runs concurrently with that window (from ClearItem/ClearPlaylist,
+	// called directly from commandrouter on a different goroutine than
+	// the single capture worker) can delete another, unrelated item's
 	// in-progress capture out from under it before its record is ever
 	// saved. Holding captureMu for the full Capture call and every GC()
 	// call closes that window: a clear that races an active capture
@@ -443,6 +459,7 @@ func NewService(
 	store Store,
 	classifier Classifier,
 	capturer Capturer,
+	mediaCapturer MediaCapturer,
 	jsonWrapper wrapper.JSON,
 	captureWindowMs int,
 	maxDiskBytes int64,
@@ -453,6 +470,7 @@ func NewService(
 		store:              store,
 		classifier:         classifier,
 		capturer:           capturer,
+		mediaCapturer:      mediaCapturer,
 		json:               jsonWrapper,
 		logger:             logger,
 		captureWindowMs:    captureWindowMs,
@@ -721,7 +739,11 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	if err != nil {
 		return fmt.Errorf("offline cache: classify %s: %w", item.Source, err)
 	}
-	if class != ClassSoftware {
+	// ClassStreaming is the only rejected class — see
+	// ErrUnsupportedMediaClass's doc. Every other class (software,
+	// media, or unknown-but-still-single-file) is enqueued and routed
+	// by captureForClass once the worker dequeues it.
+	if class == ClassStreaming {
 		return ErrUnsupportedMediaClass
 	}
 
@@ -733,7 +755,7 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	// job onto a queue nobody will ever drain. It also returns
 	// ErrQueueFull if the queue is already at capacity — see that
 	// error's doc.
-	return s.enqueue(item, epoch)
+	return s.enqueue(item, epoch, class)
 }
 
 func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
@@ -769,6 +791,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	type queuedItem struct {
 		item  dp1playlist.PlaylistItem
 		epoch uint64
+		class MediaClass
 	}
 	toQueue := make([]queuedItem, 0, total)
 	for _, item := range playlist.Items {
@@ -783,14 +806,19 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 				zap.String("item_id", item.ID), zap.Error(err))
 			continue
 		}
-		if class != ClassSoftware {
+		// ClassStreaming is the only excluded class — see
+		// ErrUnsupportedMediaClass's doc. Silently skipped here (not
+		// counted as a classifyFailed error) since a live/streaming
+		// item is a legitimate, correctly-classified exclusion, not a
+		// classification failure.
+		if class == ClassStreaming {
 			continue
 		}
-		toQueue = append(toQueue, queuedItem{item: item, epoch: epoch})
+		toQueue = append(toQueue, queuedItem{item: item, epoch: epoch, class: class})
 	}
 	if len(toQueue) == 0 && classifyFailed > 0 {
 		// Distinguish "classification itself is broken" from "this
-		// playlist genuinely has no software items" — the latter is a
+		// playlist genuinely has no cacheable items" — the latter is a
 		// normal, successful ok:true/softwareCount:0 outcome, but the
 		// former must not look identical to it (see this method's doc).
 		// Deliberately returns BEFORE saving the playlist/URL index
@@ -828,7 +856,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 
 	queued := 0
 	for _, q := range toQueue {
-		if err := s.enqueue(q.item, q.epoch); err != nil {
+		if err := s.enqueue(q.item, q.epoch, q.class); err != nil {
 			if errors.Is(err, ErrServiceNotStarted) {
 				// Stop() raced in mid-loop; the remaining items would
 				// fail the same way, so stop trying rather than log
@@ -945,7 +973,7 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 // notification in the COMMON case where the queue is nowhere near full,
 // not to be the authoritative guard. Phase 2's check, taken under the
 // same lock as the actual push, is what actually enforces the bound.
-func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64) error {
+func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class MediaClass) error {
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
@@ -1012,7 +1040,7 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64) error {
 		return ErrQueueFull
 	}
 	s.state[item.ID] = StateQueued
-	s.queue.push(captureJob{itemID: item.ID, item: item})
+	s.queue.push(captureJob{itemID: item.ID, item: item, class: class})
 	s.mu.Unlock()
 	return nil
 }
@@ -1029,7 +1057,7 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	// captureMu's doc on why the whole blob-writing window must be
 	// fenced, not only the save.
 	s.captureMu.Lock()
-	rec, err := s.capturer.Capture(ctx, j.item, s.captureWindowMs)
+	rec, err := s.captureForClass(ctx, j)
 	s.captureMu.Unlock()
 	if err != nil {
 		s.logger.Warn("offline cache: capture failed", zap.String("item_id", j.itemID), zap.Error(err))
@@ -1039,6 +1067,22 @@ func (s *service) process(ctx context.Context, j captureJob) {
 
 	s.notify(j.itemID, stateFromCoverage(rec.Coverage), rec.Coverage)
 	s.enforceDiskLimit(j.itemID)
+}
+
+// captureForClass routes a queued job to the capture pipeline matching
+// its classified media type, sampled once at classify time and carried
+// on the job (see captureJob.class's doc): ClassSoftware needs the
+// headless-Chromium pipeline (capturer) to run arbitrary code and
+// observe its unenumerable dependency graph; every other class routes
+// to the browser-free direct-download mediaCapturer — see classify.go's
+// MediaClass doc for why those never need a browser. ClassStreaming
+// never reaches here at all: DownloadItem/DownloadPlaylist reject it
+// before ever enqueuing a job (see ErrUnsupportedMediaClass's doc).
+func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecord, error) {
+	if j.class == ClassSoftware {
+		return s.capturer.Capture(ctx, j.item, s.captureWindowMs)
+	}
+	return s.mediaCapturer.Capture(ctx, j.item)
 }
 
 // enforceDiskLimit evicts the oldest-captured item (by CapturedAt),
