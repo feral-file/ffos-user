@@ -30,11 +30,18 @@ import (
 //     caching for every single-file artwork, and a best-effort direct
 //     download degrades safely (an honest capture failure) if the
 //     resolved bytes turn out not to be a single self-contained file.
-//   - ClassStreaming (HLS/.m3u8 live or VOD manifests) is the one class
-//     offline caching does not support at all: a manifest points at a
-//     set of segments fetched progressively during playback, not a
-//     single fixed byte sequence, so there is nothing a one-shot
-//     download or a static blob-store replay could faithfully serve.
+//   - ClassStreaming (HLS/.m3u8 or DASH/.mpd live or VOD manifests) is
+//     the one class offline caching does not support at all: a manifest
+//     points at a set of segments fetched progressively during
+//     playback, not a single fixed byte sequence, so there is nothing a
+//     one-shot download or a static blob-store replay could faithfully
+//     serve. Both manifest families must be excluded here, not just
+//     HLS: a DASH manifest that instead fell through to ClassUnknown's
+//     single-file path would cache only the manifest with
+//     Coverage.Complete=true, then fail every segment request offline
+//     under the default fail-closed miss policy while status still
+//     reports the item as fully cached (see feral-file/ffos-user#229
+//     review discussion).
 type MediaClass string
 
 const (
@@ -59,34 +66,47 @@ func NewClassifier(httpClient wrapper.HTTPClient) Classifier {
 	return &classifier{httpClient: httpClient}
 }
 
-// streamingURLSuffix identifies an HLS manifest by URL alone, checked
-// before any network round trip: some CDNs serve a .m3u8 manifest with a
-// generic or even missing Content-Type (e.g. behind a signed-URL proxy
-// that does not preserve it), so the URL's own extension is the more
-// reliable signal here, not merely a fallback for it.
-const streamingURLSuffix = ".m3u8"
+// streamingURLSuffixes identifies a manifest-based streaming source by
+// URL alone, checked before any network round trip: some CDNs serve a
+// manifest with a generic or even missing Content-Type (e.g. behind a
+// signed-URL proxy that does not preserve it), so the URL's own
+// extension is the more reliable signal here, not merely a fallback for
+// it. Covers both manifest families this daemon must reject — HLS
+// (.m3u8) and DASH (.mpd) — see MediaClass's doc on why DASH must be
+// excluded here too, not just HLS.
+var streamingURLSuffixes = []string{".m3u8", ".mpd"}
 
-// isStreamingURL reports whether rawURL's path ends in streamingURLSuffix.
-// A parse failure falls back to a plain suffix check on the raw string —
-// item.Source is validated for real elsewhere (a malformed URL fails the
-// eventual fetch/navigate with a clearer error); this helper only needs
-// to be a reasonable best-effort signal, never a security boundary.
+// isStreamingURL reports whether rawURL's path ends in one of
+// streamingURLSuffixes. A parse failure falls back to a plain suffix
+// check on the raw string — item.Source is validated for real elsewhere
+// (a malformed URL fails the eventual fetch/navigate with a clearer
+// error); this helper only needs to be a reasonable best-effort signal,
+// never a security boundary.
 func isStreamingURL(rawURL string) bool {
-	u, err := go_url.Parse(rawURL)
-	if err != nil {
-		return strings.HasSuffix(strings.ToLower(rawURL), streamingURLSuffix)
+	path := rawURL
+	if u, err := go_url.Parse(rawURL); err == nil {
+		path = u.Path
 	}
-	return strings.HasSuffix(strings.ToLower(u.Path), streamingURLSuffix)
+	path = strings.ToLower(path)
+	for _, suffix := range streamingURLSuffixes {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
-// streamingContentTypePrefixes are the Content-Type values an HLS
-// manifest resolves to when an origin does set one; checked ahead of
-// mediaContentTypePrefixes/softwareContentTypePrefixes so a streaming
-// manifest is never misclassified as a downloadable media file.
+// streamingContentTypePrefixes are the Content-Type values an HLS or
+// DASH manifest resolves to when an origin does set one; checked ahead
+// of mediaContentTypePrefixes/softwareContentTypePrefixes so a
+// streaming manifest is never misclassified as a downloadable media
+// file (or, for DASH specifically, as ClassUnknown — see MediaClass's
+// doc for why that matters).
 var streamingContentTypePrefixes = []string{
-	"application/vnd.apple.mpegurl",
-	"application/x-mpegurl",
-	"audio/mpegurl",
+	"application/vnd.apple.mpegurl", // HLS
+	"application/x-mpegurl",         // HLS
+	"audio/mpegurl",                 // HLS
+	"application/dash+xml",          // DASH
 }
 
 // mediaContentTypePrefixes are Content-Type prefixes the player renders

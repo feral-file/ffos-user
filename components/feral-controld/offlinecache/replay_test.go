@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -740,6 +742,64 @@ func TestReplayer_ProcessRequestPaused_FulfillsSmallBlob(t *testing.T) {
 	ct, ok := headerValue(t, params, "Content-Type")
 	require.True(t, ok)
 	assert.Equal(t, "text/html", ct)
+}
+
+// TestReplayer_OnRequestPaused_AdmissionBoundResolvesOverflowViaMissPolicy
+// is the regression test for the unbounded-goroutine-per-event fan-out
+// flagged in the PR #229 review: a request-heavy artwork with
+// Fetch.enable patterned on "*" could previously spawn an unbounded
+// number of processRequestPaused goroutines, each a candidate to hold a
+// full cached resource's bytes plus a pending CDP send.
+//
+// It fills every one of RequestPausedAdmission's semaphore slots with a
+// genuine cache HIT for the same cached URL, deliberately stuck
+// mid-flight (Fetch.fulfillRequest blocks on release below, simulating
+// a slow write to a busy kiosk socket), then fires one more concurrent
+// event for that SAME URL. If admission were not bounded — or if
+// overflow were queued behind the busy slots instead of resolved
+// immediately — this last event would also eventually call
+// Fetch.fulfillRequest once release unblocks. Instead it must resolve
+// right away via Fetch.failRequest (fail_closed's miss response),
+// proving both that admission is bounded and that overflow is answered
+// without waiting on it.
+func TestReplayer_OnRequestPaused_AdmissionBoundResolvesOverflowViaMissPolicy(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-hot", "hot payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+
+	release := make(chan struct{})
+	var admitted sync.WaitGroup
+	admitted.Add(offlinecache.RequestPausedAdmission)
+	ts.mockSession.EXPECT().
+		Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).
+		DoAndReturn(func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
+			defer admitted.Done()
+			<-release
+			return json.RawMessage(`{}`), nil
+		}).
+		Times(offlinecache.RequestPausedAdmission)
+	overflowDone := ts.expectSend("Fetch.failRequest")
+
+	// onRequestPaused's admission acquire runs synchronously on the
+	// calling goroutine (only the actual work is handed off — see its
+	// doc), so calling the captured handler this many times in a plain
+	// loop deterministically fills every slot before the loop's final,
+	// (RequestPausedAdmission+1)th call — no goroutine-scheduling races
+	// to account for here.
+	for i := 0; i < offlinecache.RequestPausedAdmission; i++ {
+		ts.handler(requestPausedEvent(t, fmt.Sprintf("req-hit-%d", i), res.URL))
+	}
+	ts.handler(requestPausedEvent(t, "req-overflow", res.URL))
+
+	// Must resolve promptly even though every admission slot is still
+	// stuck on release below — a queued (rather than bound) overflow
+	// design would instead time out here.
+	awaitSend(t, overflowDone)
+
+	close(release)
+	admitted.Wait()
 }
 
 // TestReplayer_ProcessRequestPaused_HeaderlessResourceFulfillsWithNonNullHeaders

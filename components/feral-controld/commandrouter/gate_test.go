@@ -329,7 +329,8 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 // "Offline artwork caching commands" block) are classified in Policies
 // rather than silently inheriting the generous Default policy — undersized
 // for downloadPlaylist/downloadPlaylistItem, which do DP1 resolution plus
-// enqueue into offlinecache.Service's unbounded FIFO.
+// enqueue into offlinecache.Service's jobQueue (bounded at
+// defaultMaxQueueLen, but not a limit a realistic burst is meant to hit).
 func TestDefaultGateConfig_ClassifiesOfflineCacheCommands(t *testing.T) {
 	cfg := DefaultGateConfig()
 	query := cfg.Policies[commands.CMD_DEVICE_STATUS]

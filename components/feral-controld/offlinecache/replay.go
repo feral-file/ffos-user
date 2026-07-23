@@ -195,6 +195,13 @@ type replayer struct {
 	// lock so a miss decision always sees a consistent (resources, mixed)
 	// pair. See EnableForPlaylist's doc for why this exists.
 	mixedScope bool
+
+	// admission is a non-blocking counting semaphore (buffered channel;
+	// send=acquire, receive=release) bounding concurrent
+	// processRequestPaused work — see onRequestPaused's doc on
+	// requestPausedAdmission for why. Sized once at construction time;
+	// never resized.
+	admission chan struct{}
 }
 
 // NewReplayer constructs a Replayer. staticServer's BaseURL is used to let
@@ -211,6 +218,7 @@ func NewReplayer(store Store, staticServer StaticServer, missPolicy MissPolicy, 
 		json:         jsonWrapper,
 		logger:       logger,
 		targets:      make(map[string]CDPSession),
+		admission:    make(chan struct{}, RequestPausedAdmission),
 	}
 }
 
@@ -496,10 +504,48 @@ func (r *replayer) Disable(ctx context.Context) error {
 // session's read-pump goroutine. It must not call session.Send
 // synchronously (see cdpsession.go's On doc: the pump could not then
 // deliver that Send's own reply, deadlocking against itself), so the
-// actual response decision — which itself calls Send — is handed off to a
-// new goroutine per paused request.
+// actual response decision — which itself calls Send — is handed off to
+// a goroutine per paused request.
+//
+// RequestPausedAdmission bounds how many of those goroutines may run
+// processRequestPaused's full path (cache lookup + potentially a
+// blob-store read for fulfillFromBlob) at once: with Fetch.enable
+// patterned on "*", a request-heavy software artwork (many concurrent
+// XHR/fetch calls) previously fanned out an unbounded number of these
+// per burst, each a candidate to hold a full resource's bytes plus a
+// pending CDP send — a resource-exhaustion risk on a disk/RAM-
+// constrained kiosk device (feral-file/ffos-user#229 review finding).
+// The admission channel is a non-blocking counting semaphore (send to
+// acquire, receive to release); acquiring it costs nothing beyond the
+// channel op, so the common case (well under the bound) is exactly as
+// cheap as before.
+//
+// A request that finds the semaphore full is NOT queued behind it —
+// this handler itself runs on the read pump and must return
+// immediately regardless of backlog, so blocking here would stall
+// every other CDP reply/event on this connection, not just this one
+// request — nor is it silently dropped, which would strand the kiosk
+// page's fetch/XHR pending forever. Instead it is resolved right away
+// via resolveOverflow, which answers exactly like a cache miss (per
+// the configured missPolicy) without ever touching the resources
+// lookup or a blob read. This keeps every overflow goroutine O(1)-cheap
+// and short-lived, so sustained backlog pressure can lose cache hits
+// (an accepted, explicit trade-off — see resolveOverflow's doc) but can
+// never reproduce the original unbounded-heavy-goroutine growth.
+// Exported (like ClassifyProbeRangeBytes in classify.go) so tests can
+// assert against it precisely.
+const RequestPausedAdmission = 64
+
 func (r *replayer) onRequestPaused(sessionID string, session CDPSession, params json.RawMessage) {
-	go r.processRequestPaused(sessionID, session, params)
+	select {
+	case r.admission <- struct{}{}:
+		go func() {
+			defer func() { <-r.admission }()
+			r.processRequestPaused(sessionID, session, params)
+		}()
+	default:
+		go r.resolveOverflow(sessionID, session, params)
+	}
 }
 
 // processRequestPaused always responds using session — the SAME CDP
@@ -962,4 +1008,58 @@ func (r *replayer) handleMiss(ctx context.Context, session CDPSession, requestID
 		r.logger.Warn("offline cache replay: Fetch.failRequest failed",
 			zap.String("request_id", requestID), zap.Error(err))
 	}
+}
+
+// resolveOverflow answers a Fetch.requestPaused event that arrived while
+// RequestPausedAdmission's semaphore was full — see onRequestPaused's
+// doc for why this path exists and why it must stay cheap. It resolves
+// EXACTLY like a genuine cache miss (handleMiss, keyed on the configured
+// missPolicy) and deliberately never touches r.resources or reads a
+// blob: doing either here would defeat the whole point of admission by
+// letting overflow traffic perform the same I/O the semaphore exists to
+// bound. A request answered this way is therefore always treated as a
+// miss even when resources actually has a matching entry — losing that
+// hit deterministically under sustained backlog pressure is the accepted
+// trade-off for guaranteeing this path can never itself accumulate
+// unbounded work.
+//
+// This still needs its own goroutine (never call Send from the read
+// pump — see processRequestPaused's doc), but unlike the admitted path
+// it does only one bounded Send and returns, so even a large burst of
+// concurrent overflow events cannot reproduce the original leak: each
+// instance is short-lived and holds no resource bytes.
+func (r *replayer) resolveOverflow(sessionID string, session CDPSession, params json.RawMessage) {
+	var evt struct {
+		RequestID string `json:"requestId"`
+		Request   struct {
+			URL string `json:"url"`
+		} `json:"request"`
+	}
+	if err := r.json.Unmarshal(params, &evt); err != nil {
+		r.logger.Warn("offline cache replay: failed to parse Fetch.requestPaused during admission overflow", zap.Error(err))
+		return
+	}
+
+	r.mu.RLock()
+	current, stillAttached := r.targets[sessionID]
+	mixed := r.mixedScope
+	r.mu.RUnlock()
+	// Same stale-session guard as processRequestPaused — see its doc.
+	if !stillAttached || session != current {
+		return
+	}
+
+	ctx := context.Background()
+
+	// The static server's own follow-up must still pass through even
+	// under backlog pressure — see processRequestPaused's identical
+	// check for why this cannot be collapsed into an ordinary miss.
+	if r.staticServer != nil && r.isStaticServerFollowUp(evt.Request.URL) {
+		r.continueRequest(ctx, session, evt.RequestID)
+		return
+	}
+
+	r.logger.Warn("offline cache replay: Fetch.requestPaused admission full, resolving via miss policy without a cache lookup",
+		zap.String("url", evt.Request.URL))
+	r.handleMiss(ctx, session, evt.RequestID, mixed)
 }

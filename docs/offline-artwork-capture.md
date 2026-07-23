@@ -5,9 +5,9 @@ web-based (HTML+CSS+JS, canvas, WebGL, WASM) via a headless-Chromium
 capture, or any other single-file mime type (image, video, audio, SVG,
 `model/gltf`, PDF, and unrecognized-but-still-single-file types) via a
 browser-free direct HTTP download — so `ff-player` can play it back with
-no network access, and how the result is stored and replayed. Live/HLS
-streaming (`.m3u8`) is the one source type this pipeline does not
-support at all (§3.3, §8).
+no network access, and how the result is stored and replayed. Live/VOD
+manifest-based streaming — HLS (`.m3u8`) or DASH (`.mpd`) — is the one
+source type this pipeline does not support at all (§3.3, §8).
 
 **Status:** implemented in `components/feral-controld/offlinecache/`. This
 document is the living reference for that package; the original design
@@ -53,11 +53,12 @@ benefit, so `feral-controld` downloads these directly over HTTP instead
 origin rejects `HEAD` — see `ClassifyProbeRangeBytes`'s doc): `text/html`/
 `application/xhtml+xml`/JS content types are `ClassSoftware` (headless
 capture, this section); everything else is `ClassMedia`/`ClassUnknown`
-(direct download, §3.3) **except** an HLS/live manifest
-(`application/vnd.apple.mpegurl`/`application/x-mpegurl`/`audio/mpegurl`,
-or a `source` path ending in `.m3u8`, checked by URL extension BEFORE any
-network round trip), which classifies as `ClassStreaming` — the only
-class `DownloadItem`/`DownloadPlaylist` reject outright
+(direct download, §3.3) **except** an HLS or DASH live/VOD manifest
+(`application/vnd.apple.mpegurl`/`application/x-mpegurl`/`audio/mpegurl`/
+`application/dash+xml`, or a `source` path ending in `.m3u8`/`.mpd`,
+checked by URL extension BEFORE any network round trip), which
+classifies as `ClassStreaming` — the only class `DownloadItem`/
+`DownloadPlaylist` reject outright
 (`ErrUnsupportedMediaClass`), since a live/VOD manifest has no fixed
 byte-for-byte content a one-shot download or a static blob-store replay
 could faithfully serve (§3.3, §8).
@@ -1196,17 +1197,18 @@ identical cache state.
   levels deep, or behind a worker, is not covered end to end.
 - **WebSocket data** cannot be captured-and-replayed this way — such
   requests are out of scope for this pipeline (§3.2).
-- **Live/VOD HLS streaming (`.m3u8`) is explicitly rejected up front, not
-  merely uncovered.** `classify.go` detects an HLS manifest by URL
-  extension (checked before any network round trip) or by
-  `Content-Type` (`application/vnd.apple.mpegurl`/`application/
-  x-mpegurl`/`audio/mpegurl`) and returns `ClassStreaming`, the only
-  class `DownloadItem`/`DownloadPlaylist` reject outright
-  (`ErrUnsupportedMediaClass`) rather than queuing — see §1/§3.3. A
-  manifest points at a set of segments fetched progressively during
-  playback, not one fixed byte sequence, so there is nothing a one-shot
-  download or a static blob-store replay could faithfully serve; this is
-  a deliberate scope boundary, not a gap left for a future revision to
+- **Live/VOD HLS or DASH streaming (`.m3u8`/`.mpd`) is explicitly rejected
+  up front, not merely uncovered.** `classify.go` detects an HLS or DASH
+  manifest by URL extension (checked before any network round trip) or
+  by `Content-Type` (`application/vnd.apple.mpegurl`/`application/
+  x-mpegurl`/`audio/mpegurl`/`application/dash+xml`) and returns
+  `ClassStreaming`, the only class `DownloadItem`/`DownloadPlaylist`
+  reject outright (`ErrUnsupportedMediaClass`) rather than queuing — see
+  §1/§3.3. A manifest points at a set of segments fetched progressively
+  during playback, not one fixed byte sequence, so there is nothing a
+  one-shot download or a static blob-store replay could faithfully
+  serve; this is a deliberate scope boundary, not a gap left for a
+  future revision to
   close.
 - **SVG/`model/gltf` items that reference EXTERNAL subresources are only
   partially covered by the direct-download path.** `MediaCapturer`

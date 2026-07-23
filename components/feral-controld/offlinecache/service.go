@@ -19,11 +19,11 @@ import (
 
 // ErrUnsupportedMediaClass is returned by DownloadItem when the item's
 // source classifies as ClassStreaming (see classify.go): a live/VOD HLS
-// manifest has no fixed byte-for-byte content a one-shot download or a
-// static blob-store replay could faithfully serve, so it is the one
-// class offline caching rejects outright. Every other class (software,
-// media, or unknown-but-still-single-file) is downloadable — see
-// captureForClass's doc for how each is routed.
+// or DASH manifest has no fixed byte-for-byte content a one-shot
+// download or a static blob-store replay could faithfully serve, so it
+// is the one class offline caching rejects outright. Every other class
+// (software, media, or unknown-but-still-single-file) is downloadable —
+// see captureForClass's doc for how each is routed.
 var ErrUnsupportedMediaClass = errors.New("offline cache: item is a live/streaming source and cannot be cached offline")
 
 // ErrServiceNotStarted is returned by DownloadItem/DownloadPlaylist when
@@ -269,10 +269,13 @@ type captureJob struct {
 	class MediaClass
 }
 
-// jobQueue is an unbounded FIFO so DownloadItem/DownloadPlaylist never
-// block the caller waiting for queue capacity, even for a large playlist.
-// wake is a 1-buffered signal channel, not a data channel, so pop() always
-// reads from items under the mutex instead of racing two sources of truth.
+// jobQueue is a FIFO backed by an in-memory slice so DownloadItem/
+// DownloadPlaylist never block the caller waiting for queue capacity,
+// even for a large playlist — push() only enforces defaultMaxQueueLen
+// as a backlog safety valve (see ErrQueueFull's doc), never blocks. wake
+// is a 1-buffered signal channel, not a data channel, so pop() always
+// reads from items under the mutex instead of racing two sources of
+// truth.
 type jobQueue struct {
 	mu    sync.Mutex
 	items []captureJob

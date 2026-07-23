@@ -111,9 +111,11 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_SCREEN_ROTATION: slowWrite,
 
 		// Offline-cache downloads: heavy, like displayPlaylist. Both do DP1
-		// resolution and downloadPlaylist additionally enqueues into an
-		// unbounded FIFO (offlinecache.Service's jobQueue), so a storm here
-		// is cheap to send but expensive to work through; heavy's dedupe
+		// resolution and downloadPlaylist additionally enqueues into
+		// offlinecache.Service's jobQueue — bounded (defaultMaxQueueLen,
+		// 4096) but only as a backlog safety valve, not a throttle a
+		// realistic burst is expected to hit — so a storm here is cheap
+		// to send but expensive to work through; heavy's dedupe
 		// also collapses a duplicate download request for the same
 		// playlist/item into the one already in flight rather than
 		// re-enqueuing (DownloadItem/DownloadPlaylist are themselves

@@ -43,6 +43,14 @@ func TestClassifier_Classify(t *testing.T) {
 		{name: "pdf document", contentType: "application/pdf", want: offlinecache.ClassUnknown},
 		{name: "apple hls manifest", contentType: "application/vnd.apple.mpegurl", want: offlinecache.ClassStreaming},
 		{name: "x-mpegurl hls manifest", contentType: "application/x-mpegurl; charset=utf-8", want: offlinecache.ClassStreaming},
+		// DASH manifests must classify as ClassStreaming, not
+		// ClassUnknown: see MediaClass's doc on why a DASH manifest that
+		// fell through to the single-file direct-download path would
+		// cache only the manifest with Coverage.Complete=true, then
+		// fail every segment request offline (feral-file/ffos-user#229
+		// review discussion).
+		{name: "dash manifest", contentType: "application/dash+xml", want: offlinecache.ClassStreaming},
+		{name: "dash manifest with charset", contentType: "application/dash+xml; charset=utf-8", want: offlinecache.ClassStreaming},
 	}
 
 	for _, tt := range tests {
@@ -100,6 +108,38 @@ func TestClassifier_Classify_M3U8URLIsCaseInsensitive(t *testing.T) {
 	classifier := offlinecache.NewClassifier(mockHTTP)
 
 	got, err := classifier.Classify(context.Background(), "https://example.com/live/MASTER.M3U8")
+	require.NoError(t, err)
+	assert.Equal(t, offlinecache.ClassStreaming, got)
+}
+
+// TestClassifier_Classify_MPDURLIsStreamingWithoutNetworkCall mirrors
+// the .m3u8 case above for DASH: a .mpd URL must classify as
+// ClassStreaming purely from its extension, before any HEAD/GET is ever
+// issued, so a DASH manifest can never slip through to ClassUnknown's
+// single-file capture path even when an origin serves it with a
+// misleading or absent Content-Type.
+func TestClassifier_Classify_MPDURLIsStreamingWithoutNetworkCall(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	classifier := offlinecache.NewClassifier(mockHTTP)
+
+	got, err := classifier.Classify(context.Background(), "https://example.com/live/manifest.mpd?token=abc123")
+	require.NoError(t, err)
+	assert.Equal(t, offlinecache.ClassStreaming, got)
+}
+
+// TestClassifier_Classify_MPDURLIsCaseInsensitive mirrors the .m3u8 case
+// above for DASH.
+func TestClassifier_Classify_MPDURLIsCaseInsensitive(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	classifier := offlinecache.NewClassifier(mockHTTP)
+
+	got, err := classifier.Classify(context.Background(), "https://example.com/live/MANIFEST.MPD")
 	require.NoError(t, err)
 	assert.Equal(t, offlinecache.ClassStreaming, got)
 }

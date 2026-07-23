@@ -1724,20 +1724,47 @@ to local hub WebSocket clients.
 }
 ```
 
-Delivery is best-effort on both transports: relayer delivery is skipped
-(and logged) when the relayer is not connected, and hub WS delivery is
-skipped (and logged) when there are no connected hub clients. Both sends
-run synchronously on the offline-cache service's single worker goroutine
-(the same one that runs captures — see `service.notify`), so both are
-write-deadline-bounded (5s) rather than able to block indefinitely on a
-stalled/backpressured client: relayer via `notifySendTimeout` in
-`notifier.go`, hub WS via `ws.go`'s `SetWriteDeadline` call before every
-`WriteJSON` (also shared by every other hub WS sender, not just this
-notification — see `ws.go`'s `sendWriteWait`). A connection that hits its
-deadline is dropped as a failed write and closed, same as any other write
-error; the queued/downloading captures behind it in the worker's queue
-are unaffected. Clients that need a definitive current state should still
-poll `getOfflineCacheStatus`.
+Delivery is best-effort on both transports, but the two transports are no
+longer symmetric in how they are decoupled from the offline-cache
+service's single capture-worker goroutine (the same one that runs
+captures — see `service.notify`):
+
+- **Relayer** delivery is silently skipped (no log) when the relayer is
+  not connected, and otherwise still runs synchronously on the capture
+  worker, write-deadline-bounded to 5s via `notifySendTimeout` in
+  `notifier.go` rather than able to block indefinitely on a
+  backpressured relayer connection; only a failed `Send` itself is
+  logged.
+- **Hub WS** delivery is unconditionally enqueued (non-blocking, never
+  gated on whether any hub client happens to be connected right now)
+  onto a bounded background queue (`notifyQueueCapacity`, 256 entries in
+  `notifier.go`) drained one notification at a time, in order, by a
+  dedicated background worker goroutine — never sent inline on the
+  capture worker. That worker's `ws.WS.SendAll` call is itself a no-op
+  (debug-logged, not a drop/warning) when there are no connected hub
+  clients at delivery time; skip-if-no-clients is `SendAll`'s own
+  behavior (`ws.go`), not a decision `Notifier` makes before enqueueing.
+  Queueing exists because `SendAll`'s per-connection writes are each
+  individually bounded (`ws.go`'s `sendWriteWait`), but the loop over
+  however many hub clients are connected has no aggregate bound;
+  without queueing, several slow/wedged clients could block the capture
+  worker for `(client count) * sendWriteWait`, stalling the entire
+  download queue behind what is meant to be a best-effort side-channel.
+  Two situations still drop a notification outright, logged as a
+  warning each time: the queue is full (the worker has fallen far
+  enough behind that 256 notifications are already pending — see
+  `notifyQueueCapacity`'s doc for why that bound is not expected to be
+  hit in normal use), or the notification was still queued when the
+  daemon began shutting down (`Notifier.Close` does not drain the
+  remainder — see its doc for why flushing to a client the process is
+  about to stop serving has no value). A connection that hits its write
+  deadline (either transport) is dropped as a failed write and closed,
+  same as any other write error; the queued/downloading captures behind
+  it in the worker's queue are unaffected either way.
+
+Clients that need a definitive current state should still poll
+`getOfflineCacheStatus` rather than relying on every notification having
+been delivered.
 
 This notification is attempt-level, not cache-level: it reports the
 outcome of one specific capture attempt for `itemId`, which is not always
