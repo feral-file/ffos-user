@@ -184,10 +184,21 @@ func main() {
 }
 
 func (app *app) run(ctx context.Context, conf *config.Config) error {
-	// Load state
+	// Load state. A load failure must NOT abort startup: controld is the sole
+	// SoftAP/LAN-recovery owner, so returning here would crash-loop the daemon
+	// (Restart=always with no start limit) and strand an offline device with
+	// no setup AP and no LAN hub — the exact unrecoverable state this daemon
+	// exists to prevent. Quarantine the unreadable file (best-effort rename,
+	// preserving the bytes for diagnosis instead of overwriting them) and
+	// continue on a fresh empty state: the worst case is the device presents
+	// as unclaimed and re-pairs, which the claim flow handles.
 	s, err := state.Load(app.Logger)
 	if err != nil {
-		return err
+		app.Logger.Error("Failed to load persisted state; quarantining it and continuing with empty state", zap.Error(err))
+		if rerr := app.OS.Rename(constants.STATE_FILE, constants.STATE_FILE+".corrupt"); rerr != nil {
+			app.Logger.Warn("Failed to quarantine state file", zap.Error(rerr))
+		}
+		s = state.GetState() // installs and returns a fresh empty state
 	}
 
 	// Set global topic ID in Sentry if available

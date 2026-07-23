@@ -324,6 +324,53 @@ func TestApp_Run_Success(t *testing.T) {
 			},
 		},
 		{
+			// Corrupt/unreadable persisted state must NOT abort startup: controld
+			// is the sole SoftAP/LAN-recovery owner, and returning the error
+			// crash-looped the daemon, stranding an offline device with no
+			// recovery surface. run() quarantines the file and continues on an
+			// empty state — every lifecycle expectation below firing IS the
+			// assertion that the recovery surfaces still come up.
+			name: "state load failure quarantines and continues startup",
+			setupFunc: func(ts *testSetup) {
+				ts.config.EnableHub = boolPtr(false)
+
+				ts.mockStateManager.EXPECT().
+					Load(ts.logger).
+					Return(nil, errors.New("unexpected end of JSON input"))
+				// Quarantine keeps the corrupt bytes for diagnosis.
+				ts.mockOS.EXPECT().
+					Rename(constants.STATE_FILE, constants.STATE_FILE+".corrupt").
+					Return(nil)
+				// The empty fallback state serves the rest of startup.
+				ts.mockStateManager.EXPECT().
+					GetState().
+					Return(&state.State{
+						Relayer:         &state.RelayerState{},
+						ConnectedDevice: &state.Device{},
+					}).
+					AnyTimes()
+
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+				ts.mockCDP.EXPECT().Close()
+				ts.mockWatchdog.EXPECT().Start(gomock.Any())
+				ts.mockWatchdog.EXPECT().Stop()
+				ts.mockDBus.EXPECT().Start().Return(nil)
+				ts.mockDBus.EXPECT().Stop().Return(nil)
+				ts.mockMediator.EXPECT().Start()
+				ts.mockMediator.EXPECT().Stop()
+				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+				ts.mockStatusPoller.EXPECT().Stop()
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+
+				ts.mockDBus.EXPECT().
+					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+					Return([]interface{}{false}, nil)
+			},
+		},
+		{
 			// Factory-fresh boot: online with NO topic. The startup connect must
 			// fire anyway — connecting with an empty topic is the designed
 			// topic-assignment path, and a device that boots already online never
@@ -438,16 +485,10 @@ func TestApp_Run_Errors(t *testing.T) {
 		setupFunc func(*testSetup)
 		wantErr   string
 	}{
-		{
-			name: "state load failure",
-			setupFunc: func(ts *testSetup) {
-				// Mock state load failure
-				ts.mockStateManager.EXPECT().
-					Load(ts.logger).
-					Return(nil, errors.New("failed to load state file"))
-			},
-			wantErr: "failed to load state file",
-		},
+		// NOTE: "state load failure" is deliberately NOT an error case anymore:
+		// run() quarantines the unreadable file and continues on an empty state
+		// (see "state load failure quarantines and continues startup" in the
+		// success table) — aborting crash-looped the sole recovery daemon.
 		{
 			name: "DBus start failure",
 			setupFunc: func(ts *testSetup) {
