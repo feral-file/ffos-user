@@ -112,6 +112,9 @@ func TestMediator_HandleDBusSignal_SysMetrics(t *testing.T) {
 					SaveLastSysMetrics(metricsData).
 					Times(1)
 
+				// A connected relayer short-circuits the heartbeat reconcile.
+				ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
+
 				payload := godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_SYSMETRICS,
 					Body:   []interface{}{metricsData},
@@ -567,6 +570,8 @@ func TestMediator_SysMetricsSelfHealsMDNS(t *testing.T) {
 		// stays down), so this Start can only come from the SYSMETRICS reconcile.
 		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
 		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		// A connected relayer short-circuits the heartbeat's relayer reconcile.
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
 
 		handler := captureHandler(ts)
 		link := &stubLinkState{hasLink: false}
@@ -588,6 +593,8 @@ func TestMediator_SysMetricsSelfHealsMDNS(t *testing.T) {
 		// NOT Start again.
 		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
 		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		// A connected relayer short-circuits the heartbeat's relayer reconcile.
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
 
 		handler := captureHandler(ts)
 		ts.mediator.Start()
@@ -595,6 +602,137 @@ func TestMediator_SysMetricsSelfHealsMDNS(t *testing.T) {
 
 		_, err := (*handler)(ts.ctx, sysMetrics)
 		assert.NoError(t, err)
+	})
+}
+
+// TestMediator_SysMetricsReconcilesRelayer is the regression test for the
+// stranded-relayer recovery gap: the startup gate's connectivity snapshot can
+// be wrong-and-final (evaluated while D-Bus was down on an already-online
+// network), and sys-monitord emits connectivity_change only on TRANSITIONS —
+// so nothing edge-triggered will ever connect the relayer, no topic is
+// assigned, and auto-claim strands. The periodic SYSMETRICS heartbeat must
+// reconcile the relayer connection without any connectivity_change ever being
+// delivered.
+func TestMediator_SysMetricsReconcilesRelayer(t *testing.T) {
+	metricsData := []byte(`{"cpu":1}`)
+	sysMetrics := godbus.DBusPayload{
+		Member: dbus.MONITORD_EVENT_SYSMETRICS,
+		Body:   []interface{}{metricsData},
+	}
+
+	captureHandler := func(ts *testSetup) *func(context.Context, godbus.DBusPayload) ([]interface{}, error) {
+		var h func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+		ts.mockDbus.EXPECT().
+			OnBusSignal(gomock.Any()).
+			DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+				h = handler
+			}).Times(1)
+		ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+		return &h
+	}
+	expectConnectivity := func(ts *testSetup) *gomock.Call {
+		return ts.mockDbus.EXPECT().Call(
+			gomock.Any(),
+			dbus.MONITORD_NAME,
+			dbus.MONITORD_PATH,
+			dbus.MONITORD_INTERFACE,
+			dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
+			false,
+		)
+	}
+
+	t.Run("already-online device with no connectivity_change connects the relayer", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
+		expectConnectivity(ts).Return([]interface{}{true}, nil).Times(1)
+		ts.mockRelayer.EXPECT().RetryableConnect(gomock.Any()).Return(nil).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("connected relayer short-circuits without D-Bus traffic", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		// No Call and no RetryableConnect expectations: any D-Bus query or
+		// connect attempt fails the test.
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("unanswerable connectivity query is assumed offline", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
+		expectConnectivity(ts).Return(nil, errors.New("dbus: client not started")).Times(1)
+		// No RetryableConnect: assumed offline.
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("offline device stays disconnected", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
+		expectConnectivity(ts).Return([]interface{}{false}, nil).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("overlapping heartbeats collapse to one in-flight connect", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(2)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).AnyTimes()
+		// Times(1) on the query and the connect IS the single-flight
+		// assertion: the second heartbeat lands while the first is still
+		// inside RetryableConnect and must do nothing.
+		expectConnectivity(ts).Return([]interface{}{true}, nil).Times(1)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		ts.mockRelayer.EXPECT().
+			RetryableConnect(gomock.Any()).
+			DoAndReturn(func(context.Context) error {
+				close(entered)
+				<-release
+				return nil
+			}).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = (*handler)(ts.ctx, sysMetrics)
+		}()
+		<-entered
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+		close(release)
+		<-done
 	})
 }
 

@@ -255,6 +255,9 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return([]interface{}{false}, nil)
+				// Relayer Close is unconditional at shutdown (a later reconcile
+				// may have connected); it is a no-op on a nil conn.
+				ts.mockRelayer.EXPECT().Close()
 			},
 		},
 		{
@@ -378,6 +381,9 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return(nil, errors.New("DBusClient not started"))
+				// Close is unconditional at shutdown (a later reconcile may
+				// have connected), and a no-op on a nil conn.
+				ts.mockRelayer.EXPECT().Close()
 
 				// ...and the daemon still reaches READY.
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
@@ -442,6 +448,9 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return(nil, errors.New("DBusClient not started"))
+				// Close is unconditional at shutdown (a later reconcile may
+				// have connected), and a no-op on a nil conn.
+				ts.mockRelayer.EXPECT().Close()
 
 				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
 			},
@@ -491,6 +500,9 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return([]interface{}{false}, nil)
+				// Relayer Close is unconditional at shutdown (a later reconcile
+				// may have connected); it is a no-op on a nil conn.
+				ts.mockRelayer.EXPECT().Close()
 			},
 		},
 		{
@@ -581,6 +593,9 @@ func TestApp_Run_Success(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return([]interface{}{false}, nil)
+				// Relayer Close is unconditional at shutdown (a later reconcile
+				// may have connected); it is a no-op on a nil conn.
+				ts.mockRelayer.EXPECT().Close()
 			},
 		},
 	}
@@ -728,6 +743,9 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return([]interface{}{false}, nil)
+				// Relayer Close is unconditional at shutdown (a later reconcile
+				// may have connected); it is a no-op on a nil conn.
+				ts.mockRelayer.EXPECT().Close()
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
@@ -785,6 +803,9 @@ func TestApp_Run_Errors(t *testing.T) {
 				ts.mockDBus.EXPECT().
 					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
 					Return(nil, errors.New("DBus call failed"))
+				// Relayer Close is unconditional at shutdown (a later reconcile
+				// may have connected); it is a no-op on a nil conn.
+				ts.mockRelayer.EXPECT().Close()
 
 				// Mock StatusPoller start and stop
 				ts.mockStatusPoller.EXPECT().Start(gomock.Any())

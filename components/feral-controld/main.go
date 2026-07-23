@@ -294,7 +294,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		defer app.Provisioning.Stop()
 	}
 
-	// Get connectivity status and connect to relayer if ready
+	// Get connectivity status and connect to relayer if ready. This gate is a
+	// one-shot LATENCY fast path, not the thing that guarantees a relayer
+	// connection: its connectivity snapshot can be wrong-and-final (taken
+	// while D-Bus is still down on an already-online network, where no
+	// connectivity TRANSITION will ever fire to correct it). Durability comes
+	// from the mediator, which reconciles the relayer connection against
+	// connectivity on every periodic SYSMETRICS heartbeat — see
+	// mediator.reconcileRelayer.
 	connected, err := getConnectivityStatus(ctx, app.DBus, app.Logger)
 	if err != nil {
 		app.Logger.Error("Failed to get connectivity status", zap.Error(err))
@@ -323,10 +330,10 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			// provisioning and LAN recovery down with it — the exact coupling the
 			// unconditional-start model exists to remove (.start-services.sh starts us
 			// --no-block precisely because pre-READY failure can happen). Retry in the
-			// background instead; the mediator's
-			// connectivity-restored handler also
-			// re-attempts the connection, and RetryableConnect tolerates racing them
-			// (ErrAlreadyConnected is success).
+			// background instead; the mediator's connectivity-change handler and
+			// heartbeat reconcile also re-attempt the connection, and
+			// RetryableConnect tolerates racing them (ErrAlreadyConnected is
+			// success).
 			app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
 			go func() {
 				if retryErr := app.Relayer.RetryableConnect(ctx); retryErr != nil {
@@ -336,16 +343,17 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		} else {
 			app.Logger.Info("Initial relayer connection established")
 		}
-		// Close regardless of whether the *initial* connect succeeded: the background
-		// retry (or a later mediator/D-Bus reconnect) may have established the
-		// connection by shutdown time, and Close is a no-op on a nil conn.
-		defer app.Relayer.Close()
 	} else {
 		app.Logger.Info("Skipping initial relayer connection",
 			zap.Bool("internet_connected", connected),
 			zap.Bool("relayer_ready", s.Relayer.IsReady()),
 		)
 	}
+	// Close unconditionally: a connection can exist at shutdown regardless of
+	// this gate's snapshot — the background retry, the mediator's
+	// connectivity-change handler, or its heartbeat reconcile may have
+	// established one — and Close is a no-op on a nil conn.
+	defer app.Relayer.Close()
 
 	// Start Playlist Refresher
 	app.PlaylistRefresher.Start()

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
@@ -58,6 +60,13 @@ type mediator struct {
 	// on the relayer-message goroutine; no lock by the same single-writer
 	// argument as the executor's claimObserver.
 	topicObserver func()
+
+	// relayerReconciling collapses overlapping heartbeat-driven relayer
+	// reconciles to one in flight: signal handlers run on per-signal
+	// goroutines and heartbeats outpace RetryableConnect's transient-retry
+	// loop. Overlaps would be tolerated (ErrAlreadyConnected is success) but
+	// are pointless work against the relayer endpoint.
+	relayerReconciling atomic.Bool
 
 	mdnsMu         sync.Mutex
 	mdnsAdvertiser mdns.Advertiser
@@ -197,6 +206,69 @@ func (m *mediator) SetClaimed(claimed bool) {
 	}
 }
 
+// reconcileRelayer drives the relayer connection to its desired state —
+// connected whenever the device is online — off the periodic SYSMETRICS
+// heartbeat. It is deliberately cheap on the steady path: a connected relayer
+// short-circuits before any D-Bus traffic. Single-flight via
+// relayerReconciling (see the field comment).
+func (m *mediator) reconcileRelayer(ctx context.Context) {
+	if m.relayer.IsConnected() {
+		return
+	}
+	if !m.relayerReconciling.CompareAndSwap(false, true) {
+		return
+	}
+	defer m.relayerReconciling.Store(false)
+
+	connected, err := m.queryConnectivity(ctx)
+	if err != nil {
+		// Assumed-offline discipline: an unanswerable query reads as offline;
+		// Debug because this repeats every heartbeat while degraded.
+		m.logger.Debug("Relayer reconcile: connectivity unknown, assuming offline", zap.Error(err))
+		return
+	}
+	if !connected {
+		return
+	}
+
+	m.logger.Info("Relayer reconcile: device online with relayer disconnected, connecting")
+	if err := m.relayer.RetryableConnect(ctx); err != nil {
+		m.logger.Error("Relayer reconcile: connect failed, retrying on a later heartbeat", zap.Error(err))
+	} else {
+		m.logger.Info("Relayer reconcile: relayer connected")
+	}
+}
+
+// queryConnectivity reads sys-monitord's CACHED internet reachability
+// (refresh=false): this runs every metrics interval while the relayer is
+// down, so it must cost one local D-Bus round-trip, never a network probe —
+// the same polling discipline as the hub status internet probe. sys-monitord
+// refreshes its own cache, so a stale answer heals within its refresh period.
+func (m *mediator) queryConnectivity(ctx context.Context) (bool, error) {
+	deadlineCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := m.dbus.Call(
+		deadlineCtx,
+		dbus.MONITORD_NAME,
+		dbus.MONITORD_PATH,
+		dbus.MONITORD_INTERFACE,
+		dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
+		false,
+	)
+	if err != nil {
+		return false, err
+	}
+	if len(resp) != 1 {
+		return false, fmt.Errorf("expected 1 response, got %d", len(resp))
+	}
+	connected, ok := resp[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("expected bool, got %T", resp[0])
+	}
+	return connected, nil
+}
+
 func (m *mediator) handleDBusSignal(
 	ctx context.Context,
 	payload godbus.DBusPayload) ([]interface{}, error) {
@@ -234,6 +306,23 @@ func (m *mediator) handleDBusSignal(
 		m.mdnsMu.Lock()
 		m.reconcileMDNSLocked(ctx)
 		m.mdnsMu.Unlock()
+
+		// The relayer connection gets the same level-triggered treatment off
+		// this heartbeat as mDNS above. This is the house discipline, not a
+		// coincidence: connectivity_change fires only on internet-reachability
+		// TRANSITIONS, so any consumer that missed its edge stays wrong until
+		// the state happens to transition again. The startup relayer gate is
+		// exactly such a consumer — it evaluates connectivity once, and when
+		// that snapshot was taken while D-Bus was still down (non-fatal start
+		// with background retry) on a network that is already online, no
+		// transition ever comes: the relayer never connects, no topic is
+		// assigned, and auto-claim strands even though provisioning sees the
+		// device online. Reconciling here converges within one metrics
+		// interval instead. When the heartbeat itself is absent (D-Bus or
+		// sys-monitord down), connectivity is unknowable and the
+		// assumed-offline discipline applies — there is nothing to reconcile
+		// toward.
+		m.reconcileRelayer(ctx)
 
 	case dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE:
 		if len(payload.Body) != 1 {
