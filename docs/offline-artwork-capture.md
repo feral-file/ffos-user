@@ -899,6 +899,23 @@ Replay handles this with CDP **flat-mode multi-target** attach:
   meaningless against the new socket. `Target.detachedFromTarget` drops an
   individual child mid-session (e.g. an iframe navigation) so a long-lived
   connection does not accumulate dead per-target state.
+- **The attach/detach handoff itself races the generation boundary.**
+  Because `handleTargetAttached`/`handleTargetDetached` hand off to their
+  own goroutines (see above), a `Target.attachedToTarget` or
+  `Target.detachedFromTarget` event can be read on an OLD top-level
+  session's pump and then not actually get processed until AFTER a
+  reconnect has already superseded that session via a fresh
+  `Attach("", newRoot)`. Plain `Attach`/`Detach` would happily act on the
+  stale `root` anyway, injecting a child bound to a dead socket into the
+  CURRENT generation's target map — the next `EnableForPlaylist`/
+  `Disable` fan-out would then try (and fail or stall on the dead
+  socket's send timeout) to `Fetch.enable`/`disable` it. `replay.go`
+  closes this with `AttachChild`/`DetachChild`: both take the `root` the
+  event was delivered on and verify, atomically under the same
+  `transitionMu` a reconnect's `attachRoot` swap holds, that `root` is
+  still the current top-level session before touching the target map.
+  `kiosktargets.go` calls these instead of plain `Attach`/`Detach` for
+  exactly this reason.
 
 This covers exactly one level of cross-origin nesting (kiosk page ->
 artwork iframe), which is the reproduced topology. It is deliberately not

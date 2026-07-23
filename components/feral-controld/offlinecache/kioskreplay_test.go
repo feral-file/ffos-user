@@ -112,11 +112,14 @@ func TestKioskReplay_AttachOnReconnect_AttachesAndDetachesChildTargets(t *testin
 
 	mockReplayer.EXPECT().Attach("", gomock.Any()).Times(1)
 	attached := make(chan struct{}, 1)
-	mockReplayer.EXPECT().Attach("child-sess-1", gomock.Any()).
-		Do(func(string, offlinecache.CDPSession) { attached <- struct{}{} }).Times(1)
+	mockReplayer.EXPECT().AttachChild(gomock.Any(), "child-sess-1", gomock.Any()).
+		DoAndReturn(func(offlinecache.CDPSession, string, offlinecache.CDPSession) bool {
+			attached <- struct{}{}
+			return true
+		}).Times(1)
 	detached := make(chan struct{}, 1)
-	mockReplayer.EXPECT().Detach("child-sess-1").
-		Do(func(string) { detached <- struct{}{} }).Times(1)
+	mockReplayer.EXPECT().DetachChild(gomock.Any(), "child-sess-1").
+		Do(func(offlinecache.CDPSession, string) { detached <- struct{}{} }).Times(1)
 
 	store, _ := newTestStore(t)
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
@@ -179,6 +182,86 @@ func TestKioskReplay_AttachOnReconnect_AttachesAndDetachesChildTargets(t *testin
 // interception — the caller logs it and still re-syncs scope — but the
 // error must still propagate so it is visible, not swallowed). The
 // top-level target is still attached first.
+// TestKioskReplay_AttachOnReconnect_AttachChildRejectionSkipsResume pins
+// the caller-boundary half of the reconnect-race fix: when Replayer's
+// AttachChild reports the root as superseded (false), handleTargetAttached
+// must NOT attempt to resume the paused target either — see AttachChild's
+// doc for why a rejected attach means the iframe's own top-level page is
+// already gone, so there is nothing left on screen to unfreeze. This
+// complements the replayer-level regression tests in replay_test.go
+// (TestReplayer_AttachChild_RejectsSupersededRoot etc.), which prove the
+// guard itself; this one proves kiosktargets.go actually respects a
+// false return rather than resuming anyway.
+func TestKioskReplay_AttachOnReconnect_AttachChildRejectionSkipsResume(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockDialer := mocks.NewMockWebSocketDialer(ctrl)
+	conn := newFakeWSConn()
+
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:9222/json", nil)
+	require.NoError(t, err)
+	mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9222/json", nil).Return(req, nil).Times(1)
+	mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/page/1"}]`)),
+	}, nil).Times(1)
+	mockDialer.EXPECT().DialContext(gomock.Any(), "ws://127.0.0.1:9222/devtools/page/1", nil).
+		Return(conn, nil, nil).Times(1)
+
+	mockReplayer.EXPECT().Attach("", gomock.Any()).Times(1)
+	rejected := make(chan struct{}, 1)
+	// Simulate root having already been superseded by the time this
+	// event's goroutine runs: AttachChild reports failure.
+	mockReplayer.EXPECT().AttachChild(gomock.Any(), "child-sess-stale", gomock.Any()).
+		DoAndReturn(func(offlinecache.CDPSession, string, offlinecache.CDPSession) bool {
+			rejected <- struct{}{}
+			return false
+		}).Times(1)
+
+	store, _ := newTestStore(t)
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		mockHTTP, mockDialer, wrapper.NewJSON(), wrapper.NewIO(), zaptest.NewLogger(t))
+	defer func() { _ = conn.Close() }()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- kr.AttachOnReconnect(context.Background()) }()
+	ackOutbound(t, conn) // Target.setAutoAttach
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttachOnReconnect did not complete")
+	}
+
+	attachedEvt, err := json.Marshal(map[string]interface{}{
+		"method": "Target.attachedToTarget",
+		"params": map[string]interface{}{
+			"sessionId":  "child-sess-stale",
+			"targetInfo": map[string]interface{}{"targetId": "T1", "type": "iframe"},
+		},
+	})
+	require.NoError(t, err)
+	conn.pushReply(attachedEvt)
+
+	select {
+	case <-rejected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttachChild was not called for the attached-target event")
+	}
+
+	// No Runtime.runIfWaitingForDebugger (or anything else) must be sent
+	// on this session: a rejected AttachChild means the caller must skip
+	// the resume entirely.
+	select {
+	case msg := <-conn.outbound:
+		t.Fatalf("unexpected outbound message after AttachChild rejection: %v", msg)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestKioskReplay_AttachOnReconnect_AutoAttachSetupFailureIsReported(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

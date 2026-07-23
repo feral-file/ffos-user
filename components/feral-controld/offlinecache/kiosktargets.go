@@ -58,7 +58,7 @@ func enableChildTargetAutoAttach(
 		go handleTargetAttached(root, replayer, jsonWrapper, logger, params)
 	})
 	root.On("Target.detachedFromTarget", func(params json.RawMessage) {
-		go handleTargetDetached(replayer, jsonWrapper, logger, params)
+		go handleTargetDetached(root, replayer, jsonWrapper, logger, params)
 	})
 
 	if _, err := root.Send(ctx, "Target.setAutoAttach", map[string]interface{}{
@@ -98,10 +98,13 @@ type targetDetachedEvent struct {
 // Runtime.runIfWaitingForDebugger, even when replay is not currently
 // enabled — a target paused by waitForDebuggerOnStart that is never
 // resumed would hang forever, freezing that iframe on screen. The only
-// non-resuming paths are the early returns below (unparseable event, or an
-// event with no sessionId): there is then no session to route a resume to,
-// and in practice CDP always includes sessionId on this event, so no real
-// target is left dangling.
+// non-resuming paths are the early returns below (unparseable event, an
+// event with no sessionId, or root having already been superseded by a
+// reconnect — see AttachChild's doc): in the first two there is no
+// session to route a resume to (and in practice CDP always includes
+// sessionId on this event, so no real target is left dangling that
+// way); in the third, the top-level page this iframe belonged to is
+// itself already gone, so there is nothing left on screen to unfreeze.
 func handleTargetAttached(
 	root CDPSession,
 	replayer Replayer,
@@ -122,8 +125,18 @@ func handleTargetAttached(
 		return
 	}
 
+	// AttachChild (not plain Attach) is required here: this handler runs
+	// on its own goroutine, off the CDP read pump that delivered this
+	// event, so a kiosk reconnect can supersede root at any point before
+	// this goroutine actually runs — see AttachChild's doc for why
+	// attaching against a superseded root would inject a dead-socket
+	// session into the CURRENT generation's target set.
 	child := root.ForSession(evt.SessionID)
-	replayer.Attach(evt.SessionID, child)
+	if !replayer.AttachChild(root, evt.SessionID, child) {
+		logger.Debug("offline cache replay: dropping Target.attachedToTarget from a superseded root connection",
+			zap.String("session_id", evt.SessionID), zap.String("target_id", evt.TargetInfo.TargetID))
+		return
+	}
 
 	// Resume the paused child now that interception is armed. Use a
 	// background context: this runs off the CDP event pump, decoupled
@@ -137,8 +150,11 @@ func handleTargetAttached(
 
 // handleTargetDetached drops a child target that has gone away (iframe
 // navigated away or was removed). Runs on its own goroutine (never the
-// read pump, since Detach may take transitionMu).
+// read pump, since Detach may take transitionMu). Uses DetachChild (not
+// plain Detach) for the same reconnect-race reason handleTargetAttached
+// uses AttachChild — see AttachChild/DetachChild's docs.
 func handleTargetDetached(
+	root CDPSession,
 	replayer Replayer,
 	jsonWrapper wrapper.JSON,
 	logger *zap.Logger,
@@ -152,5 +168,5 @@ func handleTargetDetached(
 	if evt.SessionID == "" {
 		return
 	}
-	replayer.Detach(evt.SessionID)
+	replayer.DetachChild(root, evt.SessionID)
 }

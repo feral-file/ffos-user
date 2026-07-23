@@ -1347,6 +1347,99 @@ func TestReplayer_Attach_RootReattachDropsChildTargets(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+// TestReplayer_AttachChild_SucceedsWhenRootIsCurrent pins that AttachChild
+// behaves exactly like the plain Attach child path when root still
+// matches the currently active top-level session — the common,
+// no-reconnect-in-flight case.
+func TestReplayer_AttachChild_SucceedsWhenRootIsCurrent(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	child := mocks.NewMockCDPSession(ts.ctrl)
+	child.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+	attached := ts.replayer.AttachChild(ts.mockSession, "child-1", child)
+	assert.True(t, attached, "AttachChild must succeed when root is still the current top-level session")
+}
+
+// TestReplayer_AttachChild_RejectsSupersededRoot pins the fix for a
+// reconnect race (PR #229 review): kiosktargets.go's
+// Target.attachedToTarget handler runs on its own goroutine, off the CDP
+// read pump that delivered the event, so a kiosk reconnect
+// (Attach("", newRoot)) can supersede root before that goroutine's
+// AttachChild call actually runs. AttachChild must detect this and
+// refuse to attach — otherwise a child session bound to the now-dead OLD
+// root's socket would be injected into the CURRENT generation's target
+// set, and the next EnableForPlaylist/Disable fan-out would try (and
+// fail or stall on the dead socket's send timeout) to Fetch.enable/
+// disable a session that can never respond.
+func TestReplayer_AttachChild_RejectsSupersededRoot(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	staleRoot := ts.mockSession
+
+	// Reconnect: a new top-level session supersedes staleRoot.
+	newRoot := mocks.NewMockCDPSession(ts.ctrl)
+	newRoot.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+	staleRoot.EXPECT().Close().Return(nil).Times(1)
+	ts.replayer.Attach("", newRoot)
+
+	// A delayed handler for an event that was read on staleRoot's pump
+	// before the reconnect now tries to attach against staleRoot. The
+	// child mock has NO expectations set at all (no On, no Send) — if
+	// AttachChild wrongly proceeded, the strict gomock controller would
+	// fail this test on the unexpected On call attachChild makes.
+	child := mocks.NewMockCDPSession(ts.ctrl)
+	attached := ts.replayer.AttachChild(staleRoot, "child-stale", child)
+	assert.False(t, attached, "AttachChild must reject a root that a later reconnect has already superseded")
+}
+
+// TestReplayer_DetachChild_SucceedsWhenRootIsCurrent pins that
+// DetachChild behaves exactly like the plain Detach path when root still
+// matches the currently active top-level session.
+func TestReplayer_DetachChild_SucceedsWhenRootIsCurrent(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	child, childHandler := attachChildTarget(t, ts, "child-1", false)
+	child.EXPECT().Close().Return(nil).Times(1)
+	ts.replayer.DetachChild(ts.mockSession, "child-1")
+
+	// After detach, a late event on that child is dropped (no Send).
+	childHandler(requestPausedEvent(t, "req-stale", "https://example.com/whatever.js"))
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestReplayer_DetachChild_RejectsSupersededRoot is DetachChild's
+// counterpart to AttachChild's reconnect-race guard above: a stale
+// Target.detachedFromTarget delivered on a superseded root must never be
+// allowed to touch the CURRENT generation's target set — otherwise, in
+// the (should-never-happen, since CDP mints a fresh sessionId per
+// connection) case a stale event's sessionId collided with a live
+// child's, it would incorrectly drop a target that is still in active
+// use.
+func TestReplayer_DetachChild_RejectsSupersededRoot(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	staleRoot := ts.mockSession
+
+	// Reconnect supersedes staleRoot, then a legitimate child attaches
+	// under the NEW root using the same sessionId a stale event below
+	// will reference.
+	newRoot := mocks.NewMockCDPSession(ts.ctrl)
+	newRoot.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+	staleRoot.EXPECT().Close().Return(nil).Times(1)
+	ts.replayer.Attach("", newRoot)
+
+	liveChild := mocks.NewMockCDPSession(ts.ctrl)
+	liveChild.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+	require.True(t, ts.replayer.AttachChild(newRoot, "child-1", liveChild))
+
+	// liveChild has NO Close() expectation: if DetachChild wrongly
+	// proceeded against the stale root, the strict gomock controller
+	// would fail this test on the unexpected Close() call.
+	ts.replayer.DetachChild(staleRoot, "child-1")
+}
+
 // TestReplayer_Detach_ClosesAndDropsChildTarget pins that detaching a
 // child unregisters it (Close) and stops routing its events.
 func TestReplayer_Detach_ClosesAndDropsChildTarget(t *testing.T) {

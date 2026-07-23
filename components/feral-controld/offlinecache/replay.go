@@ -80,6 +80,29 @@ type Replayer interface {
 	// on an iframe navigation) after EnableForPlaylist already ran, so
 	// attach-time enablement is what keeps interception armed for it.
 	Attach(sessionID string, session CDPSession)
+	// AttachChild is Attach's reconnect-race-safe counterpart for the
+	// flat-mode child-target path specifically: it behaves exactly like
+	// Attach(sessionID, session) with a non-empty sessionID, EXCEPT it
+	// first verifies — atomically, under the same lock Attach's
+	// top-level generation swap uses — that root is still the CURRENT
+	// top-level session (i.e. the most recent Attach("", root) call
+	// this replayer has seen). It exists because kiosktargets.go's
+	// Target.attachedToTarget handler runs on its own goroutine, off
+	// the CDP read pump that delivered the event: a kiosk reconnect can
+	// supersede root (via a fresh Attach("", newRoot) call) at any
+	// point between that event being read and this goroutine actually
+	// running. Without this guard, a delayed handler would call plain
+	// Attach with a child session bound to the now-DEAD old root,
+	// injecting it into the CURRENT generation's target set — the next
+	// EnableForPlaylist/Disable fan-out would then try (and fail or
+	// stall on the dead socket's send timeout) to Fetch.enable/disable
+	// it, degrading or delaying live replay scope for an iframe that no
+	// longer exists the moment its top-level page was replaced.
+	// Returns false (informational, not an error) when root was already
+	// superseded, in which case nothing was attached — see
+	// kiosktargets.go's handleTargetAttached for why the caller must
+	// then also skip resuming the paused target.
+	AttachChild(root CDPSession, sessionID string, session CDPSession) (attached bool)
 	// Detach drops a child target that has gone away
 	// (Target.detachedFromTarget). It unregisters that target's handlers
 	// so a long-lived kiosk connection that sees many iframe navigations
@@ -87,6 +110,15 @@ type Replayer interface {
 	// (top-level) sessionID is a no-op: the top-level target only changes
 	// via a full reconnect, handled by Attach's generation boundary above.
 	Detach(sessionID string)
+	// DetachChild is Detach's counterpart to AttachChild, for the exact
+	// same reconnect-race reason: a Target.detachedFromTarget delivered
+	// on a superseded root must never touch the CURRENT generation's
+	// target set — see AttachChild's doc. In practice this guards
+	// against the (extremely unlikely, since CDP mints a fresh sessionId
+	// per connection) case of a stale event's sessionId colliding with a
+	// live child's; the guard is kept symmetric with AttachChild rather
+	// than relying on that being merely unlikely.
+	DetachChild(root CDPSession, sessionID string)
 	// EnableForItem loads itemID's captured record and enables Fetch
 	// interception scoped to it. Call before displaying a single cached
 	// item. Equivalent to EnableForPlaylist(ctx, []string{itemID}, false):
@@ -248,6 +280,38 @@ func (r *replayer) Attach(sessionID string, session CDPSession) {
 	r.attachChild(sessionID, session)
 }
 
+// AttachChild is the reconnect-race-safe entry point for kiosktargets.go
+// — see the Replayer interface doc for why the plain Attach above is
+// unsafe for that specific caller. Holding transitionMu across BOTH the
+// root-currency check and attachChild's own mutation is what makes this
+// atomic with respect to a concurrent Attach("", newRoot) call: that
+// call also takes transitionMu for its whole attachRoot swap (see
+// Attach's own doc), so there is no window between "root is still
+// current" and "attach the child" where a reconnect could land.
+func (r *replayer) AttachChild(root CDPSession, sessionID string, session CDPSession) bool {
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+
+	if !r.isCurrentRootLocked(root) {
+		return false
+	}
+	r.attachChild(sessionID, session)
+	return true
+}
+
+// isCurrentRootLocked reports whether root is the top-level session most
+// recently installed by Attach("", root) (i.e. attachRoot has not since
+// superseded it with a later reconnect). Caller must hold transitionMu —
+// see AttachChild/DetachChild's docs for why that is what makes this
+// check atomic with respect to a concurrent attachRoot swap, rather than
+// a separate query a caller could race against.
+func (r *replayer) isCurrentRootLocked(root CDPSession) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	current, ok := r.targets[""]
+	return ok && current == root
+}
+
 // attachRoot handles a fresh top-level connection (initial attach or a
 // reconnect after a kiosk/OOM restart). A new top-level session is a
 // generation boundary: every child target from the prior connection
@@ -344,7 +408,32 @@ func (r *replayer) Detach(sessionID string) {
 	}
 	r.transitionMu.Lock()
 	defer r.transitionMu.Unlock()
+	r.detachLocked(sessionID)
+}
 
+// DetachChild is Detach's reconnect-race-safe counterpart, symmetric
+// with AttachChild — see both docs. Caller (kiosktargets.go) passes the
+// root session the Target.detachedFromTarget event was delivered on;
+// this only proceeds if that root is still current, atomically with
+// respect to a concurrent reconnect (transitionMu is the same lock
+// attachRoot's swap uses).
+func (r *replayer) DetachChild(root CDPSession, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+
+	if !r.isCurrentRootLocked(root) {
+		return
+	}
+	r.detachLocked(sessionID)
+}
+
+// detachLocked is Detach/DetachChild's shared body: drop sessionID from
+// the target set and close its session view. Caller must hold
+// transitionMu.
+func (r *replayer) detachLocked(sessionID string) {
 	r.mu.Lock()
 	session := r.targets[sessionID]
 	delete(r.targets, sessionID)
