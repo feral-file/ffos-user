@@ -247,28 +247,44 @@ func (d *downloader) start(ctx context.Context) error {
 		fmt.Sprintf("--remote-debugging-port=%d", d.debugPort),
 		"--remote-debugging-address=127.0.0.1",
 		"--headless=new",
-		// GPU acceleration is intentionally left enabled (no --disable-gpu).
-		// DP-1 software artworks are canvas/WebGL/WASM content (see this
-		// package's doc comment), and the kiosk Chromium a capture must
-		// behave like (users/feralfile/scripts/start-kiosk.sh) runs with
-		// GPU rasterization on. --disable-gpu forces WebGL context
-		// creation to fail outright rather than falling back to software
-		// rendering, so an artwork that feature-detects WebGL and only
-		// fetches its shader/texture assets when a context is available
-		// would silently skip those requests during capture — producing
-		// a Coverage.Complete=true record that is actually missing
-		// resources the real kiosk needs. --disable-gpu is a legacy
-		// workaround for Chromium's old headless implementation and is
-		// not needed for "--headless=new", which supports real GPU
-		// rendering; --ignore-gpu-blocklist mirrors the kiosk's own flag
-		// to stop an offscreen/headless surface being treated as
-		// unsupported hardware. This narrows, but does not close, the
-		// fidelity gap between the two Chromium instances' GPU code
-		// paths (headless capture still renders off-screen rather than
-		// through the kiosk's Wayland surface) — see
-		// docs/offline-artwork-capture.md's known limitations.
-		"--ignore-gpu-blocklist",
-		"--enable-gpu-rasterization",
+		// WebGL context creation must SUCCEED here (plain --disable-gpu
+		// forces it to fail outright rather than fall back to software
+		// rendering — see below), because an artwork that feature-detects
+		// WebGL and only fetches its shader/texture assets when a context
+		// is available would otherwise silently skip those requests
+		// during capture, producing a Coverage.Complete=true record that
+		// is actually missing resources the real kiosk needs.
+		//
+		// An earlier version of this code satisfied that by mirroring the
+		// kiosk's REAL GPU hardware acceleration flags
+		// (--ignore-gpu-blocklist --enable-gpu-rasterization). That was
+		// wrong: capture never renders to a visible surface (see
+		// capture.go's doc — CDP Network events are used only to learn
+		// which URLs were requested, then bytes are re-fetched directly
+		// over HTTP), so pixel-accurate or fast rendering is never
+		// needed, only a non-null WebGL context. Contending for the
+		// SAME physical GPU the kiosk Chromium is actively using for
+		// live hardware-accelerated playback caused device-wide hard
+		// freezes (no OOM-killer trace, no clean shutdown — consistent
+		// with a GPU-driver-level lockup) when a download ran during
+		// playback. Forcing Chromium's software WebGL backend (SwANGLE:
+		// ANGLE translating GL ES calls to SwiftShader) instead gives
+		// the SAME successful-context-creation behavior the artwork
+		// feature-detection needs, entirely on the CPU, with zero
+		// contention for the kiosk's GPU.
+		//
+		// --enable-unsafe-swiftshader is required from Chromium 130+:
+		// automatic SwiftShader-as-WebGL-fallback was deprecated, so
+		// software WebGL must be explicitly requested or context
+		// creation fails the same way --disable-gpu does — see
+		// https://chromium.googlesource.com/chromium/src/+/main/docs/gpu/swiftshader.md.
+		// "unsafe" here refers to SwiftShader's weaker sandboxing
+		// guarantees for untrusted content, an accepted trade-off this
+		// process already makes by design (it exists specifically to
+		// navigate to and execute untrusted third-party artwork code).
+		"--use-gl=angle",
+		"--use-angle=swiftshader-webgl",
+		"--enable-unsafe-swiftshader",
 		// Matches the kiosk's autoplay policy (start-kiosk.sh). An
 		// artwork that only requests further assets after a video/audio
 		// element's play() promise resolves must see the same

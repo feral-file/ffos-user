@@ -987,22 +987,38 @@ identical cache state.
   than special-cased (if it is a `POST`/similar unsafe method, specifically
   as `unsupported_method(<method>):<url>` — see §4.7), and artworks that
   degrade gracefully when it is unavailable are unaffected.
-- **Headless GPU rendering path is not identical to the kiosk's.**
-  `downloader.go` launches headless Chromium with GPU acceleration enabled
-  (`--ignore-gpu-blocklist`/`--enable-gpu-rasterization`, no
-  `--disable-gpu`) so WebGL/canvas artworks take the same
-  context-available code path during capture as they do live — the prior
-  `--disable-gpu` flag made `canvas.getContext("webgl")` return `null`
-  during capture, which could make a feature-detecting artwork silently
-  skip GL-dependent resource fetches that the live kiosk does make. This
-  narrows, but does not close, the gap: headless capture still renders
-  off-screen rather than through the kiosk's Wayland surface
-  (`start-kiosk.sh`), and the two Chromium instances are not forced onto
-  the same ANGLE/Vulkan backend. This has not been validated against the
-  actual device GPU/driver under concurrent kiosk load; if field capture
-  results diverge from live rendering for GPU-heavy artworks, start by
-  comparing `chrome://gpu` output between the two Chromium instances on
-  the actual hardware.
+- **Headless GPU rendering path is not identical to the kiosk's, and
+  deliberately does not touch real GPU hardware.** `downloader.go`
+  launches headless Chromium with Chromium's software WebGL backend
+  forced on (`--use-gl=angle --use-angle=swiftshader-webgl
+  --enable-unsafe-swiftshader`, no `--disable-gpu`) so WebGL/canvas
+  artworks take the same context-available code path during capture as
+  they do live — plain `--disable-gpu` makes `canvas.getContext("webgl")`
+  return `null` during capture, which could make a feature-detecting
+  artwork silently skip GL-dependent resource fetches that the live
+  kiosk does make. `--enable-unsafe-swiftshader` is required from
+  Chromium 130+: automatic SwiftShader-as-WebGL-fallback was deprecated,
+  so software WebGL must be explicitly requested or context creation
+  fails the same way `--disable-gpu` does.
+  An earlier version of this flag set instead mirrored the kiosk's REAL
+  GPU hardware acceleration (`--ignore-gpu-blocklist
+  --enable-gpu-rasterization`) on the theory that it would narrow the
+  rendering-fidelity gap. Field testing found this caused device-wide
+  hard freezes (no OOM-killer trace, no clean shutdown logged — the
+  signature of a GPU-driver-level lockup, not a memory issue) when a
+  download ran while the kiosk was actively using the same physical GPU
+  for live hardware-accelerated playback. Since capture never renders to
+  a visible surface — it uses CDP `Network` events only to learn which
+  URLs a page requested, then re-fetches bytes directly over HTTP (see
+  §3, `capture.go`'s doc) — pixel-accurate or fast rendering was never
+  actually required, only a non-null WebGL context; forcing the software
+  backend gives that same successful-context-creation behavior with zero
+  contention for the kiosk's GPU. This still does not close the fidelity
+  gap for artworks whose *visual output* depends on real GPU rendering
+  characteristics (headless capture renders off-screen via SwiftShader
+  rather than through the kiosk's Wayland surface), but capture only
+  needs the resource-fetch side effects of that rendering, not its visual
+  accuracy — see `start-kiosk.sh`.
 
 ## 9. See also
 

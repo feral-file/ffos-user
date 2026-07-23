@@ -101,12 +101,16 @@ func TestDownloader_Acquire_StartsChromiumAndReturnsEndpoint(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:9223", endpoint)
 }
 
-// TestDownloader_Start_EnablesGPUAndMatchesKioskAutoplay pins the launch
-// flags that keep headless capture's rendering behavior aligned with the
-// kiosk Chromium (users/feralfile/scripts/start-kiosk.sh). Reintroducing
-// --disable-gpu here would silently break WebGL/canvas artwork capture:
-// see the rationale in downloader.go's start().
-func TestDownloader_Start_EnablesGPUAndMatchesKioskAutoplay(t *testing.T) {
+// TestDownloader_Start_UsesSoftwareWebGLAndMatchesKioskAutoplay pins the
+// launch flags that keep WebGL context creation succeeding (so
+// feature-detection-gated artwork resource fetches still happen) WITHOUT
+// contending for the kiosk's real GPU hardware — see the rationale in
+// downloader.go's start(). Reintroducing either --disable-gpu (breaks
+// WebGL/canvas artwork capture) or the real-GPU-hardware flags
+// (--ignore-gpu-blocklist/--enable-gpu-rasterization, which previously
+// caused device-wide freezes by contending with the kiosk's own GPU use)
+// would regress this.
+func TestDownloader_Start_UsesSoftwareWebGLAndMatchesKioskAutoplay(t *testing.T) {
 	ts := setupDownloader(t, time.Hour)
 	defer ts.ctrl.Finish()
 	defer func() { _ = ts.downloader.Close() }()
@@ -116,8 +120,11 @@ func TestDownloader_Start_EnablesGPUAndMatchesKioskAutoplay(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotContains(t, ts.lastStartArgs, "--disable-gpu")
-	assert.Contains(t, ts.lastStartArgs, "--ignore-gpu-blocklist")
-	assert.Contains(t, ts.lastStartArgs, "--enable-gpu-rasterization")
+	assert.NotContains(t, ts.lastStartArgs, "--ignore-gpu-blocklist")
+	assert.NotContains(t, ts.lastStartArgs, "--enable-gpu-rasterization")
+	assert.Contains(t, ts.lastStartArgs, "--use-gl=angle")
+	assert.Contains(t, ts.lastStartArgs, "--use-angle=swiftshader-webgl")
+	assert.Contains(t, ts.lastStartArgs, "--enable-unsafe-swiftshader")
 	assert.Contains(t, ts.lastStartArgs, "--autoplay-policy=no-user-gesture-required")
 }
 
