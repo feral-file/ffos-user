@@ -59,7 +59,7 @@ verify-go-component-test:
 	@test -n "$(GO_COMPONENT)" || (echo "GO_COMPONENT is required" >&2; exit 2)
 	@cd components/$(GO_COMPONENT) && go mod download
 	@cd components/$(GO_COMPONENT) && go vet ./...
-	@cd components/$(GO_COMPONENT) && go test -v $$(go list ./... | grep -vE "/mocks|/wrapper")
+	@cd components/$(GO_COMPONENT) && go test -v -race $$(go list ./... | grep -vE "/mocks|/wrapper")
 
 # verify-scripts pins the user-session shell contracts that ship only on the
 # full-image rail (feral-player static serving + the headless startup contract).
