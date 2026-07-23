@@ -210,10 +210,43 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.Watchdog.Start(ctx)
 	defer app.Watchdog.Stop()
 
-	// Initialize DBus client
-	err = app.DBus.Start()
-	if err != nil {
-		return err
+	// Initialize DBus client. NON-FATAL: controld is the sole SoftAP/LAN
+	// recovery owner, and D-Bus startup can fail transiently — the session bus
+	// socket may not be up yet at boot, or the com.feralfile.controld name may
+	// still be held by a dying predecessor during a restart race. Returning
+	// here crash-looped the daemon before the hub or provisioning ever
+	// started, leaving an offline device with NEITHER recovery surface.
+	// Continue startup and retry in the background instead: every D-Bus
+	// consumer degrades gracefully until a retry succeeds (Call errors →
+	// provisioning's connUnknown discipline assumes offline and keeps
+	// re-querying, so the setup AP still raises; handler registration is an
+	// in-memory append that takes effect once the bus connects).
+	//
+	// Retries call Start() WITHOUT an interleaved Stop(): godbus's Stop closes
+	// its done channel permanently, so a Stop→Start cycle would leave the new
+	// signal-delivery goroutine stillborn. A retry after a name-conflict
+	// failure can re-register the signal channel (duplicate signal deliveries;
+	// our handlers are level-triggered and idempotent) — proper generation
+	// handling belongs in godbus as a follow-up.
+	if err := app.DBus.Start(); err != nil {
+		app.Logger.Error("DBus start failed; continuing startup and retrying in background", zap.Error(err))
+		go func() {
+			backoff := time.Second
+			for {
+				if serr := app.Clock.SleepContext(ctx, backoff); serr != nil {
+					return
+				}
+				if serr := app.DBus.Start(); serr == nil {
+					app.Logger.Info("DBus client started after retry")
+					return
+				} else { //nolint:revive // keep the retry outcome branches adjacent
+					app.Logger.Warn("DBus start retry failed", zap.Error(serr), zap.Duration("backoff", backoff))
+				}
+				if backoff *= 2; backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+			}
+		}()
 	}
 	defer func() {
 		_ = app.DBus.Stop()

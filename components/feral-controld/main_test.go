@@ -324,6 +324,65 @@ func TestApp_Run_Success(t *testing.T) {
 			},
 		},
 		{
+			// A transient D-Bus startup failure (session-bus socket race, bus name
+			// still held by a dying predecessor) must NOT abort startup: controld
+			// is the sole SoftAP/LAN-recovery owner, and aborting here happened
+			// BEFORE the hub or provisioning started — a crash-looping daemon left
+			// an offline device with neither recovery surface. run() must log,
+			// retry Start in the background, and still bring the hub up and reach
+			// READY; D-Bus consumers degrade gracefully (the connectivity query
+			// errors → treated as offline) until a retry lands.
+			name: "DBus start failure continues to READY with recovery surfaces",
+			setupFunc: func(ts *testSetup) {
+				ts.mockStateManager.EXPECT().
+					Load(ts.logger).
+					Return(&state.State{
+						Relayer: &state.RelayerState{TopicID: ""},
+					}, nil)
+
+				// Initial Start fails; the background retry parks in SleepContext
+				// until the test context ends, so no second Start is attempted.
+				ts.mockDBus.EXPECT().
+					Start().
+					Return(errors.New("session bus unavailable"))
+				ts.mockClock.EXPECT().
+					SleepContext(gomock.Any(), gomock.Any()).
+					DoAndReturn(func(ctx context.Context, _ time.Duration) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}).
+					AnyTimes()
+				ts.mockDBus.EXPECT().Stop().Return(nil).AnyTimes()
+
+				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
+				ts.mockCDP.EXPECT().Close()
+				ts.mockWatchdog.EXPECT().Start(gomock.Any())
+				ts.mockWatchdog.EXPECT().Stop()
+				ts.mockMediator.EXPECT().Start()
+				ts.mockMediator.EXPECT().Stop()
+				ts.mockStatusPoller.EXPECT().Start(gomock.Any())
+				ts.mockStatusPoller.EXPECT().Stop()
+				ts.mockRefresher.EXPECT().Start()
+				ts.mockRefresher.EXPECT().Stop()
+				ts.mockOOMRecoverer.EXPECT().Start(gomock.Any())
+
+				// The LAN recovery hub still comes up...
+				ts.mockHub.EXPECT().Start()
+				ts.mockHub.EXPECT().Stop().Return(nil)
+				ts.mockOS.EXPECT().ReadFile(constants.HOSTNAME_FILE).Return([]byte("test-hostname"), nil)
+				ts.mockMediator.EXPECT().InitializeMDNS(gomock.Any(), gomock.Any(), gomock.Any())
+
+				// ...the degraded connectivity query reads as offline (no relayer
+				// connect attempted)...
+				ts.mockDBus.EXPECT().
+					Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+					Return(nil, errors.New("DBusClient not started"))
+
+				// ...and the daemon still reaches READY.
+				ts.mockDaemon.EXPECT().SdNotify(false, go_daemon.SdNotifyReady).Return(true, nil)
+			},
+		},
+		{
 			// Corrupt/unreadable persisted state must NOT abort startup: controld
 			// is the sole SoftAP/LAN-recovery owner, and returning the error
 			// crash-looped the daemon, stranding an offline device with no
@@ -489,29 +548,11 @@ func TestApp_Run_Errors(t *testing.T) {
 		// run() quarantines the unreadable file and continues on an empty state
 		// (see "state load failure quarantines and continues startup" in the
 		// success table) — aborting crash-looped the sole recovery daemon.
-		{
-			name: "DBus start failure",
-			setupFunc: func(ts *testSetup) {
-				// Mock state load ok
-				ts.mockStateManager.EXPECT().
-					Load(ts.logger).
-					Return(&state.State{
-						Relayer: &state.RelayerState{TopicID: ""},
-					}, nil)
-
-				// CDP.Start runs after DBus.Start, so a DBus failure returns before it.
-
-				// Mock Watchdog start and stop
-				ts.mockWatchdog.EXPECT().Start(gomock.Any())
-				ts.mockWatchdog.EXPECT().Stop()
-
-				// Mock DBus start failure
-				ts.mockDBus.EXPECT().
-					Start().
-					Return(errors.New("DBus service unavailable"))
-			},
-			wantErr: "DBus service unavailable",
-		},
+		// NOTE: "DBus start failure" is deliberately NOT an error case anymore:
+		// run() logs, retries Start in the background, and continues bringing up
+		// the recovery surfaces (see "DBus start failure continues to READY with
+		// recovery surfaces" in the success table) — aborting crash-looped the
+		// sole SoftAP/LAN-recovery daemon before either surface existed.
 		{
 			// PR #218 review regression: a failed initial relayer connection must NOT
 			// abort run(). Aborting here happens before SdNotifyReady, so a relayer
