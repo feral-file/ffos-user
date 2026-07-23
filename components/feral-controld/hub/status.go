@@ -12,12 +12,19 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
-// StatusContract is the LAN API version reported by GET /api/status. It is a
-// forward-compatibility detection field for the #3471 dual-running window: while
-// BLE and the new LAN pairing path co-exist, a client reads this to tell which
-// LAN contract a given device speaks before it commits to a flow. Bump this only
-// on a breaking change to the LAN API surface; additive fields keep "1".
+// StatusContract is the LEGACY LAN API version reported by GET /api/status.
+// The route is kept for transitional tooling that already reads it; it is NOT
+// the surface the pairing app keys on (see StatusContractV2). Bump neither in
+// place: breaking changes get a new versioned route.
 const StatusContract = "1"
+
+// StatusContractV2 is the LAN API version reported by GET /api/v2/status — the
+// pairing surface the new app keys on. The versioned route is the firmware
+// gate: old firmware serves no /api/v2/status (and no `api` mDNS TXT key), so
+// the app can tell a LAN-pairable device from an old one by a 404 alone,
+// without shape-sniffing /api/status. Keep in sync with mdns' advertised
+// api=<v> TXT value.
+const StatusContractV2 = "2"
 
 // StatusProvider supplies the dynamic device fields served at GET /api/status.
 // The hub owns only the transport and the contract version; everything device-
@@ -58,9 +65,11 @@ type StatusInfo struct {
 	TopicID string
 }
 
-// statusResponse is the on-the-wire JSON shape of GET /api/status. branch and
-// internet are additive (contract stays "1"); together with the existing
-// fields they make the LAN payload informationally equivalent to the
+// statusResponse is the on-the-wire JSON shape of GET /api/status AND
+// /api/v2/status (identical fields; only the contract value differs per
+// route). branch and internet are additive (the legacy route keeps contract
+// "1"); together with the existing fields they make the LAN payload
+// informationally equivalent to the
 // device_connect claim QR (device_id|topic_id|internet|branch|version|phase —
 // the QR's constant "pairing" phase is derivable as claimed==false with a
 // served topic_id).
@@ -76,9 +85,22 @@ type statusResponse struct {
 	TopicID      string `json:"topic_id"`
 }
 
-// handleStatus serves GET /api/status: a small JSON snapshot LAN clients use to
-// discover a device's identity, LAN contract version, and claim/setup state.
+// handleStatus serves GET /api/status — the legacy (contract "1") route, kept
+// for transitional tooling. New clients use /api/v2/status.
 func (h *hub) handleStatus(w http.ResponseWriter, r *http.Request) {
+	h.serveStatus(w, r, StatusContract)
+}
+
+// handleStatusV2 serves GET /api/v2/status — the LAN pairing surface. Same
+// payload shape as v1; the versioned route (plus the mDNS `api` TXT key) is
+// what lets the app filter out old firmware.
+func (h *hub) handleStatusV2(w http.ResponseWriter, r *http.Request) {
+	h.serveStatus(w, r, StatusContractV2)
+}
+
+// serveStatus renders the status snapshot LAN clients use to discover a
+// device's identity, LAN contract version, and claim/setup state.
+func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -101,7 +123,7 @@ func (h *hub) handleStatus(w http.ResponseWriter, r *http.Request) {
 		DeviceID:     info.DeviceID,
 		Version:      info.Version,
 		Branch:       info.Branch,
-		Contract:     StatusContract,
+		Contract:     contract,
 		Claimed:      info.Claimed,
 		Internet:     info.Internet,
 		SetupState:   info.SetupState,

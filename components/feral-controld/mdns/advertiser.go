@@ -12,6 +12,15 @@ const (
 	defaultPort   = 1111
 	serviceType   = "_ff1._tcp"
 	serviceDomain = "local."
+
+	// APITXTVersion is the LAN API version advertised as the `api=<v>` TXT
+	// key. It mirrors hub.StatusContractV2 (kept in sync by convention, not a
+	// production import — mdns stays hub-free; a hub-side test asserts the two
+	// constants are equal): the pairing app filters discovery on this
+	// key, so old firmware — which advertises no `api` key and serves no
+	// /api/v2/status — never pops a pairing notification and is never offered
+	// as pairable, without the app needing an HTTP probe per discovered device.
+	APITXTVersion = "2"
 )
 
 // DeviceInfo contains the info to publish via mDNS.
@@ -44,6 +53,29 @@ func New(logger *zap.Logger) Advertiser {
 	return &advertiser{logger: logger}
 }
 
+// txtRecords builds the advertised TXT set. Split from Start so the record
+// contract is unit-testable without zeroconf binding sockets.
+func txtRecords(info DeviceInfo) []string {
+	txt := []string{}
+	if info.ID != "" {
+		txt = append(txt, "id="+info.ID)
+	}
+	if info.Name != "" {
+		txt = append(txt, "name="+info.Name)
+	}
+	// claimed is always published (even when false) so a resolver can rely on
+	// its presence rather than having to infer "unclaimed" from an absent key.
+	if info.Claimed {
+		txt = append(txt, "claimed=true")
+	} else {
+		txt = append(txt, "claimed=false")
+	}
+	// api is always published: it is the discovery-time firmware gate (see
+	// APITXTVersion). Old firmware's records lack the key entirely.
+	txt = append(txt, "api="+APITXTVersion)
+	return txt
+}
+
 // Start registers an mDNS service.
 func (a *advertiser) Start(info DeviceInfo) error {
 	a.mu.Lock()
@@ -65,22 +97,7 @@ func (a *advertiser) Start(info DeviceInfo) error {
 		name = "FF1"
 	}
 
-	txt := []string{}
-	if info.ID != "" {
-		txt = append(txt, "id="+info.ID)
-	}
-	if info.Name != "" {
-		txt = append(txt, "name="+info.Name)
-	}
-	// claimed is always published (even when false) so a resolver can rely on
-	// its presence rather than having to infer "unclaimed" from an absent key.
-	if info.Claimed {
-		txt = append(txt, "claimed=true")
-	} else {
-		txt = append(txt, "claimed=false")
-	}
-
-	server, err := zeroconf.Register(name, serviceType, serviceDomain, port, txt, nil)
+	server, err := zeroconf.Register(name, serviceType, serviceDomain, port, txtRecords(info), nil)
 	if err != nil {
 		a.mu.Unlock()
 		return fmt.Errorf("failed to register mdns service: %w", err)

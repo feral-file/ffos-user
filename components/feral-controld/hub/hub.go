@@ -93,6 +93,7 @@ func (h *hub) routes() {
 	mux.HandleFunc("/api/cast", h.withMiddleware("cast", h.handleCast))
 	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
 	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
+	mux.HandleFunc("/api/v2/status", h.withMiddleware("status_v2", h.handleStatusV2))
 	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
 
 	// Chokepoint completeness: without this, the ServeMux serves unmatched

@@ -166,13 +166,14 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 | Route | Method | Purpose |
 |---|---|---|
 | `/api/cast` | POST | Same JSON command envelope as the relayer (`command` + `request`); routed through the same `commandrouter`, including the pre-CDP mint-pairing commands. Non-POST → `405`. A per-command token-bucket gate inside `commandrouter` can additionally return `429`. |
-| `/api/status` | GET | Device/setup status JSON (below). Non-GET → `405`. |
+| `/api/status` | GET | LEGACY device/setup status JSON (below), `contract: "1"`. Kept for transitional tooling; not the pairing surface. Non-GET → `405`. |
+| `/api/v2/status` | GET | The LAN **pairing** surface: identical payload, `contract: "2"`. The versioned route is the firmware gate — old firmware 404s here (and advertises no `api` mDNS TXT key), which is how the app tells LAN-pairable devices from old ones. Non-GET → `405`. |
 | `/api/notification` | GET → WS | Upgrades to a WebSocket that streams the same outbound notifications the relayer receives. Non-GET → `405`. |
 | `/metrics` | GET | Prometheus text exposition of playback metrics. |
 
 The hub does not carry `messageID == "system"` messages; topic assignment is relayer-only.
 
-**`GET /api/status` body** (`hub/status.go`):
+**`GET /api/status` / `GET /api/v2/status` body** (`hub/status.go`; identical shape, only `contract` differs):
 
 ```json
 {
@@ -188,7 +189,7 @@ The hub does not carry `messageID == "system"` messages; topic assignment is rel
 }
 ```
 
-- `contract` is the string `"1"`, owned by the hub (not the status provider). It is the **dual-running-window** signal: when a future firmware turns on LAN authorization and starts retiring the open `:1111` surface, clients read this field to tell old-firmware from new-firmware devices instead of hitting a silent hard break. Its value today is simply that every shipped device carries the field. See `docs/web-controller-feasibility.md`.
+- `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface. See `docs/web-controller-feasibility.md`.
 - `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.
 - `claimed` mirrors the mDNS TXT `claimed` value.
 - `branch` and `version` are read from the same `ff1-config.json` the OTA gate uses, so the LAN payload can never disagree with the claim QR.
@@ -196,7 +197,7 @@ The hub does not carry `messageID == "system"` messages; topic assignment is rel
 
 **Claim-QR parity.** The `device_connect` claim QR encodes `device_id|topic_id|internet|branch|version|setup_phase`. Every segment is recoverable from this endpoint, so a LAN client that discovered the device over mDNS needs nothing the QR has: `device_id` → `device_id`, `topic_id` → `topic_id` (served claimed or not: FF1 is multi-controller, so additional phones — and a replacement phone after the original is lost — pair over LAN without a QR; LAN-presence is the authorization boundary, matching the BLE-era posture), `internet` → `internet`, `branch` → `branch`, `version` → `version`, and the QR's constant `pairing` phase → derivable as `claimed == false` with a non-empty `topic_id` (`setup_state` + `claimed` carry strictly more information).
 
-**mDNS advertisement** (`mdns` package): service type `_ff1._tcp` in `local.`, port `1111`. TXT keys: `id`, `name`, and `claimed` (always published, even when `false`, so resolvers can rely on the key's presence). Discoverability is link-keyed (advertised whenever there is any network link, torn down when the link drops), and a claim-state flip triggers a Stop+Start re-registration so the TXT `claimed` value is refreshed.
+**mDNS advertisement** (`mdns` package): service type `_ff1._tcp` in `local.`, port `1111`. TXT keys: `id`, `name`, `claimed` (always published, even when `false`, so resolvers can rely on the key's presence), and `api` (always published; value mirrors the v2 status contract, currently `api=2`). `api` is the discovery-time firmware gate: the pairing app requires it before treating a discovered device as pairable, so old firmware — whose records lack the key — never triggers a pairing notification, without a per-device HTTP probe. Discoverability is link-keyed (advertised whenever there is any network link, torn down when the link drops), and a claim-state flip triggers a Stop+Start re-registration so the TXT `claimed` value is refreshed.
 
 ---
 

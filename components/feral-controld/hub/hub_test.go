@@ -14,11 +14,13 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -886,6 +888,69 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 	assert.Equal(t, "connected", got["connectivity"])
 	assert.Equal(t, "topic-xyz", got["topic_id"],
 		"an UNCLAIMED device serves its topic_id — that is the LAN claim handover")
+}
+
+// TestStatusContractV2MatchesMDNSTXTVersion enforces the hub<->mdns version
+// sync that production code keeps by convention (mdns must stay hub-free, so
+// no import ties the constants together). The pairing app's gate is two-part —
+// TXT api=<v> at discovery, contract <v> on /api/v2/status — and bumping one
+// side without the other would silently desync it; this test makes that a
+// build failure instead.
+func TestStatusContractV2MatchesMDNSTXTVersion(t *testing.T) {
+	assert.Equal(t, StatusContractV2, mdns.APITXTVersion,
+		"hub.StatusContractV2 and mdns.APITXTVersion must be bumped together")
+}
+
+// TestHandleStatusV2_SamePayloadContract2 pins the v2 pairing surface: same
+// fields as /api/status but contract "2". The versioned route is the firmware
+// gate the app keys on — old firmware 404s here — so v2 must never silently
+// diverge from the provider-backed payload, and v1 must keep reporting "1".
+func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mux := http.NewServeMux()
+	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
+
+	provider := stubStatusProvider{info: StatusInfo{
+		DeviceID:     "ff1-abc",
+		Version:      "1.2.3",
+		Branch:       "develop",
+		Claimed:      false,
+		Internet:     true,
+		SetupState:   "unclaimed",
+		Connectivity: "connected",
+		TopicID:      "topic-xyz",
+	}}
+	New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger)
+
+	// Through the real mux, so the route registration itself is covered.
+	get := func(path string) map[string]any {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		require.Equal(t, http.StatusOK, w.Code, path)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), path)
+		return got
+	}
+
+	v2 := get("/api/v2/status")
+	assert.Equal(t, StatusContractV2, v2["contract"])
+	assert.Equal(t, "ff1-abc", v2["device_id"])
+	assert.Equal(t, "develop", v2["branch"])
+	assert.Equal(t, "topic-xyz", v2["topic_id"])
+	assert.Equal(t, true, v2["internet"])
+
+	v1 := get("/api/status")
+	assert.Equal(t, StatusContract, v1["contract"], "legacy route keeps contract 1")
+	delete(v1, "contract")
+	delete(v2, "contract")
+	assert.Equal(t, v1, v2, "v1 and v2 must serve the identical provider payload")
 }
 
 // TestHandleStatus_ClaimedDeviceStillServesTopicID pins the multi-controller

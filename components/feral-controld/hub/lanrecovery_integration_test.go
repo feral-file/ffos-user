@@ -292,6 +292,23 @@ func TestLANRecovery_OfflineCommandPipeline(t *testing.T) {
 		assert.Equal(t, "ff1-offline", got["device_id"])
 		assert.Equal(t, "disconnected", got["connectivity"], "device is offline (no internet/relayer)")
 	})
+
+	t.Run("v2 status read returns contract 2 while offline", func(t *testing.T) {
+		rig := newLANRig(t, commandrouter.DefaultGateConfig(), offlineStatus())
+
+		resp, err := http.Get(rig.server.URL + "/api/v2/status")
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		b, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(b, &got))
+		assert.Equal(t, StatusContractV2, got["contract"])
+		assert.Equal(t, "2", got["contract"])
+		assert.Equal(t, "ff1-offline", got["device_id"])
+	})
 }
 
 // TestLANRecovery_StormLimiterProtectsOfflinePipeline proves the storm gate is
