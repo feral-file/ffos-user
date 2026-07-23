@@ -1166,15 +1166,12 @@ func TestRefresher_ProcessPlayingPlaylist_NoPlaylistData(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Expect status poller to return player status with no playlist data
+	// An empty player status is nothing-to-refresh: the startup loop succeeds
+	// and settles into the ticker (no retry Sleep).
+	setupBackgroundMocks(ts)
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, nil), nil).
-		AnyTimes()
-
-	// Expect Sleep to be called during retry logic
-	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
 		AnyTimes()
 
 	// Should not call DP1 or CDP since there's no playlist data
@@ -1354,15 +1351,12 @@ func TestRefresher_ProcessPlayingPlaylist_InvalidPlayerStatus(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Test with invalid player status (no playlist URL or playlist)
+	// A displayPlaylist status with no playlist payload is the unconfigured
+	// state: treated as success, so the loop settles into the ticker.
+	setupBackgroundMocks(ts)
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, nil), nil).
-		AnyTimes()
-
-	// Expect Sleep to be called during retry logic
-	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
 		AnyTimes()
 
 	// Should not call DP1 or CDP since there's no valid playlist data
@@ -1658,4 +1652,32 @@ func TestRefresher_Background_RetryLogic(t *testing.T) {
 
 	// Stop the refresher
 	ts.refresher.Stop()
+}
+
+// TestRefresher_ProcessPlayingPlaylist_EmptyPlayerIsNotAnError: a fresh-boot
+// player reports displayPlaylist with neither a playlist URL nor an inline
+// playlist (nothing assigned yet). That is a normal state, not a failure: no
+// Error logs, no DP1/CDP traffic, and the startup loop must settle into the
+// refresh ticker instead of spinning at the 5-second polling cadence forever.
+func TestRefresher_ProcessPlayingPlaylist_EmptyPlayerIsNotAnError(t *testing.T) {
+	core, observed := observer.New(zap.ErrorLevel)
+	ts := setupWithLogger(t, zap.New(core))
+	defer ts.teardown()
+	ts.mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	// Ticker mocks only: no clock.Sleep expectation, so a regression to the
+	// error-and-retry path fails the test on the unexpected Sleep call.
+	setupBackgroundMocks(ts)
+
+	ts.mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ts.ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, nil), nil).
+		AnyTimes()
+	// No DP1 or CDP Send expectations: nothing must be processed or sent.
+
+	ts.refresher.Start()
+	time.Sleep(100 * time.Millisecond)
+	ts.refresher.Stop()
+
+	assert.Zero(t, observed.Len(), "empty player state must not log Error-level entries")
 }

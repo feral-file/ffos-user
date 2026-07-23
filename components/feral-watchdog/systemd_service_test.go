@@ -20,10 +20,10 @@ func TestSystemdMonitor_ServiceFailedMetric_EmittedOnceWhileStuck(t *testing.T) 
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active", "active")
+	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "active", "active", "failed", "active")
+	setServiceStates(t, "active", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 	requireNoError(t, monitor.check(ctx))
 
@@ -36,54 +36,54 @@ func TestSystemdMonitor_ServiceFailedIncident_OneForCascade(t *testing.T) {
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active", "active")
+	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	// First service fails -> incident opens.
-	setServiceStates(t, "active", "active", "failed", "active")
+	setServiceStates(t, "active", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	// Additional service fails while incident is already open.
-	setServiceStates(t, "active", "failed", "failed", "active")
+	setServiceStates(t, "failed", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-setupd.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
 }
 
 func TestSystemdMonitor_ServiceFailedIncident_ReopensAfterRecovery(t *testing.T) {
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active", "active")
+	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "active", "active", "failed", "active")
+	setServiceStates(t, "active", "failed", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	// All services recover -> incident latch resets.
-	setServiceStates(t, "active", "active", "active", "active")
+	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "active", "failed", "active", "active")
+	setServiceStates(t, "failed", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
 	assertMetricCount(t, metrics, "service_failed_incident 1", 2)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-setupd.service"} 1`, 1)
+	assertMetricCount(t, metrics, `ff_service_failed{service="feral-player.service"} 1`, 1)
 }
 
 func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active", "active")
+	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "failed", "active", "active", "active")
+	setServiceStates(t, "failed", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 	requireNoError(t, monitor.check(ctx))
 
@@ -92,22 +92,21 @@ func TestSystemdMonitor_PlayerServiceFailedIsTracked(t *testing.T) {
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 }
 
-// After decoupling from chromium-ready.target, an inactive feral-setupd or
-// feral-controld is a genuine fault: it must be reported as a failure
-// (per-service metric + incident notification), not the old Info-level
-// "expected teardown". The target state is no longer consulted.
-func TestSystemdMonitor_InactiveSetupdControld_ReportedAsFailure(t *testing.T) {
+// After decoupling from chromium-ready.target, an inactive feral-controld is a
+// genuine fault: it must be reported as a failure (per-service metric + incident
+// notification), not the old Info-level "expected teardown". The target state is
+// no longer consulted.
+func TestSystemdMonitor_InactiveControld_ReportedAsFailure(t *testing.T) {
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active", "active")
+	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "active", "inactive", "inactive", "active")
+	setServiceStates(t, "active", "inactive", "active")
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
-	assertMetricCount(t, metrics, `ff_service_failed{service="feral-setupd.service"} 1`, 1)
 	assertMetricCount(t, metrics, `ff_service_failed{service="feral-controld.service"} 1`, 1)
 	assertMetricCount(t, metrics, "service_failed_incident 1", 1)
 }
@@ -121,12 +120,11 @@ func TestSystemdMonitor_InactiveServiceLogLevels(t *testing.T) {
 	logger := zap.New(core)
 	monitor := NewSystemdMonitor(nil, logger, NewCommandHandler(logger, nil), nil)
 
-	setServiceStates(t, "inactive", "inactive", "inactive", "inactive")
+	setServiceStates(t, "inactive", "inactive", "inactive")
 	requireNoError(t, monitor.check(context.Background()))
 
 	assertInactiveLogLevels(t, logs, map[string]zapcore.Level{
 		"feral-controld.service":     zapcore.ErrorLevel,
-		"feral-setupd.service":       zapcore.ErrorLevel,
 		"feral-player.service":       zapcore.ErrorLevel,
 		"feral-sys-monitord.service": zapcore.ErrorLevel,
 	})
@@ -134,15 +132,15 @@ func TestSystemdMonitor_InactiveServiceLogLevels(t *testing.T) {
 
 // feral-player and feral-sys-monitord keep their prior inactive handling: an
 // inactive reading is logged (Error) but is NOT escalated to a failure metric.
-// This locks the intended asymmetry against setupd/controld.
+// This locks the intended asymmetry against controld.
 func TestSystemdMonitor_InactivePlayerSysMonitord_NoFailureMetric(t *testing.T) {
 	monitor, collector := newTestSystemdMonitor(t)
 	ctx := context.Background()
 
-	setServiceStates(t, "active", "active", "active", "active")
+	setServiceStates(t, "active", "active", "active")
 	requireNoError(t, monitor.check(ctx))
 
-	setServiceStates(t, "inactive", "active", "active", "inactive")
+	setServiceStates(t, "inactive", "active", "inactive")
 	requireNoError(t, monitor.check(ctx))
 
 	metrics := collector.Metrics()
@@ -227,9 +225,6 @@ case "$unit" in
   "feral-player.service")
     state="${FF_TEST_PLAYER_STATE:-active}"
     ;;
-  "feral-setupd.service")
-    state="${FF_TEST_SETUPD_STATE:-active}"
-    ;;
   "feral-controld.service")
     state="${FF_TEST_CONTROLD_STATE:-active}"
     ;;
@@ -280,10 +275,9 @@ exec /bin/cat "$@"
 	}
 }
 
-func setServiceStates(t *testing.T, player, setupd, controld, sysMonitord string) {
+func setServiceStates(t *testing.T, player, controld, sysMonitord string) {
 	t.Helper()
 	t.Setenv("FF_TEST_PLAYER_STATE", player)
-	t.Setenv("FF_TEST_SETUPD_STATE", setupd)
 	t.Setenv("FF_TEST_CONTROLD_STATE", controld)
 	t.Setenv("FF_TEST_SYSMONITORD_STATE", sysMonitord)
 }

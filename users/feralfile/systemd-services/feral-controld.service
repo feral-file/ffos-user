@@ -1,8 +1,11 @@
 [Unit]
 Description=Feral File Controld
 After=system-ready.target feral-sys-monitord.service
-StartLimitBurst=5
-StartLimitIntervalSec=600
+# No start-rate lockout: since the setupd merge, controld is the device's ONLY
+# provisioning path (SoftAP portal + LAN hub — there is no BLE fallback). Five
+# fast crashes must degrade into slow Restart=always retries, never a permanent
+# "start-limit-hit" dead state that bricks setup on an offline device.
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify

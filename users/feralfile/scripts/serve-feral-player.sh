@@ -8,10 +8,60 @@ readonly FF_PLAYER_READY_TIMEOUT_SECONDS="${FF_PLAYER_READY_TIMEOUT_SECONDS:-30}
 readonly FF_PLAYER_READY_POLL_SECONDS="${FF_PLAYER_READY_POLL_SECONDS:-1}"
 readonly FF_PLAYER_CONTRACT_FILE="${FF_PLAYER_ROOT}/ffos-player-contract.json"
 readonly FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}"
+readonly FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT="${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT:-1}"
 
 require_binary() {
 	if ! command -v "$1" >/dev/null 2>&1; then
 		echo "serve-feral-player: required binary not found: $1" >&2
+		exit 1
+	fi
+}
+
+# SoftAP onboarding narrates entirely through the player's setupDisplay CDP
+# contract (soft-AP QR, join feedback, claim QR). controld deliberately degrades
+# to narration-disabled when the bundle lacks it, so without this gate a bad
+# bundle reaches READY and a fresh offline device sits with no displayed setup
+# credentials. Default-required for exactly that reason (unlike the optional
+# mint-pairing gate below); FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 is the
+# dev/legacy-bundle escape hatch. The checks mirror
+# setupui.validateSetupDisplayContract — keep the two in sync.
+validate_setup_display_contract() {
+	if [[ "${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT}" != "1" ]]; then
+		return 0
+	fi
+
+	if [[ ! -f "${FF_PLAYER_CONTRACT_FILE}" ]]; then
+		echo "serve-feral-player: missing player contract manifest at ${FF_PLAYER_CONTRACT_FILE}" >&2
+		exit 1
+	fi
+
+	require_binary python3
+	if ! python3 - "${FF_PLAYER_CONTRACT_FILE}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+required_states = {"softap_qr", "joining", "join_failed", "updating", "claim_qr", "ready", "hidden"}
+
+with open(path, encoding="utf-8") as fh:
+    manifest = json.load(fh)
+
+contract = manifest.get("contracts", {}).get("setupDisplay")
+if not isinstance(contract, dict):
+    raise SystemExit("missing contracts.setupDisplay")
+if contract.get("version") != 1:
+    raise SystemExit("contracts.setupDisplay.version must be 1")
+if contract.get("requestKey") != "request":
+    raise SystemExit('contracts.setupDisplay.requestKey must be "request"')
+states = contract.get("states")
+if not isinstance(states, list) or not required_states.issubset(set(states)):
+    raise SystemExit("contracts.setupDisplay.states missing required states")
+accepted = contract.get("acceptedResponse")
+if not isinstance(accepted, dict) or accepted.get("ok") is not True:
+    raise SystemExit("contracts.setupDisplay.acceptedResponse.ok must be true")
+PY
+	then
+		echo "serve-feral-player: invalid setupDisplay player contract at ${FF_PLAYER_CONTRACT_FILE}" >&2
 		exit 1
 	fi
 }
@@ -63,6 +113,7 @@ start_server() {
 		exit 1
 	fi
 
+	validate_setup_display_contract
 	validate_player_contract
 
 	require_binary darkhttpd

@@ -263,6 +263,21 @@ func (r *refresher) processPlayingPlaylist() (err error) {
 		}
 	}()
 
+	// A displayPlaylist status carrying neither a URL nor an inline playlist
+	// is the player's fresh-boot/unconfigured state (nothing assigned yet),
+	// not a failure. Returning an error here would pin the startup loop at
+	// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
+	// long as the device sits unconfigured — hours on a first boot with no
+	// network. There is nothing to refresh; report success so the refresher
+	// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence. This check
+	// must stay in sync with resolveDisplayedPlaylist's own default case
+	// (which returns an error instead, for resyncKioskReplayScopeToCurrentDisplay's
+	// best-effort caller where an error is simply logged and swallowed).
+	if playerStatus.PlaylistURL == nil && playerStatus.Playlist == nil {
+		r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
+		return nil
+	}
+
 	playlist, err := r.resolveDisplayedPlaylist(playerStatus)
 	if err != nil {
 		return err
@@ -350,6 +365,13 @@ func (r *refresher) processPlayingPlaylist() (err error) {
 // offline and already displaying a playlist via that same fallback must
 // still be able to re-resolve "what is currently displayed" here, both for
 // the main refresh pass and for a corrective resync.
+//
+// The default case's error is intentionally NOT the "fresh-boot/unconfigured
+// player" signal processPlayingPlaylist's own pre-check treats as a
+// successful no-op (see there): processPlayingPlaylist filters that state
+// out before ever calling this, so reaching default here would indicate a
+// genuinely unexpected playerStatus shape. resyncKioskReplayScopeToCurrentDisplay
+// does not pre-filter and simply logs+swallows this error as best-effort.
 func (r *refresher) resolveDisplayedPlaylist(playerStatus *status.PlayerStatus) (*dp1.Playlist, error) {
 	switch {
 	case playerStatus.PlaylistURL != nil:

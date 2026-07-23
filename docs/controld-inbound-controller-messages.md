@@ -158,7 +158,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### showPairingQRCode
 
-Purpose: ask `feral-setupd` to show or hide the setup pairing QR code.
+Purpose: show or hide the setup pairing (claim) QR code. Handled in-process by `feral-controld`: `show=true` runs the mandatory pre-claim OTA gate and, on no-update-needed, paints the claim QR through the `setupDisplay` narration contract; `show=false` records the `ready` state before hiding the overlay.
 
 Example:
 
@@ -179,7 +179,6 @@ Current success response: `{"ok": true}`.
 Current error cases:
 
 - Invalid `request.show` shape causes command failure.
-- D-Bus send failure to `feral-setupd` causes command failure.
 
 Current relayer error response: none standardized; command failure is logged.
 
@@ -744,7 +743,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### updateToLatestVersion
 
-Purpose: signal `feral-setupd` to show update UI and execute a system update.
+Purpose: run a system update. Handled in-process by `feral-controld`'s OTA gate (`otagate.RequestUpdate`, mode `Available`), which narrates progress and drives the local updater.
 
 Example:
 
@@ -762,13 +761,13 @@ Current success response: `{"ok": true}`.
 
 Current error cases:
 
-- D-Bus send failure to `feral-setupd`.
+- Starting or running the local updater fails.
 
 Current relayer error response: none standardized; command failure is logged.
 
 ### factoryReset
 
-Purpose: signal `feral-setupd` to show reset UI and execute factory reset.
+Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted relayer topic, narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume).
 
 Example:
 
@@ -786,14 +785,20 @@ Current success response: `{"ok": true}`.
 
 Current error cases:
 
-- D-Bus send failure to `feral-setupd`.
+- Starting `set-factory-boot.service` fails.
 
 Current relayer error response: none standardized; command failure is logged.
 
 ### uploadLogs
 
-Purpose: signal `feral-setupd` to upload logs. The optional support bundle id
-uses an additive D-Bus signal.
+Purpose: upload device logs. Handled in-process by `feral-controld` and
+**fire-and-forget** (see [`api-design.md`](api-design.md)): the command
+validates the request, schedules the upload, and ACKs immediately; a detached
+worker then zips the device logs and submits them (JSON pre-sign request to the
+FF1 log-submissions endpoint returning a pre-signed S3 URL, then a PUT of the
+zip), bounded by a 10-minute budget and single-flighted — a duplicate command
+while an upload is running is ACKed and ignored. The optional support bundle id
+is included in the submission request.
 
 Example:
 
@@ -814,12 +819,15 @@ Example:
 
 Current success response: `{"ok": true}`.
 
-Current error cases:
+Current error cases (returned to the caller — only pre-schedule validation can
+fail the command):
 
 - Invalid request shape.
 - Missing `userId`, `apiKey`, or `title`.
-- Bundled upload payload cannot be marshaled.
-- D-Bus send failure to `feral-setupd`.
+
+Failures after the ACK (zipping, obtaining the presigned URL, or uploading the
+zip) are logged on-device by the detached worker and are **not** surfaced to
+the caller.
 
 Current relayer error response: none standardized; command failure is logged.
 

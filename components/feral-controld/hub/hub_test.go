@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,11 +14,13 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -53,7 +56,7 @@ func setup(t *testing.T) *testSetup {
 	mux := http.NewServeMux()
 	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
 
-	h := New(ctx, mockWS, mockCmd, mockServer, mockJSON, logger)
+	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:        ctrl,
@@ -92,7 +95,7 @@ func TestNew(t *testing.T) {
 		Return(http.NewServeMux()).
 		Times(1)
 
-	h := New(ctx, mockWS, mockCmd, mockServer, mockJSON, logger)
+	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
 	assert.NotNil(t, h)
 }
 
@@ -116,7 +119,7 @@ func TestNew_UnsupportedHandlerType(t *testing.T) {
 		Times(1)
 
 	assert.Panics(t, func() {
-		New(ctx, mockWS, mockCmd, mockServer, mockJSON, logger)
+		New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
 	})
 }
 
@@ -152,23 +155,40 @@ func TestStart_Success(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestStart_ListenAndServeError(t *testing.T) {
+func TestStart_ListenAndServeError_Retries(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+
+	// Compresses the package-level backoff seam; do not add t.Parallel() to
+	// hub tests while this mutation pattern is in use.
+	oldBase := listenRetryBase
+	listenRetryBase = time.Millisecond
+	defer func() { listenRetryBase = oldBase }()
 
 	// Mock WS Close - may be called due to context cancellation
 	ts.mockWS.EXPECT().
 		Close().
 		MinTimes(1)
 
-	// Mock HTTPServer ListenAndServe to return an error
-	expectedErr := errors.New("server error")
-	ts.mockServer.EXPECT().
-		ListenAndServe().
-		Return(expectedErr).
-		Times(1)
+	// A transient bind failure must be retried, not abandoned: the hub is the
+	// LAN recovery channel and a one-shot listener would stay dead until an
+	// unrelated daemon restart. Two failures, then the server reports closed.
+	served := make(chan struct{})
+	bindErr := errors.New("listen tcp 0.0.0.0:1111: bind: address already in use")
+	gomock.InOrder(
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			Return(bindErr).
+			Times(2),
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			DoAndReturn(func() error {
+				close(served)
+				return http.ErrServerClosed
+			}).
+			Times(1),
+	)
 
-	// Mock Stop to be called when ListenAndServe fails
 	ts.mockServer.EXPECT().
 		Shutdown(gomock.Any()).
 		Return(nil).
@@ -177,12 +197,98 @@ func TestStart_ListenAndServeError(t *testing.T) {
 	// Start the hub
 	ts.hub.Start()
 
-	// Give it a moment to process
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-served:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener was not retried after bind failures")
+	}
 
 	// Stop the hub
 	err := ts.hub.Stop()
 	assert.NoError(t, err)
+}
+
+// TestUnmatchedRouteGoesThroughMiddleware: the mux's default 404 must NOT
+// serve unmatched paths bare — they have to pass the same chokepoint as real
+// routes (storm cap, logging, the future LAN-auth seam). Proven by showing an
+// unmatched request is shed with 429 when every slot is held: a bypass would
+// return 404 regardless of saturation.
+func TestUnmatchedRouteGoesThroughMiddleware(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mux := http.NewServeMux()
+	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
+
+	h := New(context.Background(), mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+	hh := h.(*hub)
+
+	// Unsaturated: unmatched path 404s (served through the middleware).
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+
+	// Saturated: every slot held -> the unmatched request must be shed by the
+	// storm cap, not slip past it to a bare 404.
+	for i := 0; i < MAX_INFLIGHT_REQUESTS; i++ {
+		hh.reqSlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < MAX_INFLIGHT_REQUESTS; i++ {
+			<-hh.reqSlots
+		}
+	}()
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/definitely-not-a-route", nil))
+	assert.Equal(t, http.StatusTooManyRequests, rr.Code)
+}
+
+func TestStart_ListenRetryStopsOnContextCancel(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	h := New(ctx, mockWS, mockCmd, nil, mockServer, mockJSON, logger)
+
+	// One failing attempt; the default 1s backoff leaves ample room to cancel
+	// before a second attempt, and ctrl.Finish asserts exactly one call.
+	attempted := make(chan struct{})
+	mockServer.EXPECT().
+		ListenAndServe().
+		DoAndReturn(func() error {
+			close(attempted)
+			return errors.New("listen tcp 0.0.0.0:1111: bind: address already in use")
+		}).
+		Times(1)
+	mockWS.EXPECT().Close().AnyTimes()
+	mockServer.EXPECT().Shutdown(gomock.Any()).Return(nil).AnyTimes()
+
+	h.Start()
+
+	select {
+	case <-attempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener was never attempted")
+	}
+	cancel()
+
+	// Give the retry goroutine a moment to observe cancellation; ctrl.Finish
+	// then asserts ListenAndServe was not called again.
+	time.Sleep(50 * time.Millisecond)
 }
 
 func TestStop(t *testing.T) {
@@ -276,12 +382,26 @@ func TestHub_Start_ListenAndServeError(t *testing.T) {
 		Close().
 		AnyTimes()
 
-	// Mock HTTPServer ListenAndServe to return an error
+	// Compresses the package-level backoff seam; do not add t.Parallel() to
+	// hub tests while this mutation pattern is in use.
+	oldBase := listenRetryBase
+	listenRetryBase = time.Millisecond
+	defer func() { listenRetryBase = oldBase }()
+
+	// One transient error, then the retry loop observes the closed server and
+	// exits. Bounding the sequence keeps the retry goroutine from outliving
+	// the test (an unbounded Times(1) raced the retry's backoff before).
 	expectedErr := errors.New("server error")
-	ts.mockServer.EXPECT().
-		ListenAndServe().
-		Return(expectedErr).
-		Times(1)
+	gomock.InOrder(
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			Return(expectedErr).
+			Times(1),
+		ts.mockServer.EXPECT().
+			ListenAndServe().
+			Return(http.ErrServerClosed).
+			AnyTimes(),
+	)
 
 	// Mock Stop to be called when ListenAndServe fails
 	ts.mockServer.EXPECT().
@@ -336,7 +456,7 @@ func TestHub_ContextCancellation(t *testing.T) {
 	mockServer.EXPECT().Shutdown(gomock.Any()).Return(nil).AnyTimes()
 
 	// Create hub with cancellable context
-	h := New(ctx, ts.mockWS, ts.mockCmd, mockServer, wrapper.NewJSON(), logger)
+	h := New(ctx, ts.mockWS, ts.mockCmd, nil, mockServer, wrapper.NewJSON(), logger)
 
 	// Mock WS Close - may be called multiple times due to context cancellation
 	ts.mockWS.EXPECT().Close().AnyTimes()
@@ -683,19 +803,20 @@ func (c *countingHandler) Process(_ context.Context, _ commands.Command) (interf
 	return nil, nil
 }
 
-// TestHandleCast_RejectsWhenAtCapacity verifies the LAN hub bounds concurrent
-// casts: once the in-flight budget is exhausted, further casts are rejected
-// with 429 before decoding or reaching the command handler, so a storm cannot
-// pile up unbounded HTTP goroutines (feral-file/ffos-user#208).
-func TestHandleCast_RejectsWhenAtCapacity(t *testing.T) {
+// TestMiddleware_RejectsWhenAtCapacity verifies the shared hub middleware bounds
+// concurrent in-flight requests across all routes: once the in-flight budget is
+// exhausted, further requests are rejected with 429 before decoding or reaching
+// the handler, so a storm cannot pile up unbounded HTTP goroutines
+// (feral-file/ffos-user#208).
+func TestMiddleware_RejectsWhenAtCapacity(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
 	hubImpl := ts.hub.(*hub)
 
-	// Saturate the in-flight cast budget; nothing releases these in the test.
-	for i := 0; i < MAX_INFLIGHT_CASTS; i++ {
-		hubImpl.castSlots <- struct{}{}
+	// Saturate the shared in-flight budget; nothing releases these in the test.
+	for i := 0; i < MAX_INFLIGHT_REQUESTS; i++ {
+		hubImpl.reqSlots <- struct{}{}
 	}
 
 	req := httptest.NewRequest(
@@ -707,11 +828,260 @@ func TestHandleCast_RejectsWhenAtCapacity(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// No mockCmd.Process / mockJSON.NewDecoder expectations: the capacity check
-	// runs before either, so a satisfied gomock controller asserts they are
-	// never reached.
-	hubImpl.handleCast(w, req)
+	// in the middleware runs before either, so a satisfied gomock controller
+	// asserts they are never reached. The cast handler is reached only through
+	// the shared middleware, so exercise the wrapped handler here.
+	hubImpl.withMiddleware("cast", hubImpl.handleCast)(w, req)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+}
+
+// stubStatusProvider is a fixed StatusProvider for status-endpoint tests.
+type stubStatusProvider struct{ info StatusInfo }
+
+func (s stubStatusProvider) Status(context.Context) StatusInfo { return s.info }
+
+// TestHandleStatus_ReturnsContractAndFields verifies GET /api/status, served
+// through the shared middleware, returns the provider's device fields plus the
+// hub-owned LAN contract version.
+func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	provider := stubStatusProvider{info: StatusInfo{
+		DeviceID:     "ff1-abc",
+		Version:      "1.2.3",
+		Branch:       "develop",
+		Claimed:      false,
+		Internet:     true,
+		SetupState:   "unclaimed",
+		Connectivity: "connected",
+		TopicID:      "topic-xyz",
+	}}
+	h := New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger).(*hub)
+
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	w := httptest.NewRecorder()
+	h.withMiddleware("status", h.handleStatus)(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+	var got map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, "ff1-abc", got["device_id"])
+	assert.Equal(t, "1.2.3", got["version"])
+	assert.Equal(t, "develop", got["branch"],
+		"branch is the claim-QR parity field; the LAN payload must carry it")
+	assert.Equal(t, StatusContract, got["contract"])
+	assert.Equal(t, false, got["claimed"])
+	assert.Equal(t, true, got["internet"],
+		"internet (reachability) is distinct from connectivity (LAN link)")
+	assert.Equal(t, "unclaimed", got["setup_state"])
+	assert.Equal(t, "connected", got["connectivity"])
+	assert.Equal(t, "topic-xyz", got["topic_id"],
+		"an UNCLAIMED device serves its topic_id — that is the LAN claim handover")
+}
+
+// TestHandleCast_OversizedBodyRejected413: the storm cap bounds concurrency,
+// not allocations — the middleware body cap must stop an oversized cast
+// inside the decoder with 413 (not 400: the caller sent too much, not
+// garbage), before anything reaches the command router. The command handler
+// mock carries no expectations, so any call through to it fails the test.
+func TestHandleCast_OversizedBodyRejected413(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mux := http.NewServeMux()
+	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
+
+	New(context.Background(), mockWS, mockCmd, nil, mockServer, wrapper.NewJSON(), logger)
+
+	body := strings.NewReader(`{"command":"` + strings.Repeat("a", MAX_REQUEST_BODY_BYTES+1024) + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/cast", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+}
+
+// TestStatusContractV2MatchesMDNSTXTVersion enforces the hub<->mdns version
+// sync that production code keeps by convention (mdns must stay hub-free, so
+// no import ties the constants together). The pairing app's gate is two-part —
+// TXT api=<v> at discovery, contract <v> on /api/v2/status — and bumping one
+// side without the other would silently desync it; this test makes that a
+// build failure instead.
+func TestStatusContractV2MatchesMDNSTXTVersion(t *testing.T) {
+	assert.Equal(t, StatusContractV2, mdns.APITXTVersion,
+		"hub.StatusContractV2 and mdns.APITXTVersion must be bumped together")
+}
+
+// TestHandleStatusV2_SamePayloadContract2 pins the v2 pairing surface: same
+// fields as /api/status but contract "2". The versioned route is the firmware
+// gate the app keys on — old firmware 404s here — so v2 must never silently
+// diverge from the provider-backed payload, and v1 must keep reporting "1".
+func TestHandleStatusV2_SamePayloadContract2(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mux := http.NewServeMux()
+	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
+
+	provider := stubStatusProvider{info: StatusInfo{
+		DeviceID:     "ff1-abc",
+		Version:      "1.2.3",
+		Branch:       "develop",
+		Claimed:      false,
+		Internet:     true,
+		SetupState:   "unclaimed",
+		Connectivity: "connected",
+		TopicID:      "topic-xyz",
+	}}
+	New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger)
+
+	// Through the real mux, so the route registration itself is covered.
+	get := func(path string) map[string]any {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		require.Equal(t, http.StatusOK, w.Code, path)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got), path)
+		return got
+	}
+
+	v2 := get("/api/v2/status")
+	assert.Equal(t, StatusContractV2, v2["contract"])
+	assert.Equal(t, "ff1-abc", v2["device_id"])
+	assert.Equal(t, "develop", v2["branch"])
+	assert.Equal(t, "topic-xyz", v2["topic_id"])
+	assert.Equal(t, true, v2["internet"])
+
+	v1 := get("/api/status")
+	assert.Equal(t, StatusContract, v1["contract"], "legacy route keeps contract 1")
+	delete(v1, "contract")
+	delete(v2, "contract")
+	assert.Equal(t, v1, v2, "v1 and v2 must serve the identical provider payload")
+}
+
+// TestHandleStatus_ClaimedDeviceStillServesTopicID pins the multi-controller
+// contract: FF1 is controlled by several phones, and a frame whose original
+// phone is lost/wiped must stay pairable from any LAN peer, so a CLAIMED
+// device keeps serving its topic_id (LAN-presence = authorization, matching
+// the BLE-era posture). The claimed flag stays visible so the app can
+// suppress the unprompted app-open claim offer — manual pairing only.
+func TestHandleStatus_ClaimedDeviceStillServesTopicID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	provider := stubStatusProvider{info: StatusInfo{
+		DeviceID: "ff1-abc",
+		Claimed:  true,
+		TopicID:  "topic-xyz",
+	}}
+	h := New(ctx, mockWS, mockCmd, provider, mockServer, wrapper.NewJSON(), logger).(*hub)
+
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	w := httptest.NewRecorder()
+	h.withMiddleware("status", h.handleStatus)(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var got map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, true, got["claimed"])
+	assert.Equal(t, "topic-xyz", got["topic_id"],
+		"a claimed device keeps serving its topic — multi-phone pairing "+
+			"and lost-phone recovery depend on it")
+}
+
+// TestHandleStatus_NilProviderReturnsContract verifies a nil provider still
+// yields a valid response carrying the contract (forward-compat detection must
+// work even before a provider is wired).
+func TestHandleStatus_NilProviderReturnsContract(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	hubImpl := ts.hub.(*hub) // setup() wires a nil status provider
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	w := httptest.NewRecorder()
+
+	// setup()'s hub uses a mocked JSON encoder, so drive a real one here.
+	hubImpl.json = wrapper.NewJSON()
+	hubImpl.withMiddleware("status", hubImpl.handleStatus)(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var got map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal(t, StatusContract, got["contract"])
+}
+
+// TestHandleStatus_InvalidMethod verifies non-GET is rejected.
+func TestHandleStatus_InvalidMethod(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	hubImpl := ts.hub.(*hub)
+	req := httptest.NewRequest("POST", "/api/status", nil)
+	w := httptest.NewRecorder()
+	hubImpl.handleStatus(w, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+// TestMiddleware_EnvelopeRoundTrip proves a normal cast envelope flows through
+// the shared middleware (in-flight limiter + logging active) and the storm gate
+// to the inner handler and back, unharmed.
+func TestMiddleware_EnvelopeRoundTrip(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mockServer.EXPECT().Handler().Return(http.NewServeMux()).AnyTimes()
+
+	stub := &countingHandler{}
+	gated := commandrouter.NewGate(stub, commandrouter.GateConfig{
+		Enabled:       true,
+		MaxConcurrent: 16,
+		Default:       commandrouter.Policy{Rate: 5, Burst: 5, Weight: 1},
+	}, logger)
+	h := New(ctx, mockWS, gated, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
+
+	body := `{"command":"roundtrip","request":{"k":"v"}}`
+	req := httptest.NewRequest("POST", "/api/cast", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.withMiddleware("cast", h.handleCast)(w, req)
+
+	// countingHandler returns (nil, nil) -> 204 No Content, proving the envelope
+	// decoded and reached the inner handler through the wrapped path.
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, int64(1), stub.calls.Load())
 }
 
 // TestHandleCast_StormProtection drives a burst of cast requests through the LAN
@@ -737,7 +1107,7 @@ func TestHandleCast_StormProtection(t *testing.T) {
 	}
 	gated := commandrouter.NewGate(stub, gateCfg, logger)
 
-	h := New(ctx, mockWS, gated, mockServer, wrapper.NewJSON(), logger).(*hub)
+	h := New(ctx, mockWS, gated, nil, mockServer, wrapper.NewJSON(), logger).(*hub)
 
 	const total = 5
 	var accepted, limited int

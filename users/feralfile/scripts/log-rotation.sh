@@ -11,7 +11,6 @@ if [ ! -f "$LOG_CONFIG_FILE" ]; then
 # Format: LOG_PATH|ROTATED_LOG_DIR
 /home/feralfile/.logs/chromium.log|/home/feralfile/.logs/backup/chromium
 /home/feralfile/.logs/controld.log|/home/feralfile/.logs/backup/controld
-/home/feralfile/.logs/setupd.log|/home/feralfile/.logs/backup/setupd
 /home/feralfile/.logs/sys-monitord.log|/home/feralfile/.logs/backup/sys-monitord
 /home/feralfile/.logs/watchdog.log|/home/feralfile/.logs/backup/watchdog
 /home/feralfile/.logs/feral-player.log|/home/feralfile/.logs/backup/feral-player

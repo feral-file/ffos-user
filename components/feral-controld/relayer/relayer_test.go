@@ -21,6 +21,7 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -121,6 +122,85 @@ func setupMockTicker(ts *testSetup) *mocks.MockTicker {
 		AnyTimes()
 
 	return mockTicker
+}
+
+// TestClient_ConnectAfterCloseDeliversMessages: Close() retires the done
+// generation; a later Connect (the factory-reset-failed recovery path) must
+// start a FRESH generation. Before the fix, the reconnect's read/ping
+// goroutines observed the closed channel and exited immediately — a dialed
+// socket with no reader — so this test proves liveness by asserting a message
+// read on the SECOND connection actually reaches a handler.
+func TestClient_ConnectAfterCloseDeliversMessages(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	setupMockTicker(ts)
+	ts.mockClock.EXPECT().Now().Return(time.Time{}).AnyTimes()
+
+	ts.mockDialer.EXPECT().
+		DialContext(ts.ctx, gomock.Any(), nil).
+		Return(ts.mockConn, &http.Response{StatusCode: http.StatusOK}, nil).
+		Times(2)
+	ts.mockConn.EXPECT().SetPongHandler(gomock.Any()).Times(2)
+	ts.mockConn.EXPECT().WriteJSON(gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).AnyTimes()
+	ts.mockConn.EXPECT().
+		WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), gomock.Any()).
+		Return(nil).
+		AnyTimes()
+	ts.mockConn.EXPECT().Close().Return(nil).AnyTimes()
+
+	// Deterministic read choreography, counter-based because expectations are
+	// consumed in CALL order, not per-goroutine: call 1 is generation 1's read
+	// (entry-signaled so Close cannot precede it; released after Close so gen 1
+	// exits via its retired done), call 2 hands generation 2 the payload, and
+	// later calls block until teardown.
+	firstEntered := make(chan struct{})
+	gen1Release := make(chan struct{})
+	blockForever := make(chan struct{})
+	defer func() {
+		select {
+		case <-blockForever:
+		default:
+			close(blockForever)
+		}
+	}()
+	payload := []byte(`{"messageID":"m1","message":{"command":"noop","request":{}}}`)
+	var readCalls int32
+	ts.mockConn.EXPECT().ReadMessage().DoAndReturn(func() (int, []byte, error) {
+		switch atomic.AddInt32(&readCalls, 1) {
+		case 1:
+			close(firstEntered)
+			<-gen1Release
+			return 0, nil, errors.New("use of closed network connection")
+		case 2:
+			return websocket.TextMessage, payload, nil
+		default:
+			<-blockForever
+			return 0, nil, errors.New("use of closed network connection")
+		}
+	}).AnyTimes()
+
+	delivered := make(chan string, 1)
+	ts.client.OnRelayerMessage(func(_ context.Context, p relayer.Payload) error {
+		delivered <- p.MessageID
+		return nil
+	})
+
+	require.NoError(t, ts.client.Connect(ts.ctx))
+	<-firstEntered     // generation 1 is provably parked in its read
+	ts.client.Close()  // retires generation 1
+	close(gen1Release) // its read returns; the loop sees the retired done and exits
+
+	require.NoError(t, ts.client.Connect(ts.ctx), "Connect after Close must succeed")
+	select {
+	case id := <-delivered:
+		assert.Equal(t, "m1", id)
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnected session never delivered a message: read loop is dead (stale done generation)")
+	}
+
+	ts.client.Close()
 }
 
 func TestClient_Connect_Success(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -726,6 +727,99 @@ func TestTracker_PowerCycleReprobeRecoversDespiteFutileLatch(t *testing.T) {
 	clock.advance(ddcReprobeInterval + time.Second)
 	require.True(t, pollRound(t, p), "the scheduled reprobe must run")
 	require.True(t, pollRound(t, p), "a rescued reprobe must reopen polling")
+}
+
+// TestTracker_RecoveryFromUnsupportedBumpsGeneration pins the display-comeback
+// contract for the fingerprint-blind power cycle: a monitor toggled off and on
+// while its HPD/EDID stay up never changes the DRM fingerprint, so the comeback
+// is only visible as a successful attempt against an "unsupported" verdict.
+// That success must bump Generation() — it is what re-arms Generation()-keyed
+// give-up state (the sleep panel leg's retry cap) so the scheduled power state
+// is re-driven onto the returned panel instead of waiting for the next
+// schedule boundary.
+func TestTracker_RecoveryFromUnsupportedBumpsGeneration(t *testing.T) {
+	t.Parallel()
+	fp := "fp-stable-across-power-cycle"
+	mode := "awake"
+	reply := func(argv []string) ([]byte, error) {
+		if mode == "awake" {
+			return replyHealthy(argv)
+		}
+		return replyNoDdc(argv)
+	}
+	p, _, clock := newTrackedPanel(reply, &fp)
+
+	require.True(t, pollRound(t, p))
+	genProven := p.Generation()
+
+	// Power off (fingerprint unchanged): demotion alone must NOT bump the
+	// generation — the give-up state it keys is per display, and the display
+	// has not come back yet.
+	mode = "off"
+	for i := 0; i < ddcProbeFailThreshold; i++ {
+		require.True(t, pollRound(t, p))
+	}
+	require.False(t, pollRound(t, p), "hard failures must close the gate")
+	require.Equal(t, genProven, p.Generation(), "power-off alone must not bump the generation")
+
+	// Power back on: the successful reprobe is the only comeback signal there
+	// is, and it must start a new generation.
+	mode = "awake"
+	clock.advance(ddcReprobeIntervalProven + time.Second)
+	require.True(t, pollRound(t, p), "proven lease must reopen the reprobe")
+	genRecovered := p.Generation()
+	require.Greater(t, genRecovered, genProven, "recovery from unsupported must bump the generation")
+
+	// everSucceeded must survive the bump: the next off period still gets the
+	// short proven-panel lease, not the slow unproven one.
+	mode = "off"
+	for i := 0; i < ddcProbeFailThreshold; i++ {
+		require.True(t, pollRound(t, p))
+	}
+	require.False(t, pollRound(t, p))
+	clock.advance(ddcReprobeIntervalProven + time.Second)
+	require.True(t, pollRound(t, p), "panel must keep the proven short lease after a recovery bump")
+}
+
+// TestTracker_UnavailableReprobeIsQuiet pins the log taxonomy for the
+// powered-off-monitor steady state: once the tracker holds the "unsupported"
+// verdict, a failing scheduled reprobe (initial read, recovery poke, retry)
+// must emit nothing at Info level or above. Pre-fix it logged an Info + Warn
+// pair every reprobe lease, forever, while a monitor was merely powered off.
+func TestTracker_UnavailableReprobeIsQuiet(t *testing.T) {
+	t.Parallel()
+	fp := "fp-quiet-reprobe"
+	mode := "awake"
+	reply := func(argv []string) ([]byte, error) {
+		if mode == "awake" {
+			return replyHealthy(argv)
+		}
+		return replyNoDdc(argv)
+	}
+	core, observed := observer.New(zap.InfoLevel)
+	exec := &scriptedExec{reply: reply}
+	clock := &fakeTrackerClock{now: time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)}
+	p := &panelDdc{
+		exec:          exec,
+		clock:         clock,
+		logger:        zap.New(core),
+		fingerprintFn: func() string { return fp },
+	}
+
+	require.True(t, pollRound(t, p))
+	mode = "off"
+	for i := 0; i < ddcProbeFailThreshold; i++ {
+		require.True(t, pollRound(t, p))
+	}
+	require.False(t, pollRound(t, p), "hard failures must close the gate")
+
+	clock.advance(ddcReprobeIntervalProven + time.Second)
+	observed.TakeAll() // demotion-phase logs are expected; only the reprobe must be quiet
+	require.True(t, pollRound(t, p), "reprobe window must reopen the gate")
+	if entries := observed.TakeAll(); len(entries) != 0 {
+		t.Fatalf("a failing reprobe of a known-unavailable panel must not log at Info or above, got %d: %v",
+			len(entries), entries)
+	}
 }
 
 // TestTracker_DisplayChangeReenablesRecovery: futility is a per-generation

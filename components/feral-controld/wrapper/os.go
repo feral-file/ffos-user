@@ -13,6 +13,8 @@ type OS interface {
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, data []byte, perm go_os.FileMode) error
 	ReadDir(path string) ([]go_os.DirEntry, error)
+	// Stat also backs blob/disk size accounting in the offline-cache store.
+	Stat(path string) (go_os.FileInfo, error)
 	IsNotExist(err error) bool
 	MkdirAll(path string, perm go_os.FileMode) error
 	Rename(oldpath, newpath string) error
@@ -21,8 +23,6 @@ type OS interface {
 	// feature; every other OS caller is unaffected since these are additive.
 	Remove(path string) error
 	RemoveAll(path string) error
-	// Stat backs blob/disk size accounting in the offline-cache store.
-	Stat(path string) (go_os.FileInfo, error)
 	// Open backs the offline-cache static server's streamed serving of
 	// large blobs (io.ReadSeeker, so http.ServeContent can honor Range
 	// requests for video seeking) without loading the whole file into
@@ -55,6 +55,10 @@ func (o os) ReadDir(path string) ([]go_os.DirEntry, error) {
 	return go_os.ReadDir(path)
 }
 
+func (o os) Stat(path string) (go_os.FileInfo, error) {
+	return go_os.Stat(path)
+}
+
 func (o os) IsNotExist(err error) bool {
 	return go_os.IsNotExist(err)
 }
@@ -73,10 +77,6 @@ func (o os) Remove(path string) error {
 
 func (o os) RemoveAll(path string) error {
 	return go_os.RemoveAll(path)
-}
-
-func (o os) Stat(path string) (go_os.FileInfo, error) {
-	return go_os.Stat(path)
 }
 
 func (o os) Open(path string) (*go_os.File, error) {

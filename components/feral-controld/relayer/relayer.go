@@ -350,6 +350,20 @@ func (r *relayer) Connect(ctx context.Context) error {
 	// nil channel mid-reassignment). The local copy keeps the goroutine reading
 	// a stable channel for its lifetime.
 	r.Lock()
+	// Close() retires r.done permanently for the goroutines of the PREVIOUS
+	// session; a Connect after Close (the factory-reset-failed recovery path)
+	// must start a FRESH generation, or the new read/ping goroutines would
+	// observe the closed channel and exit immediately — a dialed socket with
+	// no reader. Each goroutine captures ITS generation locally: a stale
+	// goroutine outliving a Close/Connect cycle must keep gating on the
+	// channel it was born under, never the field (which is both a data race
+	// and the wrong generation).
+	select {
+	case <-r.done:
+		r.done = make(chan struct{})
+	default:
+	}
+	done := r.done
 	if r.pingDoneChan == nil {
 		r.pingDoneChan = make(chan struct{})
 	}
@@ -364,7 +378,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 			case <-ctx.Done():
 				ticker.Stop()
 				return
-			case <-r.done:
+			case <-done:
 				ticker.Stop()
 				return
 			case <-pingDone:
@@ -377,7 +391,7 @@ func (r *relayer) Connect(ctx context.Context) error {
 	}()
 
 	// Handle background tasks
-	r.background(ctx)
+	r.background(ctx, done)
 
 	r.logger.Info("Connected to Relayer", zap.String("reqID", cfRay))
 
@@ -419,7 +433,9 @@ func (r *relayer) RemoveRelayerMessage(f Handler) {
 	}
 }
 
-func (r *relayer) background(ctx context.Context) {
+// background runs the read loop for ONE connection generation: done is the
+// generation channel captured at Connect time (see the generation note there).
+func (r *relayer) background(ctx context.Context, done chan struct{}) {
 	go func() {
 		r.logger.Info("Relayer background goroutine started")
 		for {
@@ -428,7 +444,7 @@ func (r *relayer) background(ctx context.Context) {
 				r.logger.Info("Closing WebSocket connection due to context cancellation")
 				r.Close()
 				return
-			case <-r.done:
+			case <-done:
 				// Exit if closed manually
 				r.logger.Info("Context handler exiting due to manual close")
 				return
@@ -444,7 +460,7 @@ func (r *relayer) background(ctx context.Context) {
 				r.Unlock()
 				_, msg, err := conn.ReadMessage()
 				if err != nil {
-					if r.shouldStop(ctx) {
+					if r.shouldStop(ctx, done) {
 						r.logger.Info("Relayer read loop stopped after connection shutdown", zap.Error(err))
 						return
 					}
@@ -455,7 +471,7 @@ func (r *relayer) background(ctx context.Context) {
 					)
 					err := r.reconnect(ctx)
 					if err != nil {
-						if r.shouldStop(ctx) {
+						if r.shouldStop(ctx, done) {
 							r.logger.Info("Skipping relayer reconnect failure during shutdown", zap.Error(err))
 							return
 						}
@@ -496,7 +512,7 @@ func (r *relayer) background(ctx context.Context) {
 					zap.Int("message_length", len(msg)),
 				)
 
-				r.dispatchMessage(ctx, payload)
+				r.dispatchMessage(ctx, payload, done)
 			}
 		}
 	}()
@@ -507,8 +523,8 @@ func (r *relayer) background(ctx context.Context) {
 // Backpressure is accounted PER PAYLOAD, not per handler: one dispatch slot
 // covers the whole fan-out and a saturated command is shed exactly once. This
 // matters because more than one handler can be registered at a time — the
-// mediator is permanent, but dbus.GetRelayerTopicID temporarily registers a
-// control-plane listener. Per-handler accounting would otherwise shed the same
+// mediator is permanent, but a transient control-plane listener can register
+// alongside it. Per-handler accounting would otherwise shed the same
 // command once per listener (duplicate rate_limited replies for one messageID)
 // and make effective command capacity depend on how many listeners happen to
 // be installed.
@@ -521,7 +537,7 @@ func (r *relayer) background(ctx context.Context) {
 //
 // Extracted from the read loop so the saturation/shed path is unit-testable
 // without the full connection machinery.
-func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
+func (r *relayer) dispatchMessage(ctx context.Context, payload Payload, done chan struct{}) {
 	// Snapshot handlers under the lock: OnRelayerMessage/RemoveRelayerMessage
 	// mutate the slice concurrently (e.g. the temporary D-Bus listener), so the
 	// read loop must not iterate it directly.
@@ -540,7 +556,7 @@ func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
 	if payload.MessageID == MESSAGE_ID_SYSTEM {
 		select {
 		case r.controlSem <- struct{}{}:
-			go r.runHandlers(ctx, payload, handlers, r.controlSem)
+			go r.runHandlers(ctx, payload, handlers, r.controlSem, done)
 		default:
 			// Control lane saturated: drop. System messages carry no caller
 			// awaiting a reply by messageID (sendShedResponse skips them), so a
@@ -555,7 +571,7 @@ func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
 
 	select {
 	case r.dispatchSem <- struct{}{}:
-		go r.runHandlers(ctx, payload, handlers, r.dispatchSem)
+		go r.runHandlers(ctx, payload, handlers, r.dispatchSem, done)
 	default:
 		// Saturated: shed this command once, but reply legibly so the caller
 		// sees a rate-limit rejection instead of a silent timeout
@@ -573,14 +589,14 @@ func (r *relayer) dispatchMessage(ctx context.Context, payload Payload) {
 // loop. When sem is non-nil it owns a single slot in that semaphore (dispatchSem
 // for commands, controlSem for control-plane) for the whole fan-out and releases
 // it when all handlers return.
-func (r *relayer) runHandlers(ctx context.Context, payload Payload, handlers []Handler, sem chan struct{}) {
+func (r *relayer) runHandlers(ctx context.Context, payload Payload, handlers []Handler, sem chan struct{}, done chan struct{}) {
 	if sem != nil {
 		defer func() { <-sem }()
 	}
 	select {
 	case <-ctx.Done():
 		return
-	case <-r.done:
+	case <-done:
 		return
 	default:
 	}
@@ -715,6 +731,10 @@ func (r *relayer) ping() {
 }
 
 // Close closes the Relayer connection
+// Close retires the current session. NOTE: a Connect racing this call can
+// start a fresh done generation (that is the point — factory-reset recovery),
+// so done-close alone does not guarantee no goroutine survives; full shutdown
+// relies on ctx cancellation, which every relayer goroutine also observes.
 func (r *relayer) Close() {
 	r.Lock()
 	defer r.Unlock()
@@ -743,7 +763,7 @@ func (r *relayer) Close() {
 
 // shouldStop is checked after blocking socket calls return so shutdown-driven
 // close errors do not get mistaken for remote disconnects that need reconnecting.
-func (r *relayer) shouldStop(ctx context.Context) bool {
+func (r *relayer) shouldStop(ctx context.Context, done chan struct{}) bool {
 	select {
 	case <-ctx.Done():
 		return true
@@ -751,7 +771,7 @@ func (r *relayer) shouldStop(ctx context.Context) bool {
 	}
 
 	select {
-	case <-r.done:
+	case <-done:
 		return true
 	default:
 		return false

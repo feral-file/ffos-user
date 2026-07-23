@@ -169,7 +169,7 @@ func TestDispatchMessage_ShedsSaturatedCommand(t *testing.T) {
 	r.dispatchMessage(context.Background(), Payload{
 		MessageID: "msg-1",
 		Message:   Message{Command: &command},
-	})
+	}, make(chan struct{}))
 
 	// The shed reply is written off the read loop, so wait for it to land.
 	select {
@@ -211,7 +211,7 @@ func TestDispatchMessage_ShedsOncePerPayloadAcrossHandlers(t *testing.T) {
 	r.dispatchMessage(context.Background(), Payload{
 		MessageID: "msg-1",
 		Message:   Message{Command: &command},
-	})
+	}, make(chan struct{}))
 
 	// Exactly one reply lands...
 	select {
@@ -249,7 +249,7 @@ func TestDispatchMessage_ShedReplyDoesNotBlockReadLoop(t *testing.T) {
 		r.dispatchMessage(context.Background(), Payload{
 			MessageID: "msg-1",
 			Message:   Message{Command: &command},
-		})
+		}, make(chan struct{}))
 		close(returned)
 	}()
 
@@ -297,7 +297,7 @@ func TestDispatchMessage_BoundsControlPlaneStorm(t *testing.T) {
 		r.dispatchMessage(context.Background(), Payload{
 			MessageID: MESSAGE_ID_SYSTEM,
 			Message:   Message{TopicID: &topicID},
-		})
+		}, make(chan struct{}))
 	}
 
 	// Exactly the admitted handlers run; the bound is never exceeded.
@@ -347,7 +347,7 @@ func TestDispatchMessage_ControlLaneRecoversAfterDrain(t *testing.T) {
 		r.dispatchMessage(context.Background(), Payload{
 			MessageID: MESSAGE_ID_SYSTEM,
 			Message:   Message{TopicID: &topicID},
-		})
+		}, make(chan struct{}))
 	}
 
 	// First admitted and held; second dropped (lane saturated).
@@ -405,7 +405,7 @@ func TestDispatchMessage_SlotReleasedAfterHandlerSendCompletes(t *testing.T) {
 	r.dispatchMessage(context.Background(), Payload{
 		MessageID: "msg-1",
 		Message:   Message{Command: &command},
-	})
+	}, make(chan struct{}))
 
 	// The handler's Send is in flight, holding the only dispatch slot (cap 1).
 	select {

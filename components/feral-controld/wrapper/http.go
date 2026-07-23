@@ -35,6 +35,16 @@ func NewHTTPClient() HTTPClient {
 	}
 }
 
+// NewHTTPClientWithoutTimeout returns a client with NO whole-request timeout.
+// http.Client.Timeout covers the entire request INCLUDING the body transfer, so
+// the 30s default deterministically kills any large upload on a slow uplink —
+// exactly the case (big log archives) where the transfer matters most. Callers
+// MUST bound each request themselves via a request context deadline; do not use
+// this for ordinary short API calls.
+func NewHTTPClientWithoutTimeout() HTTPClient {
+	return httpClient{client: &go_http.Client{}}
+}
+
 func (h httpClient) NewRequest(method string, url string, body go_io.Reader) (*go_http.Request, error) {
 	return go_http.NewRequest(method, url, body)
 }

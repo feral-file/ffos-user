@@ -179,7 +179,9 @@ func (ws *ws) Send(connID string, message any) error {
 func (ws *ws) SendAll(message any) error {
 	ws.mu.RLock()
 	if len(ws.connections) == 0 {
-		ws.logger.Warn("No connections to send message to",
+		// The normal state whenever no LAN client is attached — every status
+		// push lands here. Debug, not Warn: it is not an anomaly.
+		ws.logger.Debug("No connections to send message to",
 			zap.String("message_type", fmt.Sprintf("%T", message)),
 		)
 		ws.mu.RUnlock()
