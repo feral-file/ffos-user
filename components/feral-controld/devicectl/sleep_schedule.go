@@ -97,7 +97,20 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 			continue
 		}
 
-		now := e.clock.Now().In(sleepschedule.LocalTimezone())
+		loc, tzResolved := sleepschedule.LocalTimezoneResolved()
+		if !tzResolved {
+			// The time.Local fallback is usually stale UTC (device booted before
+			// the timezone landed): evaluating the schedule on it would sleep or
+			// wake the display hours off the user's wall clock. Defer until the
+			// timezone resolves; the capped tick re-checks within a minute.
+			e.sleepScheduleFileMu.Unlock()
+			e.logger.Warn("Sleep schedule: device timezone unresolved; deferring schedule evaluation")
+			if !e.waitForSleepScheduleSignal(ctx, sleepScheduleMaxTick) {
+				return
+			}
+			continue
+		}
+		now := e.clock.Now().In(loc)
 		normalized, changed := sleepschedule.Normalize(record, now)
 		if changed {
 			if err := sleepschedule.Save(e.os, e.json, normalized); err != nil {

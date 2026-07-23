@@ -35,15 +35,23 @@ type Connectivity struct {
 	handlers      []ConnectivityHandler
 	doneChan      chan struct{}
 	lastConnected *bool
+
+	// probe performs one reachability check. Defaults to CheckConnectivity;
+	// a seam so the generation-guard regression tests can block a probe
+	// deterministically without dialing real ping targets. Set once at
+	// construction, never mutated after.
+	probe func(timeout time.Duration) (bool, error)
 }
 
 func NewConnectivity(ctx context.Context, logger *zap.Logger) *Connectivity {
-	return &Connectivity{
+	c := &Connectivity{
 		ctx:      ctx,
 		logger:   logger,
 		handlers: []ConnectivityHandler{},
 		doneChan: make(chan struct{}),
 	}
+	c.probe = c.CheckConnectivity
+	return c
 }
 
 func (c *Connectivity) GetLastConnected() bool {
@@ -66,8 +74,19 @@ func (c *Connectivity) Start() {
 
 func (c *Connectivity) restart() {
 	c.Stop()
-	c.doneChan = make(chan struct{})
+	c.resetDone()
 	c.Start()
+}
+
+// resetDone replaces the generation channel under the lock: notifyHandlers'
+// goroutines and background's capture read c.doneChan, so an unlocked swap
+// here is a data race with them. Split from restart so the swap is
+// individually exercisable in the concurrency regression test without
+// spawning the real ping loop.
+func (c *Connectivity) resetDone() {
+	c.Lock()
+	defer c.Unlock()
+	c.doneChan = make(chan struct{})
 }
 
 func (c *Connectivity) Stop() {
@@ -103,9 +122,15 @@ func (c *Connectivity) RemoveConnectivityChange(h ConnectivityHandler) {
 
 // notifyHandlers notifies all registered handlers about connectivity status
 func (c *Connectivity) notifyHandlers(ctx context.Context, connected bool) {
+	// Capture the generation channel under the same lock as the handlers copy:
+	// restart() swaps c.doneChan (via resetDone), so the spawned goroutines
+	// must not read the mutable field directly — that is a data race, and a
+	// notification from the OLD generation gating on the NEW channel would
+	// also outlive the stop it belongs to.
 	c.Lock()
 	handlers := make([]ConnectivityHandler, len(c.handlers))
 	copy(handlers, c.handlers)
+	done := c.doneChan
 	c.Unlock()
 
 	for _, handler := range handlers {
@@ -113,7 +138,7 @@ func (c *Connectivity) notifyHandlers(ctx context.Context, connected bool) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-c.doneChan:
+			case <-done:
 				return
 			default:
 				h(ctx, connected)
@@ -126,6 +151,14 @@ func (c *Connectivity) background() {
 	go func() {
 		c.logger.Info("Connectivity background goroutine started")
 
+		// Capture THIS watcher generation's done channel: restart() swaps
+		// c.doneChan, so reading the field from the loop races the swap — and a
+		// check already in flight across a stop/restart must not apply its
+		// stale result as current state.
+		c.Lock()
+		done := c.doneChan
+		c.Unlock()
+
 		// Get the last connected state
 		c.Lock()
 		lastConnected := c.lastConnected
@@ -133,10 +166,22 @@ func (c *Connectivity) background() {
 
 		// Always check connectivity for the first time
 		if lastConnected == nil {
-			connected, err := c.CheckConnectivity(PING_TIMEOUT)
+			connected, err := c.probe(PING_TIMEOUT)
 			if err != nil {
 				// We accept not being able to check connectivity and only log the warning
 				c.logger.Warn("Connectivity check failed", zap.Error(err))
+			}
+			// Same generation guard as the ticker branch below: the watcher may
+			// have been stopped/restarted while this probe was dialing, and a
+			// retired generation applying its result would overwrite the
+			// replacement watcher's state and emit a stale transition.
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-done:
+				c.logger.Info("Connectivity Watcher stopped before initial state applied; discarding stale probe result")
+				return
+			default:
 			}
 			c.Lock()
 			c.lastConnected = &connected
@@ -164,12 +209,23 @@ func (c *Connectivity) background() {
 			case <-c.ctx.Done():
 				c.logger.Info("Connectivity background goroutine stopped")
 				return
-			case <-c.doneChan:
+			case <-done:
 				c.logger.Info("Connectivity Watcher stopped")
 				return
 			case <-ticker.C:
 				c.logger.Info("Checking connectivity")
-				connected, err := c.CheckConnectivity(PING_TIMEOUT)
+				connected, err := c.probe(PING_TIMEOUT)
+				// The watcher may have been stopped/restarted while the check
+				// was dialing (the change-triggered restart): its result belongs
+				// to the OLD generation and must not be applied or logged as
+				// current — a stale "offline" here would flap the whole stack.
+				select {
+				case <-done:
+					c.logger.Debug("Discarding connectivity result from stopped watcher",
+						zap.Bool("connected", connected))
+					return
+				default:
+				}
 				c.logger.Info("Connectivity check result", zap.Bool("connected", connected))
 				if err != nil {
 					// We accept not being able to check connectivity and only log the warning

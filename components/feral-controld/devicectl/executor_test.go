@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +20,6 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
-	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -34,7 +33,6 @@ type testSetup struct {
 	ctx              context.Context
 	executor         devicectl.Executor
 	mockCDP          *mocks.MockCDP
-	mockDBus         *mocks.MockDBus
 	mockStatus       *mocks.MockStatusPoller
 	mockJSON         *mocks.MockJSON
 	mockClock        *mocks.MockClock
@@ -54,7 +52,6 @@ func setup(t *testing.T) *testSetup {
 
 	// Create mocks
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockDBus := mocks.NewMockDBus(ctrl)
 	mockStatus := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
@@ -75,7 +72,6 @@ func setup(t *testing.T) *testSetup {
 	// Create executor with mocks
 	executor := devicectl.New(
 		mockCDP,
-		mockDBus,
 		mockDeviceStatus,
 		mockStatus,
 		panelDDC,
@@ -92,7 +88,6 @@ func setup(t *testing.T) *testSetup {
 		ctx:              ctx,
 		executor:         executor,
 		mockCDP:          mockCDP,
-		mockDBus:         mockDBus,
 		mockStatus:       mockStatus,
 		mockJSON:         mockJSON,
 		mockClock:        mockClock,
@@ -198,7 +193,8 @@ func TestExecutor_Connect_Success(t *testing.T) {
 			return nil
 		})
 
-	// Mock state manager get
+	// Mock state manager get. AnyTimes: connect() also reads state for the
+	// wasClaimed check before saving.
 	ts.mockStateManager.EXPECT().
 		GetState().
 		Return(&state.State{
@@ -207,7 +203,7 @@ func TestExecutor_Connect_Success(t *testing.T) {
 				Name:     device.Name,
 				Platform: device.Platform,
 			},
-		}).Times(2)
+		}).AnyTimes()
 
 	// Mock state manager save
 	ts.mockStateManager.EXPECT().
@@ -283,7 +279,8 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 						return nil
 					})
 
-				// Mock state manager get
+				// Mock state manager get. AnyTimes: connect() also reads state
+				// for the wasClaimed check before saving.
 				ts.mockStateManager.EXPECT().
 					GetState().
 					Return(&state.State{
@@ -292,7 +289,7 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 							Name:     "Test Device",
 							Platform: 1,
 						},
-					})
+					}).AnyTimes()
 
 				// Mock state manager save to fail
 				ts.mockStateManager.EXPECT().
@@ -333,94 +330,6 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 			assert.Nil(t, result, "expected nil result on error")
 		})
 	}
-}
-
-func TestExecutor_ShowPairingQRCode_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Setup test data
-	cmd := commands.Command{
-		Type: commands.CMD_SHOW_PAIRING_QR_CODE,
-		Arguments: map[string]interface{}{
-			"show": true,
-		},
-	}
-
-	arguments := `{"show":true}`
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(arguments), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal([]byte(arguments), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			args := v.(*struct {
-				Show bool `json:"show"`
-			})
-			args.Show = true
-			return nil
-		})
-
-	// Mock DBus call
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_SHOW_PAIRING_QR_CODE,
-			Body:      []interface{}{true},
-		}).
-		Return(nil)
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_ShowPairingQRCode_DBusError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Setup test data
-	cmd := commands.Command{
-		Type: commands.CMD_SHOW_PAIRING_QR_CODE,
-		Arguments: map[string]interface{}{
-			"show": true,
-		},
-	}
-
-	arguments := `{"show":true}`
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return([]byte(arguments), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal([]byte(arguments), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			args := v.(*struct {
-				Show bool `json:"show"`
-			})
-			args.Show = true
-			return nil
-		})
-
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send show pairing QR code")
 }
 
 func TestExecutor_DeviceStatus_Success(t *testing.T) {
@@ -4658,339 +4567,107 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 	assert.Equal(t, 45.0, resultMap["disk"], "disk metric should match saved value")
 }
 
-func TestExecutor_SystemUpdate_Success(t *testing.T) {
+func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_UPDATE_TO_LATEST,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// Mock DBus call for factory reset
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_SYSTEM_UPDATE,
-			Body:      []interface{}{},
-		}).
-		Return(nil)
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_SystemUpdate_DBusError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Setup test data
-	cmd := commands.Command{
-		Type:      commands.CMD_UPDATE_TO_LATEST,
-		Arguments: map[string]interface{}{},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{}`), nil)
-
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send system update signal")
-}
-
-func TestExecutor_FactoryReset_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	// Setup test data
 	cmd := commands.Command{
 		Type:      commands.CMD_FACTORY_RESET,
 		Arguments: map[string]interface{}{},
 	}
 
-	// Mock JSON marshaling
 	ts.mockJSON.EXPECT().
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Mock DBus call for factory reset
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_FACTORY_RESET,
-			Body:      []interface{}{},
-		}).
-		Return(nil)
+	// Topic is cleared before the reset proceeds (security property).
+	ts.mockStateManager.EXPECT().
+		GetState().
+		Return(&state.State{
+			Relayer:         &state.RelayerState{TopicID: "old-topic"},
+			ConnectedDevice: &state.Device{ID: "phone-1"},
+		})
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			assert.Equal(t, "", s.Relayer.TopicID)
+			assert.Equal(t, "", s.ConnectedDevice.ID,
+				"the ConnectedDevice claim record must fall with the topic")
+			return nil
+		})
 
-	// Execute command
+	// The in-process reset starts the system reset unit directly.
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
+		Return(ts.mockExecCmd)
+	ts.mockExecCmd.EXPECT().
+		CombinedOutput().
+		Return([]byte(""), nil)
+
+	// The live relayer session is revoked as part of the reset boundary.
+	relayerClosed := false
+	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
+	var observed []bool
+	ts.executor.SetClaimObserver(func(claimed bool) { observed = append(observed, claimed) })
+
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
+	assert.True(t, relayerClosed, "factory reset must close the live relayer session")
+	assert.Equal(t, []bool{false}, observed,
+		"the claim observer must see the unclaim so mDNS re-advertises claimed=false")
 }
 
-func TestExecutor_FactoryReset_DBusError(t *testing.T) {
+// TestExecutor_FactoryReset_UnitFailureStillRevokesSession: set-factory-boot
+// only STAGES a reboot, and its start can fail — the reset boundary (persisted
+// topic cleared + live relayer session closed) must hold BEFORE that outcome,
+// so a failed or delayed reset still leaves the former owner's control channel
+// revoked (the fail-safe direction).
+func TestExecutor_FactoryReset_UnitFailureStillRevokesSession(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Setup test data
 	cmd := commands.Command{
 		Type:      commands.CMD_FACTORY_RESET,
 		Arguments: map[string]interface{}{},
 	}
 
-	// Mock JSON marshaling
 	ts.mockJSON.EXPECT().
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send factory reset signal")
-}
-
-func TestExecutor_UploadLogs_Success(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId": "test-user-id",
-			"apiKey": "test-api-key",
-			"title":  "test-title",
-		},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-			}
+	ts.mockStateManager.EXPECT().
+		GetState().
+		Return(&state.State{
+			Relayer:         &state.RelayerState{TopicID: "old-topic"},
+			ConnectedDevice: &state.Device{ID: "phone-1"},
+		})
+	ts.mockStateManager.EXPECT().
+		Save(gomock.Any()).
+		DoAndReturn(func(s *state.State) error {
+			assert.Equal(t, "", s.Relayer.TopicID)
+			assert.Equal(t, "", s.ConnectedDevice.ID,
+				"the ConnectedDevice claim record must fall with the topic")
 			return nil
 		})
 
-	// Mock DBus call for upload logs
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS,
-			Body:      []interface{}{"test-user-id", "test-api-key", "test-title"},
-		}).
-		Return(nil)
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").
+		Return(ts.mockExecCmd)
+	ts.mockExecCmd.EXPECT().
+		CombinedOutput().
+		Return([]byte("Failed to start set-factory-boot.service"), errors.New("exit status 1"))
 
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
+	relayerClosed := false
+	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
+	var observed []bool
+	ts.executor.SetClaimObserver(func(claimed bool) { observed = append(observed, claimed) })
 
-func TestExecutor_UploadLogs_WithSupportBundleID(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId":          "test-user-id",
-			"apiKey":          "test-api-key",
-			"title":           "test-title",
-			"supportBundleID": "bundle-123",
-		},
-	}
-
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","supportBundleID":"bundle-123"}`), nil)
-
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-				args.SupportBundleID = "bundle-123"
-			}
-			return nil
-		})
-
-	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-123"}`)
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return(bundledPayload, nil)
-
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
-			Body:      []interface{}{bundledPayload},
-		}).
-		Return(nil)
-
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_UploadLogs_WithSnakeCaseSupportBundleID(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId":            "test-user-id",
-			"apiKey":            "test-api-key",
-			"title":             "test-title",
-			"support_bundle_id": "bundle-456",
-		},
-	}
-
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","support_bundle_id":"bundle-456"}`), nil)
-
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-				args.SupportBundleIDSnake = "bundle-456"
-			}
-			return nil
-		})
-
-	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-456"}`)
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return(bundledPayload, nil)
-
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
-			Body:      []interface{}{bundledPayload},
-		}).
-		Return(nil)
-
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.NoError(t, err)
-	assert.Equal(t, devicectl.CmdOK, result)
-}
-
-func TestExecutor_UploadLogs_WithSupportBundleIDReturnsBundledSignalError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId":          "test-user-id",
-			"apiKey":          "test-api-key",
-			"title":           "test-title",
-			"supportBundleID": "bundle-123",
-		},
-	}
-
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title","supportBundleID":"bundle-123"}`), nil)
-
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-				args.SupportBundleID = "bundle-123"
-			}
-			return nil
-		})
-
-	bundledPayload := []byte(`{"user_id":"test-user-id","api_key":"test-api-key","title":"test-title","support_bundle_id":"bundle-123"}`)
-	ts.mockJSON.EXPECT().
-		Marshal(gomock.Any()).
-		Return(bundledPayload, nil)
-
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, godbus.DBusPayload{
-			Interface: dbus.INTERFACE,
-			Path:      dbus.PATH,
-			Member:    dbus.SETUPD_EVENT_UPLOAD_LOGS_WITH_BUNDLE,
-			Body:      []interface{}{bundledPayload},
-		}).
-		Return(errors.New("ack timeout"))
-
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send bundled upload logs signal")
-	assert.Contains(t, err.Error(), "ack timeout")
+	_, err := ts.executor.Execute(ts.ctx, cmd)
+	require.Error(t, err)
+	assert.True(t, relayerClosed, "a failed reset unit must still leave the relayer session revoked")
+	assert.Equal(t, []bool{false}, observed,
+		"a failed reset unit must still leave the device locally unclaimed")
 }
 
 func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
@@ -5050,61 +4727,12 @@ func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {
 	}
 }
 
-func TestExecutor_UploadLogs_DBusError(t *testing.T) {
-	ts := setup(t)
-	defer ts.teardown()
-
-	cmd := commands.Command{
-		Type: commands.CMD_UPLOAD_LOGS,
-		Arguments: map[string]interface{}{
-			"userId": "test-user-id",
-			"apiKey": "test-api-key",
-			"title":  "test-title",
-		},
-	}
-
-	// Mock JSON marshaling
-	ts.mockJSON.EXPECT().
-		Marshal(cmd.Arguments).
-		Return([]byte(`{"userId":"test-user-id","apiKey":"test-api-key","title":"test-title"}`), nil)
-
-	// Mock JSON unmarshaling
-	ts.mockJSON.EXPECT().
-		Unmarshal(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(data []byte, v interface{}) error {
-			if args, ok := v.(*struct {
-				UserID               string `json:"userId"`
-				APIKey               string `json:"apiKey"`
-				Title                string `json:"title"`
-				SupportBundleID      string `json:"supportBundleID"`
-				SupportBundleIDSnake string `json:"support_bundle_id"`
-			}); ok {
-				args.UserID = "test-user-id"
-				args.APIKey = "test-api-key"
-				args.Title = "test-title"
-			}
-			return nil
-		})
-
-	// Mock DBus call to fail
-	ts.mockDBus.EXPECT().
-		RetryableSend(ts.ctx, gomock.Any()).
-		Return(errors.New("dbus error"))
-
-	// Execute command
-	result, err := ts.executor.Execute(ts.ctx, cmd)
-	assert.Error(t, err)
-	assert.Nil(t, result)
-	assert.Contains(t, err.Error(), "failed to send upload logs signal")
-}
-
 func TestExecutor_NewHandler(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	mockCDP := mocks.NewMockCDP(ctrl)
-	mockDBus := mocks.NewMockDBus(ctrl)
 	mockDeviceStatus := mocks.NewMockDeviceStatus(ctrl)
 	mockStatus := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
@@ -5116,7 +4744,6 @@ func TestExecutor_NewHandler(t *testing.T) {
 
 	handler := devicectl.New(
 		mockCDP,
-		mockDBus,
 		mockDeviceStatus,
 		mockStatus,
 		panelDDC,
@@ -5655,4 +5282,157 @@ func TestExecutor_DdcPanelStatus_RetryWhenNoVcpLines(t *testing.T) {
 	require.NotNil(t, st.Monitor)
 	assert.Equal(t, "ASUS:ROG-Strix", *st.Monitor)
 	assert.Nil(t, st.Errors)
+}
+
+// TestExecutor_Connect_EmptyDeviceID: an empty clientDevice ID must be rejected
+// before any state is saved or the claim observer fires — every derived claim
+// view (mDNS init, /api/status, topic withholding) keys on a non-empty ID, so
+// accepting it would desync mDNS TXT claimed=true from /api/status claimed=false.
+func TestExecutor_Connect_EmptyDeviceID(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	device := devicectl.Device{ID: "  ", Name: "Test Device", Platform: 1}
+	cmd := commands.Command{
+		Type: commands.CMD_CONNECT,
+		Arguments: map[string]interface{}{
+			"clientDevice":   device,
+			"primaryAddress": "192.168.1.100",
+		},
+	}
+
+	arguments := `{"clientDevice":{"device_id":"  ","device_name":"Test Device","platform":1},"primaryAddress":"192.168.1.100"}`
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			args := v.(*struct {
+				Device         devicectl.Device `json:"clientDevice"`
+				PrimaryAddress string           `json:"primaryAddress"`
+			})
+			args.Device = device
+			args.PrimaryAddress = "192.168.1.100"
+			return nil
+		})
+	// No state-manager or claim-observer expectations: rejection must happen first.
+
+	result, err := ts.executor.Execute(ts.ctx, cmd)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "clientDevice.id is required")
+}
+
+// TestExecutor_ScreenRotation_ConcurrentTapsAdvanceTwoSteps pins the
+// serialization contract the command-storm gate now relies on: rotation is
+// not deduped (each byte-identical tap is a distinct relative step), so two
+// overlapping taps must advance two orientation steps. Without rotationMu the
+// orientation-file read-modify-write is a lost update — both taps read the
+// same start and apply the same target, collapsing two taps into one step.
+func TestExecutor_ScreenRotation_ConcurrentTapsAdvanceTwoSteps(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	cmd := commands.Command{
+		Type:      commands.CMD_SCREEN_ROTATION,
+		Arguments: map[string]interface{}{"clockwise": true},
+	}
+	arguments := `{"clockwise":true}`
+
+	ts.mockJSON.EXPECT().
+		Marshal(cmd.Arguments).
+		Return([]byte(arguments), nil).
+		Times(2)
+	ts.mockJSON.EXPECT().
+		Unmarshal([]byte(arguments), gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			v.(*struct {
+				Clockwise bool `json:"clockwise"`
+			}).Clockwise = true
+			return nil
+		}).
+		Times(2)
+
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "wlr-randr").
+		Return(ts.mockExecCmd).
+		Times(2)
+	ts.mockExecCmd.EXPECT().
+		Output().
+		Return([]byte("HDMI-A-1 \"Dell Inc. DELL S2721QS D3SNM43 (HDMI-A-1)\""), nil).
+		Times(2)
+
+	// stored is the in-memory stand-in for SCREEN_ORIENTATION_FILE. The first
+	// ReadFile parks until the second ReadFile arrives (unserialized overlap)
+	// or a grace period elapses — under rotationMu the second command is
+	// parked on the mutex and can never reach ReadFile concurrently, so the
+	// timeout path is the serialized outcome.
+	var stateMu sync.Mutex
+	stored := "normal"
+	readCount := 0
+	secondReadEntered := make(chan struct{})
+	ts.mockOS.EXPECT().
+		ReadFile(constants.SCREEN_ORIENTATION_FILE).
+		DoAndReturn(func(string) ([]byte, error) {
+			stateMu.Lock()
+			readCount++
+			idx := readCount
+			val := stored
+			stateMu.Unlock()
+			if idx == 2 {
+				close(secondReadEntered)
+			} else {
+				select {
+				case <-secondReadEntered:
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+			return []byte(val), nil
+		}).
+		Times(2)
+
+	var transforms []string
+	ts.mockExec.EXPECT().
+		CommandContext(ts.ctx, "wlr-randr", "--output", "HDMI-A-1", "--transform", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, arg ...string) wrapper.ExecCmd {
+			stateMu.Lock()
+			transforms = append(transforms, arg[len(arg)-1])
+			stateMu.Unlock()
+			return ts.mockExecCmd
+		}).
+		Times(2)
+	ts.mockExecCmd.EXPECT().
+		Run().
+		Return(nil).
+		Times(2)
+
+	ts.mockOS.EXPECT().
+		WriteFile(constants.SCREEN_ORIENTATION_FILE, gomock.Any(), os.FileMode(0600)).
+		DoAndReturn(func(_ string, data []byte, _ os.FileMode) error {
+			stateMu.Lock()
+			stored = string(data)
+			stateMu.Unlock()
+			return nil
+		}).
+		Times(2)
+	ts.mockStatus.EXPECT().
+		ForceRefresh().
+		Times(2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := ts.executor.Execute(ts.ctx, cmd)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+
+	// Two clockwise taps from normal must land on 180 (normal → 270 → 180).
+	// A lost update leaves 270 with both applies targeting 270.
+	assert.Equal(t, "180", stored)
+	assert.Equal(t, []string{"270", "180"}, transforms)
 }

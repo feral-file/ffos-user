@@ -13,18 +13,42 @@ Each service in `components/` has exactly one responsibility. That boundary must
 |---|---|---|
 | `feral-sys-monitord` | Observe and publish device health (CPU, RAM, disk, GPU, connectivity, system events) | Go |
 | `feral-watchdog` | Consume health signals and decide recovery actions (restart, clean disk, reboot) | Go |
-| `feral-controld` | Maintain the relayer connection and route remote commands to local handlers | Go |
-| `feral-setupd` | BLE provisioning, setup/recovery UI transitions, updater orchestration | Rust |
-| `launcher-ui` | Launch Chromium in kiosk mode at the correct URL and exit | Go |
+| `feral-controld` | Relayer connection and command routing **plus** the full device-setup domain: SoftAP provisioning, captive portal, OTA gate, on-screen setup narration, claiming, factory reset, log upload, and the LAN hub | Go |
 | `player-wrapper-ui` | Wrap the media player process | Go |
+
+`feral-setupd` and `launcher-ui` no longer exist. The setup/recovery daemon was merged into `feral-controld` (see "The setupd merge" below); the Chromium kiosk is now launched directly by `users/feralfile/scripts/start-kiosk.sh` (unit `chromium-kiosk.service`), not by a `launcher-ui` process. The repository contains no Rust.
 
 Rules for each boundary:
 
 - `feral-sys-monitord` is a **publisher only**. It must not make recovery decisions, reboot the system, or call other services. Callers pull from it via RPC or subscribe to its signals.
 - `feral-watchdog` is the **single owner of recovery policy**. It decides when to restart Chromium, clean disk pressure, or reboot. Raw telemetry collection does not belong here; that belongs in `feral-sys-monitord`.
-- `feral-controld` is the **connectivity and command orchestration hub**. It must not absorb device-policy logic that belongs in `feral-watchdog` or setup logic that belongs in `feral-setupd`. It is the highest-risk service for architectural sprawl; resist it.
-- `feral-setupd` is the **setup and recovery UX owner**. Its scope is first-run provisioning, pairing, recovery UI, and updater orchestration. It should not grow into a general device-policy daemon.
-- `launcher-ui` and `player-wrapper-ui` are **thin process starters**. They contain no business logic. Parameters come from command-line arguments. State and control live in daemons, not in these wrappers.
+- `feral-controld` is the **connectivity, command orchestration, and device-setup hub**. Since the setupd merge it deliberately owns first-run provisioning and recovery as well as runtime command routing. It remains the highest-risk service for architectural sprawl: keep the setup domain (`softap`, `portal`, `provisioning`, `wifictl`, `otagate`, `setupui`) and the runtime domain (`relayer`, `commandrouter`, `devicectl`, `cdp`, `hub`) as legible sub-packages, and do not let unrelated device policy that belongs in `feral-watchdog` leak in.
+- `player-wrapper-ui` is a **thin process starter**. It contains no business logic. Parameters come from command-line arguments. State and control live in daemons, not in this wrapper.
+
+---
+
+## The setupd merge (fault-containment rationale)
+
+An earlier version of this document treated BLE provisioning as a hard isolation invariant: "BLE provisioning is owned entirely by `feral-setupd`." That boundary was **deliberately removed**. The former Rust `feral-setupd` daemon was folded into `feral-controld`, and BLE provisioning was replaced by SoftAP (a Wi-Fi hotspot + captive portal). The reasons are the new fault-containment story, and they should be treated as intentional direction, not drift:
+
+- **Single language.** The device-services surface is now Go end to end. Rust, `cargo`, and the BLE/GATT stack are gone. There is one build toolchain, one test story, and one set of readability rules.
+- **In-process supervision domain.** The setup flow and the runtime command path share one process, one state store, and one connectivity view. The provisioning event loop runs under a panic-recovering supervisor (`provisioning/supervisor.go`, capped exponential backoff) that contains panics *inside* the loop without tearing down the daemon. Cross-process D-Bus round-trips that used to coordinate controld↔setupd (`GetRelayerTopicID`, `show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`) are now direct in-process calls.
+- **Relaxed StartLimit.** Because `feral-controld` is now the device's **only** provisioning path — there is no BLE fallback — its unit sets `StartLimitIntervalSec=0` (`users/feralfile/systemd-services/feral-controld.service`). Fast repeated crashes must degrade into slow `Restart=always` retries (`RestartSec=5`), never latch into a permanent `start-limit-hit` dead state that would strand setup on an offline device.
+- **Provisioning-first startup.** `main.go` brings the LAN hub, mDNS, and the provisioning domain up **before** the relayer/CDP init, and the relayer connect is best-effort and never fatal. A relayer or CDP failure cannot abort device setup or the LAN recovery channel. `users/feralfile/.start-services.sh` starts `feral-controld.service` first, with `--no-block`, for the same reason.
+
+Process-level crash recovery remains systemd's job; the in-process supervisor only contains panics within the provisioning loop.
+
+---
+
+## Deliberately-open LAN surface (release-scoped, pending security sign-off)
+
+This release ships three LAN-facing surfaces **without** authentication. They are accepted, release-scoped decisions, not oversights. Each is named here for security sign-off, and each has a single declared end state: **v2 screen-anchored LAN pairing** (issue [#3471](https://github.com/feral-file/ffos-user/issues/3471)), where a short code shown on the device's display anchors trust, the device stores authorized controller keys, the owner reviews/revokes them on-device, and factory reset clears them.
+
+1. **Unauthenticated command API on `:1111`.** `POST /api/cast` on the LAN hub accepts the same command envelope as the relayer and routes it through the same `commandrouter`. Any host on the local network can drive the device. The hub's single shared middleware (`hub/middleware.go`) is the **designated insertion point** for the v2 authorization layer — it is the one chokepoint every hub route passes through.
+2. **Prometheus `/metrics` on the LAN.** The hub serves playback metrics in Prometheus text format at `:1111/metrics`, unauthenticated, on the same surface.
+3. **System-wide unprivileged-port floor.** `feral-controld` runs as a `systemd --user` service (uid 1000) where `CAP_NET_BIND_SERVICE` is inert, so the captive portal binds `:80` by lowering the system-wide unprivileged-port floor: `net.ipv4.ip_unprivileged_port_start=80`. This sysctl is set in the base image (`ffos` repo, `archiso-ff1/airootfs/etc/sysctl.d/10-unprivileged-port-start.conf`), not in this repository, and it applies to **every** process on the device, not just the portal.
+
+Until v2 lands, deployments must treat the LAN as a trust boundary: enable these surfaces only on networks where local clients are trusted. The `contract` field on `GET /api/status` (value `"1"`) exists for the dual-running window that retiring the open surface requires — see `docs/api-design.md` and `docs/web-controller-feasibility.md`.
 
 ---
 
@@ -32,7 +56,7 @@ Rules for each boundary:
 
 ### Primary IPC: D-Bus (session bus, user scope)
 
-D-Bus is the canonical inter-service transport on-device. All cross-service communication between daemons happens over D-Bus unless noted otherwise.
+D-Bus remains the canonical inter-service transport on-device between the **remaining** daemons.
 
 **Signal direction** (one-way, fire-and-forget):
 
@@ -42,21 +66,15 @@ feral-sys-monitord  --[sysmetrics]-----------> feral-controld
                     --[connectivity_change]--> feral-controld
                     --[connectivity_change]--> feral-watchdog
                     --[sysevent]-------------> feral-watchdog
-
-feral-controld      --[show_pairing_qr_code]-> feral-setupd
-                    --[factory_reset]--------> feral-setupd
-                    --[system_update]--------> feral-setupd
-                    --[upload_logs]----------> feral-setupd
-                    --[upload_logs_with_bundle]-> feral-setupd
 ```
 
 **RPC direction** (request/response):
 
 ```
 feral-controld  --[GetConnectivityStatus]--> feral-sys-monitord
-feral-setupd    --[GetConnectivityStatus]--> feral-sys-monitord
-feral-setupd    --[GetRelayerTopicID]------> feral-controld
 ```
+
+The former controld→setupd signals (`show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle`) and the `GetRelayerTopicID` RPC no longer cross a process boundary: those handlers now live inside `feral-controld` and are invoked directly. `com.feralfile.controld`'s `dbus` package now exports only the inbound `feral-sys-monitord` constants it consumes.
 
 ### External transport: WebSocket relayer
 
@@ -64,42 +82,49 @@ feral-setupd    --[GetRelayerTopicID]------> feral-controld
 
 ### UI control: Chrome DevTools Protocol (CDP)
 
-Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-setupd` drives setup UI pages (QR code, messages, and the bundled local webapp). `feral-controld` forwards web commands from the relayer to Chromium via CDP. `feral-watchdog` monitors Chromium health and issues recovery commands via CDP. Neither daemon embeds a web server or serves UI assets directly.
+Daemons control the Chromium kiosk instance over CDP (HTTP + WebSocket to `127.0.0.1:9222`). `feral-controld` forwards web commands from the relayer to Chromium via CDP, and drives the on-screen **setup narration** through the player's `setupDisplay` CDP contract (see `setupui`, below). `feral-watchdog` monitors Chromium health via HTTP polling of `/json/version` and uses CDP navigation to steer Chromium back to the player during recovery. Neither daemon embeds a web server for UI assets.
 
-`feral-player.service` is the readiness gate for the bundled local webapp. Chromium kiosk and any daemon that navigates to the local player must wait for that unit to report `READY=1`.
+`feral-player.service` is the readiness gate for the bundled local webapp. Chromium kiosk and any daemon that navigates to the local player must wait for that unit to report `READY=1`. The kiosk boots the bundled player at `http://127.0.0.1:8080/`.
 
-### Local device control: Hub WebSocket (port 1111)
+### On-screen setup narration: `setupDisplay` (CDP → ff-player)
 
-`feral-controld` exposes a local WebSocket server on `0.0.0.0:1111` when `enableHub` is true in config. This hub accepts the same command format as the relayer and is used for local-network control (e.g. from a companion app on the same network). mDNS advertises hub availability. The hub is not a replacement for the relayer; it is an optional local control path.
+`feral-controld`'s `setupui` package pushes setup progress to the bundled player through a single CDP command, `setupDisplay`, delivered via `window.handleCDPRequest(...)` over `Runtime.evaluate`. The contract is:
 
-### Panel control: DDC/CI via `ddcutil`
+- **Manifest-gated.** `setupui` reads the player capability manifest at `/opt/feral/feral-player/ffos-player-contract.json` and only narrates if `contracts.setupDisplay` (version `1`) is present. An older player yields a permanent no-narration fallback; there is no separate setup page.
+- **Fire-and-forget.** Pushes never block, never return a fatal error, and never panic. A burst collapses to at most one trailing send; the last state is re-pushed on CDP reconnect.
+- **Namespace-extensible.** New narration states can be added without breaking older players (e.g. `factory_reset` is an extension state outside the contract's required set), which is what keeps the v2 pairing-approval overlay additive.
 
-`feral-controld`’s `devicectl` executor drives the attached panel over DDC/CI using the `ddcutil` CLI. Remote or hub commands `ddcPanelControl` and `ddcPanelStatus` map to brightness, contrast, speaker volume, mute, and power VCPs on the default display; the helper wraps `ddcutil` with a lightweight retry/recovery run when the tool reports display-not-found or missing VCP output.
+### Local device control: LAN hub (port 1111)
 
-### Mobile provisioning: BLE GATT (Bluetooth Low Energy)
-
-`feral-setupd` exposes a BLE GATT service used by the mobile app during first-run provisioning. BLE is the setup channel only; it is not used for runtime device control or command routing. No other service registers a GATT service.
+`feral-controld` exposes an HTTP server on `0.0.0.0:1111` (`hub` package). Unlike the earlier optional WebSocket hub, the listener now binds **unconditionally** at boot (gated only by the `enableHub` config flag, which defaults on): it is the BLE-replacement LAN recovery channel and must stay reachable whenever there is a link. It exposes `POST /api/cast` (relayer command envelope), `GET /api/status` (legacy, contract `"1"`), `GET /api/v2/status` (the LAN pairing surface, contract `"2"` — old firmware 404s here, which is how the app gates pairability), `GET → WS /api/notification`, and `GET /metrics`, all through one shared middleware. See `docs/api-design.md` for the wire surface and the open-LAN caveats above.
 
 ### Service discovery: mDNS
 
-`feral-controld` advertises the device on the local network via mDNS when hub is enabled and internet is connected. The advertisement includes the device ID, name, and hub port (1111).
+`feral-controld` advertises the device via mDNS (`_ff1._tcp`, `mdns` package). Unlike the hub listener, mDNS **discoverability** is link-keyed: it comes up whenever there is any network link (ethernet or Wi-Fi), independent of internet reachability or relayer connectivity, and is torn down when the link drops. The TXT record carries `id`, `name`, and `claimed` (always published, even when `false`). A claim-state flip triggers a Stop+Start re-registration so resolvers see the new `claimed` value.
+
+### Panel control: DDC/CI via `ddcutil`
+
+`feral-controld`'s `devicectl` executor drives the attached panel over DDC/CI using the `ddcutil` CLI. Remote or hub commands `ddcPanelControl` and `ddcPanelStatus` map to brightness, contrast, speaker volume, mute, and power VCPs on the default display; the helper wraps `ddcutil` with a lightweight retry/recovery run when the tool reports display-not-found or missing VCP output.
+
+### Mobile provisioning: SoftAP + captive portal
+
+First-run and offline-recovery provisioning is done over a NetworkManager Wi-Fi hotspot (`softap`) and a device-served captive portal (`portal`), coordinated by the `provisioning` state machine and executed by `wifictl`. There is no BLE/GATT surface. The AP SSID is `FF1-<device_id>`, WPA2-PSK derived from the device id, and the portal binds `:80`. See `docs/api-design.md` and `docs/setup-flow.md` for the full contract and flow.
 
 ---
 
-## Launcher UI and Daemon Logic Ownership
+## Kiosk and Daemon Logic Ownership
 
-The boundary between launcher/UI code and daemon logic:
+The boundary between kiosk/UI code and daemon logic:
 
-- **Daemons own all state, policy, and side effects.** Daemons decide what page to show, when to update, and what to do on errors.
-- **Chromium (via CDP) renders the UI.** Pages are HTML/JS served from `file:///opt/feral/ui/launcher/` or from the bundled local player at `http://127.0.0.1:8080/`. Daemons navigate or execute JavaScript by calling CDP, not by modifying files on disk at runtime.
+- **Daemons own all state, policy, and side effects.** Daemons decide what to show, when to update, and what to do on errors.
+- **Chromium (via CDP) renders the UI.** The kiosk loads the bundled local player at `http://127.0.0.1:8080/`. Daemons navigate or execute JavaScript by calling CDP, not by modifying files on disk at runtime. Setup progress is pushed through the `setupDisplay` contract; there is no separate setup web page and no `file:///.../launcher/` surface.
 - **Mint pairing display belongs to the player UI.** `feral-controld` owns broker/session state and drives the bundled player through the `mintPairingDisplay` CDP command. The player renders a transient overlay above active artwork playback; `ffos-user` does not ship a separate mint-pairing QR page.
-- **`launcher-ui` is a one-shot process starter.** It constructs a URL from command-line arguments (key=value pairs), launches Chromium with `cage` as the Wayland compositor, and waits. It contains no business logic and no daemon lifecycle. Arguments come from the systemd unit; they do not change at runtime.
-- **UI does not call daemons directly** except through the Hub WebSocket (when local control UI in Chromium sends commands to controld on port 1111). All other control flows originate in daemons and push into Chromium via CDP.
-- **`player-wrapper-ui`** follows the same pattern: thin process wrapper, no policy.
+- **The kiosk is a one-shot launcher script.** `users/feralfile/scripts/start-kiosk.sh` launches Chromium after waiting for a display and for `feral-player.service`. It contains no business logic and no daemon lifecycle.
+- **UI does not call daemons directly** except through the LAN hub (when a local client sends commands to controld on port 1111). All other control flows originate in daemons and push into Chromium via CDP.
 
 When adding new behavior that spans UI and daemon logic:
-1. The state and decision logic goes in a daemon (usually `feral-controld` or `feral-setupd`).
-2. The daemon issues a CDP call to navigate or execute JavaScript in Chromium.
+1. The state and decision logic goes in a daemon (usually `feral-controld`).
+2. The daemon issues a CDP call (`window.handleCDPRequest`) to narrate, navigate, or execute JavaScript in Chromium.
 3. The UI renders what it is told.
 
 ---
@@ -112,16 +137,20 @@ Each service owns its own state files exclusively. No service should read or wri
 |---|---|---|
 | `feral-controld` | `/home/feralfile/.state/controld.state` | Relayer topic ID, connected device (ID, name, platform) |
 | `feral-controld` | `/home/feralfile/.state/screen-orientation` | Last committed screen orientation value |
-| `feral-setupd` | `/home/feralfile/.state/setupd` | Setup state: `setup_phase` (durable recovery state), `pre_failure_phase` (phase to restore after OTA recovery), `topic_id` (relayer topic), `connected` (first-internet flag). Legacy `paired` flag migrated to `setup_phase=ready` on upgrade. |
+| `feral-controld` | `/home/feralfile/.state/analytics-toggle-off` | Presence = analytics disabled |
+| `feral-controld` | `/home/feralfile/.state/beta-features-toggle-on` | Presence = beta features enabled |
+| `feral-controld` | `/home/feralfile/.state/saved-volume` | Persisted volume level |
 | updater scripts | `/home/feralfile/ff1-config.json` | Device branch, current version, update channel URLs (read-only at runtime by services) |
-| system | `/etc/hostname` | Device hostname (read-only at runtime; used by `controld` for mDNS identity) |
+| system | `/etc/hostname` | Device hostname (read-only at runtime; used by `controld` for mDNS identity, the SoftAP SSID/PSK, and the device id) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-count` | Chromium OOM kill count (read by `controld` OOM recoverer) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-handled-count` | Handled OOM kill count (written by `controld` OOM recoverer) |
 | `feral-watchdog` | `/home/feralfile/.state/failed_recovery_version` | Version of a recovery candidate that failed to boot |
 
+The former `feral-setupd` state file (`/home/feralfile/.state/setupd`, with `setup_phase` / `pre_failure_phase` / `topic_id` / `connected`) is gone. The merged OTA gate (`otagate`) tracks update state in memory (`Mode`/`Result` enums and an in-memory permanent-failure latch) rather than persisting a durable setup-phase machine; the relayer topic lives in `controld.state`; the live setup/provisioning state is derived from the `provisioning` machine, not a file.
+
 Rules:
 - State writes must be atomic. Use write-to-temp-then-rename (`FILE.tmp` → `FILE`).
-- State files are human-readable text. Most use JSON, but `feral-setupd`'s `setupd` file uses a flat `key=value` line format (one key per line). Add fields additively; never rename or remove fields without a migration path.
+- State files are human-readable text (JSON for `controld.state`).
 - State is not a message bus. Services that need to react to changes in another service's state must use D-Bus signals, not file polling.
 - `ff1-config.json` is read-only at runtime for all services. Only updater scripts write it. It does not control the local player URL.
 - SSH authorized keys (`/home/feralfile/.ssh/authorized_keys`) are managed by `feral-controld` on behalf of the `sshAccess` command.
@@ -136,6 +165,8 @@ The device uses a two-version (v1 and v2) btrfs snapshot system. Agents must not
 
 - The btrfs default subvolume (`@snapshots/@`) is only changed **after** a successful boot from a candidate subvolume. Candidates boot exactly once via `bootctl set-oneshot`.
 - The marker file `var/lib/factory_reset/support_v2_root_snapshot` inside a snapshot distinguishes v2 from v1 layout. Both layouts must remain supported in the rollback initcpio hook.
+
+Factory reset is a security-relevant special case: `feral-controld` starts `set-factory-boot.service` (via `systemctl`) which stages a one-shot boot into the pristine factory snapshot and reboots. It **abandons** the running subvolume rather than wiping it. Because the persisted relayer topic survives on the old subvolume until the reboot completes, `controld` clears the topic in-process at reset time (`clearPersistedRelayerTopic`) to close the window where a resold or interrupted device could remain commandable on the old topic.
 
 ### Service state files
 
@@ -156,10 +187,11 @@ Component versions follow semantic versioning. The `ffos` build repo pins the `f
 1. `feral-sys-monitord` emits signals; it never takes recovery actions or calls other services.
 2. `feral-watchdog` consumes signals; it never emits its own D-Bus health signals.
 3. `feral-controld` is the only service that connects to the remote relayer.
-4. CDP access (port 9222) is used only by `feral-controld`, `feral-setupd`, and `feral-watchdog`.
-5. BLE provisioning is owned entirely by `feral-setupd`. No other service registers a GATT service.
+4. CDP access (port 9222) is limited to `feral-controld` (command forwarding and setup narration) and `feral-watchdog` (recovery navigation; its health checks poll HTTP `/json/version`). No other service touches CDP.
+5. Provisioning has exactly one owner (`feral-controld`, via SoftAP + captive portal). There is no BLE/GATT surface and no second provisioning path.
 6. State files under `/home/feralfile/.state/` are single-owner. No two services write the same file.
-7. `launcher-ui` exits after Chromium exits. It does not restart Chromium; `feral-watchdog` or systemd does that.
-8. The Hub WebSocket (port 1111) is optional (`enableHub` config flag). No service depends on it being present.
-9. `feral-controld` exposes D-Bus RPC to other services (`GetRelayerTopicID`). It must not remove this method without a coordinated update to all callers.
-10. `feral-sys-monitord` exposes D-Bus RPC (`GetConnectivityStatus`, `GetSysMetrics`). These are relied on by `feral-controld` and `feral-setupd` at startup.
+7. The Chromium kiosk is launched by `start-kiosk.sh`; it does not restart Chromium after a crash — `feral-watchdog` or systemd does.
+8. The LAN hub listener (port 1111) binds unconditionally when `enableHub` is on (its default); it is the LAN recovery channel and must not be re-gated on internet or relayer state. mDNS discoverability, by contrast, is link-keyed.
+9. `feral-controld`'s startup brings the hub, mDNS, and provisioning up before the relayer/CDP init, and the relayer connect is never fatal. Do not reorder so that a relayer or CDP failure can abort setup.
+10. `feral-sys-monitord` exposes D-Bus RPC (`GetConnectivityStatus`, `GetSysMetrics`), relied on by `feral-controld`. Do not remove without a coordinated update to all callers.
+11. The unauthenticated `:1111` command API, `:1111/metrics`, and the system-wide `ip_unprivileged_port_start=80` sysctl are accepted, release-scoped surfaces whose end state is v2 screen-anchored pairing (#3471). Add LAN authorization at the hub's shared middleware chokepoint, not by diverging individual routes.

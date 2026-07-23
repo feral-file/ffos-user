@@ -137,4 +137,4 @@ exec cage -- /bin/bash -c "
     --deny-permission-prompts \
     --disable-external-intent-requests \
     --disable-component-extensions-with-background-pages \
-    file:///opt/feral/ui/launcher/index.html?step=logo"
+    http://127.0.0.1:8080/"

@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'components/feral-controld/**/*.go'
+      - 'components/feral-controld/**/*.html'
       - '.golangci.yml'
       - 'Makefile'
       - 'components/Makefile'
