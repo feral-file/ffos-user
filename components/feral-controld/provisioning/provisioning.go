@@ -635,10 +635,18 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
 		// contract.
 		online, oerr := m.conn.Online(ctx)
 		if oerr != nil {
-			m.logger.Warn("provisioning: post-join connectivity query failed; assuming offline", zap.Error(oerr))
+			m.logger.Warn("provisioning: post-join connectivity query failed; assuming offline until a query succeeds", zap.Error(oerr))
 			online = false
 		}
 		m.onConnectivity(ctx, online)
+		if oerr != nil {
+			// Same assumed-vs-read discipline as the boot-time query (and the
+			// same AFTER-onConnectivity ordering, since it clears the flag):
+			// sys-monitord being briefly unavailable during the join must not
+			// become a permanent offline verdict that raises the AP over a
+			// working uplink after the offline window.
+			m.connUnknown = true
+		}
 		return
 	}
 

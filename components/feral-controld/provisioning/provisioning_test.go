@@ -648,6 +648,39 @@ func TestConnectivityRecoveryThroughLoop(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond)
 }
 
+// TestJoinWithFailedPostJoinQueryRecoversOnTick: sys-monitord briefly
+// unavailable during a successful association must not become a permanent
+// offline verdict — the boot-time connUnknown discipline applies to the
+// post-join assessment too, so a tick re-query (no connectivity event needed)
+// settles the machine Online instead of raising the AP over a working uplink
+// after the offline window.
+func TestJoinWithFailedPostJoinQueryRecoversOnTick(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	// Association succeeds; the uplink genuinely works, but the post-join
+	// query fails (monitord blip).
+	h.wifi.joinErr = nil
+	h.conn.online = true
+	h.conn.setErr(errors.New("monitord momentarily unavailable"))
+	h.wifi.setProfile(true)
+	h.m.applyJoin(ctx, "HomeNet", "pw")
+
+	require.Equal(t, StateOfflineRetrying, h.m.State(), "failed query is assumed offline for now")
+	require.Equal(t, portal.JoinSucceeded, h.m.Status().State)
+
+	// monitord recovers: the next tick's re-query must settle Online with no
+	// connectivity event, and the AP must never come back.
+	h.conn.setErr(nil)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateOnline, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"), "no AP re-raise over a working uplink")
+}
+
 // TestOnlineBootWithFailedInitialQueryRecoversOnTick: controld starts before
 // sys-monitord, so the boot-time reachability query can fail; the machine then
 // assumes offline and raises the AP. monitord may resolve its initial state
