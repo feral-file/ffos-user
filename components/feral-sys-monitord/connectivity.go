@@ -35,15 +35,23 @@ type Connectivity struct {
 	handlers      []ConnectivityHandler
 	doneChan      chan struct{}
 	lastConnected *bool
+
+	// probe performs one reachability check. Defaults to CheckConnectivity;
+	// a seam so the generation-guard regression tests can block a probe
+	// deterministically without dialing real ping targets. Set once at
+	// construction, never mutated after.
+	probe func(timeout time.Duration) (bool, error)
 }
 
 func NewConnectivity(ctx context.Context, logger *zap.Logger) *Connectivity {
-	return &Connectivity{
+	c := &Connectivity{
 		ctx:      ctx,
 		logger:   logger,
 		handlers: []ConnectivityHandler{},
 		doneChan: make(chan struct{}),
 	}
+	c.probe = c.CheckConnectivity
+	return c
 }
 
 func (c *Connectivity) GetLastConnected() bool {
@@ -158,10 +166,22 @@ func (c *Connectivity) background() {
 
 		// Always check connectivity for the first time
 		if lastConnected == nil {
-			connected, err := c.CheckConnectivity(PING_TIMEOUT)
+			connected, err := c.probe(PING_TIMEOUT)
 			if err != nil {
 				// We accept not being able to check connectivity and only log the warning
 				c.logger.Warn("Connectivity check failed", zap.Error(err))
+			}
+			// Same generation guard as the ticker branch below: the watcher may
+			// have been stopped/restarted while this probe was dialing, and a
+			// retired generation applying its result would overwrite the
+			// replacement watcher's state and emit a stale transition.
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-done:
+				c.logger.Info("Connectivity Watcher stopped before initial state applied; discarding stale probe result")
+				return
+			default:
 			}
 			c.Lock()
 			c.lastConnected = &connected
@@ -194,7 +214,7 @@ func (c *Connectivity) background() {
 				return
 			case <-ticker.C:
 				c.logger.Info("Checking connectivity")
-				connected, err := c.CheckConnectivity(PING_TIMEOUT)
+				connected, err := c.probe(PING_TIMEOUT)
 				// The watcher may have been stopped/restarted while the check
 				// was dialing (the change-triggered restart): its result belongs
 				// to the OLD generation and must not be applied or logged as
