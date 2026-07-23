@@ -91,7 +91,7 @@ All messages are JSON. The message envelope is:
 }
 ```
 
-- `messageID == "system"`: a system message. The `message.topicID` field, if present, must be saved to state and returned to any pending `GetRelayerTopicID` callers.
+- `messageID == "system"`: a system message. The `message.topicID` field, if present, must be saved to state; on the first (empty → non-empty) assignment the mediator also fires the topic observer that re-triggers the auto-claim flow. (The BLE-era `GetRelayerTopicID` RPC and its pending callers are retired — the topic is consumed in-process.)
 - Any other `messageID`: a command message. Route to `commandrouter`.
 
 **Outbound (device sends to relayer):**
@@ -334,7 +334,7 @@ RPCs that timeout should log the error and either fail the calling operation or 
 
 ### Relayer connection
 
-`feral-controld` retries the relayer WebSocket connection with exponential back-off. The relayer connection is conditional on `GetConnectivityStatus` returning true and the persisted `TopicID` being non-empty. If either precondition is missing, `controld` waits for the `connectivity_change` D-Bus signal before attempting to connect.
+`feral-controld` retries the relayer WebSocket connection with exponential back-off. The relayer connection is conditional on reachability ONLY (`GetConnectivityStatus` returning true) — never on a persisted `TopicID`. Connecting with an **empty** topic is the designed topic-assignment path: the connect URL omits the `topicID` parameter and the server answers with a `MESSAGE_ID_SYSTEM` carrying the assigned topic, which the mediator persists. Gating on a non-empty topic would deadlock a factory-fresh device that boots already online (no `connectivity_change` edge ever fires on it). When the device is offline, `controld` waits for the `connectivity_change` D-Bus signal before attempting to connect.
 
 ### OTA gate (`otagate`)
 

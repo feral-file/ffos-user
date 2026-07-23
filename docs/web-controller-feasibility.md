@@ -23,8 +23,10 @@ pre-merge format; built in `devicectl`):
 <device_id>|<topic_id>|<internet true/false>|<branch>|<version>|pairing
 ```
 
-(The LAN API version field `contract: "1"` lives on the hub's `GET /api/status`,
-not in the QR payload.)
+(The LAN API version lives on the hub's status routes, not in the QR payload:
+`GET /api/v2/status` — the pairing surface the app gates on — serves
+`contract: "2"`; the legacy `GET /api/status` keeps `contract: "1"` for
+transitional tooling.)
 
 The mobile app parses this QR, extracts the topic ID, and binds it to the user's account via a cloud pairing call. The device rotates its topic ID on factory reset; unclaim revokes binding server-side.
 
@@ -117,7 +119,7 @@ No features from this section are assigned or scoped for immediate implementatio
 
 The LAN hub and SoftAP provisioning chain are designed to coexist with the relayer, not immediately replace it.
 
-The `contract` version field in `GET /api/status` (`contract: "1"`) exists for the dual-running window that retiring the open `:1111` surface requires: when a future firmware turns on LAN authorization, clients can detect old-firmware vs new-firmware devices by this field instead of hitting a silent hard break. Its value today is simply that every shipped device carries the field.
+The implemented firmware gate is the **versioned status route plus the mDNS TXT key**: new firmware serves `GET /api/v2/status` (`contract: "2"`) and advertises `api=2` on `_ff1._tcp`; old firmware 404s on the v2 route and lacks the TXT key, so the pairing app treats it as not LAN-pairable without shape-sniffing. The legacy `GET /api/status` (`contract: "1"`) remains for transitional tooling, and the same versioned-route mechanism is the escape hatch for the future LAN-authorization break: when auth turns on, clients detect capability by route/TXT version instead of hitting a silent hard break.
 
 The open, unauthenticated LAN hub is release-scoped, with a declared v2 end state: **screen-anchored LAN pairing** — a short code shown on the device's display anchors trust, the device stores authorized controller keys, the owner reviews/revokes them on-device, and factory reset clears them. The hub's single shared middleware is the designated insertion point for that authorization layer; the `setupDisplay` overlay contract is namespace-extensible so the pairing-approval overlay can be added without breaking older players.
 
