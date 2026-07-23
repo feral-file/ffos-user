@@ -270,6 +270,35 @@ func TestRecomputeNow_WakePathForceCastsNowDisplay(t *testing.T) {
 	sched.RecomputeNow(context.Background())
 }
 
+func TestPrepare_DateOnlyDisplayAt_NotEligible(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	// §3.5.2: date-only is rejected — present but unresolvable, not evergreen.
+	active := sched.Prepare(byDisplayAtPlaylist(
+		item("bad-date", "2026-07-21"),
+		item("ok", "2026-07-22T00:00:00Z"),
+		item("intro", ""),
+	))
+	require.Equal(t, []string{"ok", "intro"}, itemIDs(active.Items))
+}
+
 func TestPrepare_AllFuture_ReturnsOnlyEvergreen(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -307,12 +336,18 @@ func byDisplayAtPlaylist(items ...dp1playlist.PlaylistItem) *dp1.Playlist {
 }
 
 func item(id, displayAt string) dp1playlist.PlaylistItem {
-	return dp1playlist.PlaylistItem{
-		ID:        id,
-		Title:     id,
-		Source:    "https://example.com/" + id + ".html",
-		DisplayAt: displayAt,
+	it := dp1playlist.PlaylistItem{
+		ID:     id,
+		Title:  id,
+		Source: "https://example.com/" + id + ".html",
 	}
+	// Empty string keeps DisplayAt nil (evergreen). Non-empty sets a present
+	// pointer; date-only values are invalid per §3.5.2 and not evergreen.
+	if displayAt != "" {
+		da := displayAt
+		it.DisplayAt = &da
+	}
+	return it
 }
 
 func itemIDs(items []dp1playlist.PlaylistItem) []string {

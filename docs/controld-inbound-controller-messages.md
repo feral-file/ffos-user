@@ -274,6 +274,7 @@ When the resolved playlist includes `schedule.byDisplayAt: true`, controld
 computes an active set (`max(displayAt <= now)` items plus items without
 `displayAt`) and sends only that filtered playlist to Chromium. Timezone-less
 `displayAt` values use device local time; values with `Z`/offset are absolute.
+Date-only (`YYYY-MM-DD`) is rejected per DP-1 §3.5.2 (not evergreen).
 Controld keeps the full playlist in memory to arm the next `displayAt`
 transition and to recompute after wake or CDP reconnect. Initial casts and
 timed / wake / reconnect pushes are force casts (`intent.action=now_display`

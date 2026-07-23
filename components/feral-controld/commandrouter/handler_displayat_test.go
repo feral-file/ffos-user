@@ -56,9 +56,9 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersByDisplayAt(t *testing.T)
 			Title:    "Daily",
 			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
-				{ID: "day21", Title: "Day 21", Source: "https://example.com/21.html", DisplayAt: "2026-07-21T00:00:00Z"},
-				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: "2026-07-22T00:00:00Z"},
-				{ID: "day23", Title: "Day 23", Source: "https://example.com/23.html", DisplayAt: "2026-07-23T00:00:00Z"},
+				{ID: "day21", Title: "Day 21", Source: "https://example.com/21.html", DisplayAt: strPtr("2026-07-21T00:00:00Z")},
+				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+				{ID: "day23", Title: "Day 23", Source: "https://example.com/23.html", DisplayAt: strPtr("2026-07-23T00:00:00Z")},
 			},
 		},
 	}
@@ -284,7 +284,7 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 			Title:    "Daily",
 			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
-				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: "2026-07-22T00:00:00Z"},
+				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
 		},
 	}
@@ -332,7 +332,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 		Playlist: dp1playlist.Playlist{
 			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
-				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: "2026-07-22T00:00:00Z"},
+				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
 		},
 	})
@@ -353,3 +353,5 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 	track.RecomputeNow(ctx)
 }
+
+func strPtr(s string) *string { return &s }
