@@ -752,9 +752,94 @@ silently stretch a short caller deadline out to the full 15s — exactly
 the "caller's tighter deadline wins" contract this ctx construction
 otherwise promises everywhere else in `Send`.
 
+### 6.1 Cross-origin iframes are separate CDP targets and must be attached individually
+
+`feral-player` renders a software artwork inside an `<iframe>`. When that
+iframe is cross-origin from the kiosk page (the common case — the artwork
+is served from a different origin than the player shell), Chromium's site
+isolation runs it in its own renderer process with its **own CDP target**
+(an out-of-process iframe, OOPIF). A single CDP session attached only to
+the top-level page target never sees that iframe's requests at all, so
+`Fetch` interception scoped to the page silently misses everything the
+artwork itself loads — including its very first document request — and
+those requests fall through to the (offline) network. Field testing
+confirmed this made cross-origin iframe artworks fail offline even when
+fully cached; the page-only session had effectively never intercepted
+them, relying on live connectivity.
+
+Replay handles this with CDP **flat-mode multi-target** attach:
+
+- `kiosktargets.go`'s `enableChildTargetAutoAttach` issues
+  `Target.setAutoAttach{autoAttach:true, flatten:true,
+  waitForDebuggerOnStart:true, filter:[{type:"iframe"}]}` on the
+  freshly-dialed top-level session (once per reconnect, from
+  `KioskReplay.AttachOnReconnect`).
+- Each auto-attached child target arrives as a `Target.attachedToTarget`
+  event carrying its own flat-mode `sessionId`. `cdpsession.go` now stamps
+  that `sessionId` on outbound commands (`ForSession(sessionID)`) and
+  routes inbound events to handlers registered for that same
+  `(method, sessionId)` pair, so several targets multiplex over the one
+  websocket. `replay.go` keeps a `sessionId -> session` target map (the
+  empty id is the top-level page) and enables `Fetch` on, and answers
+  paused requests from, each target independently — `Fetch` is a
+  per-target domain, and a `requestId` is only unique within its own
+  target's session.
+- **`waitForDebuggerOnStart:true` is load-bearing, not optional.** It
+  pauses a newly created child target before it issues even its first
+  document request. On `Target.attachedToTarget` replay (1) attaches its
+  handler and enables `Fetch` on the child, THEN (2) calls
+  `Runtime.runIfWaitingForDebugger` to let it proceed. Without the pause,
+  the child's first request could race ahead of `Fetch.enable` and reach
+  the network before interception is armed — reintroducing the exact
+  "first request always misses" failure, intermittently instead of
+  deterministically. The attach/detach handlers hand off to their own
+  goroutines because they issue CDP `Send`s (child `Fetch.enable`,
+  `Runtime.runIfWaitingForDebugger`) that would deadlock the read pump if
+  run inline (see `cdpsession.go`'s `On` doc).
+- A child that attaches while a scope is already enabled is armed
+  immediately (attach-time `Fetch.enable`), since in the display path the
+  scope is enabled *before* the kiosk navigates and creates the iframe.
+- A fresh top-level connection (a kiosk/OOM reconnect) is a generation
+  boundary: it supersedes and closes the old top-level session and drops
+  every child target from the prior connection, whose `sessionId`s are
+  meaningless against the new socket. `Target.detachedFromTarget` drops an
+  individual child mid-session (e.g. an iframe navigation) so a long-lived
+  connection does not accumulate dead per-target state.
+
+This covers exactly one level of cross-origin nesting (kiosk page ->
+artwork iframe), which is the reproduced topology. It is deliberately not
+recursive — see §8.
+
 On every `Fetch.requestPaused` event, keyed on the **exact original URL**
 (never a rewritten relative path — this is what makes replay work for
 absolute and cross-origin URLs without touching the artwork's own code):
+
+**Player-appended query params are stripped before the miss check.**
+ff-player's `ArtworkPlayer.tsx` unconditionally appends
+`&display_mode=fit` or `&display_mode=crop` to a software/iframe
+artwork's URL right before navigating to it — a UI-local rendering hint
+derived from the device's own display settings, added strictly after the
+signed DP-1 `item.Source` was already finalized. `capture.go` always
+navigates to (and therefore stores every resource keyed on) the *bare*
+`item.Source` — it never sees this parameter. Field testing found this
+made the exact-URL lookup above miss **unconditionally** for every
+iframe-type item's own top-level document request, not as a
+partial-capture edge case: under `fail_closed` (the effective policy the
+instant a displayed playlist's every item is cached, i.e. `mixed=false`
+— exactly the case offline mode exists to serve), that guaranteed miss
+failed the navigation itself with `net::ERR_FAILED` before the artwork
+ever started loading, surfacing on-device as Chromium's own broken-frame
+icon inside the iframe. `replay.go`'s `stripPlayerAppendedParams` retries
+a miss once with a small, explicit allowlist of such params removed
+(currently just `display_mode`) — order- and encoding-preserving for
+every surviving query parameter, since a naive
+parse-then-`net/url.Values.Encode()` round trip would alphabetically
+resort them and reintroduce a mismatch for a different reason. This is
+deliberately an allowlist, not a blanket "ignore extra query params"
+normalization: an unknown extra param still misses (and fails closed),
+so a genuinely different URL can never be silently served the wrong
+cached bytes. If a future `ff-player` version starts appending another
+UI-only param, add it to `playerAppendedQueryParams` in `replay.go`.
 
 - **Redirect resource** → `Fetch.fulfillRequest` with the recorded status,
   `Location` header, and the resource's captured `Headers` (below), no
@@ -965,14 +1050,30 @@ identical cache state.
   window, not manifest-based; no capture is a formal guarantee. Coverage
   (`Coverage.Complete`/`Reason`) is the best-effort signal surfaced to the
   mobile app, not a certification.
-- **Nested targets are not separately attached.** Capture only observes the
-  top-level page target's `Network` events; it does not attach
-  `Target.setAutoAttach` for Web Workers or nested iframes, so requests
-  issued purely from within a worker or iframe (rather than proxied through
-  the top-level page) can be invisible to capture. Service Workers
-  registered by the artwork itself compound this: they can intercept and
-  serve their own responses, further hiding requests from top-level
-  `Network` domain capture.
+- **Nested targets are not separately attached on the CAPTURE side.**
+  Capture (`capture.go`) only observes the top-level page target's
+  `Network` events; it does not attach `Target.setAutoAttach` for Web
+  Workers or nested iframes, so requests issued purely from within a
+  worker or a nested iframe (rather than proxied through the top-level
+  page) can be invisible to capture. Service Workers registered by the
+  artwork itself compound this: they can intercept and serve their own
+  responses, further hiding requests from top-level `Network` domain
+  capture. Note this is a capture-side statement: capture navigates the
+  headless page's *top-level document* directly to `item.Source`
+  (`Page.navigate`), so `item.Source`'s own top-level document and the
+  resources it requests directly ARE observed — the gap is resources
+  requested only from a worker or a *further* nested iframe inside that
+  page.
+- **Replay attaches cross-origin iframe targets, but only one level
+  deep.** Replay (§6.1) DOES attach the kiosk page's direct cross-origin
+  iframe child targets via flat-mode `Target.setAutoAttach`, because the
+  artwork is embedded in an iframe by `feral-player` and would otherwise
+  be un-intercepted. It is deliberately not recursive: a *further* nested
+  cross-origin iframe (inside the artwork's own iframe) would need
+  `Target.setAutoAttach` reissued on that child's session, and Web Workers
+  are excluded by the `iframe` filter. Combined with the capture-side
+  limitation above, content whose resources live two or more cross-origin
+  levels deep, or behind a worker, is not covered end to end.
 - **WebSocket / streaming data** cannot be captured-and-replayed this way —
   such items are out of scope for this pipeline (§3.2).
 - **Personalized/authenticated responses** captured once may not be valid

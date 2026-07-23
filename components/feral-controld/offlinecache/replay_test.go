@@ -48,7 +48,7 @@ func setupReplay(t *testing.T, missPolicy offlinecache.MissPolicy) *replayTestSe
 		On("Fetch.requestPaused", gomock.Any()).
 		Do(func(_ string, h func(json.RawMessage)) { handler = h }).
 		Times(1)
-	rp.Attach(mockSession)
+	rp.Attach("", mockSession)
 	require.NotNil(t, handler)
 
 	return &replayTestSetup{
@@ -157,7 +157,7 @@ func TestReplayer_Attach_ClosesPreviouslyAttachedSession(t *testing.T) {
 	newSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
 	ts.mockSession.EXPECT().Close().Return(nil).Times(1)
 
-	ts.replayer.Attach(newSession)
+	ts.replayer.Attach("", newSession)
 }
 
 // TestReplayer_ProcessRequestPaused_DelayedEventFromSupersededSessionIsDropped
@@ -189,7 +189,7 @@ func TestReplayer_ProcessRequestPaused_DelayedEventFromSupersededSessionIsDroppe
 	newSession := mocks.NewMockCDPSession(ts.ctrl)
 	newSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
 	ts.mockSession.EXPECT().Close().Return(nil).Times(1)
-	ts.replayer.Attach(newSession)
+	ts.replayer.Attach("", newSession)
 
 	// Fires the OLD session's bound handler directly, mirroring a real
 	// CDPSession read pump delivering an event that was already queued
@@ -243,7 +243,7 @@ func TestReplayer_EnableForPlaylist_SerializesAgainstConcurrentAttach(t *testing
 	go func() {
 		newSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
 		ts.mockSession.EXPECT().Close().Return(nil).Times(1)
-		ts.replayer.Attach(newSession)
+		ts.replayer.Attach("", newSession)
 		close(attachDone)
 	}()
 
@@ -276,7 +276,7 @@ func TestReplayer_Attach_FirstCallDoesNotCloseAnything(t *testing.T) {
 	// mockSession.Close is deliberately not expected: the first Attach has
 	// no prior session to supersede.
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
-	rp.Attach(mockSession)
+	rp.Attach("", mockSession)
 }
 
 func TestReplayer_EnableForItem_NoSessionAttached(t *testing.T) {
@@ -431,6 +431,85 @@ func TestReplayer_ProcessRequestPaused_DistinctMethodsToSameURLServeIndependentl
 	assert.EqualValues(t, 204, optionsParams["responseCode"])
 }
 
+// TestReplayer_ProcessRequestPaused_StripsPlayerAppendedDisplayModeParam
+// is the regression test for a field-reproduced bug: ff-player's
+// ArtworkPlayer.tsx unconditionally appends "&display_mode=fit|crop" to
+// a software/iframe artwork's URL before navigating to it, but
+// capture.go always navigates to (and therefore stores resources keyed
+// on) the bare item.Source. Without the stripPlayerAppendedParams retry
+// in processRequestPaused, EVERY iframe-type item's own top-level
+// document request misses the exact-URL lookup unconditionally, and
+// under fail_closed (the effective policy once a whole displayed
+// playlist is cached — mixed=false) that failed the navigation itself
+// with net::ERR_FAILED, breaking offline playback for every software
+// artwork. See docs/offline-artwork-capture.md §6.
+func TestReplayer_ProcessRequestPaused_StripsPlayerAppendedDisplayModeParam(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload") // res.URL has no query string
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	liveURL := res.URL + "?display_mode=fit"
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", liveURL))
+	params := awaitSend(t, done)
+	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("software payload")), params["body"])
+}
+
+// TestReplayer_ProcessRequestPaused_StripsDisplayModeWithoutReorderingOtherParams
+// pins that stripping display_mode never routes through a
+// parse-then-net/url.Values.Encode() round trip: Values.Encode() sorts
+// keys alphabetically, which would turn a captured
+// "?edition_number=0&blockchain=bitmark" into
+// "?blockchain=bitmark&edition_number=0" on lookup and reintroduce
+// exactly the mismatch this fix closes, just for a different reason.
+func TestReplayer_ProcessRequestPaused_StripsDisplayModeWithoutReorderingOtherParams(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	capturedURL := "https://cdn.example.com/previews/abc/?edition_number=0&blockchain=bitmark"
+	hash := writeBlobString(t, ts.store, "software payload")
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		ItemID:    "item-1",
+		Item:      dp1playlist.PlaylistItem{ID: "item-1", Source: capturedURL},
+		Entry:     capturedURL,
+		Resources: []offlinecache.Resource{{URL: capturedURL, Status: 200, SHA256: hash, ContentType: "text/html"}},
+		Coverage:  offlinecache.Coverage{Complete: true},
+	}))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	// Exactly what ArtworkPlayer.tsx produces: the ORIGINAL query order
+	// preserved, with "&display_mode=crop" appended at the end.
+	liveURL := capturedURL + "&display_mode=crop"
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", liveURL))
+	params := awaitSend(t, done)
+	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("software payload")), params["body"])
+}
+
+// TestReplayer_ProcessRequestPaused_UnknownExtraParamStillMisses pins
+// that the display_mode allowlist is genuinely narrow: an unrelated
+// extra query param a request happens to carry must still miss (and
+// fail closed here), never be silently matched to a cached resource
+// whose URL lacks it. A blanket "ignore any extra query param"
+// normalization would risk serving the wrong bytes for an artwork whose
+// own logic legitimately varies content by query key; this test would
+// catch that regression.
+func TestReplayer_ProcessRequestPaused_UnknownExtraParamStillMisses(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	liveURL := res.URL + "?some_other_param=1"
+	done := ts.expectSend("Fetch.failRequest")
+	ts.handler(requestPausedEvent(t, "req-1", liveURL))
+	awaitSend(t, done)
+}
+
 func TestReplayer_Disable_DisablesFetchAndClearsScope(t *testing.T) {
 	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
 	defer ts.ctrl.Finish()
@@ -511,6 +590,51 @@ func TestReplayer_ProcessRequestPaused_FulfillsSmallBlob(t *testing.T) {
 	ct, ok := headerValue(t, params, "Content-Type")
 	require.True(t, ok)
 	assert.Equal(t, "text/html", ct)
+}
+
+// TestReplayer_ProcessRequestPaused_HeaderlessResourceFulfillsWithNonNullHeaders
+// is the regression test for the "shader stalls forever" bug: a cached
+// resource with no Content-Type and no extra headers must still fulfill,
+// and its Fetch.fulfillRequest params must carry a non-null (JSON `[]`,
+// not `null`) responseHeaders — Chromium rejects a present-but-null
+// responseHeaders with "Invalid parameters", leaving the paused request
+// hung. This path is reached in the field mainly by cross-origin iframe
+// sub-resources (e.g. p5.js shader files) now that OOPIF targets are
+// intercepted.
+func TestReplayer_ProcessRequestPaused_HeaderlessResourceFulfillsWithNonNullHeaders(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	hash := writeBlobString(t, ts.store, "void main(){}")
+	rec := &offlinecache.ItemRecord{
+		ItemID: "item-shader",
+		Resources: []offlinecache.Resource{
+			// No ContentType, no Headers — the exact shape that produced a
+			// nil headers slice before the fix.
+			{URL: "https://cdn.example.com/shaders/post.frag", Status: 200, SHA256: hash},
+		},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}
+	require.NoError(t, ts.store.SaveItem(rec))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-shader"))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", "https://cdn.example.com/shaders/post.frag"))
+	params := awaitSend(t, done)
+
+	assert.EqualValues(t, 200, params["responseCode"])
+	raw, ok := params["responseHeaders"]
+	require.True(t, ok, "responseHeaders must be present")
+	require.NotNil(t, raw, "responseHeaders must be a non-nil slice (JSON [] not null), or Chromium rejects the fulfill")
+	headers, ok := raw.([]map[string]interface{})
+	require.True(t, ok, "responseHeaders must be a header array")
+	assert.Empty(t, headers, "a headerless resource yields an empty (but non-nil) header array")
+	body, ok := params["body"].(string)
+	require.True(t, ok)
+	decoded, err := base64.StdEncoding.DecodeString(body)
+	require.NoError(t, err)
+	assert.Equal(t, "void main(){}", string(decoded))
 }
 
 func TestReplayer_ProcessRequestPaused_PartialContentBlobNormalizedTo200(t *testing.T) {
@@ -607,7 +731,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectPassesCORSHeadersToStat
 
 	var handler func(json.RawMessage)
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)
-	rp.Attach(mockSession)
+	rp.Attach("", mockSession)
 
 	corsHeaders := map[string]string{"Access-Control-Allow-Origin": "https://example.com"}
 	rec := &offlinecache.ItemRecord{
@@ -683,7 +807,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectsToStatic(t *testing.T)
 
 	var handler func(json.RawMessage)
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)
-	rp.Attach(mockSession)
+	rp.Attach("", mockSession)
 
 	rec := &offlinecache.ItemRecord{
 		ItemID: "item-large",
@@ -738,7 +862,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetMissesWhenStaticServerNotListen
 
 	var handler func(json.RawMessage)
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)
-	rp.Attach(mockSession)
+	rp.Attach("", mockSession)
 
 	rec := &offlinecache.ItemRecord{
 		ItemID: "item-large",
@@ -869,4 +993,172 @@ func TestReplayer_ProcessRequestPaused_StaticServerLookalikeURLsAreNotPassedThro
 				"a static-server lookalike URL must be treated as a miss, never passed through to the network")
 		})
 	}
+}
+
+// attachChildTarget attaches a fresh mock child session (a cross-origin
+// iframe target) to ts.replayer and returns both the mock and the
+// Fetch.requestPaused handler bound to it, mirroring what kiosktargets.go
+// does on a real Target.attachedToTarget. onEnable, when non-nil, is armed
+// as the child's Fetch.enable expectation (used when a scope is already
+// active, so attach immediately arms Fetch on the new target).
+func attachChildTarget(t *testing.T, ts *replayTestSetup, sessionID string, expectFetchEnable bool) (*mocks.MockCDPSession, func(json.RawMessage)) {
+	t.Helper()
+	child := mocks.NewMockCDPSession(ts.ctrl)
+	var childHandler func(json.RawMessage)
+	child.EXPECT().On("Fetch.requestPaused", gomock.Any()).
+		Do(func(_ string, h func(json.RawMessage)) { childHandler = h }).Times(1)
+	if expectFetchEnable {
+		child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	}
+	ts.replayer.Attach(sessionID, child)
+	require.NotNil(t, childHandler)
+	return child, childHandler
+}
+
+// TestReplayer_AttachChild_WhileEnabledArmsFetchImmediately pins that a
+// child iframe attaching AFTER a scope is already enabled gets Fetch
+// enabled on it right away — the display path enables scope before the
+// kiosk navigates and creates the iframe, so relying only on the next
+// EnableForPlaylist pass would leave the iframe un-intercepted meanwhile.
+func TestReplayer_AttachChild_WhileEnabledArmsFetchImmediately(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	// Attaching the child while enabled must arm Fetch on it (expected).
+	child, childHandler := attachChildTarget(t, ts, "child-1", true)
+
+	// A request paused on the child target resolves from the same cached
+	// resource union as the page — the iframe's own request is now served
+	// from cache instead of falling through to the offline network. It
+	// must be answered on the CHILD session, not the page.
+	done := make(chan map[string]interface{}, 1)
+	child.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, params map[string]interface{}) (json.RawMessage, error) {
+			done <- params
+			return json.RawMessage(`{}`), nil
+		}).Times(1)
+	childHandler(requestPausedEvent(t, "req-c", res.URL))
+	awaitSend(t, done)
+}
+
+// TestReplayer_EnableForPlaylist_FansOutToAllTargets pins that enabling a
+// scope arms Fetch on every currently-attached target (the page and each
+// iframe), not just the top-level page.
+func TestReplayer_EnableForPlaylist_FansOutToAllTargets(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedItem(t, ts.store, "item-1", "software payload")
+
+	// Child attaches BEFORE enabling, so no attach-time Fetch.enable.
+	child, _ := attachChildTarget(t, ts, "child-1", false)
+
+	// Enabling now must send Fetch.enable to BOTH the page and the child.
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+}
+
+// TestReplayer_Disable_FansOutToAllTargets pins that Disable turns Fetch
+// off on every attached target and then clears scope.
+func TestReplayer_Disable_FansOutToAllTargets(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	seedItem(t, ts.store, "item-1", "software payload")
+
+	child, _ := attachChildTarget(t, ts, "child-1", false)
+
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	child.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	require.NoError(t, ts.replayer.Disable(context.Background()))
+}
+
+// TestReplayer_Disable_PartialTargetFailureForcesPassThrough pins that if
+// even one target's Fetch.disable fails, replay cannot prove interception
+// is off everywhere, so it keeps scope and forces the same pass-through
+// relaxation a mixed scope uses (never fail_closed) — while still trying
+// every target.
+func TestReplayer_Disable_PartialTargetFailureForcesPassThrough(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload")
+
+	child, _ := attachChildTarget(t, ts, "child-1", false)
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+	// The page disables fine, but the child's Fetch.disable fails. Both
+	// are still attempted.
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	child.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).Return(nil, assert.AnError).Times(1)
+	err := ts.replayer.Disable(context.Background())
+	assert.ErrorIs(t, err, assert.AnError)
+
+	// Scope was NOT cleared: a cached hit still serves, and an unrelated
+	// miss passes through instead of failing closed.
+	hitDone := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-hit", res.URL))
+	awaitSend(t, hitDone)
+
+	missDone := ts.expectSend("Fetch.continueRequest")
+	ts.handler(requestPausedEvent(t, "req-miss", "https://example.com/unrelated.js"))
+	awaitSend(t, missDone)
+}
+
+// TestReplayer_Attach_RootReattachDropsChildTargets pins that a fresh
+// top-level connection (a kiosk reconnect) wipes every child target from
+// the prior connection: their sessionIds are meaningless against the new
+// socket, so a delayed event bound to an old child must be dropped rather
+// than answered.
+func TestReplayer_Attach_RootReattachDropsChildTargets(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	_, oldChildHandler := attachChildTarget(t, ts, "child-1", false)
+
+	// Reconnect: a new top-level session supersedes the old one (which is
+	// closed) and drops the old child.
+	newRoot := mocks.NewMockCDPSession(ts.ctrl)
+	newRoot.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+	ts.mockSession.EXPECT().Close().Return(nil).Times(1)
+	ts.replayer.Attach("", newRoot)
+
+	// A late event from the dropped child must be ignored: neither the old
+	// child nor the new root has a Send expectation, so any attempt to
+	// answer it fails the strict gomock controller.
+	oldChildHandler(requestPausedEvent(t, "req-stale", "https://example.com/whatever.js"))
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestReplayer_Detach_ClosesAndDropsChildTarget pins that detaching a
+// child unregisters it (Close) and stops routing its events.
+func TestReplayer_Detach_ClosesAndDropsChildTarget(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+
+	child, childHandler := attachChildTarget(t, ts, "child-1", false)
+	child.EXPECT().Close().Return(nil).Times(1)
+	ts.replayer.Detach("child-1")
+
+	// After detach, a late event on that child is dropped (no Send).
+	childHandler(requestPausedEvent(t, "req-stale", "https://example.com/whatever.js"))
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestReplayer_Detach_UnknownSessionIsNoop pins that detaching a sessionId
+// that was never attached is a harmless no-op.
+func TestReplayer_Detach_UnknownSessionIsNoop(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	ts.replayer.Detach("never-attached")
+	// Detaching the empty (top-level) sessionId must also be ignored so it
+	// can never wipe live top-level interception.
+	ts.replayer.Detach("")
 }

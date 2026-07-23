@@ -36,15 +36,27 @@ func (m *MockOfflineCacheReplayer) EXPECT() *MockOfflineCacheReplayerMockRecorde
 }
 
 // Attach mocks base method.
-func (m *MockOfflineCacheReplayer) Attach(session offlinecache.CDPSession) {
+func (m *MockOfflineCacheReplayer) Attach(sessionID string, session offlinecache.CDPSession) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Attach", session)
+	m.ctrl.Call(m, "Attach", sessionID, session)
 }
 
 // Attach indicates an expected call of Attach.
-func (mr *MockOfflineCacheReplayerMockRecorder) Attach(session interface{}) *gomock.Call {
+func (mr *MockOfflineCacheReplayerMockRecorder) Attach(sessionID, session interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Attach", reflect.TypeOf((*MockOfflineCacheReplayer)(nil).Attach), session)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Attach", reflect.TypeOf((*MockOfflineCacheReplayer)(nil).Attach), sessionID, session)
+}
+
+// Detach mocks base method.
+func (m *MockOfflineCacheReplayer) Detach(sessionID string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Detach", sessionID)
+}
+
+// Detach indicates an expected call of Detach.
+func (mr *MockOfflineCacheReplayerMockRecorder) Detach(sessionID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Detach", reflect.TypeOf((*MockOfflineCacheReplayer)(nil).Detach), sessionID)
 }
 
 // Disable mocks base method.

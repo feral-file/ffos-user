@@ -29,11 +29,22 @@ import (
 // via config (offlineCache.enabled=false) until that is confirmed on
 // real hardware.
 //
+// A SECOND such assumption now rides on this path: the flat-mode
+// child-target auto-attach in kiosktargets.go (Target.setAutoAttach with
+// waitForDebuggerOnStart + Runtime.runIfWaitingForDebugger sequencing)
+// depends on how this specific Chromium build reports and pauses
+// cross-origin iframe (OOPIF) targets. It is exercised in tests only
+// against a scripted fake DevTools peer, never a real browser, so it too
+// must be validated on real hardware before shipping. offlineCache.enabled
+// gates the whole feature and is the rollback valve for both concerns.
+//
 //go:generate mockgen -source=kioskreplay.go -destination=../mocks/offlinecache_kioskreplay.go -package=mocks -mock_names=KioskReplay=MockOfflineCacheKioskReplay
 type KioskReplay interface {
 	// AttachOnReconnect dials a fresh event-driven CDP session to the
-	// kiosk and re-registers Replayer's Fetch.requestPaused handler on
-	// it. Call from cdp.CDP's onConnect hook.
+	// kiosk, re-registers Replayer's Fetch.requestPaused handler on the
+	// top-level page target, and enables flat-mode auto-attach so the
+	// page's cross-origin child iframe targets are intercepted too (see
+	// kiosktargets.go). Call from cdp.CDP's onConnect hook.
 	AttachOnReconnect(ctx context.Context) error
 	// SyncPlaylist scopes replay to whichever of itemIDs are already
 	// cached, disabling interception entirely if none are.
@@ -150,12 +161,23 @@ func NewKioskReplay(
 // later) re-establishes it from current cache state, which is simpler and
 // safer than caching "what was enabled before" across a page reload that
 // may have changed what is actually on screen.
+//
+// After attaching the top-level target it enables flat-mode auto-attach
+// (see enableChildTargetAutoAttach) so the kiosk page's cross-origin,
+// out-of-process iframe targets get intercepted too. An auto-attach setup
+// failure is returned but is non-fatal to top-level interception: the
+// caller (main.go's onConnect hook) logs it and still runs the scope
+// re-sync, so at worst only child-iframe replay is missing until the next
+// reconnect.
 func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
 	session, err := DialPageSession(ctx, k.endpoint, k.httpClient, k.dialer, k.json, k.io, k.logger)
 	if err != nil {
 		return fmt.Errorf("offline cache: dial kiosk CDP session for replay: %w", err)
 	}
-	k.replayer.Attach(session)
+	k.replayer.Attach("", session)
+	if err := enableChildTargetAutoAttach(ctx, session, k.replayer, k.json, k.logger); err != nil {
+		return fmt.Errorf("offline cache: enable kiosk child-target auto-attach: %w", err)
+	}
 	return nil
 }
 

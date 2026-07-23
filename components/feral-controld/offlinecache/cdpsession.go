@@ -49,21 +49,44 @@ const defaultSendTimeout = 15 * time.Second
 // short-lived (one per download job, one per displayed cached item) and
 // own their own dial/teardown lifecycle in downloader.go/replay.go.
 //
+// Flat-mode multi-target: one dialed connection can carry several CDP
+// targets (the directly-connected top-level page PLUS any child targets
+// auto-attached via Target.setAutoAttach{flatten:true} — e.g. a kiosk
+// page's cross-origin, out-of-process iframes). Every such child target
+// has its own opaque CDP sessionId; the top-level target this connection
+// was dialed against is addressed with the empty sessionId. ForSession
+// returns a view scoped to one target's sessionId so callers can Send
+// commands to, and On-subscribe to events from, exactly that target —
+// see kiosktargets.go for the attach/detach lifecycle that drives it.
+//
 //go:generate mockgen -source=cdpsession.go -destination=../mocks/offlinecache_cdpsession.go -package=mocks -mock_names=CDPSession=MockCDPSession
 type CDPSession interface {
-	// Send issues a CDP command and blocks for its matching response, or
-	// until ctx is done or the session closes.
+	// Send issues a CDP command against this session's target and blocks
+	// for its matching response, or until ctx is done or the session
+	// closes.
 	Send(ctx context.Context, method string, params map[string]interface{}) (json.RawMessage, error)
 	// On registers a handler for every event with the given CDP method name
-	// (e.g. "Fetch.requestPaused"). Handlers run synchronously on the read
+	// (e.g. "Fetch.requestPaused") delivered for THIS session's target.
+	// Handlers run synchronously on the read
 	// pump goroutine in registration order, so a handler must not block or
 	// call Send and wait on its own reply inline — that would deadlock the
 	// pump against the very reply it is waiting to read. Long-running work
 	// triggered by an event should be handed off to another goroutine.
 	On(method string, handler func(params json.RawMessage))
+	// ForSession returns a CDPSession view scoped to the given flat-mode
+	// child target sessionID, multiplexed over this same underlying
+	// connection. sessionID == "" returns the top-level target (the
+	// receiver itself). Send/On on the returned view stamp/filter that
+	// sessionId so a command reaches exactly its target and an event
+	// handler only fires for its own target's events. Closing a non-root
+	// view unregisters only that target's handlers; it must NOT tear down
+	// the shared connection (see flatSession.Close).
+	ForSession(sessionID string) CDPSession
 	// Close stops the read pump and closes the underlying connection.
 	// Idempotent; safe to call multiple times or after the peer already
-	// closed the connection.
+	// closed the connection. On a child-target view (ForSession with a
+	// non-empty id) this is instead a per-target detach — see
+	// flatSession.Close.
 	Close() error
 }
 
@@ -83,6 +106,16 @@ type pendingCall struct {
 	result json.RawMessage
 	err    error
 	done   chan struct{}
+}
+
+// handlerKey scopes an event handler to both a CDP method name AND the
+// flat-mode target sessionId it belongs to, so a "Fetch.requestPaused"
+// handler registered for one cross-origin iframe target never fires for a
+// different target's event of the same method. The empty sessionId is the
+// top-level page target this connection was dialed against.
+type handlerKey struct {
+	method    string
+	sessionID string
 }
 
 type cdpSession struct {
@@ -107,9 +140,13 @@ type cdpSession struct {
 	// rather than left to the caller.
 	writeMu sync.Mutex
 
-	mu       sync.Mutex
-	pending  map[int64]*pendingCall
-	handlers map[string][]func(params json.RawMessage)
+	mu      sync.Mutex
+	pending map[int64]*pendingCall
+	// handlers is keyed by (method, sessionId): a single connection
+	// multiplexes events for the top-level target (empty sessionId) and
+	// every auto-attached child target (its own sessionId), so routing
+	// must key on both — see handlerKey and dispatchEvent.
+	handlers map[handlerKey][]func(params json.RawMessage)
 	closed   bool
 	closeErr error
 
@@ -137,7 +174,7 @@ func newCDPSessionWithTimeout(conn wrapper.WebSocketConn, jsonWrapper wrapper.JS
 		logger:      logger,
 		sendTimeout: sendTimeout,
 		pending:     make(map[int64]*pendingCall),
-		handlers:    make(map[string][]func(params json.RawMessage)),
+		handlers:    make(map[handlerKey][]func(params json.RawMessage)),
 		doneChan:    make(chan struct{}),
 	}
 	go s.readPump()
@@ -148,6 +185,11 @@ type cdpOutbound struct {
 	ID     int64                  `json:"id"`
 	Method string                 `json:"method"`
 	Params map[string]interface{} `json:"params"`
+	// SessionID routes this command to a flat-mode child target. Omitted
+	// (via omitempty) for the top-level target, keeping every existing
+	// root-only call byte-identical on the wire to before flat-mode
+	// support existed.
+	SessionID string `json:"sessionId,omitempty"`
 }
 
 type cdpInbound struct {
@@ -156,9 +198,26 @@ type cdpInbound struct {
 	Params json.RawMessage `json:"params"`
 	Result json.RawMessage `json:"result"`
 	Error  *cdpRemoteError `json:"error"`
+	// SessionID tags which flat-mode target this event/response came
+	// from; empty for the top-level target. Only events are routed by it
+	// (responses match on ID alone, since ids are unique per connection
+	// regardless of session — see resolveCall).
+	SessionID string `json:"sessionId,omitempty"`
 }
 
+// Send issues a command against the top-level target (empty sessionId).
 func (s *cdpSession) Send(ctx context.Context, method string, params map[string]interface{}) (json.RawMessage, error) {
+	return s.sendForSession(ctx, "", method, params)
+}
+
+// sendForSession is Send's implementation, additionally stamping a
+// flat-mode sessionId on the outbound envelope when non-empty so the
+// command reaches a specific child target. The id-allocation, write
+// serialization, pending-map, and timeout logic are all session-agnostic:
+// CDP request ids are unique per CONNECTION (not per session), so
+// multiplexing several targets over one socket needs no extra
+// concurrency control here beyond the existing writeMu/pending machinery.
+func (s *cdpSession) sendForSession(ctx context.Context, sessionID, method string, params map[string]interface{}) (json.RawMessage, error) {
 	// Always impose the internal ceiling on top of whatever the caller's
 	// ctx already carries — context.WithTimeout keeps the sooner of the
 	// two deadlines, so a caller with its own tighter deadline is
@@ -187,7 +246,7 @@ func (s *cdpSession) Send(ctx context.Context, method string, params map[string]
 		s.mu.Unlock()
 	}
 
-	data, err := s.json.Marshal(cdpOutbound{ID: id, Method: method, Params: params})
+	data, err := s.json.Marshal(cdpOutbound{ID: id, Method: method, Params: params, SessionID: sessionID})
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("offline cache: marshal cdp request %s: %w", method, err)
@@ -250,10 +309,42 @@ func closedOrUnknown(err error) error {
 	return fmt.Errorf("session closed")
 }
 
+// On registers a handler for the top-level target (empty sessionId).
 func (s *cdpSession) On(method string, handler func(params json.RawMessage)) {
+	s.onForSession("", method, handler)
+}
+
+func (s *cdpSession) onForSession(sessionID, method string, handler func(params json.RawMessage)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.handlers[method] = append(s.handlers[method], handler)
+	key := handlerKey{method: method, sessionID: sessionID}
+	s.handlers[key] = append(s.handlers[key], handler)
+}
+
+// removeHandlers drops every handler registered for a child target's
+// sessionId. Called when that target detaches (see flatSession.Close):
+// without it, a long-lived kiosk connection that sees many iframe
+// navigations would accumulate dead per-target handler entries
+// unboundedly, since each freshly-attached iframe gets a brand-new
+// sessionId. The empty (top-level) sessionId is never removed this way —
+// its handlers live for the whole connection.
+func (s *cdpSession) removeHandlers(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.handlers {
+		if key.sessionID == sessionID {
+			delete(s.handlers, key)
+		}
+	}
+}
+
+// ForSession returns a view scoped to sessionID. The empty id is the
+// top-level target, which is this connection itself.
+func (s *cdpSession) ForSession(sessionID string) CDPSession {
+	if sessionID == "" {
+		return s
+	}
+	return &flatSession{parent: s, sessionID: sessionID}
 }
 
 func (s *cdpSession) Close() error {
@@ -262,6 +353,43 @@ func (s *cdpSession) Close() error {
 		err = s.conn.Close()
 	})
 	return err
+}
+
+// flatSession is a CDPSession view scoped to one flat-mode child target,
+// sharing the parent connection's read pump, write serialization, and
+// pending-call machinery. It exists so replay.go can keep threading a
+// single CDPSession per intercepted target (one per attached iframe)
+// through its per-request fulfill/continue/fail helpers unchanged — each
+// target just gets its own flatSession whose Send/On carry that target's
+// sessionId automatically.
+type flatSession struct {
+	parent    *cdpSession
+	sessionID string
+}
+
+func (f *flatSession) Send(ctx context.Context, method string, params map[string]interface{}) (json.RawMessage, error) {
+	return f.parent.sendForSession(ctx, f.sessionID, method, params)
+}
+
+func (f *flatSession) On(method string, handler func(params json.RawMessage)) {
+	f.parent.onForSession(f.sessionID, method, handler)
+}
+
+func (f *flatSession) ForSession(sessionID string) CDPSession {
+	return f.parent.ForSession(sessionID)
+}
+
+// Close on a child view is a per-target DETACH, not a connection
+// teardown: it only unregisters this target's event handlers. It must
+// never close the parent socket — several child targets and the
+// top-level page all share that one connection, so closing it here would
+// silently kill interception for every OTHER attached target too. The
+// child target's actual end is signalled out of band by
+// Target.detachedFromTarget (see kiosktargets.go); this just stops us
+// dispatching any late in-flight events for it.
+func (f *flatSession) Close() error {
+	f.parent.removeHandlers(f.sessionID)
+	return nil
 }
 
 // readPump owns the connection's read side for the session's lifetime. It
@@ -286,7 +414,7 @@ func (s *cdpSession) readPump() {
 		}
 
 		if msg.Method != "" {
-			s.dispatchEvent(msg.Method, msg.Params)
+			s.dispatchEvent(msg.Method, msg.SessionID, msg.Params)
 			continue
 		}
 
@@ -326,9 +454,9 @@ func (s *cdpSession) resolveCall(id int64, result json.RawMessage, cdpErr *cdpRe
 	close(call.done)
 }
 
-func (s *cdpSession) dispatchEvent(method string, params json.RawMessage) {
+func (s *cdpSession) dispatchEvent(method, sessionID string, params json.RawMessage) {
 	s.mu.Lock()
-	handlers := append([]func(json.RawMessage){}, s.handlers[method]...)
+	handlers := append([]func(json.RawMessage){}, s.handlers[handlerKey{method: method, sessionID: sessionID}]...)
 	s.mu.Unlock()
 	for _, h := range handlers {
 		h(params)

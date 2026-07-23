@@ -335,6 +335,123 @@ func TestCDPSession_On_DispatchesEventsByMethod(t *testing.T) {
 	}
 }
 
+// TestCDPSession_ForSession_StampsSessionIDOnOutbound proves a command
+// issued on a child-target view carries that target's flat-mode sessionId
+// on the wire, while the top-level session omits it entirely (keeping
+// root-only traffic byte-identical to before flat-mode support).
+func TestCDPSession_ForSession_StampsSessionIDOnOutbound(t *testing.T) {
+	conn := newFakeWSConn()
+	session := offlinecache.NewCDPSession(conn, wrapper.NewJSON(), zaptest.NewLogger(t))
+	defer func() { _ = session.Close() }()
+
+	go func() {
+		_, _ = session.ForSession("child-1").Send(context.Background(), "Fetch.enable", map[string]interface{}{})
+	}()
+	childSent := conn.nextOutbound(t)
+	assert.Equal(t, "Fetch.enable", childSent["method"])
+	assert.Equal(t, "child-1", childSent["sessionId"])
+
+	go func() { _, _ = session.Send(context.Background(), "Network.enable", map[string]interface{}{}) }()
+	rootSent := conn.nextOutbound(t)
+	assert.Equal(t, "Network.enable", rootSent["method"])
+	_, hasSessionID := rootSent["sessionId"]
+	assert.False(t, hasSessionID, "top-level command must omit sessionId")
+}
+
+// TestCDPSession_On_FiltersEventsBySessionID proves an event is delivered
+// only to the handler registered for its own target's sessionId: a
+// child's Fetch.requestPaused must not fire the top-level handler and vice
+// versa. This is the core routing guarantee that lets replay answer a
+// paused request on the exact target it came from.
+func TestCDPSession_On_FiltersEventsBySessionID(t *testing.T) {
+	conn := newFakeWSConn()
+	session := offlinecache.NewCDPSession(conn, wrapper.NewJSON(), zaptest.NewLogger(t))
+	defer func() { _ = session.Close() }()
+
+	rootCh := make(chan json.RawMessage, 1)
+	childCh := make(chan json.RawMessage, 1)
+	session.On("Fetch.requestPaused", func(p json.RawMessage) { rootCh <- p })
+	session.ForSession("child-1").On("Fetch.requestPaused", func(p json.RawMessage) { childCh <- p })
+
+	childEvent, err := json.Marshal(map[string]interface{}{
+		"method":    "Fetch.requestPaused",
+		"sessionId": "child-1",
+		"params":    map[string]interface{}{"requestId": "c"},
+	})
+	require.NoError(t, err)
+	conn.pushReply(childEvent)
+
+	select {
+	case params := <-childCh:
+		assert.JSONEq(t, `{"requestId":"c"}`, string(params))
+	case <-time.After(2 * time.Second):
+		t.Fatal("child handler never fired for its own event")
+	}
+	// Dispatch is synchronous on the read pump, so by the time childCh
+	// received, the root handler would already have fired had it been
+	// (wrongly) matched.
+	assert.Empty(t, rootCh, "top-level handler must not fire for a child's event")
+
+	rootEvent, err := json.Marshal(map[string]interface{}{
+		"method": "Fetch.requestPaused",
+		"params": map[string]interface{}{"requestId": "r"},
+	})
+	require.NoError(t, err)
+	conn.pushReply(rootEvent)
+
+	select {
+	case params := <-rootCh:
+		assert.JSONEq(t, `{"requestId":"r"}`, string(params))
+	case <-time.After(2 * time.Second):
+		t.Fatal("top-level handler never fired for its own event")
+	}
+	assert.Empty(t, childCh, "child handler must not fire for a top-level event")
+}
+
+// TestCDPSession_ChildClose_UnregistersHandlersButKeepsConnection pins the
+// load-bearing distinction in flatSession.Close: detaching one child
+// target unregisters only that target's handlers and must NOT tear down
+// the shared socket that the top-level page and every other child still
+// use.
+func TestCDPSession_ChildClose_UnregistersHandlersButKeepsConnection(t *testing.T) {
+	conn := newFakeWSConn()
+	session := offlinecache.NewCDPSession(conn, wrapper.NewJSON(), zaptest.NewLogger(t))
+	defer func() { _ = session.Close() }()
+
+	child := session.ForSession("child-1")
+	childCh := make(chan json.RawMessage, 1)
+	child.On("Fetch.requestPaused", func(p json.RawMessage) { childCh <- p })
+	require.NoError(t, child.Close())
+
+	// After detach, an event for child-1 has no handler to reach.
+	childEvent, err := json.Marshal(map[string]interface{}{
+		"method":    "Fetch.requestPaused",
+		"sessionId": "child-1",
+		"params":    map[string]interface{}{"requestId": "c"},
+	})
+	require.NoError(t, err)
+	conn.pushReply(childEvent)
+
+	// The connection is still alive: a top-level command still round-trips.
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := session.Send(context.Background(), "Network.enable", map[string]interface{}{})
+		resultCh <- err
+	}()
+	sent := conn.nextOutbound(t)
+	reply, err := json.Marshal(map[string]interface{}{"id": int64(sent["id"].(float64)), "result": map[string]interface{}{}})
+	require.NoError(t, err)
+	conn.pushReply(reply)
+
+	select {
+	case err := <-resultCh:
+		require.NoError(t, err, "connection must survive a child detach")
+	case <-time.After(2 * time.Second):
+		t.Fatal("top-level Send did not resolve after a child detach")
+	}
+	assert.Empty(t, childCh, "detached child handler must not fire")
+}
+
 func TestCDPSession_Close_FailsPendingCalls(t *testing.T) {
 	conn := newFakeWSConn()
 	session := offlinecache.NewCDPSession(conn, wrapper.NewJSON(), zaptest.NewLogger(t))

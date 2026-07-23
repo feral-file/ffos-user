@@ -9,6 +9,7 @@ import (
 	json "encoding/json"
 	reflect "reflect"
 
+	offlinecache "github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -47,6 +48,20 @@ func (m *MockCDPSession) Close() error {
 func (mr *MockCDPSessionMockRecorder) Close() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockCDPSession)(nil).Close))
+}
+
+// ForSession mocks base method.
+func (m *MockCDPSession) ForSession(sessionID string) offlinecache.CDPSession {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ForSession", sessionID)
+	ret0, _ := ret[0].(offlinecache.CDPSession)
+	return ret0
+}
+
+// ForSession indicates an expected call of ForSession.
+func (mr *MockCDPSessionMockRecorder) ForSession(sessionID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ForSession", reflect.TypeOf((*MockCDPSession)(nil).ForSession), sessionID)
 }
 
 // On mocks base method.
