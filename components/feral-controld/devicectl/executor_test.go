@@ -4583,11 +4583,16 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	// Topic is cleared before the reset proceeds (security property).
 	ts.mockStateManager.EXPECT().
 		GetState().
-		Return(&state.State{Relayer: &state.RelayerState{TopicID: "old-topic"}})
+		Return(&state.State{
+			Relayer:         &state.RelayerState{TopicID: "old-topic"},
+			ConnectedDevice: &state.Device{ID: "phone-1"},
+		})
 	ts.mockStateManager.EXPECT().
 		Save(gomock.Any()).
 		DoAndReturn(func(s *state.State) error {
 			assert.Equal(t, "", s.Relayer.TopicID)
+			assert.Equal(t, "", s.ConnectedDevice.ID,
+				"the ConnectedDevice claim record must fall with the topic")
 			return nil
 		})
 
@@ -4602,11 +4607,15 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 	// The live relayer session is revoked as part of the reset boundary.
 	relayerClosed := false
 	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
+	var observed []bool
+	ts.executor.SetClaimObserver(func(claimed bool) { observed = append(observed, claimed) })
 
 	result, err := ts.executor.Execute(ts.ctx, cmd)
 	assert.NoError(t, err)
 	assert.Equal(t, devicectl.CmdOK, result)
 	assert.True(t, relayerClosed, "factory reset must close the live relayer session")
+	assert.Equal(t, []bool{false}, observed,
+		"the claim observer must see the unclaim so mDNS re-advertises claimed=false")
 }
 
 // TestExecutor_FactoryReset_UnitFailureStillRevokesSession: set-factory-boot
@@ -4629,11 +4638,16 @@ func TestExecutor_FactoryReset_UnitFailureStillRevokesSession(t *testing.T) {
 
 	ts.mockStateManager.EXPECT().
 		GetState().
-		Return(&state.State{Relayer: &state.RelayerState{TopicID: "old-topic"}})
+		Return(&state.State{
+			Relayer:         &state.RelayerState{TopicID: "old-topic"},
+			ConnectedDevice: &state.Device{ID: "phone-1"},
+		})
 	ts.mockStateManager.EXPECT().
 		Save(gomock.Any()).
 		DoAndReturn(func(s *state.State) error {
 			assert.Equal(t, "", s.Relayer.TopicID)
+			assert.Equal(t, "", s.ConnectedDevice.ID,
+				"the ConnectedDevice claim record must fall with the topic")
 			return nil
 		})
 
@@ -4646,10 +4660,14 @@ func TestExecutor_FactoryReset_UnitFailureStillRevokesSession(t *testing.T) {
 
 	relayerClosed := false
 	ts.executor.SetRelayerCloser(func() { relayerClosed = true })
+	var observed []bool
+	ts.executor.SetClaimObserver(func(claimed bool) { observed = append(observed, claimed) })
 
 	_, err := ts.executor.Execute(ts.ctx, cmd)
 	require.Error(t, err)
 	assert.True(t, relayerClosed, "a failed reset unit must still leave the relayer session revoked")
+	assert.Equal(t, []bool{false}, observed,
+		"a failed reset unit must still leave the device locally unclaimed")
 }
 
 func TestExecutor_UploadLogs_MissingArguments(t *testing.T) {

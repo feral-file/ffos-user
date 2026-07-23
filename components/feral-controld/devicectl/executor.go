@@ -1959,9 +1959,22 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	// (and the live relayer session) survive on disk until that reboot actually
 	// completes. A resold device — or one whose reset is interrupted before the
 	// reboot — would otherwise keep running on the old subvolume and stay
-	// commandable via the saved topic. Clear the persisted topic here so that
-	// window is closed.
-	e.clearPersistedRelayerTopic()
+	// commandable via the saved topic. Clear the persisted claim (topic AND
+	// ConnectedDevice) here so that window is closed: leaving ConnectedDevice
+	// would keep the process locally "claimed" (hub /api/status, mDNS TXT,
+	// claimSettled) after a failed/delayed reset, blocking any re-claim.
+	e.clearPersistedClaim()
+
+	// The process-lifetime pairing latch must fall with the persisted claim,
+	// or claimSettled() would still read true and withhold the claim QR after
+	// a failed reset.
+	e.pairingConfirmed.Store(false)
+
+	// Reflect the unclaim on every surface that mirrors claim state (mDNS TXT
+	// via the mediator's observer), exactly as a claim flips it the other way.
+	if e.claimObserver != nil {
+		e.claimObserver(false)
+	}
 
 	// Revoke the LIVE control channel too, not just the persisted topic: the
 	// reset unit only STAGES a reboot, and until that reboot actually happens
@@ -1983,18 +1996,30 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	return e.factoryResetInProcess(ctx)
 }
 
-// clearPersistedRelayerTopic zeroes the persisted relayer topicID. See
-// factoryReset for the security rationale. Best-effort: a save failure is logged
-// but does not abort the reset (the reboot into the factory snapshot still
-// discards the topic). A no-op when no topic is persisted.
-func (e *executor) clearPersistedRelayerTopic() {
+// clearPersistedClaim zeroes the persisted relayer topicID AND the
+// ConnectedDevice claim record. See factoryReset for the security rationale.
+// Best-effort: a save failure is logged but does not abort the reset (the
+// reboot into the factory snapshot still discards both). A no-op when nothing
+// is persisted.
+func (e *executor) clearPersistedClaim() {
 	s := state.GetState()
-	if s == nil || s.Relayer == nil || s.Relayer.TopicID == "" {
+	if s == nil {
 		return
 	}
-	s.Relayer.TopicID = ""
+	changed := false
+	if s.Relayer != nil && s.Relayer.TopicID != "" {
+		s.Relayer.TopicID = ""
+		changed = true
+	}
+	if s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != "" {
+		s.ConnectedDevice = &state.Device{}
+		changed = true
+	}
+	if !changed {
+		return
+	}
 	if err := s.Save(); err != nil {
-		e.logger.Error("Factory reset: failed to clear persisted relayer topic", zap.Error(err))
+		e.logger.Error("Factory reset: failed to clear persisted claim state", zap.Error(err))
 	}
 }
 
