@@ -181,6 +181,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				playlist = h.scheduler.Prepare(playlist)
 			}
 			command.Arguments["dp1_call"] = playlist
+			// Player CanvasService rejects displayPlaylist without a known
+			// intent.action ("Unknown DP1 action: undefined" → ok:false).
+			// Controller casts are force-display, same contract as
+			// playlistschedule push (now_display, never soft refresh).
+			ensureDisplayPlaylistIntent(command.Arguments)
 
 		}
 
@@ -218,6 +223,27 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		}
 
 		return result, nil
+	}
+}
+
+// ensureDisplayPlaylistIntent sets intent.action=now_display when the cast
+// request has no action yet. Controllers historically send only playlistUrl /
+// dp1_call; the player still requires a known DP1 action. Soft refresh keeps
+// its own path (playlist-refresher sets refresh:true and does not use this
+// helper). An explicit controller intent is preserved.
+func ensureDisplayPlaylistIntent(args map[string]interface{}) {
+	if args == nil {
+		return
+	}
+	if intent, ok := args["intent"].(map[string]interface{}); ok {
+		if action, _ := intent["action"].(string); action != "" {
+			return
+		}
+		intent["action"] = "now_display"
+		return
+	}
+	args["intent"] = map[string]interface{}{
+		"action": "now_display",
 	}
 }
 

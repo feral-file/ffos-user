@@ -81,6 +81,11 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersByDisplayAt(t *testing.T)
 			require.Len(t, items, 1)
 			item0 := items[0].(map[string]interface{})
 			assert.Equal(t, "day22", item0["id"])
+			// Cast path must force-display: player rejects missing intent.action.
+			intent, ok := cmd.Arguments["intent"].(map[string]interface{})
+			require.True(t, ok, "intent should be present")
+			assert.Equal(t, "now_display", intent["action"])
+			assert.NotContains(t, payload, `"refresh":true`)
 			return playerOkResponse(), nil
 		},
 	)
@@ -92,6 +97,129 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersByDisplayAt(t *testing.T)
 	})
 	require.NoError(t, err)
 	assert.True(t, sched.HasCache())
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+		return time.UTC
+	}, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+
+	playlistURL := "https://example.com/plain.json"
+	full := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title: "Plain",
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "a", Title: "A", Source: "https://example.com/a.html"},
+			},
+		},
+	}
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			const prefix = "window.handleCDPRequest("
+			payload := expr[len(prefix) : len(expr)-1]
+			var cmd commands.Command
+			require.NoError(t, json.Unmarshal([]byte(payload), &cmd))
+			intent, ok := cmd.Arguments["intent"].(map[string]interface{})
+			require.True(t, ok)
+			assert.Equal(t, "custom_action", intent["action"])
+			return playerOkResponse(), nil
+		},
+	)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{
+			"playlistUrl": playlistURL,
+			"intent": map[string]interface{}{
+				"action": "custom_action",
+			},
+		},
+	})
+	require.NoError(t, err)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+		return time.UTC
+	}, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+
+	playlistURL := "https://example.com/plain.json"
+	full := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title: "Plain",
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "a", Title: "A", Source: "https://example.com/a.html"},
+			},
+		},
+	}
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			const prefix = "window.handleCDPRequest("
+			payload := expr[len(prefix) : len(expr)-1]
+			var cmd commands.Command
+			require.NoError(t, json.Unmarshal([]byte(payload), &cmd))
+			intent, ok := cmd.Arguments["intent"].(map[string]interface{})
+			require.True(t, ok, "plain cast must still default intent.action")
+			assert.Equal(t, "now_display", intent["action"])
+			return playerOkResponse(), nil
+		},
+	)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+	require.NoError(t, err)
 }
 
 type trackingScheduler struct {
