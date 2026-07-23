@@ -18,6 +18,18 @@ import (
 // in the command router for /api/cast; this is the coarse, route-agnostic cap.
 const MAX_INFLIGHT_REQUESTS = 64
 
+// MAX_REQUEST_BODY_BYTES bounds every hub request body via http.MaxBytesReader.
+// The in-flight cap alone bounds concurrency, not allocations: without a body
+// limit, 64 concurrent LAN casts could each make the provisioning-owning
+// daemon buffer an arbitrarily large JSON value while decoding. Sized by the
+// largest legitimate envelope: displayPlaylist's `dp1_call` variant carries a
+// FULL INLINE DP1 playlist (not just a URL), which scales with artwork count —
+// 4 MiB gives even huge playlists generous headroom while capping the
+// worst-case transient at 256 MiB instead of unbounded. Same boundary class
+// the captive portal carries; the GET routes and the WS upgrade have no body,
+// so the reader is inert there. Oversized bodies surface as 413 in handleCast.
+const MAX_REQUEST_BODY_BYTES = 4 << 20
+
 // withMiddleware is the SINGLE wrapper every hub route is registered through.
 //
 // It is deliberately the one chokepoint for cross-cutting concerns on the LAN
@@ -48,6 +60,8 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 			http.Error(w, "Too many concurrent requests, slow down", http.StatusTooManyRequests)
 			return
 		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, MAX_REQUEST_BODY_BYTES)
 
 		// LAN AUTHORIZATION SEAM (issue #3471): screen-anchored pairing checks
 		// go here, guarding every route uniformly, before next is invoked.

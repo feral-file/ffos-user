@@ -166,6 +166,15 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 	// per-command token-bucket gate runs below inside cmdHandler.Process.
 	var payload commands.Command
 	if err := h.json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		// The middleware's MaxBytesReader makes an oversized body surface here
+		// as *http.MaxBytesError: report it as 413 (the caller sent too much),
+		// not 400 (the caller sent garbage).
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.logger.Warn("Cast payload exceeds body limit", zap.Int64("limit", maxErr.Limit))
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		h.logger.Error("Failed to decode cast payload", zap.Error(err))
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return

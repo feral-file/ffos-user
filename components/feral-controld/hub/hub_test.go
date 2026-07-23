@@ -890,6 +890,32 @@ func TestHandleStatus_ReturnsContractAndFields(t *testing.T) {
 		"an UNCLAIMED device serves its topic_id — that is the LAN claim handover")
 }
 
+// TestHandleCast_OversizedBodyRejected413: the storm cap bounds concurrency,
+// not allocations — the middleware body cap must stop an oversized cast
+// inside the decoder with 413 (not 400: the caller sent too much, not
+// garbage), before anything reaches the command router. The command handler
+// mock carries no expectations, so any call through to it fails the test.
+func TestHandleCast_OversizedBodyRejected413(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	mockWS := mocks.NewMockWS(ctrl)
+	mockCmd := mocks.NewMockCommandHandler(ctrl)
+	mockServer := mocks.NewMockHTTPServer(ctrl)
+	mux := http.NewServeMux()
+	mockServer.EXPECT().Handler().Return(mux).AnyTimes()
+
+	New(context.Background(), mockWS, mockCmd, nil, mockServer, wrapper.NewJSON(), logger)
+
+	body := strings.NewReader(`{"command":"` + strings.Repeat("a", MAX_REQUEST_BODY_BYTES+1024) + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/cast", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+}
+
 // TestStatusContractV2MatchesMDNSTXTVersion enforces the hub<->mdns version
 // sync that production code keeps by convention (mdns must stay hub-free, so
 // no import ties the constants together). The pairing app's gate is two-part —
