@@ -384,7 +384,7 @@ func (f *flatSession) ForSession(sessionID string) CDPSession {
 // never close the parent socket — several child targets and the
 // top-level page all share that one connection, so closing it here would
 // silently kill interception for every OTHER attached target too. The
-// child target's actual end is signalled out of band by
+// child target's actual end is signaled out of band by
 // Target.detachedFromTarget (see kiosktargets.go); this just stops us
 // dispatching any late in-flight events for it.
 func (f *flatSession) Close() error {
