@@ -153,6 +153,11 @@ func (c *fakeConn) Subscribe(fn func(bool)) func() {
 	c.mu.Unlock()
 	return func() {}
 }
+func (c *fakeConn) setErr(err error) {
+	c.mu.Lock()
+	c.err = err
+	c.mu.Unlock()
+}
 func (c *fakeConn) push(online bool) {
 	c.mu.Lock()
 	c.online = online
@@ -641,6 +646,37 @@ func TestConnectivityRecoveryThroughLoop(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return h.m.State() == StateOnline && h.rec.count("ap.Down") >= 1
 	}, 2*time.Second, 5*time.Millisecond)
+}
+
+// TestOnlineBootWithFailedInitialQueryRecoversOnTick: controld starts before
+// sys-monitord, so the boot-time reachability query can fail; the machine then
+// assumes offline and raises the AP. monitord may resolve its initial state
+// before its signal emitters register, so no connectivity_change event ever
+// corrects the guess — ticks must re-query until one succeeds, and an actually
+// online device must drop the wrongly raised AP.
+func TestOnlineBootWithFailedInitialQueryRecoversOnTick(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.conn.online = true                           // actually reachable (e.g. ethernet)
+	h.conn.err = errors.New("monitord not up yet") // ...but the query fails at boot
+
+	h.m.Start(context.Background())
+	defer h.m.Stop()
+
+	// The failed query is assumed offline: unprovisioned + offline raises the AP.
+	require.Eventually(t, func() bool {
+		return h.m.State() == StateAPActive && h.rec.count("ap.Up") == 1
+	}, 2*time.Second, 5*time.Millisecond, "assumed-offline boot must raise the AP")
+
+	// monitord comes up: the next tick's re-query gets the real answer and the
+	// machine converges to the online truth (unprovisioned + reachable =
+	// Unprovisioned, AP down).
+	h.conn.setErr(nil)
+	h.clk.tick <- time.Time{}
+
+	require.Eventually(t, func() bool {
+		return h.m.State() == StateUnprovisioned && h.rec.count("portal.Stop") >= 1
+	}, 2*time.Second, 5*time.Millisecond, "tick re-query must correct the assumption and drop the AP")
 }
 
 // TestRecoveredPanicRebuildsActiveAP: the supervisor reruns loop after a panic

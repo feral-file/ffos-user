@@ -218,6 +218,17 @@ type Machine struct {
 	// this flag a Down failure during the join bounce left the profile behind
 	// until the next daemon boot's sweep.
 	apDownPending bool
+
+	// connUnknown records that the machine is running on an ASSUMED offline
+	// state because a reachability query failed (controld starts before
+	// sys-monitord, so the boot-time query commonly races the monitor's own
+	// startup). Every tick re-queries until one succeeds; without this an
+	// ONLINE first boot could raise the setup AP on the failed assumption and
+	// keep it up forever — monitord may resolve its initial state before its
+	// signal emitters are registered, so no connectivity_change event ever
+	// corrects the guess. Touched only on the loop goroutine (loop /
+	// onConnectivity / onTick), so it needs no lock.
+	connUnknown bool
 }
 
 type eventKind int
@@ -371,13 +382,20 @@ func (m *Machine) loop(ctx context.Context) {
 	ticker := m.clock.NewTicker(m.checkInterval)
 	defer ticker.Stop()
 
-	// Initial assessment from a point-in-time reachability query.
+	// Initial assessment from a point-in-time reachability query. A failed
+	// query is an ASSUMPTION, not a reading: mark it unknown so onTick keeps
+	// re-querying until a real answer arrives (see connUnknown).
 	online, err := m.conn.Online(ctx)
 	if err != nil {
-		m.logger.Warn("provisioning: initial connectivity query failed; assuming offline", zap.Error(err))
+		m.logger.Warn("provisioning: initial connectivity query failed; assuming offline until a query succeeds", zap.Error(err))
 		online = false
 	}
 	m.onConnectivity(ctx, online)
+	if err != nil {
+		// AFTER onConnectivity: it clears the flag (any assessment normally
+		// resolves it), and this one did not.
+		m.connUnknown = true
+	}
 
 	for {
 		select {
@@ -457,6 +475,10 @@ func (m *Machine) State() State {
 // onConnectivity applies a reachability reading and drives the resting-state
 // decision. See the rule table in the package doc.
 func (m *Machine) onConnectivity(ctx context.Context, online bool) {
+	// Any reading — a connectivity_change event or a successful re-query —
+	// resolves an assumed-offline boot. (The loop re-arms the flag itself for
+	// the one call it makes on a FAILED initial query.)
+	m.connUnknown = false
 	if online {
 		m.clearOffline()
 		if m.hasProfile(ctx) {
@@ -510,6 +532,20 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 
 // onTick fires the sustained-offline window and retries any deferred AP op.
 func (m *Machine) onTick(ctx context.Context) {
+	// Recover from an assumed-offline boot: re-query reachability until one
+	// query succeeds (a connectivity_change event also resolves it). Runs
+	// BEFORE the window/reconcile logic so a corrected reading drives this
+	// same tick's decisions.
+	if m.connUnknown {
+		online, err := m.conn.Online(ctx)
+		if err != nil {
+			m.logger.Warn("provisioning: connectivity re-query failed; still assuming offline", zap.Error(err))
+		} else {
+			m.logger.Info("provisioning: connectivity re-query resolved the assumed-offline boot", zap.Bool("online", online))
+			m.onConnectivity(ctx, online)
+		}
+	}
+
 	m.mu.Lock()
 	st := m.state
 	since := m.offlineSince
