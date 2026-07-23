@@ -128,12 +128,26 @@ func (r *refresher) Start() {
 
 	r.started = true
 	r.done = make(chan struct{}) // Recreate the done channel for each start
+	// Snapshot the freshly created channel under mu and hand it to
+	// background as a parameter rather than letting background read
+	// r.done directly: background's select loop re-evaluates its case
+	// expressions on every iteration, so an unsynchronized field read
+	// there could race against a LATER Start() call's write to r.done
+	// once this goroutine's own done channel has since been closed by
+	// Stop and a new Start/background pair is already running (the
+	// exact shape of TestRefresher_ConcurrentStartStop, which caught
+	// this race under -race: Start's write at this line vs Stop's read
+	// of r.done below, both previously unsynchronized). Passing the
+	// value as a parameter means this goroutine only ever observes the
+	// one done channel that was live when it started, with no further
+	// field access needed for its whole lifetime.
+	done := r.done
 	r.mu.Unlock()
 
-	go r.background()
+	go r.background(done)
 }
 
-func (r *refresher) background() {
+func (r *refresher) background(done chan struct{}) {
 	r.logger.Info("Refresher background goroutine started")
 
 	// Process playing playlist until it succeeds
@@ -159,7 +173,7 @@ func (r *refresher) background() {
 			if err := r.processPlayingPlaylist(); err != nil {
 				r.logProcessFailure(err)
 			}
-		case <-r.done:
+		case <-done:
 			ticker.Stop()
 			r.logger.Info("Refresher background goroutine stopped due to done channel")
 			return
@@ -180,13 +194,19 @@ func (r *refresher) Stop() {
 	}
 
 	r.started = false
+	// Snapshot r.done under mu (symmetric with Start's write above) and
+	// operate on the local copy from here on — reading the field again
+	// after unlocking is exactly the race -race caught: a concurrent
+	// Start() call can write a brand-new channel into r.done between
+	// this unlock and an unsynchronized re-read below.
+	done := r.done
 	r.mu.Unlock()
 
 	select {
-	case <-r.done:
+	case <-done:
 		// Already closed
 	default:
-		close(r.done)
+		close(done)
 	}
 
 	r.logger.Info("Refresher stopped")
