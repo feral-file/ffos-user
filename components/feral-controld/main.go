@@ -84,7 +84,13 @@ type app struct {
 	KioskReplay              offlinecache.KioskReplay
 	OfflineCacheService      offlinecache.Service
 	OfflineCacheStaticServer offlinecache.StaticServer
-	Hub                      hub.Hub
+	// OfflineCacheNotifier's Close (background WS-delivery worker
+	// shutdown) is driven directly here rather than through
+	// OfflineCacheService: Service only holds it via the narrower
+	// ProgressObserver interface, which has no Close method — see
+	// offlinecache.Runtime.Notifier's doc.
+	OfflineCacheNotifier *offlinecache.Notifier
+	Hub                  hub.Hub
 }
 
 func main() {
@@ -280,6 +286,18 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// the daemon's core playback/command path never depended on this
 	// feature before it existed.
 	if app.OfflineCacheService != nil {
+		// OfflineCacheNotifier's Close is deferred BEFORE
+		// OfflineCacheService.Stop below (registered first), so Go's
+		// LIFO defer order runs Stop FIRST on shutdown: Stop's own doc
+		// guarantees no further ProgressObserver callbacks (so no more
+		// notifications will ever be enqueued) only once it returns.
+		// Closing the notifier's background delivery worker before that
+		// would risk dropping an in-flight final notification for no
+		// benefit — the notifier's own worker is just an idle goroutine
+		// until Close runs anyway.
+		if app.OfflineCacheNotifier != nil {
+			defer app.OfflineCacheNotifier.Close()
+		}
 		if err := app.OfflineCacheService.Start(ctx); err != nil {
 			app.Logger.Error("Failed to start offline cache service", zap.Error(err))
 		} else {
@@ -546,6 +564,7 @@ func initializeApp(
 	var offlineCache offlinecache.Service
 	var kioskReplay offlinecache.KioskReplay
 	var offlineCacheStaticServer offlinecache.StaticServer
+	var offlineCacheNotifier *offlinecache.Notifier
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -555,6 +574,7 @@ func initializeApp(
 		offlineCache = ocRuntime.Service
 		kioskReplay = ocRuntime.KioskReplay
 		offlineCacheStaticServer = ocRuntime.StaticServer
+		offlineCacheNotifier = ocRuntime.Notifier
 	}
 
 	// Command handler. The raw handler serves internal daemon lifecycle flows
@@ -613,6 +633,7 @@ func initializeApp(
 		KioskReplay:              kioskReplay,
 		OfflineCacheService:      offlineCache,
 		OfflineCacheStaticServer: offlineCacheStaticServer,
+		OfflineCacheNotifier:     offlineCacheNotifier,
 		Hub:                      hub,
 	}
 }

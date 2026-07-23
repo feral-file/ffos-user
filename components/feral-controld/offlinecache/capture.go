@@ -53,6 +53,27 @@ const captureWindowDefault = 20 * time.Second
 // to bound total wall-clock cost.
 const captureFinalizeWindowDefault = 60 * time.Second
 
+// clearObservedOriginsStorageWindow bounds the aggregate wall-clock cost
+// of clearObservedOriginsStorage's post-capture per-origin cleanup loop.
+// Each individual Storage.clearDataForOrigin call is already bounded by
+// CDPSession's own per-send timeout (defaultSendTimeout, 15s in
+// production — see cdpsession.go), but that only bounds ONE origin: an
+// artwork whose navigation, redirect chain, and subresources touched
+// many distinct origins could otherwise cost up to
+// (origin count) * defaultSendTimeout in the worst case (e.g. several
+// slow/wedged origins), and since capture holds the single download
+// worker's slot for its entire duration (see service.go's captureMu),
+// that would monopolize it well past captureWindowMs, starving every
+// other queued download. Deriving a bounded child context here caps the
+// worst case at this constant regardless of origin count: once it
+// elapses, the loop's own ctx.Err() check stops attempting further
+// clears and logs how many origins were left uncleared, rather than
+// letting the loop keep blocking — the SAME "best-effort, only affects
+// how clean the NEXT job's starting state is" trade-off
+// clearObservedOriginsStorage's own doc already accepts, just now also
+// bounded in aggregate time rather than only in eventual outcome.
+const clearObservedOriginsStorageWindow = 30 * time.Second
+
 // Capturer drives one headless-Chromium capture of a playlist item's
 // source URL and writes the result to the Store.
 //
@@ -417,7 +438,10 @@ func (c *capturer) resetTargetState(ctx context.Context, session CDPSession, sou
 // Best-effort by design: called after the record this capture produced
 // is already final, so a failure here must never turn an otherwise-
 // successful capture into an error — it only affects how clean the
-// NEXT job's starting state is, not this one's correctness.
+// NEXT job's starting state is, not this one's correctness. The whole
+// loop is bounded to clearObservedOriginsStorageWindow in aggregate —
+// see that constant's doc for why a per-call timeout alone is not
+// enough to bound this function's total cost.
 func (c *capturer) clearObservedOriginsStorage(ctx context.Context, session CDPSession, resources []Resource) {
 	origins := make(map[string]bool, len(resources))
 	for _, res := range resources {
@@ -427,8 +451,26 @@ func (c *capturer) clearObservedOriginsStorage(ctx context.Context, session CDPS
 		}
 		origins[origin] = true
 	}
+	if len(origins) == 0 {
+		return
+	}
+
+	clearCtx, cancel := context.WithTimeout(ctx, clearObservedOriginsStorageWindow)
+	defer cancel()
+	cleared := 0
 	for origin := range origins {
-		if _, err := session.Send(ctx, "Storage.clearDataForOrigin", map[string]interface{}{
+		// Checked before each send (rather than relying solely on
+		// session.Send's own per-call ctx.Err() handling) so a deadline
+		// that elapses BETWEEN calls skips every remaining origin
+		// immediately instead of still issuing one more Send that is
+		// certain to fail on an already-expired context.
+		if clearCtx.Err() != nil {
+			c.logger.Warn("offline cache: post-capture origin storage clear window elapsed, skipping remaining origins",
+				zap.Int("origins_cleared", cleared), zap.Int("origins_total", len(origins)))
+			return
+		}
+		cleared++
+		if _, err := session.Send(clearCtx, "Storage.clearDataForOrigin", map[string]interface{}{
 			"origin":       origin,
 			"storageTypes": "all",
 		}); err != nil {

@@ -127,6 +127,12 @@ type Runtime struct {
 	Service      Service
 	KioskReplay  KioskReplay
 	StaticServer StaticServer
+	// Notifier is exposed so main.go can Close its background WS-
+	// delivery worker at shutdown (see Notifier.Close's doc) — the
+	// Service itself only holds it through the narrower ProgressObserver
+	// interface (OnItemStateChanged only), which has no Close method, so
+	// Service cannot own this shutdown step itself.
+	Notifier *Notifier
 }
 
 // Bootstrap wires every offlinecache component together from Options. It
@@ -168,7 +174,7 @@ func Bootstrap(
 	service := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, logger)
 	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, logger)
 
-	return Runtime{Service: service, KioskReplay: kioskReplay, StaticServer: staticServer}
+	return Runtime{Service: service, KioskReplay: kioskReplay, StaticServer: staticServer, Notifier: notifier}
 }
 
 // safeHeadlessDebugPort defends against offlineCache.headlessDebugPort

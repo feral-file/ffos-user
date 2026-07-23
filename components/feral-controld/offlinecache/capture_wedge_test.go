@@ -2,6 +2,7 @@ package offlinecache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	go_io "io"
 	go_http "net/http"
@@ -194,4 +195,100 @@ func TestResolveResources_DeadlineExpiringMidFinalizationPreservesEarlierFetches
 	assert.Contains(t, coverage.Reason, "finalization_deadline_exceeded:"+slowURL)
 	assert.NotContains(t, coverage.Reason, "finalization_deadline_exceeded:"+fastURL)
 	assert.Equal(t, 1, client.calls, "only fastURL should ever be fetched; slowURL's turn starts strictly after cancellation")
+}
+
+// fakeCDPSession is a minimal hand-rolled CDPSession fake (package
+// offlinecache; importing mocks here would be a cycle — same reason
+// countingHTTPClient above is hand-rolled rather than a gomock mock).
+// Send records every Storage.clearDataForOrigin call's origin, in call
+// order, and runs onSend (if set) before returning — letting a test
+// react to (e.g. cancel a context after) a specific call, the same
+// pattern countingHTTPClient.doFunc uses for fetchAndStoreBody above.
+type fakeCDPSession struct {
+	sentOrigins []string
+	onSend      func(ctx context.Context, method string, params map[string]interface{})
+}
+
+func (f *fakeCDPSession) Send(ctx context.Context, method string, params map[string]interface{}) (json.RawMessage, error) {
+	if method == "Storage.clearDataForOrigin" {
+		if origin, ok := params["origin"].(string); ok {
+			f.sentOrigins = append(f.sentOrigins, origin)
+		}
+	}
+	if f.onSend != nil {
+		f.onSend(ctx, method, params)
+	}
+	return json.RawMessage(`{}`), nil
+}
+func (f *fakeCDPSession) On(string, func(json.RawMessage)) {}
+func (f *fakeCDPSession) ForSession(string) CDPSession     { return f }
+func (f *fakeCDPSession) Close() error                     { return nil }
+
+// TestClearObservedOriginsStorage_ClearsEveryDistinctOrigin is the
+// baseline companion to the deadline test below: with no deadline
+// pressure at all, every distinct origin among resources must still get
+// its own Storage.clearDataForOrigin call — pinned here so a future
+// change to the aggregate-bound logic cannot accidentally skip origins
+// unconditionally instead of only once the deadline actually elapses.
+func TestClearObservedOriginsStorage_ClearsEveryDistinctOrigin(t *testing.T) {
+	c := &capturer{logger: zaptest.NewLogger(t)}
+	session := &fakeCDPSession{}
+
+	resources := []Resource{
+		{URL: "https://a.example.com/1.bin"},
+		{URL: "https://a.example.com/2.bin"}, // same origin as above — must be deduped
+		{URL: "https://b.example.com/1.bin"},
+		{URL: "not a url"}, // unparsable; must be skipped, not fail the whole call
+	}
+
+	c.clearObservedOriginsStorage(context.Background(), session, resources)
+
+	assert.ElementsMatch(t, []string{"https://a.example.com", "https://b.example.com"}, session.sentOrigins)
+}
+
+// TestClearObservedOriginsStorage_AggregateDeadlineSkipsRemainingOrigins
+// is the regression test for the P1 finding that clearObservedOriginsStorage's
+// per-origin cleanup loop had no aggregate deadline: each
+// Storage.clearDataForOrigin call is individually bounded by CDPSession's
+// own per-send timeout, but an artwork whose navigation/redirects/
+// subresources touched MANY distinct origins could still cost
+// (origin count) * that per-call timeout in the worst case, monopolizing
+// the single capture worker slot for far longer than intended — see
+// clearObservedOriginsStorageWindow's doc.
+//
+// Rather than waiting out the real 30s constant, the fake session's own
+// first Send call cancels the ctx passed into clearObservedOriginsStorage
+// — exactly like
+// TestResolveResources_DeadlineExpiringMidFinalizationPreservesEarlierFetches
+// above simulates "the deadline already elapsed" deterministically,
+// without any real sleep/timer race. context.WithTimeout's child
+// deadline can only be EARLIER than (or equal to) its parent's, so
+// canceling this test's parent ctx exercises the exact same ctx.Err()
+// short-circuit a real elapsed clearObservedOriginsStorageWindow would
+// — proving the bound is enforced via ctx propagation, not merely
+// documented.
+func TestClearObservedOriginsStorage_AggregateDeadlineSkipsRemainingOrigins(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &fakeCDPSession{
+		onSend: func(context.Context, string, map[string]interface{}) {
+			// Cancel after the first call is recorded, so every
+			// remaining origin's turn observes an already-done
+			// context — proving the loop's own ctx.Err() check, not
+			// luck, is what stops it early.
+			cancel()
+		},
+	}
+
+	c := &capturer{logger: zaptest.NewLogger(t)}
+
+	const originCount = 5
+	resources := make([]Resource, 0, originCount)
+	for i := 0; i < originCount; i++ {
+		resources = append(resources, Resource{URL: fmt.Sprintf("https://origin-%d.example.com/asset.bin", i)})
+	}
+
+	c.clearObservedOriginsStorage(ctx, session, resources)
+
+	assert.Len(t, session.sentOrigins, 1,
+		"only the first origin's clear should run once the aggregate deadline (bounded here by the canceled parent ctx) has elapsed")
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -458,6 +459,13 @@ func TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend(t *
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	// This test's CDP send returns a bare "success" string rather than a
+	// realistic {"message":{"ok":true}} envelope, which
+	// isPlayerResponseOk treats as NOT ok (fail-closed — see its doc),
+	// so every pass here also exercises the corrective-resync path
+	// below; PlaybackGeneration just needs to answer, not assert
+	// anything about it.
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 
 	mockTicker := mocks.NewMockTicker(ctrl)
@@ -804,6 +812,190 @@ func TestRefresher_ProcessPlayingPlaylist_KioskReplaySyncFailureDoesNotBlockRefr
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
 	r.Start()
 	time.Sleep(100 * time.Millisecond)
+	r.Stop()
+}
+
+// playerNotOkResponse mirrors commandrouter/handler_test.go's own helper of
+// the same name (kept as an independent copy — see
+// refresher.isPlayerResponseOk's doc for why commandrouter and
+// playlist-refresher do not share test helpers either): the shape
+// ff-player's window.handleCDPRequest replies with when it rejects a
+// command.
+func playerNotOkResponse() map[string]interface{} {
+	return map[string]interface{}{
+		"messageID": "1",
+		"message": map[string]interface{}{
+			"ok": false,
+		},
+	}
+}
+
+// TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope
+// is the regression test for the P1 finding that a CDP transport failure
+// left replay's Fetch-interception scope pointed at whatever this pass had
+// just resolved (via the pre-send SyncPlaylist below), even though the
+// kiosk never actually received it. Since the refresher's retry loop keeps
+// re-attempting a permanently-failing send (Sleep is mocked as an
+// immediate no-op below, so it spins fast rather than actually waiting),
+// FetchPlayerStatus/ProcessPlaylistURL are mocked to alternate between two
+// distinct playlists on successive calls: this lets the test tell apart
+// "the main pass's own pre-send sync" (item-new, the odd calls) from "the
+// resync's independent, freshly-queried sync" (item-old, the even calls)
+// without pinning a specific call count against a loop that runs an
+// indeterminate number of times before the test observes success and
+// stops it.
+func TestRefresher_ProcessPlayingPlaylist_CDPSendFailureRevertsKioskReplayScope(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	// The retry loop's Sleep between failed attempts is mocked as an
+	// immediate no-op, so it spins as fast as the mocks allow rather
+	// than actually waiting PLAYER_STATUS_POLLING_INTERVAL each time.
+	mockClock.EXPECT().Sleep(gomock.Any()).AnyTimes()
+
+	url := "http://example.com/playlist.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+	}}
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+	}}
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &url, nil), nil).
+		AnyTimes()
+
+	var resolveCalls atomic.Int64
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, url, false).
+		DoAndReturn(func(context.Context, string, bool) (*dp1.Playlist, error) {
+			if resolveCalls.Add(1)%2 == 1 {
+				return newPlaylist, nil
+			}
+			return oldPlaylist, nil
+		}).
+		AnyTimes()
+
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, errors.New("cdp send failed")).
+		AnyTimes()
+
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item-new"}).
+		Return(nil).
+		MinTimes(1)
+	reverted := make(chan struct{}, 8)
+	mockKioskReplay.EXPECT().
+		SyncPlaylist(ctx, []string{"item-old"}).
+		DoAndReturn(func(context.Context, []string) error {
+			select {
+			case reverted <- struct{}{}:
+			default:
+			}
+			return nil
+		}).
+		MinTimes(1)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
+	r.Start()
+
+	select {
+	case <-reverted:
+		// The revert-to-"item-old" sync ran, proving the CDP send
+		// failure triggered an independent re-sync rather than leaving
+		// scope pinned to the just-attempted "item-new".
+	case <-time.After(2 * time.Second):
+		t.Fatal("CDP send failure never triggered a revert sync to the player's currently-reported playlist")
+	}
+
+	r.Stop()
+}
+
+// TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope
+// mirrors the CDP-send-failure regression above for the other failure
+// shape: the CDP send itself succeeds at the transport level, but the
+// player replies ok:false (rejecting the refreshed playlist), which must
+// revert scope the same way. Unlike the transport-failure test, err stays
+// nil here (see processPlayingPlaylist's doc), so background()'s
+// retry-until-success loop treats this single pass as done and moves on
+// to the (never-firing, in this test) ticker — making the exact call
+// sequence below deterministic enough to pin with gomock.InOrder.
+func TestRefresher_ProcessPlayingPlaylist_PlayerRejectionRevertsKioskReplayScope(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
+	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+
+	url := "http://example.com/playlist.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+	}}
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+	}}
+
+	gomock.InOrder(
+		mockStatusPoller.EXPECT().
+			FetchPlayerStatus(ctx).
+			Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &url, nil), nil),
+		mockDP1.EXPECT().
+			ProcessPlaylistURL(ctx, url, false).
+			Return(newPlaylist, nil),
+		mockKioskReplay.EXPECT().
+			SyncPlaylist(ctx, []string{"item-new"}).
+			Return(nil),
+		mockCDP.EXPECT().
+			Send(cdp.METHOD_EVALUATE, gomock.Any()).
+			Return(playerNotOkResponse(), nil),
+		// Only reached via the deferred revert: FetchPlayerStatus/
+		// ProcessPlaylistURL/SyncPlaylist run a SECOND time,
+		// independently, after the player rejection above.
+		mockStatusPoller.EXPECT().
+			FetchPlayerStatus(ctx).
+			Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &url, nil), nil),
+		mockDP1.EXPECT().
+			ProcessPlaylistURL(ctx, url, false).
+			Return(oldPlaylist, nil),
+		mockKioskReplay.EXPECT().
+			SyncPlaylist(ctx, []string{"item-old"}).
+			Return(nil),
+	)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), mockClock, logger)
+	r.Start()
+	time.Sleep(150 * time.Millisecond)
 	r.Stop()
 }
 
