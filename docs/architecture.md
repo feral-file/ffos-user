@@ -48,7 +48,7 @@ This release ships three LAN-facing surfaces **without** authentication. They ar
 2. **Prometheus `/metrics` on the LAN.** The hub serves playback metrics in Prometheus text format at `:1111/metrics`, unauthenticated, on the same surface.
 3. **System-wide unprivileged-port floor.** `feral-controld` runs as a `systemd --user` service (uid 1000) where `CAP_NET_BIND_SERVICE` is inert, so the captive portal binds `:80` by lowering the system-wide unprivileged-port floor: `net.ipv4.ip_unprivileged_port_start=80`. This sysctl is set in the base image (`ffos` repo, `archiso-ff1/airootfs/etc/sysctl.d/10-unprivileged-port-start.conf`), not in this repository, and it applies to **every** process on the device, not just the portal.
 
-Until v2 lands, deployments must treat the LAN as a trust boundary: enable these surfaces only on networks where local clients are trusted. The `contract` field on `GET /api/status` (value `"1"`) exists for the dual-running window that retiring the open surface requires — see `docs/api-design.md` and `docs/web-controller-feasibility.md`.
+Until v2 lands, deployments must treat the LAN as a trust boundary: enable these surfaces only on networks where local clients are trusted. The `contract` field on `GET /api/status` (value `"1"`) exists for the dual-running window that retiring the open surface requires — see `docs/api-design.md`.
 
 ---
 

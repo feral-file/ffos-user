@@ -189,7 +189,7 @@ The hub does not carry `messageID == "system"` messages; topic assignment is rel
 }
 ```
 
-- `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface. See `docs/web-controller-feasibility.md`.
+- `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface.
 - `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.
 - `claimed` mirrors the mDNS TXT `claimed` value.
 - `branch` and `version` are read from the same `ff1-config.json` the OTA gate uses, so the LAN payload can never disagree with the claim QR.
