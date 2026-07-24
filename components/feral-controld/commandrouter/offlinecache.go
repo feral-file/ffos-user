@@ -149,7 +149,7 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 	if err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
-	return map[string]any{"ok": true, "status": "queued", "total": total, "softwareCount": queued}, nil
+	return map[string]any{"ok": true, "status": "queued", "total": total, "queuedCount": queued}, nil
 }
 
 func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[string]any) (interface{}, error) {
@@ -438,7 +438,7 @@ func errorResponse(code, message string, retryable bool) map[string]any {
 
 // offlineCacheErrorResponse classifies a Service error into an RPC error
 // body. ErrUnsupportedMediaClass is the one case a mobile-app client should
-// treat as non-retryable (the artwork will never become software-based);
+// treat as non-retryable (live/HLS streaming sources cannot be cached offline);
 // everything else (disk/store/network) is surfaced as retryable.
 func offlineCacheErrorResponse(err error) map[string]any {
 	if errors.Is(err, offlinecache.ErrServiceNotStarted) {

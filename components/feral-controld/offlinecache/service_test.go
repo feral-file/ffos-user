@@ -439,7 +439,7 @@ func TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim(
 // the regression test for the false-success hazard: if the classifier
 // itself is broken (e.g. a transient network error) for every eligible
 // item, that must be reported as an error, not silently collapse into
-// the same ok:true/softwareCount:0 shape a playlist with genuinely no
+// the same ok:true/queuedCount:0 shape a playlist with genuinely no
 // software items would produce.
 //
 // It also pins a second invariant on the SAME failure: the playlist

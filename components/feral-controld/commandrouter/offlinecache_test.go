@@ -285,7 +285,7 @@ func TestCommandHandler_DownloadPlaylist_Success(t *testing.T) {
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
 	assert.Equal(t, 2, resp["total"])
-	assert.Equal(t, 1, resp["softwareCount"])
+	assert.Equal(t, 1, resp["queuedCount"])
 }
 
 // TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL

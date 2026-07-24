@@ -1494,27 +1494,24 @@ Success response:
   "ok": true,
   "status": "queued",
   "total": 12,
-  "softwareCount": 5
+  "queuedCount": 5
 }
 ```
 
-`total` is every item in the resolved playlist; `softwareCount` is how many
-were actually queued — despite the name, this now counts EVERY queued
-item regardless of class (software captured via headless Chromium, media/
-unknown via direct download; see `docs/offline-artwork-capture.md` §3.3),
-not literally just `ClassSoftware` ones. The field name is kept as-is for
-mobile-app wire compatibility rather than renamed to something like
-`queuedCount`; only its meaning has broadened. An item classified as
+`total` is every item in the resolved playlist; `queuedCount` is how many
+were actually queued for offline capture — every class except live/HLS
+streaming (software via headless Chromium, media/unknown via direct HTTP
+download; see `docs/offline-artwork-capture.md` §3.3). An item classified as
 live/HLS streaming (or missing an `id`/`source`) is simply excluded from
-`softwareCount` with `ok: true` — that is the normal, successful shape for
+`queuedCount` with `ok: true` — that is the normal, successful shape for
 a playlist with few or no cacheable items. If classification itself fails
 (e.g. a transient network error reaching the classify target) for every
 eligible item so nothing could be queued at all, this command instead
 fails with `offline_cache_error` rather than returning that same
-`ok: true`/`softwareCount: 0` shape: a broken classifier must not look
+`ok: true`/`queuedCount: 0` shape: a broken classifier must not look
 identical to "this playlist genuinely has no cacheable items" to the
 controller. A classify failure for only *some* items still returns
-`ok: true` with `softwareCount` reflecting whatever did queue
+`ok: true` with `queuedCount` reflecting whatever did queue
 successfully; the skipped item(s) are logged server-side but not
 individually reported here.
 

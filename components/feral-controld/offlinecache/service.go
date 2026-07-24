@@ -173,7 +173,7 @@ type Service interface {
 	// item hit a classify error (queued==0 but at least one classify
 	// call failed), that is materially different from "this playlist
 	// really has no cacheable items" and is reported as an error instead
-	// of a false ok:true/softwareCount:0 — a transient classifier outage
+	// of a false ok:true/queuedCount:0 — a transient classifier outage
 	// must not look identical to an all-streaming playlist to the
 	// controller. A classify failure alongside at least one successful
 	// queue is still reported as success (queued reflects only the
@@ -822,7 +822,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	if len(toQueue) == 0 && classifyFailed > 0 {
 		// Distinguish "classification itself is broken" from "this
 		// playlist genuinely has no cacheable items" — the latter is a
-		// normal, successful ok:true/softwareCount:0 outcome, but the
+		// normal, successful ok:true/queuedCount:0 outcome, but the
 		// former must not look identical to it (see this method's doc).
 		// Deliberately returns BEFORE saving the playlist/URL index
 		// below: loadCachedPlaylistForURL's/CachedPlaylistForURL's doc
