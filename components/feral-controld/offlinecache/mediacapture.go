@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	go_http "net/http"
+	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -119,6 +121,20 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 	if err != nil {
 		return Resource{}, fmt.Errorf("build request: %w", err)
 	}
+	// ff-player's <video crossOrigin="anonymous"> element always sends an
+	// Origin header, and CDN/S3-backed CORS configs commonly only emit
+	// Access-Control-Allow-Origin (and friends) when a request carries
+	// one — a bare Origin-less GET can get a byte-identical response
+	// with those headers silently absent. This capture path has no
+	// browser, so it never sends one on its own; setting it explicitly
+	// to the kiosk's real origin makes the CDN's response here match
+	// what the live player would see, so filterReplayableHeaders below
+	// actually has CORS headers to capture instead of finding none and
+	// silently leaving Resource.Headers empty — which would otherwise
+	// make every offline replay of this resource fail Chromium's own
+	// CORS enforcement despite byte-correct status/body (see
+	// docs/offline-artwork-capture.md §3.3/§4.6).
+	req.Header.Set("Origin", strings.TrimSuffix(constant.WEBAPP_URL, "/"))
 	resp, err := c.httpClient.Do(req.WithContext(ctx))
 	if err != nil {
 		return Resource{}, fmt.Errorf("fetch: %w", err)

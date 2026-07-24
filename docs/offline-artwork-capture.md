@@ -339,7 +339,10 @@ answer the second time around.
   `ff-player`'s `<video crossOrigin="anonymous">` element CORS-checks its
   response exactly like a cross-origin `fetch()`/XHR would, so an offline
   replay missing those headers would still fail Chromium's own CORS
-  enforcement even with byte-correct status/body.
+  enforcement even with byte-correct status/body. Getting those headers
+  onto the wire in the first place requires sending an `Origin` header on
+  the capture request too — see §4.6's expanded note — since this path has
+  no browser to send one on its own.
 - **A fetch failure is a hard error, not a partial-coverage record.**
   Because there is only one resource, a failed `GET`
   (`http_error(<status>)`, a transport-level `fetch_failed`, or the disk
@@ -492,6 +495,24 @@ small, curated allowlist of CORS/cross-origin-relevant headers
 (`Resource.Headers`, populated by `filterReplayableHeaders`) all the way
 from capture through both replay paths — see §5's `Resource.Headers` bullet
 and §6's per-path bullets for the mechanics.
+
+This only captures what the origin actually sent, though — and many
+CORS-configured origins (CloudFront/S3-backed CDNs in particular) only
+emit `Access-Control-Allow-Origin` et al. when the *request* itself
+carries an `Origin` header, answering an Origin-less request with a
+byte-identical body but none of those headers. `capture.go`'s
+CDP-observed path never hits this: a real browser's cross-origin
+`fetch()`/`<video crossOrigin>` request always sends its own `Origin`.
+`mediacapture.go`'s browser-free `MediaCapturer`, however, used to issue
+a bare `GET` with no `Origin` header at all — silently starving
+`filterReplayableHeaders` of anything to capture for every
+`ClassMedia`/`ClassUnknown` item (the majority of plain image/video/audio
+artwork previews) even though the CDN would have happily returned the
+CORS headers to a real player request. `MediaCapturer.fetchResource` now
+sets `Origin` to the kiosk's own origin (`constant.WEBAPP_URL`) so its
+capture request matches what the live `<video crossOrigin="anonymous">`
+element would send, and the CDN's response — and therefore
+`Resource.Headers` — matches reality. See §3.3's CORS bullet.
 
 ### 4.7 A resource's identity is method+URL, not URL alone
 

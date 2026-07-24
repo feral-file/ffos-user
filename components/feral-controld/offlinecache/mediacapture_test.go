@@ -59,6 +59,25 @@ func (h *mediaCaptureTestHarness) expectGET(t *testing.T, url string, resp *http
 	return h.mockHTTP.EXPECT().Do(gomock.Any()).Return(resp, nil).Times(1)
 }
 
+// expectGETCapturingRequest is expectGET's counterpart for tests that need
+// to inspect the *http.Request actually handed to httpClient.Do — e.g. to
+// assert on headers fetchResource sets after NewRequest returns, which a
+// fixed expected-request value (as expectGET uses) can't observe.
+func (h *mediaCaptureTestHarness) expectGETCapturingRequest(
+	t *testing.T, url string, resp *http.Response,
+) *[]*http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	require.NoError(t, err)
+	h.mockHTTP.EXPECT().NewRequest(http.MethodGet, url, nil).Return(req, nil).Times(1)
+	captured := make([]*http.Request, 0, 1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(r *http.Request) (*http.Response, error) {
+		captured = append(captured, r)
+		return resp, nil
+	}).Times(1)
+	return &captured
+}
+
 func newMediaResponse(statusCode int, contentType, body string, extraHeaders map[string]string) *http.Response {
 	h := http.Header{}
 	if contentType != "" {
@@ -119,6 +138,37 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	saved, err := h.store.LoadItem("item-1")
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources, "Capture must have persisted the record via SaveItem, not just returned it")
+}
+
+// TestMediaCapturer_Capture_SendsOriginHeader is the regression test for
+// the CORS-capture gap this path used to have: ff-player's real
+// <video crossOrigin="anonymous"> element always sends an Origin header,
+// and CDN/S3-backed CORS configs commonly only emit
+// Access-Control-Allow-Origin when a request carries one — a bare
+// Origin-less GET (this path's previous behavior) could get a
+// byte-identical response with those headers silently absent, leaving
+// Resource.Headers empty and every offline replay of the asset failing
+// Chromium's own CORS enforcement despite correct bytes. fetchResource
+// must set Origin to the kiosk's own origin so captured headers match
+// what the live player actually observes.
+func TestMediaCapturer_Capture_SendsOriginHeader(t *testing.T) {
+	h := setupMediaCapture(t)
+	defer h.ctrl.Finish()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/video.mp4"}
+	captured := h.expectGETCapturingRequest(
+		t, item.Source,
+		newMediaResponse(http.StatusOK, "video/mp4", "bytes", map[string]string{
+			"Access-Control-Allow-Origin": "*",
+		}),
+	)
+
+	_, err := h.capturer.Capture(context.Background(), item)
+	require.NoError(t, err)
+
+	require.Len(t, *captured, 1)
+	assert.Equal(t, "http://127.0.0.1:8080", (*captured)[0].Header.Get("Origin"),
+		"must send the kiosk's own origin so CORS-conditional CDNs answer the same way they would for the real player")
 }
 
 // TestMediaCapturer_Capture_StoresUnderOriginalSourceEvenAfterRedirect
