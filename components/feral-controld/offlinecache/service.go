@@ -757,8 +757,13 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	// this is the authoritative check that actually prevents pushing a
 	// job onto a queue nobody will ever drain. It also returns
 	// ErrQueueFull if the queue is already at capacity — see that
-	// error's doc.
-	return s.enqueue(item, epoch, class)
+	// error's doc. The newly-queued bool is irrelevant to a single-item
+	// download's caller (downloadPlaylistItem's response is ok/error
+	// only, with no aggregate count to keep accurate), so it is
+	// deliberately discarded here — see DownloadPlaylist for the caller
+	// that does need it.
+	_, err = s.enqueue(item, epoch, class)
+	return err
 }
 
 func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
@@ -859,7 +864,8 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 
 	queued := 0
 	for _, q := range toQueue {
-		if err := s.enqueue(q.item, q.epoch, q.class); err != nil {
+		newlyQueued, err := s.enqueue(q.item, q.epoch, q.class)
+		if err != nil {
 			if errors.Is(err, ErrServiceNotStarted) {
 				// Stop() raced in mid-loop; the remaining items would
 				// fail the same way, so stop trying rather than log
@@ -877,7 +883,15 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 			// be silently swallowed into a success report.
 			return queued, total, fmt.Errorf("offline cache: queue playlist %s items: %w", playlist.ID, err)
 		}
-		queued++
+		// Only count jobs THIS call actually put in the queue. enqueue
+		// also returns a nil error for idempotent no-ops (item already
+		// queued/downloading from an earlier call) and for a concurrent
+		// clear winning the race — neither actually queued anything, so
+		// counting them here would inflate queuedCount above what was
+		// truly newly scheduled for a retried or clear-racing request.
+		if newlyQueued {
+			queued++
+		}
 	}
 	return queued, total, nil
 }
@@ -953,6 +967,16 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 // matters. Returns ErrQueueFull if the queue is already at maxQueueLen
 // — see that error's doc.
 //
+// The queued bool distinguishes "this call actually pushed a new job"
+// (true) from every no-op nil-error outcome (false: already
+// queued/downloading, or a concurrent clear won the race — see the
+// cleared checks below). Callers that report an aggregate count back to
+// a client (DownloadPlaylist's queuedCount) MUST gate on this bool
+// rather than on err == nil: counting every nil return as "queued"
+// overstates the number of jobs actually newly scheduled whenever a
+// request is retried while items are still in flight, or races a
+// ClearPlaylist/ClearItem for the same id.
+//
 // This runs in two locked phases with the observer notification in
 // between, rather than one critical section covering everything, for two
 // reasons:
@@ -976,9 +1000,9 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 // notification in the COMMON case where the queue is nowhere near full,
 // not to be the authoritative guard. Phase 2's check, taken under the
 // same lock as the actual push, is what actually enforces the bound.
-func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class MediaClass) error {
+func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class MediaClass) (queued bool, err error) {
 	if !s.started.Load() {
-		return ErrServiceNotStarted
+		return false, ErrServiceNotStarted
 	}
 	s.mu.RLock()
 	st, tracked := s.state[item.ID]
@@ -986,7 +1010,7 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	cleared := s.downloadEpoch[item.ID] != epoch
 	s.mu.RUnlock()
 	if tracked && (st == StateQueued || st == StateDownloading) {
-		return nil
+		return false, nil
 	}
 	// A clear landed since this download sampled its epoch (see
 	// downloadEpoch's doc): honor the clear and abort rather than
@@ -994,10 +1018,10 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	// skip the observer's spurious "queued" notification in the common
 	// case; phase 2 below re-checks under the commit lock authoritatively.
 	if cleared {
-		return nil
+		return false, nil
 	}
 	if queueFull {
-		return ErrQueueFull
+		return false, ErrQueueFull
 	}
 
 	if s.observer != nil {
@@ -1021,11 +1045,11 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	s.mu.Lock()
 	if !s.started.Load() {
 		s.mu.Unlock()
-		return ErrServiceNotStarted
+		return false, ErrServiceNotStarted
 	}
 	if st, ok := s.state[item.ID]; ok && (st == StateQueued || st == StateDownloading) {
 		s.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	// Authoritative clear check: this read and the queue.push below are
 	// one critical section under the same mu reserveForClear bumps the
@@ -1036,16 +1060,16 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	// clear failed to remove — see downloadEpoch's doc.
 	if s.downloadEpoch[item.ID] != epoch {
 		s.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	if s.queue.len() >= s.maxQueueLen {
 		s.mu.Unlock()
-		return ErrQueueFull
+		return false, ErrQueueFull
 	}
 	s.state[item.ID] = StateQueued
 	s.queue.push(captureJob{itemID: item.ID, item: item, class: class})
 	s.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 func (s *service) process(ctx context.Context, j captureJob) {

@@ -435,6 +435,63 @@ func TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim(
 	assert.JSONEq(t, string(raw), string(stored), "the playlist must be stored byte-for-byte as received, not re-marshaled")
 }
 
+// TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems is
+// the regression test for the queuedCount-overcount bug: a client that
+// retries downloadPlaylist for a playlist whose item is still
+// downloading from the FIRST call must see the retry's queuedCount
+// reflect that nothing new was scheduled, not double-count the same
+// in-flight item. enqueue's idempotent no-op (item already
+// StateDownloading) must translate to DownloadPlaylist's aggregate count
+// staying at 0 for the second call — see enqueue's "queued bool" doc.
+func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t",
+		"items": []map[string]interface{}{
+			{"id": "item-1", "source": "https://example.com/index.html"},
+		},
+	})
+	require.NoError(t, err)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	gate := make(chan struct{})
+	// Classify runs once per DownloadPlaylist call regardless of whether
+	// the item ends up newly queued, so both calls hit it.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(2)
+	// Times(1): the retry below must not schedule a second capture for
+	// the same in-flight item.
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			<-gate
+			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued1, total1, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, queued1, "the first call must report the item as newly queued")
+	assert.Equal(t, 1, total1)
+
+	require.Eventually(t, func() bool {
+		snap, err := ts.service.Status([]string{"item-1"})
+		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == offlinecache.StateDownloading
+	}, 2*time.Second, 10*time.Millisecond, "worker should have dequeued into downloading before the retry lands")
+
+	queued2, total2, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+	assert.Zero(t, queued2, "a retry while the only item is still downloading must report queuedCount 0, not double-count it")
+	assert.Equal(t, 1, total2)
+
+	close(gate)
+	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+}
+
 // TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError is
 // the regression test for the false-success hazard: if the classifier
 // itself is broken (e.g. a transient network error) for every eligible
