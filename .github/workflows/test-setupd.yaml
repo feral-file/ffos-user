@@ -12,9 +12,7 @@ on:
       - 'scripts/verify-setupd-docker.sh'
       - 'scripts/test-serve-feral-player.sh'
       - 'scripts/test-headless-startup-contract.sh'
-      - 'users/feralfile/scripts/**'
-      - 'users/feralfile/.start-services.sh'
-      - 'users/feralfile/systemd-services/**'
+      - 'users/feralfile/**'
   workflow_call:
     inputs:
       upload-coverage:

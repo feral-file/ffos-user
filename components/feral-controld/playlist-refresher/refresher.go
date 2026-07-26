@@ -84,19 +84,33 @@ func (r *refresher) Start() {
 
 	r.started = true
 	r.done = make(chan struct{}) // Recreate the done channel for each start
+	done := r.done
 	r.mu.Unlock()
 
-	go r.background()
+	go r.background(done)
 }
 
-func (r *refresher) background() {
+func (r *refresher) background(done <-chan struct{}) {
 	r.logger.Info("Refresher background goroutine started")
+	runCtx, cancel := context.WithCancel(r.context)
+	defer cancel()
+
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-runCtx.Done():
+		}
+	}()
 
 	// Process playing playlist until it succeeds
 	for {
 		if err := r.processPlayingPlaylist(); err != nil {
 			r.logProcessFailure(err)
-			r.clock.Sleep(PLAYER_STATUS_POLLING_INTERVAL)
+			if err := r.clock.SleepContext(runCtx, PLAYER_STATUS_POLLING_INTERVAL); err != nil {
+				r.logger.Info("Refresher background goroutine stopped before initial success")
+				return
+			}
 			continue
 		}
 		break
@@ -111,11 +125,11 @@ func (r *refresher) background() {
 			if err := r.processPlayingPlaylist(); err != nil {
 				r.logProcessFailure(err)
 			}
-		case <-r.done:
+		case <-done:
 			ticker.Stop()
 			r.logger.Info("Refresher background goroutine stopped due to done channel")
 			return
-		case <-r.context.Done():
+		case <-runCtx.Done():
 			ticker.Stop()
 			r.logger.Info("Refresher background goroutine stopped due to context cancellation")
 			return

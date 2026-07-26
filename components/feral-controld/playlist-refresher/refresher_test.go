@@ -198,7 +198,7 @@ func TestRefresher_Start_Success(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Test
@@ -226,7 +226,7 @@ func TestRefresher_Start_AlreadyStarted(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Start first time
@@ -256,7 +256,7 @@ func TestRefresher_Stop_Success(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Start the refresher
@@ -281,6 +281,41 @@ func TestRefresher_Stop_NotStarted(t *testing.T) {
 	// Should not panic
 }
 
+func TestRefresher_StopCancelsInitialRetryLoop(t *testing.T) {
+	ts := setupWithLogger(t, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	defer ts.teardown()
+
+	ts.mockCDP.EXPECT().Initialized().Return(false).AnyTimes()
+
+	enteredSleep := make(chan struct{})
+	sleepReturned := make(chan struct{})
+	var enteredOnce sync.Once
+	var returnedOnce sync.Once
+	ts.mockClock.EXPECT().
+		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		DoAndReturn(func(ctx context.Context, _ time.Duration) error {
+			enteredOnce.Do(func() { close(enteredSleep) })
+			<-ctx.Done()
+			returnedOnce.Do(func() { close(sleepReturned) })
+			return ctx.Err()
+		}).
+		AnyTimes()
+
+	ts.refresher.Start()
+	select {
+	case <-enteredSleep:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresher did not enter initial retry sleep")
+	}
+
+	ts.refresher.Stop()
+	select {
+	case <-sleepReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not cancel initial retry sleep")
+	}
+}
+
 func TestRefresher_ConcurrentStartStop(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
@@ -293,7 +328,7 @@ func TestRefresher_ConcurrentStartStop(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Test concurrent Start/Stop operations
@@ -327,7 +362,7 @@ func TestRefresher_MultipleStartStop(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Test multiple Start/Stop cycles
@@ -508,7 +543,7 @@ func TestRefresher_ProcessPlayingPlaylist_NoPlaylistData(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Should not call DP1 or CDP since there's no playlist data
@@ -559,7 +594,7 @@ func TestRefresher_ProcessPlayingPlaylist_StatusPollerError(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Should not call DP1 or CDP since status poller failed
@@ -594,7 +629,7 @@ func TestRefresher_ProcessPlayingPlaylist_DP1ProcessPlaylistURLError(t *testing.
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Should not call CDP since DP1 failed
@@ -629,7 +664,7 @@ func TestRefresher_ProcessPlayingPlaylist_DP1ProcessDynamicPlaylistError(t *test
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Should not call CDP since DP1 failed
@@ -671,7 +706,7 @@ func TestRefresher_ProcessPlayingPlaylist_CDPSendError(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Start the refresher
@@ -696,7 +731,7 @@ func TestRefresher_ProcessPlayingPlaylist_InvalidPlayerStatus(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Should not call DP1 or CDP since there's no valid playlist data
@@ -898,7 +933,7 @@ func TestRefresher_HeadlessBoot_CDPNotInitialized(t *testing.T) {
 
 	// Quiet retry loop: sleep between passes.
 	ts.mockClock.EXPECT().
-		Sleep(refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
 		AnyTimes()
 
 	// No expectations on FetchPlayerStatus / DP1 / CDP.Send: any such call is an
@@ -929,7 +964,7 @@ func TestRefresher_HeadlessBoot_CDPConnectsLater(t *testing.T) {
 	)
 
 	ts.mockClock.EXPECT().
-		Sleep(refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
 		Times(2)
 
 	playlistURL := "http://example.com/playlist.json"
@@ -981,7 +1016,7 @@ func TestRefresher_Background_RetryLogic(t *testing.T) {
 
 	// Expect Sleep to be called during retry logic (once after each failed attempt)
 	ts.mockClock.EXPECT().
-		Sleep(gomock.Any()).
+		SleepContext(gomock.Any(), gomock.Any()).
 		AnyTimes()
 
 	// Start the refresher
@@ -1078,7 +1113,7 @@ func TestRefresher_MalformedPlaylistError_DoesNotUseDisplayAtCache(t *testing.T)
 		ProcessPlaylistURL(ctx, playlistURL, false).
 		Return(nil, errors.New("invalid character 'x' looking for beginning of value")).
 		AnyTimes()
-	mockClock.EXPECT().Sleep(gomock.Any()).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
@@ -1114,7 +1149,7 @@ func TestRefresher_TransientURLError_WithoutCache_SurfacesError(t *testing.T) {
 		ProcessPlaylistURL(ctx, playlistURL, false).
 		Return(nil, &url.Error{Op: "Get", URL: playlistURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
 		AnyTimes()
-	mockClock.EXPECT().Sleep(gomock.Any()).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))

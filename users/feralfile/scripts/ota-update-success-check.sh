@@ -51,11 +51,11 @@ check_services() {
 attempt=0
 while [ $attempt -lt $MAX_ATTEMPTS ]; do
   echo "Attempt $((attempt + 1)) of $MAX_ATTEMPTS: Checking services..."
-  
+
   if check_services; then
     ((CONFIRM_COUNT++))
     echo "Confirmation $CONFIRM_COUNT of $CONFIRMATIONS_NEEDED"
-    
+
     if [ $CONFIRM_COUNT -ge $CONFIRMATIONS_NEEDED ]; then
       echo "All services confirmed active $CONFIRMATIONS_NEEDED times"
       METRIC="ff_ota_update{event=\"success\",target_version=\"$VERSION\"} 1"
@@ -69,7 +69,7 @@ while [ $attempt -lt $MAX_ATTEMPTS ]; do
   else
     CONFIRM_COUNT=0
   fi
-  
+
   ((attempt++))
   if [ $attempt -lt $MAX_ATTEMPTS ]; then
     sleep $INTERVAL
