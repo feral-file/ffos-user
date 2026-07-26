@@ -175,7 +175,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
-			// Filter byDisplayAt playlists to the active set before the player
+			// Filter displayAt playlists to the active set before the player
 			// sees them. The scheduler keeps the full list for timer/wake updates.
 			if h.scheduler != nil {
 				playlist = h.scheduler.Prepare(playlist)

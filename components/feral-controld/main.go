@@ -475,7 +475,7 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
-	// displayAt scheduler: filters byDisplayAt playlists before CDP and advances
+	// displayAt scheduler: filters playlists with displayAt items before CDP and advances
 	// them on timer / wake / CDP reconnect from an in-memory full-playlist cache.
 	playlistScheduler := playlistschedule.New(context, cdp, clock, nil, logger)
 	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)

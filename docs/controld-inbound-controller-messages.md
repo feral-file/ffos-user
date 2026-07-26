@@ -57,13 +57,13 @@ for relayer topic assignment:
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
   through CDP as `window.handleCDPRequest(...)`. Controld defaults missing CDP
   `intent.action` to `now_display` so the player accepts the cast. When the
-  playlist has `schedule.byDisplayAt: true`, controld filters items to the
+  playlist has item-level `displayAt` values, controld filters items to the
   current active set before CDP, caches the full playlist, and advances the
   player on the next `displayAt` (timer), sleep-schedule wake, or CDP reconnect
   with a force cast (`intent.action=now_display`, not `refresh: true`) so
   cutover is not deferred until the current artwork duration ends. URL /
   dynamic playlist refresh still uses `refresh: true`. Playlists without
-  `byDisplayAt` are otherwise forwarded unchanged.
+  `displayAt` are otherwise forwarded unchanged.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
@@ -270,7 +270,7 @@ The player rejects `displayPlaylist` without a known DP1 action
 5-minute URL/dynamic refresher path (`refresh: true`), which does not use this
 cast default.
 
-When the resolved playlist includes `schedule.byDisplayAt: true`, controld
+When the resolved playlist includes item-level `displayAt` values, controld
 computes an active set (`max(displayAt <= now)` items plus items without
 `displayAt`) and sends only that filtered playlist to Chromium. Timezone-less
 `displayAt` values use device local time; values with `Z`/offset are absolute.
@@ -384,7 +384,7 @@ command failure is logged.
 
 Purpose: tell the player to resume or display its default playlist. This is
 forwarded to Chromium through CDP. Controld also clears any cached
-`byDisplayAt` playlist so timer/wake/reconnect recomputes cannot resurrect the
+`displayAt` playlist so timer/wake/reconnect recomputes cannot resurrect the
 previous scheduled cast after default playback starts (including OOM recovery).
 
 Example:

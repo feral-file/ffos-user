@@ -243,7 +243,7 @@ func (r *refresher) handleRefreshError(err error, kind string) error {
 }
 
 // isTransientPlaylistRefreshError reports transport / upstream-availability
-// failures where retrying from the cached byDisplayAt playlist is safe.
+// failures where retrying from the cached displayAt playlist is safe.
 // Deterministic data/config errors (malformed JSON, invalid dynamicQuery,
 // permanent DNS, non-timeout URL failures) return false.
 func isTransientPlaylistRefreshError(err error) bool {

@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -21,7 +20,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 )
 
-func TestPrepare_WithoutByDisplayAt_PassthroughAndClearsCache(t *testing.T) {
+func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -35,7 +34,7 @@ func TestPrepare_WithoutByDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
 	// Seed a scheduled playlist first so we can prove a later unscheduled cast clears it.
-	seed := byDisplayAtPlaylist(
+	seed := displayAtPlaylist(
 		item("a", "2026-07-21T00:00:00"),
 		item("b", "2026-07-23T00:00:00"),
 	)
@@ -59,7 +58,7 @@ func TestPrepare_WithoutByDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	assert.False(t, sched.HasCache())
 }
 
-func TestPrepare_ByDisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
+func TestPrepare_DisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -79,7 +78,7 @@ func TestPrepare_ByDisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	full := byDisplayAtPlaylist(
+	full := displayAtPlaylist(
 		item("intro", ""),
 		item("a", "2026-07-21T00:00:00"),
 		item("b", "2026-07-22T00:00:00"),
@@ -118,7 +117,7 @@ func TestPrepare_TimezoneLessDisplayAtUsesDeviceLocal(t *testing.T) {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	full := byDisplayAtPlaylist(
+	full := displayAtPlaylist(
 		item("day21", "2026-07-21T00:00:00"),
 		item("day22", "2026-07-22T00:00:00"),
 	)
@@ -147,7 +146,7 @@ func TestPrepare_AbsoluteTimezoneDisplayAt(t *testing.T) {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	full := byDisplayAtPlaylist(
+	full := displayAtPlaylist(
 		item("utc", "2026-07-22T00:00:00Z"),
 		item("future", "2026-07-22T12:00:00Z"),
 	)
@@ -210,7 +209,7 @@ func TestTimerFires_RecomputesAndPushesActiveSet(t *testing.T) {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	full := byDisplayAtPlaylist(
+	full := displayAtPlaylist(
 		item("day22", "2026-07-22T00:00:00Z"),
 		item("day23", "2026-07-23T00:00:00Z"),
 	)
@@ -263,7 +262,7 @@ func TestRecomputeNow_WakePathForceCastsNowDisplay(t *testing.T) {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	_ = sched.Prepare(byDisplayAtPlaylist(
+	_ = sched.Prepare(displayAtPlaylist(
 		item("day22", "2026-07-22T00:00:00Z"),
 		item("day23", "2026-07-23T00:00:00Z"),
 	))
@@ -291,7 +290,7 @@ func TestPrepare_DateOnlyDisplayAt_NotEligible(t *testing.T) {
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
 	// §3.5.2: date-only is rejected — present but unresolvable, not evergreen.
-	active := sched.Prepare(byDisplayAtPlaylist(
+	active := sched.Prepare(displayAtPlaylist(
 		item("bad-date", "2026-07-21"),
 		item("ok", "2026-07-22T00:00:00Z"),
 		item("intro", ""),
@@ -318,19 +317,18 @@ func TestPrepare_AllFuture_ReturnsOnlyEvergreen(t *testing.T) {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	active := sched.Prepare(byDisplayAtPlaylist(
+	active := sched.Prepare(displayAtPlaylist(
 		item("intro", ""),
 		item("future", "2026-07-22T00:00:00Z"),
 	))
 	require.Equal(t, []string{"intro"}, itemIDs(active.Items))
 }
 
-func byDisplayAtPlaylist(items ...dp1playlist.PlaylistItem) *dp1.Playlist {
+func displayAtPlaylist(items ...dp1playlist.PlaylistItem) *dp1.Playlist {
 	return &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
-			Items:    items,
+			Title: "Daily",
+			Items: items,
 		},
 	}
 }
@@ -390,7 +388,7 @@ func TestRecomputeNow_PushesNewerCacheWhenPrepareWinsPushLockRace(t *testing.T) 
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	_ = sched.Prepare(byDisplayAtPlaylist(item("old", "2026-07-22T00:00:00Z")))
+	_ = sched.Prepare(displayAtPlaylist(item("old", "2026-07-22T00:00:00Z")))
 
 	started := make(chan struct{})
 	releaseCast := make(chan struct{})
@@ -411,7 +409,7 @@ func TestRecomputeNow_PushesNewerCacheWhenPrepareWinsPushLockRace(t *testing.T) 
 
 	// Let RecomputeNow block on pushMu, then supersede the cache.
 	time.Sleep(50 * time.Millisecond)
-	_ = sched.Prepare(byDisplayAtPlaylist(item("new", "2026-07-22T00:00:00Z")))
+	_ = sched.Prepare(displayAtPlaylist(item("new", "2026-07-22T00:00:00Z")))
 	close(releaseCast)
 
 	select {
@@ -440,7 +438,7 @@ func TestPrepare_AllFutureNoEvergreen_EmptyActiveSet(t *testing.T) {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	active := sched.Prepare(byDisplayAtPlaylist(
+	active := sched.Prepare(displayAtPlaylist(
 		item("future", "2026-07-22T00:00:00Z"),
 	))
 	require.NotNil(t, active)
@@ -467,7 +465,7 @@ func TestClear_StopsTimerAndDropsCache(t *testing.T) {
 		return time.UTC
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	_ = sched.Prepare(byDisplayAtPlaylist(
+	_ = sched.Prepare(displayAtPlaylist(
 		item("day22", "2026-07-22T00:00:00Z"),
 		item("day23", "2026-07-23T00:00:00Z"),
 	))
@@ -526,7 +524,7 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	_ = sched.Prepare(byDisplayAtPlaylist(item("old", "2026-07-22T00:00:00Z")))
+	_ = sched.Prepare(displayAtPlaylist(item("old", "2026-07-22T00:00:00Z")))
 
 	doneRecompute := make(chan struct{})
 	go func() {
