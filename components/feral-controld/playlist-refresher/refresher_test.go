@@ -1030,14 +1030,18 @@ func TestRefresher_Background_RetryLogic(t *testing.T) {
 }
 
 type fakePlaylistScheduler struct {
-	hasCache   bool
-	recomputes int
-	prepares   int
-	pushCalls  int
+	hasCache       bool
+	cacheOnPrepare bool
+	recomputes     int
+	prepares       int
+	pushCalls      int
 }
 
 func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 	f.prepares++
+	if f.cacheOnPrepare {
+		f.hasCache = true
+	}
 	return playlist
 }
 func (f *fakePlaylistScheduler) RecomputeNow(context.Context) { f.recomputes++ }
@@ -1199,4 +1203,50 @@ func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
 
 	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must call Prepare")
 	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must send via WithPlayerPush")
+}
+
+func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	playlistURL := "https://example.com/daily.json"
+	pl := createMockPlaylist()
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(pl, nil).
+		AnyTimes()
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.NotContains(t, expr, `"refresh":true`)
+			return "success", nil
+		}).
+		AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must rebuild scheduler cache")
+	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must still serialize the send")
 }

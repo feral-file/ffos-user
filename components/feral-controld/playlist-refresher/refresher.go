@@ -218,17 +218,32 @@ func (r *refresher) processPlayingPlaylist() error {
 		return errors.New("player status has no playlist URL or playlist")
 	}
 
+	hadDisplayAtCache := false
 	if r.scheduler != nil {
+		hadDisplayAtCache = r.scheduler.HasCache()
 		playlist = r.scheduler.Prepare(playlist)
 	}
 
 	// Send playlist to CDP
-	command := commands.Command{
-		Type: commands.CMD_DISPLAY_PLAYLIST,
-		Arguments: map[string]interface{}{
+	args := map[string]interface{}{
+		"dp1_call": playlist,
+		"refresh":  true,
+	}
+	if r.scheduler != nil && r.scheduler.HasCache() && !hadDisplayAtCache {
+		// After a controld restart the in-memory displayAt cache is empty, so
+		// the refresher may be the first path to reconstruct the active set from
+		// player status. Force-cast that first scheduled reconstruction; a soft
+		// refresh can defer when the current item disappeared from the new set.
+		args = map[string]interface{}{
+			"intent": map[string]interface{}{
+				"action": "now_display",
+			},
 			"dp1_call": playlist,
-			"refresh":  true,
-		},
+		}
+	}
+	command := commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: args,
 	}
 
 	sendErr := error(nil)

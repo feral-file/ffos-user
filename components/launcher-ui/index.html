@@ -53,7 +53,7 @@
             width: auto;
             height: auto;
         }
-
+        
         .logo {
             width: 50vw;
             height: 50vh;
@@ -109,7 +109,7 @@
                     // 2. Device info mode via device_info parameter
                     const qrContent = params.get("qr_content");
                     const deviceInfo = params.get("device_info");
-
+                    
                     let qrData;
                     if (qrContent) {
                         // Use custom QR content directly
@@ -122,7 +122,7 @@
                         document.getElementById("qrcode").innerHTML = '<div style="color: #ff4d4f;">No QR data available</div>';
                         return;
                     }
-
+                    
                     // Calculate QR code size based on viewport
                     const minEdge = Math.min(window.innerWidth, window.innerHeight);
                     const qrSize = Math.floor(minEdge / 2);

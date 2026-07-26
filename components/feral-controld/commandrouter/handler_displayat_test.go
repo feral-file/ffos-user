@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -53,6 +54,9 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Title: "Daily",
+			Schedule: &playlists.Schedule{
+				ByDisplayAt: true,
+			},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day21", Title: "Day 21", Source: "https://example.com/21.html", DisplayAt: strPtr("2026-07-21T00:00:00Z")},
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
@@ -280,6 +284,9 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Title: "Daily",
+			Schedule: &playlists.Schedule{
+				ByDisplayAt: true,
+			},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -327,6 +334,9 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
+			Schedule: &playlists.Schedule{
+				ByDisplayAt: true,
+			},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},

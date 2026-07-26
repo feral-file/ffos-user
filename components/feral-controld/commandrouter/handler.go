@@ -122,6 +122,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return result, nil
 	} else {
 		var playlist *dp1.Playlist
+		schedulerPrepared := false
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -179,6 +180,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// sees them. The scheduler keeps the full list for timer/wake updates.
 			if h.scheduler != nil {
 				playlist = h.scheduler.Prepare(playlist)
+				schedulerPrepared = h.scheduler.HasCache()
 			}
 			command.Arguments["dp1_call"] = playlist
 			// Player CanvasService rejects displayPlaylist without a known
@@ -214,6 +216,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			result, err = h.sendCDPRequest(command)
 		}
 		if err != nil {
+			if schedulerPrepared && h.scheduler != nil {
+				h.scheduler.Clear()
+			}
 			return nil, err
 		}
 

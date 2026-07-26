@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -55,6 +56,45 @@ func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	}
 	got := sched.Prepare(plain)
 	assert.Equal(t, plain, got)
+	assert.False(t, sched.HasCache())
+}
+
+func TestPrepare_DisplayAtWithoutByDisplayAt_PassthroughAndClearsCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("old", "2026-07-22T00:00:00Z"),
+		item("new", "2026-07-23T00:00:00Z"),
+	))
+	require.True(t, sched.HasCache())
+
+	unscheduled := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title: "Metadata only",
+			Items: []dp1playlist.PlaylistItem{
+				item("old", "2026-07-22T00:00:00Z"),
+				item("new", "2026-07-23T00:00:00Z"),
+			},
+		},
+	}
+	got := sched.Prepare(unscheduled)
+	assert.Equal(t, unscheduled, got)
 	assert.False(t, sched.HasCache())
 }
 
@@ -329,6 +369,9 @@ func displayAtPlaylist(items ...dp1playlist.PlaylistItem) *dp1.Playlist {
 		Playlist: dp1playlist.Playlist{
 			Title: "Daily",
 			Items: items,
+			Schedule: &playlists.Schedule{
+				ByDisplayAt: true,
+			},
 		},
 	}
 }

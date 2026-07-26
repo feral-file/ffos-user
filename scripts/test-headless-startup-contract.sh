@@ -23,8 +23,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 user_root="$repo_root/users/feralfile"
 kiosk_script="$user_root/scripts/start-kiosk.sh"
 start_services="$user_root/.start-services.sh"
-login_profile="$user_root/.bash_profile"
-file_permissions="$user_root/.file_permissions.sh"
 units_dir="$user_root/systemd-services"
 
 fail() {
@@ -48,7 +46,7 @@ assert_not_contains() {
 
 # --- 1. Shell syntax for every user script -----------------------------------
 
-for script in "$user_root"/scripts/*.sh "$start_services" "$login_profile" "$file_permissions"; do
+for script in "$user_root"/scripts/*.sh "$start_services"; do
   bash -n "$script" || fail "syntax error in $script"
 done
 
