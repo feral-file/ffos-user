@@ -146,13 +146,14 @@ func (r *refresher) Stop() {
 	}
 
 	r.started = false
+	done := r.done
 	r.mu.Unlock()
 
 	select {
-	case <-r.done:
+	case <-done:
 		// Already closed
 	default:
-		close(r.done)
+		close(done)
 	}
 
 	r.logger.Info("Refresher stopped")
