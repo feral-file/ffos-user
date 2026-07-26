@@ -241,7 +241,7 @@ func (t *trackingScheduler) Clear() {
 	t.clearCalls++
 	t.inner.Clear()
 }
-func (t *trackingScheduler) ClearThenWithPlayerPush(fn func()) {
+func (t *trackingScheduler) ClearThenWithPlayerPush(fn func() bool) {
 	t.clearThenFn++
 	t.inner.ClearThenWithPlayerPush(fn)
 }
@@ -249,8 +249,10 @@ func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
 	t.inner.WithPlayerPush(fn)
 }
-func (t *trackingScheduler) HasCache() bool { return t.inner.HasCache() }
-func (t *trackingScheduler) Stop()          { t.inner.Stop() }
+func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot { return t.inner.Snapshot() }
+func (t *trackingScheduler) Restore(s playlistschedule.Snapshot) { t.inner.Restore(s) }
+func (t *trackingScheduler) HasCache() bool                      { return t.inner.HasCache() }
+func (t *trackingScheduler) Stop()                               { t.inner.Stop() }
 
 func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -358,6 +360,212 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 	// Recompute after default must not resurrect the old Daily cast.
 	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
 	track.RecomputeNow(ctx)
+}
+
+func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectRestoresCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		},
+	).AnyTimes()
+
+	inner := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+		return time.UTC
+	}, logger)
+	track := &trackingScheduler{inner: inner}
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, track, mockJSON, logger)
+
+	_ = track.Prepare(&dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Schedule: &playlists.Schedule{
+				ByDisplayAt: true,
+			},
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+			},
+		},
+	})
+	require.True(t, track.HasCache())
+
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]interface{}{
+		"message": map[string]interface{}{"ok": false},
+	}, nil)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+		Arguments: map[string]interface{}{},
+	})
+	require.NoError(t, err)
+	assert.True(t, track.HasCache(), "default rejection must restore previous displayAt cache")
+
+	mockCDP.EXPECT().Initialized().Return(true)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, `"id":"day22"`)
+			return playerOkResponse(), nil
+		},
+	)
+	track.RecomputeNow(ctx)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+		return time.UTC
+	}, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Title: "Old",
+		Schedule: &playlists.Schedule{
+			ByDisplayAt: true,
+		},
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+		},
+	}}
+	_ = sched.Prepare(oldPlaylist)
+	require.True(t, sched.HasCache())
+
+	newURL := "https://example.com/new.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Title: "New",
+		Schedule: &playlists.Schedule{
+			ByDisplayAt: true,
+		},
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+		},
+	}}
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, true).Return(newPlaylist, nil)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(nil, assert.AnError)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": newURL},
+	})
+	require.Error(t, err)
+
+	mockCDP.EXPECT().Initialized().Return(true)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, `"id":"old"`)
+			assert.NotContains(t, expr, `"id":"new"`)
+			return playerOkResponse(), nil
+		},
+	)
+	sched.RecomputeNow(ctx)
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+		return time.UTC
+	}, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+
+	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Title: "Old",
+		Schedule: &playlists.Schedule{
+			ByDisplayAt: true,
+		},
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+		},
+	}}
+	_ = sched.Prepare(oldPlaylist)
+	require.True(t, sched.HasCache())
+
+	newURL := "https://example.com/new.json"
+	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Title: "New",
+		Schedule: &playlists.Schedule{
+			ByDisplayAt: true,
+		},
+		Items: []dp1playlist.PlaylistItem{
+			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+		},
+	}}
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, true).Return(newPlaylist, nil)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]interface{}{
+		"message": map[string]interface{}{"ok": false},
+	}, nil)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": newURL},
+	})
+	require.NoError(t, err)
+
+	mockCDP.EXPECT().Initialized().Return(true)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, `"id":"old"`)
+			assert.NotContains(t, expr, `"id":"new"`)
+			return playerOkResponse(), nil
+		},
+	)
+	sched.RecomputeNow(ctx)
 }
 
 func strPtr(s string) *string { return &s }

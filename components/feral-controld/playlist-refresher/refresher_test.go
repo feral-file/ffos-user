@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 
 	"github.com/golang/mock/gomock"
@@ -1035,6 +1036,7 @@ type fakePlaylistScheduler struct {
 	recomputes     int
 	prepares       int
 	pushCalls      int
+	restores       int
 }
 
 func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
@@ -1046,7 +1048,7 @@ func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 }
 func (f *fakePlaylistScheduler) RecomputeNow(context.Context) { f.recomputes++ }
 func (f *fakePlaylistScheduler) Clear()                       { f.hasCache = false }
-func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func()) {
+func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func() bool) {
 	f.hasCache = false
 	fn()
 }
@@ -1054,8 +1056,12 @@ func (f *fakePlaylistScheduler) WithPlayerPush(fn func()) {
 	f.pushCalls++
 	fn()
 }
-func (f *fakePlaylistScheduler) HasCache() bool { return f.hasCache }
-func (f *fakePlaylistScheduler) Stop()          { f.Clear() }
+func (f *fakePlaylistScheduler) Snapshot() playlistschedule.Snapshot {
+	return playlistschedule.Snapshot{}
+}
+func (f *fakePlaylistScheduler) Restore(playlistschedule.Snapshot) { f.restores++ }
+func (f *fakePlaylistScheduler) HasCache() bool                    { return f.hasCache }
+func (f *fakePlaylistScheduler) Stop()                             { f.Clear() }
 
 func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -1192,7 +1198,7 @@ func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
 		AnyTimes()
 	mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return("success", nil).
+		Return(map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil).
 		AnyTimes()
 
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
@@ -1237,7 +1243,7 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 			expr, _ := params["expression"].(string)
 			assert.Contains(t, expr, `"action":"now_display"`)
 			assert.NotContains(t, expr, `"refresh":true`)
-			return "success", nil
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
 		}).
 		AnyTimes()
 
@@ -1249,4 +1255,125 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 
 	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must rebuild scheduler cache")
 	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must still serialize the send")
+}
+
+func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	playlistURL := "https://example.com/daily.json"
+	pl := createMockPlaylist()
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(pl, nil).
+		AnyTimes()
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, assert.AnError).
+		AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.GreaterOrEqual(t, fakeSched.restores, 1, "failed send must restore scheduler snapshot")
+}
+
+func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	playlistURL := "https://example.com/daily.json"
+	pl := createMockPlaylist()
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(pl, nil).
+		AnyTimes()
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(map[string]interface{}{"message": map[string]interface{}{"ok": false}}, nil).
+		AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.GreaterOrEqual(t, fakeSched.restores, 1, "player rejection must restore scheduler snapshot")
+}
+
+func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	playlistURL := "https://example.com/daily.json"
+	pl := createMockPlaylist()
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(pl, nil).
+		AnyTimes()
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return("success", nil).
+		AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.GreaterOrEqual(t, fakeSched.restores, 1, "missing ok must restore scheduler snapshot")
 }

@@ -580,11 +580,12 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 	// run after — and recompute must not push again after clear.
 	defaultDone := make(chan struct{})
 	go func() {
-		sched.ClearThenWithPlayerPush(func() {
+		sched.ClearThenWithPlayerPush(func() bool {
 			// Simulate displayDefaultPlaylist CDP under the same lock.
 			_, _ = cdpMock.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 				"expression": `window.handleCDPRequest({"command":"displayDefaultPlaylist","request":{}})`,
 			})
+			return true
 		})
 		close(defaultDone)
 	}()

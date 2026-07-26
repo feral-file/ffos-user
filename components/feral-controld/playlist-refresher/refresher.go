@@ -219,27 +219,16 @@ func (r *refresher) processPlayingPlaylist() error {
 	}
 
 	hadDisplayAtCache := false
+	var schedulerSnapshot playlistschedule.Snapshot
+	schedulerMutated := false
 	if r.scheduler != nil {
 		hadDisplayAtCache = r.scheduler.HasCache()
-		playlist = r.scheduler.Prepare(playlist)
 	}
 
 	// Send playlist to CDP
 	args := map[string]interface{}{
 		"dp1_call": playlist,
 		"refresh":  true,
-	}
-	if r.scheduler != nil && r.scheduler.HasCache() && !hadDisplayAtCache {
-		// After a controld restart the in-memory displayAt cache is empty, so
-		// the refresher may be the first path to reconstruct the active set from
-		// player status. Force-cast that first scheduled reconstruction; a soft
-		// refresh can defer when the current item disappeared from the new set.
-		args = map[string]interface{}{
-			"intent": map[string]interface{}{
-				"action": "now_display",
-			},
-			"dp1_call": playlist,
-		}
 	}
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -248,7 +237,30 @@ func (r *refresher) processPlayingPlaylist() error {
 
 	sendErr := error(nil)
 	send := func() {
-		_, sendErr = r.sendCDPRequest(command)
+		if r.scheduler != nil {
+			schedulerSnapshot = r.scheduler.Snapshot()
+			playlist = r.scheduler.Prepare(playlist)
+			schedulerMutated = true
+			if r.scheduler.HasCache() && !hadDisplayAtCache {
+				// After a controld restart the in-memory displayAt cache is empty, so
+				// the refresher may be the first path to reconstruct the active set from
+				// player status. Force-cast that first scheduled reconstruction; a soft
+				// refresh can defer when the current item disappeared from the new set.
+				command.Arguments = map[string]interface{}{
+					"intent": map[string]interface{}{
+						"action": "now_display",
+					},
+					"dp1_call": playlist,
+				}
+			} else {
+				command.Arguments["dp1_call"] = playlist
+			}
+		}
+		result, err := r.sendCDPRequest(command)
+		sendErr = err
+		if schedulerMutated && (sendErr != nil || !playerResponseOK(result)) {
+			r.scheduler.Restore(schedulerSnapshot)
+		}
 	}
 	if r.scheduler != nil {
 		r.scheduler.WithPlayerPush(send)
@@ -256,6 +268,19 @@ func (r *refresher) processPlayingPlaylist() error {
 		send()
 	}
 	return sendErr
+}
+
+func playerResponseOK(result interface{}) bool {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		okVal, ok := msg["ok"].(bool)
+		return ok && okVal
+	}
+	okVal, ok := m["ok"].(bool)
+	return ok && okVal
 }
 
 // handleRefreshError degrades to the displayAt cache only for transient fetch

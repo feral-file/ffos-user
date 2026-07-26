@@ -46,15 +46,24 @@ type Scheduler interface {
 	Clear()
 	// ClearThenWithPlayerPush clears the cache and runs fn while still holding
 	// the player-push lock. Used for displayDefaultPlaylist so a stale
-	// RecomputeNow cannot overwrite the default player state after Clear.
-	ClearThenWithPlayerPush(fn func())
+	// RecomputeNow cannot overwrite the default player state after Clear. If
+	// fn returns false, the previous cache is restored before releasing the
+	// lock because the player did not accept the default transition.
+	ClearThenWithPlayerPush(fn func() bool)
 	// WithPlayerPush serializes CDP playlist updates against timer/wake
 	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
 	// send so a stale RecomputeNow cannot overwrite a newer cast mid-flight.
 	WithPlayerPush(fn func())
+	Snapshot() Snapshot
+	Restore(Snapshot)
 	// HasCache reports whether a displayAt playlist is currently cached.
 	HasCache() bool
 	Stop()
+}
+
+type Snapshot struct {
+	full       *dp1.Playlist
+	lastActive []dp1playlist.PlaylistItem
 }
 
 // LocationFunc returns the device-local timezone used to resolve timezone-less
@@ -134,13 +143,30 @@ func (s *scheduler) Clear() {
 
 // ClearThenWithPlayerPush clears under pushMu then runs fn before releasing,
 // so displayDefaultPlaylist CDP cannot race an in-flight RecomputeNow push.
-func (s *scheduler) ClearThenWithPlayerPush(fn func()) {
+func (s *scheduler) ClearThenWithPlayerPush(fn func() bool) {
 	s.pushMu.Lock()
 	defer s.pushMu.Unlock()
 	s.mu.Lock()
+	snapshot := s.snapshotLocked()
 	s.clearLocked()
 	s.mu.Unlock()
-	fn()
+	if !fn() {
+		s.mu.Lock()
+		s.restoreLocked(snapshot)
+		s.mu.Unlock()
+	}
+}
+
+func (s *scheduler) Snapshot() Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshotLocked()
+}
+
+func (s *scheduler) Restore(snapshot Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restoreLocked(snapshot)
 }
 
 func (s *scheduler) Stop() {
@@ -233,6 +259,26 @@ func (s *scheduler) clearLocked() {
 	s.lastActive = nil
 }
 
+func (s *scheduler) snapshotLocked() Snapshot {
+	return Snapshot{
+		full:       clonePlaylist(s.full),
+		lastActive: cloneItems(s.lastActive),
+	}
+}
+
+func (s *scheduler) restoreLocked(snapshot Snapshot) {
+	if s.cancelTimer != nil {
+		s.cancelTimer()
+		s.cancelTimer = nil
+	}
+	s.full = clonePlaylist(snapshot.full)
+	s.lastActive = cloneItems(snapshot.lastActive)
+	s.generation++
+	if s.full != nil {
+		s.armTimerLocked()
+	}
+}
+
 func (s *scheduler) activeLocked() *dp1.Playlist {
 	now := s.clock.Now()
 	loc := s.locFn()
@@ -315,13 +361,29 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist) error {
 		return fmt.Errorf("marshal displayAt playlist command: %w", err)
 	}
 
-	_, err = s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
 	})
 	if err != nil {
 		return fmt.Errorf("send displayAt playlist to CDP: %w", err)
 	}
+	if !playerResponseOK(result) {
+		return fmt.Errorf("player rejected displayAt playlist")
+	}
 	return nil
+}
+
+func playerResponseOK(result interface{}) bool {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if msg, ok := m["message"].(map[string]interface{}); ok {
+		okVal, _ := msg["ok"].(bool)
+		return okVal
+	}
+	okVal, _ := m["ok"].(bool)
+	return okVal
 }
 
 func scheduleByDisplayAt(p *dp1.Playlist) bool {
