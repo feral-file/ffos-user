@@ -1556,10 +1556,10 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 
 	assert.Zero(t, fakeSched.prepares, "player status only has the filtered active set and must not replace the full cache")
 	assert.Zero(t, fakeSched.resumePersisted, "steady-state inline displayAt status must not force-cast on every refresh tick")
-	assert.Zero(t, fakeSched.pushCalls, "static inline restart recovery is pushed by the scheduler, not refresher send")
+	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
 }
 
-func TestRefresher_StaticInlineDisplayAt_ResumesPendingPersistedCache(t *testing.T) {
+func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentity(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -1606,11 +1606,11 @@ func TestRefresher_StaticInlineDisplayAt_ResumesPendingPersistedCache(t *testing
 	r.Stop()
 
 	assert.Zero(t, fakeSched.prepares, "player status only has the filtered active set and must not replace the full cache")
-	assert.GreaterOrEqual(t, fakeSched.resumePersisted, 1, "pending persisted cache should resume from static inline displayAt status")
-	assert.Zero(t, fakeSched.pushCalls, "static inline restart recovery is pushed by the scheduler, not refresher send")
+	assert.Zero(t, fakeSched.resumePersisted, "static inline status has no full-playlist identity and must not validate persisted cache ownership")
+	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
 }
 
-func TestRefresher_StaticInlineRestoredPending_ResumesEmptyActiveSet(t *testing.T) {
+func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -1649,8 +1649,59 @@ func TestRefresher_StaticInlineRestoredPending_ResumesEmptyActiveSet(t *testing.
 	r.Stop()
 
 	assert.Zero(t, fakeSched.prepares, "empty active status cannot replace the persisted full playlist")
-	assert.GreaterOrEqual(t, fakeSched.resumePersisted, 1, "all-future schedule must resume from persisted cache")
-	assert.Zero(t, fakeSched.pushCalls, "static inline restart recovery is pushed by the scheduler, not refresher send")
+	assert.Zero(t, fakeSched.resumePersisted, "empty active status has no full-playlist identity and must not validate persisted cache ownership")
+	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
+}
+
+func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{hasCache: true, restoredPending: true}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	displayAt := "2026-07-22T00:00:00Z"
+	newerActive := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title:    "Newer accepted cast",
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Items: []dp1playlist.PlaylistItem{
+				{
+					ID:        "newer-active",
+					Title:     "Newer Active",
+					Source:    "https://example.com/newer.html",
+					DisplayAt: &displayAt,
+				},
+			},
+		},
+	}
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, newerActive), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
+		Times(0)
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.Zero(t, fakeSched.prepares, "filtered static status must not replace the persisted full playlist")
+	assert.Zero(t, fakeSched.resumePersisted, "stale persisted cache must not be force-cast over a newer accepted static cast")
+	assert.Zero(t, fakeSched.pushCalls)
 }
 
 func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *testing.T) {

@@ -283,8 +283,12 @@ false, or no playlist item has `displayAt`, controld forwards the full playlist
 unchanged. Controld keeps the full playlist in memory while casting, persists it
 only after the player accepts the filtered cast, and uses that committed cache to
 arm the next `displayAt` transition and to recompute after wake, CDP reconnect,
-or a controld-only restart. Initial casts and
-timed / wake / reconnect pushes are force casts (`intent.action=now_display`
+or a controld-only restart when current player status can validate ownership
+from a URL or dynamic source. Static inline player status contains only the
+filtered active set and no stable full-playlist identity, so controld does not
+restart-resume a persisted static inline schedule from player status alone.
+Initial casts and timed / wake / reconnect pushes are force casts
+(`intent.action=now_display`
 without `refresh`) so the player applies the playlist immediately even if the
 current artwork still has remaining duration; the 5-minute URL/dynamic
 playlist-refresher path continues to use `refresh: true`. A later

@@ -216,16 +216,12 @@ func (r *refresher) processPlayingPlaylist() error {
 				return r.handleRefreshError(err, "dynamic playlist")
 			}
 		} else {
-			if r.scheduler != nil && r.scheduler.RestoredPending() && playlistschedule.DisplayAtScheduleEnabled(playerStatus.Playlist) {
-				// Static inline displayAt player status only contains the active
-				// set, not the full playlist. For all-future schedules that active
-				// set can be empty, so the displayPlaylist command itself is the
-				// restart ownership signal when schedule.byDisplayAt is still set;
-				// the persisted full playlist remains the only source that can arm
-				// the first future boundary.
-				r.scheduler.ResumePersisted(r.context)
-				return nil
-			}
+			// Static inline displayAt player status only contains the filtered
+			// active set and no stable identity tying it to the durable full
+			// playlist. After a crash or failed cache write, resuming from that
+			// status could overwrite a newer accepted cast with stale persisted
+			// state, so only URL/dynamic refreshes may validate restored cache
+			// ownership.
 			r.logger.Debug("Playlist has no dynamic queries, skipping")
 			return nil
 		}
