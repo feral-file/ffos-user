@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -59,7 +58,7 @@ func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	assert.False(t, sched.HasCache())
 }
 
-func TestPrepare_DisplayAtWithoutByDisplayAt_PassthroughAndClearsCache(t *testing.T) {
+func TestPrepare_DisplayAtWithoutSchedule_FiltersAndCaches(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -84,7 +83,7 @@ func TestPrepare_DisplayAtWithoutByDisplayAt_PassthroughAndClearsCache(t *testin
 	))
 	require.True(t, sched.HasCache())
 
-	unscheduled := &dp1.Playlist{
+	withoutSchedule := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Title: "Metadata only",
 			Items: []dp1playlist.PlaylistItem{
@@ -93,9 +92,10 @@ func TestPrepare_DisplayAtWithoutByDisplayAt_PassthroughAndClearsCache(t *testin
 			},
 		},
 	}
-	got := sched.Prepare(unscheduled)
-	assert.Equal(t, unscheduled, got)
-	assert.False(t, sched.HasCache())
+	got := sched.Prepare(withoutSchedule)
+	require.NotNil(t, got)
+	assert.Equal(t, []string{"old"}, itemIDs(got.Items))
+	assert.True(t, sched.HasCache())
 }
 
 func TestPrepare_DisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
@@ -134,6 +134,111 @@ func TestPrepare_DisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
 	assert.True(t, sched.HasCache())
 	// Full playlist remains cached for later timer/wake recomputation.
 	assert.Len(t, full.Items, 6)
+}
+
+func TestPrepare_DisplayAt_PersistsFullPlaylistAndClearDeletes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	store := &memoryStore{}
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	full := displayAtPlaylist(
+		item("today", "2026-07-22T00:00:00Z"),
+		item("tomorrow", "2026-07-23T00:00:00Z"),
+	)
+	active := sched.Prepare(full)
+	require.Equal(t, []string{"today"}, itemIDs(active.Items))
+	require.NotNil(t, store.saved)
+	assert.Equal(t, []string{"today", "tomorrow"}, itemIDs(store.saved.Items))
+
+	sched.Clear()
+	assert.True(t, store.cleared)
+	assert.Nil(t, store.saved)
+}
+
+func TestStop_CancelsTimerWithoutClearingPersistedPlaylist(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	store := &memoryStore{}
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	timerCanceled := make(chan struct{})
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			close(timerCanceled)
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	_ = sched.Prepare(displayAtPlaylist(
+		item("today", "2026-07-22T00:00:00Z"),
+		item("tomorrow", "2026-07-23T00:00:00Z"),
+	))
+	require.NotNil(t, store.saved)
+
+	sched.Stop()
+	select {
+	case <-timerCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("displayAt timer was not canceled on Stop")
+	}
+	assert.NotNil(t, store.saved, "service shutdown must preserve restart recovery cache")
+	assert.False(t, store.cleared)
+}
+
+func TestNewWithStore_RestoredCacheWaitsForValidationThenRecomputes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	store := &memoryStore{
+		saved: displayAtPlaylist(
+			item("day22", "2026-07-22T00:00:00Z"),
+			item("day23", "2026-07-23T00:00:00Z"),
+		),
+	}
+	now := time.Date(2026, 7, 23, 1, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.Contains(t, expr, "day23")
+			assert.NotContains(t, expr, "day22")
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	require.True(t, sched.HasCache())
+
+	sched.RecomputeNow(context.Background())
+	sched.ResumePersisted(context.Background())
 }
 
 func TestPrepare_TimezoneLessDisplayAtUsesDeviceLocal(t *testing.T) {
@@ -338,6 +443,33 @@ func TestPrepare_DateOnlyDisplayAt_NotEligible(t *testing.T) {
 	require.Equal(t, []string{"ok", "intro"}, itemIDs(active.Items))
 }
 
+func TestPrepare_InvalidPresentDisplayAt_StillSchedules(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	emptyDisplayAt := ""
+	active := sched.Prepare(&dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "invalid", Source: "https://example.com/invalid.html", DisplayAt: &emptyDisplayAt},
+				item("intro", ""),
+			},
+		},
+	})
+	require.Equal(t, []string{"intro"}, itemIDs(active.Items))
+	assert.True(t, sched.HasCache())
+}
+
 func TestPrepare_AllFuture_ReturnsOnlyEvergreen(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -369,9 +501,6 @@ func displayAtPlaylist(items ...dp1playlist.PlaylistItem) *dp1.Playlist {
 		Playlist: dp1playlist.Playlist{
 			Title: "Daily",
 			Items: items,
-			Schedule: &playlists.Schedule{
-				ByDisplayAt: true,
-			},
 		},
 	}
 }
@@ -397,6 +526,50 @@ func itemIDs(items []dp1playlist.PlaylistItem) []string {
 		out[i] = it.ID
 	}
 	return out
+}
+
+type memoryStore struct {
+	saved   *dp1.Playlist
+	cleared bool
+	err     error
+}
+
+func (m *memoryStore) Load() (*dp1.Playlist, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return cloneTestPlaylist(m.saved), nil
+}
+
+func (m *memoryStore) Save(p *dp1.Playlist) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.saved = cloneTestPlaylist(p)
+	m.cleared = false
+	return nil
+}
+
+func (m *memoryStore) Clear() error {
+	if m.err != nil {
+		return m.err
+	}
+	m.saved = nil
+	m.cleared = true
+	return nil
+}
+
+func cloneTestPlaylist(p *dp1.Playlist) *dp1.Playlist {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	out.Items = append([]dp1playlist.PlaylistItem(nil), p.Items...)
+	if p.Schedule != nil {
+		sched := *p.Schedule
+		out.Schedule = &sched
+	}
+	return &out
 }
 
 func TestRecomputeNow_PushesNewerCacheWhenPrepareWinsPushLockRace(t *testing.T) {

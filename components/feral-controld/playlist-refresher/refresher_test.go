@@ -536,18 +536,15 @@ func TestRefresher_ProcessPlayingPlaylist_NoPlaylistData(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
+	setupBackgroundMocks(ts)
+
 	// Expect status poller to return player status with no playlist data
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, nil), nil).
 		AnyTimes()
 
-	// Expect Sleep to be called during retry logic
-	ts.mockClock.EXPECT().
-		SleepContext(gomock.Any(), gomock.Any()).
-		AnyTimes()
-
-	// Should not call DP1 or CDP since there's no playlist data
+	// Should not call DP1 or CDP since there's no playlist data.
 
 	// Start the refresher
 	ts.refresher.Start()
@@ -724,18 +721,15 @@ func TestRefresher_ProcessPlayingPlaylist_InvalidPlayerStatus(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
+	setupBackgroundMocks(ts)
+
 	// Test with invalid player status (no playlist URL or playlist)
 	ts.mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ts.ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, nil), nil).
 		AnyTimes()
 
-	// Expect Sleep to be called during retry logic
-	ts.mockClock.EXPECT().
-		SleepContext(gomock.Any(), gomock.Any()).
-		AnyTimes()
-
-	// Should not call DP1 or CDP since there's no valid playlist data
+	// Should not call DP1 or CDP since there's no playlist data to refresh yet.
 
 	// Start the refresher
 	ts.refresher.Start()
@@ -1031,12 +1025,14 @@ func TestRefresher_Background_RetryLogic(t *testing.T) {
 }
 
 type fakePlaylistScheduler struct {
-	hasCache       bool
-	cacheOnPrepare bool
-	recomputes     int
-	prepares       int
-	pushCalls      int
-	restores       int
+	hasCache        bool
+	restoredPending bool
+	cacheOnPrepare  bool
+	recomputes      int
+	resumePersisted int
+	prepares        int
+	pushCalls       int
+	restores        int
 }
 
 func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
@@ -1047,7 +1043,11 @@ func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 	return playlist
 }
 func (f *fakePlaylistScheduler) RecomputeNow(context.Context) { f.recomputes++ }
-func (f *fakePlaylistScheduler) Clear()                       { f.hasCache = false }
+func (f *fakePlaylistScheduler) ResumePersisted(context.Context) {
+	f.resumePersisted++
+	f.recomputes++
+}
+func (f *fakePlaylistScheduler) Clear() { f.hasCache = false }
 func (f *fakePlaylistScheduler) ClearThenWithPlayerPush(fn func() bool) {
 	f.hasCache = false
 	fn()
@@ -1061,6 +1061,7 @@ func (f *fakePlaylistScheduler) Snapshot() playlistschedule.Snapshot {
 }
 func (f *fakePlaylistScheduler) Restore(playlistschedule.Snapshot) { f.restores++ }
 func (f *fakePlaylistScheduler) HasCache() bool                    { return f.hasCache }
+func (f *fakePlaylistScheduler) RestoredPending() bool             { return f.restoredPending }
 func (f *fakePlaylistScheduler) Stop()                             { f.Clear() }
 
 func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) {
@@ -1255,6 +1256,156 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 
 	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must rebuild scheduler cache")
 	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must still serialize the send")
+}
+
+func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{
+		hasCache:        true,
+		restoredPending: true,
+		cacheOnPrepare:  true,
+	}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	playlistURL := "https://example.com/daily.json"
+	pl := createMockPlaylist()
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(pl, nil).
+		AnyTimes()
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.NotContains(t, expr, `"refresh":true`)
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).
+		AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must validate rebuilt scheduled playlist")
+	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must still serialize the send")
+}
+
+func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{hasCache: true, cacheOnPrepare: true}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	displayAt := "2026-07-22T00:00:00Z"
+	pl := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title: "Daily",
+			Items: []dp1playlist.PlaylistItem{
+				{
+					ID:        "active",
+					Title:     "Active",
+					Source:    "https://example.com/active.html",
+					DisplayAt: &displayAt,
+				},
+			},
+		},
+	}
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
+		Times(0)
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.Zero(t, fakeSched.prepares, "player status only has the filtered active set and must not replace the full cache")
+	assert.Zero(t, fakeSched.resumePersisted, "steady-state inline displayAt status must not force-cast on every refresh tick")
+	assert.Zero(t, fakeSched.pushCalls, "static inline restart recovery is pushed by the scheduler, not refresher send")
+}
+
+func TestRefresher_StaticInlineDisplayAt_ResumesPendingPersistedCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	fakeSched := &fakePlaylistScheduler{hasCache: true, restoredPending: true}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	displayAt := "2026-07-22T00:00:00Z"
+	pl := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title: "Daily",
+			Items: []dp1playlist.PlaylistItem{
+				{
+					ID:        "active",
+					Title:     "Active",
+					Source:    "https://example.com/active.html",
+					DisplayAt: &displayAt,
+				},
+			},
+		},
+	}
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), nil, pl), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessDynamicPlaylist(gomock.Any(), gomock.Any(), gomock.Any()).
+		Times(0)
+	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(300 * time.Millisecond)
+	r.Stop()
+
+	assert.Zero(t, fakeSched.prepares, "player status only has the filtered active set and must not replace the full cache")
+	assert.GreaterOrEqual(t, fakeSched.resumePersisted, 1, "pending persisted cache should resume from static inline displayAt status")
+	assert.Zero(t, fakeSched.pushCalls, "static inline restart recovery is pushed by the scheduler, not refresher send")
 }
 
 func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {

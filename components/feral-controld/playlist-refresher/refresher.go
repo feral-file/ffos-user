@@ -205,24 +205,35 @@ func (r *refresher) processPlayingPlaylist() error {
 			return r.handleRefreshError(err, "playlist URL")
 		}
 	case playerStatus.Playlist != nil:
-		if !playerStatus.Playlist.HasDynamicContent() {
+		if playerStatus.Playlist.HasDynamicContent() {
+			playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
+			if err != nil {
+				return r.handleRefreshError(err, "dynamic playlist")
+			}
+		} else {
+			if r.scheduler != nil && r.scheduler.RestoredPending() && playlistschedule.HasDisplayAtSchedule(playerStatus.Playlist) {
+				// Static inline displayAt player status only contains the active set,
+				// not the full playlist. Use it as an ownership signal for the
+				// persisted scheduler cache instead of calling Prepare with
+				// incomplete data.
+				r.scheduler.ResumePersisted(r.context)
+				return nil
+			}
 			r.logger.Debug("Playlist has no dynamic queries, skipping")
 			return nil
 		}
-
-		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
-		if err != nil {
-			return r.handleRefreshError(err, "dynamic playlist")
-		}
 	default:
-		return errors.New("player status has no playlist URL or playlist")
+		r.logger.Debug("Player status has no playlist URL or playlist, skipping")
+		return nil
 	}
 
 	hadDisplayAtCache := false
+	hadRestoredPending := false
 	var schedulerSnapshot playlistschedule.Snapshot
 	schedulerMutated := false
 	if r.scheduler != nil {
 		hadDisplayAtCache = r.scheduler.HasCache()
+		hadRestoredPending = r.scheduler.RestoredPending()
 	}
 
 	// Send playlist to CDP
@@ -241,11 +252,12 @@ func (r *refresher) processPlayingPlaylist() error {
 			schedulerSnapshot = r.scheduler.Snapshot()
 			playlist = r.scheduler.Prepare(playlist)
 			schedulerMutated = true
-			if r.scheduler.HasCache() && !hadDisplayAtCache {
-				// After a controld restart the in-memory displayAt cache is empty, so
-				// the refresher may be the first path to reconstruct the active set from
-				// player status. Force-cast that first scheduled reconstruction; a soft
-				// refresh can defer when the current item disappeared from the new set.
+			if r.scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending) {
+				// After a controld restart the memory cache may be empty, so
+				// the refresher may be the first path to reconstruct scheduler
+				// ownership from URL/dynamic/player status. Force-cast that first
+				// scheduled reconstruction; a soft refresh can defer when the current
+				// item disappeared from the new set.
 				command.Arguments = map[string]interface{}{
 					"intent": map[string]interface{}{
 						"action": "now_display",
@@ -291,7 +303,7 @@ func (r *refresher) handleRefreshError(err error, kind string) error {
 		r.logger.Warn("Playlist refresh failed transiently; recomputing from displayAt cache",
 			zap.String("kind", kind),
 			zap.Error(err))
-		r.scheduler.RecomputeNow(r.context)
+		r.scheduler.ResumePersisted(r.context)
 		return nil
 	}
 	return err

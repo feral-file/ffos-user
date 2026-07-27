@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -54,9 +53,6 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Title: "Daily",
-			Schedule: &playlists.Schedule{
-				ByDisplayAt: true,
-			},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day21", Title: "Day 21", Source: "https://example.com/21.html", DisplayAt: strPtr("2026-07-21T00:00:00Z")},
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
@@ -236,7 +232,8 @@ func (t *trackingScheduler) Prepare(p *dp1.Playlist) *dp1.Playlist {
 	t.lastPrepared = p
 	return t.inner.Prepare(p)
 }
-func (t *trackingScheduler) RecomputeNow(ctx context.Context) { t.inner.RecomputeNow(ctx) }
+func (t *trackingScheduler) RecomputeNow(ctx context.Context)    { t.inner.RecomputeNow(ctx) }
+func (t *trackingScheduler) ResumePersisted(ctx context.Context) { t.inner.ResumePersisted(ctx) }
 func (t *trackingScheduler) Clear() {
 	t.clearCalls++
 	t.inner.Clear()
@@ -252,6 +249,7 @@ func (t *trackingScheduler) WithPlayerPush(fn func()) {
 func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot { return t.inner.Snapshot() }
 func (t *trackingScheduler) Restore(s playlistschedule.Snapshot) { t.inner.Restore(s) }
 func (t *trackingScheduler) HasCache() bool                      { return t.inner.HasCache() }
+func (t *trackingScheduler) RestoredPending() bool               { return t.inner.RestoredPending() }
 func (t *trackingScheduler) Stop()                               { t.inner.Stop() }
 
 func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T) {
@@ -286,9 +284,6 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
 			Title: "Daily",
-			Schedule: &playlists.Schedule{
-				ByDisplayAt: true,
-			},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -336,9 +331,6 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Schedule: &playlists.Schedule{
-				ByDisplayAt: true,
-			},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -392,9 +384,6 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectRestoresCache
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Schedule: &playlists.Schedule{
-				ByDisplayAt: true,
-			},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -454,9 +443,6 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "Old",
-		Schedule: &playlists.Schedule{
-			ByDisplayAt: true,
-		},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -467,9 +453,6 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "New",
-		Schedule: &playlists.Schedule{
-			ByDisplayAt: true,
-		},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -524,9 +507,6 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "Old",
-		Schedule: &playlists.Schedule{
-			ByDisplayAt: true,
-		},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -537,9 +517,6 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Title: "New",
-		Schedule: &playlists.Schedule{
-			ByDisplayAt: true,
-		},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},

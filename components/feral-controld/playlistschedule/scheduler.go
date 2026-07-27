@@ -28,8 +28,8 @@ const displayAtMaxTick = 60 * time.Second
 // Scheduler caches the full displayAt playlist, exposes the active set for
 // the player, and re-pushes when the next displayAt threshold is crossed.
 type Scheduler interface {
-	// Prepare caches a schedule.byDisplayAt playlist and returns the active set
-	// for the player. Playlists without byDisplayAt clear any prior schedule
+	// Prepare caches a displayAt playlist and returns the active set for the
+	// player. Playlists without item-level displayAt clear any prior schedule
 	// and are returned unchanged.
 	Prepare(playlist *dp1.Playlist) *dp1.Playlist
 	// RecomputeNow re-filters the cached playlist and force-casts it to the
@@ -37,8 +37,17 @@ type Scheduler interface {
 	// reconnect, and after a transient network refresh failure that still has
 	// a usable cache. Force-cast is required so a displayAt cutover is not
 	// deferred until the current artwork finishes its duration. No-op when
-	// nothing is cached.
+	// nothing is cached, or when a restart-restored cache has not yet been
+	// validated against current player status.
 	RecomputeNow(ctx context.Context)
+	// ResumePersisted validates that player status still describes a scheduled
+	// displayPlaylist command after a controld restart, then arms timers and
+	// force-casts from the persisted full playlist.
+	ResumePersisted(ctx context.Context)
+	// RestoredPending reports whether the in-memory cache came from durable
+	// state and still needs current player-status validation before normal
+	// recompute paths may use it.
+	RestoredPending() bool
 	// Clear drops the cached displayAt playlist and cancels the transition
 	// timer under the player-push lock so an in-flight RecomputeNow cannot
 	// start a new push after the clear. Prefer ClearThenWithPlayerPush when
@@ -62,8 +71,9 @@ type Scheduler interface {
 }
 
 type Snapshot struct {
-	full       *dp1.Playlist
-	lastActive []dp1playlist.PlaylistItem
+	full            *dp1.Playlist
+	lastActive      []dp1playlist.PlaylistItem
+	restoredPending bool
 }
 
 // LocationFunc returns the device-local timezone used to resolve timezone-less
@@ -83,6 +93,7 @@ type scheduler struct {
 	clock  wrapper.Clock
 	locFn  LocationFunc
 	logger *zap.Logger
+	store  Store
 
 	// full is the last displayAt playlist (complete item list). The player
 	// only ever receives the filtered active set derived from this cache.
@@ -94,6 +105,11 @@ type scheduler struct {
 	// generation increments on every Prepare/clear so a RecomputeNow that
 	// snapshotted an older cache can drop its push after a newer cast wins.
 	generation uint64
+	// restoredPending marks a durable cache loaded at startup but not yet
+	// validated against the player's current displayPlaylist status. CDP
+	// reconnect/wake/timer paths must not resurrect it until the refresher sees
+	// that the player is still on a scheduled playlist command.
+	restoredPending bool
 
 	// cancelTimer cancels the in-flight next-displayAt wait. Controld must not
 	// keep a stale timer after a new cast or after Stop — otherwise a late fire
@@ -109,22 +125,46 @@ func New(
 	locFn LocationFunc,
 	logger *zap.Logger,
 ) Scheduler {
+	return NewWithStore(ctx, cdpClient, clock, locFn, nil, logger)
+}
+
+// NewWithStore builds a scheduler that restores the last full scheduled
+// playlist from durable state. Used by production so a controld-only restart
+// can recover future displayAt items that were already filtered out of the
+// player-visible playlist.
+func NewWithStore(
+	ctx context.Context,
+	cdpClient cdp.CDP,
+	clock wrapper.Clock,
+	locFn LocationFunc,
+	store Store,
+	logger *zap.Logger,
+) Scheduler {
 	if locFn == nil {
 		locFn = sleepschedule.LocalTimezone
 	}
-	return &scheduler{
+	s := &scheduler{
 		ctx:    ctx,
 		cdp:    cdpClient,
 		clock:  clock,
 		locFn:  locFn,
 		logger: logger,
+		store:  store,
 	}
+	s.restorePersisted()
+	return s
 }
 
 func (s *scheduler) HasCache() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.full != nil
+}
+
+func (s *scheduler) RestoredPending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.restoredPending
 }
 
 func (s *scheduler) WithPlayerPush(fn func()) {
@@ -170,7 +210,9 @@ func (s *scheduler) Restore(snapshot Snapshot) {
 }
 
 func (s *scheduler) Stop() {
-	s.Clear()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelTimerLocked()
 }
 
 func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
@@ -181,7 +223,7 @@ func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !scheduleByDisplayAt(playlist) {
+	if !HasDisplayAtSchedule(playlist) {
 		// A non-scheduled cast must cancel any prior Daily timer; otherwise the
 		// previous playlist's next displayAt would overwrite the new cast.
 		s.clearLocked()
@@ -190,9 +232,11 @@ func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 
 	s.generation++
 	s.full = clonePlaylist(playlist)
+	s.restoredPending = false
 	active := s.activeLocked()
 	s.lastActive = cloneItems(active.Items)
 	s.armTimerLocked()
+	s.persistLocked()
 
 	s.logger.Info("Prepared displayAt active set",
 		zap.Int("fullItems", len(playlist.Items)),
@@ -201,6 +245,22 @@ func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 }
 
 func (s *scheduler) RecomputeNow(ctx context.Context) {
+	s.recompute(ctx, true)
+}
+
+func (s *scheduler) ResumePersisted(ctx context.Context) {
+	s.mu.Lock()
+	if s.full == nil {
+		s.mu.Unlock()
+		return
+	}
+	if s.restoredPending {
+		s.restoredPending = false
+		s.generation++
+		s.armTimerLocked()
+	}
+	s.mu.Unlock()
+
 	s.recompute(ctx, true)
 }
 
@@ -214,7 +274,7 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 
 	for {
 		s.mu.Lock()
-		if s.full == nil {
+		if s.full == nil || s.restoredPending {
 			s.mu.Unlock()
 			return
 		}
@@ -248,21 +308,28 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 }
 
 func (s *scheduler) clearLocked() {
-	if s.cancelTimer != nil {
-		s.cancelTimer()
-		s.cancelTimer = nil
-	}
+	s.cancelTimerLocked()
 	if s.full != nil {
 		s.generation++
 	}
 	s.full = nil
 	s.lastActive = nil
+	s.restoredPending = false
+	s.persistLocked()
+}
+
+func (s *scheduler) cancelTimerLocked() {
+	if s.cancelTimer != nil {
+		s.cancelTimer()
+		s.cancelTimer = nil
+	}
 }
 
 func (s *scheduler) snapshotLocked() Snapshot {
 	return Snapshot{
-		full:       clonePlaylist(s.full),
-		lastActive: cloneItems(s.lastActive),
+		full:            clonePlaylist(s.full),
+		lastActive:      cloneItems(s.lastActive),
+		restoredPending: s.restoredPending,
 	}
 }
 
@@ -273,16 +340,60 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 	}
 	s.full = clonePlaylist(snapshot.full)
 	s.lastActive = cloneItems(snapshot.lastActive)
+	s.restoredPending = snapshot.restoredPending
 	s.generation++
-	if s.full != nil {
+	if s.full != nil && !s.restoredPending {
 		s.armTimerLocked()
+	}
+	s.persistLocked()
+}
+
+func (s *scheduler) restorePersisted() {
+	if s.store == nil {
+		return
+	}
+	playlist, err := s.store.Load()
+	if err != nil {
+		s.logger.Warn("Failed to load persisted displayAt playlist", zap.Error(err))
+		return
+	}
+	if playlist == nil {
+		return
+	}
+	if !HasDisplayAtSchedule(playlist) {
+		s.logger.Warn("Ignoring persisted playlist without displayAt items")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.full = clonePlaylist(playlist)
+	active := s.activeLocked()
+	s.lastActive = cloneItems(active.Items)
+	s.restoredPending = true
+	s.logger.Info("Restored persisted displayAt playlist",
+		zap.Int("fullItems", len(s.full.Items)),
+		zap.Int("activeItems", len(active.Items)))
+}
+
+func (s *scheduler) persistLocked() {
+	if s.store == nil {
+		return
+	}
+	var err error
+	if s.full == nil {
+		err = s.store.Clear()
+	} else {
+		err = s.store.Save(s.full)
+	}
+	if err != nil {
+		s.logger.Warn("Failed to persist displayAt playlist cache", zap.Error(err))
 	}
 }
 
 func (s *scheduler) activeLocked() *dp1.Playlist {
 	now := s.clock.Now()
 	loc := s.locFn()
-	items := displayat.ComputeActiveSet(&s.full.Playlist, now, loc)
+	items := computeActiveSet(&s.full.Playlist, now, loc)
 	out := clonePlaylist(s.full)
 	out.Items = items
 	return out
@@ -301,7 +412,7 @@ func (s *scheduler) armTimerLocked() {
 	}
 
 	now := s.clock.Now()
-	next := displayat.NextDisplayAt(&s.full.Playlist, now, s.locFn())
+	next := nextDisplayAt(&s.full.Playlist, now, s.locFn())
 	if next == nil {
 		s.logger.Debug("No future displayAt; holding current active set")
 		return
@@ -386,8 +497,97 @@ func playerResponseOK(result interface{}) bool {
 	return okVal
 }
 
-func scheduleByDisplayAt(p *dp1.Playlist) bool {
-	return p != nil && p.Schedule != nil && p.Schedule.ByDisplayAt
+// HasDisplayAtSchedule reports whether a playlist carries item-level displayAt
+// scheduling. DP-1 no longer has a separate opt-in flag; the field itself is
+// the contract.
+func HasDisplayAtSchedule(p *dp1.Playlist) bool {
+	if p == nil {
+		return false
+	}
+	for _, item := range p.Items {
+		if item.DisplayAt != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func computeActiveSet(p *dp1playlist.Playlist, now time.Time, loc *time.Location) []dp1playlist.PlaylistItem {
+	if p == nil {
+		return nil
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+
+	type resolved struct {
+		item      dp1playlist.PlaylistItem
+		instant   time.Time
+		isTimed   bool
+		evergreen bool
+	}
+
+	items := make([]resolved, 0, len(p.Items))
+	for _, it := range p.Items {
+		r := resolved{item: it}
+		if it.DisplayAt == nil {
+			r.evergreen = true
+		} else if parsed := displayat.Parse(*it.DisplayAt, loc); parsed.IsValid() {
+			r.instant = parsed.Resolved
+			r.isTimed = true
+		}
+		items = append(items, r)
+	}
+
+	var maxInstant time.Time
+	hasPast := false
+	for _, r := range items {
+		if r.isTimed && !r.instant.After(now) {
+			if !hasPast || r.instant.After(maxInstant) {
+				maxInstant = r.instant
+				hasPast = true
+			}
+		}
+	}
+
+	result := make([]dp1playlist.PlaylistItem, 0, len(items))
+	for _, r := range items {
+		switch {
+		case r.isTimed:
+			if hasPast && r.instant.Equal(maxInstant) {
+				result = append(result, r.item)
+			}
+		case r.evergreen:
+			result = append(result, r.item)
+		}
+	}
+	return result
+}
+
+func nextDisplayAt(p *dp1playlist.Playlist, now time.Time, loc *time.Location) *time.Time {
+	if p == nil {
+		return nil
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+
+	var next *time.Time
+	for _, it := range p.Items {
+		if it.DisplayAt == nil {
+			continue
+		}
+		parsed := displayat.Parse(*it.DisplayAt, loc)
+		if !parsed.IsValid() {
+			continue
+		}
+		instant := parsed.Resolved
+		if instant.After(now) && (next == nil || instant.Before(*next)) {
+			t := instant
+			next = &t
+		}
+	}
+	return next
 }
 
 func clonePlaylist(p *dp1.Playlist) *dp1.Playlist {

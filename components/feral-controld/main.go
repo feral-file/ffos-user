@@ -261,8 +261,8 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	}
 
 	// Register scheduler Stop before refresher Stop so LIFO shutdown stops the
-	// refresher first — otherwise a late Prepare could re-arm a timer after
-	// the scheduler already cleared on Stop.
+	// refresher first — otherwise a late Prepare could re-arm a displayAt
+	// timer after the scheduler already canceled timers on Stop.
 	if app.PlaylistScheduler != nil {
 		defer app.PlaylistScheduler.Stop()
 	}
@@ -475,9 +475,12 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
-	// displayAt scheduler: filters playlists with displayAt items before CDP and advances
-	// them on timer / wake / CDP reconnect from an in-memory full-playlist cache.
-	playlistScheduler := playlistschedule.New(context, cdp, clock, nil, logger)
+	// displayAt scheduler: filters playlists with displayAt items before CDP
+	// and advances them on timer / wake / CDP reconnect. The full playlist is
+	// persisted because the player only stores the filtered active set; after a
+	// controld-only restart we still need future scheduled items.
+	playlistScheduler := playlistschedule.NewWithStore(context, cdp, clock, nil,
+		playlistschedule.NewFileStore(os, json), logger)
 	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)
 
 	// Mint Pairing
