@@ -359,6 +359,7 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 		json:          wrapper.NewJSON(),
 		cdp:           mockCDP,
 	}
+	SetWithPlayerPush(e, scheduler.WithPlayerPush, zap.NewNop())
 
 	doneConnect := make(chan struct{})
 	go func() {
@@ -369,6 +370,9 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 	}()
 
 	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	assert.NotContains(t, pushed, "default", "claim-time fallback must wait for the in-flight scheduler push lock")
+	mu.Unlock()
 	close(releaseOldPush)
 
 	select {

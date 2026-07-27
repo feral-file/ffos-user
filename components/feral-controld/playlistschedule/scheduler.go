@@ -55,6 +55,10 @@ type Scheduler interface {
 	// and still needs to be fetched into an in-memory full playlist before
 	// normal recompute paths may use it.
 	RestoredPending() bool
+	// SourceMatches reports whether the current scheduler cache belongs to the
+	// supplied refreshable source. Callers use it before falling back to cached
+	// displayAt state after a transient refresh failure.
+	SourceMatches(source Source) bool
 	// Clear drops the cached displayAt playlist and cancels the transition
 	// timer under the player-push lock so an in-flight RecomputeNow cannot
 	// start a new push after the clear.
@@ -184,6 +188,12 @@ func (s *scheduler) RestoredPending() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.restoredPending
+}
+
+func (s *scheduler) SourceMatches(source Source) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.source.Matches(source)
 }
 
 func (s *scheduler) WithPlayerPush(fn func()) {
@@ -322,6 +332,7 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 		}
 		gen := s.generation
 		active := s.activeLocked()
+		source := snapshotSource(s.source)
 		s.armTimerLocked()
 		if !force && reflect.DeepEqual(active.Items, s.lastActive) {
 			s.mu.Unlock()
@@ -329,7 +340,7 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 		}
 		s.mu.Unlock()
 
-		if err := s.push(ctx, active); err != nil {
+		if err := s.push(ctx, active, source); err != nil {
 			s.logger.Warn("Failed to push recomputed displayAt playlist", zap.Error(err))
 			return
 		}
@@ -493,7 +504,7 @@ func (s *scheduler) waitAndFire(timerCtx context.Context, wait time.Duration) {
 	s.recompute(s.ctx, false)
 }
 
-func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist) error {
+func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Source) error {
 	if s.cdp == nil {
 		return fmt.Errorf("cdp not configured")
 	}
@@ -514,8 +525,8 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist) error {
 			"dp1_call": playlist,
 		},
 	}
-	if s.source.PlaylistURL != "" {
-		command.Arguments["playlistUrl"] = s.source.PlaylistURL
+	if source.PlaylistURL != "" {
+		command.Arguments["playlistUrl"] = source.PlaylistURL
 	}
 	payload, err := command.JSON()
 	if err != nil {

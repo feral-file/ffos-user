@@ -399,6 +399,24 @@ func (e *executor) setOnAwake(fn func(context.Context)) {
 	e.onAwake = fn
 }
 
+// SetWithPlayerPush registers the playlist-write serialization hook shared with
+// displayAt scheduling. It intentionally serializes claim-time default fallback
+// writes without giving devicectl permission to clear scheduler-owned cache.
+func SetWithPlayerPush(exec Executor, fn func(func()), logger *zap.Logger) {
+	setter, ok := exec.(interface{ setWithPlayerPush(func(func())) })
+	if !ok {
+		logger.Warn("Executor does not support player-push serialization hook")
+		return
+	}
+	setter.setWithPlayerPush(fn)
+}
+
+func (e *executor) setWithPlayerPush(fn func(func())) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	e.withPlayerPush = fn
+}
+
 // applySleepTransitionIfChanged drives a transition only when it is not already
 // aligned. It is the schedule loop's entry point: manual overrides
 // (sleepNow/wakeNow/setSleepSchedule) call applySleepTransition directly so an

@@ -90,7 +90,7 @@ func playerNotOkResponse() map[string]interface{} {
 // displayPlaylist via URL: DP1 processing, CDP send returning ok, and ForceRefresh.
 func expectDisplayPlaylistSuccess(ts *testSetup, playlistURL string, playlist *dp1.Playlist) {
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(playlist, nil).
 		Times(1)
 
@@ -556,7 +556,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
 		Return(processedPlaylist, nil).
 		Times(1)
 
@@ -646,7 +646,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, false).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
 		Return(processedPlaylist, nil).
 		Times(1)
 
@@ -826,7 +826,7 @@ func TestCommandHandler_Metrics_DisplayPlaylist_CDPFailure(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 
@@ -860,7 +860,7 @@ func TestCommandHandler_Metrics_PlayerResponseNotOk(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 
@@ -898,7 +898,7 @@ func TestCommandHandler_Metrics_PlayerResponseMissingMessage(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, false).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 

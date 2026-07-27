@@ -220,6 +220,12 @@ type executor struct {
 	// stale playlist on screen). Not part of the exported Executor interface so
 	// mocks stay unchanged; wire via SetOnAwake.
 	onAwake func(context.Context)
+
+	// withPlayerPush, when set, serializes claim-time default playlist fallback
+	// writes with displayAt timer/wake/reconnect pushes. The fallback remains
+	// player-owned and must not clear scheduler authority because
+	// onlyIfNoPlaylist:true can succeed as a no-op.
+	withPlayerPush func(func())
 }
 
 func New(
@@ -463,7 +469,18 @@ func (e *executor) sendDisplayDefaultPlaylist() error {
 		return result, nil
 	}
 
-	_, err := send()
+	e.sleepApplyMu.Lock()
+	withPlayerPush := e.withPlayerPush
+	e.sleepApplyMu.Unlock()
+
+	var err error
+	if withPlayerPush != nil {
+		withPlayerPush(func() {
+			_, err = send()
+		})
+		return err
+	}
+	_, err = send()
 	return err
 }
 

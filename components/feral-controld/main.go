@@ -591,6 +591,7 @@ func initializeApp(
 	// source must be fetched again before scheduled cutovers resume.
 	playlistScheduler := playlistschedule.NewWithStore(context, cdp, clock, nil,
 		playlistschedule.NewFileStore(os, json), logger)
+	devicectl.SetWithPlayerPush(executor, playlistScheduler.WithPlayerPush, logger)
 	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)
 
 	// Mint Pairing

@@ -62,7 +62,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 		},
 	}
 
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, ok := params["expression"].(string)
@@ -134,7 +134,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testi
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr := params["expression"].(string)
@@ -198,7 +198,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr := params["expression"].(string)
@@ -257,7 +257,10 @@ func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot { return t.inne
 func (t *trackingScheduler) Restore(s playlistschedule.Snapshot) { t.inner.Restore(s) }
 func (t *trackingScheduler) HasCache() bool                      { return t.inner.HasCache() }
 func (t *trackingScheduler) RestoredPending() bool               { return t.inner.RestoredPending() }
-func (t *trackingScheduler) Stop()                               { t.inner.Stop() }
+func (t *trackingScheduler) SourceMatches(s playlistschedule.Source) bool {
+	return t.inner.SourceMatches(s)
+}
+func (t *trackingScheduler) Stop() { t.inner.Stop() }
 
 func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -296,7 +299,7 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
@@ -348,7 +351,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 	}
 
 	var payloads []commands.Command
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, playlistURL).Return(full, nil)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
@@ -648,7 +651,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
 	}}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, false).Return(newPlaylist, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, newURL).Return(newPlaylist, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(nil, assert.AnError)
 
 	_, err := handler.Process(ctx, commands.Command{
@@ -712,7 +715,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
 	}}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, false).Return(newPlaylist, nil)
+	mockDP1.EXPECT().ProcessPlaylistURLForCast(ctx, newURL).Return(newPlaylist, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]interface{}{
 		"message": map[string]interface{}{"ok": false},
 	}, nil)

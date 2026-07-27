@@ -209,14 +209,14 @@ func (r *refresher) processPlayingPlaylist() error {
 		schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
 		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
 		if err != nil {
-			return r.handleRefreshError(err, "playlist URL")
+			return r.handleRefreshError(err, "playlist URL", schedulerSource)
 		}
 	case playerStatus.Playlist != nil:
 		if playerStatus.Playlist.HasDynamicContent() {
 			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
 			playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
 			if err != nil {
-				return r.handleRefreshError(err, "dynamic playlist")
+				return r.handleRefreshError(err, "dynamic playlist", schedulerSource)
 			}
 		} else {
 			// Static inline displayAt player status only contains the filtered
@@ -318,8 +318,12 @@ func playerResponseOK(result interface{}) bool {
 // handleRefreshError degrades to the displayAt cache only for transient fetch
 // failures. Schema/parse/logic errors must surface so a bad feed cannot pin the
 // device on a stale active set forever.
-func (r *refresher) handleRefreshError(err error, kind string) error {
-	if r.scheduler != nil && r.scheduler.HasCache() && !r.scheduler.RestoredPending() && isTransientPlaylistRefreshError(err) {
+func (r *refresher) handleRefreshError(err error, kind string, source playlistschedule.Source) error {
+	if r.scheduler != nil &&
+		r.scheduler.HasCache() &&
+		!r.scheduler.RestoredPending() &&
+		r.scheduler.SourceMatches(source) &&
+		isTransientPlaylistRefreshError(err) {
 		r.logger.Warn("Playlist refresh failed transiently; recomputing from displayAt cache",
 			zap.String("kind", kind),
 			zap.Error(err))

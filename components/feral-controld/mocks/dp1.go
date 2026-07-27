@@ -51,6 +51,21 @@ func (mr *MockDP1MockRecorder) ProcessDynamicPlaylist(ctx, playlist, minimal int
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessDynamicPlaylist", reflect.TypeOf((*MockDP1)(nil).ProcessDynamicPlaylist), ctx, playlist, minimal)
 }
 
+// ProcessDynamicPlaylistForCast mocks base method.
+func (m *MockDP1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist dp1.Playlist) (*dp1.Playlist, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ProcessDynamicPlaylistForCast", ctx, playlist)
+	ret0, _ := ret[0].(*dp1.Playlist)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ProcessDynamicPlaylistForCast indicates an expected call of ProcessDynamicPlaylistForCast.
+func (mr *MockDP1MockRecorder) ProcessDynamicPlaylistForCast(ctx, playlist interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessDynamicPlaylistForCast", reflect.TypeOf((*MockDP1)(nil).ProcessDynamicPlaylistForCast), ctx, playlist)
+}
+
 // ProcessPlaylistURL mocks base method.
 func (m *MockDP1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*dp1.Playlist, error) {
 	m.ctrl.T.Helper()
@@ -64,4 +79,19 @@ func (m *MockDP1) ProcessPlaylistURL(ctx context.Context, url string, minimal bo
 func (mr *MockDP1MockRecorder) ProcessPlaylistURL(ctx, url, minimal interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessPlaylistURL", reflect.TypeOf((*MockDP1)(nil).ProcessPlaylistURL), ctx, url, minimal)
+}
+
+// ProcessPlaylistURLForCast mocks base method.
+func (m *MockDP1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*dp1.Playlist, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ProcessPlaylistURLForCast", ctx, url)
+	ret0, _ := ret[0].(*dp1.Playlist)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ProcessPlaylistURLForCast indicates an expected call of ProcessPlaylistURLForCast.
+func (mr *MockDP1MockRecorder) ProcessPlaylistURLForCast(ctx, url interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ProcessPlaylistURLForCast", reflect.TypeOf((*MockDP1)(nil).ProcessPlaylistURLForCast), ctx, url)
 }

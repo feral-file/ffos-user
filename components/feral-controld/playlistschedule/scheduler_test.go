@@ -744,6 +744,63 @@ func TestRecomputeNow_PushesNewerCacheWhenPrepareWinsPushLockRace(t *testing.T) 
 	}
 }
 
+func TestRecomputeNow_SnapshotsSourceWithActiveSet(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	oldURL := "https://example.com/old.json"
+	newURL := "https://example.com/new.json"
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	_ = sched.PrepareWithSource(
+		displayAtPlaylist(item("old", "2026-07-22T00:00:00Z")),
+		playlistschedule.Source{PlaylistURL: oldURL},
+	)
+
+	var mutateOnce sync.Once
+	cdpMock.EXPECT().Initialized().DoAndReturn(func() bool {
+		mutateOnce.Do(func() {
+			_ = sched.PrepareWithSource(
+				displayAtPlaylist(item("new", "2026-07-22T00:00:00Z")),
+				playlistschedule.Source{PlaylistURL: newURL},
+			)
+		})
+		return true
+	}).AnyTimes()
+
+	var sends int
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			sends++
+			expr := params["expression"].(string)
+			if sends == 1 {
+				assert.Contains(t, expr, `"id":"old"`)
+				assert.Contains(t, expr, `"playlistUrl":"`+oldURL+`"`)
+				assert.NotContains(t, expr, newURL)
+				return map[string]interface{}{"ok": true}, nil
+			}
+			assert.Contains(t, expr, `"id":"new"`)
+			assert.Contains(t, expr, `"playlistUrl":"`+newURL+`"`)
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(2)
+
+	sched.RecomputeNow(context.Background())
+}
+
 func TestPrepare_AllFutureNoEvergreen_EmptyActiveSet(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

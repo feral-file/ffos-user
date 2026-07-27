@@ -1042,11 +1042,12 @@ type fakePlaylistScheduler struct {
 func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 	return f.PrepareWithSource(playlist, playlistschedule.Source{})
 }
-func (f *fakePlaylistScheduler) PrepareWithSource(playlist *dp1.Playlist, _ playlistschedule.Source) *dp1.Playlist {
+func (f *fakePlaylistScheduler) PrepareWithSource(playlist *dp1.Playlist, source playlistschedule.Source) *dp1.Playlist {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prepares++
 	f.token++
+	f.source = source
 	if f.cacheOnPrepare {
 		f.hasCache = true
 	}
@@ -1118,6 +1119,11 @@ func (f *fakePlaylistScheduler) RestoredPending() bool {
 	defer f.mu.Unlock()
 	return f.restoredPending
 }
+func (f *fakePlaylistScheduler) SourceMatches(source playlistschedule.Source) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.source.Matches(source)
+}
 func (f *fakePlaylistScheduler) Stop() { f.Clear() }
 func (f *fakePlaylistScheduler) preparesCount() int {
 	f.mu.Lock()
@@ -1156,12 +1162,15 @@ func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) 
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
-	fakeSched := &fakePlaylistScheduler{hasCache: true}
+	playlistURL := "https://example.com/daily.json"
+	fakeSched := &fakePlaylistScheduler{
+		hasCache: true,
+		source:   playlistschedule.Source{PlaylistURL: playlistURL},
+	}
 
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
 
-	playlistURL := "https://example.com/daily.json"
 	mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
@@ -1178,6 +1187,45 @@ func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) 
 	r.Stop()
 
 	assert.GreaterOrEqual(t, fakeSched.recomputesCount(), 1, "transient fetch should recompute from cache")
+}
+
+func TestRefresher_TransientURLError_MismatchedSourceDoesNotUseDisplayAtCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	currentURL := "https://example.com/current.json"
+	fakeSched := &fakePlaylistScheduler{
+		hasCache: true,
+		source:   playlistschedule.Source{PlaylistURL: "https://example.com/old.json"},
+	}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &currentURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, currentURL, false).
+		Return(nil, &url.Error{Op: "Get", URL: currentURL, Err: &net.DNSError{Name: "example.com", IsTemporary: true}}).
+		AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+	time.Sleep(200 * time.Millisecond)
+	r.Stop()
+
+	assert.Equal(t, 0, fakeSched.recomputesCount(), "transient fetch from a different source must not reassert stale cache")
 }
 
 func TestRefresher_MalformedPlaylistError_DoesNotUseDisplayAtCache(t *testing.T) {
