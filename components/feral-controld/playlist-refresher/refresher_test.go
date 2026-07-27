@@ -1039,6 +1039,9 @@ type fakePlaylistScheduler struct {
 }
 
 func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
+	return f.PrepareWithSource(playlist, playlistschedule.Source{})
+}
+func (f *fakePlaylistScheduler) PrepareWithSource(playlist *dp1.Playlist, _ playlistschedule.Source) *dp1.Playlist {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prepares++
@@ -1443,6 +1446,7 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, _ := params["expression"].(string)
 			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.Contains(t, expr, `"playlistUrl":"`+playlistURL+`"`)
 			assert.NotContains(t, expr, `"refresh":true`)
 			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
 		}).
@@ -1493,6 +1497,7 @@ func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *t
 		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, _ := params["expression"].(string)
 			assert.Contains(t, expr, `"action":"now_display"`)
+			assert.Contains(t, expr, `"playlistUrl":"`+playlistURL+`"`)
 			assert.NotContains(t, expr, `"refresh":true`)
 			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
 		}).

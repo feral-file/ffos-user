@@ -124,6 +124,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	} else {
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
+		var schedulerSource playlistschedule.Source
 		schedulerMutated := false
 		schedulerRestored := false
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
@@ -150,6 +151,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if err != nil {
 					return nil, err
 				}
+				schedulerSource = playlistschedule.Source{PlaylistURL: url}
 
 			case command.Arguments["dp1_call"] != nil:
 				playlistMap, ok := command.Arguments["dp1_call"].(map[string]interface{})
@@ -210,7 +212,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				schedulerSnapshot = h.scheduler.Snapshot()
 				// Filter displayAt playlists to the active set before the player
 				// sees them. The scheduler keeps the full list for timer/wake updates.
-				playlist = h.scheduler.Prepare(playlist)
+				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
 				schedulerMutated = true
 				command.Arguments["dp1_call"] = playlist
 				result, err = h.sendCDPRequest(command)

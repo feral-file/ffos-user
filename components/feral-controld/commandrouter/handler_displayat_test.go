@@ -234,6 +234,10 @@ func (t *trackingScheduler) Prepare(p *dp1.Playlist) *dp1.Playlist {
 	t.lastPrepared = p
 	return t.inner.Prepare(p)
 }
+func (t *trackingScheduler) PrepareWithSource(p *dp1.Playlist, source playlistschedule.Source) *dp1.Playlist {
+	t.lastPrepared = p
+	return t.inner.PrepareWithSource(p, source)
+}
 func (t *trackingScheduler) RecomputeNow(ctx context.Context)    { t.inner.RecomputeNow(ctx) }
 func (t *trackingScheduler) ResumePersisted(ctx context.Context) { t.inner.ResumePersisted(ctx) }
 func (t *trackingScheduler) Clear() {
@@ -304,6 +308,81 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 1, track.pushCalls, "displayPlaylist must serialize CDP via WithPlayerPush")
+}
+
+func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+		return loc
+	}, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+
+	playlistURL := "https://example.com/daily.json"
+	full := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title:    "Daily",
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+				{ID: "day23", Title: "Day 23", Source: "https://example.com/23.html", DisplayAt: strPtr("2026-07-23T00:00:00Z")},
+			},
+		},
+	}
+
+	var payloads []commands.Command
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, ok := params["expression"].(string)
+			require.True(t, ok)
+			const prefix = "window.handleCDPRequest("
+			require.Contains(t, expr, prefix)
+			payload := expr[len(prefix) : len(expr)-1]
+			var cmd commands.Command
+			require.NoError(t, json.Unmarshal([]byte(payload), &cmd))
+			payloads = append(payloads, cmd)
+			return playerOkResponse(), nil
+		},
+	).Times(2)
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	_, err := handler.Process(ctx, commands.Command{
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{"playlistUrl": playlistURL},
+	})
+	require.NoError(t, err)
+
+	sched.RecomputeNow(ctx)
+
+	require.Len(t, payloads, 2)
+	recomputed := payloads[1]
+	assert.Equal(t, playlistURL, recomputed.Arguments["playlistUrl"], "scheduler-owned pushes must preserve URL identity for future refresh")
+	assert.NotContains(t, recomputed.Arguments, "refresh")
+	intent, ok := recomputed.Arguments["intent"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "now_display", intent["action"])
 }
 
 func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *testing.T) {

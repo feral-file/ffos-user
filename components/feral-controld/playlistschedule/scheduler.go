@@ -33,6 +33,11 @@ type Scheduler interface {
 	// player. Playlists without schedule.byDisplayAt plus item-level displayAt
 	// clear any prior schedule and are returned unchanged.
 	Prepare(playlist *dp1.Playlist) *dp1.Playlist
+	// PrepareWithSource is Prepare plus the original refreshable source identity.
+	// URL casts must keep playlistUrl on scheduler-owned pushes so the player
+	// status remains refreshable and restart validation can tie persisted cache
+	// ownership back to a stable source.
+	PrepareWithSource(playlist *dp1.Playlist, source Source) *dp1.Playlist
 	// RecomputeNow re-filters the cached playlist and force-casts it to the
 	// player (now_display, not refresh). Used on timer fire, wake, CDP
 	// reconnect, and after a transient network refresh failure that still has
@@ -84,6 +89,11 @@ type Snapshot struct {
 	full            *dp1.Playlist
 	lastActive      []dp1playlist.PlaylistItem
 	restoredPending bool
+	source          Source
+}
+
+type Source struct {
+	PlaylistURL string
 }
 
 // LocationFunc returns the device-local timezone used to resolve timezone-less
@@ -120,6 +130,10 @@ type scheduler struct {
 	// reconnect/wake/timer paths must not resurrect it until the refresher sees
 	// that the player is still on a scheduled playlist command.
 	restoredPending bool
+	// source tracks the refreshable identity for scheduler-owned pushes. The
+	// full cached playlist supplies future items; source keeps player status
+	// tied to the controller/refresher URL that can be re-resolved later.
+	source Source
 
 	// cancelTimer cancels the in-flight next-displayAt wait. Controld must not
 	// keep a stale timer after a new cast or after Stop — otherwise a late fire
@@ -240,6 +254,10 @@ func (s *scheduler) Stop() {
 }
 
 func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
+	return s.PrepareWithSource(playlist, Source{})
+}
+
+func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp1.Playlist {
 	if playlist == nil {
 		return nil
 	}
@@ -256,6 +274,7 @@ func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
 
 	s.generation++
 	s.full = clonePlaylist(playlist)
+	s.source = source
 	s.restoredPending = false
 	active := s.activeLocked()
 	s.lastActive = cloneItems(active.Items)
@@ -336,6 +355,7 @@ func (s *scheduler) clearLocked() {
 	s.full = nil
 	s.lastActive = nil
 	s.restoredPending = false
+	s.source = Source{}
 }
 
 func (s *scheduler) cancelTimerLocked() {
@@ -350,6 +370,7 @@ func (s *scheduler) snapshotLocked() Snapshot {
 		full:            clonePlaylist(s.full),
 		lastActive:      cloneItems(s.lastActive),
 		restoredPending: s.restoredPending,
+		source:          snapshotSource(s.source),
 	}
 }
 
@@ -361,6 +382,7 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 	s.full = clonePlaylist(snapshot.full)
 	s.lastActive = cloneItems(snapshot.lastActive)
 	s.restoredPending = snapshot.restoredPending
+	s.source = snapshotSource(snapshot.source)
 	s.generation++
 	if s.full != nil && !s.restoredPending {
 		s.armTimerLocked()
@@ -387,6 +409,7 @@ func (s *scheduler) restorePersisted() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.full = clonePlaylist(playlist)
+	s.source = Source{}
 	active := s.activeLocked()
 	s.lastActive = cloneItems(active.Items)
 	s.restoredPending = true
@@ -487,6 +510,9 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist) error {
 			"dp1_call": playlist,
 		},
 	}
+	if s.source.PlaylistURL != "" {
+		command.Arguments["playlistUrl"] = s.source.PlaylistURL
+	}
 	payload, err := command.JSON()
 	if err != nil {
 		return fmt.Errorf("marshal displayAt playlist command: %w", err)
@@ -555,4 +581,8 @@ func clonePlaylist(p *dp1.Playlist) *dp1.Playlist {
 
 func cloneItems(items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	return append([]dp1playlist.PlaylistItem(nil), items...)
+}
+
+func snapshotSource(source Source) Source {
+	return Source{PlaylistURL: source.PlaylistURL}
 }

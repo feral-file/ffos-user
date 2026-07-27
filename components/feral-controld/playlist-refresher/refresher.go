@@ -203,12 +203,14 @@ func (r *refresher) processPlayingPlaylist() error {
 
 	// Process playlist
 	var playlist *dp1.Playlist
+	var schedulerSource playlistschedule.Source
 	switch {
 	case playerStatus.PlaylistURL != nil:
 		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
 		if err != nil {
 			return r.handleRefreshError(err, "playlist URL")
 		}
+		schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
 	case playerStatus.Playlist != nil:
 		if playerStatus.Playlist.HasDynamicContent() {
 			playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
@@ -264,7 +266,7 @@ func (r *refresher) processPlayingPlaylist() error {
 				return
 			}
 			schedulerSnapshot = r.scheduler.Snapshot()
-			playlist = r.scheduler.Prepare(playlist)
+			playlist = r.scheduler.PrepareWithSource(playlist, schedulerSource)
 			schedulerMutated = true
 			if r.scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending) {
 				// After a controld restart the memory cache may be empty, so
@@ -277,6 +279,9 @@ func (r *refresher) processPlayingPlaylist() error {
 						"action": "now_display",
 					},
 					"dp1_call": playlist,
+				}
+				if schedulerSource.PlaylistURL != "" {
+					command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
 				}
 			} else {
 				command.Arguments["dp1_call"] = playlist
