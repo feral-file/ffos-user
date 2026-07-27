@@ -43,27 +43,27 @@ type Scheduler interface {
 	// reconnect, and after a transient network refresh failure that still has
 	// a usable cache. Force-cast is required so a displayAt cutover is not
 	// deferred until the current artwork finishes its duration. No-op when
-	// nothing is cached, or when a restart-restored cache has not yet been
-	// validated against current player status.
+	// nothing is cached, or when a restart-restored source has not yet been
+	// refetched into an in-memory playlist.
 	RecomputeNow(ctx context.Context)
-	// ResumePersisted validates that player status still describes a scheduled
-	// displayPlaylist command after a controld restart, then arms timers and
-	// force-casts from the persisted full playlist.
+	// ResumePersisted arms timers and force-casts from the in-memory full
+	// playlist. It is used only after the refresher has reconstructed scheduler
+	// state from a fetched source or after a transient refresh failure while a
+	// non-pending in-memory cache already exists.
 	ResumePersisted(ctx context.Context)
-	// RestoredPending reports whether the in-memory cache came from durable
-	// state and still needs current player-status validation before normal
-	// recompute paths may use it.
+	// RestoredPending reports whether a durable source was loaded at startup
+	// and still needs to be fetched into an in-memory full playlist before
+	// normal recompute paths may use it.
 	RestoredPending() bool
 	// Clear drops the cached displayAt playlist and cancels the transition
 	// timer under the player-push lock so an in-flight RecomputeNow cannot
-	// start a new push after the clear. Prefer ClearThenWithPlayerPush when
-	// the clear must be paired with a CDP send (displayDefaultPlaylist).
+	// start a new push after the clear.
 	Clear()
 	// ClearThenWithPlayerPush clears the cache and runs fn while still holding
-	// the player-push lock. Used for displayDefaultPlaylist so a stale
-	// RecomputeNow cannot overwrite the default player state after Clear. If
-	// fn returns false, the previous cache is restored before releasing the
-	// lock because the player did not accept the default transition.
+	// the player-push lock. Use it only when a caller can prove the paired
+	// player write replaces scheduler-owned playback. If fn returns false, the
+	// previous cache is restored before releasing the lock because the player
+	// did not accept the transition.
 	ClearThenWithPlayerPush(fn func() bool)
 	// WithPlayerPush serializes CDP playlist updates against timer/wake
 	// recomputes. Cast and refresh paths must wrap their displayPlaylist CDP
@@ -90,10 +90,6 @@ type Snapshot struct {
 	lastActive      []dp1playlist.PlaylistItem
 	restoredPending bool
 	source          Source
-}
-
-type Source struct {
-	PlaylistURL string
 }
 
 // LocationFunc returns the device-local timezone used to resolve timezone-less
@@ -125,10 +121,10 @@ type scheduler struct {
 	// generation increments on every Prepare/clear so a RecomputeNow that
 	// snapshotted an older cache can drop its push after a newer cast wins.
 	generation uint64
-	// restoredPending marks a durable cache loaded at startup but not yet
-	// validated against the player's current displayPlaylist status. CDP
-	// reconnect/wake/timer paths must not resurrect it until the refresher sees
-	// that the player is still on a scheduled playlist command.
+	// restoredPending marks a durable source loaded at startup but not yet
+	// refreshed into a full in-memory playlist. CDP reconnect/wake/timer paths
+	// must not push until the refresher fetches the source and prepares a fresh
+	// playlist.
 	restoredPending bool
 	// source tracks the refreshable identity for scheduler-owned pushes. The
 	// full cached playlist supplies future items; source keeps player status
@@ -218,7 +214,7 @@ func (s *scheduler) Clear() {
 }
 
 // ClearThenWithPlayerPush clears under pushMu then runs fn before releasing,
-// so displayDefaultPlaylist CDP cannot race an in-flight RecomputeNow push.
+// so a paired replacement CDP send cannot race an in-flight RecomputeNow push.
 func (s *scheduler) ClearThenWithPlayerPush(fn func() bool) {
 	s.pushMu.Lock()
 	defer s.pushMu.Unlock()
@@ -291,10 +287,14 @@ func (s *scheduler) RecomputeNow(ctx context.Context) {
 }
 
 func (s *scheduler) ResumePersisted(ctx context.Context) {
+	_ = s.resumePersisted(ctx)
+}
+
+func (s *scheduler) resumePersisted(ctx context.Context) bool {
 	s.mu.Lock()
 	if s.full == nil {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	if s.restoredPending {
 		s.restoredPending = false
@@ -304,6 +304,7 @@ func (s *scheduler) ResumePersisted(ctx context.Context) {
 	s.mu.Unlock()
 
 	s.recompute(ctx, true)
+	return true
 }
 
 func (s *scheduler) recompute(ctx context.Context, force bool) {
@@ -394,28 +395,19 @@ func (s *scheduler) restorePersisted() {
 	if s.store == nil {
 		return
 	}
-	playlist, err := s.store.Load()
+	source, err := s.store.Load()
 	if err != nil {
-		s.logger.Warn("Failed to load persisted displayAt playlist", zap.Error(err))
+		s.logger.Warn("Failed to load persisted displayAt source", zap.Error(err))
 		return
 	}
-	if playlist == nil {
-		return
-	}
-	if !HasDisplayAtSchedule(playlist) {
-		s.logger.Warn("Ignoring persisted playlist without displayAt items")
+	if source == nil || source.IsZero() {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.full = clonePlaylist(playlist)
-	s.source = Source{}
-	active := s.activeLocked()
-	s.lastActive = cloneItems(active.Items)
+	s.source = snapshotSource(*source)
 	s.restoredPending = true
-	s.logger.Info("Restored persisted displayAt playlist",
-		zap.Int("fullItems", len(s.full.Items)),
-		zap.Int("activeItems", len(active.Items)))
+	s.logger.Info("Restored persisted displayAt source")
 }
 
 func (s *scheduler) persistLocked() {
@@ -426,7 +418,7 @@ func (s *scheduler) persistLocked() {
 	if s.full == nil {
 		err = s.store.Clear()
 	} else {
-		err = s.store.Save(s.full)
+		err = s.store.Save(snapshotSource(s.source))
 	}
 	if err != nil {
 		s.logger.Warn("Failed to persist displayAt playlist cache", zap.Error(err))
@@ -581,8 +573,4 @@ func clonePlaylist(p *dp1.Playlist) *dp1.Playlist {
 
 func cloneItems(items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
 	return append([]dp1playlist.PlaylistItem(nil), items...)
-}
-
-func snapshotSource(source Source) Source {
-	return Source{PlaylistURL: source.PlaylistURL}
 }

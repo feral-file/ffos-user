@@ -59,8 +59,9 @@ for relayer topic assignment:
   `intent.action` to `now_display` so the player accepts the cast. When the
   playlist opts into `schedule.byDisplayAt` and contains item-level `displayAt`
   values, controld filters them to the current active set before CDP, commits
-  the full playlist to durable cache only after the player accepts that filtered
-  cast, and advances the player on the next `displayAt` (timer),
+  only the refreshable source identity to durable cache after the player accepts
+  that filtered cast, keeps the resolved full playlist in memory, and advances
+  the player on the next `displayAt` (timer),
   sleep-schedule wake, or CDP reconnect with a force cast
   (`intent.action=now_display`, not `refresh: true`) so cutover is not deferred
   until the current artwork duration ends. URL / dynamic playlist refresh still
@@ -280,22 +281,24 @@ that filtered playlist to Chromium. Timezone-less `displayAt` values use device
 local time; values with `Z`/offset are absolute. Date-only (`YYYY-MM-DD`) is
 rejected per DP-1 §3.5.2 (not evergreen). If `schedule.byDisplayAt` is absent /
 false, or no playlist item has `displayAt`, controld forwards the full playlist
-unchanged. Controld keeps the full playlist in memory while casting, persists it
-only after the player accepts the filtered cast, and uses that committed cache to
-arm the next `displayAt` transition and to recompute after wake, CDP reconnect,
-or a controld-only restart when current player status can validate ownership
-from a URL or dynamic source. Static inline player status contains only the
-filtered active set and no stable full-playlist identity, so controld does not
-restart-resume a persisted static inline schedule from player status alone.
+unchanged. Controld keeps the resolved full playlist in memory while casting,
+persists only its refreshable source identity after the player accepts the
+filtered cast, and uses the in-memory playlist to arm the next `displayAt`
+transition and to recompute after wake or CDP reconnect. After a controld-only
+restart, the refresher must fetch the source again before scheduler cutovers
+resume; if that fetch fails, controld leaves the current player artwork alone
+and retries later. Static inline player status contains only the filtered active
+set and no stable full-playlist identity, so controld does not restart-resume a
+persisted static inline schedule from player status alone.
 Initial casts and timed / wake / reconnect pushes are force casts
 (`intent.action=now_display`
 without `refresh`) so the player applies the playlist immediately even if the
 current artwork still has remaining duration; the 5-minute URL/dynamic
-playlist-refresher path continues to use `refresh: true`. A later
-`displayDefaultPlaylist` clears that cache so a scheduled push cannot overwrite
-the default player state. Clear and the default CDP send share the same
-serialization lock as timed recomputes so an in-flight push cannot land after
-default playback takes over.
+playlist-refresher path continues to use `refresh: true`. The legacy
+`displayDefaultPlaylist` command is forwarded to the player as a player-owned
+fallback and does not clear controld's displayAt cache; with
+`onlyIfNoPlaylist`, a successful response may mean the player no-opped because
+content was already playing.
 
 Playlist URL example:
 
@@ -394,9 +397,9 @@ command failure is logged.
 ### displayDefaultPlaylist
 
 Purpose: tell the player to resume or display its default playlist. This is
-forwarded to Chromium through CDP. Controld also clears any cached
-`displayAt` playlist so timer/wake/reconnect recomputes cannot resurrect the
-previous scheduled cast after default playback starts (including OOM recovery).
+forwarded to Chromium through CDP as a legacy player-owned fallback. It does
+not clear controld's cached `displayAt` playlist because a successful player
+response does not prove that default playback replaced the current playlist.
 
 Example:
 

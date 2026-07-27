@@ -281,7 +281,7 @@ func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
 	assert.Equal(t, []string{"hide"}, spy.calls)
 }
 
-func TestConnectClaimTransitionDefaultPlaybackWinsInFlightDisplayAtRecompute(t *testing.T) {
+func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -356,11 +356,10 @@ func TestConnectClaimTransitionDefaultPlaybackWinsInFlightDisplayAtRecompute(t *
 
 	spy := &narratorSpy{}
 	e := &executor{
-		logger:            zap.NewNop(),
-		setupNarrator:     spy,
-		json:              wrapper.NewJSON(),
-		cdp:               mockCDP,
-		playlistScheduler: scheduler,
+		logger:        zap.NewNop(),
+		setupNarrator: spy,
+		json:          wrapper.NewJSON(),
+		cdp:           mockCDP,
 	}
 
 	doneConnect := make(chan struct{})
@@ -380,11 +379,12 @@ func TestConnectClaimTransitionDefaultPlaybackWinsInFlightDisplayAtRecompute(t *
 		t.Fatal("connect did not finish")
 	}
 
-	assert.False(t, scheduler.HasCache())
+	assert.True(t, scheduler.HasCache())
 	mu.Lock()
 	defer mu.Unlock()
 	require.NotEmpty(t, pushed)
-	assert.Equal(t, "default", pushed[len(pushed)-1], "claim-time default must win after stale displayAt recompute")
+	assert.Contains(t, pushed, "default", "claim-time default is still sent as conditional player fallback")
+	assert.Contains(t, pushed, "old", "existing displayAt schedule remains authoritative in this branch")
 }
 
 // TestMaybeShowClaimQROnOnline_NoTopicWithholds: without a relayer topic the

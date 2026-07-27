@@ -1036,6 +1036,7 @@ type fakePlaylistScheduler struct {
 	pushCalls       int
 	restores        int
 	commits         int
+	source          playlistschedule.Source
 }
 
 func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
@@ -1237,12 +1238,16 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
-	fakeSched := &fakePlaylistScheduler{hasCache: true, restoredPending: true}
+	playlistURL := "https://example.com/plain.json"
+	fakeSched := &fakePlaylistScheduler{
+		hasCache:        true,
+		restoredPending: true,
+		source:          playlistschedule.Source{PlaylistURL: playlistURL},
+	}
 
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
 
-	playlistURL := "https://example.com/plain.json"
 	mockStatusPoller.EXPECT().
 		FetchPlayerStatus(ctx).
 		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
@@ -1259,8 +1264,8 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 	time.Sleep(200 * time.Millisecond)
 	r.Stop()
 
-	assert.Equal(t, 0, fakeSched.resumePersisted, "pending persisted cache must not resume until ownership is validated")
-	assert.Equal(t, 0, fakeSched.recomputes)
+	assert.Equal(t, 0, fakeSched.resumePersisted, "pending source must wait for a successful fetch before scheduler resumes")
+	assert.Equal(t, 0, fakeSched.recomputes, "fetch failure should leave current player artwork unchanged")
 }
 
 func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {

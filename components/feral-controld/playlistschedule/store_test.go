@@ -6,14 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/display-protocol/dp1-go/extension/playlists"
-	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/constant"
-	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -26,8 +23,8 @@ func TestFileStoreLoad(t *testing.T) {
 	mockOS := mocks.NewMockOS(ctrl)
 	json := wrapper.NewJSON()
 	store := playlistschedule.NewFileStore(mockOS, json)
-	playlist := storeTestPlaylist()
-	data, err := json.Marshal(playlist)
+	source := playlistschedule.Source{PlaylistURL: "https://example.com/feed.json"}
+	data, err := json.Marshal(source)
 	require.NoError(t, err)
 
 	mockOS.EXPECT().
@@ -40,7 +37,29 @@ func TestFileStoreLoad(t *testing.T) {
 	got, err := store.Load()
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, []string{"future"}, []string{got.Items[0].ID})
+	assert.Equal(t, "https://example.com/feed.json", got.PlaylistURL)
+}
+
+func TestFileStoreLoadZeroSourceReturnsNil(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	json := wrapper.NewJSON()
+	store := playlistschedule.NewFileStore(mockOS, json)
+	data, err := json.Marshal(playlistschedule.Source{})
+	require.NoError(t, err)
+
+	mockOS.EXPECT().
+		ReadFile(constant.DISPLAY_AT_PLAYLIST_FILE).
+		Return(data, nil)
+	mockOS.EXPECT().
+		IsNotExist(nil).
+		Return(false)
+
+	got, err := store.Load()
+	require.NoError(t, err)
+	assert.Nil(t, got)
 }
 
 func TestFileStoreLoadMissingReturnsNil(t *testing.T) {
@@ -80,7 +99,7 @@ func TestFileStoreLoadCorruptJSONReturnsError(t *testing.T) {
 	got, err := store.Load()
 	require.Error(t, err)
 	assert.Nil(t, got)
-	assert.Contains(t, err.Error(), "decode displayAt playlist cache")
+	assert.Contains(t, err.Error(), "decode displayAt source cache")
 }
 
 func TestFileStoreSaveWritesTempThenRenames(t *testing.T) {
@@ -98,14 +117,15 @@ func TestFileStoreSaveWritesTempThenRenames(t *testing.T) {
 	mockOS.EXPECT().
 		WriteFile(tmp, gomock.AssignableToTypeOf([]byte{}), os.FileMode(0o600)).
 		DoAndReturn(func(_ string, data []byte, _ os.FileMode) error {
-			assert.Contains(t, string(data), `"id":"future"`)
+			assert.Contains(t, string(data), `"playlistUrl":"https://example.com/feed.json"`)
+			assert.NotContains(t, string(data), `"playlist"`)
 			return nil
 		})
 	mockOS.EXPECT().
 		Rename(tmp, constant.DISPLAY_AT_PLAYLIST_FILE).
 		Return(nil)
 
-	require.NoError(t, store.Save(storeTestPlaylist()))
+	require.NoError(t, store.Save(playlistschedule.Source{PlaylistURL: "https://example.com/feed.json"}))
 }
 
 func TestFileStoreSavePropagatesWriteAndRenameFailures(t *testing.T) {
@@ -120,7 +140,7 @@ func TestFileStoreSavePropagatesWriteAndRenameFailures(t *testing.T) {
 				writeErr := errors.New("disk full")
 				mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil)
 				mockOS.EXPECT().WriteFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(writeErr)
-				return store.Save(storeTestPlaylist())
+				return store.Save(playlistschedule.Source{PlaylistURL: "https://example.com/feed.json"})
 			},
 			want: "write displayAt playlist cache",
 		},
@@ -131,7 +151,7 @@ func TestFileStoreSavePropagatesWriteAndRenameFailures(t *testing.T) {
 				mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil)
 				mockOS.EXPECT().WriteFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 				mockOS.EXPECT().Rename(gomock.Any(), gomock.Any()).Return(renameErr)
-				return store.Save(storeTestPlaylist())
+				return store.Save(playlistschedule.Source{PlaylistURL: "https://example.com/feed.json"})
 			},
 			want: "finalize displayAt playlist cache",
 		},
@@ -170,22 +190,4 @@ func TestFileStoreClearWritesEmptyTempThenRenames(t *testing.T) {
 		Return(nil)
 
 	require.NoError(t, store.Clear())
-}
-
-func storeTestPlaylist() *dp1.Playlist {
-	displayAt := "2026-07-22T00:00:00Z"
-	return &dp1.Playlist{
-		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
-			Items: []dp1playlist.PlaylistItem{
-				{
-					ID:        "future",
-					Title:     "Future",
-					Source:    "https://example.com/future.html",
-					DisplayAt: &displayAt,
-				},
-			},
-		},
-	}
 }

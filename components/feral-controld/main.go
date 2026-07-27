@@ -592,7 +592,6 @@ func initializeApp(
 	playlistScheduler := playlistschedule.NewWithStore(context, cdp, clock, nil,
 		playlistschedule.NewFileStore(os, json), logger)
 	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)
-	devicectl.SetPlaylistScheduler(executor, playlistScheduler, logger)
 
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)

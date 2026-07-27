@@ -206,13 +206,14 @@ func (r *refresher) processPlayingPlaylist() error {
 	var schedulerSource playlistschedule.Source
 	switch {
 	case playerStatus.PlaylistURL != nil:
+		schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
 		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
 		if err != nil {
 			return r.handleRefreshError(err, "playlist URL")
 		}
-		schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
 	case playerStatus.Playlist != nil:
 		if playerStatus.Playlist.HasDynamicContent() {
+			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
 			playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
 			if err != nil {
 				return r.handleRefreshError(err, "dynamic playlist")

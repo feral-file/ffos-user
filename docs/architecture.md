@@ -137,7 +137,7 @@ Each service owns its own state files exclusively. No service should read or wri
 |---|---|---|
 | `feral-controld` | `/home/feralfile/.state/controld.state` | Relayer topic ID, connected device (ID, name, platform) |
 | `feral-controld` | `/home/feralfile/.state/screen-orientation` | Last committed screen orientation value |
-| `feral-controld` | `/home/feralfile/.state/display-at-playlist.json` | Full DP-1 playlist for the active `schedule.byDisplayAt` cast, used to recover future item cutovers after a controld-only restart when current player status can validate ownership from a URL or dynamic source |
+| `feral-controld` | `/home/feralfile/.state/display-at-playlist.json` | Refreshable source identity for the active `schedule.byDisplayAt` cast. The resolved full playlist is memory-only and is refetched after a controld-only restart; if refetch fails, the player keeps its current artwork until a later retry succeeds |
 | `feral-controld` | `/home/feralfile/.state/analytics-toggle-off` | Presence = analytics disabled |
 | `feral-controld` | `/home/feralfile/.state/beta-features-toggle-on` | Presence = beta features enabled |
 | `feral-controld` | `/home/feralfile/.state/saved-volume` | Persisted volume level |

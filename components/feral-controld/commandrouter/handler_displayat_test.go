@@ -385,7 +385,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 	assert.Equal(t, "now_display", intent["action"])
 }
 
-func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *testing.T) {
+func TestCommandHandler_Process_DisplayDefaultPlaylist_DoesNotClearDisplayAtCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -431,15 +431,21 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 		Arguments: map[string]interface{}{},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 1, track.clearThenFn, "default playlist must ClearThenWithPlayerPush")
-	assert.False(t, track.HasCache())
+	assert.Equal(t, 0, track.clearThenFn, "default playlist must not clear scheduler cache without takeover proof")
+	assert.True(t, track.HasCache())
 
-	// Recompute after default must not resurrect the old Daily cast.
-	mockCDP.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+	mockCDP.EXPECT().Initialized().Return(true)
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, `"id":"day22"`)
+			return playerOkResponse(), nil
+		},
+	)
 	track.RecomputeNow(ctx)
 }
 
-func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectRestoresCache(t *testing.T) {
+func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectLeavesCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -487,7 +493,8 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectRestoresCache
 		Arguments: map[string]interface{}{},
 	})
 	require.NoError(t, err)
-	assert.True(t, track.HasCache(), "default rejection must restore previous displayAt cache")
+	assert.Equal(t, 0, track.clearThenFn, "default playlist rejection must not enter clear/restore flow")
+	assert.True(t, track.HasCache(), "default rejection must leave previous displayAt cache intact")
 
 	mockCDP.EXPECT().Initialized().Return(true)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(

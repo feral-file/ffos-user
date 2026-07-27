@@ -170,6 +170,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 
 				if playlist.HasDynamicContent() {
+					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
 					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
@@ -196,17 +197,12 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
-		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
-		// scheduler push lock with RecomputeNow so a stale timed push cannot
-		// land after a newer cast or after default playback takes over.
+		// Forward to CDP. displayPlaylist shares the scheduler push lock with
+		// RecomputeNow so a stale timed push cannot land after a newer cast.
+		// displayDefaultPlaylist is player-owned fallback today; it may no-op
+		// successfully, so this path must not clear scheduler authority until
+		// controld can prove that default playback replaced the current playlist.
 		switch {
-		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
-			// Clear + CDP under one pushMu hold: Clear alone is not enough if
-			// RecomputeNow already snapshotted and is waiting to push.
-			h.scheduler.ClearThenWithPlayerPush(func() bool {
-				result, err = h.sendCDPRequest(command)
-				return err == nil && playerresponse.OK(result)
-			})
 		case commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
 				schedulerSnapshot = h.scheduler.Snapshot()
