@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -58,7 +59,7 @@ func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	assert.False(t, sched.HasCache())
 }
 
-func TestPrepare_DisplayAtWithoutSchedule_FiltersAndCaches(t *testing.T) {
+func TestPrepare_DisplayAtWithoutSchedule_PassthroughAndClearsCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -94,8 +95,8 @@ func TestPrepare_DisplayAtWithoutSchedule_FiltersAndCaches(t *testing.T) {
 	}
 	got := sched.Prepare(withoutSchedule)
 	require.NotNil(t, got)
-	assert.Equal(t, []string{"old"}, itemIDs(got.Items))
-	assert.True(t, sched.HasCache())
+	assert.Equal(t, []string{"old", "new"}, itemIDs(got.Items))
+	assert.False(t, sched.HasCache())
 }
 
 func TestPrepare_DisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
@@ -162,10 +163,90 @@ func TestPrepare_DisplayAt_PersistsFullPlaylistAndClearDeletes(t *testing.T) {
 	)
 	active := sched.Prepare(full)
 	require.Equal(t, []string{"today"}, itemIDs(active.Items))
+	assert.Nil(t, store.saved, "Prepare must not persist before the player accepts the cast")
+
+	sched.Commit()
 	require.NotNil(t, store.saved)
 	assert.Equal(t, []string{"today", "tomorrow"}, itemIDs(store.saved.Items))
 
 	sched.Clear()
+	assert.False(t, store.cleared, "Clear must not persist before the player accepts the replacement")
+	assert.NotNil(t, store.saved, "durable cache must still reflect the last accepted scheduled cast")
+
+	sched.Commit()
+	assert.True(t, store.cleared)
+	assert.Nil(t, store.saved)
+}
+
+func TestPrepare_NonScheduledClearRequiresCommit(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	store := &memoryStore{}
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.Prepare(displayAtPlaylist(item("today", "2026-07-22T00:00:00Z")))
+	sched.Commit()
+	require.NotNil(t, store.saved)
+
+	plain := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		Title: "Plain",
+		Items: []dp1playlist.PlaylistItem{item("plain", "")},
+	}}
+	active := sched.Prepare(plain)
+	require.Equal(t, []string{"plain"}, itemIDs(active.Items))
+	assert.False(t, sched.HasCache())
+	assert.False(t, store.cleared, "non-scheduled replacement must not clear durable cache before player acceptance")
+	assert.NotNil(t, store.saved)
+
+	sched.Commit()
+	assert.True(t, store.cleared)
+	assert.Nil(t, store.saved)
+}
+
+func TestClearThenWithPlayerPush_ClearRequiresAcceptedDefault(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	store := &memoryStore{}
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	_ = sched.Prepare(displayAtPlaylist(item("today", "2026-07-22T00:00:00Z")))
+	sched.Commit()
+	require.NotNil(t, store.saved)
+
+	sched.ClearThenWithPlayerPush(func() bool { return false })
+	assert.True(t, sched.HasCache())
+	assert.False(t, store.cleared, "rejected default must not clear durable cache")
+	assert.NotNil(t, store.saved)
+
+	sched.ClearThenWithPlayerPush(func() bool { return true })
+	assert.False(t, sched.HasCache())
 	assert.True(t, store.cleared)
 	assert.Nil(t, store.saved)
 }
@@ -195,6 +276,7 @@ func TestStop_CancelsTimerWithoutClearingPersistedPlaylist(t *testing.T) {
 		item("today", "2026-07-22T00:00:00Z"),
 		item("tomorrow", "2026-07-23T00:00:00Z"),
 	))
+	sched.Commit()
 	require.NotNil(t, store.saved)
 
 	sched.Stop()
@@ -460,6 +542,7 @@ func TestPrepare_InvalidPresentDisplayAt_StillSchedules(t *testing.T) {
 	emptyDisplayAt := ""
 	active := sched.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "invalid", Source: "https://example.com/invalid.html", DisplayAt: &emptyDisplayAt},
 				item("intro", ""),
@@ -499,8 +582,9 @@ func TestPrepare_AllFuture_ReturnsOnlyEvergreen(t *testing.T) {
 func displayAtPlaylist(items ...dp1playlist.PlaylistItem) *dp1.Playlist {
 	return &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title: "Daily",
-			Items: items,
+			Title:    "Daily",
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Items:    items,
 		},
 	}
 }

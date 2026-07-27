@@ -57,16 +57,17 @@ for relayer topic assignment:
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
   through CDP as `window.handleCDPRequest(...)`. Controld defaults missing CDP
   `intent.action` to `now_display` so the player accepts the cast. When the
-  playlist contains item-level `displayAt` values, controld filters them to the
-  current active set before CDP, caches the full playlist, and advances the
-  player on the next `displayAt` (timer),
+  playlist opts into `schedule.byDisplayAt` and contains item-level `displayAt`
+  values, controld filters them to the current active set before CDP, commits
+  the full playlist to durable cache only after the player accepts that filtered
+  cast, and advances the player on the next `displayAt` (timer),
   sleep-schedule wake, or CDP reconnect with a force cast
   (`intent.action=now_display`, not `refresh: true`) so cutover is not deferred
   until the current artwork duration ends. URL / dynamic playlist refresh still
   uses `refresh: true`, except the first scheduled reconstruction after a
   controld restart force-casts because scheduler ownership may need to be
-  restored from persisted state. Playlists without item-level `displayAt` are
-  otherwise forwarded unchanged.
+  restored from persisted state. Playlists without `schedule.byDisplayAt` or
+  without item-level `displayAt` are otherwise forwarded unchanged.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
@@ -272,15 +273,17 @@ The player rejects `displayPlaylist` without a known DP1 action
 5-minute URL/dynamic refresher path (`refresh: true`), which does not use this
 cast default.
 
-When the resolved playlist contains item-level `displayAt` values, controld
-computes an active set (`max(displayAt <= now)` items plus items without
-`displayAt`) and sends only that filtered playlist to Chromium. Timezone-less
-`displayAt` values use device local time; values with `Z`/offset are absolute.
-Date-only (`YYYY-MM-DD`) is rejected per DP-1 §3.5.2 (not evergreen). If no
-playlist item has `displayAt`, controld forwards the full playlist unchanged.
-Controld persists the full playlist and keeps it in memory to arm the next
-`displayAt` transition and to recompute after wake, CDP reconnect, or a
-controld-only restart. Initial casts and
+When the resolved playlist opts into `schedule.byDisplayAt` and contains
+item-level `displayAt` values, controld computes an active set
+(`max(displayAt <= now)` items plus items without `displayAt`) and sends only
+that filtered playlist to Chromium. Timezone-less `displayAt` values use device
+local time; values with `Z`/offset are absolute. Date-only (`YYYY-MM-DD`) is
+rejected per DP-1 §3.5.2 (not evergreen). If `schedule.byDisplayAt` is absent /
+false, or no playlist item has `displayAt`, controld forwards the full playlist
+unchanged. Controld keeps the full playlist in memory while casting, persists it
+only after the player accepts the filtered cast, and uses that committed cache to
+arm the next `displayAt` transition and to recompute after wake, CDP reconnect,
+or a controld-only restart. Initial casts and
 timed / wake / reconnect pushes are force casts (`intent.action=now_display`
 without `refresh`) so the player applies the playlist immediately even if the
 current artwork still has remaining duration; the 5-minute URL/dynamic

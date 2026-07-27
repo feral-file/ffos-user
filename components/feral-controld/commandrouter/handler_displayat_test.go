@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -52,7 +53,8 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title: "Daily",
+			Title:    "Daily",
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day21", Title: "Day 21", Source: "https://example.com/21.html", DisplayAt: strPtr("2026-07-21T00:00:00Z")},
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
@@ -246,6 +248,8 @@ func (t *trackingScheduler) WithPlayerPush(fn func()) {
 	t.pushCalls++
 	t.inner.WithPlayerPush(fn)
 }
+func (t *trackingScheduler) AuthorityToken() uint64              { return t.inner.AuthorityToken() }
+func (t *trackingScheduler) Commit()                             { t.inner.Commit() }
 func (t *trackingScheduler) Snapshot() playlistschedule.Snapshot { return t.inner.Snapshot() }
 func (t *trackingScheduler) Restore(s playlistschedule.Snapshot) { t.inner.Restore(s) }
 func (t *trackingScheduler) HasCache() bool                      { return t.inner.HasCache() }
@@ -283,7 +287,8 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title: "Daily",
+			Title:    "Daily",
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -331,6 +336,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_ClearsDisplayAtCache(t *t
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -384,6 +390,7 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectRestoresCache
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -442,7 +449,8 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title: "Old",
+		Title:    "Old",
+		Schedule: &playlists.Schedule{ByDisplayAt: true},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -452,7 +460,8 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title: "New",
+		Title:    "New",
+		Schedule: &playlists.Schedule{ByDisplayAt: true},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -506,7 +515,8 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title: "Old",
+		Title:    "Old",
+		Schedule: &playlists.Schedule{ByDisplayAt: true},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -516,7 +526,8 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title: "New",
+		Title:    "New",
+		Schedule: &playlists.Schedule{ByDisplayAt: true},
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},

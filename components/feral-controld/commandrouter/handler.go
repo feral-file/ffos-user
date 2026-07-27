@@ -216,6 +216,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if err != nil || !isPlayerResponseOk(result) {
 					h.scheduler.Restore(schedulerSnapshot)
 					schedulerRestored = true
+				} else {
+					h.scheduler.Commit()
 				}
 			})
 		default:

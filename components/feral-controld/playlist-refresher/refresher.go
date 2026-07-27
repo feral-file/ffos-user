@@ -181,6 +181,11 @@ func (r *refresher) processPlayingPlaylist() error {
 		return errCDPNotReady
 	}
 
+	var authorityToken uint64
+	if r.scheduler != nil {
+		authorityToken = r.scheduler.AuthorityToken()
+	}
+
 	// Get player status
 	playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
 	if err != nil {
@@ -211,11 +216,13 @@ func (r *refresher) processPlayingPlaylist() error {
 				return r.handleRefreshError(err, "dynamic playlist")
 			}
 		} else {
-			if r.scheduler != nil && r.scheduler.RestoredPending() && playlistschedule.HasDisplayAtSchedule(playerStatus.Playlist) {
-				// Static inline displayAt player status only contains the active set,
-				// not the full playlist. Use it as an ownership signal for the
-				// persisted scheduler cache instead of calling Prepare with
-				// incomplete data.
+			if r.scheduler != nil && r.scheduler.RestoredPending() && playlistschedule.DisplayAtScheduleEnabled(playerStatus.Playlist) {
+				// Static inline displayAt player status only contains the active
+				// set, not the full playlist. For all-future schedules that active
+				// set can be empty, so the displayPlaylist command itself is the
+				// restart ownership signal when schedule.byDisplayAt is still set;
+				// the persisted full playlist remains the only source that can arm
+				// the first future boundary.
 				r.scheduler.ResumePersisted(r.context)
 				return nil
 			}
@@ -256,6 +263,10 @@ func (r *refresher) processPlayingPlaylist() error {
 	sendErr := error(nil)
 	send := func() {
 		if r.scheduler != nil {
+			if r.scheduler.AuthorityToken() != authorityToken {
+				r.logger.Debug("Skipping obsolete playlist refresh after playlist authority changed")
+				return
+			}
 			schedulerSnapshot = r.scheduler.Snapshot()
 			playlist = r.scheduler.Prepare(playlist)
 			schedulerMutated = true
@@ -279,6 +290,8 @@ func (r *refresher) processPlayingPlaylist() error {
 		sendErr = err
 		if schedulerMutated && (sendErr != nil || !playerResponseOK(result)) {
 			r.scheduler.Restore(schedulerSnapshot)
+		} else if schedulerMutated {
+			r.scheduler.Commit()
 		}
 	}
 	if r.scheduler != nil {
@@ -306,7 +319,7 @@ func playerResponseOK(result interface{}) bool {
 // failures. Schema/parse/logic errors must surface so a bad feed cannot pin the
 // device on a stale active set forever.
 func (r *refresher) handleRefreshError(err error, kind string) error {
-	if r.scheduler != nil && r.scheduler.HasCache() && isTransientPlaylistRefreshError(err) {
+	if r.scheduler != nil && r.scheduler.HasCache() && !r.scheduler.RestoredPending() && isTransientPlaylistRefreshError(err) {
 		r.logger.Warn("Playlist refresh failed transiently; recomputing from displayAt cache",
 			zap.String("kind", kind),
 			zap.Error(err))
