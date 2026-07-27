@@ -463,6 +463,89 @@ func TestCommandHandler_Process_DisplayPlaylist_WithPlaylistObject(t *testing.T)
 	assert.Equal(t, cdpResult, result)
 }
 
+// TestCommandHandler_Process_DisplayPlaylist_PreservesUnmodeledItemFields locks in
+// that a static inline playlist reaches the player as the caller's original map,
+// not a re-serialization of the typed dp1.Playlist. The typed struct models
+// spec-core fields only; round-tripping through it silently drops anything else —
+// item-level `metadata` (artist names for tombstone labels, ff-player#255) was
+// dropped exactly this way. The typed value must remain validation-only here.
+func TestCommandHandler_Process_DisplayPlaylist_PreservesUnmodeledItemFields(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	playlistMap := map[string]interface{}{
+		"items": []interface{}{
+			map[string]interface{}{
+				"id":       "item1",
+				"title":    "Pre-Process",
+				"source":   "https://example.com/work.html",
+				"duration": 240,
+				// Not modeled by dp1-go's PlaylistItem; must survive to the player.
+				"metadata": map[string]interface{}{
+					"title":   "Pre-Process",
+					"artists": []interface{}{map[string]interface{}{"name": "Casey Reas"}},
+				},
+			},
+		},
+	}
+	playlistBytes := []byte(`{"items":[{"id":"item1","title":"Pre-Process"}]}`)
+	mockPlaylist := &dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Items: []dp1playlist.PlaylistItem{
+				{
+					ID:       "item1",
+					Title:    "Pre-Process",
+					Source:   "https://example.com/work.html",
+					Duration: float64Ptr(240),
+				},
+			},
+		},
+	}
+
+	command := commands.Command{
+		Type: commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: map[string]interface{}{
+			"dp1_call": playlistMap,
+		},
+	}
+
+	ts.mockJSON.EXPECT().
+		Marshal(playlistMap).
+		Return(playlistBytes, nil).
+		Times(1)
+
+	ts.mockJSON.EXPECT().
+		Unmarshal(playlistBytes, gomock.Any()).
+		DoAndReturn(func(data []byte, v interface{}) error {
+			playlist := v.(**dp1.Playlist)
+			*playlist = mockPlaylist
+			return nil
+		}).
+		Times(1)
+
+	var sentExpression string
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(method string, params map[string]interface{}) (map[string]interface{}, error) {
+			sentExpression, _ = params["expression"].(string)
+			return playerOkResponse(), nil
+		}).
+		Times(1)
+
+	ts.mockStatusPoller.EXPECT().
+		ForceRefresh().
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	// The forwarded payload must carry the unmodeled field; the typed
+	// re-serialization would have dropped it.
+	assert.Contains(t, sentExpression, `"metadata"`)
+	assert.Contains(t, sentExpression, "Casey Reas")
+}
+
 func TestCommandHandler_Process_RefreshArtwork(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

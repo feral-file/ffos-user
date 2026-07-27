@@ -131,6 +131,19 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					status.RecordPlaybackFailure()
 				}
 			}()
+			// forward is what actually reaches the player as dp1_call. The typed
+			// dp1.Playlist models spec-core fields only, so re-serializing it strips
+			// anything beyond that set — including item-level `metadata`, which the
+			// player reads for tombstone labels (ff-player#255). For a static inline
+			// playlist the typed value exists only to validate shape and detect
+			// dynamic content, so the caller's original map is forwarded instead and
+			// unmodeled fields survive. Dynamic playlists forward the processed typed
+			// result: resolution rewrites the item list, so the raw map no longer
+			// describes what should play. playlistUrl playlists also forward typed —
+			// the fetch happens inside the dp1 package, which never exposes the raw
+			// document; lifting that needs a ProcessPlaylistURL API change and is
+			// deliberately out of scope here.
+			var forward any
 			switch {
 			case command.Arguments["playlistUrl"] != nil:
 				url, ok := command.Arguments["playlistUrl"].(string)
@@ -142,6 +155,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if err != nil {
 					return nil, err
 				}
+				forward = playlist
 
 			case command.Arguments["dp1_call"] != nil:
 				playlistMap, ok := command.Arguments["dp1_call"].(map[string]interface{})
@@ -165,13 +179,16 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err
 					}
+					forward = playlist
+				} else {
+					forward = playlistMap
 				}
 
 			default:
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
-			command.Arguments["dp1_call"] = playlist
+			command.Arguments["dp1_call"] = forward
 
 		}
 
