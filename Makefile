@@ -1,5 +1,5 @@
 .PHONY: verify
-verify: verify-go verify-setupd
+verify: verify-go verify-scripts
 
 .PHONY: verify-go
 verify-go: \
@@ -59,20 +59,12 @@ verify-go-component-test:
 	@test -n "$(GO_COMPONENT)" || (echo "GO_COMPONENT is required" >&2; exit 2)
 	@cd components/$(GO_COMPONENT) && go mod download
 	@cd components/$(GO_COMPONENT) && go vet ./...
-	@cd components/$(GO_COMPONENT) && go test -v $$(go list ./... | grep -vE "/mocks|/wrapper")
+	@cd components/$(GO_COMPONENT) && go test -v -race $$(go list ./... | grep -vE "/mocks|/wrapper")
 
-.PHONY: verify-setupd
-verify-setupd: verify-setupd-lint verify-setupd-test
-
-.PHONY: verify-setupd-lint
-verify-setupd-lint:
-	@cd components/feral-setupd && cargo fmt -- --check
-	@cd components/feral-setupd && cargo clippy --all-targets --all-features -- -D warnings
-	@cd components/feral-setupd && cargo check --all-targets --all-features --verbose
-
-.PHONY: verify-setupd-test
-verify-setupd-test:
-	@cd components/feral-setupd && cargo check --verbose
+# verify-scripts pins the user-session shell contracts that ship only on the
+# full-image rail (feral-player static serving + the headless startup contract).
+# These have no cargo/go test to run them, so they are their own verify target.
+.PHONY: verify-scripts
+verify-scripts:
 	@./scripts/test-serve-feral-player.sh
 	@./scripts/test-headless-startup-contract.sh
-	@cd components/feral-setupd && cargo test --all-targets --all-features --verbose

@@ -223,7 +223,14 @@ func (r *refresher) processPlayingPlaylist() error {
 			return nil
 		}
 	default:
-		r.logger.Debug("Player status has no playlist URL or playlist, skipping")
+		// A displayPlaylist status carrying neither a URL nor an inline playlist
+		// is the player's fresh-boot/unconfigured state (nothing assigned yet),
+		// not a failure. Returning an error here would pin the startup loop at
+		// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
+		// long as the device sits unconfigured — hours on a first boot with no
+		// network. There is nothing to refresh; report success so the refresher
+		// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence.
+		r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
 		return nil
 	}
 

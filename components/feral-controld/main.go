@@ -34,10 +34,14 @@ import (
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	"github.com/feral-file/ffos-user/components/feral-controld/softap"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/watchdog"
+	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
@@ -52,7 +56,13 @@ var (
 
 type app struct {
 	// Basic components
-	Ctx    context.Context
+	Ctx context.Context
+	// Cancel cancels Ctx. Long-lived components built in initializeApp (the hub
+	// shutdown watcher, the claim flow's claimCtx, the playlist refresher) hold
+	// Ctx directly, so shutdown must cancel at this root — canceling a child
+	// context derived later would leave those paths running on a live context.
+	// Nil in the test app, which passes its own ctx.
+	Cancel context.CancelFunc
 	Logger *zap.Logger
 
 	// Wrappers
@@ -81,6 +91,16 @@ type app struct {
 	PlaylistScheduler playlistschedule.Scheduler
 	MintPairing       mintpairing.Service
 	Hub               hub.Hub
+	LinkChecker       *status.LinkChecker
+
+	// Provisioning is the setup-AP trigger state machine. run() starts it
+	// unconditionally; left nil in the test app. Typed as an interface so tests
+	// can inject an ordering spy.
+	Provisioning provisioningRunner
+	// SetupUI is the on-screen setup-narration surface driven by the provisioning
+	// domain. run() re-pushes its last state (Resync) when CDP (re)connects so a
+	// late-loading player catches up. Nil in the test app.
+	SetupUI *setupui.Service
 }
 
 func main() {
@@ -133,8 +153,9 @@ func main() {
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
 		})
 
-	// Create context for graceful shutdown
-	ctx, cancel := context.WithCancel(app.Ctx)
+	// Graceful shutdown cancels the app-lifetime context created in
+	// initializeApp (see app.Cancel).
+	ctx, cancel := app.Ctx, app.Cancel
 	defer cancel()
 
 	// Handle signals for graceful shutdown
@@ -165,10 +186,21 @@ func main() {
 }
 
 func (app *app) run(ctx context.Context, conf *config.Config) error {
-	// Load state
+	// Load state. A load failure must NOT abort startup: controld is the sole
+	// SoftAP/LAN-recovery owner, so returning here would crash-loop the daemon
+	// (Restart=always with no start limit) and strand an offline device with
+	// no setup AP and no LAN hub — the exact unrecoverable state this daemon
+	// exists to prevent. Quarantine the unreadable file (best-effort rename,
+	// preserving the bytes for diagnosis instead of overwriting them) and
+	// continue on a fresh empty state: the worst case is the device presents
+	// as unclaimed and re-pairs, which the claim flow handles.
 	s, err := state.Load(app.Logger)
 	if err != nil {
-		return err
+		app.Logger.Error("Failed to load persisted state; quarantining it and continuing with empty state", zap.Error(err))
+		if rerr := app.OS.Rename(constants.STATE_FILE, constants.STATE_FILE+".corrupt"); rerr != nil {
+			app.Logger.Warn("Failed to quarantine state file", zap.Error(rerr))
+		}
+		s = state.GetState() // installs and returns a fresh empty state
 	}
 
 	// Set global topic ID in Sentry if available
@@ -180,26 +212,98 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	app.Watchdog.Start(ctx)
 	defer app.Watchdog.Stop()
 
-	// Initialize DBus client
-	err = app.DBus.Start()
-	if err != nil {
-		return err
+	// Initialize DBus client. NON-FATAL: controld is the sole SoftAP/LAN
+	// recovery owner, and D-Bus startup can fail transiently — the session bus
+	// socket may not be up yet at boot, or the com.feralfile.controld name may
+	// still be held by a dying predecessor during a restart race. Returning
+	// here crash-looped the daemon before the hub or provisioning ever
+	// started, leaving an offline device with NEITHER recovery surface.
+	// Continue startup and retry in the background instead: every D-Bus
+	// consumer degrades gracefully until a retry succeeds (Call errors →
+	// provisioning's connUnknown discipline assumes offline and keeps
+	// re-querying, so the setup AP still raises; handler registrations are
+	// recorded by the Restartable wrapper and replayed onto the client that
+	// finally starts).
+	//
+	// Restart safety lives in dbus.Restartable, not here: each retry builds a
+	// FRESH underlying godbus client, started before publication, so retries
+	// never race live Call/Stop and never accumulate signal registrations on
+	// the shared bus (failed attempts are torn down with their connection).
+	// See dbus/restartable.go for the godbus hazards this design closes.
+	if err := app.DBus.Start(); err != nil {
+		app.Logger.Error("DBus start failed; continuing startup and retrying in background", zap.Error(err))
+		go func() {
+			backoff := time.Second
+			for {
+				if serr := app.Clock.SleepContext(ctx, backoff); serr != nil {
+					return
+				}
+				if serr := app.DBus.Start(); serr == nil {
+					app.Logger.Info("DBus client started after retry")
+					return
+				} else { //nolint:revive // keep the retry outcome branches adjacent
+					app.Logger.Warn("DBus start retry failed", zap.Error(serr), zap.Duration("backoff", backoff))
+				}
+				if backoff *= 2; backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+			}
+		}()
 	}
 	defer func() {
 		_ = app.DBus.Stop()
 	}()
 
-	dbusHandler := dbus.NewHandler(ctx, app.Relayer, app.Logger)
-	err = app.DBus.Export(dbusHandler, dbus.PATH, dbus.INTERFACE)
-	if err != nil {
-		return err
-	}
-
 	// Initialize Mediator
 	app.Mediator.Start()
 	defer app.Mediator.Stop()
 
-	// Get connectivity status and connect to relayer if ready
+	// P2.5 startup ordering: the local recovery + setup surfaces (hub + mDNS, then
+	// the provisioning domain) come up BEFORE the relayer/CDP init below and never
+	// wait on them. The relayer connection is a best-effort, never-fatal step (see
+	// the gate further down); bringing the LAN hub and the SoftAP setup path up
+	// first means a device that cannot reach the relayer at all can still be
+	// recovered over the LAN and can still raise its setup AP. Nothing here depends
+	// on the relayer or CDP being up.
+
+	// Start Hub if enabled. The hub listener stays bound unconditionally (it is
+	// the BLE-replacement LAN recovery channel), while mDNS *discoverability* is
+	// keyed on link state inside the mediator — see InitializeMDNS.
+	if conf.HubEnabled() {
+		app.Hub.Start()
+		defer func() {
+			if err := app.Hub.Stop(); err != nil {
+				app.Logger.Warn("Failed to stop hub", zap.Error(err))
+			}
+		}()
+
+		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
+		deviceInfo.Claimed = s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != ""
+		advertiser := mdns.New(app.Logger)
+		defer advertiser.Stop()
+
+		// Key mDNS on link state, not the internet-reachability `connected` flag.
+		app.Mediator.InitializeMDNS(advertiser, deviceInfo, app.LinkChecker)
+	}
+
+	// Start the provisioning (setup-AP) domain. controld owns device setup, so the
+	// machine runs its own supervised event loop; its startup cannot be aborted by
+	// a relayer or CDP failure below (both come after this point). app.Provisioning
+	// is nil in the test app; guard for it.
+	if app.Provisioning != nil {
+		app.Logger.Info("Starting provisioning domain")
+		app.Provisioning.Start(ctx)
+		defer app.Provisioning.Stop()
+	}
+
+	// Get connectivity status and connect to relayer if ready. This gate is a
+	// one-shot LATENCY fast path, not the thing that guarantees a relayer
+	// connection: its connectivity snapshot can be wrong-and-final (taken
+	// while D-Bus is still down on an already-online network, where no
+	// connectivity TRANSITION will ever fire to correct it). Durability comes
+	// from the mediator, which reconciles the relayer connection against
+	// connectivity on every periodic SYSMETRICS heartbeat — see
+	// mediator.reconcileRelayer.
 	connected, err := getConnectivityStatus(ctx, app.DBus, app.Logger)
 	if err != nil {
 		app.Logger.Error("Failed to get connectivity status", zap.Error(err))
@@ -211,19 +315,27 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		zap.Bool("relayer_ready", s.Relayer.IsReady()),
 		zap.String("topic_id", s.Relayer.TopicID),
 	)
-	if connected && s.Relayer.IsReady() {
+	// Gate on reachability ONLY, never on IsReady(): connecting with an empty
+	// topic is the designed topic-ASSIGNMENT path (relayer.Connect omits the
+	// topicID query param and the server answers with a MESSAGE_ID_SYSTEM
+	// carrying the assigned topic, which the mediator persists). Gating on
+	// IsReady() stranded factory-fresh devices that boot already online: no
+	// connectivity CHANGE event ever fires on them, so the mediator's
+	// restore handler never runs either, no topic is ever assigned, and the
+	// auto-claim flow times out waiting for one.
+	if connected {
 		app.Logger.Info("Connecting relayer during startup")
 		err = app.Relayer.Connect(ctx)
 		if err != nil {
-			// Never fatal: returning here would exit before SdNotifyReady and before our
-			// D-Bus interface has been up long enough for setupd's wait_for_controld, so a
-			// relayer outage would crash-loop this daemon AND take BLE provisioning down
-			// with it — the exact coupling the unconditional-start model exists to remove
-			// (.start-services.sh starts us --no-block precisely because pre-READY failure
-			// can happen). Retry in the background instead; the mediator's
-			// connectivity-restored handler and the GetRelayerInfo D-Bus path also
-			// re-attempt the connection, and RetryableConnect tolerates racing them
-			// (ErrAlreadyConnected is success).
+			// Never fatal: returning here would exit before SdNotifyReady, so a relayer
+			// outage would crash-loop this daemon and take the in-process SoftAP
+			// provisioning and LAN recovery down with it — the exact coupling the
+			// unconditional-start model exists to remove (.start-services.sh starts us
+			// --no-block precisely because pre-READY failure can happen). Retry in the
+			// background instead; the mediator's connectivity-change handler and
+			// heartbeat reconcile also re-attempt the connection, and
+			// RetryableConnect tolerates racing them (ErrAlreadyConnected is
+			// success).
 			app.Logger.Error("Failed initial relayer connection, retrying in background", zap.Error(err))
 			go func() {
 				if retryErr := app.Relayer.RetryableConnect(ctx); retryErr != nil {
@@ -233,32 +345,17 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		} else {
 			app.Logger.Info("Initial relayer connection established")
 		}
-		// Close regardless of whether the *initial* connect succeeded: the background
-		// retry (or a later mediator/D-Bus reconnect) may have established the
-		// connection by shutdown time, and Close is a no-op on a nil conn.
-		defer app.Relayer.Close()
 	} else {
 		app.Logger.Info("Skipping initial relayer connection",
 			zap.Bool("internet_connected", connected),
 			zap.Bool("relayer_ready", s.Relayer.IsReady()),
 		)
 	}
-
-	// Start Hub if enabled
-	if conf.EnableHub {
-		app.Hub.Start()
-		defer func() {
-			if err := app.Hub.Stop(); err != nil {
-				app.Logger.Warn("Failed to stop hub", zap.Error(err))
-			}
-		}()
-
-		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
-		advertiser := mdns.New(app.Logger)
-		defer advertiser.Stop()
-
-		app.Mediator.InitializeMDNS(advertiser, deviceInfo, connected)
-	}
+	// Close unconditionally: a connection can exist at shutdown regardless of
+	// this gate's snapshot — the background retry, the mediator's
+	// connectivity-change handler, or its heartbeat reconcile may have
+	// established one — and Close is a no-op on a nil conn.
+	defer app.Relayer.Close()
 
 	// Register scheduler Stop before refresher Stop so LIFO shutdown stops the
 	// refresher first — otherwise a late Prepare could re-arm a displayAt
@@ -300,6 +397,12 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			app.PlaylistScheduler.RecomputeNow(ctx)
 		}
 		app.StatusPoller.ForceRefresh()
+		// Re-push the last setup-narration state so a freshly-(re)loaded player
+		// catches up to where provisioning currently is. No-op if nothing has been
+		// narrated yet or (test app) no narrator is wired.
+		if app.SetupUI != nil {
+			app.SetupUI.Resync()
+		}
 	})
 	defer app.CDP.Close()
 
@@ -402,8 +505,10 @@ func initializeApp(
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
-	// Basic components
-	context := context.Background()
+	// Basic components. This is the daemon-lifetime context: it flows into every
+	// long-lived component built below, and main cancels it (app.Cancel) on
+	// SIGTERM so those components observe shutdown.
+	context, cancelApp := context.WithCancel(context.Background())
 
 	// Wrappers
 	clock := wrapper.NewClock()
@@ -428,8 +533,14 @@ func initializeApp(
 	// Relayer
 	relayer := relayer.New(relayerEndpoint, relayerAPIKey, webSocketDialer, randomizer, clock, os, json, logger)
 
-	// DBus
-	dbusClient := godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
+	// DBus. Wrapped in a Restartable adapter so a failed Start (session bus not
+	// up yet, name still held by a dying predecessor) can be retried by run()
+	// without racing live consumers: each attempt builds a fresh underlying
+	// client and only publishes it once fully started — see dbus.Restartable
+	// for why a raw godbus client must not be re-Started in place.
+	dbusClient := dbus.NewRestartable(logger, func() dbus.DBus {
+		return godbus.NewDBusClient(context, logger, dbusName, dbusOpts...)
+	})
 
 	// DeviceStatus
 	deviceStatus := status.NewDeviceStatus(json, os, exec, httpClient, io, cdp)
@@ -457,7 +568,6 @@ func initializeApp(
 	// Executor
 	executor := devicectl.New(
 		cdp,
-		dbusClient,
 		deviceStatus,
 		poller,
 		ddcPanel,
@@ -513,11 +623,70 @@ func initializeApp(
 	// Mediator
 	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
 
-	// Hub
-	hub := hub.New(context, wsHandler, cmdHandler, nil, json, logger)
+	// LinkChecker is the shared link-state seam keying mDNS/hub discoverability
+	// on the presence of any LAN link rather than internet reachability.
+	linkChecker := status.NewLinkChecker(exec, logger)
+
+	// Claim-state transitions (a successful connect) re-register mDNS with the
+	// updated `claimed` TXT. Wire the executor's observer to the mediator here so
+	// neither package depends on the other's concrete type.
+	executor.SetClaimObserver(mediator.SetClaimed)
+	// Factory reset revokes the live relayer session, not just the persisted
+	// topic (the staged reboot can be delayed or fail). Wired here for the same
+	// no-cross-import reason as the claim observer.
+	executor.SetRelayerCloser(relayer.Close)
+
+	// Provisioning domain (SoftAP setup). controld owns setup, so run() starts it
+	// unconditionally. The connectivity adapter reads sys-monitord over the shared
+	// D-Bus client; the WiredLink guard reuses the link checker so an unprovisioned
+	// ethernet device never pops the setup AP. Narration flows through a
+	// setupui.Service.
+	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
+	// One narration surface for the whole process: the executor's controld-owned
+	// claim / factory-reset / OTA-failure narration shares this exact instance with
+	// the provisioning domain below, so the single on-connect Resync() wired into
+	// CDP.Start re-pushes every narration state (not just provisioning's) when
+	// Chromium reconnects mid-setup.
+	executor.SetSetupUI(setupNarrator)
+	softAP := softap.NewNetworkManager(exec, logger, "", nil)
+	wifiCtl := wifictl.New(exec, clock, logger, "")
+	// The claim QR auto-paints when an unclaimed device comes online — the
+	// launcher-ui replacement (see MaybeShowClaimQROnOnline).
+	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context}
+	if ac, ok := executor.(autoClaimFlow); ok {
+		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
+		// Topic assignment re-triggers the claim flow: a factory-fresh device
+		// connects with no topic and may receive its system topic AFTER the
+		// flow's bounded topic wait expired — with no further online
+		// transition, nothing else would ever re-run it. The flow itself
+		// no-ops when settled or already in flight, so a spurious fire is
+		// harmless.
+		mediator.SetTopicObserver(func() { go ac.MaybeShowClaimQROnOnline(context) })
+	}
+	provMachine := provisioning.New(provisioning.Config{
+		AP:           softAP,
+		Wifi:         wifiCtl,
+		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
+		Clock:        clock,
+		Logger:       logger,
+		Notifier:     provisioningNotifier,
+		WiredLink:    linkChecker.HasWiredLink,
+	})
+
+	// Hub status provider. The base provider reads identity/version/claim/topic
+	// from on-device state and reports a placeholder setup_state; the wrapper lets
+	// the live provisioning machine supply the real setup_state.
+	baseStatusProvider := hub.NewStateStatusProvider(os, json, linkChecker, logger)
+	statusProvider := &provisioningStatusProvider{
+		base:     baseStatusProvider,
+		machine:  provMachine,
+		internet: internetProbeFrom(dbusClient, logger),
+	}
+	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
 
 	return &app{
 		Ctx:               context,
+		Cancel:            cancelApp,
 		Logger:            logger,
 		Clock:             clock,
 		OS:                os,
@@ -542,6 +711,9 @@ func initializeApp(
 		PlaylistScheduler: playlistScheduler,
 		MintPairing:       mintPairing,
 		Hub:               hub,
+		LinkChecker:       linkChecker,
+		Provisioning:      provMachine,
+		SetupUI:           setupNarrator,
 	}
 }
 

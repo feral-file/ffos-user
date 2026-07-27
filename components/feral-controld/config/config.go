@@ -52,12 +52,22 @@ type Config struct {
 	RelayerConfig     *RelayerConfig       `json:"relayer"`
 	MintPairingConfig *MintPairingConfig   `json:"mintPairing"`
 	SentryConfig      *logger.SentryConfig `json:"sentry"`
-	EnableHub         bool                 `json:"enableHub"`
-	CommandStorm      *CommandStormConfig  `json:"commandStorm,omitempty"`
+	// EnableHub gates the LAN hub. It is a pointer so an absent key can default
+	// ON: the hub is the BLE-replacement recovery channel, so it must run
+	// unless an operator explicitly sets "enableHub": false. Read via
+	// HubEnabled(), never directly.
+	EnableHub    *bool               `json:"enableHub"`
+	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
+}
+
+// HubEnabled reports whether the LAN hub should run. It defaults ON: only an
+// explicit "enableHub": false disables it.
+func (c *Config) HubEnabled() bool {
+	return c.EnableHub == nil || *c.EnableHub
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager

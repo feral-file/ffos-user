@@ -112,6 +112,9 @@ func TestMediator_HandleDBusSignal_SysMetrics(t *testing.T) {
 					SaveLastSysMetrics(metricsData).
 					Times(1)
 
+				// A connected relayer short-circuits the heartbeat reconcile.
+				ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
+
 				payload := godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_SYSMETRICS,
 					Body:   []interface{}{metricsData},
@@ -351,16 +354,28 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 	}
 }
 
+// stubLinkState is a controllable status.LinkState for tests. It is mutable so a
+// test can advertise one link state at InitializeMDNS time (to suppress the
+// init-time Start) and another during the connectivity-change event.
+type stubLinkState struct{ hasLink bool }
+
+func (s *stubLinkState) HasLink(context.Context) bool { return s.hasLink }
+
 func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
 
 	tests := []struct {
-		name      string
-		setupFunc func(*testSetup, *mocks.MockAdvertiser) (godbus.DBusPayload, error)
+		name string
+		// linkUp is the link state during the connectivity-change event.
+		linkUp    bool
+		setupFunc func(*testSetup, *mocks.MockAdvertiser) godbus.DBusPayload
 	}{
 		{
-			name: "connectivity gained - restarts mDNS advertiser",
-			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+			// Internet restored with a link present: tear down stale sockets and
+			// re-register on the fresh interface set.
+			name:   "internet gained, link up - re-registers advertiser",
+			linkUp: true,
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
 				ts.mockCDP.EXPECT().
 					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 						"expression": "window.handleConnectivityChange(true)",
@@ -376,33 +391,39 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
 					Body:   []interface{}{true},
-				}, nil
+				}
 			},
 		},
 		{
-			name: "connectivity gained - mDNS start fails",
-			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+			// The core LAN-recovery regression: internet reachability dropped but
+			// a LAN link remains, so the advertiser MUST stay up (re-register),
+			// not tear down. Future stories must not re-couple this to internet.
+			name:   "internet lost but link up - advertiser stays up",
+			linkUp: true,
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
 				ts.mockCDP.EXPECT().
 					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-						"expression": "window.handleConnectivityChange(true)",
+						"expression": "window.handleConnectivityChange(false)",
 					}).
 					Return(map[string]interface{}{"result": "ok"}, nil).
 					Times(1)
 
-				ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(2)
+				ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
 
 				mockAdvertiser.EXPECT().Stop().Times(1)
-				mockAdvertiser.EXPECT().Start(deviceInfo).Return(errors.New("bind failed")).Times(1)
+				mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
 
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
-					Body:   []interface{}{true},
-				}, nil // mDNS start error is logged, not propagated
+					Body:   []interface{}{false},
+				}
 			},
 		},
 		{
-			name: "connectivity lost - stops mDNS advertiser",
-			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) (godbus.DBusPayload, error) {
+			// No link at all: stop and stay down.
+			name:   "internet lost and link down - advertiser stays down",
+			linkUp: false,
+			setupFunc: func(ts *testSetup, mockAdvertiser *mocks.MockAdvertiser) godbus.DBusPayload {
 				ts.mockCDP.EXPECT().
 					Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 						"expression": "window.handleConnectivityChange(false)",
@@ -417,7 +438,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 				return godbus.DBusPayload{
 					Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
 					Body:   []interface{}{false},
-				}, nil
+				}
 			},
 		},
 	}
@@ -428,7 +449,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 			defer ts.teardown()
 
 			mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
-			payload, expectedError := tt.setupFunc(ts, mockAdvertiser)
+			payload := tt.setupFunc(ts, mockAdvertiser)
 
 			var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
 			ts.mockDbus.EXPECT().
@@ -439,29 +460,289 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 
 			ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
 
+			// Initialize with link down so InitializeMDNS does not Start at init;
+			// then set the link state that the connectivity-change event sees.
+			link := &stubLinkState{hasLink: false}
 			ts.mediator.Start()
-			ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, false)
+			ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, link)
+			link.hasLink = tt.linkUp
 
 			result, err := capturedHandler(ts.ctx, payload)
 
-			if expectedError != nil {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), expectedError.Error())
-			} else {
-				assert.NoError(t, err)
-				assert.Nil(t, result)
-			}
+			assert.NoError(t, err)
+			assert.Nil(t, result)
 		})
 	}
+}
+
+// TestMediator_InitializeMDNS_LinkGated verifies mDNS starts at init only when a
+// link is present, and is independent of internet reachability.
+func TestMediator_InitializeMDNS_LinkGated(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
+
+	t.Run("link up - starts at init", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+	})
+
+	t.Run("link down - does not start at init", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// No Start expectation: a satisfied controller asserts Start is never called.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: false})
+	})
+}
+
+// TestMediator_SetClaimed verifies the claim-state re-register path: a
+// false->true transition re-registers the advertiser with the updated TXT
+// (claimed), while a no-op transition does not churn it.
+func TestMediator_SetClaimed(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
+	claimedInfo := deviceInfo
+	claimedInfo.Claimed = true
+
+	t.Run("claim flip re-registers with updated TXT", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// Start at init (link up), then Stop+Start for the claim flip.
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		mockAdvertiser.EXPECT().Stop().Times(1)
+		mockAdvertiser.EXPECT().Start(claimedInfo).Return(nil).Times(1)
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetClaimed(true)
+	})
+
+	t.Run("no-op transition does not re-register", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		// Already unclaimed; SetClaimed(false) must not touch the advertiser.
+
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+		ts.mediator.SetClaimed(false)
+	})
+}
+
+// TestMediator_SysMetricsSelfHealsMDNS is the F1 regression: a LAN link that
+// comes up while the internet stays down never fires connectivity_change, so the
+// advertiser would otherwise never start and the recovery hub would be
+// undiscoverable. The periodic SYSMETRICS reconcile must start it once a link
+// appears, and must not churn a healthy advertiser.
+func TestMediator_SysMetricsSelfHealsMDNS(t *testing.T) {
+	deviceInfo := mdns.DeviceInfo{ID: "test-device", Name: "Test Device", Port: 1111}
+	metricsData := []byte(`{"cpu":1}`)
+
+	sysMetrics := godbus.DBusPayload{
+		Member: dbus.MONITORD_EVENT_SYSMETRICS,
+		Body:   []interface{}{metricsData},
+	}
+
+	captureHandler := func(ts *testSetup) *func(context.Context, godbus.DBusPayload) ([]interface{}, error) {
+		var h func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+		ts.mockDbus.EXPECT().
+			OnBusSignal(gomock.Any()).
+			DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+				h = handler
+			}).Times(1)
+		ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+		return &h
+	}
+
+	t.Run("link up without internet starts the advertiser via SYSMETRICS", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// Init link-down → not started. connectivity_change never fires (internet
+		// stays down), so this Start can only come from the SYSMETRICS reconcile.
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		// A connected relayer short-circuits the heartbeat's relayer reconcile.
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
+
+		handler := captureHandler(ts)
+		link := &stubLinkState{hasLink: false}
+		ts.mediator.Start()
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, link)
+
+		// LAN link appears; internet still down (no connectivity_change).
+		link.hasLink = true
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("reconcile does not churn an already-advertising device", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
+		// Init link-up → started once; a later SYSMETRICS with link still up must
+		// NOT Start again.
+		mockAdvertiser.EXPECT().Start(deviceInfo).Return(nil).Times(1)
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		// A connected relayer short-circuits the heartbeat's relayer reconcile.
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		ts.mediator.InitializeMDNS(mockAdvertiser, deviceInfo, &stubLinkState{hasLink: true})
+
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+}
+
+// TestMediator_SysMetricsReconcilesRelayer is the regression test for the
+// stranded-relayer recovery gap: the startup gate's connectivity snapshot can
+// be wrong-and-final (evaluated while D-Bus was down on an already-online
+// network), and sys-monitord emits connectivity_change only on TRANSITIONS —
+// so nothing edge-triggered will ever connect the relayer, no topic is
+// assigned, and auto-claim strands. The periodic SYSMETRICS heartbeat must
+// reconcile the relayer connection without any connectivity_change ever being
+// delivered.
+func TestMediator_SysMetricsReconcilesRelayer(t *testing.T) {
+	metricsData := []byte(`{"cpu":1}`)
+	sysMetrics := godbus.DBusPayload{
+		Member: dbus.MONITORD_EVENT_SYSMETRICS,
+		Body:   []interface{}{metricsData},
+	}
+
+	captureHandler := func(ts *testSetup) *func(context.Context, godbus.DBusPayload) ([]interface{}, error) {
+		var h func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+		ts.mockDbus.EXPECT().
+			OnBusSignal(gomock.Any()).
+			DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+				h = handler
+			}).Times(1)
+		ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+		return &h
+	}
+	expectConnectivity := func(ts *testSetup) *gomock.Call {
+		return ts.mockDbus.EXPECT().Call(
+			gomock.Any(),
+			dbus.MONITORD_NAME,
+			dbus.MONITORD_PATH,
+			dbus.MONITORD_INTERFACE,
+			dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
+			false,
+		)
+	}
+
+	t.Run("already-online device with no connectivity_change connects the relayer", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
+		expectConnectivity(ts).Return([]interface{}{true}, nil).Times(1)
+		ts.mockRelayer.EXPECT().RetryableConnect(gomock.Any()).Return(nil).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("connected relayer short-circuits without D-Bus traffic", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		// No Call and no RetryableConnect expectations: any D-Bus query or
+		// connect attempt fails the test.
+		ts.mockRelayer.EXPECT().IsConnected().Return(true).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("unanswerable connectivity query is assumed offline", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
+		expectConnectivity(ts).Return(nil, errors.New("dbus: client not started")).Times(1)
+		// No RetryableConnect: assumed offline.
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("offline device stays disconnected", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(1)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).Times(1)
+		expectConnectivity(ts).Return([]interface{}{false}, nil).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+	})
+
+	t.Run("overlapping heartbeats collapse to one in-flight connect", func(t *testing.T) {
+		ts := setup(t)
+		defer ts.teardown()
+
+		ts.mockExecutor.EXPECT().SaveLastSysMetrics(metricsData).Times(2)
+		ts.mockRelayer.EXPECT().IsConnected().Return(false).AnyTimes()
+		// Times(1) on the query and the connect IS the single-flight
+		// assertion: the second heartbeat lands while the first is still
+		// inside RetryableConnect and must do nothing.
+		expectConnectivity(ts).Return([]interface{}{true}, nil).Times(1)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		ts.mockRelayer.EXPECT().
+			RetryableConnect(gomock.Any()).
+			DoAndReturn(func(context.Context) error {
+				close(entered)
+				<-release
+				return nil
+			}).Times(1)
+
+		handler := captureHandler(ts)
+		ts.mediator.Start()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = (*handler)(ts.ctx, sysMetrics)
+		}()
+		<-entered
+		_, err := (*handler)(ts.ctx, sysMetrics)
+		assert.NoError(t, err)
+		close(release)
+		<-done
+	})
 }
 
 func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
-	// Test unknown signal - we'll use a known signal type but test the warning case
+	// Test unknown signal - a member the mediator does not handle.
 	payload := godbus.DBusPayload{
-		Member: dbus.SETUPD_EVENT_SHOW_PAIRING_QR_CODE, // This is an unknown signal for the mediator
+		Member: godbus.Member("unknown_signal"),
 		Body:   []interface{}{},
 	}
 
@@ -486,6 +767,56 @@ func TestMediator_HandleDBusSignal_ACKAndUnknown(t *testing.T) {
 	// Verify - unknown signals should return nil without error
 	assert.NoError(t, err)
 	assert.Nil(t, result)
+}
+
+// TestMediator_TopicAssignmentFiresObserver: the empty->non-empty system-topic
+// persist must fire the topic observer (the factory-fresh re-trigger for the
+// auto-claim flow, whose bounded topic wait may already have expired), and a
+// topic ROTATION on a device that already had one must not.
+func TestMediator_TopicAssignmentFiresObserver(t *testing.T) {
+	cases := []struct {
+		name      string
+		prevTopic string
+		wantFired bool
+	}{
+		{name: "first assignment fires", prevTopic: "", wantFired: true},
+		{name: "rotation does not re-fire", prevTopic: "old-topic", wantFired: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := setup(t)
+			defer ts.teardown()
+
+			fired := false
+			ts.mediator.SetTopicObserver(func() { fired = true })
+
+			ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
+			s := &state.State{Relayer: &state.RelayerState{TopicID: tc.prevTopic}}
+			mockStateManager := mocks.NewMockStateManager(ts.ctrl)
+			mockStateManager.EXPECT().GetState().Return(s).Times(1)
+			mockStateManager.EXPECT().Save(s).Return(nil).Times(1)
+			state.InjectStateManagerForTesting(mockStateManager)
+
+			var capturedHandler relayer.Handler
+			ts.mockDbus.EXPECT().OnBusSignal(gomock.Any()).Times(1)
+			ts.mockRelayer.EXPECT().
+				OnRelayerMessage(gomock.Any()).DoAndReturn(func(handler relayer.Handler) {
+				capturedHandler = handler
+			}).Times(1)
+			ts.mediator.Start()
+
+			topicID := "assigned-topic"
+			err := capturedHandler(ts.ctx, relayer.Payload{
+				MessageID: relayer.MESSAGE_ID_SYSTEM,
+				Message:   relayer.Message{TopicID: &topicID},
+			})
+			state.ResetForTesting()
+
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantFired, fired)
+			assert.Equal(t, topicID, s.Relayer.TopicID, "topic persisted before/regardless of observer")
+		})
+	}
 }
 
 func TestMediator_HandleRelayerMessage_System(t *testing.T) {

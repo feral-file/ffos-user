@@ -50,11 +50,12 @@ There is currently no version suffix in any D-Bus name. Adding a version suffix 
 
 | Bus name | Object path | Interface | Type | Members |
 |---|---|---|---|---|
-| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | RPC | `GetRelayerTopicID() → (string, error)` |
-| `com.feralfile.controld` | `/com/feralfile/controld` | `com.feralfile.controld.general` | Signal emitter (received from setupd via controld bus) | `show_pairing_qr_code`, `factory_reset`, `system_update`, `upload_logs`, `upload_logs_with_bundle` |
+| `com.feralfile.controld` | — | — | Bus name only (no exported RPCs currently) | — |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | RPC | `GetConnectivityStatus(refresh bool) → (bool, error)`, `GetSysMetrics() → (*SysDBusMetrics, error)` |
 | `com.feralfile.sysmonitord` | `/com/feralfile/sysmonitord` | `com.feralfile.sysmonitord` | Signal emitter | `sysmetrics`, `connectivity_change`, `sysevent` |
 | `com.feralfile.watchdog` | — | — | Bus name only (no exported RPCs currently) | — |
+
+Before the setupd merge, `feral-controld` exported a `GetRelayerTopicID` RPC and emitted `show_pairing_qr_code` / `factory_reset` / `system_update` / `upload_logs` / `upload_logs_with_bundle` signals to `feral-setupd` on its own bus. Those handlers are now in-process inside `feral-controld`, so it exports no RPCs and emits none of those signals; its `dbus` package holds only the inbound `com.feralfile.sysmonitord` constants it consumes.
 
 ---
 
@@ -62,7 +63,7 @@ There is currently no version suffix in any D-Bus name. Adding a version suffix 
 
 ### D-Bus RPC
 
-- Methods return typed Go/Rust values plus `*dbus.Error` as the final return value.
+- Methods return typed Go values plus `*dbus.Error` as the final return value.
 - A nil `dbus.Error` means success. A non-nil `dbus.Error` means failure; the error message is a human-readable string.
 - Callers must treat an error response as a signal to retry, fall back, or log — not silently ignore.
 - Boolean parameters that control behavior (e.g. `refresh bool` on `GetConnectivityStatus`) should be explicit positional args, not buried in a map.
@@ -90,7 +91,7 @@ All messages are JSON. The message envelope is:
 }
 ```
 
-- `messageID == "system"`: a system message. The `message.topicID` field, if present, must be saved to state and returned to any pending `GetRelayerTopicID` callers.
+- `messageID == "system"`: a system message. The `message.topicID` field, if present, must be saved to state; on the first (empty → non-empty) assignment the mediator also fires the topic observer that re-triggers the auto-claim flow. (The BLE-era `GetRelayerTopicID` RPC and its pending callers are retired — the topic is consumed in-process.)
 - Any other `messageID`: a command message. Route to `commandrouter`.
 
 **Outbound (device sends to relayer):**
@@ -145,7 +146,7 @@ Successful `setSleepSchedule`, `sleepNow`, and `wakeNow` responses include `{"ok
 
 **Command type constants** are defined in `components/feral-controld/commands/types.go`. New remote commands must be added there with a corresponding entry in `deviceCtlCommands` if they require executor handling.
 
-The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional `supportBundleID` or `support_bundle_id`. Without a bundle id, `feral-controld` emits the original `upload_logs(user_id, api_key, title)` signal. With a bundle id, it emits additive `upload_logs_with_bundle(payload []byte)` where `payload` is JSON containing `user_id`, `api_key`, `title`, and `support_bundle_id`, so the old D-Bus signal payload shape stays unchanged and the new bundled upload payload can grow additively.
+The `uploadLogs` command accepts `userId`, `apiKey`, and `title`, plus optional `supportBundleID` or `support_bundle_id` (the camelCase form wins when both are present). `feral-controld` performs the upload **in-process** (the feral-setupd `log_uploader.rs` flow ported into `devicectl/loguploader.go` — no D-Bus signal is emitted; the retired `upload_logs` / `upload_logs_with_bundle` signals no longer exist). The command ACKs as soon as the upload is scheduled; a detached worker then zips the device logs and submits them through the v2 pre-sign API (JSON pre-sign request returning a pre-signed S3 URL, then an `application/zip` PUT), bounded by a 10-minute budget and single-flighted so a duplicate command while an upload is running is ACKed and ignored. `userId`/`title` are validated for parity with the old contract but unused by the v2 API; upload failures are logged on-device, not surfaced to the caller.
 
 The `startMintPairingSession` command is a controller-to-controld request to create one Mint Pairing Broker channel and display its pairing code through the player overlay via CDP command `mintPairingDisplay`. The command returns explicit `RPC` payloads with `ok`, `status`, `channelID`, `pairingCode`, and `expiresAt` on success; failures return `ok: false` with `error.code`. If a non-expired session is already active, it returns `already_started` and re-displays the same code. The broker short code is intentionally visible; raw browser session tokens are not. Any terminal pairing state hides the overlay so the bundled local player continues normal artwork playback. Shutdown cleanup is bounded within `feral-controld`'s process-level forced-exit window, so late terminal delivery is explicitly best-effort once that internal budget is exhausted.
 
@@ -158,63 +159,118 @@ The `mintPairingApprovalDecision` command is a controller-to-controld approval r
 - `mint_pairing_approval_request` — browser-session mint request details sent to controller/mobile approval UI, including browser information and the E2EE challenge.
 - `mint_pairing_approval_outcome` — terminal mint-pairing result used to clear controller/mobile approval UI.
 
-### Hub WebSocket protocol (port 1111)
+### LAN hub HTTP surface (port 1111)
 
-The Hub uses the same JSON command envelope as the relayer. The Hub does not carry `messageID == "system"` messages. A Hub client sends a command; `controld` routes it through the same `commandrouter` as relayer commands, including pre-CDP mint-pairing commands. Because the hub binds to `0.0.0.0:1111` when enabled, it is a trusted-local-network control surface: deployments must only enable it on networks where local clients are trusted, or add an explicit command-level guard before exposing privileged commands differently from the relayer path.
+`feral-controld`'s `hub` package binds `0.0.0.0:1111`. The listener is up unconditionally when `enableHub` is set (default on) — it is the BLE-replacement LAN recovery channel, not an optional feature. Every route is registered through one shared middleware (`hub/middleware.go`) that applies an in-flight storm cap (HTTP `429` over `MAX_INFLIGHT_REQUESTS = 64`) and per-request logging. That middleware is the single chokepoint and the designated insertion point for the future LAN-authorization layer (#3471); today all routes are **unauthenticated**.
 
-### BLE GATT protocol (feral-setupd)
-
-The BLE command characteristic uses a binary encoding:
-
-**Write (mobile → device):** `[cmd_string]\x00[reply_id_string]\x00[param1_string]\x00...`
-
-- `cmd` is a null-terminated string matching one of the constants in `constant.rs`.
-- `reply_id` is a null-terminated string used to correlate the response.
-- Zero or more `params` follow, each null-terminated.
-
-**Notification (device → mobile):** `[reply_id_string]\x00[status_code_u8][result_string1]\x00...`
-
-- `reply_id` echoes the request's `reply_id`.
-- `status_code` is a single byte. `0` = success; non-zero values are defined in `constant.rs` (`BLE_ERR_CODE_*`).
-- Zero or more result strings follow, each null-terminated.
-
-**BLE command registry:**
-
-| Command constant | String | Description |
+| Route | Method | Purpose |
 |---|---|---|
-| `CMD_CONNECT_WIFI` | `connect_wifi` | Connect to a WiFi network |
-| `CMD_SCAN_WIFI` | `scan_wifi` | Scan for available SSIDs |
-| `CMD_GET_INFO` | `get_info` | Returns `device_info` string |
-| `CMD_SET_TIME` | `set_time` | Set device system time |
-| `CMD_KEEP_WIFI` | `keep_wifi` | Keep current WiFi and proceed |
-| `CMD_FACTORY_RESET` | `factory_reset` | Initiate factory reset |
-| `CMD_SEND_LOGS` | `send_log` | Upload device logs |
+| `/api/cast` | POST | Same JSON command envelope as the relayer (`command` + `request`); routed through the same `commandrouter`, including the pre-CDP mint-pairing commands. Non-POST → `405`. A per-command token-bucket gate inside `commandrouter` can additionally return `429`. |
+| `/api/status` | GET | LEGACY device/setup status JSON (below), `contract: "1"`. Kept for transitional tooling; not the pairing surface. Non-GET → `405`. |
+| `/api/v2/status` | GET | The LAN **pairing** surface: identical payload, `contract: "2"`. The versioned route is the firmware gate — old firmware 404s here (and advertises no `api` mDNS TXT key), which is how the app tells LAN-pairable devices from old ones. Non-GET → `405`. |
+| `/api/notification` | GET → WS | Upgrades to a WebSocket that streams the same outbound notifications the relayer receives. Non-GET → `405`. |
+| `/metrics` | GET | Prometheus text exposition of playback metrics. |
 
-`send_log` accepts `user_id`, `api_key`, and `title` parameters, plus an optional fourth `support_bundle_id` parameter. When present, `feral-setupd` includes it in the FF1 `/v2/ff1/log-submissions` request so support-logs can join FF1 evidence into the support bundle.
+The hub does not carry `messageID == "system"` messages; topic assignment is relayer-only.
 
-**`device_info` string format** (returned by `get_info`):
+**`GET /api/status` / `GET /api/v2/status` body** (`hub/status.go`; identical shape, only `contract` differs):
+
+```json
+{
+  "device_id": "...",
+  "version": "...",
+  "branch": "...",
+  "contract": "1",
+  "claimed": true,
+  "internet": true,
+  "setup_state": "online",
+  "connectivity": "...",
+  "topic_id": "..."
+}
+```
+
+- `contract` is owned by the hub (not the status provider): `"1"` on the legacy route, `"2"` on `/api/v2/status`. The versioned route — not the field — is the firmware gate the pairing app uses: a device that 404s on `/api/v2/status` (or lacks the `api` mDNS TXT key) is old firmware and must be treated as **not LAN-pairable** (no discovery notification, no pairing offer). The field remains the dual-running-window signal for retiring the open `:1111` surface.
+- `setup_state` is a coarse provisioning-state string. When the provisioning machine is wired in (production), it is the live machine state: `starting`, `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The bare status provider falls back to `claimed` / `unclaimed`.
+- `claimed` mirrors the mDNS TXT `claimed` value.
+- `branch` and `version` are read from the same `ff1-config.json` the OTA gate uses, so the LAN payload can never disagree with the claim QR.
+- `internet` is live internet reachability (sys-monitord's cached signal, one local D-Bus round-trip per poll). It is distinct from `connectivity`, which is LAN-link state: a device on a healthy LAN with a dead WAN is `connectivity: "connected"`, `internet: false`.
+
+**Claim-QR parity.** The `device_connect` claim QR encodes `device_id|topic_id|internet|branch|version|setup_phase`. Every segment is recoverable from this endpoint, so a LAN client that discovered the device over mDNS needs nothing the QR has: `device_id` → `device_id`, `topic_id` → `topic_id` (served claimed or not: FF1 is multi-controller, so additional phones — and a replacement phone after the original is lost — pair over LAN without a QR; LAN-presence is the authorization boundary, matching the BLE-era posture), `internet` → `internet`, `branch` → `branch`, `version` → `version`, and the QR's constant `pairing` phase → derivable as `claimed == false` with a non-empty `topic_id` (`setup_state` + `claimed` carry strictly more information).
+
+**mDNS advertisement** (`mdns` package): service type `_ff1._tcp` in `local.`, port `1111`. TXT keys: `id`, `name`, `claimed` (always published, even when `false`, so resolvers can rely on the key's presence), and `api` (always published; value mirrors the v2 status contract, currently `api=2`). `api` is the discovery-time firmware gate: the pairing app requires it before treating a discovered device as pairable, so old firmware — whose records lack the key — never triggers a pairing notification, without a per-device HTTP probe. Discoverability is link-keyed (advertised whenever there is any network link, torn down when the link drops), and a claim-state flip triggers a Stop+Start re-registration so the TXT `claimed` value is refreshed.
+
+---
+
+## SoftAP provisioning and captive portal
+
+First-run and offline-recovery Wi-Fi provisioning is done over a NetworkManager hotspot plus a device-served captive portal. There is no BLE/GATT surface. Ownership is split across `softap` (raise/lower the AP), `portal` (HTTP), `provisioning` (state machine), and `wifictl` (nmcli scan/join).
+
+### The access point
+
+- **SSID:** `FF1-<device_id>` (constant prefix `FF1-`, device id read from `/etc/hostname`).
+- **PSK (WPA2):** a deterministic **8-digit numeric code** derived from the device id: the first 4 bytes of `SHA-256(device_id)` reduced modulo 10⁸ and zero-padded to exactly 8 digits (WPA2's minimum key length). Digits-only because users type it on a phone keyboard while reading it off the TV; deterministic so the same device always advertises the same key. Same convenience-level security posture as the earlier id-derived scheme — the on-screen QR carries the credentials, and the AP is short-lived and offline.
+- **Backend:** NetworkManager shared mode via `nmcli device wifi hotspot con-name ff1-softap ssid <SSID> password <PSK>`. NM runs the DHCP/NAT/gateway itself; the gateway IP is NM's shared-mode default and is not set by our code. The `softap.Backend` interface is the A/B containment boundary (NM hotspot vs. standalone hostapd+dnsmasq); flipping it touches only that package.
+
+### Captive portal HTTP endpoints
+
+The portal binds `:80` (permitted by the system-wide `net.ipv4.ip_unprivileged_port_start=80` sysctl shipped in the `ffos` image, since `feral-controld` runs as a `systemd --user` service where `CAP_NET_BIND_SERVICE` is inert).
+
+| Route | Method | Behavior |
+|---|---|---|
+| `/` | GET/POST | Renders the network-picker page (SSID list from the pre-AP scan cache; falls back to a manual SSID field on scan failure). |
+| `/connect` | POST | Credential submit. Parses form fields `ssid` and `password` and calls the provisioning machine's join. On acceptance renders a "connecting, reconnect if this drops" page; on outright rejection re-renders the picker. Non-POST → `303` to `/`. |
+| `/status` | GET | JSON `{ "state", "ssid?", "reason?", "message?" }` where `state` ∈ `idle` / `joining` / `succeeded` / `failed`. Sourced from the provisioning machine so it survives a portal restart across the AP bounce. `Cache-Control: no-store`. |
+| `/rescan` | GET | Plain-HTML confirmation page (`rescan_confirm.html`) warning that the setup Wi-Fi will restart and the QR must be re-scanned. A page rather than `window.confirm()` because captive-portal mini-browsers (iOS CNA, Android sign-in sheet) suppress JS dialogs. Viewing it does not bounce the AP. |
+| `/rescan` | POST | Performs the bounce: the machine tears the AP down, runs a fresh station-mode scan, and re-raises — disconnecting the phone; the response page (sent before the bounce lands) tells the user to re-scan the QR code to reconnect. Renders `rescan.html` on acceptance, re-renders the picker on rejection. Other methods → `303` to `/`. |
+| OS probe paths | GET | `/generate_204`, `/gen_204`, `/hotspot-detect.html`, `/library/test/success.html`, `/connecttest.txt`, `/ncsi.txt` all `302` to `/`. Any other unmatched non-root path is also redirected, covering unenumerated probe variants. |
+
+Captive detection is a three-layer design split across the `ffos` image and this portal:
+
+- **DNS layer (image-shipped, `ffos` repo):** the hotspot's dedicated dnsmasq instance resolves every name to `192.0.2.1` (`address=/#/192.0.2.1` in `archiso-ff1/airootfs/etc/NetworkManager/dnsmasq-shared.d/captive.conf`, plus an explicit `address=/ff1.config/192.0.2.1` pin for the canonical name). The answer is a public-looking RFC 5737 TEST-NET address, NOT the hotspot gateway: Samsung One UI's NetworkStack refuses captive detection when probe hostnames resolve to private IPs ("DNS response to the URL is private IP", verified on a Galaxy S23 Ultra), so answering with the gateway's RFC 1918 address would break the sign-in prompt on Samsung phones. The canonical **human-facing** portal address is `http://ff1.config` — it rides the catch-all like any other name, and it is what the frame's setup screen (ff-player `SetupOverlay`) and the portal pages tell users to type; the raw `192.0.2.1` form still works but is no longer surfaced, and the old `10.42.0.1` form is retired. The name is only resolvable on the isolated hotspot; keep it in sync across `captive.conf`, `SetupOverlay`, and the portal templates.
+- **NAT layer (image-shipped, `ffos` repo):** `/etc/nftables.conf` redirects client traffic to `192.0.2.1:80` back to the local portal, and `192.0.2.1:443` to a closed local port so HTTPS probes fail fast with a RST instead of hanging. The fast `:443` RST also makes browsers' HTTPS-first upgrade of a typed `ff1.config` fall back to HTTP promptly. The NAT rule matches only the destination IP, so `ff1.config` needs no dedicated rule.
+- **HTTP layer (this service):** once the redirected probe lands on the routes above, the `302`-on-probe (rather than returning the 204/success body each OS expects) is what makes the phone conclude it is behind a captive portal and auto-open the page.
+
+The DNS and NAT layers only make the probe request arrive; the HTTP layer is what makes it look like a captive portal.
+
+### AP trigger state machine (`provisioning`)
+
+Machine states: `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The AP is raised or suppressed from connectivity and link signals:
+
+- **Unprovisioned (no saved Wi-Fi profile) + offline + no wired link → raise the AP immediately.**
+- **Provisioned + offline → arm a sustained-offline window** (`defaultOfflineWindow = 5m`, re-evaluated on a `15s` tick); the AP is raised only if the device is still offline when the window elapses, so a brief router reboot never pops the AP.
+- **A live wired (ethernet) link suppresses the AP** even while reported offline. A Wi-Fi link that is up-but-offline is deliberately **not** suppressed — that is the broken-credentials case the AP exists to fix.
+- **Any transition back online tears the AP down.**
+- **Join sequencing (the "AP bounce"):** on credential submit the machine tears the AP down *before* the station-mode join (the single radio cannot host the AP and join at once), then joins via `wifictl`. On **any** join failure (including wrong password) the AP is re-raised so the user can retry; the portal `/status` reports `failed` with a reason.
+
+`wifictl` wraps `nmcli` for saved-profile enumeration, scanning (with a pre-AP scan cache, TTL 10m, because NM serializes Wi-Fi operations on the single radio), and joining. Join errors are classified as auth / SSID-not-found / timeout / unknown and mapped to portal messages.
+
+### Claim QR (`device_connect` URL)
+
+After provisioning and the mandatory pre-claim OTA gate pass, `feral-controld` paints the claim QR through the `setupui` `setupDisplay` contract. The encoded URL is:
 
 ```
-<device_id>|<topic_id>|<internet>|<branch>|<version>|<setup_phase>
+https://link.feralfile.com/device_connect/<device_id>|<topic_id>|<internet>|<branch>|<version>|<setup_phase>
 ```
 
-- `branch` is URL-safe encoded: `/` replaced with `%2F`.
-- `internet` is the string `"true"` or `"false"` (cached connectivity value; force-refreshed during `checking_version` and `updating` when mobile polls `get_info`).
-- `topic_id` may be empty string if not yet assigned.
-- `setup_phase` reflects current setup progress. Values: `idle`, `wifi_connecting`, `checking_version`, `updating`, `update_failed`, `pairing`, `ready`. Mobile apps poll this field to detect update failures and drive recovery UI. Older firmware omitting this field should be treated as `idle` by mobile clients.
+- The payload is a **pipe-delimited string**, not base64/JSON. It is kept byte-identical to the string the former setupd/launcher path produced so the phone parser cannot tell the difference.
+- `branch` is URL-safe encoded (`/` → `%2F`); nothing else is encoded.
+- `internet` is the literal `"true"` / `"false"` (it is `"true"` here, since reaching the claim QR means the pre-claim live version check just succeeded).
+- `setup_phase` is the literal `pairing` at this point (the one surviving `setup_phase`-shaped value; the durable setupd phase machine was not ported).
 
-This format is a contract between `feral-setupd` and the mobile app. The sixth field is an additive extension; do not remove or reorder existing fields without a coordinated mobile-app release.
+This string is a contract with the mobile app: field order and the `|` separator are fixed; the sixth field is an additive extension. Do not remove or reorder existing fields without a coordinated mobile-app release.
+
+**Claim QR lifecycle (`showPairingQRCode`).** `show=true` runs the mandatory pre-claim OTA gate (`EnsureLatestBeforeClaim`) and only paints the claim QR on `no-update-needed`; if an update starts, the device is too old, or the version check fails, the QR is withheld. `show=false` (cloud ended pairing) records the `ready` narration state **before** hiding the overlay, so a durable "pairing succeeded" transition is never lost if the hide is interrupted.
 
 ---
 
 ## Backward-Compatibility Posture
 
-1. **Additive changes are always safe.** Add new D-Bus methods, new JSON fields, new BLE commands, or new relayer command types without breaking existing callers.
+1. **Additive changes are always safe.** Add new D-Bus methods, new JSON fields, new portal/hub fields, or new relayer command types without breaking existing callers.
 2. **Never rename or remove existing methods or fields** without a version bump or a coordinated multi-service release that updates all callers simultaneously.
 3. **Never change D-Bus signal payload shapes** (member name, body types) without updating all subscribers in the same PR.
-4. **BLE payload format changes** require a coordinated mobile-app release. Treat the BLE encoding as a stable wire format between releases.
+4. **Portal and hub wire surfaces** (captive-portal form fields `ssid`/`password`, `/status` JSON, `GET /api/status` fields, mDNS TXT keys) are contracts with phones, LAN clients, and resolvers. Change them additively; the `contract` field on `/api/status` is the escape hatch for a breaking change to the `:1111` surface.
 5. **Relayer command field names** (`command`, `request`) are shared with the web app layer and potentially the mobile app. Do not rename them without coordinating with all consumers (the `FIXME` comments in `commands/types.go` acknowledge this debt).
-6. **`device_info` string** is parsed by the mobile app. Field order and separator (`|`) are fixed.
+6. **Claim QR `device_info` string** is parsed by the mobile app. Field order and separator (`|`) are fixed.
 
 ---
 
@@ -260,23 +316,9 @@ It is on by default with tuned defaults. The optional `commandStorm` config sect
 - `disabled` (default `false`) — turn the gate off entirely.
 - `maxConcurrent` (default `16`, used when `> 0`) — global in-flight command budget. A command's internal weight is clamped to this budget, so setting it below a heavy command's weight throttles that command (it reserves the whole budget while in flight) rather than rejecting it forever.
 
-### BLE error codes
+### Provisioning join errors
 
-Error codes are single bytes defined in `constant.rs`. Use the most specific code available. Do not invent new codes without updating `constant.rs` and the mobile app in a coordinated release.
-
-| Code | Constant | Meaning |
-|---|---|---|
-| `0` | `BLE_SUCCESS_CODE` | Success |
-| `1` | `BLE_ERR_CODE_WRONG_WIFI_PWD` | Wrong WiFi password |
-| `2` | `BLE_ERR_CODE_NO_INTERNET` | WiFi connected but no internet |
-| `3` | `BLE_ERR_CODE_SERVER_UNREACHABLE` | Server unreachable |
-| `4` | `BLE_ERR_CODE_WIFI_REQUIRED` | WiFi required but not connected |
-| `5` | `BLE_ERR_CODE_DEVICE_UPDATING` | Device is currently updating |
-| `6` | `BLE_ERR_CODE_VERSION_CHECK_FAILED` | Version check failed |
-| `7` | `BLE_ERR_CODE_INVALID_PARAMS` | Invalid parameters |
-| `9` | `BLE_ERR_CODE_NETWORK_ERROR` | Generic network error |
-| `10` | `BLE_ERR_CODE_VERSION_TOO_OLD` | Device version too old for auto-upgrade |
-| `255` | `BLE_ERR_CODE_UNKNOWN_ERROR` | Unknown error |
+There is no BLE error-code table. Join failures surface through the captive portal instead: `wifictl` classifies an `nmcli` join failure as auth (wrong password), SSID-not-found, timeout, or unknown, and the provisioning machine renders the corresponding reason on the portal `/status` response (`state: "failed"`, plus `reason` / `message`) while re-raising the AP for a retry.
 
 ---
 
@@ -287,45 +329,38 @@ Error codes are single bytes defined in `constant.rs`. Use the most specific cod
 | Caller | Callee | Method | Timeout |
 |---|---|---|---|
 | `feral-controld` | `feral-sys-monitord` | `GetConnectivityStatus` | 7 seconds |
-| `feral-setupd` | `feral-sys-monitord` | `GetConnectivityStatus` | 7 second (`DBUS_INTERNET_CHECK_TIMEOUT`) |
-| `feral-setupd` | `feral-controld` | `GetRelayerTopicID` | 31 seconds (`DBUS_RELAYER_CHECK_TIMEOUT`) |
-| `feral-setupd` | — | Wait for controld to appear on bus | 30 seconds (`WAIT_FOR_CONTROLD_TIMEOUT`) |
 
-RPCs that timeout should log the error and either fail the calling operation or fall back to a cached/default value. Do not silently swallow D-Bus timeouts.
-
-### D-Bus signal retries
-
-`feral-controld` uses `RetryableSend` for D-Bus signals that must not be dropped (e.g. sending event signals to `feral-setupd`). Retryable sends should back off and log on repeated failure.
+RPCs that timeout should log the error and either fail the calling operation or fall back to a cached/default value. Do not silently swallow D-Bus timeouts. With the setupd merge, controld no longer waits on a peer daemon at startup or issues cross-process `GetRelayerTopicID` calls; the topic is read directly from local state.
 
 ### Relayer connection
 
-`feral-controld` retries the relayer WebSocket connection with exponential back-off. The relayer connection is conditional on `GetConnectivityStatus` returning true and the persisted `TopicID` being non-empty. If either precondition is missing, `controld` waits for the `connectivity_change` D-Bus signal before attempting to connect.
+`feral-controld` retries the relayer WebSocket connection with exponential back-off. The relayer connection is conditional on reachability ONLY (`GetConnectivityStatus` returning true) — never on a persisted `TopicID`. Connecting with an **empty** topic is the designed topic-assignment path: the connect URL omits the `topicID` parameter and the server answers with a `MESSAGE_ID_SYSTEM` carrying the assigned topic, which the mediator persists. Gating on a non-empty topic would deadlock a factory-fresh device that boots already online (no `connectivity_change` edge ever fires on it). When the device is offline, `controld` waits for the `connectivity_change` D-Bus signal before attempting to connect.
 
-### BLE response
+### OTA gate (`otagate`)
 
-The mobile app expects a BLE notification within a reasonable time after a write. Long-running BLE commands (e.g. `connect_wifi`, `send_log`) must either:
-- Return quickly with `BLE_SUCCESS_CODE` and perform the work asynchronously (`UpdateExecution::NonBlocking`), or
-- Return the result directly if the operation completes quickly enough.
+The OTA gate is single-flight across both its entry points via one `singleflight` key (`"ota"`): concurrent callers **coalesce** onto the one in-flight update and share its result rather than being rejected. The entry points are:
 
-`feral-setupd` uses `UpdateExecution::Blocking` for flows started from D-Bus (which can wait) and `UpdateExecution::NonBlocking` for flows started from BLE (which must respond quickly to the mobile app).
+- `RequestUpdate` — the user-triggered `updateToLatestVersion` command, mode `Available` (update to any newer version).
+- `EnsureLatestBeforeClaim` — the mandatory pre-claim gate, mode `Required` (update only if a mandatory/minimum version demands it).
 
-Because `handle_connect_wifi` / `handle_keep_wifi` await their callback before sending the BLE notification, the forced version refresh runs **on** the mobile response path. To keep that response within contract, `check_and_update_system` bounds the refresh by execution mode: `NonBlocking` (BLE) uses `RefreshRetries::Single` (one attempt, worst case ≈ one `UPDATER_VERSION_CHECK_REQUEST_TIMEOUT`), while `Blocking` (D-Bus/startup) uses `RefreshRetries::Full` (the full retry budget). The mandatory-update / reflash decision still runs from the single fetch result; only the slow retry loop is dropped for BLE. A failed `Single` fetch returns `VersionCheckFailed` quickly so the mobile app can retry.
+Updates are **always driven locally** now — the gate starts the updater systemd unit on-device and tails its log. There is no remote/BLE-triggered update path, and the setupd `setup_phase` machine and `pre_failure_phase` persistence were deliberately not ported; the gate tracks only in-memory `Mode`/`Result` enums and a permanent-failure latch.
 
-### Updater version check
+Two retry ladders:
 
-`feral-setupd` retries the remote version check up to `UPDATER_VERSION_CHECK_RETRIES` (3) times with a 2-second delay between retries before treating the check as failed (the `RefreshRetries::Full` budget used by Blocking flows; BLE/`NonBlocking` flows use `RefreshRetries::Single` — see "BLE response" above). Each attempt is additionally capped by `UPDATER_VERSION_CHECK_REQUEST_TIMEOUT` (10s) so an unstable connection (stalled connect/TLS/read) fails fast with a classified network error instead of hanging on the “checking for updates” screen until the OS socket timeout.
+- **Version-check ladder:** up to 3 attempts, fixed 2-second wait between them, each attempt capped at a 10-second per-request timeout so an unstable connection fails fast with a classified network error instead of hanging. A failed version check returns `ResultVersionCheckFailed` and **does not latch**.
+- **Update-spawn ladder:** up to `MaxUpdateRetries = 3` attempts; a transient failure before the final attempt backs off `2^attempt` seconds (2s then 4s) and retries. A permanent failure — or a transient failure on the final attempt — **latches** the in-memory permanent-failure state and fires the `OnPermanentFailure` callback. An explicit retry clears the latch. Transient vs. permanent is decided by exact-string matching against the `ffos` updater script messages (`classifyUpdaterMessage`), so that companion script output must stay aligned.
 
-During `check_and_update_system`, each HTTP fetch attempt notifies a small progress channel so setup can navigate the TV to a short “checking for updates” line before the request runs. The function starts with a forced `refresh_remote_version`; if that live fetch fails it surfaces the classified copy and returns `VersionCheckFailed` instead of falling back to stale cached metadata (so an outage or a newly raised minimum version is not masked). When a later required/available comparison fails (the `is_update_required` / `is_update_available` error path), the TV message is likewise chosen from a coarse failure class (network vs HTTP 5xx vs HTTP 4xx vs parse/unexpected body vs unknown). BLE status code `6` (`BLE_ERR_CODE_VERSION_CHECK_FAILED`) is unchanged.
+The setupd one-attempt BLE refresh variant (`RefreshRetries::Single`) is intentionally absent — there is no BLE response deadline to protect.
 
 ---
 
 ## Protocol Invariants Agents Must Not Break
 
 1. The relayer `messageID == "system"` path is the canonical source of the device's `TopicID`. Do not add a second path that sets `TopicID` without going through this flow.
-2. `GetRelayerTopicID` on D-Bus blocks until the topic ID is available (up to 31 seconds). Callers must account for this latency. Do not convert it to an async signal without updating all callers.
+2. The `TopicID` is read from local state (`controld.state`); it is no longer fetched via a cross-process `GetRelayerTopicID` D-Bus RPC. Do not reintroduce a peer-daemon dependency for the topic.
 3. `sysmetrics` signal body is a JSON-encoded byte slice. Consumers unmarshal it into the metrics struct. Adding fields to the struct is safe; removing or renaming fields is a breaking change.
    - `gpu.gpu_busy` is the driver-reported utilization field and should be preferred by app consumers when they need a direct busy percentage.
    - `gpu.current_frequency / gpu.max_frequency` remains available as a clock-ratio fallback, but it is not a substitute for actual utilization.
 4. `connectivity_change` signal body is a single `bool`. It must stay a single `bool`. If more data is needed, add a new signal rather than replacing this one.
-5. BLE `get_info` returns exactly one string element (the `device_info` string). Do not add a second element without updating the mobile app.
-6. Hub WebSocket accepts exactly the same command envelope as the relayer. The Hub and relayer command paths share `commandrouter`. Do not diverge them without explicit justification.
+5. The claim QR `device_info` string is a single pipe-delimited field list kept byte-identical to the pre-merge format. Do not reorder or re-encode it without a coordinated mobile-app release.
+6. The LAN hub `POST /api/cast` accepts exactly the same command envelope as the relayer, and both paths share `commandrouter`. Do not diverge them without explicit justification.
