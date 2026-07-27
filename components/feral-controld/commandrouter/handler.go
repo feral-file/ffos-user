@@ -185,7 +185,24 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		// Forward to CDP (final, full data)
 		result, err = h.sendCDPRequest(command)
 		if err != nil {
-			return nil, err
+			// refreshArtwork's evaluate needs a live player page
+			// (window.handleCDPRequest), but a refresh is most needed exactly
+			// when the page is broken — e.g. Chromium serving stale cached
+			// chunks after a player bundle swap (#234), where the app never
+			// boots. The cache was already cleared above; a browser-level
+			// Page.reload needs no page JS and completes the recovery. Only
+			// when the reload itself fails is the command truly dead.
+			if commandType != commands.CMD_REFRESH_ARTWORK {
+				return nil, err
+			}
+			if _, reloadErr := h.cdp.Send("Page.reload", map[string]interface{}{"ignoreCache": true}); reloadErr != nil {
+				return nil, err
+			}
+			h.logger.Warn("refreshArtwork: player page unresponsive; recovered with cache clear + Page.reload", zap.Error(err))
+			err = nil
+			result = map[string]interface{}{
+				"message": map[string]interface{}{"ok": true, "recovered": "reload"},
+			}
 		}
 
 		// Force refresh status poller
