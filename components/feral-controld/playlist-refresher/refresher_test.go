@@ -1616,7 +1616,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 	r.Stop()
 
 	assert.Zero(t, fakeSched.prepares, "player status only has the filtered active set and must not replace the full cache")
-	assert.Zero(t, fakeSched.resumePersisted, "static inline status has no full-playlist identity and must not validate persisted cache ownership")
+	assert.Zero(t, fakeSched.resumePersisted, "static inline status has no refreshable source identity and must not validate persisted scheduler ownership")
 	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
 }
 
@@ -1658,8 +1658,8 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "empty active status cannot replace the persisted full playlist")
-	assert.Zero(t, fakeSched.resumePersisted, "empty active status has no full-playlist identity and must not validate persisted cache ownership")
+	assert.Zero(t, fakeSched.prepares, "empty active status cannot rebuild scheduler state from persisted source")
+	assert.Zero(t, fakeSched.resumePersisted, "empty active status has no refreshable source identity and must not validate persisted scheduler ownership")
 	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
 }
 
@@ -1709,8 +1709,8 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "filtered static status must not replace the persisted full playlist")
-	assert.Zero(t, fakeSched.resumePersisted, "stale persisted cache must not be force-cast over a newer accepted static cast")
+	assert.Zero(t, fakeSched.prepares, "filtered static status cannot rebuild scheduler state from persisted source")
+	assert.Zero(t, fakeSched.resumePersisted, "persisted source must not be force-cast over a newer accepted static cast")
 	assert.Zero(t, fakeSched.pushCalls)
 }
 
@@ -1757,8 +1757,8 @@ func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *test
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "static player status cannot replace the persisted full playlist")
-	assert.Zero(t, fakeSched.resumePersisted, "non-scheduled status must not validate stale persisted schedule ownership")
+	assert.Zero(t, fakeSched.prepares, "static player status cannot rebuild scheduler state from persisted source")
+	assert.Zero(t, fakeSched.resumePersisted, "non-scheduled status must not validate persisted schedule ownership")
 	assert.Zero(t, fakeSched.pushCalls)
 }
 

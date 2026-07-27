@@ -322,6 +322,44 @@ func TestNewWithStore_RestoredSourceDoesNotRecomputeUntilRefresh(t *testing.T) {
 	sched.ResumePersisted(context.Background())
 }
 
+func TestRestore_RestoredPendingSourceOnlyKeepsDurableSource(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	playlistURL := "https://example.com/daily.json"
+	store := &memoryStore{
+		saved: playlistschedule.Source{PlaylistURL: playlistURL},
+	}
+	now := time.Date(2026, 7, 23, 1, 0, 0, 0, time.UTC)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	sched := playlistschedule.NewWithStore(context.Background(), cdpMock, clock, func() *time.Location {
+		return time.UTC
+	}, store, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	snapshot := sched.Snapshot()
+
+	_ = sched.PrepareWithSource(
+		displayAtPlaylist(item("day23", "2026-07-23T00:00:00Z")),
+		playlistschedule.Source{PlaylistURL: playlistURL},
+	)
+	require.True(t, sched.HasCache())
+
+	sched.Restore(snapshot)
+
+	assert.True(t, sched.RestoredPending())
+	assert.False(t, sched.HasCache())
+	assert.Equal(t, playlistURL, store.saved.PlaylistURL, "failed first refresh must keep durable source for retry")
+	assert.False(t, store.cleared)
+}
+
 func TestPrepare_TimezoneLessDisplayAtUsesDeviceLocal(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -801,8 +839,8 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 				pushedIDs = append(pushedIDs, "old")
 				enteredOnce.Do(func() { close(enteredSend) })
 				<-releaseSend
-			case strings.Contains(expr, "displayDefaultPlaylist"):
-				pushedIDs = append(pushedIDs, "default")
+			case strings.Contains(expr, `"id":"replacement"`):
+				pushedIDs = append(pushedIDs, "replacement")
 			default:
 				pushedIDs = append(pushedIDs, "other")
 			}
@@ -823,18 +861,18 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 	}()
 	<-enteredSend
 
-	// While recompute holds pushMu inside Send, clear+default must wait, then
+	// While recompute holds pushMu inside Send, replacement must wait, then
 	// run after — and recompute must not push again after clear.
-	defaultDone := make(chan struct{})
+	replacementDone := make(chan struct{})
 	go func() {
 		sched.ClearThenWithPlayerPush(func() bool {
-			// Simulate displayDefaultPlaylist CDP under the same lock.
+			// Simulate a scheduler-owned replacement CDP send under the same lock.
 			_, _ = cdpMock.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-				"expression": `window.handleCDPRequest({"command":"displayDefaultPlaylist","request":{}})`,
+				"expression": `window.handleCDPRequest({"command":"displayPlaylist","request":{"dp1_call":{"items":[{"id":"replacement"}]}}})`,
 			})
 			return true
 		})
-		close(defaultDone)
+		close(replacementDone)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -846,7 +884,7 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 		t.Fatal("recompute did not finish")
 	}
 	select {
-	case <-defaultDone:
+	case <-replacementDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ClearThenWithPlayerPush did not finish")
 	}
@@ -855,5 +893,5 @@ func TestClearThenWithPlayerPush_BlocksInFlightRecomputeFromOverwriting(t *testi
 	mu.Lock()
 	defer mu.Unlock()
 	require.NotEmpty(t, pushedIDs)
-	assert.Equal(t, "default", pushedIDs[len(pushedIDs)-1], "default must win after clear")
+	assert.Equal(t, "replacement", pushedIDs[len(pushedIDs)-1], "replacement must win after clear")
 }

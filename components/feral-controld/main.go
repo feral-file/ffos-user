@@ -586,9 +586,9 @@ func initializeApp(
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
 	// displayAt scheduler: filters playlists with displayAt items before CDP
-	// and advances them on timer / wake / CDP reconnect. The full playlist is
-	// persisted because the player only stores the filtered active set; after a
-	// controld-only restart we still need future scheduled items.
+	// and advances them on timer / wake / CDP reconnect. Durable state stores
+	// only the refreshable source identity; after a controld-only restart the
+	// source must be fetched again before scheduled cutovers resume.
 	playlistScheduler := playlistschedule.NewWithStore(context, cdp, clock, nil,
 		playlistschedule.NewFileStore(os, json), logger)
 	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)

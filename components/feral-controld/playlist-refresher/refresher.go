@@ -220,11 +220,9 @@ func (r *refresher) processPlayingPlaylist() error {
 			}
 		} else {
 			// Static inline displayAt player status only contains the filtered
-			// active set and no stable identity tying it to the durable full
-			// playlist. After a crash or failed cache write, resuming from that
-			// status could overwrite a newer accepted cast with stale persisted
-			// state, so only URL/dynamic refreshes may validate restored cache
-			// ownership.
+			// active set and no refreshable source identity. After restart,
+			// controld cannot rebuild future items from that status, so only
+			// URL/dynamic statuses can reconstruct scheduler ownership.
 			r.logger.Debug("Playlist has no dynamic queries, skipping")
 			return nil
 		}

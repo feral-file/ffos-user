@@ -72,7 +72,7 @@ type Scheduler interface {
 	// AuthorityToken changes whenever scheduler-owned playlist authority
 	// changes. Refreshers snapshot it before slow URL/dynamic resolution and
 	// re-check under WithPlayerPush so stale refresh results cannot overwrite a
-	// newer cast or default playlist.
+	// newer scheduler-owned cast.
 	AuthorityToken() uint64
 	// Commit persists the scheduler state currently accepted by the player.
 	// Cast paths call it only after CDP returns ok so durable restart recovery
@@ -148,10 +148,9 @@ func New(
 	return NewWithStore(ctx, cdpClient, clock, locFn, nil, logger)
 }
 
-// NewWithStore builds a scheduler that restores the last full scheduled
-// playlist from durable state. Used by production so a controld-only restart
-// can recover future displayAt items that were already filtered out of the
-// player-visible playlist.
+// NewWithStore builds a scheduler that restores the last refreshable scheduled
+// source from durable state. Used by production so a controld-only restart can
+// refetch URL/dynamic displayAt schedules before future cutovers resume.
 func NewWithStore(
 	ctx context.Context,
 	cdpClient cdp.CDP,
@@ -388,6 +387,10 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 	if s.full != nil && !s.restoredPending {
 		s.armTimerLocked()
 	}
+	if s.restoredPending && s.full == nil && !s.source.IsZero() {
+		s.persistSourceLocked()
+		return
+	}
 	s.persistLocked()
 }
 
@@ -422,6 +425,15 @@ func (s *scheduler) persistLocked() {
 	}
 	if err != nil {
 		s.logger.Warn("Failed to persist displayAt playlist cache", zap.Error(err))
+	}
+}
+
+func (s *scheduler) persistSourceLocked() {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.Save(snapshotSource(s.source)); err != nil {
+		s.logger.Warn("Failed to persist displayAt source cache", zap.Error(err))
 	}
 }
 
