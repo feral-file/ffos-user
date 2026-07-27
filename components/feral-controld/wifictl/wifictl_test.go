@@ -2,6 +2,7 @@ package wifictl
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -372,6 +373,286 @@ func TestCachedScanServesWithinTTLThenRefreshes(t *testing.T) {
 	_, err = c.CachedScan(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 2, scans)
+}
+
+// --- scan readiness gate -----------------------------------------------------
+
+// deviceShowOut renders the terse `nmcli device show` block shape the readiness
+// gate parses: one FIELD:value line per field, grouped per device, with STATE
+// carrying the raw NMDeviceState enum ahead of its localized name.
+func deviceShowOut(state int, stateName string) []byte {
+	return []byte("GENERAL.DEVICE:eth0\nGENERAL.TYPE:ethernet\nGENERAL.STATE:100 (connected)\n" +
+		"GENERAL.DEVICE:wlan0\nGENERAL.TYPE:wifi\nGENERAL.STATE:" +
+		strconv.Itoa(state) + " (" + stateName + ")\n")
+}
+
+// TestRefreshScanCacheWaitsForScannableDevice is the root-cause regression.
+// Right after the setup AP is torn down the Wi-Fi device sits below
+// NM_DEVICE_STATE_DISCONNECTED while wpa_supplicant re-attaches, and NM refuses
+// RequestScan there — which nmcli reports as exit 0 with zero rows, not as an
+// error. Scanning in that window therefore cannot fail loudly; it can only lie.
+// So the scan must not be issued until the device is scannable.
+func TestRefreshScanCacheWaitsForScannableDevice(t *testing.T) {
+	var stateCalls int
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "device show") {
+			stateCalls++
+			if stateCalls <= 2 {
+				return deviceShowOut(20, "unavailable"), nil
+			}
+			return deviceShowOut(30, "disconnected"), nil
+		}
+		if strings.Contains(joined, "device wifi list") {
+			return []byte("Alpha\n"), nil
+		}
+		return nil, nil
+	})
+
+	got, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, got)
+
+	// The scan ran exactly once, and only after the device left "unavailable".
+	var order []string
+	for _, argv := range exec.recorded() {
+		joined := strings.Join(argv, " ")
+		switch {
+		case strings.Contains(joined, "device show"):
+			order = append(order, "state")
+		case strings.Contains(joined, "device wifi list"):
+			order = append(order, "scan")
+		}
+	}
+	assert.Equal(t, []string{"state", "state", "state", "scan"}, order,
+		"no scan may be issued while the radio would reject it")
+}
+
+// TestScanReadyGivesUpAndScansAnyway: a device stuck below DISCONNECTED must
+// not stall provisioning forever — the AP has to come back up either way, and
+// nmcli's real answer is still better than none.
+func TestScanReadyGivesUpAndScansAnyway(t *testing.T) {
+	scans := 0
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "device show") {
+			return deviceShowOut(20, "unavailable"), nil
+		}
+		if strings.Contains(joined, "device wifi list") {
+			scans++
+			return []byte("Alpha\n"), nil
+		}
+		return nil, nil
+	})
+
+	got, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, got)
+	assert.Equal(t, 1, scans, "the scan still runs after the readiness window closes")
+}
+
+// TestScanReadyFailsOpenOnUnknownState: an nmcli output shape we cannot parse
+// (different version, unexpected fields) must not gate the scan at all.
+func TestScanReadyFailsOpenOnUnknownState(t *testing.T) {
+	cases := map[string][]byte{
+		"empty output":      nil,
+		"no wifi device":    []byte("GENERAL.DEVICE:eth0\nGENERAL.TYPE:ethernet\nGENERAL.STATE:100 (connected)\n"),
+		"non-numeric state": []byte("GENERAL.DEVICE:wlan0\nGENERAL.TYPE:wifi\nGENERAL.STATE:disconnected\n"),
+		"unexpected shape":  []byte("wlan0 wifi disconnected\n"),
+		"state before type": []byte("GENERAL.STATE:20 (unavailable)\nGENERAL.DEVICE:wlan0\nGENERAL.TYPE:wifi\n"),
+	}
+	for name, showOut := range cases {
+		t.Run(name, func(t *testing.T) {
+			scans := 0
+			c, _, _ := newController(func(argv []string) ([]byte, error) {
+				joined := strings.Join(argv, " ")
+				if strings.Contains(joined, "device show") {
+					return showOut, nil
+				}
+				if strings.Contains(joined, "device wifi list") {
+					scans++
+					return []byte("Alpha\n"), nil
+				}
+				return nil, nil
+			})
+
+			got, err := c.RefreshScanCache(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, []string{"Alpha"}, got)
+			assert.Equal(t, 1, scans)
+		})
+	}
+}
+
+// TestScanReadyFailsOpenOnStateQueryError: nmcli itself failing is not a reason
+// to withhold the scan either.
+func TestScanReadyFailsOpenOnStateQueryError(t *testing.T) {
+	scans := 0
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "device show") {
+			return []byte("Error: unknown"), fakeExitError{code: 1, msg: "exit status 1"}
+		}
+		if strings.Contains(joined, "device wifi list") {
+			scans++
+			return []byte("Alpha\n"), nil
+		}
+		return nil, nil
+	})
+
+	_, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, scans)
+}
+
+// TestScanReadyPinsIface: with an explicit interface the state query targets it
+// rather than enumerating every device.
+func TestScanReadyPinsIface(t *testing.T) {
+	exec := &scriptedExec{reply: func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device show") {
+			return deviceShowOut(30, "disconnected"), nil
+		}
+		return []byte("Alpha\n"), nil
+	}}
+	clock := &fakeClock{now: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
+	c := New(exec, clock, zap.NewNop(), "wlan0")
+
+	_, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+
+	var showArgs string
+	for _, argv := range exec.recorded() {
+		if joined := strings.Join(argv, " "); strings.Contains(joined, "device show") {
+			showArgs = joined
+		}
+	}
+	assert.Contains(t, showArgs, "device show wlan0")
+}
+
+// TestRefreshScanCacheKeepsCacheOnEmptyScan is the regression for the portal's
+// "search for networks again" button blanking its own picker: the button
+// bounces the AP, and the refresh that follows catches NM's BSS list still
+// empty from the AP-mode flip. That empty result must not evict the entries the
+// picker is showing, and must not extend their expiry either.
+func TestRefreshScanCacheKeepsCacheOnEmptyScan(t *testing.T) {
+	var out []byte
+	c, _, clock := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return out, nil
+		}
+		return nil, nil
+	})
+
+	out = []byte("Alpha\nBravo\n")
+	got, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"Alpha", "Bravo"}, got)
+
+	// The post-bounce scan succeeds but sees nothing.
+	clock.advance(time.Minute)
+	out = nil
+	got, err = c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, got, "the LIVE result is reported, so callers can retry")
+
+	// ...and the picker still has its networks.
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha", "Bravo"}, cached)
+
+	// The retained entries keep their ORIGINAL expiry: the empty scan bought no
+	// extra life, so a stale list still ages out on schedule.
+	clock.advance(scanCacheTTL - time.Minute)
+	out = []byte("Charlie\n")
+	cached, err = c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Charlie"}, cached)
+}
+
+// TestRefreshScanCacheEmptyWithNoCacheExpiresFast: with nothing worth keeping,
+// the empty result is cached only briefly — long enough that portal page loads
+// do not each fire a live scan under the AP, short enough to retry soon.
+func TestRefreshScanCacheEmptyWithNoCacheExpiresFast(t *testing.T) {
+	var scans int
+	var out []byte
+	c, _, clock := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			scans++
+			return out, nil
+		}
+		return nil, nil
+	})
+
+	got, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, got)
+	require.Equal(t, 1, scans)
+
+	// Within the short TTL the empty answer is served from cache.
+	clock.advance(emptyScanCacheTTL / 2)
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, cached)
+	assert.Equal(t, 1, scans, "no live scan while the AP holds the radio")
+
+	// Past it, the next read scans again — and picks up the recovered networks.
+	clock.advance(emptyScanCacheTTL)
+	out = []byte("Alpha\n")
+	cached, err = c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, cached)
+	assert.Equal(t, 2, scans)
+}
+
+// TestRefreshScanCacheEmptyDoesNotReviveExpiredCache: an expired list is not
+// "usable" — an empty scan past its TTL must not resurrect it.
+func TestRefreshScanCacheEmptyDoesNotReviveExpiredCache(t *testing.T) {
+	var out []byte
+	c, _, clock := newController(func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return out, nil
+		}
+		return nil, nil
+	})
+
+	out = []byte("Alpha\n")
+	_, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+
+	clock.advance(scanCacheTTL + time.Minute)
+	out = nil
+	_, err = c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, cached, "stale entries stay retired")
+}
+
+// TestRefreshScanCacheErrorLeavesCacheIntact: an nmcli failure is not evidence
+// about the airwaves at all, so it changes nothing.
+func TestRefreshScanCacheErrorLeavesCacheIntact(t *testing.T) {
+	fail := false
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		if !strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			return nil, nil
+		}
+		if fail {
+			return []byte("Error: device busy"), fakeExitError{code: 1, msg: "exit status 1"}
+		}
+		return []byte("Alpha\n"), nil
+	})
+
+	_, err := c.RefreshScanCache(context.Background())
+	require.NoError(t, err)
+
+	fail = true
+	_, err = c.RefreshScanCache(context.Background())
+	require.Error(t, err)
+
+	cached, err := c.CachedScan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Alpha"}, cached)
 }
 
 func TestScanForcesRescan(t *testing.T) {

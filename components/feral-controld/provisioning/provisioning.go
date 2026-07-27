@@ -137,6 +137,17 @@ const (
 	// portal picker can only ever offer what this scan saw (the radio cannot
 	// scan again once the AP holds it), so a transient scan failure is retried
 	// rather than raising the AP over an empty or stale list.
+	//
+	// A scan that succeeds with ZERO networks is retried on the same footing as
+	// an error. Post-AP-bounce that used to be the COMMON case rather than a
+	// rare one — nmcli reports "the radio was not ready to scan" as an empty
+	// list with exit 0 — but the cause is now handled where it belongs, by
+	// wifictl.waitForScanReady gating the scan on the device becoming
+	// scannable. This loop stays a backstop for the residue (NM's BSS list
+	// still filling in after the mode flip), which is why the attempt count is
+	// the modest original: the settling wait is no longer its job. The whole
+	// loop runs under the "Looking for nearby Wi-Fi networks" narration with
+	// the AP down, so its worst case is time the phone spends stranded.
 	preAPScanAttempts   = 3
 	preAPScanRetryDelay = 2 * time.Second
 )
@@ -762,22 +773,27 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	})
 
 	var scanErr error
+	var ssids []string
 	for attempt := 1; attempt <= preAPScanAttempts; attempt++ {
-		if _, scanErr = m.wifi.RefreshScanCache(ctx); scanErr == nil {
+		ssids, scanErr = m.wifi.RefreshScanCache(ctx)
+		if scanErr == nil && len(ssids) > 0 {
 			break
 		}
-		m.logger.Warn("provisioning: pre-AP scan failed",
-			zap.Int("attempt", attempt), zap.Int("max", preAPScanAttempts), zap.Error(scanErr))
+		m.logger.Warn("provisioning: pre-AP scan produced no usable result",
+			zap.Int("attempt", attempt), zap.Int("max", preAPScanAttempts),
+			zap.Int("ssids", len(ssids)), zap.Error(scanErr))
 		if attempt < preAPScanAttempts {
 			if err := m.clock.SleepContext(ctx, preAPScanRetryDelay); err != nil {
 				break
 			}
 		}
 	}
-	if scanErr != nil {
-		// Non-fatal after retries: the portal falls back to manual SSID entry on
-		// an empty cache, and withholding the AP entirely would strand the user.
-		m.logger.Warn("provisioning: proceeding without a fresh scan; portal falls back to manual entry",
+	if scanErr != nil || len(ssids) == 0 {
+		// Non-fatal after retries: withholding the AP entirely would strand the
+		// user. The portal serves whatever the cache still holds — wifictl keeps
+		// the previous entries rather than letting an empty scan blank them —
+		// and falls back to manual SSID entry only when there is nothing left.
+		m.logger.Warn("provisioning: proceeding without a fresh scan result",
 			zap.Error(scanErr))
 	}
 

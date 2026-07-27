@@ -88,6 +88,10 @@ type fakeWifi struct {
 	// scanErrs is consumed one per RefreshScanCache call; nil entries and calls
 	// beyond the script succeed.
 	scanErrs []error
+	// emptyScans makes that many RefreshScanCache calls return (nil, nil) — a
+	// scan that succeeded but saw nothing, which the real controller reports
+	// when NM's BSS list is still empty after an AP-mode flip.
+	emptyScans int
 	// panicNext makes the next HasSavedProfile call panic (once), injecting a
 	// loop-goroutine panic for supervisor-recovery tests.
 	panicNext bool
@@ -116,9 +120,16 @@ func (w *fakeWifi) RefreshScanCache(context.Context) ([]string, error) {
 		err = w.scanErrs[0]
 		w.scanErrs = w.scanErrs[1:]
 	}
+	empty := w.emptyScans > 0
+	if empty {
+		w.emptyScans--
+	}
 	w.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	if empty {
+		return nil, nil
 	}
 	return []string{"Net"}, nil
 }
@@ -886,14 +897,64 @@ func TestAPRaiseScanRetriesUntilComplete(t *testing.T) {
 func TestAPRaiseProceedsAfterScanRetriesExhausted(t *testing.T) {
 	h := newHarness(t)
 	h.wifi.setProfile(false)
-	h.wifi.scanErrs = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+	h.wifi.scanErrs = repeatErrs(preAPScanAttempts, "busy")
 	ctx := context.Background()
 
 	h.m.onConnectivity(ctx, false)
 
 	require.Equal(t, StateAPActive, h.m.State())
-	assert.Equal(t, 3, h.rec.count("wifi.RefreshScanCache"))
+	assert.Equal(t, preAPScanAttempts, h.rec.count("wifi.RefreshScanCache"))
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestAPRaiseRetriesEmptyScan: a scan that SUCCEEDS with zero networks is
+// retried like a failure. Right after the rescan bounce NM's BSS list is still
+// empty while the radio finishes flipping out of AP mode, and accepting that
+// first empty answer is what blanked the portal picker.
+func TestAPRaiseRetriesEmptyScan(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.wifi.emptyScans = 2
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+
+	require.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 3, h.rec.count("wifi.RefreshScanCache"), "two empty scans then a populated one")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+	// The populated (last) scan still precedes the raise.
+	list := h.rec.list()
+	lastScan := -1
+	for i, e := range list {
+		if e == "wifi.RefreshScanCache" {
+			lastScan = i
+		}
+	}
+	assert.Less(t, lastScan, indexOf(list, "ap.Up"))
+}
+
+// TestAPRaiseProceedsAfterEmptyScansExhausted: a genuinely empty environment
+// must still get an AP — the retries bound the wait, they do not gate the raise.
+func TestAPRaiseProceedsAfterEmptyScansExhausted(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.wifi.emptyScans = preAPScanAttempts
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false)
+
+	require.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, preAPScanAttempts, h.rec.count("wifi.RefreshScanCache"))
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// repeatErrs builds an n-long scanErrs script of identical failures.
+func repeatErrs(n int, msg string) []error {
+	errs := make([]error, n)
+	for i := range errs {
+		errs[i] = errors.New(msg)
+	}
+	return errs
 }
 
 // TestScanningNarrationPrecedesAPRaise: the "scanning" announcement fires
