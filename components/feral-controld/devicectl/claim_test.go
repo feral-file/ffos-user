@@ -3,10 +3,13 @@ package devicectl
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/display-protocol/dp1-go/extension/playlists"
+	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +18,9 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
+	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -46,6 +51,8 @@ func (s *narratorSpy) ShowUpdating(progress int) {
 	s.lastProgress = progress
 }
 func (s *narratorSpy) Hide() { s.calls = append(s.calls, "hide") }
+
+func strPtr(s string) *string { return &s }
 
 func TestFormatDeviceConnectURL_ByteCompatible(t *testing.T) {
 	// The exact bytes launcher-ui/index.html renders as the claim QR for a fixture
@@ -272,6 +279,112 @@ func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	assert.Equal(t, []string{"hide"}, spy.calls)
+}
+
+func TestConnectClaimTransitionDefaultPlaybackWinsInFlightDisplayAtRecompute(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+	sm.EXPECT().Save(gomock.Any()).Return(nil)
+
+	mockClock := mocks.NewMockClock(ctrl)
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	enteredOldPush := make(chan struct{})
+	releaseOldPush := make(chan struct{})
+	var enteredOnce sync.Once
+	var mu sync.Mutex
+	var pushed []string
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			switch {
+			case strings.Contains(expr, `"id":"old"`):
+				mu.Lock()
+				pushed = append(pushed, "old")
+				mu.Unlock()
+				enteredOnce.Do(func() { close(enteredOldPush) })
+				<-releaseOldPush
+			case strings.Contains(expr, string(commands.CMD_DISPLAY_DEFAULT_PLAYLIST)):
+				assert.Contains(t, expr, `"onlyIfNoPlaylist":true`)
+				mu.Lock()
+				pushed = append(pushed, "default")
+				mu.Unlock()
+			default:
+				mu.Lock()
+				pushed = append(pushed, "other")
+				mu.Unlock()
+			}
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		},
+	).AnyTimes()
+
+	scheduler := playlistschedule.New(context.Background(), mockCDP, mockClock, func() *time.Location {
+		return time.UTC
+	}, zap.NewNop())
+	_ = scheduler.Prepare(&dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Title:    "Daily",
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Items: []dp1playlist.PlaylistItem{
+				{
+					ID:        "old",
+					Title:     "old",
+					Source:    "https://example.com/old.html",
+					DisplayAt: strPtr("2026-07-22T00:00:00Z"),
+				},
+			},
+		},
+	})
+	require.True(t, scheduler.HasCache())
+
+	go scheduler.RecomputeNow(context.Background())
+	<-enteredOldPush
+
+	spy := &narratorSpy{}
+	e := &executor{
+		logger:            zap.NewNop(),
+		setupNarrator:     spy,
+		json:              wrapper.NewJSON(),
+		cdp:               mockCDP,
+		playlistScheduler: scheduler,
+	}
+
+	doneConnect := make(chan struct{})
+	go func() {
+		res, err := e.connect([]byte(`{"clientDevice":{"device_id":"phone-1","device_name":"Phone","platform":1},"primaryAddress":"192.168.1.50"}`))
+		require.NoError(t, err)
+		assert.Equal(t, CmdOK, res)
+		close(doneConnect)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(releaseOldPush)
+
+	select {
+	case <-doneConnect:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connect did not finish")
+	}
+
+	assert.False(t, scheduler.HasCache())
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, pushed)
+	assert.Equal(t, "default", pushed[len(pushed)-1], "claim-time default must win after stale displayAt recompute")
 }
 
 // TestMaybeShowClaimQROnOnline_NoTopicWithholds: without a relayer topic the

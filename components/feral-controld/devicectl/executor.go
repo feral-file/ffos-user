@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -220,6 +221,13 @@ type executor struct {
 	// stale playlist on screen). Not part of the exported Executor interface so
 	// mocks stay unchanged; wire via SetOnAwake.
 	onAwake func(context.Context)
+
+	// playlistScheduler serializes claim-time default playback against
+	// displayAt timer/wake/reconnect pushes. Not part of the exported Executor
+	// interface so mocks stay unchanged; wire via SetPlaylistScheduler.
+	playlistScheduler interface {
+		ClearThenWithPlayerPush(func() bool)
+	}
 }
 
 func New(
@@ -250,6 +258,29 @@ func New(
 
 func (e *executor) SetClaimObserver(observer func(claimed bool)) {
 	e.claimObserver = observer
+}
+
+// SetPlaylistScheduler registers the displayAt scheduler authority used by
+// claim-time default playback. Safe before commands are served.
+func SetPlaylistScheduler(exec Executor, scheduler interface {
+	ClearThenWithPlayerPush(func() bool)
+}, logger *zap.Logger) {
+	setter, ok := exec.(interface {
+		setPlaylistScheduler(interface {
+			ClearThenWithPlayerPush(func() bool)
+		})
+	})
+	if !ok {
+		logger.Warn("Executor does not support playlist scheduler")
+		return
+	}
+	setter.setPlaylistScheduler(scheduler)
+}
+
+func (e *executor) setPlaylistScheduler(scheduler interface {
+	ClearThenWithPlayerPush(func() bool)
+}) {
+	e.playlistScheduler = scheduler
 }
 
 // SetSetupUI injects the shared setup-narration surface so the controld-owned
@@ -442,22 +473,47 @@ func (e *executor) sendDisplayDefaultPlaylist() error {
 		return fmt.Errorf("cdp client is not configured")
 	}
 
-	command := commands.Command{
-		Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-		Arguments: map[string]any{
-			"onlyIfNoPlaylist": true,
-		},
-	}
-	payload, err := command.JSON()
-	if err != nil {
-		return fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+	send := func() (interface{}, error) {
+		command := commands.Command{
+			Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+			Arguments: map[string]any{
+				"onlyIfNoPlaylist": true,
+			},
+		}
+		payload, err := command.JSON()
+		if err != nil {
+			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+		}
+
+		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
+			"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
+		}
+		return result, nil
 	}
 
-	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+	if e.playlistScheduler == nil {
+		_, err := send()
+		return err
+	}
+
+	var err error
+	e.playlistScheduler.ClearThenWithPlayerPush(func() bool {
+		var result interface{}
+		result, err = send()
+		if err != nil {
+			return false
+		}
+		if !playerresponse.OK(result) {
+			err = fmt.Errorf("player rejected displayDefaultPlaylist command")
+			return false
+		}
+		return true
 	})
 	if err != nil {
-		return fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
+		return err
 	}
 	return nil
 }

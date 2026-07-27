@@ -11,6 +11,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -133,7 +134,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				h.logger.Info("result from CDP", zap.Any("result", result))
-				if !isPlayerResponseOk(result) {
+				if !playerresponse.OK(result) {
 					h.logger.Warn("Playback verification failed: player did not respond with ok")
 					status.RecordPlaybackFailure()
 				}
@@ -202,7 +203,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// RecomputeNow already snapshotted and is waiting to push.
 			h.scheduler.ClearThenWithPlayerPush(func() bool {
 				result, err = h.sendCDPRequest(command)
-				return err == nil && isPlayerResponseOk(result)
+				return err == nil && playerresponse.OK(result)
 			})
 		case commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil:
 			h.scheduler.WithPlayerPush(func() {
@@ -213,7 +214,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				schedulerMutated = true
 				command.Arguments["dp1_call"] = playlist
 				result, err = h.sendCDPRequest(command)
-				if err != nil || !isPlayerResponseOk(result) {
+				if err != nil || !playerresponse.OK(result) {
 					h.scheduler.Restore(schedulerSnapshot)
 					schedulerRestored = true
 				} else {
@@ -261,21 +262,6 @@ func ensureDisplayPlaylistIntent(args map[string]interface{}) {
 	args["intent"] = map[string]interface{}{
 		"action": "now_display",
 	}
-}
-
-// isPlayerResponseOk checks whether the CDP result from the player
-// contains { "message": { "ok": true } }.
-func isPlayerResponseOk(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	msg, ok := m["message"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	okVal, _ := msg["ok"].(bool)
-	return okVal
 }
 
 // sendCDPRequest marshals payload and sends to CDP

@@ -17,6 +17,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -497,23 +498,10 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist) error {
 	if err != nil {
 		return fmt.Errorf("send displayAt playlist to CDP: %w", err)
 	}
-	if !playerResponseOK(result) {
+	if !playerresponse.OK(result) {
 		return fmt.Errorf("player rejected displayAt playlist")
 	}
 	return nil
-}
-
-func playerResponseOK(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	if msg, ok := m["message"].(map[string]interface{}); ok {
-		okVal, _ := msg["ok"].(bool)
-		return okVal
-	}
-	okVal, _ := m["ok"].(bool)
-	return okVal
 }
 
 // HasDisplayAtSchedule reports whether a playlist opts into item-level
