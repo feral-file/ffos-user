@@ -1119,6 +1119,31 @@ func (f *fakePlaylistScheduler) RestoredPending() bool {
 	return f.restoredPending
 }
 func (f *fakePlaylistScheduler) Stop() { f.Clear() }
+func (f *fakePlaylistScheduler) preparesCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prepares
+}
+func (f *fakePlaylistScheduler) pushCallsCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pushCalls
+}
+func (f *fakePlaylistScheduler) recomputesCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.recomputes
+}
+func (f *fakePlaylistScheduler) resumePersistedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resumePersisted
+}
+func (f *fakePlaylistScheduler) restoresCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.restores
+}
 
 func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -1152,7 +1177,7 @@ func TestRefresher_TransientURLError_RecomputesFromDisplayAtCache(t *testing.T) 
 	time.Sleep(200 * time.Millisecond)
 	r.Stop()
 
-	assert.GreaterOrEqual(t, fakeSched.recomputes, 1, "transient fetch should recompute from cache")
+	assert.GreaterOrEqual(t, fakeSched.recomputesCount(), 1, "transient fetch should recompute from cache")
 }
 
 func TestRefresher_MalformedPlaylistError_DoesNotUseDisplayAtCache(t *testing.T) {
@@ -1188,7 +1213,7 @@ func TestRefresher_MalformedPlaylistError_DoesNotUseDisplayAtCache(t *testing.T)
 	time.Sleep(200 * time.Millisecond)
 	r.Stop()
 
-	assert.Equal(t, 0, fakeSched.recomputes, "data/parse errors must not degrade to cache")
+	assert.Equal(t, 0, fakeSched.recomputesCount(), "data/parse errors must not degrade to cache")
 }
 
 func TestRefresher_TransientURLError_WithoutCache_SurfacesError(t *testing.T) {
@@ -1224,7 +1249,7 @@ func TestRefresher_TransientURLError_WithoutCache_SurfacesError(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	r.Stop()
 
-	assert.Equal(t, 0, fakeSched.recomputes, "without cache, transient errors must not recompute")
+	assert.Equal(t, 0, fakeSched.recomputesCount(), "without cache, transient errors must not recompute")
 }
 
 func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testing.T) {
@@ -1264,8 +1289,8 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 	time.Sleep(200 * time.Millisecond)
 	r.Stop()
 
-	assert.Equal(t, 0, fakeSched.resumePersisted, "pending source must wait for a successful fetch before scheduler resumes")
-	assert.Equal(t, 0, fakeSched.recomputes, "fetch failure should leave current player artwork unchanged")
+	assert.Equal(t, 0, fakeSched.resumePersistedCount(), "pending source must wait for a successful fetch before scheduler resumes")
+	assert.Equal(t, 0, fakeSched.recomputesCount(), "fetch failure should leave current player artwork unchanged")
 }
 
 func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
@@ -1305,8 +1330,8 @@ func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must call Prepare")
-	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must send via WithPlayerPush")
+	assert.GreaterOrEqual(t, fakeSched.preparesCount(), 1, "refresh must call Prepare")
+	assert.GreaterOrEqual(t, fakeSched.pushCallsCount(), 1, "refresh must send via WithPlayerPush")
 }
 
 func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing.T) {
@@ -1361,8 +1386,8 @@ func TestRefresher_URLRefresh_SkipsObsoleteResultAfterAuthorityChange(t *testing
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "obsolete refresh must not replace scheduler cache")
-	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "obsolete refresh must re-check under the push lock")
+	assert.Zero(t, fakeSched.preparesCount(), "obsolete refresh must not replace scheduler cache")
+	assert.GreaterOrEqual(t, fakeSched.pushCallsCount(), 1, "obsolete refresh must re-check under the push lock")
 }
 
 func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing.T) {
@@ -1416,8 +1441,8 @@ func TestRefresher_URLRefresh_SkipsObsoleteStatusAfterAuthorityChange(t *testing
 	time.Sleep(100 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "obsolete status snapshot must not replace scheduler cache")
-	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "obsolete status must re-check under the push lock")
+	assert.Zero(t, fakeSched.preparesCount(), "obsolete status snapshot must not replace scheduler cache")
+	assert.GreaterOrEqual(t, fakeSched.pushCallsCount(), 1, "obsolete status must re-check under the push lock")
 }
 
 func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
@@ -1463,8 +1488,8 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must rebuild scheduler cache")
-	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must still serialize the send")
+	assert.GreaterOrEqual(t, fakeSched.preparesCount(), 1, "refresh must rebuild scheduler cache")
+	assert.GreaterOrEqual(t, fakeSched.pushCallsCount(), 1, "refresh must still serialize the send")
 }
 
 func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *testing.T) {
@@ -1514,8 +1539,8 @@ func TestRefresher_DisplayAtRestoredPending_ForceCastsFirstValidatedRefresh(t *t
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.GreaterOrEqual(t, fakeSched.prepares, 1, "refresh must validate rebuilt scheduled playlist")
-	assert.GreaterOrEqual(t, fakeSched.pushCalls, 1, "refresh must still serialize the send")
+	assert.GreaterOrEqual(t, fakeSched.preparesCount(), 1, "refresh must validate rebuilt scheduled playlist")
+	assert.GreaterOrEqual(t, fakeSched.pushCallsCount(), 1, "refresh must still serialize the send")
 }
 
 func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testing.T) {
@@ -1563,9 +1588,9 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "player status only has the filtered active set and must not replace the full cache")
-	assert.Zero(t, fakeSched.resumePersisted, "steady-state inline displayAt status must not force-cast on every refresh tick")
-	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
+	assert.Zero(t, fakeSched.preparesCount(), "player status only has the filtered active set and must not replace the full cache")
+	assert.Zero(t, fakeSched.resumePersistedCount(), "steady-state inline displayAt status must not force-cast on every refresh tick")
+	assert.Zero(t, fakeSched.pushCallsCount(), "static inline status must not trigger a refresher send")
 }
 
 func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentity(t *testing.T) {
@@ -1613,9 +1638,9 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "player status only has the filtered active set and must not replace the full cache")
-	assert.Zero(t, fakeSched.resumePersisted, "static inline status has no refreshable source identity and must not validate persisted scheduler ownership")
-	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
+	assert.Zero(t, fakeSched.preparesCount(), "player status only has the filtered active set and must not replace the full cache")
+	assert.Zero(t, fakeSched.resumePersistedCount(), "static inline status has no refreshable source identity and must not validate persisted scheduler ownership")
+	assert.Zero(t, fakeSched.pushCallsCount(), "static inline status must not trigger a refresher send")
 }
 
 func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *testing.T) {
@@ -1655,9 +1680,9 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "empty active status cannot rebuild scheduler state from persisted source")
-	assert.Zero(t, fakeSched.resumePersisted, "empty active status has no refreshable source identity and must not validate persisted scheduler ownership")
-	assert.Zero(t, fakeSched.pushCalls, "static inline status must not trigger a refresher send")
+	assert.Zero(t, fakeSched.preparesCount(), "empty active status cannot rebuild scheduler state from persisted source")
+	assert.Zero(t, fakeSched.resumePersistedCount(), "empty active status has no refreshable source identity and must not validate persisted scheduler ownership")
+	assert.Zero(t, fakeSched.pushCallsCount(), "static inline status must not trigger a refresher send")
 }
 
 func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast(t *testing.T) {
@@ -1705,9 +1730,9 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "filtered static status cannot rebuild scheduler state from persisted source")
-	assert.Zero(t, fakeSched.resumePersisted, "persisted source must not be force-cast over a newer accepted static cast")
-	assert.Zero(t, fakeSched.pushCalls)
+	assert.Zero(t, fakeSched.preparesCount(), "filtered static status cannot rebuild scheduler state from persisted source")
+	assert.Zero(t, fakeSched.resumePersistedCount(), "persisted source must not be force-cast over a newer accepted static cast")
+	assert.Zero(t, fakeSched.pushCallsCount())
 }
 
 func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *testing.T) {
@@ -1753,9 +1778,9 @@ func TestRefresher_StaticInlineRestoredPending_IgnoresNonScheduledStatus(t *test
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.Zero(t, fakeSched.prepares, "static player status cannot rebuild scheduler state from persisted source")
-	assert.Zero(t, fakeSched.resumePersisted, "non-scheduled status must not validate persisted schedule ownership")
-	assert.Zero(t, fakeSched.pushCalls)
+	assert.Zero(t, fakeSched.preparesCount(), "static player status cannot rebuild scheduler state from persisted source")
+	assert.Zero(t, fakeSched.resumePersistedCount(), "non-scheduled status must not validate persisted schedule ownership")
+	assert.Zero(t, fakeSched.pushCallsCount())
 }
 
 func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
@@ -1796,7 +1821,7 @@ func TestRefresher_PrepareSendFailure_RestoresSchedulerCache(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.GreaterOrEqual(t, fakeSched.restores, 1, "failed send must restore scheduler snapshot")
+	assert.GreaterOrEqual(t, fakeSched.restoresCount(), 1, "failed send must restore scheduler snapshot")
 }
 
 func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
@@ -1836,7 +1861,7 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.GreaterOrEqual(t, fakeSched.restores, 1, "player rejection must restore scheduler snapshot")
+	assert.GreaterOrEqual(t, fakeSched.restoresCount(), 1, "player rejection must restore scheduler snapshot")
 }
 
 func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) {
@@ -1876,7 +1901,7 @@ func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) 
 	time.Sleep(300 * time.Millisecond)
 	r.Stop()
 
-	assert.GreaterOrEqual(t, fakeSched.restores, 1, "missing ok must restore scheduler snapshot")
+	assert.GreaterOrEqual(t, fakeSched.restoresCount(), 1, "missing ok must restore scheduler snapshot")
 }
 
 // TestRefresher_ProcessPlayingPlaylist_EmptyPlayerIsNotAnError: a fresh-boot
