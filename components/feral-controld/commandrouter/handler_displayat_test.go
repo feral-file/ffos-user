@@ -3,6 +3,7 @@ package commandrouter_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -505,6 +506,110 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectLeavesCache(t
 		},
 	)
 	track.RecomputeNow(ctx)
+}
+
+func TestCommandHandler_Process_DisplayDefaultPlaylist_WaitsForInFlightRecompute(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctx := context.Background()
+	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockJSON := mocks.NewMockJSON(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	mockClock.EXPECT().Now().Return(now).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(c context.Context, _ time.Duration) error {
+			<-c.Done()
+			return c.Err()
+		},
+	).AnyTimes()
+
+	scheduledEntered := make(chan struct{})
+	releaseScheduled := make(chan struct{})
+	writes := make(chan string, 2)
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			switch {
+			case strings.Contains(expr, `"command":"displayPlaylist"`) && strings.Contains(expr, `"id":"day22"`):
+				writes <- "scheduled"
+				close(scheduledEntered)
+				<-releaseScheduled
+			case strings.Contains(expr, `"command":"displayDefaultPlaylist"`):
+				writes <- "default"
+			default:
+				writes <- "other"
+			}
+			return playerOkResponse(), nil
+		},
+	).AnyTimes()
+	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location {
+		return time.UTC
+	}, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
+
+	_ = sched.Prepare(&dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Items: []dp1playlist.PlaylistItem{
+				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
+			},
+		},
+	})
+	require.True(t, sched.HasCache())
+
+	recomputeDone := make(chan struct{})
+	go func() {
+		sched.RecomputeNow(ctx)
+		close(recomputeDone)
+	}()
+
+	select {
+	case <-scheduledEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler recompute did not enter CDP send")
+	}
+	require.Equal(t, "scheduled", <-writes)
+
+	defaultDone := make(chan error, 1)
+	go func() {
+		_, err := handler.Process(ctx, commands.Command{
+			Type:      commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+			Arguments: map[string]interface{}{},
+		})
+		defaultDone <- err
+	}()
+
+	select {
+	case write := <-writes:
+		t.Fatalf("displayDefaultPlaylist sent before in-flight scheduler push released: %s", write)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseScheduled)
+
+	select {
+	case <-recomputeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduler recompute did not finish")
+	}
+	select {
+	case err := <-defaultDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("displayDefaultPlaylist did not finish")
+	}
+	require.Equal(t, "default", <-writes)
 }
 
 func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache(t *testing.T) {

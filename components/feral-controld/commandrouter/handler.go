@@ -197,8 +197,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
-		// Forward to CDP. displayPlaylist shares the scheduler push lock with
-		// RecomputeNow so a stale timed push cannot land after a newer cast.
+		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
+		// scheduler push lock with RecomputeNow so a stale timed push cannot land
+		// after a newer cast or OOM-recovery fallback.
 		// displayDefaultPlaylist is player-owned fallback today; it may no-op
 		// successfully, so this path must not clear scheduler authority until
 		// controld can prove that default playback replaced the current playlist.
@@ -218,6 +219,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				} else {
 					h.scheduler.Commit()
 				}
+			})
+		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
+			h.scheduler.WithPlayerPush(func() {
+				result, err = h.sendCDPRequest(command)
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
