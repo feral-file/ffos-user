@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -54,8 +53,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Title: "Daily",
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day21", Title: "Day 21", Source: "https://example.com/21.html", DisplayAt: strPtr("2026-07-21T00:00:00Z")},
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
@@ -64,7 +62,7 @@ func TestCommandHandler_Process_DisplayPlaylist_FiltersDisplayAt(t *testing.T) {
 		},
 	}
 
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr, ok := params["expression"].(string)
@@ -136,7 +134,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PreservesExplicitIntent(t *testi
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr := params["expression"].(string)
@@ -200,7 +198,7 @@ func TestCommandHandler_Process_DisplayPlaylist_DefaultsIntentOnPlainPlaylist(t 
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
 			expr := params["expression"].(string)
@@ -292,14 +290,13 @@ func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T)
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Title: "Daily",
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
 		},
 	}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(playerOkResponse(), nil)
 	mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
@@ -342,8 +339,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 	playlistURL := "https://example.com/daily.json"
 	full := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Title: "Daily",
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Title: "Day 22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 				{ID: "day23", Title: "Day 23", Source: "https://example.com/23.html", DisplayAt: strPtr("2026-07-23T00:00:00Z")},
@@ -352,7 +348,7 @@ func TestCommandHandler_Process_DisplayPlaylist_RecomputePreservesPlaylistURL(t 
 	}
 
 	var payloads []commands.Command
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, true).Return(full, nil)
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, playlistURL, false).Return(full, nil)
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
 		func(_ string, params map[string]interface{}) (interface{}, error) {
@@ -416,7 +412,6 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_DoesNotClearDisplayAtCach
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -476,7 +471,6 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_PlayerRejectLeavesCache(t
 
 	_ = track.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -560,7 +554,6 @@ func TestCommandHandler_Process_DisplayDefaultPlaylist_WaitsForInFlightRecompute
 
 	_ = sched.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "day22", Source: "https://example.com/22.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 			},
@@ -640,8 +633,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title:    "Old",
-		Schedule: &playlists.Schedule{ByDisplayAt: true},
+		Title: "Old",
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -651,13 +643,12 @@ func TestCommandHandler_Process_DisplayPlaylist_SendFailureRestoresPreviousCache
 
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title:    "New",
-		Schedule: &playlists.Schedule{ByDisplayAt: true},
+		Title: "New",
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
 	}}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, true).Return(newPlaylist, nil)
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, false).Return(newPlaylist, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(nil, assert.AnError)
 
 	_, err := handler.Process(ctx, commands.Command{
@@ -706,8 +697,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, sched, mockJSON, logger)
 
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title:    "Old",
-		Schedule: &playlists.Schedule{ByDisplayAt: true},
+		Title: "Old",
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "old", Source: "https://example.com/old.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
@@ -717,13 +707,12 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectRestoresPreviousCach
 
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Title:    "New",
-		Schedule: &playlists.Schedule{ByDisplayAt: true},
+		Title: "New",
 		Items: []dp1playlist.PlaylistItem{
 			{ID: "new", Source: "https://example.com/new.html", DisplayAt: strPtr("2026-07-22T00:00:00Z")},
 		},
 	}}
-	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, true).Return(newPlaylist, nil)
+	mockDP1.EXPECT().ProcessPlaylistURL(ctx, newURL, false).Return(newPlaylist, nil)
 	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]interface{}{
 		"message": map[string]interface{}{"ok": false},
 	}, nil)

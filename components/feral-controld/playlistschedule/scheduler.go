@@ -30,8 +30,8 @@ const displayAtMaxTick = 60 * time.Second
 // the player, and re-pushes when the next displayAt threshold is crossed.
 type Scheduler interface {
 	// Prepare caches a displayAt playlist and returns the active set for the
-	// player. Playlists without schedule.byDisplayAt plus item-level displayAt
-	// clear any prior schedule and are returned unchanged.
+	// player. Playlists without item-level displayAt clear any prior schedule
+	// and are returned unchanged.
 	Prepare(playlist *dp1.Playlist) *dp1.Playlist
 	// PrepareWithSource is Prepare plus the original refreshable source identity.
 	// URL casts must keep playlistUrl on scheduler-owned pushes so the player
@@ -534,15 +534,10 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist) error {
 	return nil
 }
 
-// HasDisplayAtSchedule reports whether a playlist opts into item-level
-// displayAt scheduling and carries at least one timed item. DP-1 treats
-// schedule.byDisplayAt as the scheduling gate; item displayAt fields alone are
-// metadata and must not filter playback.
+// HasDisplayAtSchedule reports whether a playlist carries at least one timed
+// item. Item-level displayAt is the scheduling contract.
 func HasDisplayAtSchedule(p *dp1.Playlist) bool {
 	if p == nil {
-		return false
-	}
-	if !DisplayAtScheduleEnabled(p) {
 		return false
 	}
 	for _, item := range p.Items {
@@ -551,10 +546,6 @@ func HasDisplayAtSchedule(p *dp1.Playlist) bool {
 		}
 	}
 	return false
-}
-
-func DisplayAtScheduleEnabled(p *dp1.Playlist) bool {
-	return p != nil && p.Schedule != nil && p.Schedule.ByDisplayAt
 }
 
 func computeActiveSet(p *dp1playlist.Playlist, now time.Time, loc *time.Location) []dp1playlist.PlaylistItem {
@@ -575,10 +566,6 @@ func clonePlaylist(p *dp1.Playlist) *dp1.Playlist {
 	}
 	if p.DynamicQueries != nil {
 		out.DynamicQueries = append([]dp1.LegacyDynamicQuery(nil), p.DynamicQueries...)
-	}
-	if p.Schedule != nil {
-		sched := *p.Schedule
-		out.Schedule = &sched
 	}
 	return &out
 }

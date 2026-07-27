@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -337,8 +336,7 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 	}, zap.NewNop())
 	_ = scheduler.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Title: "Daily",
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:        "old",

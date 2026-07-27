@@ -10,8 +10,8 @@ github.com/coreos/go-systemd/v22 v22.5.0 h1:RrqgGjYQKalulkV8NGVIfkXQf6YYmOyiJKk8
 github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/display-protocol/dp1-go v0.4.1-0.20260723030411-3d88901efab8 h1:CGnLRtRtkt1fn5ONsOxkGZDxldE4rbJ7+gPPIgxhsWc=
-github.com/display-protocol/dp1-go v0.4.1-0.20260723030411-3d88901efab8/go.mod h1:nr1evGRAKXv0V+6Tq/u13nbccxr1wkAEzjsG7lOthHs=
+github.com/display-protocol/dp1-go v0.5.1 h1:QgTV05kJrn8oaF1NZty2FRSl82pUt4bkI8Sj0ejmeEc=
+github.com/display-protocol/dp1-go v0.5.1/go.mod h1:nr1evGRAKXv0V+6Tq/u13nbccxr1wkAEzjsG7lOthHs=
 github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=
 github.com/dlclark/regexp2 v1.11.0/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
 github.com/feral-file/ff-art-computer-handoff/clients/ephemeral-token-minter/go v0.0.0-20260616080701-abdaf42db208 h1:ygPY2TH+4FoNttRD4wWtNErEJ0apbd3m1rKOIgJqOrc=

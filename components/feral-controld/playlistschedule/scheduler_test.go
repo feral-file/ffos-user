@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/display-protocol/dp1-go/extension/playlists"
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -59,7 +58,7 @@ func TestPrepare_WithoutDisplayAt_PassthroughAndClearsCache(t *testing.T) {
 	assert.False(t, sched.HasCache())
 }
 
-func TestPrepare_DisplayAtWithoutSchedule_PassthroughAndClearsCache(t *testing.T) {
+func TestPrepare_DisplayAtWithoutWrapper_FiltersActiveSet(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -86,7 +85,7 @@ func TestPrepare_DisplayAtWithoutSchedule_PassthroughAndClearsCache(t *testing.T
 
 	withoutSchedule := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title: "Metadata only",
+			Title: "Schedule-free displayAt",
 			Items: []dp1playlist.PlaylistItem{
 				item("old", "2026-07-22T00:00:00Z"),
 				item("new", "2026-07-23T00:00:00Z"),
@@ -95,8 +94,8 @@ func TestPrepare_DisplayAtWithoutSchedule_PassthroughAndClearsCache(t *testing.T
 	}
 	got := sched.Prepare(withoutSchedule)
 	require.NotNil(t, got)
-	assert.Equal(t, []string{"old", "new"}, itemIDs(got.Items))
-	assert.False(t, sched.HasCache())
+	assert.Equal(t, []string{"old"}, itemIDs(got.Items))
+	assert.True(t, sched.HasCache())
 }
 
 func TestPrepare_DisplayAt_FiltersActiveSetAndPreservesOrder(t *testing.T) {
@@ -579,7 +578,6 @@ func TestPrepare_InvalidPresentDisplayAt_StillSchedules(t *testing.T) {
 	emptyDisplayAt := ""
 	active := sched.Prepare(&dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
 			Items: []dp1playlist.PlaylistItem{
 				{ID: "invalid", Source: "https://example.com/invalid.html", DisplayAt: &emptyDisplayAt},
 				item("intro", ""),
@@ -619,9 +617,8 @@ func TestPrepare_AllFuture_ReturnsOnlyEvergreen(t *testing.T) {
 func displayAtPlaylist(items ...dp1playlist.PlaylistItem) *dp1.Playlist {
 	return &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
-			Items:    items,
+			Title: "Daily",
+			Items: items,
 		},
 	}
 }

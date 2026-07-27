@@ -1537,8 +1537,7 @@ func TestRefresher_StaticInlineDisplayAt_DoesNotOverwriteSchedulerCache(t *testi
 	displayAt := "2026-07-22T00:00:00Z"
 	pl := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Title: "Daily",
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:        "active",
@@ -1588,8 +1587,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeWithoutPlayerIdentit
 	displayAt := "2026-07-22T00:00:00Z"
 	pl := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Title: "Daily",
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:        "active",
@@ -1638,9 +1636,8 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotResumeEmptyActiveSet(t *te
 
 	emptyActive := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Daily",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
-			Items:    nil,
+			Title: "Daily",
+			Items: nil,
 		},
 	}
 	mockStatusPoller.EXPECT().
@@ -1682,8 +1679,7 @@ func TestRefresher_StaticInlineRestoredPending_DoesNotOverwriteNewerAcceptedCast
 	displayAt := "2026-07-22T00:00:00Z"
 	newerActive := &dp1.Playlist{
 		Playlist: dp1playlist.Playlist{
-			Title:    "Newer accepted cast",
-			Schedule: &playlists.Schedule{ByDisplayAt: true},
+			Title: "Newer accepted cast",
 			Items: []dp1playlist.PlaylistItem{
 				{
 					ID:        "newer-active",

@@ -147,7 +147,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
-				playlist, err = h.dp1.ProcessPlaylistURL(ctx, url, true)
+				// Display casts resolve the complete playlist because item-level
+				// displayAt can appear after the legacy minimal page and still
+				// needs to arm scheduler cutovers.
+				playlist, err = h.dp1.ProcessPlaylistURL(ctx, url, false)
 				if err != nil {
 					return nil, err
 				}
@@ -171,7 +174,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 				if playlist.HasDynamicContent() {
 					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
-					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
+					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, false)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err
