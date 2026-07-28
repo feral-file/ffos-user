@@ -78,11 +78,16 @@ wait_for_display() {
 wait_for_display
 
 # Chromium's HTTP cache can outlive a player-bundle swap and poison the app
-# shell: darkhttpd serves the bundle with no Cache-Control headers, so Chromium
-# heuristically caches the route HTML and even negative (404) chunk responses
-# captured while a swap is in flight — entries that survive kiosk restarts and
-# full reboots and leave the wall running the previous app or a ChunkLoadError
-# page (#234). The purge is keyed to a content fingerprint of the bundle, not
+# shell: heuristically cached route HTML and negative (404) chunk responses
+# captured while a swap is in flight survive kiosk restarts and full reboots
+# and leave the wall running the previous app or a ChunkLoadError page (#234).
+# serve-feral-player.sh mitigates going forward by having darkhttpd send a
+# global "Cache-Control: no-cache" when the binary supports --header — but
+# that only governs responses fetched while the header is active. Entries
+# cached headerless (on an already-poisoned device, or under the legacy
+# fallback when darkhttpd lacks --header) carry heuristic freshness and are
+# reused WITHOUT revalidation, so this purge remains the backstop that heals
+# them. The purge is keyed to a content fingerprint of the bundle, not
 # done unconditionally, so an unchanged bundle keeps the cache (remote artwork
 # stays warm across the frequent Restart=always kiosk restarts) and any bundle
 # change — OTA, pacman, or manual dev swap — wipes it exactly once. This must

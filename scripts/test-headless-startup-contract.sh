@@ -187,10 +187,13 @@ expect_proceed "no readable status fails open" "fail open"
 
 # --- 5. player-bundle cache guard (#234) ---------------------------------------
 
-# darkhttpd serves the bundle with no Cache-Control headers, so Chromium's
-# disk cache can keep serving a previous player app (or negatively-cached 404s
-# for its chunks) across kiosk restarts AND reboots after a bundle swap. The
-# guard in start-kiosk.sh purges the cache exactly when the bundle fingerprint
+# Chromium's disk cache can keep serving a previous player app (or
+# negatively-cached 404s for its chunks) across kiosk restarts AND reboots
+# after a bundle swap. serve-feral-player.sh mitigates with a global
+# "Cache-Control: no-cache" when darkhttpd supports --header, but entries
+# cached headerless — before that header was active, or under the legacy
+# headerless fallback — are reused without revalidation, so the guard in
+# start-kiosk.sh purges the cache exactly when the bundle fingerprint
 # changes; these cases pin both directions (purge on change, keep when
 # unchanged — the keep side is what protects remote-artwork cache warmth).
 # The guard must actually be CALLED, and called before Chromium exists —
