@@ -76,28 +76,28 @@ Machine states: `starting` (pre-assessment sentinel, held only until the boot co
 ```mermaid
 stateDiagram-v2
   [*] --> online: online + saved profile
-  [*] --> unprovisioned: online, or offline with a wired link
-  [*] --> ap_active: unprovisioned + offline + no wired link
+  [*] --> unprovisioned: online, or offline with an active link
+  [*] --> ap_active: unprovisioned + offline + no link
 
   online --> offline_retrying: lost internet (provisioned)
-  offline_retrying --> ap_active: sustained-offline window elapsed
+  offline_retrying --> ap_active: sustained-offline window elapsed with no link
   offline_retrying --> online: internet back
 
-  unprovisioned --> ap_active: goes offline with no wired link
+  unprovisioned --> ap_active: goes offline with no link
   ap_active --> joining: portal /connect (creds submitted)
   ap_active --> ap_active: portal /rescan (AP bounce + fresh scan)
   joining --> online: join succeeded (AP stays down)
   joining --> ap_active: join failed (AP re-raised)
 
   ap_active --> online: internet returned on its own
-  ap_active --> unprovisioned: wired link appeared
+  ap_active --> unprovisioned: went online (no saved profile)
 ```
 
 **Trigger rules:**
 
-- **Unprovisioned + offline + no wired link → raise the AP immediately.** A fresh device with no saved Wi-Fi and no ethernet needs the AP right away.
-- **Provisioned + offline → arm a sustained-offline window** (`defaultOfflineWindow = 5m`, re-checked on a `15s` tick). The AP is raised only if the device is still offline when the window elapses, so a brief router reboot never pops the AP over active artwork.
-- **A live wired (ethernet) link suppresses the AP** even when the device reports offline. A Wi-Fi link that is up but offline is deliberately *not* suppressed — that is the broken-credentials case the AP exists to fix.
+- **Unprovisioned + offline + no link → raise the AP immediately.** A fresh device with no saved Wi-Fi and no ethernet needs the AP right away.
+- **Provisioned + offline → arm a sustained-offline window** (`defaultOfflineWindow = 5m`, re-checked on a `15s` tick). The AP is raised only if the device is still offline **and link-less** when the window elapses, so a brief router reboot never pops the AP over active artwork.
+- **Any live local link suppresses the AP** — a wired (ethernet) link or an associated Wi-Fi station — even when the device reports offline. The AP raises on **link loss, not internet loss**: it can only fix "cannot associate" (re-submitting credentials for a network the device is already on just rejoins the same dead network), and the cases it genuinely rescues — a changed Wi-Fi password, a vanished SSID — present as link *down*, not up-but-offline. Raising over a live Wi-Fi association would also drop the station link on the single radio, killing LAN hub control and mDNS on an otherwise healthy LAN (ISP outage, air-gapped gallery). At each guarded window expiry the window is re-armed fresh, so losing the link starts a new sustained window rather than raising the AP instantly off a stale one.
 - **Any return to online tears the AP down.**
 
 ---
@@ -161,7 +161,7 @@ After `ready`/`hidden`, the bundled player owns the screen and normal artwork pl
 
 ## Offline recovery
 
-A claimed, provisioned device that later loses internet does **not** immediately show the AP. It enters `offline_retrying` and waits out the sustained-offline window (5m). If internet returns first, it goes back to `online` with no visible change. If the window elapses while still offline (and no wired link is present), it raises the AP with reason `sustained-offline` — the same portal path as first-run provisioning — so the owner can re-enter Wi-Fi credentials. The LAN hub listener stays bound throughout (only mDNS discoverability is link-keyed; the listener itself is unconditional), so a LAN client can still reach the device on a working local link even with no internet.
+A claimed, provisioned device that later loses internet does **not** immediately show the AP. It enters `offline_retrying` and waits out the sustained-offline window (5m). If internet returns first, it goes back to `online` with no visible change. If the window elapses while still offline **and with no local link at all** (no ethernet, no Wi-Fi association), it raises the AP with reason `sustained-offline` — the same portal path as first-run provisioning — so the owner can re-enter Wi-Fi credentials. A device whose Wi-Fi association survives (WAN outage, air-gapped LAN) stays in `offline_retrying` indefinitely with the AP down: it keeps its station link, stays reachable on the LAN hub, and keeps advertising mDNS. Moving such a frame to a new Wi-Fi while the old network is still associated has no over-the-LAN credential path today (the hub's `connect` command is the claim/pairing step, not a Wi-Fi join; an over-the-hub Wi-Fi change is a possible follow-up) — the recovery is physical: power off or unplug the old router so the association drops, which raises the AP after a fresh sustained window. The LAN hub listener stays bound throughout (only mDNS discoverability is link-keyed; the listener itself is unconditional), so a LAN client can still reach the device on a working local link even with no internet.
 
 ---
 

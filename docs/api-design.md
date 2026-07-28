@@ -236,9 +236,9 @@ The DNS and NAT layers only make the probe request arrive; the HTTP layer is wha
 
 Machine states: `online`, `offline_retrying`, `unprovisioned`, `ap_active`, `joining`. The AP is raised or suppressed from connectivity and link signals:
 
-- **Unprovisioned (no saved Wi-Fi profile) + offline + no wired link → raise the AP immediately.**
-- **Provisioned + offline → arm a sustained-offline window** (`defaultOfflineWindow = 5m`, re-evaluated on a `15s` tick); the AP is raised only if the device is still offline when the window elapses, so a brief router reboot never pops the AP.
-- **A live wired (ethernet) link suppresses the AP** even while reported offline. A Wi-Fi link that is up-but-offline is deliberately **not** suppressed — that is the broken-credentials case the AP exists to fix.
+- **Unprovisioned (no saved Wi-Fi profile) + offline + no link → raise the AP immediately.**
+- **Provisioned + offline → arm a sustained-offline window** (`defaultOfflineWindow = 5m`, re-evaluated on a `15s` tick); the AP is raised only if the device is still offline **and link-less** when the window elapses, so a brief router reboot never pops the AP.
+- **Any live local link suppresses the AP** — wired (ethernet) or an associated Wi-Fi station — even while reported offline. The AP raises on **link loss, not internet loss**: broken credentials and vanished SSIDs present as link *down*, while up-but-offline means a dead upstream the AP cannot fix — and raising it would drop the station link on the single radio (#233). The device's own setup hotspot never counts as a link.
 - **Any transition back online tears the AP down.**
 - **Join sequencing (the "AP bounce"):** on credential submit the machine tears the AP down *before* the station-mode join (the single radio cannot host the AP and join at once), then joins via `wifictl`. On **any** join failure (including wrong password) the AP is re-raised so the user can retry; the portal `/status` reports `failed` with a reason.
 

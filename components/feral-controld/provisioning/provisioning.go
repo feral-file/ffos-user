@@ -111,9 +111,9 @@ type WifiController interface {
 //
 // This conflates "online via Ethernet" with "online via Wi-Fi", which is exactly
 // what the AP decision needs (either way, no AP) and is what sys-monitord's
-// GetConnectivityStatus / connectivity_change actually expose. The finer
-// link-type-aware gating (mediator's LinkState seam) is a future refinement;
-// this machine deliberately does not depend on it.
+// GetConnectivityStatus / connectivity_change actually expose. Offline readings
+// alone do NOT raise the AP: Config.ActiveLink refines them with link state, so
+// only link LOSS (no wire, no Wi-Fi association) reaches the AP path.
 type Connectivity interface {
 	Online(ctx context.Context) (bool, error)
 	Subscribe(fn func(online bool)) (unsubscribe func())
@@ -163,18 +163,23 @@ type Config struct {
 	// Notifier is optional.
 	Notifier Notifier
 
-	// WiredLink is an optional guard against raising the setup AP on a device
-	// that has an active WIRED (ethernet) link but is reported offline. The
-	// Connectivity source is internet-reachability only, so a wired device whose
-	// upstream/router is momentarily down looks identical to a truly disconnected
-	// one — and an unprovisioned wired device would otherwise pop the setup AP even
-	// though ethernet is its intended path. When WiredLink reports true the machine
-	// treats the device as reachable-by-wire and keeps the AP down (exactly as an
-	// ethernet-online device does). It is deliberately wired-ONLY: a wifi link that
-	// is up but offline must still reach the AP path, because that is the
-	// broken-credentials case the AP exists to fix. Nil disables the guard
-	// (preserving the Connectivity-only behavior).
-	WiredLink func(ctx context.Context) bool
+	// ActiveLink is an optional guard against raising the setup AP on a device
+	// that has an active local link (ethernet OR an associated Wi-Fi station) but
+	// is reported offline. The Connectivity source is internet-reachability only,
+	// so a device whose upstream/router is down looks identical to a truly
+	// disconnected one — yet the AP can only fix "cannot associate": re-submitting
+	// credentials for a network the device is already on rejoins the same dead
+	// network, and the cases the AP genuinely rescues (changed password, vanished
+	// SSID) present as link DOWN, not up-but-offline. Raising the AP over a live
+	// Wi-Fi association is actively harmful on single-radio hardware: it drops
+	// the station link, killing LAN hub control and mDNS on an otherwise healthy
+	// LAN. When ActiveLink reports true the machine keeps the AP down (exactly as
+	// an online device does). The machine ignores this guard while its own setup
+	// AP is up, so a probe that matches the hotspot's wifi device (as
+	// status.LinkChecker.HasLink does) is correct to pass — callers need not
+	// filter it out themselves. Nil disables the guard (preserving the
+	// Connectivity-only behavior).
+	ActiveLink func(ctx context.Context) bool
 
 	// PortalAddr is the portal bind address (default ":80").
 	PortalAddr string
@@ -192,14 +197,14 @@ type Config struct {
 
 // Machine is the setup-AP trigger state machine.
 type Machine struct {
-	ap        softap.Backend
-	wifi      WifiController
-	conn      Connectivity
-	clock     wrapper.Clock
-	logger    *zap.Logger
-	notifier  Notifier
-	wiredLink func(ctx context.Context) bool
-	newPortal func(portal.Config) PortalServer
+	ap         softap.Backend
+	wifi       WifiController
+	conn       Connectivity
+	clock      wrapper.Clock
+	logger     *zap.Logger
+	notifier   Notifier
+	activeLink func(ctx context.Context) bool
+	newPortal  func(portal.Config) PortalServer
 
 	portalAddr    string
 	offlineWindow time.Duration
@@ -282,7 +287,7 @@ func New(cfg Config) *Machine {
 		clock:         cfg.Clock,
 		logger:        logger,
 		notifier:      cfg.Notifier,
-		wiredLink:     cfg.WiredLink,
+		activeLink:    cfg.ActiveLink,
 		newPortal:     cfg.NewPortal,
 		portalAddr:    cfg.PortalAddr,
 		offlineWindow: cfg.OfflineWindow,
@@ -506,17 +511,19 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 
 	// Offline.
 	if !m.hasProfile(ctx) {
-		// Wired-link guard: a device with an active ethernet link is reachable by
-		// wire even when sys-monitord reports offline (e.g. a WAN/router blip), and
-		// ethernet is its intended path — it must never pop the setup AP, exactly as
-		// an ethernet-ONLINE device never does. Treat it as unprovisioned-but-wired
-		// (AP stays down). Wifi-link-up-but-offline is deliberately NOT caught here:
-		// that is the broken-credentials case the AP exists to fix.
-		if m.hasWiredLink(ctx) {
+		// Link guard: a device with an active local link — in this no-profile
+		// branch that is ethernet in practice, since NM cannot hold a station
+		// association without a profile and hasActiveLink excludes our own
+		// hotspot — is reachable on its LAN even when sys-monitord reports
+		// offline (e.g. a WAN/router blip). It must never pop the setup AP,
+		// exactly as an ONLINE device never does. Treat it as
+		// unprovisioned-but-linked (AP stays down). Only a device with NO link
+		// at all cannot self-heal.
+		if m.hasActiveLink(ctx) {
 			m.clearOffline()
 			m.transition(ctx, StateUnprovisioned, Detail{
-				Reason:  "wired-link",
-				Message: "Wired network present; Wi-Fi not configured",
+				Reason:  "link-present",
+				Message: "Network link present; Wi-Fi not configured",
 			})
 			return
 		}
@@ -564,27 +571,32 @@ func (m *Machine) onTick(ctx context.Context) {
 
 	if st == StateOfflineRetrying && !since.IsZero() &&
 		m.clock.Now().Sub(since) >= m.offlineWindow {
-		// Wired-link guard, provisioned flavor: the sustained-offline AP exists to
-		// fix broken Wi-Fi credentials, but a device on active ethernet is already
-		// on its intended path — popping the setup AP would only add noise (and an
-		// open WPA2 surface). Re-arm the window instead of raising: if the wire is
-		// later unplugged while still offline, the NEXT expiry raises the AP, which
-		// keeps the "sustained offline" semantics relative to losing the wire.
-		if m.hasWiredLink(ctx) {
+		// Link guard, provisioned flavor: the sustained-offline AP exists to
+		// fix "cannot associate" (changed password, vanished SSID — both
+		// present as link DOWN). A device still holding a link — ethernet, or
+		// a Wi-Fi association whose WAN died — is on its intended path and
+		// stays reachable on its LAN; raising the AP would drop that link on
+		// single-radio hardware and cannot fix an upstream outage anyway.
+		// Re-arm the window instead of raising: if the link is later lost
+		// while still offline, the NEXT expiry raises the AP, which keeps the
+		// "sustained offline" semantics relative to losing the link.
+		if m.hasActiveLink(ctx) {
 			// clearOffline+start = reset to a FRESH window: startOfflineWindow alone
 			// is a no-op on an armed window, which would leave a stale expiry that
-			// raises the AP instantly the moment the wire disappears.
+			// raises the AP instantly the moment the link disappears. Fall through
+			// to reconcile below rather than returning: a pending AP-profile
+			// teardown (apDownPending) must keep retrying on guarded expiries too.
 			m.clearOffline()
 			m.startOfflineWindow()
+		} else {
+			m.clearOffline()
+			m.resetJoinStatus()
+			m.transition(ctx, StateAPActive, Detail{
+				Reason:  "sustained-offline",
+				Message: "Wi-Fi unavailable; starting setup",
+			})
 			return
 		}
-		m.clearOffline()
-		m.resetJoinStatus()
-		m.transition(ctx, StateAPActive, Detail{
-			Reason:  "sustained-offline",
-			Message: "Wi-Fi unavailable; starting setup",
-		})
-		return
 	}
 
 	// Idempotent retry: a prior ensureAPUp/Down that failed converges here.
@@ -921,14 +933,30 @@ func (m *Machine) hasProfile(ctx context.Context) bool {
 	return ok
 }
 
-// hasWiredLink reports whether the optional WiredLink guard sees an active
-// ethernet link. A nil guard reports false, preserving the Connectivity-only
-// behavior (no wired suppression).
-func (m *Machine) hasWiredLink(ctx context.Context) bool {
-	if m.wiredLink == nil {
+// hasActiveLink reports whether the optional ActiveLink guard sees an active
+// local link (ethernet or an associated Wi-Fi station). A nil guard reports
+// false, preserving the Connectivity-only behavior (no link suppression).
+//
+// The machine's OWN setup AP never counts as a link: the production guard is an
+// nmcli probe that reports any wifi device in "connected" state, which matches
+// the hotspot while the AP is up. Without this short-circuit a redundant
+// offline reading arriving with the AP raised (a monitord restart re-emits its
+// first probe unconditionally; the connUnknown re-query path feeds one in after
+// an assumed-offline boot) would take the link-present branch, transition away
+// from StateAPActive and tear down the AP mid-setup — with no further
+// connectivity event to ever re-raise it. The hotspot holds the radio; it is
+// not an uplink.
+func (m *Machine) hasActiveLink(ctx context.Context) bool {
+	if m.activeLink == nil {
 		return false
 	}
-	return m.wiredLink(ctx)
+	m.mu.Lock()
+	apUp := m.apUp
+	m.mu.Unlock()
+	if apUp {
+		return false
+	}
+	return m.activeLink(ctx)
 }
 
 // resetJoinStatus drops any prior join outcome before a FRESH AP raise

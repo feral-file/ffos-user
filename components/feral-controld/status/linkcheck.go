@@ -54,7 +54,9 @@ func NewLinkChecker(exec wrapper.Exec, logger *zap.Logger) *LinkChecker {
 // HasLink returns true when at least one ethernet or wifi device is in
 // NetworkManager's "connected" state. It is best-effort: any probe failure is
 // treated as "no link" so callers fail closed (advertiser stays down) rather
-// than advertising on an interface that cannot actually carry traffic.
+// than advertising on an interface that cannot actually carry traffic. The
+// provisioning AP-trigger guard keys on this same probe: the setup AP raises on
+// link loss (no wire, no Wi-Fi association), never on internet loss alone.
 func (c *LinkChecker) HasLink(ctx context.Context) bool {
 	if c == nil || c.exec == nil {
 		return false
@@ -62,22 +64,9 @@ func (c *LinkChecker) HasLink(ctx context.Context) bool {
 	return c.hasLinkOfType(ctx, "ethernet", "wifi")
 }
 
-// HasWiredLink reports whether at least one ETHERNET device is in
-// NetworkManager's "connected" state. It is the wired-only sibling of HasLink,
-// used by the provisioning AP-trigger guard: an unprovisioned device with a live
-// ethernet link must never raise the setup AP even when reported offline, but a
-// wifi-only link (which may be up with broken credentials) must still reach the
-// AP path. Like HasLink it fails closed to false on any probe error.
-func (c *LinkChecker) HasWiredLink(ctx context.Context) bool {
-	if c == nil || c.exec == nil {
-		return false
-	}
-	return c.hasLinkOfType(ctx, "ethernet")
-}
-
 // hasLinkOfType reports whether any device whose TYPE is in wantTypes is in
-// NetworkManager's "connected" state. Shared nmcli probe behind HasLink and
-// HasWiredLink; best-effort, returning false on any probe failure.
+// NetworkManager's "connected" state. Best-effort nmcli probe behind HasLink,
+// returning false on any probe failure.
 func (c *LinkChecker) hasLinkOfType(ctx context.Context, wantTypes ...string) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, linkCheckTimeout)
 	defer cancel()

@@ -615,9 +615,10 @@ func initializeApp(
 
 	// Provisioning domain (SoftAP setup). controld owns setup, so run() starts it
 	// unconditionally. The connectivity adapter reads sys-monitord over the shared
-	// D-Bus client; the WiredLink guard reuses the link checker so an unprovisioned
-	// ethernet device never pops the setup AP. Narration flows through a
-	// setupui.Service.
+	// D-Bus client; the ActiveLink guard reuses the link checker so a device with
+	// any live local link (ethernet or an associated Wi-Fi station) never pops the
+	// setup AP — the AP raises on link loss, not internet loss (#233). Narration
+	// flows through a setupui.Service.
 	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
@@ -647,7 +648,7 @@ func initializeApp(
 		Clock:        clock,
 		Logger:       logger,
 		Notifier:     provisioningNotifier,
-		WiredLink:    linkChecker.HasWiredLink,
+		ActiveLink:   linkChecker.HasLink,
 	})
 
 	// Hub status provider. The base provider reads identity/version/claim/topic
