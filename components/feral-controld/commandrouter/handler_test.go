@@ -968,3 +968,91 @@ func TestCommandHandler_Metrics_NonPlaybackCommand_NoMetrics(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, beforeAttempts, status.PlaybackStartTotal(), "non-playback command should not increment attempt counter")
 }
+
+// refreshArtwork must survive a dead player page: the evaluate path needs
+// window.handleCDPRequest, which is exactly what's missing when Chromium is
+// serving a stale/broken bundle (#234) — the situation a refresh exists to
+// fix. Cache clear + browser-level Page.reload is the recovery.
+func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaReload(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	command := commands.Command{
+		Type:      commands.CMD_REFRESH_ARTWORK,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockCDP.EXPECT().
+		Send("Network.clearBrowserCache", map[string]interface{}{}).
+		Return(nil, nil).
+		Times(1)
+
+	// Page evaluate fails — no live player app.
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, errors.New("evaluate failed: handleCDPRequest is not defined")).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send("Page.reload", map[string]interface{}{"ignoreCache": true}).
+		Return(nil, nil).
+		Times(1)
+
+	ts.mockStatusPoller.EXPECT().
+		ForceRefresh().
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.True(t, isPlayerResponseOkForTest(result))
+}
+
+// When both the evaluate and the reload fail, the command must report the
+// original failure — a dead CDP connection is not recoverable here.
+func TestCommandHandler_Process_RefreshArtwork_ReloadAlsoFails(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	command := commands.Command{
+		Type:      commands.CMD_REFRESH_ARTWORK,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockCDP.EXPECT().
+		Send("Network.clearBrowserCache", map[string]interface{}{}).
+		Return(nil, nil).
+		Times(1)
+
+	evalErr := errors.New("evaluate failed")
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, evalErr).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send("Page.reload", map[string]interface{}{"ignoreCache": true}).
+		Return(nil, errors.New("no CDP connection")).
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.Error(t, err)
+	assert.Equal(t, evalErr, err)
+	assert.Nil(t, result)
+}
+
+// Non-refresh commands must NOT get the reload fallback — a failed
+// displayPlaylist evaluate is a real failure the caller needs to see.
+func isPlayerResponseOkForTest(result interface{}) bool {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	msg, ok := m["message"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	okVal, _ := msg["ok"].(bool)
+	return okVal
+}

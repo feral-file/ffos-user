@@ -391,12 +391,22 @@ Example:
 }
 ```
 
-Current success response: Chromium/player response.
+Current success response: Chromium/player response — or, when the player page
+is unresponsive, a synthesized `{"message": {"ok": true, "recovered": "reload"}}`
+(see below).
 
 Current error cases:
 
 - Cache clear failure is logged as a warning and does not stop the command.
-- CDP command forwarding failure causes command failure.
+- CDP page-evaluate failure does NOT fail the command: controld falls back to
+  a browser-level `Page.reload` (`ignoreCache: true`), which needs no page JS.
+  A refresh is most needed exactly when the page is broken (e.g. Chromium
+  serving stale cached chunks after a player bundle swap), so cache clear +
+  forced reload is the complete recovery. The synthesized success response
+  carries `recovered: "reload"` so controllers can distinguish it from a
+  normal player reply.
+- Only when the fallback `Page.reload` also fails (dead CDP connection) does
+  the command fail, surfacing the original evaluate error.
 
 Current relayer error response: none standardized; command failure is logged.
 
