@@ -16,7 +16,7 @@
     z-index: 2;
     width: 100%;
     height: 100%;
-    display: flex;
+    display: none;
     align-items: center;
     justify-content: center;
     background-color: #000000;
@@ -89,11 +89,13 @@ const FileUseIframePDF = ["pdf", "application/pdf"];
 const stage  = document.getElementById('stage');
 const loading = document.querySelector('.loading');
 const CLIENT_BANDWIDTH_HINT = 16; // Default value for bandwidth hint on load stream video
+const LOADING_OVERLAY_DELAY_MS = 2000;
 
 let mode = 'fit';                     // 'fit' | 'fill'
 let currentEl = null;                 // <img> or <video> or <audio> or <iframe>
 let isStreaming = false;
-let isLoading = true;
+let loadingOverlayTimer = null;
+let activeArtworkToken = 0;
 
 function applyMode(el){
   if(!el) return;
@@ -109,17 +111,55 @@ function hideLoading(){
   loading.style.display = 'none';
 }
 
+function clearLoadingOverlayTimer() {
+  if (loadingOverlayTimer) {
+    clearTimeout(loadingOverlayTimer);
+    loadingOverlayTimer = null;
+  }
+}
+
+function beginArtworkLoad() {
+  clearLoadingOverlayTimer();
+  hideLoading();
+
+  const token = ++activeArtworkToken;
+  // Keep the artwork state in loading immediately, but only surface the
+  // overlay if the artwork still has not rendered after a short grace period.
+  loadingOverlayTimer = setTimeout(() => {
+    if (token !== activeArtworkToken) {
+      return;
+    }
+    loadingOverlayTimer = null;
+    showLoading();
+  }, LOADING_OVERLAY_DELAY_MS);
+
+  return token;
+}
+
+function finishArtworkLoad(token) {
+  if (token !== activeArtworkToken) {
+    return;
+  }
+
+  clearLoadingOverlayTimer();
+  hideLoading();
+}
+
 function setSrc(url, mimeType){
-  if(currentEl) stage.removeChild(currentEl);
-  showLoading();
-  if (!url) return;
+  if(currentEl) {
+    stage.removeChild(currentEl);
+    currentEl = null;
+  }
+  if (!url) {
+    clearLoadingOverlayTimer();
+    hideLoading();
+    return;
+  }
+
+  const artworkToken = beginArtworkLoad();
 
   const type = mimeType || url.split('.').pop().toLowerCase();
-  const el = fileTypeToPlayerElement(type, url);
-  el.onload = el.onloadeddata = () => {
-    el.focus();
-    hideLoading();
-  };
+  const el = fileTypeToPlayerElement(type, url, artworkToken);
   applyMode(el);
   stage.appendChild(el);
   currentEl = el;
@@ -169,7 +209,7 @@ function retryToPlayVideo(el) {
   }
 }
 
-function setStreamElement(url, el) {
+function setStreamElement(url, el, artworkToken) {
   if (isStreaming && Hls.isSupported() && url.endsWith(".m3u8")) {
     const hls = new Hls({
       maxBufferSize: 60 * 1000 * 1000,
@@ -188,7 +228,7 @@ function setStreamElement(url, el) {
           console.log("Error play video", error);
         })
         .finally(() => {
-          hideLoading();
+          finishArtworkLoad(artworkToken);
         });
     });
 
@@ -233,7 +273,7 @@ function setIframeElement(url) {
   return el;
 }
 
-function fileTypeToPlayerElement(type, url) {
+function fileTypeToPlayerElement(type, url, artworkToken) {
   isStreaming = false;
   if (!type) {
     return;
@@ -245,7 +285,7 @@ function fileTypeToPlayerElement(type, url) {
   if (MIMETypeStreamVideo.includes(type)) {
     isStreaming = true;
     el = setVideoElementWithoutSrc();
-    setStreamElement(url, el);
+    setStreamElement(url, el, artworkToken);
   } else if (MITETypeIframe.includes(type)) {
     el = setIframeElement(url);
   } else if (FileUseObject.includes(type) || type.match(MIMETypeObject)) {
@@ -258,7 +298,7 @@ function fileTypeToPlayerElement(type, url) {
       retryToPlayVideo(el);
     })
     .finally(() => {
-      hideLoading();
+      finishArtworkLoad(artworkToken);
     });
   } else if (FileUseAudio.includes(type) || type.match(MIMETypeAudio)) {
     el = setAudioElement(url);
@@ -268,6 +308,15 @@ function fileTypeToPlayerElement(type, url) {
     el = setIframeElement(url);
   } else {
     el = setIframeElement(url);
+  }
+
+  if (el) {
+    el.onload = el.onloadeddata = () => {
+      if (typeof el.focus === 'function') {
+        el.focus();
+      }
+      finishArtworkLoad(artworkToken);
+    };
   }
 
   return el;
