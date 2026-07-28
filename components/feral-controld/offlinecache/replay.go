@@ -99,11 +99,15 @@ type Replayer interface {
 	// stall on the dead socket's send timeout) to Fetch.enable/disable
 	// it, degrading or delaying live replay scope for an iframe that no
 	// longer exists the moment its top-level page was replaced.
-	// Returns false (informational, not an error) when root was already
-	// superseded, in which case nothing was attached — see
-	// kiosktargets.go's handleTargetAttached for why the caller must
-	// then also skip resuming the paused target.
-	AttachChild(root CDPSession, sessionID string, session CDPSession) (attached bool)
+	// The returned bool is the caller's authorization to RESUME the
+	// paused child target, and is false for either of two reasons, both
+	// leading to the same action: root was already superseded (nothing
+	// was attached, and resuming a dead connection's target is
+	// pointless), or Fetch could not be armed on the child. The second
+	// is a correctness requirement, not an optimization — see
+	// attachChild's doc for why resuming an unarmed child silently
+	// defeats fail_closed.
+	AttachChild(root CDPSession, sessionID string, session CDPSession) (resumeChild bool)
 	// Detach drops a child target that has gone away
 	// (Target.detachedFromTarget). It unregisters that target's handlers
 	// so a long-lived kiosk connection that sees many iframe navigations
@@ -243,6 +247,10 @@ type replayer struct {
 	// requestPausedAdmission for why. Sized once at construction time;
 	// never resized.
 	admission chan struct{}
+	// overflowAdmission is the same shape for the overflow path, which
+	// is cheap per goroutine but not instantaneous — see
+	// OverflowAdmission's doc.
+	overflowAdmission chan struct{}
 }
 
 // NewReplayer constructs a Replayer. staticServer's BaseURL is used to let
@@ -253,13 +261,14 @@ func NewReplayer(store Store, staticServer StaticServer, missPolicy MissPolicy, 
 		missPolicy = MissPolicyFailClosed
 	}
 	return &replayer{
-		store:        store,
-		staticServer: staticServer,
-		missPolicy:   missPolicy,
-		json:         jsonWrapper,
-		logger:       logger,
-		targets:      make(map[string]CDPSession),
-		admission:    make(chan struct{}, RequestPausedAdmission),
+		store:             store,
+		staticServer:      staticServer,
+		missPolicy:        missPolicy,
+		json:              jsonWrapper,
+		logger:            logger,
+		targets:           make(map[string]CDPSession),
+		admission:         make(chan struct{}, RequestPausedAdmission),
+		overflowAdmission: make(chan struct{}, OverflowAdmission),
 	}
 }
 
@@ -286,7 +295,9 @@ func (r *replayer) Attach(sessionID string, session CDPSession) {
 		r.attachRoot(session)
 		return
 	}
-	r.attachChild(sessionID, session)
+	// Result ignored: this entry point does not drive target resumption
+	// (kiosktargets.go uses AttachChild for that) — see attachChild's doc.
+	_ = r.attachChild(sessionID, session)
 }
 
 // AttachChild is the reconnect-race-safe entry point for kiosktargets.go
@@ -304,8 +315,7 @@ func (r *replayer) AttachChild(root CDPSession, sessionID string, session CDPSes
 	if !r.isCurrentRootLocked(root) {
 		return false
 	}
-	r.attachChild(sessionID, session)
-	return true
+	return r.attachChild(sessionID, session)
 }
 
 // isCurrentRootLocked reports whether root is the top-level session most
@@ -377,7 +387,17 @@ func (r *replayer) attachRoot(session CDPSession) {
 // leave the iframe's own requests un-intercepted in between. Caller holds
 // transitionMu; this may Send (Fetch.enable), so it must not run on the
 // CDP read pump — see kiosktargets.go.
-func (r *replayer) attachChild(sessionID string, session CDPSession) {
+// Returns whether the caller may resume this child target. Arming Fetch
+// is the whole precondition for resuming it: a child resumed with
+// interception NOT armed runs completely outside replay, so every request
+// it makes goes straight to the network — silently, while the scope still
+// claims fail_closed and status still reports the item cached. Leaving it
+// paused instead is the fail-closed-consistent outcome: a visibly stalled
+// iframe rather than an invisible violation of the guarantee offline mode
+// exists to make. Under a policy that already permits the network for a
+// miss (pass_through, or a mixed scope), that trade is not worth making,
+// so resuming is allowed there.
+func (r *replayer) attachChild(sessionID string, session CDPSession) (resumable bool) {
 	r.mu.Lock()
 	if existing, ok := r.targets[sessionID]; ok && existing != session {
 		// Same sessionId re-reported with a different view: drop the
@@ -400,12 +420,31 @@ func (r *replayer) attachChild(sessionID string, session CDPSession) {
 		r.onRequestPaused(sessionID, session, params)
 	})
 
-	if enabled {
-		if _, err := session.Send(context.Background(), "Fetch.enable", fetchEnablePatternAll()); err != nil {
-			r.logger.Warn("offline cache replay: Fetch.enable on newly attached child target failed",
-				zap.String("session_id", sessionID), zap.Error(err))
-		}
+	if !enabled {
+		// No scope is active, so there is nothing to arm and nothing for
+		// this child to escape: replay is not intercepting anything right
+		// now, on any target.
+		return true
 	}
+
+	if _, err := session.Send(context.Background(), "Fetch.enable", fetchEnablePatternAll()); err != nil {
+		r.logger.Warn("offline cache replay: Fetch.enable on newly attached child target failed",
+			zap.String("session_id", sessionID), zap.Error(err))
+		// A transport failure means this session is finished — retire it
+		// (which also closes it, so Chromium releases anything it has
+		// paused) rather than leaving a corpse in the target set.
+		r.retireIfDeadLocked(sessionID, session, err, "Fetch.enable (child attach)")
+
+		r.mu.RLock()
+		networkAlreadyPermitted := r.missPolicy == MissPolicyPassThrough || r.mixedScope
+		r.mu.RUnlock()
+		if !networkAlreadyPermitted {
+			r.logger.Warn("offline cache replay: leaving child target paused, its requests would bypass offline replay",
+				zap.String("session_id", sessionID))
+		}
+		return networkAlreadyPermitted
+	}
+	return true
 }
 
 func (r *replayer) Detach(sessionID string) {
@@ -693,11 +732,34 @@ func (r *replayer) Disable(ctx context.Context) error {
 // the configured missPolicy) without ever touching the resources
 // lookup or a blob read. This keeps every overflow goroutine O(1)-cheap
 // and short-lived, so sustained backlog pressure can lose cache hits
-// (an accepted, explicit trade-off — see resolveOverflow's doc) but can
-// never reproduce the original unbounded-heavy-goroutine growth.
+// (an accepted, explicit trade-off — see resolveOverflow's doc).
 // Exported (like ClassifyProbeRangeBytes in classify.go) so tests can
 // assert against it precisely.
 const RequestPausedAdmission = 64
+
+// OverflowAdmission bounds the overflow path itself, which was
+// previously an unbounded `go resolveOverflow(...)` per excess event.
+// "O(1)-cheap and short-lived" was true of the work each one does, but
+// not of how long it can take to do it: resolveOverflow answers via
+// CDPSession.Send, which blocks on that session's writeMu — a plain
+// mutex, taken BEFORE the send's own deadline context is consulted, so a
+// goroutine can queue on it for (queue position) x (write deadline)
+// regardless of its own ceiling. With Fetch armed at pattern "*"
+// Chromium pauses EVERY request, so a burst against a backpressured
+// socket accumulated goroutines at page-load rate on a device already
+// carrying OOM pressure from the kiosk (feral-file/ffos-user#229 review
+// finding).
+//
+// Sized well above RequestPausedAdmission because overflow is the wide,
+// cheap path: it should absorb a large burst before shedding. Beyond it
+// an event is dropped with a warning, which strands that one request
+// pending in the page — the same last-resort trade Notifier's bounded WS
+// queue already makes for the same reason, and strictly better than the
+// alternatives available here: blocking would stall the read pump (and
+// with it every CDP reply on this connection, including the ones the
+// queued sends are waiting for), and growing without bound is the defect
+// itself.
+const OverflowAdmission = 512
 
 func (r *replayer) onRequestPaused(sessionID string, session CDPSession, params json.RawMessage) {
 	select {
@@ -707,7 +769,21 @@ func (r *replayer) onRequestPaused(sessionID string, session CDPSession, params 
 			r.processRequestPaused(sessionID, session, params)
 		}()
 	default:
-		go r.resolveOverflow(sessionID, session, params)
+		select {
+		case r.overflowAdmission <- struct{}{}:
+			go func() {
+				defer func() { <-r.overflowAdmission }()
+				r.resolveOverflow(sessionID, session, params)
+			}()
+		default:
+			// Both semaphores are full: the CDP socket is not draining
+			// fast enough to answer what Chromium is pausing. Dropping
+			// leaves this one request pending in the page — see
+			// OverflowAdmission's doc for why that beats the two
+			// alternatives.
+			r.logger.Warn("offline cache replay: dropped a paused request, both admission bounds are full",
+				zap.String("session_id", sessionID))
+		}
 	}
 }
 

@@ -2296,3 +2296,68 @@ func TestService_Stop_WithQueuedBacklogDoesNotNotifyPerJob(t *testing.T) {
 	assert.Equal(t, 3, notifiedFor[blocking.ID],
 		"the in-flight capture is a real attempt and must still report its outcome")
 }
+
+// TestService_DownloadPlaylist_ClassificationIsBoundedAndConcurrent is the
+// regression test for downloadPlaylist holding its acknowledgment behind
+// serial network classification. Every classify here hangs until its
+// context is done, which under the old serial code meant
+// (item count) x (client timeout) — hours for a full playlist, while the
+// LAN hub gave up on the response at 30s and the work carried on anyway.
+// The command must instead come back bounded by classifyPhaseTimeout no
+// matter how many items are involved.
+func TestService_DownloadPlaylist_ClassificationIsBoundedAndConcurrent(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const itemCount = 60
+	items := make([]map[string]interface{}, itemCount)
+	for i := range items {
+		items[i] = map[string]interface{}{
+			"id":     fmt.Sprintf("item-%02d", i),
+			"source": fmt.Sprintf("https://unreachable.example/%02d.html", i),
+		}
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t", "items": items,
+	})
+	require.NoError(t, err)
+
+	// Every source is a black hole: the probe returns only when its own
+	// context is canceled, which is what an unreachable host looks like
+	// up to the client's timeout.
+	var inFlight, maxInFlight atomic.Int64
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ string) (offlinecache.MediaClass, error) {
+			cur := inFlight.Add(1)
+			for {
+				observed := maxInFlight.Load()
+				if cur <= observed || maxInFlight.CompareAndSwap(observed, cur) {
+					break
+				}
+			}
+			defer inFlight.Add(-1)
+			<-ctx.Done()
+			return offlinecache.ClassUnknown, ctx.Err()
+		}).Times(itemCount)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	start := time.Now()
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	elapsed := time.Since(start)
+
+	// Nothing could be classified, so this is the documented
+	// "classification itself is broken" error rather than a false
+	// ok/queuedCount:0 — the bound must not change that contract.
+	require.Error(t, err)
+	assert.Equal(t, 0, queued)
+	assert.Equal(t, itemCount, total)
+
+	assert.Less(t, elapsed, 30*time.Second,
+		"the command must answer within its own classification bound, not (item count) x the client timeout")
+	assert.Greater(t, maxInFlight.Load(), int64(1),
+		"classification must run concurrently; serial probing is what made the wall clock scale with item count")
+	assert.LessOrEqual(t, maxInFlight.Load(), int64(8),
+		"...but bounded, so a playlist whose items share a host does not fan out a burst at it")
+}

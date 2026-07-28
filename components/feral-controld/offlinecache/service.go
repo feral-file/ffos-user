@@ -994,6 +994,110 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	return nil
 }
 
+// classifyPhaseTimeout bounds the whole classification step of one
+// DownloadPlaylist call.
+//
+// Classification is a real network round trip per item (a HEAD, with a
+// ranged-GET fallback — see classify.go) on the daemon-wide 30s client,
+// and it runs BEFORE the command can answer. Serially, a playlist of
+// unreachable sources therefore held the command — and its heavy
+// storm-gate weight — for (item count) x up to 30s, i.e. hours, while
+// the LAN hub gave up on the response at its own 30s write deadline and
+// the work carried on regardless (hub.go passes the daemon context, not
+// the request's, so the client hanging up cancels nothing).
+//
+// Bounding the phase — rather than moving classification into the
+// background — keeps every documented response field honest:
+// queuedCount still means "actually queued", and the all-failed case is
+// still distinguishable from "no cacheable items". An item not
+// classified before this deadline is treated exactly like a classify
+// failure, which is already a logged, skipped, excluded-from-queuedCount
+// outcome. A caller that wants those items simply retries.
+const classifyPhaseTimeout = 10 * time.Second
+
+// classifyConcurrency caps how many classify probes are in flight at
+// once. Enough to make a large playlist finish well inside
+// classifyPhaseTimeout when origins are healthy, small enough not to
+// fan out a burst at one origin (a playlist's items commonly share a
+// host).
+const classifyConcurrency = 8
+
+// classifyPlaylistItems classifies every eligible item concurrently and
+// returns those worth queuing, in playlist order, plus how many failed
+// classification outright. Order is preserved deliberately: the enqueue
+// loop that consumes this drives capture order, and a playlist's item
+// order is the artist's, not an implementation detail to be scrambled by
+// whichever probe happened to answer first.
+func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist.PlaylistItem) ([]queuedItem, int) {
+	ctx, cancel := context.WithTimeout(ctx, classifyPhaseTimeout)
+	defer cancel()
+
+	results := make([]*queuedItem, len(items))
+	failed := make([]bool, len(items))
+
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, classifyConcurrency)
+	for i, item := range items {
+		if item.ID == "" || item.Source == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, item dp1playlist.PlaylistItem) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+
+			// Sampled per item immediately before its own classify, so
+			// a clear landing during this (network-bound) window is
+			// still caught at enqueue — see downloadEpoch's doc. The
+			// concurrency does not change that contract: each item's
+			// epoch still brackets only its own classify.
+			epoch := s.currentEpoch(item.ID)
+			class, err := s.classifier.Classify(ctx, item.Source)
+			if err != nil {
+				failed[i] = true
+				s.logger.Warn("offline cache: classify failed while queuing playlist, skipping item",
+					zap.String("item_id", item.ID), zap.Error(err))
+				return
+			}
+			// ClassStreaming is the only excluded class — see
+			// ErrUnsupportedMediaClass's doc. Silently skipped here (not
+			// counted as a failure) since a live/streaming item is a
+			// legitimate, correctly-classified exclusion, not a
+			// classification failure.
+			if class == ClassStreaming {
+				return
+			}
+			results[i] = &queuedItem{item: item, epoch: epoch, class: class}
+		}(i, item)
+	}
+	wg.Wait()
+
+	toQueue := make([]queuedItem, 0, len(items))
+	failures := 0
+	for i := range items {
+		if failed[i] {
+			failures++
+			continue
+		}
+		if results[i] != nil {
+			toQueue = append(toQueue, *results[i])
+		}
+	}
+	return toQueue, failures
+}
+
+// queuedItem pairs an item with the clear-epoch sampled just before its
+// classify and the class that classify produced, so the enqueue loop can
+// detect a ClearItem/ClearPlaylist that landed in between and route the
+// job without re-classifying — see downloadEpoch's and captureJob.class's
+// docs.
+type queuedItem struct {
+	item  dp1playlist.PlaylistItem
+	epoch uint64
+	class MediaClass
+}
+
 func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
 	if !s.started.Load() {
 		return 0, 0, ErrServiceNotStarted
@@ -1019,39 +1123,11 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 	// never leave already-accepted capture jobs running in the
 	// background for a call this method is about to report as failed.
 	total := len(playlist.Items)
-	classifyFailed := 0
 	// Pair each queued item with the clear-epoch sampled just before its
 	// classify, so a ClearItem/ClearPlaylist landing during this (per
 	// item, network-bound) loop or the SavePlaylist below is detected at
 	// enqueue and cannot be silently undone — see downloadEpoch's doc.
-	type queuedItem struct {
-		item  dp1playlist.PlaylistItem
-		epoch uint64
-		class MediaClass
-	}
-	toQueue := make([]queuedItem, 0, total)
-	for _, item := range playlist.Items {
-		if item.ID == "" || item.Source == "" {
-			continue
-		}
-		epoch := s.currentEpoch(item.ID)
-		class, err := s.classifier.Classify(ctx, item.Source)
-		if err != nil {
-			classifyFailed++
-			s.logger.Warn("offline cache: classify failed while queuing playlist, skipping item",
-				zap.String("item_id", item.ID), zap.Error(err))
-			continue
-		}
-		// ClassStreaming is the only excluded class — see
-		// ErrUnsupportedMediaClass's doc. Silently skipped here (not
-		// counted as a classifyFailed error) since a live/streaming
-		// item is a legitimate, correctly-classified exclusion, not a
-		// classification failure.
-		if class == ClassStreaming {
-			continue
-		}
-		toQueue = append(toQueue, queuedItem{item: item, epoch: epoch, class: class})
-	}
+	toQueue, classifyFailed := s.classifyPlaylistItems(ctx, playlist.Items)
 	if len(toQueue) == 0 && classifyFailed > 0 {
 		// Distinguish "classification itself is broken" from "this
 		// playlist genuinely has no cacheable items" — the latter is a

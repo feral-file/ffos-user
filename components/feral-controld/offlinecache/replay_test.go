@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1510,4 +1511,109 @@ func TestReplayer_TransportFailureRetiresAndClosesTheSession(t *testing.T) {
 		assert.True(t, ts.replayer.RootAttached(),
 			"a rejected command must not be mistaken for a dead connection")
 	})
+}
+
+// TestReplayer_AttachChild_UnarmedChildIsNotResumable is the regression
+// test for the silent fail_closed bypass. A child target whose
+// Fetch.enable fails is not intercepted at all, so resuming it lets the
+// iframe fetch straight from the network while the scope still claims
+// fail_closed and status still reports the item cached. AttachChild's
+// bool is the caller's authorization to resume, so it must be false.
+func TestReplayer_AttachChild_UnarmedChildIsNotResumable(t *testing.T) {
+	newChild := func(t *testing.T, ts *replayTestSetup, sendErr error) *mocks.MockCDPSession {
+		t.Helper()
+		child := mocks.NewMockCDPSession(ts.ctrl)
+		child.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
+		child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(nil, sendErr).Times(1)
+		return child
+	}
+
+	t.Run("fail_closed keeps the child paused", func(t *testing.T) {
+		ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+		defer ts.ctrl.Finish()
+		seedItem(t, ts.store, "item-1", "software payload")
+		ts.stubFetchEnable()
+		require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+		// A transport failure also retires the session, so it is closed.
+		child := newChild(t, ts, fmt.Errorf("write failed: %w", offlinecache.ErrCDPTransport))
+		child.EXPECT().Close().Return(nil).Times(1)
+
+		assert.False(t, ts.replayer.AttachChild(ts.mockSession, "child-1", child),
+			"an unarmed child must never be resumed under fail_closed: its requests would bypass replay entirely")
+	})
+
+	t.Run("pass_through resumes, since the network is already permitted", func(t *testing.T) {
+		ts := setupReplay(t, offlinecache.MissPolicyPassThrough)
+		defer ts.ctrl.Finish()
+		seedItem(t, ts.store, "item-1", "software payload")
+		ts.stubFetchEnable()
+		require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+		child := newChild(t, ts, fmt.Errorf("write failed: %w", offlinecache.ErrCDPTransport))
+		child.EXPECT().Close().Return(nil).Times(1)
+
+		assert.True(t, ts.replayer.AttachChild(ts.mockSession, "child-1", child),
+			"under pass_through a miss already reaches the network, so a hung iframe buys nothing")
+	})
+
+	t.Run("a successfully armed child is resumable", func(t *testing.T) {
+		ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+		defer ts.ctrl.Finish()
+		seedItem(t, ts.store, "item-1", "software payload")
+		ts.stubFetchEnable()
+		require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+
+		child := newChild(t, ts, nil)
+		assert.True(t, ts.replayer.AttachChild(ts.mockSession, "child-1", child))
+	})
+}
+
+// TestReplayer_OnRequestPaused_OverflowGoroutinesAreBounded pins the
+// second half of the admission story. The overflow path was a bare
+// `go resolveOverflow(...)` per excess event — "O(1)-cheap and
+// short-lived" in the work it does, but not in how long it can take:
+// resolveOverflow answers through CDPSession.Send, which blocks on that
+// session's writeMu before its own deadline is ever consulted. Against a
+// backpressured socket those goroutines accumulated at page-load rate,
+// which is the resource exhaustion the admission bound exists to prevent
+// in the first place.
+//
+// Every response here is stuck mid-flight, so nothing drains: the number
+// of Send calls Chromium can provoke must stop at the two bounds instead
+// of tracking the number of paused requests.
+func TestReplayer_OnRequestPaused_OverflowGoroutinesAreBounded(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-hot", "hot payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+
+	release := make(chan struct{})
+	var sends atomic.Int64
+	stuck := func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
+		sends.Add(1)
+		<-release
+		return json.RawMessage(`{}`), nil
+	}
+	// Both response shapes wedge: hits (admitted slots) and misses
+	// (overflow slots).
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.failRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+
+	// Far more paused requests than both bounds combined.
+	const flood = offlinecache.RequestPausedAdmission + offlinecache.OverflowAdmission + 500
+	for i := 0; i < flood; i++ {
+		ts.handler(requestPausedEvent(t, fmt.Sprintf("req-%d", i), res.URL))
+	}
+
+	// Everything that got in is now wedged on release, so the in-flight
+	// count can only be what the two semaphores admitted. Give the
+	// spawned goroutines a moment to actually reach Send before counting.
+	maxInFlight := int64(offlinecache.RequestPausedAdmission + offlinecache.OverflowAdmission)
+	require.Eventually(t, func() bool { return sends.Load() > 0 }, 2*time.Second, 10*time.Millisecond)
+	require.Never(t, func() bool { return sends.Load() > maxInFlight }, 300*time.Millisecond, 20*time.Millisecond,
+		"concurrent responses must be capped by the two admission bounds, not by how many requests Chromium paused")
+
+	close(release)
 }

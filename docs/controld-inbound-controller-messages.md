@@ -1534,6 +1534,15 @@ controller. A classify failure for only *some* items still returns
 successfully; the skipped item(s) are logged server-side but not
 individually reported here.
 
+Classification of the playlist's items is **time-bounded** (10s total,
+run concurrently) so this command acknowledges promptly regardless of
+item count. Each item needs a network probe to classify, so an
+unbounded serial pass over a large playlist of unreachable sources could
+otherwise hold the command far past the LAN hub's own 30s response
+deadline. An item not classified before that bound is treated exactly
+like a classification failure: logged, skipped, and absent from
+`queuedCount`. Re-issuing the command retries those items.
+
 An item excluded because a concurrent clear won the race (see
 `downloadPlaylistItem`'s `busy` case) is likewise absent from
 `queuedCount` without failing the whole command: a playlist download is an

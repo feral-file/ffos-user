@@ -133,7 +133,14 @@ func handleTargetAttached(
 	// session into the CURRENT generation's target set.
 	child := root.ForSession(evt.SessionID)
 	if !replayer.AttachChild(root, evt.SessionID, child) {
-		logger.Debug("offline cache replay: dropping Target.attachedToTarget from a superseded root connection",
+		// Either the root was superseded (nothing attached) or Fetch
+		// could not be armed on this child. The second case is why this
+		// must return rather than resume anyway: a child resumed without
+		// interception runs entirely outside replay, so its requests go
+		// straight to the network while the scope still claims
+		// fail_closed — see Replayer.AttachChild's doc. Leaving it paused
+		// is the honest outcome.
+		logger.Debug("offline cache replay: not resuming child target (superseded root, or interception could not be armed)",
 			zap.String("session_id", evt.SessionID), zap.String("target_id", evt.TargetInfo.TargetID))
 		return
 	}

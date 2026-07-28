@@ -1167,6 +1167,23 @@ just because it happens to share a CDP target with a cached item.
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.
 
+### A child target is only resumed once interception is armed
+
+Flat-mode child targets (cross-origin OOPIF iframes) attach paused, and
+`kiosktargets.go` resumes them with `Runtime.runIfWaitingForDebugger`
+once `Replayer.AttachChild` authorizes it. That authorization is a
+correctness gate, not bookkeeping: a child resumed with `Fetch.enable`
+NOT armed runs completely outside replay, so every request the iframe
+makes goes straight to the network — silently, while the scope still
+claims `fail_closed` and status still reports the item cached.
+
+So when arming a newly attached child fails, the child is left paused
+(and a transport failure additionally retires the session, see below). A
+visibly stalled iframe is the honest outcome; an invisible bypass of the
+guarantee offline mode exists to make is not. The one exception is a
+scope where the network is already permitted for a miss —
+`pass_through`, or a `mixed` scope — where a hung iframe buys nothing.
+
 ### The replay session recovers independently of the primary CDP connection
 
 That `onConnect` hook is not sufficient on its own. The replay session is
