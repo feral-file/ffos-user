@@ -49,6 +49,20 @@ cat >"$bin_dir/darkhttpd" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+# A no-arg invocation is the serve script's --header capability probe: like
+# the real binary, print usage and exit non-zero. Whether the usage text
+# advertises --header is scenario-controlled so both a modern and a legacy
+# darkhttpd can be modeled.
+if (($# == 0)); then
+  echo "usage: darkhttpd /path/to/wwwroot [options]"
+  if [[ "${FF_PLAYER_TEST_HEADER_SUPPORT:-1}" == "1" ]]; then
+    echo "  --header 'X-Header: Value'  add a custom response header"
+  fi
+  exit 1
+fi
+
+printf '%s\n' "$@" >"${FF_PLAYER_TEST_SERVER_ARGS:?missing server args file}"
+
 root="${1:?missing root}"
 shift
 
@@ -62,6 +76,10 @@ while (($#)); do
       ;;
     --addr)
       addr="${2:?missing addr}"
+      shift 2
+      ;;
+    --header)
+      : "${2:?missing header value}"
       shift 2
       ;;
     *)
@@ -108,21 +126,25 @@ EOF
 
 chmod +x "$bin_dir/darkhttpd" "$bin_dir/curl" "$bin_dir/systemd-notify"
 
+server_args="$tmp_dir/server.args"
+
 run_ready_server() {
-  rm -f "$pid_file" "$notify_file" "$notify_args" "$output_file"
+  rm -f "$pid_file" "$notify_file" "$notify_args" "$output_file" "$server_args"
 
   FF_PLAYER_STATIC_ROOT="$root_dir" \
   FF_PLAYER_STATIC_PORT="$port" \
   FF_PLAYER_READY_TIMEOUT_SECONDS=5 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}" \
   FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT="${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT:-1}" \
+  FF_PLAYER_TEST_HEADER_SUPPORT="${FF_PLAYER_TEST_HEADER_SUPPORT:-1}" \
   FF_PLAYER_TEST_ROOT="$root_dir" \
   FF_PLAYER_TEST_PORT="$port" \
   FF_PLAYER_TEST_PID_FILE="$pid_file" \
   FF_PLAYER_TEST_NOTIFY_FILE="$notify_file" \
   FF_PLAYER_TEST_NOTIFY_ARGS="$notify_args" \
+  FF_PLAYER_TEST_SERVER_ARGS="$server_args" \
   PATH="$bin_dir:$PATH" \
-  "$@" >"$output_file" 2>&1
+  "$@" >"$output_file" 2>&1 || fail "serve script exited non-zero; see $output_file"
 
   assert_contains "$notify_args" "--ready"
   assert_contains "$notify_args" "feral-player static ready on http://127.0.0.1:${port}/"
@@ -238,5 +260,23 @@ FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 run_ready_server bash "$script_under_t
 assert_contains "$notify_args" "--ready"
 assert_contains "$notify_args" "feral-player static ready on http://127.0.0.1:${port}/"
 [ -s "$pid_file" ] || fail "expected fake darkhttpd pid file to be written"
+
+# Cache policy (#234): with a --header-capable darkhttpd the server must be
+# started with a global "Cache-Control: no-cache" — darkhttpd applies custom
+# headers to 404s too, which is what stops a mid-swap negative response from
+# being heuristically cached by a live Chromium session.
+assert_contains "$server_args" "--header"
+assert_contains "$server_args" "Cache-Control: no-cache"
+
+# A darkhttpd without --header support (probe finds no such flag in its usage
+# text) must degrade to headerless serving — passing the flag anyway would
+# fail startup and put the unit in a restart loop, which is strictly worse
+# than serving without cache headers.
+FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=1 \
+FF_PLAYER_TEST_HEADER_SUPPORT=0 \
+  run_ready_server bash "$script_under_test"
+if grep -Fq -- "--header" "$server_args"; then
+  fail "legacy darkhttpd without --header support must be started without the flag"
+fi
 
 echo "test-serve-feral-player: OK"
