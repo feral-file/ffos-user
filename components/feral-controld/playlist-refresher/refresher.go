@@ -15,6 +15,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -288,7 +289,14 @@ func (r *refresher) processPlayingPlaylist() error {
 		}
 		result, err := r.sendCDPRequest(command)
 		sendErr = err
-		if schedulerMutated && (sendErr != nil || !playerResponseOK(result)) {
+		// Transport success with ok:false (or a malformed body) must still
+		// fail the refresh pass: otherwise the startup loop treats the reject
+		// as initial success and drops from 5s retries to the 5m ticker while
+		// the player never accepted the playlist.
+		if sendErr == nil && !playerresponse.OK(result) {
+			sendErr = errors.New("player rejected playlist refresh")
+		}
+		if schedulerMutated && sendErr != nil {
 			r.scheduler.Restore(schedulerSnapshot)
 		} else if schedulerMutated {
 			r.scheduler.Commit()
@@ -300,19 +308,6 @@ func (r *refresher) processPlayingPlaylist() error {
 		send()
 	}
 	return sendErr
-}
-
-func playerResponseOK(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	if msg, ok := m["message"].(map[string]interface{}); ok {
-		okVal, ok := msg["ok"].(bool)
-		return ok && okVal
-	}
-	okVal, ok := m["ok"].(bool)
-	return ok && okVal
 }
 
 // handleRefreshError degrades to the displayAt cache only for transient fetch

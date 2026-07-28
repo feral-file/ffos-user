@@ -163,6 +163,11 @@ func float64Ptr(f float64) *float64 {
 	return &f
 }
 
+// playerOKResponse is the CDP body the player returns on an accepted refresh.
+func playerOKResponse() map[string]interface{} {
+	return map[string]interface{}{"message": map[string]interface{}{"ok": true}}
+}
+
 // Helper function to set up common mock expectations for background goroutine
 func setupBackgroundMocks(ts *testSetup) {
 	// Create a mock ticker
@@ -407,7 +412,7 @@ func TestRefresher_ProcessPlayingPlaylist_PlaylistURL(t *testing.T) {
 			assert.Contains(t, expression, "window.handleCDPRequest")
 			assert.Contains(t, expression, "dp1_call")
 			assert.Contains(t, expression, "refresh")
-			return "success", nil
+			return playerOKResponse(), nil
 		}).
 		AnyTimes()
 
@@ -444,7 +449,7 @@ func TestRefresher_ProcessPlayingPlaylist_DynamicPlaylist(t *testing.T) {
 	// Expect CDP to send the playlist
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return("success", nil).
+		Return(playerOKResponse(), nil).
 		AnyTimes()
 
 	// Start the refresher
@@ -474,7 +479,7 @@ func TestRefresher_ProcessPlayingPlaylist_SpecDynamicQueryOnly(t *testing.T) {
 		AnyTimes()
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return("success", nil).
+		Return(playerOKResponse(), nil).
 		AnyTimes()
 	ts.refresher.Start()
 	time.Sleep(100 * time.Millisecond)
@@ -775,7 +780,7 @@ func TestRefresher_SendCDPRequest_Success(t *testing.T) {
 			assert.Contains(t, expression, "dp1_call")
 			assert.Contains(t, expression, "refresh")
 
-			return "success", nil
+			return playerOKResponse(), nil
 		}).
 		AnyTimes()
 
@@ -834,7 +839,7 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 	// Expect CDP to send request (needed for processPlayingPlaylist to succeed)
 	ts.mockCDP.EXPECT().
 		Send(gomock.Any(), gomock.Any()).
-		Return(nil, nil).
+		Return(playerOKResponse(), nil).
 		AnyTimes()
 
 	// Start the refresher
@@ -898,7 +903,7 @@ func TestRefresher_Background_DoneChannel(t *testing.T) {
 	// Expect CDP to send request (needed for processPlayingPlaylist to succeed)
 	ts.mockCDP.EXPECT().
 		Send(gomock.Any(), gomock.Any()).
-		Return(nil, nil).
+		Return(playerOKResponse(), nil).
 		AnyTimes()
 
 	// Start the refresher
@@ -984,7 +989,7 @@ func TestRefresher_HeadlessBoot_CDPConnectsLater(t *testing.T) {
 
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
-		Return("success", nil).
+		Return(playerOKResponse(), nil).
 		AnyTimes()
 
 	ts.refresher.Start()
@@ -1886,6 +1891,11 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
 
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	// Reject must stay on the startup fast-retry loop (Sleep), not settle into
+	// the 5m ticker as if the pass succeeded.
+	mockClock.EXPECT().
+		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		MinTimes(1)
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
 
 	playlistURL := "https://example.com/daily.json"
@@ -1926,6 +1936,9 @@ func TestRefresher_MalformedPlayerResponse_RestoresSchedulerCache(t *testing.T) 
 	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
 
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockClock.EXPECT().
+		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		MinTimes(1)
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
 
 	playlistURL := "https://example.com/daily.json"
