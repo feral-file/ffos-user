@@ -1368,8 +1368,15 @@ mime type (image/video/audio/SVG/`model/gltf`/PDF/unrecognized) via a
 browser-free direct HTTP download; see `docs/offline-artwork-capture.md`
 §1/§3.3. This is a `commandrouter`-owned, pre-CDP command family (same
 precedent as mint-pairing): these commands never reach
-`window.handleCDPRequest(...)`. Only a live/HLS streaming source
-(`.m3u8`) is rejected — see `classify.go`.
+Manifest-based streaming sources — HLS (`.m3u8`) and DASH (`.mpd` /
+`application/dash+xml`) alike — are the one class rejected outright; see
+`classify.go`'s `ClassStreaming`. Both families must be excluded, not
+just HLS: a manifest points at segments fetched progressively during
+playback rather than a single fixed byte sequence, so a manifest that
+fell through to the single-file download path would cache only the
+manifest itself with `coverageComplete: true`, then fail every segment
+request offline under the default fail-closed miss policy while status
+still reported the item as fully cached.
 
 The subsystem is opt-in through `offlineCache.enabled` in `feral-controld`
 config. When disabled (or the config is absent), every command below returns:
@@ -1415,7 +1422,7 @@ Common error codes across this command family:
   `itemId` — it always answers `ok: true` with that item reported as
   `state: "not_cached"` (see below), since querying an item that simply
   has no cache yet is not itself an error condition.
-- `unsupported_media`: the item's source classifies as live/HLS streaming
+- `unsupported_media`: the item's source classifies as HLS/DASH manifest streaming
   (see `classify.go`'s `ClassStreaming`); this item can never be cached
   offline, so `retryable: false`. Every other class (software, media,
   unknown) is queueable.
@@ -1481,7 +1488,7 @@ item is genuinely queued either way.
 ### downloadPlaylist
 
 Purpose: resolve a playlist and queue every cacheable item it contains (up
-to `dp1.MAX_PLAYLIST_ITEMS_LIMIT` items) — every class except live/HLS
+to `dp1.MAX_PLAYLIST_ITEMS_LIMIT` items) — every class except HLS/DASH manifest
 streaming; streaming items are silently skipped rather than failing the
 whole request.
 
@@ -1511,10 +1518,10 @@ Success response:
 ```
 
 `total` is every item in the resolved playlist; `queuedCount` is how many
-were actually queued for offline capture — every class except live/HLS
+were actually queued for offline capture — every class except HLS/DASH manifest
 streaming (software via headless Chromium, media/unknown via direct HTTP
 download; see `docs/offline-artwork-capture.md` §3.3). An item classified as
-live/HLS streaming (or missing an `id`/`source`) is simply excluded from
+HLS/DASH manifest streaming (or missing an `id`/`source`) is simply excluded from
 `queuedCount` with `ok: true` — that is the normal, successful shape for
 a playlist with few or no cacheable items. If classification itself fails
 (e.g. a transient network error reaching the classify target) for every

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -112,7 +113,16 @@ type kioskReplay struct {
 	dialer     wrapper.WebSocketDialer
 	json       wrapper.JSON
 	io         wrapper.IO
+	clock      wrapper.Clock
 	logger     *zap.Logger
+	// redialMu guards lastRedial, the cooldown clock behind
+	// redialIfDue. Separate from playbackMu: a re-dial decision has
+	// nothing to do with playback serialization, and SyncPlaylist can
+	// reach it while a caller already holds playbackMu.
+	redialMu sync.Mutex
+	// lastRedial is when the most recent replay-owned re-dial was
+	// attempted (zero if never), spacing attempts by redialCooldown.
+	lastRedial time.Time
 	// playbackMu serializes scope-sync + kiosk-navigation sequences
 	// across every caller — see LockPlayback's doc.
 	playbackMu sync.Mutex
@@ -134,6 +144,7 @@ func NewKioskReplay(
 	dialer wrapper.WebSocketDialer,
 	jsonWrapper wrapper.JSON,
 	ioWrapper wrapper.IO,
+	clockWrapper wrapper.Clock,
 	logger *zap.Logger,
 ) KioskReplay {
 	return &kioskReplay{
@@ -144,6 +155,7 @@ func NewKioskReplay(
 		dialer:     dialer,
 		json:       jsonWrapper,
 		io:         ioWrapper,
+		clock:      clockWrapper,
 		logger:     logger,
 	}
 }
@@ -170,6 +182,15 @@ func NewKioskReplay(
 // re-sync, so at worst only child-iframe replay is missing until the next
 // reconnect.
 func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
+	return k.dialAndAttach(ctx)
+}
+
+// dialAndAttach is AttachOnReconnect's body, shared with the re-dial
+// SyncPlaylist performs when it finds the root retired — both need the
+// identical dial + Attach + child-auto-attach sequence, and a recovery
+// path that skipped the auto-attach step would silently lose iframe
+// replay for as long as that session lived.
+func (k *kioskReplay) dialAndAttach(ctx context.Context) error {
 	session, err := DialPageSession(ctx, k.endpoint, k.httpClient, k.dialer, k.json, k.io, k.logger)
 	if err != nil {
 		return fmt.Errorf("offline cache: dial kiosk CDP session for replay: %w", err)
@@ -181,6 +202,33 @@ func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
 	return nil
 }
 
+// redialCooldown is the minimum spacing between replay-owned re-dial
+// attempts. SyncPlaylist runs on every displayPlaylist and every
+// playlist-refresher pass, and a dial against a down kiosk costs a real
+// (15s, see defaultDialTimeout) blocking round trip — without spacing,
+// a kiosk that is simply gone would put that cost on the front of every
+// display command. Short enough that recovery still lands within one
+// refresher pass; long enough that a burst of commands cannot turn into
+// a dial storm.
+const redialCooldown = 30 * time.Second
+
+// redialIfDue re-dials the replay session, at most once per
+// redialCooldown. Returns false without attempting anything when the
+// previous attempt was too recent, so the caller reports its original
+// error rather than a misleading dial error.
+func (k *kioskReplay) redialIfDue(ctx context.Context) (bool, error) {
+	k.redialMu.Lock()
+	now := k.clock.Now()
+	if !k.lastRedial.IsZero() && now.Sub(k.lastRedial) < redialCooldown {
+		k.redialMu.Unlock()
+		return false, nil
+	}
+	k.lastRedial = now
+	k.redialMu.Unlock()
+
+	return true, k.dialAndAttach(ctx)
+}
+
 // SyncPlaylist scopes replay to whichever of itemIDs already have a
 // capture on disk (ready or partial — LoadItem succeeding is enough; a
 // partial capture is still worth serving what it has rather than nothing),
@@ -189,7 +237,58 @@ func (k *kioskReplay) AttachOnReconnect(ctx context.Context) error {
 // background download can complete (or a cache can be cleared) while the
 // same playlist is still on screen.
 func (k *kioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error {
-	cachedIDs := make([]string, 0, len(itemIDs))
+	cachedIDs, mixed := k.scopeFor(itemIDs)
+
+	err := k.applyScope(ctx, cachedIDs, mixed)
+	if err == nil {
+		return nil
+	}
+
+	// The replay session is a SEPARATE socket from the daemon's primary
+	// CDP connection, with its own read pump and its own write
+	// deadlines, so it can die on its own while the primary stays
+	// perfectly healthy. main.go's onConnect hook (the only other caller
+	// of AttachOnReconnect) fires on the PRIMARY connection's reconnect,
+	// which in that case never happens — so without a re-dial here,
+	// nothing would ever restore replay and every later sync would fail
+	// exactly like this one, silently, until the kiosk restarted.
+	//
+	// RootAttached is what distinguishes the two failure shapes: the
+	// scope call retires a session it could not reach (see the
+	// replayer's retireIfDeadLocked), so a missing root means the socket
+	// died, while a root still installed means the connection is fine
+	// and the command itself was refused — re-dialing that would be
+	// pointless churn.
+	if k.replayer.RootAttached() {
+		return err
+	}
+
+	attempted, dialErr := k.redialIfDue(ctx)
+	if !attempted {
+		// Cooled down from a recent attempt: report the real failure
+		// rather than pretending a recovery was tried.
+		return err
+	}
+	if dialErr != nil {
+		return errors.Join(err, dialErr)
+	}
+
+	// Scope restoration is free here: cachedIDs was recomputed from
+	// current store state at the top of this call, so re-applying it to
+	// the fresh session installs exactly what should be in effect now —
+	// no cached "what was enabled before" to go stale, matching the
+	// reasoning in AttachOnReconnect's doc.
+	k.logger.Info("offline cache: re-dialed kiosk replay session after transport failure, restoring scope",
+		zap.Int("cached_items", len(cachedIDs)))
+	return k.applyScope(ctx, cachedIDs, mixed)
+}
+
+// scopeFor resolves which of itemIDs are actually replayable right now,
+// and whether the resulting scope is mixed. Pure (store reads only), so
+// SyncPlaylist can compute it once and re-apply it after a re-dial
+// without re-deriving it.
+func (k *kioskReplay) scopeFor(itemIDs []string) (cachedIDs []string, mixed bool) {
+	cachedIDs = make([]string, 0, len(itemIDs))
 	total := 0
 	for _, id := range itemIDs {
 		if id == "" {
@@ -204,14 +303,16 @@ func (k *kioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error 
 				zap.String("item_id", id), zap.Error(err))
 		}
 	}
-
-	if len(cachedIDs) == 0 {
-		return k.replayer.Disable(ctx)
-	}
 	// mixed is true whenever some (but not all) of the playlist's items
 	// are cached: see Replayer.EnableForPlaylist's doc for why that
 	// relaxes the miss policy to pass-through for this scope.
-	mixed := len(cachedIDs) < total
+	return cachedIDs, len(cachedIDs) < total
+}
+
+func (k *kioskReplay) applyScope(ctx context.Context, cachedIDs []string, mixed bool) error {
+	if len(cachedIDs) == 0 {
+		return k.replayer.Disable(ctx)
+	}
 	return k.replayer.EnableForPlaylist(ctx, cachedIDs, mixed)
 }
 

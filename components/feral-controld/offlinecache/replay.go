@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	go_http "net/http"
 	"net/url"
@@ -156,6 +157,14 @@ type Replayer interface {
 	// caller, but must never be treated as "safe to ignore, disable
 	// probably still happened."
 	Disable(ctx context.Context) error
+	// RootAttached reports whether a top-level session is installed. A
+	// failed Enable/Disable retires the session it failed on when the
+	// failure was a transport one (see the implementation's
+	// retireIfDeadLocked), so a caller that sees a scope call fail can
+	// use this to distinguish "the connection is fine, the command was
+	// rejected" from "the socket is dead and something has to re-dial" —
+	// see KioskReplay.SyncPlaylist, which is that something.
+	RootAttached() bool
 }
 
 type replayer struct {
@@ -451,10 +460,15 @@ func (r *replayer) detachLocked(sessionID string) {
 // snapshotTargets returns every currently-attached target's session.
 // Caller must hold mu (read or write). The returned slice is a copy, so
 // callers can Send to each without holding mu across the round-trip.
-func (r *replayer) snapshotTargets() []CDPSession {
-	sessions := make([]CDPSession, 0, len(r.targets))
-	for _, s := range r.targets {
-		sessions = append(sessions, s)
+// snapshotTargets copies the target set so a Send loop can run without
+// holding mu. Keyed by sessionID, not a bare slice: a Send failure has to
+// be attributable back to the exact map entry it came from so
+// retireIfDeadLocked can forget that one session (and only if it has not
+// since been superseded).
+func (r *replayer) snapshotTargets() map[string]CDPSession {
+	sessions := make(map[string]CDPSession, len(r.targets))
+	for id, s := range r.targets {
+		sessions[id] = s
 	}
 	return sessions
 }
@@ -505,14 +519,73 @@ func (r *replayer) EnableForPlaylist(ctx context.Context, itemIDs []string, mixe
 	// first failure but still try the rest — a single wedged target must
 	// not leave the others un-armed.
 	var firstErr error
-	for _, session := range sessions {
+	for sessionID, session := range sessions {
 		if _, err := session.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("offline cache replay: Fetch.enable: %w", err)
 			}
+			r.retireIfDeadLocked(sessionID, session, err, "Fetch.enable")
 		}
 	}
 	return firstErr
+}
+
+// retireIfDeadLocked closes and forgets a session whose Send failed for a
+// transport reason, so a socket that can never work again is not left
+// installed as though it were live. Caller holds transitionMu (both call
+// sites are inside its critical section, which is also what makes the
+// close safe against a concurrent Attach swapping the same session).
+//
+// This exists because a gorilla/websocket connection is unusable after a
+// write error or an exceeded write deadline, yet nothing here used to
+// notice: a failed Send was reported to the caller and the dead session
+// stayed in r.targets. Every later SyncPlaylist then sent into the same
+// corpse, and because the socket was never Close()d, Chromium could still
+// consider this client attached with Fetch armed at pattern "*" — CDP
+// releases paused requests when a client DISCONNECTS, so a half-dead
+// socket that is never closed can leave requests paused forever and hang
+// playback. Closing is what makes Chromium let go; forgetting is what
+// lets KioskReplay.SyncPlaylist notice the root is gone and re-dial.
+//
+// Retirement is driven by ErrCDPTransport, which cdpsession.go stamps on
+// exactly the failures that leave the connection unusable — never on a
+// CDP error REPLY (the peer answered; the command was merely rejected)
+// and never on the caller's own expired context. Inferring "dead" by
+// exclusion here instead would let a marshal bug or a rejected
+// Fetch.enable tear down a perfectly healthy connection.
+func (r *replayer) retireIfDeadLocked(sessionID string, session CDPSession, err error, op string) {
+	if !errors.Is(err, ErrCDPTransport) {
+		return
+	}
+
+	r.mu.Lock()
+	// Only forget it if it is still the session we were given: a
+	// concurrent Attach may already have superseded this entry, and
+	// deleting then would drop the healthy replacement.
+	if current, ok := r.targets[sessionID]; !ok || current != session {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.targets, sessionID)
+	r.mu.Unlock()
+
+	r.logger.Warn("offline cache replay: retiring CDP session after transport failure",
+		zap.String("session_id", sessionID), zap.String("op", op), zap.Error(err))
+	if closeErr := session.Close(); closeErr != nil {
+		r.logger.Warn("offline cache replay: failed to close retired CDP session",
+			zap.String("session_id", sessionID), zap.Error(closeErr))
+	}
+}
+
+// RootAttached reports whether a top-level session is currently
+// installed. KioskReplay.SyncPlaylist uses it to tell "the scope call
+// failed but the connection is fine" from "the root was retired as dead
+// and a re-dial is needed" — see retireIfDeadLocked.
+func (r *replayer) RootAttached() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.targets[""]
+	return ok
 }
 
 // Disable clears local scope only AFTER Fetch.disable actually succeeds.
@@ -566,11 +639,12 @@ func (r *replayer) Disable(ctx context.Context) error {
 	// actually have. Try every target even after one fails so the others
 	// still get disabled.
 	var firstErr error
-	for _, session := range sessions {
+	for sessionID, session := range sessions {
 		if _, err := session.Send(ctx, "Fetch.disable", map[string]interface{}{}); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("offline cache replay: Fetch.disable: %w", err)
 			}
+			r.retireIfDeadLocked(sessionID, session, err, "Fetch.disable")
 		}
 	}
 	if firstErr != nil {

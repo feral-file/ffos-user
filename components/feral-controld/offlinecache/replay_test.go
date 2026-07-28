@@ -1467,3 +1467,47 @@ func TestReplayer_Detach_UnknownSessionIsNoop(t *testing.T) {
 	// can never wipe live top-level interception.
 	ts.replayer.Detach("")
 }
+
+// TestReplayer_TransportFailureRetiresAndClosesTheSession pins the first
+// half of replay recovery. A gorilla/websocket connection is unusable
+// after a write error or an exceeded write deadline, but a failed Send
+// used to be reported to the caller with the dead session left installed
+// — so every later scope call sent into the corpse. Worse, because the
+// socket was never closed, Chromium could still consider this client
+// attached with Fetch armed at pattern "*": CDP releases paused requests
+// when a client DISCONNECTS, so a half-dead socket that is never closed
+// can leave requests paused and hang playback.
+func TestReplayer_TransportFailureRetiresAndClosesTheSession(t *testing.T) {
+	t.Run("a transport failure retires the root", func(t *testing.T) {
+		ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+		defer ts.ctrl.Finish()
+		seedItem(t, ts.store, "item-1", "software payload")
+
+		ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).
+			Return(nil, fmt.Errorf("write failed: %w", offlinecache.ErrCDPTransport)).Times(1)
+		// Closing is what makes Chromium let go of the paused requests.
+		ts.mockSession.EXPECT().Close().Return(nil).Times(1)
+
+		err := ts.replayer.EnableForItem(context.Background(), "item-1")
+		require.ErrorIs(t, err, offlinecache.ErrCDPTransport)
+		assert.False(t, ts.replayer.RootAttached(),
+			"a retired root must be reported as gone so KioskReplay.SyncPlaylist knows to re-dial")
+	})
+
+	t.Run("a CDP error reply leaves the session installed", func(t *testing.T) {
+		ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+		defer ts.ctrl.Finish()
+		seedItem(t, ts.store, "item-1", "software payload")
+
+		// The peer answered, so the connection is healthy and only the
+		// command was refused. Tearing it down here would churn a
+		// working session — no Close expectation, so gomock fails the
+		// test if one happens.
+		ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).
+			Return(nil, assert.AnError).Times(1)
+
+		require.Error(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+		assert.True(t, ts.replayer.RootAttached(),
+			"a rejected command must not be mistaken for a dead connection")
+	})
+}

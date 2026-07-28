@@ -1316,6 +1316,41 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 }
 
 func (s *service) process(ctx context.Context, j captureJob) {
+	// Shutdown drain: run() empties whatever is left in the queue
+	// through here after ctx is already canceled (see its ctx.Done()
+	// branch). Those jobs were never started and never will be, so this
+	// records the terminal state and returns WITHOUT notifying.
+	//
+	// The notifications are what made this unbounded. Each drained job
+	// used to emit downloading and then failed, and Notifier's relayer
+	// send is synchronous on this goroutine with its own 5s deadline
+	// built from context.Background() — so cancellation could not
+	// shorten it. Stop() blocks on doneCh until the drain finishes, and
+	// the queue holds up to maxQueueLen jobs, which put shutdown at up
+	// to 2 x 5s x backlog against a wedged relayer. systemd would reach
+	// TimeoutStopSec and SIGKILL long before that, skipping the
+	// capturer.Close() that Stop runs afterwards — the daemon's one
+	// hook for tearing down the second headless Chromium, which exists
+	// precisely so shutdown does not depend on the cgroup kill.
+	//
+	// Nothing is lost by staying quiet here: the queue is in-memory
+	// only, every one of these items is about to become "not cached" on
+	// a store the next Start rebuilds from disk, and both transports are
+	// moments from being torn down anyway. This deliberately does NOT
+	// cover a capture already in flight when cancellation lands — that
+	// one is a real attempt with a real outcome, and its attempt-level
+	// failed notification is a contract pinned by
+	// TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched.
+	if ctx.Err() != nil {
+		// The same terminal state the old notify-driven path left
+		// behind, so Status keeps answering identically for a Stop()ed
+		// service that outlives the process (tests, chiefly).
+		s.mu.Lock()
+		s.state[j.itemID] = StateFailed
+		s.mu.Unlock()
+		return
+	}
+
 	// Wait for this job's own queued notification to have gone out
 	// before announcing downloading, so the two never reach a client in
 	// the wrong order — see captureJob.queuedNotified. The ctx escape

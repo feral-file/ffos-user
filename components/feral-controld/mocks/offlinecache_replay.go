@@ -99,6 +99,20 @@ func (mr *MockOfflineCacheReplayerMockRecorder) Disable(ctx interface{}) *gomock
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Disable", reflect.TypeOf((*MockOfflineCacheReplayer)(nil).Disable), ctx)
 }
 
+// RootAttached mocks base method.
+func (m *MockOfflineCacheReplayer) RootAttached() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RootAttached")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// RootAttached indicates an expected call of RootAttached.
+func (mr *MockOfflineCacheReplayerMockRecorder) RootAttached() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RootAttached", reflect.TypeOf((*MockOfflineCacheReplayer)(nil).RootAttached))
+}
+
 // EnableForItem mocks base method.
 func (m *MockOfflineCacheReplayer) EnableForItem(ctx context.Context, itemID string) error {
 	m.ctrl.T.Helper()

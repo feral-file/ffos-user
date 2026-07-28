@@ -1148,6 +1148,37 @@ just because it happens to share a CDP target with a cached item.
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.
 
+### The replay session recovers independently of the primary CDP connection
+
+That `onConnect` hook is not sufficient on its own. The replay session is
+a **separate websocket** from the daemon's synchronous `cdp.CDP` client —
+its own read pump, its own write deadlines — so it can die while the
+primary connection stays perfectly healthy, in which case no reconnect
+event ever fires and the hook never runs. Two mechanisms close that:
+
+- **Retirement.** `cdpsession.go` stamps `ErrCDPTransport` on exactly the
+  Send failures that leave a connection unusable (socket already closed,
+  write deadline unsettable, write failed). `replay.go`'s
+  `retireIfDeadLocked` then drops that session from the target set and
+  **closes** it. Closing matters beyond bookkeeping: CDP releases paused
+  requests when a client disconnects, so a half-dead socket left open
+  with `Fetch` armed at pattern `*` can leave requests paused
+  indefinitely and hang playback. A CDP error *reply* is deliberately not
+  a retirement reason — the peer answered, so the connection is fine and
+  only the command was refused.
+- **Replay-owned re-dial.** `KioskReplay.SyncPlaylist` checks
+  `Replayer.RootAttached()` when a scope call fails. A missing root means
+  the socket died, so it re-dials (same dial + attach + child
+  auto-attach sequence as `AttachOnReconnect`) and re-applies the scope
+  within that same sync. Scope restoration is free: `SyncPlaylist`
+  recomputes what is replayable from current store state at the top of
+  every call, so there is no cached "what was enabled before" to go
+  stale. Re-dials are spaced by `redialCooldown` (30s) because a dial
+  against a down kiosk costs a real blocking round trip
+  (`defaultDialTimeout`, 15s) and `SyncPlaylist` runs on every
+  `displayPlaylist` — without spacing, a kiosk that is simply gone would
+  put that cost on the front of every display command.
+
 `Replayer.Attach`'s `Fetch.requestPaused` handler is bound (via closure)
 to the exact session it was registered on, and `processRequestPaused`
 answers every request using that bound session, never by re-reading the

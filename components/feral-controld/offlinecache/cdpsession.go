@@ -3,6 +3,7 @@ package offlinecache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -89,6 +90,22 @@ type CDPSession interface {
 	// flatSession.Close.
 	Close() error
 }
+
+// ErrCDPTransport marks a Send failure in which the CONNECTION itself
+// failed — the socket was already closed, the write deadline could not be
+// set, or the write did not go out. A gorilla/websocket connection is
+// unusable after any of those, so a session that returns this can never
+// work again and its holder should retire it rather than keep sending
+// into it (see replayer.retireIfDeadLocked).
+//
+// Deliberately NOT returned for the two failures that leave the socket
+// perfectly healthy: a CDP error REPLY (the peer answered — see
+// cdpRemoteError) and the caller's own context expiring (our deadline,
+// not the connection's death). Classifying at the source like this,
+// rather than letting consumers infer "dead" by exclusion, is what keeps
+// a marshal bug or a rejected command from being mistaken for a broken
+// connection.
+var ErrCDPTransport = errors.New("offline cache: cdp session transport failure")
 
 // cdpRemoteError is a CDP JSON-RPC error reply (distinct from
 // cdp.RemoteError in the synchronous client since the wire shapes are
@@ -235,7 +252,7 @@ func (s *cdpSession) sendForSession(ctx context.Context, sessionID, method strin
 	if s.closed {
 		err := s.closeErr
 		s.mu.Unlock()
-		return nil, fmt.Errorf("offline cache: cdp session closed: %w", closedOrUnknown(err))
+		return nil, fmt.Errorf("%w: cdp session closed: %w", ErrCDPTransport, closedOrUnknown(err))
 	}
 	s.pending[id] = call
 	s.mu.Unlock()
@@ -280,13 +297,13 @@ func (s *cdpSession) sendForSession(ctx context.Context, sessionID, method strin
 	if err := s.conn.SetWriteDeadline(deadline); err != nil {
 		s.writeMu.Unlock()
 		cleanup()
-		return nil, fmt.Errorf("offline cache: set cdp write deadline for %s: %w", method, err)
+		return nil, fmt.Errorf("%w: set cdp write deadline for %s: %w", ErrCDPTransport, method, err)
 	}
 	err = s.conn.WriteMessage(websocket.TextMessage, data)
 	s.writeMu.Unlock()
 	if err != nil {
 		cleanup()
-		return nil, fmt.Errorf("offline cache: write cdp request %s: %w", method, err)
+		return nil, fmt.Errorf("%w: write cdp request %s: %w", ErrCDPTransport, method, err)
 	}
 
 	select {
@@ -298,7 +315,7 @@ func (s *cdpSession) sendForSession(ctx context.Context, sessionID, method strin
 		return nil, ctx.Err()
 	case <-s.doneChan:
 		cleanup()
-		return nil, fmt.Errorf("offline cache: cdp session closed while awaiting %s", method)
+		return nil, fmt.Errorf("%w: cdp session closed while awaiting %s", ErrCDPTransport, method)
 	}
 }
 

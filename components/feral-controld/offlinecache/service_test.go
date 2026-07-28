@@ -631,6 +631,13 @@ func TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccess
 	require.NoError(t, err)
 	assert.Equal(t, 1, queued)
 	assert.Equal(t, 2, total)
+
+	// Wait for the queued item to actually capture before the deferred
+	// Stop() runs. Without this the Capture expectation above was only
+	// ever satisfied by the shutdown drain happening to run it, which
+	// stopped being true once a drained job began skipping capture
+	// entirely (see process's ctx.Err() branch).
+	waitForState(t, ts.service, "item-ok", offlinecache.StateReady)
 }
 
 // TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback
@@ -2187,4 +2194,90 @@ func TestService_Notify_QueuedPrecedesDownloadingEvenWithAnIdleWorker(t *testing
 			}, seen)
 		})
 	}
+}
+
+// TestService_Stop_WithQueuedBacklogDoesNotNotifyPerJob is the shutdown
+// regression test: Stop() must not take time proportional to the queue
+// depth. run()'s cancellation path drains every remaining job through
+// process(), and each drained job used to emit downloading and then
+// failed — both synchronous relayer sends with a 5s deadline built from
+// context.Background(), so cancellation could not shorten them. A
+// backlogged queue therefore pushed shutdown past systemd's
+// TimeoutStopSec into a SIGKILL, skipping the capturer.Close() that Stop
+// runs after the drain.
+//
+// The observer here fails the test outright if a drained job notifies:
+// the blocking send is the cost being removed, so counting calls would
+// pin the symptom rather than the cause.
+func TestService_Stop_WithQueuedBacklogDoesNotNotifyPerJob(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store, _ := newTestStore(t)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).Times(1)
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
+	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
+
+	const backlog = 50
+
+	// The first item's capture blocks until cancellation, holding the
+	// single worker so every other item stays queued behind it — which
+	// is exactly the backlog state shutdown has to get through.
+	blocking := dp1playlist.PlaylistItem{ID: "item-000", Source: "https://example.com/item-000"}
+	captureStarted := make(chan struct{})
+	mockCapturer.EXPECT().Capture(gomock.Any(), blocking, gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			close(captureStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}).Times(1)
+	// Any OTHER item reaching Capture means the drain ran real work.
+	mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Not(gomock.Eq(blocking)), gomock.Any()).Times(0)
+
+	var mu sync.Mutex
+	notifiedFor := map[string]int{}
+	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
+		mu.Lock()
+		defer mu.Unlock()
+		notifiedFor[status.ItemID]++
+	}).AnyTimes()
+
+	items := make([]dp1playlist.PlaylistItem, backlog)
+	for i := range items {
+		items[i] = dp1playlist.PlaylistItem{ID: fmt.Sprintf("item-%03d", i), Source: fmt.Sprintf("https://example.com/item-%03d", i)}
+		mockClassifier.EXPECT().Classify(gomock.Any(), items[i].Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	}
+
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+
+	require.NoError(t, svc.DownloadItem(context.Background(), items[0]))
+	select {
+	case <-captureStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the first capture to occupy the worker")
+	}
+	for _, item := range items[1:] {
+		require.NoError(t, svc.DownloadItem(context.Background(), item))
+	}
+
+	svc.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Every backlogged item announced itself as queued when it was
+	// enqueued; that is the enqueue-side notification and is expected.
+	// What must NOT happen is the drain adding downloading/failed on top
+	// of it for jobs that never ran.
+	for _, item := range items[1:] {
+		assert.Equal(t, 1, notifiedFor[item.ID],
+			"drained job %s must carry only its original queued notification, not a downloading/failed pair emitted during shutdown", item.ID)
+	}
+
+	// The item that genuinely was capturing keeps its full attempt-level
+	// story (queued, downloading, failed) — see
+	// TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched.
+	assert.Equal(t, 3, notifiedFor[blocking.ID],
+		"the in-flight capture is a real attempt and must still report its outcome")
 }

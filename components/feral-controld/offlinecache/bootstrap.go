@@ -195,7 +195,7 @@ func Bootstrap(
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, jsonWrapper, logger)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
 	service := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, logger)
-	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, logger)
+	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, clockWrapper, logger)
 
 	return Runtime{Service: service, KioskReplay: kioskReplay, StaticServer: staticServer, Notifier: notifier}
 }
