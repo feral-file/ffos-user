@@ -14,6 +14,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 type fakeRelayer struct {
@@ -228,6 +229,7 @@ func TestPollPlayerStatus_SkipsWhenNotOnPlayerPage(t *testing.T) {
 		cdp:                     mockCDP,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
 		logger:                  zap.NewNop(),
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
@@ -282,6 +284,7 @@ func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
 		cdp:                     mockCDP,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
 		logger:                  zap.NewNop(),
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
@@ -337,6 +340,7 @@ func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 		cdp:                     mockCDP,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
 		logger:                  zap.NewNop(),
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
@@ -346,6 +350,54 @@ func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 
 	if mockCDP.noLogSendCalls != 1 {
 		t.Fatalf("expected one checkStatus call on the player page, got %d", mockCDP.noLogSendCalls)
+	}
+}
+
+func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok":           true,
+				"castCommand":  "displayPlaylist",
+				"index":        1,
+				"renderStatus": 2,
+				"isPaused":     false,
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockWS.sendAllCalls != 1 {
+		t.Fatalf("expected one websocket send, got %d", mockWS.sendAllCalls)
+	}
+
+	payload, ok := mockWS.lastPayload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected websocket payload map, got %T", mockWS.lastPayload)
+	}
+	message, ok := payload["message"].(*PlayerStatus)
+	if !ok {
+		t.Fatalf("expected payload message to be *PlayerStatus, got %T", payload["message"])
+	}
+	if message.RenderStatus == nil || *message.RenderStatus != 2 {
+		t.Fatalf("expected renderStatus to survive polling, got %+v", message.RenderStatus)
+	}
+	if message.Index == nil || *message.Index != 1 {
+		t.Fatalf("expected index to survive polling, got %+v", message.Index)
 	}
 }
 

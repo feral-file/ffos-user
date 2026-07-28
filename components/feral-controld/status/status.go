@@ -39,6 +39,7 @@ type PlayerStatus struct {
 	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
 	Playlist       *dp1.Playlist               `json:"playlist,omitempty"`
 	Index          *int                        `json:"index"`
+	RenderStatus   *int                        `json:"renderStatus,omitempty"`
 	IsPaused       *bool                       `json:"isPaused,omitempty"`
 	Items          *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
 	Ok             bool                        `json:"ok,omitempty"`
