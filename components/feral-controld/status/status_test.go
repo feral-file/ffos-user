@@ -794,3 +794,73 @@ func TestPlayerStatus_DefaultDurationOmittedWhenAbsent(t *testing.T) {
 		t.Fatal("defaultDuration should be omitted when the player did not report one")
 	}
 }
+
+// TestPlayerStatus_TombstoneRoundTrip guards deviceSettings.tombstone across
+// the same checkStatus -> typed unmarshal -> player_status re-marshal bridge.
+// ff-player #255 reports the field; without it here the label renders on the
+// wall but ff-app's On/Off/Timed control has no current value to show.
+func TestPlayerStatus_TombstoneRoundTrip(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape", "tombstone": "on"}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	if status.DeviceSettings == nil || status.DeviceSettings.Tombstone == nil {
+		t.Fatal("deviceSettings.tombstone was dropped on unmarshal")
+	}
+	if *status.DeviceSettings.Tombstone != "on" {
+		t.Fatalf("tombstone = %q, want \"on\"", *status.DeviceSettings.Tombstone)
+	}
+
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if got := ds["tombstone"]; got != "on" {
+		t.Fatalf("re-marshaled tombstone = %v, want \"on\"", got)
+	}
+}
+
+// TestPlayerStatus_TombstoneOmittedWhenAbsent ensures a player that never had
+// a tombstone mode set re-marshals without inventing one — absence is what
+// tells ff-app to show the "timed" fallback rather than a stored choice.
+func TestPlayerStatus_TombstoneOmittedWhenAbsent(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape"}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if _, present := ds["tombstone"]; present {
+		t.Fatal("tombstone should be omitted when the player did not report one")
+	}
+}
