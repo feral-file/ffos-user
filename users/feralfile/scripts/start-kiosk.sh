@@ -143,9 +143,14 @@ clear_chromium_cache_on_bundle_change() {
         # recorded, so every start retries (and re-warns) until the tree
         # reads cleanly — a broken bundle is legible in chromium.log rather
         # than silently disabling the guard. The launch is never blocked:
-        # rm failure is tolerated.
+        # rm failure is tolerated, but LOGGED with the same retry warning as
+        # the normal path — the line above says the cache is being cleared,
+        # and without this an operator cannot tell a successful defensive
+        # purge from stale cache left in place.
         echo "$(date '+%F %T') [WARN] Player bundle fingerprint failed${fp_cause:+ ($fp_cause)}; clearing Chromium cache, will retry on next kiosk start"
-        rm -rf "$CHROMIUM_CACHE_DIR" 2>/dev/null || true
+        if ! rm -rf "$CHROMIUM_CACHE_DIR" 2>/dev/null; then
+            echo "$(date '+%F %T') [WARN] Could not delete Chromium cache; will retry on next kiosk start"
+        fi
         return 0
     fi
     previous=$(cat "$PLAYER_FINGERPRINT_FILE" 2>/dev/null || true)

@@ -20,7 +20,10 @@ assert_contains "$unit_file" "Type=notify"
 assert_contains "$unit_file" "NotifyAccess=all"
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+# real_httpd_pid: set only while the opt-in real-darkhttpd section below has a
+# server running, so a fail() mid-section cannot leak the process.
+real_httpd_pid=""
+trap 'if [ -n "$real_httpd_pid" ]; then kill "$real_httpd_pid" 2>/dev/null || true; fi; rm -rf "$tmp_dir"' EXIT
 
 missing_root="$tmp_dir/missing"
 output_file="$tmp_dir/missing-tree.log"
@@ -277,6 +280,59 @@ FF_PLAYER_TEST_HEADER_SUPPORT=0 \
   run_ready_server bash "$script_under_test"
 if grep -Fq -- "--header" "$server_args"; then
   fail "legacy darkhttpd without --header support must be started without the flag"
+fi
+
+# --- Real-binary header validation (opt-in) ------------------------------------
+# Everything above proves argument CONSTRUCTION against a fake darkhttpd; it
+# cannot prove the deployed binary actually honors --header — and the header
+# on 404s is the only forward mitigation for a negative response cached during
+# a live bundle swap. When a real darkhttpd is on PATH (dev machines, image
+# CI), start it exactly as the serve script does and assert Cache-Control
+# lands on BOTH a 200 and a 404. Skipped legibly when the binary is absent,
+# so the fake-based contract above remains the CI floor.
+# (Verified against upstream darkhttpd 2026-07-28: usage advertises --header,
+# and the header is emitted on 200 and 404 alike.)
+if command -v darkhttpd >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+  # The capability probe's premise first: the shipped probe greps the usage
+  # text for --header, so a real binary must advertise it there. The no-arg
+  # usage dump exits non-zero by design — `|| true` keeps pipefail out of it,
+  # same as the serve script's own probe.
+  real_usage="$(darkhttpd 2>&1 || true)"
+  printf '%s' "$real_usage" | grep -q -- "--header" || \
+    fail "real darkhttpd usage must advertise --header (capability-probe premise)"
+
+  real_root="$tmp_dir/real-root"
+  mkdir -p "$real_root"
+  echo "real-binary smoke" > "$real_root/index.html"
+  real_port=$((18100 + $$ % 1800))
+  darkhttpd "$real_root" --port "$real_port" --addr 127.0.0.1 \
+    --header 'Cache-Control: no-cache' >/dev/null 2>&1 &
+  real_httpd_pid=$!
+
+  ready=0
+  for _ in $(seq 1 50); do
+    if curl -s -o /dev/null "http://127.0.0.1:$real_port/index.html"; then
+      ready=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$ready" -eq 1 ] || fail "real darkhttpd did not become ready on :$real_port"
+
+  hdr200="$(curl -sI "http://127.0.0.1:$real_port/index.html")"
+  hdr404="$(curl -sI "http://127.0.0.1:$real_port/no-such-chunk.js")"
+  kill "$real_httpd_pid" 2>/dev/null || true
+  wait "$real_httpd_pid" 2>/dev/null || true
+  real_httpd_pid=""
+
+  printf '%s' "$hdr200" | grep -q "200" || fail "real darkhttpd 200 response missing"
+  printf '%s' "$hdr200" | grep -qi "^cache-control: no-cache" || \
+    fail "real darkhttpd must emit Cache-Control: no-cache on 200 responses"
+  printf '%s' "$hdr404" | grep -q "404" || fail "real darkhttpd 404 response missing"
+  printf '%s' "$hdr404" | grep -qi "^cache-control: no-cache" || \
+    fail "real darkhttpd must emit Cache-Control: no-cache on 404 responses (the mid-swap negative-cache mitigation)"
+else
+  echo "test-serve-feral-player: SKIPPED real-darkhttpd header validation (darkhttpd or curl not on PATH)" >&2
 fi
 
 echo "test-serve-feral-player: OK"

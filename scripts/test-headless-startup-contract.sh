@@ -396,6 +396,30 @@ if [ "$(id -u)" -ne 0 ]; then
   chmod 755 "$bundle_dir"
   [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "non-traversable bundle root must purge defensively"
   [ "$(cat "$fp_file")" = "$fp_before" ] || fail "non-traversable root must not advance the stored fingerprint"
+
+  # A FAILED defensive purge must be legible: the fingerprint-failure branch
+  # has already warned "clearing Chromium cache", so when the rm then fails
+  # it must add the same delete-retry warning the normal path emits —
+  # otherwise an operator cannot tell a successful defensive purge from
+  # stale cache left in place. Fixture combines both failures: an unreadable
+  # bundle entry (fingerprint fails) and a write-protected cache parent
+  # (delete fails).
+  fp_before="$(cat "$fp_file")"
+  echo "chunk-v9" > "$bundle_dir/_next/static/chunks/unreadable2.js"
+  chmod 000 "$bundle_dir/_next/static/chunks/unreadable2.js"
+  seed_cache
+  chmod a-w "$cache_dir/Default/Cache"
+  run_cache_guard
+  chmod u+w "$cache_dir/Default/Cache"
+  chmod 644 "$bundle_dir/_next/static/chunks/unreadable2.js"
+  [ -e "$cache_dir/Default/Cache/marker" ] || fail "failed-defensive-purge fixture did not hold (marker gone)"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "failed defensive purge must not record a fingerprint"
+  grep -Fq "bundle fingerprint failed" "$guard_out" || \
+    fail "failed defensive purge must log the fingerprint warning"
+  grep -Fq "Could not delete Chromium cache" "$guard_out" || \
+    fail "failed defensive purge must log the delete-retry warning"
+  rm -f "$bundle_dir/_next/static/chunks/unreadable2.js"
+  run_cache_guard # settle: tree back to the recorded state (keep path)
 else
   echo "test-headless-startup-contract: SKIPPED unreadable-directory cases (running as root)" >&2
 fi
