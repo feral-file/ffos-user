@@ -339,6 +339,12 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	// context.Background()) so a real shutdown/cancellation still
 	// propagates through it immediately rather than waiting out the
 	// full finalize window.
+	//
+	// This is now the ONLY bound on those fetches: Bootstrap hands this
+	// capturer an http client with no whole-request timeout (see its
+	// bodyClient comment) precisely so a large asset is not killed
+	// mid-transfer at 30s, which means removing or widening this
+	// deadline no longer has a client-side backstop behind it.
 	finalizeCtx, finalizeCancel := context.WithTimeout(ctx, captureFinalizeWindowDefault)
 	defer finalizeCancel()
 	resources, coverage := c.resolveResources(finalizeCtx, tracker, c.newDiskBudget())

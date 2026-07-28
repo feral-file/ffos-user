@@ -580,6 +580,17 @@ func offlineCacheErrorResponse(err error) map[string]any {
 		// ErrItemBusy's doc.
 		return errorResponse("busy", err.Error(), true)
 	}
+	if errors.Is(err, offlinecache.ErrClearedDuringDownload) {
+		// Retryable, and the same "busy" shape as the two below: a
+		// clear landed mid-request, so nothing was queued, but
+		// re-issuing the download once that clear has settled queues
+		// normally. Reported as an error rather than the flat
+		// status:"queued" this branch used to fall through to — see
+		// ErrClearedDuringDownload's doc for why claiming success here
+		// stranded the client's progress UI on an item no worker would
+		// ever pick up.
+		return errorResponse("busy", err.Error(), true)
+	}
 	if errors.Is(err, offlinecache.ErrQueueFull) {
 		// Retryable: the backlog drains as the single capture worker
 		// works through it — see ErrQueueFull's doc. Same "busy" shape

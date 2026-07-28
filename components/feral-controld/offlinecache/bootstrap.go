@@ -162,12 +162,35 @@ func Bootstrap(
 		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, headlessDebugPort,
 		opts.HeadlessIdleTeardown, execWrapper, osWrapper, clockWrapper, httpClient, logger,
 	)
-	capturer := NewCapturer(downloader, dialer, httpClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
+
+	// bodyClient is deliberately NOT the daemon-wide httpClient above.
+	// wrapper.NewHTTPClient carries a 30s http.Client.Timeout, and that
+	// timeout covers the ENTIRE request including the response body —
+	// so every artwork asset that takes more than 30 seconds to
+	// transfer failed, unconditionally, on both download paths. That is
+	// flatly incompatible with what this subsystem exists to do: the
+	// store's budget is measured in GiB (DefaultMaxDiskBytes), and
+	// staticserver.go only earns its keep on blobs over 200 MB — a size
+	// no device uplink moves in 30 seconds, which made that entire
+	// replay path unreachable in practice rather than merely slow.
+	//
+	// The two consumers below are the only ones that stream artwork
+	// bodies. Everything else here (classifier's HEAD/GET probe,
+	// downloader's and kioskReplay's localhost CDP calls) is a small,
+	// fast request that SHOULD keep the daemon default: a stuck local
+	// call must not hang forever just because large downloads need
+	// room. Both body paths bound themselves explicitly instead — see
+	// mediaDownloadTimeout and captureFinalizeWindowDefault — which is
+	// the contract NewHTTPClientWithoutTimeout's own doc requires of
+	// every caller.
+	bodyClient := wrapper.NewHTTPClientWithoutTimeout()
+
+	capturer := NewCapturer(downloader, dialer, bodyClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	// mediaCapturer needs no Downloader/dialer — it downloads a
 	// non-software item's single-file source directly over HTTP, never
 	// spinning up the headless Chromium capturer/downloader owns (see
 	// mediacapture.go's package doc).
-	mediaCapturer := NewMediaCapturer(httpClient, store, clockWrapper, opts.MaxDiskBytes, logger)
+	mediaCapturer := NewMediaCapturer(bodyClient, store, clockWrapper, opts.MaxDiskBytes, logger)
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, jsonWrapper, logger)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)

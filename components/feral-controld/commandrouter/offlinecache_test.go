@@ -927,3 +927,37 @@ func TestCommandHandler_GetOfflineCacheStatus_ServiceError(t *testing.T) {
 type assertError string
 
 func (e assertError) Error() string { return string(e) }
+
+// TestCommandHandler_DownloadPlaylistItem_ClearWonIsReportedNotAcked pins
+// the command-level half of the false-"queued" fix: when a concurrent
+// clear wins, downloadPlaylistItem must NOT answer with the flat
+// ok:true/status:"queued" it returns on the happy path, because nothing
+// was queued and nothing ever will be. It is a retryable busy — re-issuing
+// once the clear has settled queues normally.
+func TestCommandHandler_DownloadPlaylistItem_ClearWonIsReportedNotAcked(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
+		Return(offlinecache.ErrClearedDuringDownload).Times(1)
+	// The URL index write must not happen: it is deliberately downstream
+	// of a SUCCESSFUL queue, and this download queued nothing.
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"itemId": "item-1", "playlistUrl": playlistURL},
+	})
+
+	require.NoError(t, err)
+	body := assertErrorResponse(t, result, "busy")
+	errBody, ok := body["error"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, errBody["retryable"], "the clear has settled by the time the client retries, so this must be retryable")
+}

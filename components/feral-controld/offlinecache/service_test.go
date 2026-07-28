@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1161,8 +1162,12 @@ func TestService_ClearItem_DuringBlockedClassificationDoesNotResurrect(t *testin
 		"the clear must succeed: during classification item-1 is untracked, so nothing is busy")
 	close(releaseClassify)
 
-	require.NoError(t, <-dlDone,
-		"the download must return cleanly after aborting at enqueue, not error")
+	// The clear won, so nothing was queued and nothing ever will be. An
+	// earlier revision returned nil here and the command handler
+	// answered status:"queued" for work no worker would run; reporting
+	// the abort is what closes that — see ErrClearedDuringDownload.
+	require.ErrorIs(t, <-dlDone, offlinecache.ErrClearedDuringDownload,
+		"a download aborted by a winning clear must say so, not report success for work it never queued")
 
 	_, err := ts.store.LoadItem("item-1")
 	require.Error(t, err, "the cleared record must stay deleted")
@@ -1978,4 +1983,208 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 	assert.Equal(t, offlinecache.StateReady, status.Items[0].State,
 		"a recapture aborted by shutdown must never regress an already-ready item's disk-backed status")
 	assert.Equal(t, 100, status.Items[0].Percent)
+}
+
+// TestService_DownloadItem_ClearWinningTheRaceNotifiesNothingAndReportsIt
+// pins BOTH halves of the false-"queued" fix, at the seam the mobile app
+// actually observes:
+//
+//  1. DownloadItem must report ErrClearedDuringDownload rather than nil.
+//     The commandrouter turns a nil here into a flat status:"queued",
+//     which claimed scheduled work that no worker would ever run.
+//  2. No offline_cache_status state:"queued" may be emitted for that
+//     item. An earlier revision notified the observer BEFORE enqueue's
+//     authoritative epoch re-check, so a clear landing in that window
+//     produced a queued notification for an item that was then never
+//     queued — and since nothing further would ever be sent for it, the
+//     app's progress UI waited on it indefinitely.
+//
+// The clear is forced to land inside the classify window (blocking
+// classifier, no timing chance), exactly like
+// TestService_ClearItem_DuringBlockedClassificationDoesNotResurrect.
+func TestService_DownloadItem_ClearWinningTheRaceNotifiesNothingAndReportsIt(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store, _ := newTestStore(t)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
+	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
+
+	seedItemWithCapturedAt(t, store, "item-1", "old payload", time.Now())
+
+	var mu sync.Mutex
+	var notified []offlinecache.ItemStatus
+	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
+		mu.Lock()
+		defer mu.Unlock()
+		notified = append(notified, status)
+	}).AnyTimes()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	classifyEntered := make(chan struct{})
+	releaseClassify := make(chan struct{})
+	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).DoAndReturn(
+		func(context.Context, string) (offlinecache.MediaClass, error) {
+			close(classifyEntered)
+			<-releaseClassify
+			return offlinecache.ClassSoftware, nil
+		}).Times(1)
+	// No Capture expectation: reaching the worker at all is the bug.
+
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+	defer svc.Stop()
+
+	dlDone := make(chan error, 1)
+	go func() { dlDone <- svc.DownloadItem(context.Background(), item) }()
+
+	<-classifyEntered
+	require.NoError(t, svc.ClearItem("item-1"))
+	close(releaseClassify)
+
+	require.ErrorIs(t, <-dlDone, offlinecache.ErrClearedDuringDownload,
+		"the caller must learn nothing was queued; the command layer maps this to a retryable busy, not ok/queued")
+
+	// Give any stray asynchronous notification a chance to land before
+	// asserting none did.
+	require.Never(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(notified) > 0
+	}, 200*time.Millisecond, 10*time.Millisecond,
+		"a clear that won the race must produce no state notification at all for that item, least of all state:\"queued\"")
+
+	_, err := store.LoadItem("item-1")
+	require.Error(t, err, "the cleared record must stay deleted")
+}
+
+// TestService_Enqueue_NotifiesQueuedOnlyAfterTheJobIsCommitted is the
+// ordering half of the same fix, on the happy path: the observer must see
+// state:"queued" only once the job is genuinely in the queue, so every
+// queued notification a client receives corresponds to real scheduled
+// work.
+func TestService_Enqueue_NotifiesQueuedOnlyAfterTheJobIsCommitted(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store, _ := newTestStore(t)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
+	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+
+	queuedSeen := make(chan struct{})
+	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
+		if status.State == offlinecache.StateQueued {
+			close(queuedSeen)
+		}
+	}).AnyTimes()
+
+	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	// Held open so the item is observably still queued/downloading when
+	// Status is asserted below. It must release on ctx cancellation too:
+	// Stop() blocks until the worker exits, so a capture that only ever
+	// waited on the channel would deadlock the test's own teardown.
+	blockCapture := make(chan struct{})
+	mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+		func(ctx context.Context, _ dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			select {
+			case <-blockCapture:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			require.NoError(t, store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+	defer svc.Stop()
+
+	require.NoError(t, svc.DownloadItem(context.Background(), item))
+
+	select {
+	case <-queuedSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a genuinely queued item must still produce its queued notification")
+	}
+
+	// And the state the notification claims is real: Status agrees the
+	// item is scheduled.
+	snap, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+	assert.Contains(t,
+		[]offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateDownloading},
+		snap.Items[0].State)
+}
+
+// TestService_Notify_QueuedPrecedesDownloadingEvenWithAnIdleWorker pins
+// the ordering barrier (captureJob.queuedNotified). The two notifications
+// are produced by different goroutines — queued by the enqueuing caller,
+// downloading by the capture worker — and enqueue can only emit its own
+// after committing the job, at which point an idle worker is free to pop
+// it immediately. Without the barrier a client could see progress run
+// backwards (downloading, then queued) for an item progressing normally.
+//
+// The worker is deliberately idle and the capture instant, so the worker
+// reaches its notification as early as it ever can.
+func TestService_Notify_QueuedPrecedesDownloadingEvenWithAnIdleWorker(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		t.Run(fmt.Sprintf("attempt-%d", i), func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			store, _ := newTestStore(t)
+			mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+			mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+			mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+			mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
+			mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
+
+			item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+			rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+
+			var mu sync.Mutex
+			var seen []offlinecache.ItemState
+			done := make(chan struct{})
+			mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
+				mu.Lock()
+				defer mu.Unlock()
+				seen = append(seen, status.State)
+				if status.State == offlinecache.StateReady {
+					close(done)
+				}
+			}).AnyTimes()
+
+			mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+			mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+				func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+					require.NoError(t, store.SaveItem(rec))
+					return rec, nil
+				}).Times(1)
+
+			svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+			require.NoError(t, svc.Start(context.Background()))
+			defer svc.Stop()
+
+			require.NoError(t, svc.DownloadItem(context.Background(), item))
+
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for the terminal ready notification")
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, []offlinecache.ItemState{
+				offlinecache.StateQueued, offlinecache.StateDownloading, offlinecache.StateReady,
+			}, seen)
+		})
+	}
 }

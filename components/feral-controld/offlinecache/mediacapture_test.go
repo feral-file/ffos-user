@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/golang/mock/gomock"
@@ -278,4 +280,152 @@ func TestMediaCapturer_Capture_RejectsBodyLargerThanRemainingBudget(t *testing.T
 
 	_, loadErr := h.store.LoadItem("item-1")
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a rejected oversized fetch must never leave a saved record behind")
+}
+
+// wholeRequestTimeoutClient is a wrapper.HTTPClient whose underlying
+// http.Client carries a whole-request timeout — the SHAPE of the
+// daemon-wide wrapper.NewHTTPClient this download path used to be wired
+// with, where http.Client.Timeout covers the response BODY and not just
+// the headers. The production value is 30s (wrapper.HTTPClientTimeout);
+// this stand-in is measured in milliseconds so the regression below can
+// be pinned in under a second instead of over half a minute.
+type wholeRequestTimeoutClient struct{ client *http.Client }
+
+func (c wholeRequestTimeoutClient) NewRequest(method, url string, body io.Reader) (*http.Request, error) {
+	return http.NewRequest(method, url, body)
+}
+func (c wholeRequestTimeoutClient) Do(req *http.Request) (*http.Response, error) {
+	//nolint:gosec // G704 flags the caller-supplied URL as SSRF taint. This is
+	// a test double whose only callers are the httptest servers in this file.
+	return c.client.Do(req)
+}
+func (c wholeRequestTimeoutClient) Get(url string) (*http.Response, error) {
+	return c.client.Get(url)
+}
+func (c wholeRequestTimeoutClient) Post(url, contentType string, body io.Reader) (*http.Response, error) {
+	return c.client.Post(url, contentType, body)
+}
+
+// tricklingServer serves a body in chunks separated by gap, flushing each
+// one, so the response takes a predictable wall-clock time to finish
+// while making steady progress throughout — a compressed stand-in for the
+// large-asset-on-a-slow-uplink case this path exists to support. Returns
+// the server and the exact payload it will serve.
+func tricklingServer(t *testing.T, chunks int, chunkSize int, gap time.Duration) (*httptest.Server, string) {
+	t.Helper()
+	payload := strings.Repeat("x", chunks*chunkSize)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "httptest response writer must support flushing for a trickled body")
+		for i := 0; i < chunks; i++ {
+			if _, err := io.WriteString(w, payload[i*chunkSize:(i+1)*chunkSize]); err != nil {
+				return // client hung up (cancellation test); stop trickling
+			}
+			flusher.Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(gap):
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, payload
+}
+
+func newRealClientMediaCapturer(t *testing.T, client wrapper.HTTPClient, maxDiskBytes int64) (offlinecache.MediaCapturer, offlinecache.Store) {
+	t.Helper()
+	store, _ := newTestStore(t)
+	return offlinecache.NewMediaCapturer(client, store, wrapper.NewClock(), maxDiskBytes, zaptest.NewLogger(t)), store
+}
+
+// TestMediaCapturer_Capture_SlowBodyOutlivesAWholeRequestTimeout is the
+// regression test for the wiring bug where Bootstrap handed this path the
+// daemon-wide 30s client: because http.Client.Timeout bounds the whole
+// request INCLUDING the body, every asset that took longer than 30s to
+// transfer failed unconditionally — which is most of what this subsystem
+// exists to cache (the store budget is measured in GiB, and
+// staticserver.go only matters above 200 MB). Both halves run against the
+// same trickling server so the only variable is the client.
+func TestMediaCapturer_Capture_SlowBodyOutlivesAWholeRequestTimeout(t *testing.T) {
+	item := func(srv *httptest.Server) dp1playlist.PlaylistItem {
+		return dp1playlist.PlaylistItem{ID: "item-1", Source: srv.URL + "/video.mp4"}
+	}
+
+	t.Run("a whole-request timeout kills a slow but healthy transfer", func(t *testing.T) {
+		srv, _ := tricklingServer(t, 10, 64, 40*time.Millisecond) // ~400ms of steady progress
+		capturer, store := newRealClientMediaCapturer(t,
+			wholeRequestTimeoutClient{client: &http.Client{Timeout: 120 * time.Millisecond}}, 0)
+
+		rec, err := capturer.Capture(context.Background(), item(srv))
+		require.Error(t, err, "this is the pre-fix behavior being pinned, not a desired outcome")
+		assert.Nil(t, rec)
+		_, loadErr := store.LoadItem("item-1")
+		assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
+	})
+
+	t.Run("the timeout-free capture client completes it", func(t *testing.T) {
+		srv, payload := tricklingServer(t, 10, 64, 40*time.Millisecond)
+		capturer, store := newRealClientMediaCapturer(t, wrapper.NewHTTPClientWithoutTimeout(), 0)
+
+		rec, err := capturer.Capture(context.Background(), item(srv))
+		require.NoError(t, err)
+		require.Len(t, rec.Resources, 1)
+
+		// The whole asset, not a truncated prefix: a body cut off
+		// mid-transfer must never be stored as if it were complete.
+		blob, err := store.ReadBlob(rec.Resources[0].SHA256)
+		require.NoError(t, err)
+		assert.Equal(t, payload, string(blob))
+		assert.True(t, rec.Coverage.Complete)
+	})
+}
+
+// TestMediaCapturer_Capture_TimeoutFreeClientStillHonorsCancellation pins
+// the other half of removing the client timeout: cancellation must still
+// be the thing that stops a download, or "no whole-request timeout" would
+// mean "unstoppable". mediaDownloadTimeout is the absolute ceiling on top
+// of this; ctx cancellation must not have to wait for it.
+func TestMediaCapturer_Capture_TimeoutFreeClientStillHonorsCancellation(t *testing.T) {
+	// 200 chunks x 50ms = ~10s if it ever ran to completion, far longer
+	// than the cancellation below allows.
+	srv, _ := tricklingServer(t, 200, 64, 50*time.Millisecond)
+	capturer, store := newRealClientMediaCapturer(t, wrapper.NewHTTPClientWithoutTimeout(), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	rec, err := capturer.Capture(ctx, dp1playlist.PlaylistItem{ID: "item-1", Source: srv.URL + "/video.mp4"})
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Nil(t, rec)
+	assert.Less(t, elapsed, 5*time.Second, "cancellation must abort the transfer promptly, not wait out the download ceiling")
+	_, loadErr := store.LoadItem("item-1")
+	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a canceled download must leave no record behind")
+}
+
+// TestMediaCapturer_Capture_TimeoutFreeClientStillEnforcesDiskLimit is the
+// third property removing the client timeout must not cost: the
+// maxDiskBytes ceiling is enforced by WriteBlob's own cap, independently
+// of any transport timeout, so a body that streams for a long time can
+// still never exceed the store's remaining room.
+func TestMediaCapturer_Capture_TimeoutFreeClientStillEnforcesDiskLimit(t *testing.T) {
+	srv, payload := tricklingServer(t, 8, 64, 20*time.Millisecond)
+	// A ceiling well under what the server will send (8*64 = 512 bytes).
+	capturer, store := newRealClientMediaCapturer(t, wrapper.NewHTTPClientWithoutTimeout(), 128)
+
+	rec, err := capturer.Capture(context.Background(), dp1playlist.PlaylistItem{ID: "item-1", Source: srv.URL + "/video.mp4"})
+	require.Error(t, err, "a body over the remaining disk budget must fail, not be silently truncated")
+	assert.Nil(t, rec)
+	assert.Greater(t, len(payload), 128)
+
+	_, loadErr := store.LoadItem("item-1")
+	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
 }

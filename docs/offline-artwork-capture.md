@@ -190,8 +190,7 @@ separate phase ("finalization") that is itself bounded by its own fixed
 internal deadline (`captureFinalizeWindowDefault`, 60s), independent of
 `captureWindowMs`. `captureWindowMs` only bounds *passive* CDP
 observation; finalization makes *active* outbound HTTP requests, one
-resource at a time, each of which can itself block for up to the shared
-HTTP client's own per-request timeout before failing. Without a
+resource at a time. Without a
 finalization-phase deadline, a page whose observation window closes with
 many stalled/slow-responding resources still outstanding could keep
 `capture.go` — and therefore the single download worker slot it holds for
@@ -206,6 +205,40 @@ the transport typically cancels it and it fails through the ordinary
 `fetch_failed:<url>` path — this fix does not change that.) Either way,
 the record `Capture` saves is an honestly PARTIAL one
 (`Coverage.Complete: false`), never a hang.
+
+### Why both download paths get their own HTTP client
+
+Neither body-download path uses the daemon-wide HTTP client. That client
+carries a 30-second `http.Client.Timeout`, and in Go that timeout covers
+the **entire** request including the response body — so while it was
+wired in, every asset that took more than 30 seconds to transfer failed
+unconditionally, regardless of how healthily it was progressing. That is
+incompatible with what this subsystem is for: the store's budget is
+measured in GiB, and the loopback static server below only earns its keep
+on blobs over 200 MB, a size no device uplink moves in 30 seconds. The
+large-asset replay path was therefore unreachable in practice, not merely
+slow.
+
+`bootstrap.go` gives `capture.go` and `mediacapture.go` a client built
+with `wrapper.NewHTTPClientWithoutTimeout` instead, and each path bounds
+itself explicitly, as that constructor's contract requires:
+
+- **Software** (`capture.go`): the finalization deadline above
+  (`captureFinalizeWindowDefault`, 60s) bounds the whole fetch-bodies
+  phase. It is now the only bound on those fetches — there is no
+  client-side backstop behind it.
+- **Direct media** (`mediacapture.go`): `mediaDownloadTimeout` (30
+  minutes) bounds the one download end-to-end. This path had no deadline
+  of its own at all, so it is what keeps a wedged origin from pinning the
+  single serial capture worker for the life of the process. It is a
+  total-duration ceiling, not a stall detector — see its doc comment for
+  that trade-off.
+
+Everything else in the subsystem keeps the daemon default: the
+classifier's probe and the CDP calls to localhost are small, fast
+requests that *should* fail fast. `DialPageSession` additionally bounds
+itself at 15s via `req.WithContext`, so the capturer's timeout-free
+client does not loosen the dial path.
 
 `downloader.go` runs one capture job at a time and tears the headless
 Chromium down when idle — the device already carries OOM pressure from the

@@ -89,6 +89,52 @@ var ErrQueueFull = errors.New("offline cache: download queue is full, try again 
 // meaningfully constrain legitimate traffic.
 const defaultMaxQueueLen = 4096
 
+// ErrClearedDuringDownload is returned by DownloadItem when a
+// ClearItem/ClearPlaylist for the same item landed between the epoch
+// sample at the top of the call and the commit inside enqueue (see
+// downloadEpoch's doc). The clear wins by design — resurrecting a record
+// a clear already reported success for would be the worse outcome — but
+// that means NOTHING was queued, and the caller must not be told
+// otherwise.
+//
+// This exists because the alternative was worse than a missing error: the
+// commandrouter answers downloadPlaylistItem with a flat
+// status:"queued", so swallowing this case reported scheduled work that
+// no worker would ever run, and left the mobile app's progress UI
+// waiting on an item that could never progress. ErrServiceNotStarted's
+// doc names that same "report false success to the mobile app" failure
+// as the thing it exists to prevent; this is the same hazard reached by
+// a different race.
+//
+// Retryable: re-issuing the download after the clear has landed queues
+// normally — see offlineCacheErrorResponse's "busy" mapping, which this
+// joins for exactly that reason.
+var ErrClearedDuringDownload = errors.New("offline cache: a clear for this item landed while the download was being queued, so nothing was queued")
+
+// enqueueOutcome distinguishes the three ways enqueue can return without
+// an error. It replaces a bool, which conflated two of them: "already
+// queued by an earlier call" and "a clear won the race" both meant
+// queued=false, yet only the second means the item is NOT going to be
+// captured. A caller branching on the bool therefore either reported
+// success for work that was never scheduled (DownloadItem) or had to
+// know, undocumented, that false could mean either.
+type enqueueOutcome int
+
+const (
+	// enqueueQueued: this call committed a new job to the queue.
+	enqueueQueued enqueueOutcome = iota
+	// enqueueAlreadyQueued: an identical job was already queued or
+	// downloading, so this call did nothing — but the item genuinely IS
+	// scheduled, so a single-item caller should still report success.
+	// Only an aggregate count (DownloadPlaylist's queuedCount) needs to
+	// exclude it, since nothing new was scheduled.
+	enqueueAlreadyQueued
+	// enqueueClearWon: a clear landed since the caller sampled its
+	// epoch. Nothing was queued and nothing will be — see
+	// ErrClearedDuringDownload.
+	enqueueClearWon
+)
+
 // ItemStatus is one entry of a Status snapshot, shaped for the
 // getOfflineCacheStatus command and offline_cache_status notification.
 type ItemStatus struct {
@@ -422,6 +468,24 @@ type captureJob struct {
 	// second network round trip) or risking a different answer the
 	// second time around — see captureForClass's doc.
 	class MediaClass
+	// queuedNotified is closed by enqueue once this job's
+	// state:"queued" notification has actually been emitted, and
+	// process() waits on it before emitting state:"downloading".
+	//
+	// It exists because those two notifications are produced by
+	// DIFFERENT goroutines — queued by whichever caller enqueued,
+	// downloading by the single capture worker — and enqueue can only
+	// emit its notification AFTER committing the job to the queue (see
+	// the notify call there for why emitting before the commit produced
+	// notifications for work that was never queued). The moment the
+	// commit happens, an idle worker can pop this job and reach its own
+	// notification, so without this barrier a client could observe
+	// downloading before queued: progress running backwards for an item
+	// that is in fact progressing normally.
+	//
+	// nil is tolerated (tests that push jobs directly): the barrier is
+	// simply skipped.
+	queuedNotified chan struct{}
 }
 
 // jobQueue is a FIFO backed by an in-memory slice so DownloadItem/
@@ -912,13 +976,22 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	// this is the authoritative check that actually prevents pushing a
 	// job onto a queue nobody will ever drain. It also returns
 	// ErrQueueFull if the queue is already at capacity — see that
-	// error's doc. The newly-queued bool is irrelevant to a single-item
-	// download's caller (downloadPlaylistItem's response is ok/error
-	// only, with no aggregate count to keep accurate), so it is
-	// deliberately discarded here — see DownloadPlaylist for the caller
-	// that does need it.
-	_, err = s.enqueue(item, epoch, class)
-	return err
+	// error's doc.
+	//
+	// enqueueAlreadyQueued is success for this caller: a repeated
+	// download of an item already queued/downloading is an idempotent
+	// no-op, and the item genuinely is scheduled. Only enqueueClearWon
+	// means nothing was queued and nothing will be, which is the one
+	// outcome that must not reach the caller as success — see
+	// ErrClearedDuringDownload's doc.
+	outcome, err := s.enqueue(item, epoch, class)
+	if err != nil {
+		return err
+	}
+	if outcome == enqueueClearWon {
+		return ErrClearedDuringDownload
+	}
+	return nil
 }
 
 func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (int, int, error) {
@@ -1019,7 +1092,7 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 
 	queued := 0
 	for _, q := range toQueue {
-		newlyQueued, err := s.enqueue(q.item, q.epoch, q.class)
+		outcome, err := s.enqueue(q.item, q.epoch, q.class)
 		if err != nil {
 			if errors.Is(err, ErrServiceNotStarted) {
 				// Stop() raced in mid-loop; the remaining items would
@@ -1038,13 +1111,16 @@ func (s *service) DownloadPlaylist(ctx context.Context, playlistRaw json.RawMess
 			// be silently swallowed into a success report.
 			return queued, total, fmt.Errorf("offline cache: queue playlist %s items: %w", playlist.ID, err)
 		}
-		// Only count jobs THIS call actually put in the queue. enqueue
-		// also returns a nil error for idempotent no-ops (item already
-		// queued/downloading from an earlier call) and for a concurrent
-		// clear winning the race — neither actually queued anything, so
-		// counting them here would inflate queuedCount above what was
-		// truly newly scheduled for a retried or clear-racing request.
-		if newlyQueued {
+		// Only count jobs THIS call actually put in the queue.
+		// enqueueAlreadyQueued (item already queued/downloading from an
+		// earlier call) and enqueueClearWon (a concurrent clear won)
+		// both scheduled nothing new, so counting either would inflate
+		// queuedCount above what this request truly added for a retried
+		// or clear-racing playlist. Unlike DownloadItem, a clear-won
+		// item is NOT surfaced as an error here: a playlist download is
+		// an aggregate whose other items may well have queued fine, and
+		// queuedCount already tells the caller exactly how many did.
+		if outcome == enqueueQueued {
 			queued++
 		}
 	}
@@ -1155,9 +1231,9 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 // notification in the COMMON case where the queue is nowhere near full,
 // not to be the authoritative guard. Phase 2's check, taken under the
 // same lock as the actual push, is what actually enforces the bound.
-func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class MediaClass) (queued bool, err error) {
+func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class MediaClass) (enqueueOutcome, error) {
 	if !s.started.Load() {
-		return false, ErrServiceNotStarted
+		return enqueueClearWon, ErrServiceNotStarted
 	}
 	s.mu.RLock()
 	st, tracked := s.state[item.ID]
@@ -1165,26 +1241,20 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	cleared := s.downloadEpoch[item.ID] != epoch
 	s.mu.RUnlock()
 	if tracked && (st == StateQueued || st == StateDownloading) {
-		return false, nil
+		return enqueueAlreadyQueued, nil
 	}
 	// A clear landed since this download sampled its epoch (see
 	// downloadEpoch's doc): honor the clear and abort rather than
-	// resurrect the record it deleted. Advisory here (RLock) purely to
-	// skip the observer's spurious "queued" notification in the common
-	// case; phase 2 below re-checks under the commit lock authoritatively.
+	// resurrect the record it deleted. Advisory only (RLock) — a clear
+	// can still land between here and the commit below, so phase 2
+	// re-checks authoritatively under the same mu reserveForClear bumps
+	// the epoch under. This early exit just avoids the wasted lock
+	// acquisition in the common case.
 	if cleared {
-		return false, nil
+		return enqueueClearWon, nil
 	}
 	if queueFull {
-		return false, ErrQueueFull
-	}
-
-	if s.observer != nil {
-		s.observer.OnItemStateChanged(ItemStatus{
-			ItemID:  item.ID,
-			State:   StateQueued,
-			Percent: percentForState(StateQueued),
-		})
+		return enqueueClearWon, ErrQueueFull
 	}
 
 	// Phase 2: push happens before mu is released, not after. Stop()
@@ -1200,11 +1270,11 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	s.mu.Lock()
 	if !s.started.Load() {
 		s.mu.Unlock()
-		return false, ErrServiceNotStarted
+		return enqueueClearWon, ErrServiceNotStarted
 	}
 	if st, ok := s.state[item.ID]; ok && (st == StateQueued || st == StateDownloading) {
 		s.mu.Unlock()
-		return false, nil
+		return enqueueAlreadyQueued, nil
 	}
 	// Authoritative clear check: this read and the queue.push below are
 	// one critical section under the same mu reserveForClear bumps the
@@ -1215,19 +1285,49 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	// clear failed to remove — see downloadEpoch's doc.
 	if s.downloadEpoch[item.ID] != epoch {
 		s.mu.Unlock()
-		return false, nil
+		return enqueueClearWon, nil
 	}
 	if s.queue.len() >= s.maxQueueLen {
 		s.mu.Unlock()
-		return false, ErrQueueFull
+		return enqueueClearWon, ErrQueueFull
 	}
 	s.state[item.ID] = StateQueued
-	s.queue.push(captureJob{itemID: item.ID, item: item, class: class})
+	queuedNotified := make(chan struct{})
+	s.queue.push(captureJob{itemID: item.ID, item: item, class: class, queuedNotified: queuedNotified})
 	s.mu.Unlock()
-	return true, nil
+
+	// Notified only AFTER the commit above, never before it. An earlier
+	// revision fired this between phase 1 and phase 2, so a clear
+	// landing in that window produced an offline_cache_status
+	// state:"queued" for an item that was then never queued — a
+	// terminal-looking progress entry the mobile app would wait on
+	// forever, since no further notification for that item was ever
+	// coming. Emitting after the push means the notification can only
+	// ever describe work that really is scheduled. Deliberately outside
+	// s.mu: the observer sends over the relayer/hub WS, and notify's doc
+	// explains why that must never run under this lock.
+	s.notifyObserver(item.ID, StateQueued, Coverage{})
+	// Releases process()'s barrier — see captureJob.queuedNotified.
+	// Deliberately after the notify above, and unconditional, so the
+	// worker is never left waiting on a job whose enqueuer has already
+	// moved on.
+	close(queuedNotified)
+	return enqueueQueued, nil
 }
 
 func (s *service) process(ctx context.Context, j captureJob) {
+	// Wait for this job's own queued notification to have gone out
+	// before announcing downloading, so the two never reach a client in
+	// the wrong order — see captureJob.queuedNotified. The ctx escape
+	// keeps shutdown from ever blocking on it: a canceled ctx means this
+	// capture is about to fail anyway, so ordering no longer matters.
+	if j.queuedNotified != nil {
+		select {
+		case <-j.queuedNotified:
+		case <-ctx.Done():
+		}
+	}
+
 	// s.state[j.itemID] is already StateDownloading — dequeueForProcessing
 	// set it atomically with the pop that produced j (see that
 	// function's doc). Only the observer notification remains to do

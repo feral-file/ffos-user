@@ -1457,7 +1457,17 @@ Success response:
 
 Error cases: `invalid_request` (missing `itemId`), `resolve_failed`,
 `not_found` (itemId not in the resolved playlist), `unsupported_media`,
-`offline_cache_error`.
+`busy`, `offline_cache_error`.
+
+`busy` here (retryable) covers a `clearPlaylistItemCache`/
+`clearPlaylistCache` for the same item that landed while this download was
+still resolving and queuing. The clear wins by design — the alternative
+would resurrect a record the device already told a client was deleted — so
+nothing was queued, and this command reports that rather than answering
+`status: "queued"` for work no worker will run. Re-issue the download once
+the clear has settled and it queues normally. No `offline_cache_status`
+notification is emitted for an item in this case, so a client must not
+wait on one.
 
 When the request was resolved via `playlistUrl` (not `dp1_call`) and the
 item is queued successfully, `feral-controld` also best-effort indexes the
@@ -1516,6 +1526,12 @@ controller. A classify failure for only *some* items still returns
 `ok: true` with `queuedCount` reflecting whatever did queue
 successfully; the skipped item(s) are logged server-side but not
 individually reported here.
+
+An item excluded because a concurrent clear won the race (see
+`downloadPlaylistItem`'s `busy` case) is likewise absent from
+`queuedCount` without failing the whole command: a playlist download is an
+aggregate whose other items may well have queued fine, and `queuedCount`
+already reports exactly how many did.
 
 The resolved playlist (as `dp1.DP1` returns it —
 `dynamicQuery` items already materialized, all field values including

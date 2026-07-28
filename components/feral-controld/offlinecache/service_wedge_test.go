@@ -86,14 +86,14 @@ func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *tes
 	// never taken (see downloadEpoch's doc).
 	queued1, err := s.enqueue(item1, 0, ClassSoftware)
 	require.NoError(t, err)
-	assert.True(t, queued1, "the first distinct item must be reported as newly queued")
+	assert.Equal(t, enqueueQueued, queued1, "the first distinct item must be reported as newly queued")
 	queued2, err := s.enqueue(item2, 0, ClassSoftware)
 	require.NoError(t, err)
-	assert.True(t, queued2, "the second distinct item must be reported as newly queued")
+	assert.Equal(t, enqueueQueued, queued2, "the second distinct item must be reported as newly queued")
 
 	queued3, err := s.enqueue(item3, 0, ClassSoftware)
 	assert.ErrorIs(t, err, ErrQueueFull, "a third distinct item must be rejected once the queue is already at its 2-item cap")
-	assert.False(t, queued3, "a rejected enqueue must not report itself as newly queued")
+	assert.NotEqual(t, enqueueQueued, queued3, "a rejected enqueue must not report itself as newly queued")
 	assert.Equal(t, 2, s.queue.len(), "a rejected enqueue must not have touched the queue")
 	_, tracked := s.state[item3.ID]
 	assert.False(t, tracked, "a rejected item must not be left behind in a spurious StateQueued")
@@ -102,7 +102,7 @@ func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *tes
 	require.True(t, ok)
 	queued3Retry, err := s.enqueue(item3, 0, ClassSoftware)
 	assert.NoError(t, err)
-	assert.True(t, queued3Retry, "capacity freed by a dequeue must admit a new item and report it as newly queued")
+	assert.Equal(t, enqueueQueued, queued3Retry, "capacity freed by a dequeue must admit a new item and report it as newly queued")
 }
 
 // TestService_Enqueue_IdempotentReenqueueDoesNotCountAgainstCapacity pins
@@ -118,10 +118,10 @@ func TestService_Enqueue_IdempotentReenqueueDoesNotCountAgainstCapacity(t *testi
 
 	firstQueued, err := s.enqueue(item, 0, ClassSoftware)
 	require.NoError(t, err)
-	assert.True(t, firstQueued, "the first enqueue of a distinct item must be reported as newly queued")
+	assert.Equal(t, enqueueQueued, firstQueued, "the first enqueue of a distinct item must be reported as newly queued")
 
 	reenqueued, err := s.enqueue(item, 0, ClassSoftware)
 	assert.NoError(t, err, "re-enqueuing an already-queued item must be a no-op, not rejected as queue-full")
-	assert.False(t, reenqueued, "re-enqueuing an already-queued item must NOT report itself as newly queued, or a caller aggregating counts (DownloadPlaylist's queuedCount) would overcount idempotent retries")
+	assert.Equal(t, enqueueAlreadyQueued, reenqueued, "re-enqueuing an already-queued item must NOT report itself as newly queued, or a caller aggregating counts (DownloadPlaylist's queuedCount) would overcount idempotent retries")
 	assert.Equal(t, 1, s.queue.len(), "the idempotent re-enqueue must not have pushed a second entry")
 }
