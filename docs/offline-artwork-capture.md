@@ -434,7 +434,11 @@ adding aspirational/unused reason constants — a prior revision briefly
 carried `large_asset_static`/`capture_window_elapsed`/`download_failed`
 constants for exactly this kind of future signal, and they went stale
 and unreferenced immediately, which is why they were removed rather than
-kept "for later").
+kept "for later"). Note that the joined reason is stored in full on disk
+but **truncated to ~512 bytes when reported** over
+`getOfflineCacheStatus`/`offline_cache_status` (`service.go`'s
+`truncateReason`) — one entry per failed resource with its full URL
+inline is unbounded in a way an HTTP/WebSocket response body cannot be.
 
 ### 4.4 206 Partial Content also has no CDP body
 

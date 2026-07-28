@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -308,17 +309,102 @@ func (h *handler) resolveDisplayedPlaylist(ctx context.Context, playerStatus *st
 }
 
 func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{}, error) {
-	itemIDs := stringSliceArg(args["itemIds"])
-	snapshot, err := h.offlineCache.Status(itemIDs)
+	req, errResponse := parseStatusRequest(args)
+	if errResponse != nil {
+		return errResponse, nil
+	}
+
+	snapshot, err := h.offlineCache.Status(req)
 	if err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
-	return map[string]any{
-		"ok":       true,
-		"items":    snapshot.Items,
-		"totals":   snapshot.Totals,
-		"diskUsed": snapshot.DiskUsedBytes,
-	}, nil
+
+	// Built field by field rather than by marshaling the snapshot so the
+	// optional parts stay absent instead of serializing as null: totals/
+	// diskUsed are first-page-only (see StatusSnapshot's doc), and a
+	// client on the last page must not see an empty nextCursor it might
+	// follow.
+	response := map[string]any{
+		"ok":    true,
+		"items": snapshot.Items,
+	}
+	if snapshot.Totals != nil {
+		response["totals"] = snapshot.Totals
+	}
+	if snapshot.DiskUsedBytes != nil {
+		response["diskUsed"] = *snapshot.DiskUsedBytes
+	}
+	if snapshot.NextCursor != "" {
+		response["nextCursor"] = snapshot.NextCursor
+		response["truncated"] = snapshot.Truncated
+	}
+	return response, nil
+}
+
+// parseStatusRequest validates the getOfflineCacheStatus arguments,
+// returning either the parsed request or a ready-to-send invalid_request
+// body (never both).
+//
+// This one command is validated strictly, unlike the lenient arg helpers
+// the older commands share, because every one of its inputs decides how
+// much work the daemon does and how large the response gets: a
+// misspelled itemIds (say a bare string instead of an array) used to
+// fall through to "report on EVERY item", turning a client-side typo
+// into a full-store scan on a device that also has a kiosk browser to
+// keep alive. Failing closed with a non-retryable error is the cheaper
+// outcome for both sides.
+func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[string]any) {
+	var req offlinecache.StatusRequest
+
+	if raw, present := args["itemIds"]; present && raw != nil {
+		ids, ok := stringSliceArg(raw)
+		if !ok {
+			return req, errorResponse("invalid_request", "itemIds must be an array of non-empty strings", false)
+		}
+		if len(ids) > offlinecache.MaxStatusItemIDs {
+			return req, errorResponse("invalid_request",
+				fmt.Sprintf("itemIds accepts at most %d ids per request", offlinecache.MaxStatusItemIDs), false)
+		}
+		req.ItemIDs = ids
+	}
+
+	if raw, present := args["limit"]; present && raw != nil {
+		limit, ok := intArg(raw)
+		if !ok || limit < 0 {
+			return req, errorResponse("invalid_request", "limit must be a non-negative integer", false)
+		}
+		// A limit above the cap is clamped rather than rejected: the
+		// response still says what happened (nextCursor/truncated), and
+		// a caller asking for "everything" should get the first page,
+		// not an error.
+		req.Limit = limit
+	}
+
+	if raw, present := args["cursor"]; present && raw != nil {
+		cursor, ok := raw.(string)
+		if !ok || cursor == "" {
+			return req, errorResponse("invalid_request", "cursor must be a non-empty string", false)
+		}
+		req.Cursor = cursor
+	}
+
+	if raw, present := args["totalsOnly"]; present && raw != nil {
+		totalsOnly, ok := raw.(bool)
+		if !ok {
+			return req, errorResponse("invalid_request", "totalsOnly must be a boolean", false)
+		}
+		req.TotalsOnly = totalsOnly
+	}
+
+	// totals describe the whole set; a cursor asks for part of it. Asking
+	// for both is a client bug, and answering it either way (totals of
+	// the whole set on a partial page, or a partial total) would hide
+	// that bug behind a plausible-looking number.
+	if req.TotalsOnly && req.Cursor != "" {
+		return req, errorResponse("invalid_request", "totalsOnly cannot be combined with cursor", false)
+	}
+
+	return req, nil
 }
 
 // resolveOfflineCachePlaylist mirrors the playlistUrl/dp1_call resolution
@@ -407,18 +493,52 @@ func stringArg(v any) (string, bool) {
 	return s, true
 }
 
-func stringSliceArg(v any) []string {
+// stringSliceArg reports ok=false for anything that is not a JSON array
+// of non-empty strings, rather than silently yielding the entries it
+// could make sense of — see parseStatusRequest's doc for why this one
+// argument is worth failing closed on.
+func stringSliceArg(v any) ([]string, bool) {
 	raw, ok := v.([]interface{})
 	if !ok {
-		return nil
+		return nil, false
 	}
 	out := make([]string, 0, len(raw))
 	for _, item := range raw {
-		if s, ok := item.(string); ok && s != "" {
-			out = append(out, s)
+		s, ok := item.(string)
+		if !ok || s == "" {
+			return nil, false
 		}
+		out = append(out, s)
 	}
-	return out
+	return out, true
+}
+
+// maxIntArgValue is an overflow guard, not a policy limit: the callers'
+// own bounds (MaxStatusItems, MaxStatusItemIDs) are far below it, and
+// anything above it could not be converted to int meaningfully anyway.
+const maxIntArgValue = 1 << 20
+
+// intArg accepts the shapes an integer field can arrive in: float64
+// (what encoding/json produces for every JSON number by default) and the
+// native ints a Go caller passes directly. A non-integral or
+// out-of-range number is rejected rather than truncated.
+func intArg(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		if n != math.Trunc(n) || n < -maxIntArgValue || n > maxIntArgValue {
+			return 0, false
+		}
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		if n < -maxIntArgValue || n > maxIntArgValue {
+			return 0, false
+		}
+		return int(n), true
+	default:
+		return 0, false
+	}
 }
 
 func disabledResponse(message string) map[string]any {

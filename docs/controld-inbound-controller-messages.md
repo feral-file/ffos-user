@@ -1402,8 +1402,10 @@ per-item progress arrives later over the `offline_cache_status` notification.
 Common error codes across this command family:
 
 - `disabled`: offline caching is not enabled.
-- `invalid_request`: a required field (`itemId`, `playlistId`) is missing, or
-  neither `playlistUrl` nor `dp1_call` was supplied.
+- `invalid_request`: a required field (`itemId`, `playlistId`) is missing,
+  neither `playlistUrl` nor `dp1_call` was supplied, or — for
+  `getOfflineCacheStatus` only — an argument is the wrong type or out of
+  range (see that command's own section).
 - `resolve_failed`: DP1 playlist resolution failed (bad URL, fetch failure,
   malformed `dp1_call`); `retryable: true`.
 - `not_found`: the requested `itemId` was not found in the resolved
@@ -1630,6 +1632,21 @@ Example (specific items):
 Omitting `itemIds` (or passing an empty array) reports on every item this
 process currently knows about, on disk and in flight.
 
+Request fields, all optional:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `itemIds` | string[] | Restrict the report to these items. Omitted or `[]` means every known item. At most **1024** ids per request. |
+| `limit` | integer | Cap on how many entries `items` carries. Omitted, `0`, or above the cap is clamped to **1000**, which is also the maximum. |
+| `cursor` | string | The `nextCursor` from the previous page. Omitted means the first page. |
+| `totalsOnly` | boolean | Return `totals`/`diskUsed` with an empty `items`, for a summary view. Cannot be combined with `cursor`. |
+
+Unlike the other commands in this family, these arguments are validated
+strictly: a wrong type (for example `"itemIds": "work-1"` instead of an
+array) is rejected with `invalid_request` rather than ignored, because
+every one of these fields decides how much work the device does and how
+large the response gets.
+
 Success response:
 
 ```json
@@ -1661,6 +1678,28 @@ Success response:
   "diskUsed": 4402690
 }
 ```
+
+`items` is always ordered by `itemId` — including when `itemIds` was
+given, so the response order does not follow the request order, and
+duplicate ids collapse to one entry.
+
+**Paging.** `items` never carries more than 1000 entries. When more
+remain, the response adds `"truncated": true` and `"nextCursor": "<last
+itemId in items>"`; pass that value back as `cursor` for the next page,
+and repeat until `nextCursor` is absent. Both fields are absent on the
+last page, so a client can treat "no `nextCursor`" as "that was
+everything". Because paging is by sort order rather than by position, a
+cursor stays valid even if the item it names is cleared or evicted
+between pages.
+
+`totals` and `diskUsed` describe the **whole requested set**, not the
+current page, and for that reason are returned **only on the first page**
+(a request with no `cursor`). Deriving them costs one on-disk read per
+item in the set, so recomputing them for every page would make walking a
+large cache cost far more than it needs to. A continuation page omits
+both fields; carry forward what the first page reported. Use
+`totalsOnly: true` when the summary is all you need — it skips the
+per-item disk measurements and the response body entirely.
 
 `state` is one of `not_cached`, `queued`, `downloading`, `ready`, `partial`,
 `failed`, `broken_online`. `percent` is coarse (`0` or `100`): capture is a
@@ -1695,7 +1734,19 @@ than the whole string, and must not assume the reason list is exhaustive
 or stable in wording — only `coverageComplete` itself is a stable
 boolean contract.
 
-Error cases: `offline_cache_error`.
+`reason` is **truncated to roughly 512 bytes** on the wire (both here and
+in the `offline_cache_status` notification). One entry is emitted per
+failed resource with that resource's full URL inline, and nothing bounds
+how many resources an artwork loads, so an item captured with no network
+can otherwise produce tens of KB of reason text on its own. Entries are
+kept whole — a truncated list ends with `…(+N more)`, where `N` is how
+many entries were dropped, so a partial list never reads as a complete
+one. The untruncated text stays in the device's on-disk record for
+support/debugging.
+
+Error cases: `invalid_request` (an argument of the wrong type, more than
+1024 `itemIds`, a negative or non-integral `limit`, an empty `cursor`, or
+`totalsOnly` combined with `cursor`), `offline_cache_error`.
 
 ### offline_cache_status notification
 
@@ -1758,6 +1809,10 @@ captures — see `service.notify`):
   deadline (either transport) is dropped as a failed write and closed,
   same as any other write error; the queued/downloading captures behind
   it in the worker's queue are unaffected either way.
+
+The `message` body is one `items[]` entry of `getOfflineCacheStatus` and
+follows the same rules, including the ~512-byte `reason` truncation
+described there.
 
 Clients that need a definitive current state should still poll
 `getOfflineCacheStatus` rather than relying on every notification having

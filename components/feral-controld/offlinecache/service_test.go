@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -76,7 +77,7 @@ func seedItemWithCapturedAt(t *testing.T, store offlinecache.Store, itemID, blob
 func waitForState(t *testing.T, svc offlinecache.Service, itemID string, want offlinecache.ItemState) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		snap, err := svc.Status([]string{itemID})
+		snap, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{itemID}})
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == want
 	}, 2*time.Second, 10*time.Millisecond, "item %s never reached state %s", itemID, want)
 }
@@ -294,7 +295,7 @@ func TestService_DownloadItem_IdempotentWhileInFlight(t *testing.T) {
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 	require.Eventually(t, func() bool {
-		snap, err := ts.service.Status([]string{"item-1"})
+		snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == offlinecache.StateDownloading
 	}, 2*time.Second, 10*time.Millisecond, "worker should have dequeued into downloading before the gate is released")
 
@@ -374,7 +375,7 @@ func TestService_DownloadItem_CoverageClassification(t *testing.T) {
 			require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 			waitForState(t, ts.service, "item-1", tt.wantState)
 
-			snap, err := ts.service.Status([]string{"item-1"})
+			snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
 			require.NoError(t, err)
 			require.Len(t, snap.Items, 1)
 			assert.Equal(t, wantPercent, snap.Items[0].Percent)
@@ -479,7 +480,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 	assert.Equal(t, 1, total1)
 
 	require.Eventually(t, func() bool {
-		snap, err := ts.service.Status([]string{"item-1"})
+		snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == offlinecache.StateDownloading
 	}, 2*time.Second, 10*time.Millisecond, "worker should have dequeued into downloading before the retry lands")
 
@@ -1376,7 +1377,7 @@ func TestService_Status_UnknownItemIsNotCached(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	snap, err := ts.service.Status([]string{"missing"})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"missing"}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State)
@@ -1388,12 +1389,177 @@ func TestService_Status_AggregatesTotalsAndDiskUsage(t *testing.T) {
 	seedItemWithCapturedAt(t, ts.store, "item-1", "0123456789", time.Now())
 	seedItemWithCapturedAt(t, ts.store, "item-2", "abcdefghij", time.Now())
 
-	snap, err := ts.service.Status(nil)
+	snap, err := ts.service.Status(offlinecache.StatusRequest{})
 	require.NoError(t, err)
 	assert.Len(t, snap.Items, 2)
+	require.NotNil(t, snap.Totals)
 	assert.Equal(t, 2, snap.Totals.Total)
 	assert.Equal(t, 2, snap.Totals.Ready)
-	assert.Equal(t, int64(20), snap.DiskUsedBytes)
+	require.NotNil(t, snap.DiskUsedBytes)
+	assert.Equal(t, int64(20), *snap.DiskUsedBytes)
+	assert.False(t, snap.Truncated)
+	assert.Empty(t, snap.NextCursor)
+}
+
+// seedItemWithReason writes a record whose capture came back incomplete,
+// so Status has a Coverage.Reason to report (and truncate).
+func seedItemWithReason(t *testing.T, store offlinecache.Store, itemID, reason string) {
+	t.Helper()
+	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
+		ItemID:     itemID,
+		Item:       dp1playlist.PlaylistItem{ID: itemID, Source: "https://example.com/" + itemID},
+		Entry:      "https://example.com/" + itemID,
+		Coverage:   offlinecache.Coverage{Complete: false, Reason: reason},
+		CapturedAt: time.Now(),
+	}))
+}
+
+func TestService_Status_TruncatesLongReason(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	// The shape a capture that ran with no network produces: one entry
+	// per resource, each carrying that resource's full URL.
+	entries := make([]string, 200)
+	for i := range entries {
+		entries[i] = fmt.Sprintf("fetch_failed:https://cdn.example.com/assets/very/long/path/chunk-%03d.js", i)
+	}
+	reason := strings.Join(entries, "; ")
+	require.Greater(t, len(reason), 10_000, "fixture should be far over the wire budget")
+	seedItemWithReason(t, ts.store, "item-1", reason)
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+
+	got := snap.Items[0].Reason
+	assert.Less(t, len(got), 700, "reason should be bounded, not the full %d-byte list", len(reason))
+	assert.Contains(t, got, entries[0], "kept entries must stay whole so clients can still parse the prefix")
+	assert.Regexp(t, `…\(\+\d+ more\)$`, got, "a truncated list must say how much it dropped")
+
+	// The record on disk keeps the complete reason for debugging.
+	rec, err := ts.store.LoadItem("item-1")
+	require.NoError(t, err)
+	assert.Equal(t, reason, rec.Coverage.Reason)
+}
+
+func TestService_Status_PagesWithCursor(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	for _, id := range []string{"item-1", "item-2", "item-3", "item-4", "item-5"} {
+		seedItemWithCapturedAt(t, ts.store, id, id+"-blob", time.Now())
+	}
+
+	first, err := ts.service.Status(offlinecache.StatusRequest{Limit: 2})
+	require.NoError(t, err)
+	require.Len(t, first.Items, 2)
+	assert.Equal(t, "item-1", first.Items[0].ItemID)
+	assert.Equal(t, "item-2", first.Items[1].ItemID)
+	assert.True(t, first.Truncated)
+	assert.Equal(t, "item-2", first.NextCursor)
+	// Totals cover the whole set, not just this page.
+	require.NotNil(t, first.Totals)
+	assert.Equal(t, 5, first.Totals.Total)
+	assert.Equal(t, 5, first.Totals.Ready)
+	require.NotNil(t, first.DiskUsedBytes)
+
+	second, err := ts.service.Status(offlinecache.StatusRequest{Limit: 2, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	require.Len(t, second.Items, 2)
+	assert.Equal(t, "item-3", second.Items[0].ItemID)
+	assert.Equal(t, "item-4", second.Items[1].ItemID)
+	assert.True(t, second.Truncated)
+	// Continuation pages skip the whole-set pass, so they carry no
+	// totals — see StatusSnapshot's doc.
+	assert.Nil(t, second.Totals)
+	assert.Nil(t, second.DiskUsedBytes)
+
+	last, err := ts.service.Status(offlinecache.StatusRequest{Limit: 2, Cursor: second.NextCursor})
+	require.NoError(t, err)
+	require.Len(t, last.Items, 1)
+	assert.Equal(t, "item-5", last.Items[0].ItemID)
+	assert.False(t, last.Truncated)
+	assert.Empty(t, last.NextCursor)
+}
+
+func TestService_Status_CursorSurvivesEvictedItem(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "one", time.Now())
+	seedItemWithCapturedAt(t, ts.store, "item-2", "two", time.Now())
+
+	// The cursor names an item that no longer exists (cleared or evicted
+	// between pages); paging is by sort order, so the next page still
+	// resolves rather than erroring or restarting.
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Cursor: "item-1-gone-since"})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+	assert.Equal(t, "item-2", snap.Items[0].ItemID)
+}
+
+func TestService_Status_TotalsOnlyOmitsItems(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "0123456789", time.Now())
+	seedItemWithReason(t, ts.store, "item-2", "csp_blocked")
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{TotalsOnly: true})
+	require.NoError(t, err)
+	assert.Empty(t, snap.Items)
+	assert.False(t, snap.Truncated)
+	require.NotNil(t, snap.Totals)
+	assert.Equal(t, 2, snap.Totals.Total)
+	assert.Equal(t, 1, snap.Totals.Ready)
+	require.NotNil(t, snap.DiskUsedBytes)
+	assert.Equal(t, int64(10), *snap.DiskUsedBytes)
+}
+
+func TestService_Status_SortsAndDedupesRequestedIDs(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "one", time.Now())
+	seedItemWithCapturedAt(t, ts.store, "item-2", "two", time.Now())
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{
+		ItemIDs: []string{"item-2", "item-1", "item-2", ""},
+	})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 2)
+	assert.Equal(t, "item-1", snap.Items[0].ItemID)
+	assert.Equal(t, "item-2", snap.Items[1].ItemID)
+}
+
+func TestService_Status_InFlightItemsSortWithOnDiskOnes(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	// "item-b" only exists in memory (queued, no record written yet), so
+	// it must still land in id order rather than after every on-disk id —
+	// paging by "id greater than cursor" would otherwise skip it.
+	seedItemWithCapturedAt(t, ts.store, "item-a", "a", time.Now())
+	seedItemWithCapturedAt(t, ts.store, "item-c", "c", time.Now())
+
+	item := dp1playlist.PlaylistItem{ID: "item-b", Source: "https://example.com/b"}
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+		func(ctx context.Context, _ dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			<-ctx.Done() // hold the capture open so the item stays in flight
+			return nil, ctx.Err()
+		}).AnyTimes()
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+
+	require.Eventually(t, func() bool {
+		snap, err := ts.service.Status(offlinecache.StatusRequest{})
+		return err == nil && len(snap.Items) == 3
+	}, 2*time.Second, 10*time.Millisecond)
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 3)
+	assert.Equal(t, []string{"item-a", "item-b", "item-c"},
+		[]string{snap.Items[0].ItemID, snap.Items[1].ItemID, snap.Items[2].ItemID})
 }
 
 func TestService_Start_RebuildsIndexFromExistingDiskState(t *testing.T) {
@@ -1404,7 +1570,7 @@ func TestService_Start_RebuildsIndexFromExistingDiskState(t *testing.T) {
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	snap, err := ts.service.Status([]string{"item-1"})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateReady, snap.Items[0].State)
@@ -1606,6 +1772,64 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 	}, seen)
 }
 
+// TestService_Notify_TruncatesReason pins that the notification path
+// bounds Coverage.Reason the same way Status does: this ItemStatus goes
+// straight out over the relayer and the hub WebSocket, both of which
+// bound how long a write may take but not how large it may be.
+func TestService_Notify_TruncatesReason(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store, _ := newTestStore(t)
+	mockClassifier := mocks.NewMockOfflineCacheClassifier(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
+	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
+
+	entries := make([]string, 200)
+	for i := range entries {
+		entries[i] = fmt.Sprintf("unresolved_at_deadline:https://cdn.example.com/assets/chunk-%03d.js", i)
+	}
+	reason := strings.Join(entries, "; ")
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	rec := &offlinecache.ItemRecord{
+		ItemID: "item-1", Item: item,
+		Coverage: offlinecache.Coverage{Complete: false, Reason: reason},
+	}
+
+	var terminal offlinecache.ItemStatus
+	done := make(chan struct{})
+	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
+		if status.State == offlinecache.StatePartial {
+			terminal = status
+			close(done)
+		}
+	}).Times(3)
+
+	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			require.NoError(t, store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	require.NoError(t, svc.Start(context.Background()))
+	defer svc.Stop()
+
+	require.NoError(t, svc.DownloadItem(context.Background(), item))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the observer to see the terminal partial state")
+	}
+
+	assert.Less(t, len(terminal.Reason), 700, "notification reason should be bounded, not the full %d bytes", len(reason))
+	assert.Regexp(t, `…\(\+\d+ more\)$`, terminal.Reason)
+}
+
 // TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskStatus
 // pins the intentional attempt-level-vs-cache-level split: a failed
 // *re*-capture of an item that was already cached
@@ -1659,7 +1883,7 @@ func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskSta
 
 	// The notification said "failed", but the disk-backed status must
 	// still say "ready": the old record/blob were never touched.
-	snap, err := svc.Status([]string{"item-1"})
+	snap, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateReady, snap.Items[0].State,
@@ -1748,7 +1972,7 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 		return string(blob)
 	}())
 
-	status, err := svc.Status([]string{"item-1"})
+	status, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
 	require.NoError(t, err)
 	require.Len(t, status.Items, 1)
 	assert.Equal(t, offlinecache.StateReady, status.Items[0].State,

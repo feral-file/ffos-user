@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -96,10 +97,88 @@ type ItemStatus struct {
 	// Percent is coarse (0 or 100): capture is a single bounded-window
 	// operation, not chunked, so there is no meaningful mid-download
 	// progress to report beyond "queued/downloading" vs "done".
-	Percent          int    `json:"percent"`
-	Bytes            int64  `json:"bytes,omitempty"`
-	CoverageComplete bool   `json:"coverageComplete,omitempty"`
-	Reason           string `json:"reason,omitempty"`
+	Percent int   `json:"percent"`
+	Bytes   int64 `json:"bytes,omitempty"`
+	// CoverageComplete carries omitempty, so a false value is ABSENT from
+	// the wire rather than sent as false — clients must read a missing
+	// field as false.
+	CoverageComplete bool `json:"coverageComplete,omitempty"`
+	// Reason is truncated to maxReasonBytes by every constructor of this
+	// type (itemStatus, notifyObserver); the untruncated text stays on
+	// disk in the ItemRecord. See truncateReason.
+	Reason string `json:"reason,omitempty"`
+}
+
+// reasonSeparator is what capture.go joins its per-resource failure
+// entries with when building Coverage.Reason, and therefore the boundary
+// truncateReason cuts on.
+const reasonSeparator = "; "
+
+// maxReasonBytes bounds ItemStatus.Reason on the wire.
+//
+// Coverage.Reason is one free-text entry per failed/unresolved resource,
+// each embedding that resource's full URL (capture.go), joined with
+// reasonSeparator. Nothing bounds how many resources one artwork loads,
+// so a capture that ran with no network — or whose window closed with
+// hundreds of requests still pending — can produce a reason of tens of
+// KB for a SINGLE item. Multiplied across a page of items, that is the
+// dominant term in the response body, which matters because the LAN hub
+// buffers the whole body in memory before writing it under a 30s write
+// deadline (hub.respondJSON), on a device already carrying OOM pressure
+// from the kiosk Chromium.
+//
+// Truncating here rather than at capture time keeps the on-disk record
+// complete for debugging. The wire contract already tells clients the
+// reason list is neither exhaustive nor stable in wording, and that only
+// coverageComplete is a stable boolean — see
+// docs/controld-inbound-controller-messages.md's getOfflineCacheStatus
+// section.
+const maxReasonBytes = 512
+
+// MaxStatusItems bounds how many ItemStatus entries a single Status call
+// can return, and is also the default when StatusRequest.Limit is unset.
+// The item count in the store is bounded only by BYTES (maxDiskBytes,
+// via enforceDiskLimit) — there is no count cap — so a store full of
+// small captures can hold tens of thousands of records, and an
+// unpaginated snapshot of them all was previously bounded by nothing at
+// all. Sized to be larger than any realistic single-device cache so
+// existing clients that never send a cursor keep seeing their whole
+// store in one call, while a pathological store degrades into paging
+// (nextCursor) rather than into a multi-hundred-MB response.
+const MaxStatusItems = 1000
+
+// MaxStatusItemIDs bounds StatusRequest.ItemIDs. The DP-1 spec caps a
+// playlist at 1024 items (see defaultMaxQueueLen's doc), so no
+// legitimate caller needs to ask about more identifiers than that in one
+// request, while an unbounded list would let a single 4 MiB hub body
+// (hub.MAX_REQUEST_BODY_BYTES) drive ~100k store reads.
+const MaxStatusItemIDs = 1024
+
+// StatusRequest is the input to Service.Status.
+//
+// The zero value means "first page of every item this process knows
+// about", which is the shape every caller used before paging existed.
+type StatusRequest struct {
+	// ItemIDs restricts the report to these items. Empty means every
+	// item on disk plus everything in flight. Duplicates and empty
+	// strings are dropped; the result is always ordered by itemId, not
+	// by the order given here.
+	ItemIDs []string
+	// Limit caps how many items come back. <=0 or >MaxStatusItems is
+	// clamped to MaxStatusItems.
+	Limit int
+	// Cursor is the last itemId of the previous page; this page starts
+	// at the first id strictly greater than it. Empty means the first
+	// page. Because ids are sorted, a cursor stays valid even if the
+	// item it names is evicted between pages.
+	Cursor string
+	// TotalsOnly returns totals and disk usage with an empty items list,
+	// for a caller that only renders a summary. It skips the per-item
+	// blob stats recordBytes would otherwise do (the largest syscall
+	// cost of a full snapshot) and the whole response body, but NOT the
+	// per-item record reads totals are derived from. Implies the first
+	// page: Cursor is ignored.
+	TotalsOnly bool
 }
 
 // StatusTotals summarizes a Status snapshot for quick mobile-app display
@@ -113,11 +192,85 @@ type StatusTotals struct {
 
 // StatusSnapshot is the response shape for getOfflineCacheStatus.
 type StatusSnapshot struct {
-	Items  []ItemStatus `json:"items"`
-	Totals StatusTotals `json:"totals"`
+	// Items is at most StatusRequest.Limit entries, ordered by itemId.
+	// Never nil, so the wire always carries [] rather than null.
+	Items []ItemStatus `json:"items"`
+	// Totals and DiskUsedBytes describe the WHOLE requested set, not
+	// this page, and are computed on the first page only (empty
+	// Cursor) — deriving them costs one store read per item in the set,
+	// so recomputing them for every page would turn a full paged walk
+	// from O(total) into O(pages x total). They are always both set or
+	// both nil; a continuation page leaves them nil and the client
+	// carries forward what the first page reported.
+	Totals *StatusTotals `json:"totals,omitempty"`
 	// DiskUsedBytes is named diskUsed on the wire to match the plan's
 	// documented command response shape (section 5).
-	DiskUsedBytes int64 `json:"diskUsed"`
+	DiskUsedBytes *int64 `json:"diskUsed,omitempty"`
+	// NextCursor is the itemId to pass back as StatusRequest.Cursor to
+	// fetch the next page. Empty means this was the last page.
+	NextCursor string `json:"nextCursor,omitempty"`
+	// Truncated mirrors "NextCursor is set" as an explicit flag, so a
+	// client that ignores paging can still tell it is not looking at the
+	// whole set.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// truncateReason bounds reason to roughly maxReasonBytes (plus a short
+// marker) while keeping whole entries intact, so a client still sees
+// well-formed "<kind>:<url>" tokens it can match on the fixed prefix
+// before the first ':'/'(' as documented. The dropped-entry count is
+// reported rather than silently swallowed — a truncated list must not
+// read as a complete one.
+func truncateReason(reason string) string {
+	if len(reason) <= maxReasonBytes {
+		return reason
+	}
+
+	entries := strings.Split(reason, reasonSeparator)
+	kept, used := 0, 0
+	for _, entry := range entries {
+		width := len(entry)
+		if kept > 0 {
+			width += len(reasonSeparator)
+		}
+		if used+width > maxReasonBytes {
+			break
+		}
+		used += width
+		kept++
+	}
+
+	if kept == 0 {
+		// The first entry alone is over budget (a pathologically long
+		// URL). Cut it on a rune boundary so the JSON body can never
+		// carry a partial multi-byte sequence.
+		head := truncateUTF8(entries[0], maxReasonBytes) + "…"
+		if len(entries) == 1 {
+			return head
+		}
+		return head + reasonSeparator + droppedReasonMarker(len(entries)-1)
+	}
+	// kept < len(entries) here: every entry fitting would mean the whole
+	// reason fit, which the length check above already ruled out.
+	return strings.Join(entries[:kept], reasonSeparator) + reasonSeparator + droppedReasonMarker(len(entries)-kept)
+}
+
+func droppedReasonMarker(dropped int) string {
+	return fmt.Sprintf("…(+%d more)", dropped)
+}
+
+// truncateUTF8 cuts s to at most maxBytes bytes without splitting a rune.
+// Only called when len(s) > maxBytes, so the index it walks back from is
+// always inside s.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // ProgressObserver is notified on every item state transition. Keeping this
@@ -203,9 +356,11 @@ type Service interface {
 	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (queued, total int, err error)
 	ClearItem(itemID string) error
 	ClearPlaylist(playlistID string) error
-	// Status reports on itemIDs, or on every item this process knows about
-	// (on-disk + in-flight) when itemIDs is empty.
-	Status(itemIDs []string) (StatusSnapshot, error)
+	// Status reports on req.ItemIDs, or on every item this process knows
+	// about (on-disk + in-flight) when req.ItemIDs is empty. The result
+	// is one bounded page (see MaxStatusItems and StatusSnapshot's doc);
+	// the zero StatusRequest asks for the first page of everything.
+	Status(req StatusRequest) (StatusSnapshot, error)
 	// CachedPlaylistForURL returns the raw playlist body last downloaded
 	// via DownloadPlaylist(ctx, raw, sourceURL) OR indexed via
 	// IndexPlaylistForOfflineDisplay below, for commandrouter's
@@ -1340,8 +1495,8 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error
 	return s.store.LoadPlaylist(playlistID)
 }
 
-func (s *service) Status(itemIDs []string) (StatusSnapshot, error) {
-	ids := itemIDs
+func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
+	ids := sortedUniqueIDs(req.ItemIDs)
 	if len(ids) == 0 {
 		var err error
 		ids, err = s.allKnownItemIDs()
@@ -1350,29 +1505,120 @@ func (s *service) Status(itemIDs []string) (StatusSnapshot, error) {
 		}
 	}
 
-	snapshot := StatusSnapshot{Items: make([]ItemStatus, 0, len(ids))}
-	for _, id := range ids {
-		item := s.itemStatus(id)
-		snapshot.Items = append(snapshot.Items, item)
-		snapshot.Totals.Total++
+	limit := req.Limit
+	if limit <= 0 || limit > MaxStatusItems {
+		limit = MaxStatusItems
+	}
+	// TotalsOnly is defined as a first-page request (see its doc):
+	// honoring a cursor as well would ask for the totals of a set while
+	// skipping part of it, which is not a meaningful answer. The command
+	// layer rejects the combination outright; this keeps a direct Go
+	// caller from getting a silently partial total.
+	cursor := req.Cursor
+	if req.TotalsOnly {
+		cursor = ""
+	}
+	// Every id here sorts strictly above "", so an empty cursor selects
+	// the whole set without any special-casing below.
+	withTotals := cursor == ""
+
+	snapshot := StatusSnapshot{Items: []ItemStatus{}}
+	if !req.TotalsOnly {
+		snapshot.Items = make([]ItemStatus, 0, min(limit, len(ids)))
+	}
+	var totals StatusTotals
+
+	countTotals := func(item ItemStatus) {
+		totals.Total++
 		switch item.State {
 		case StateReady:
-			snapshot.Totals.Ready++
+			totals.Ready++
 		case StateQueued, StateDownloading:
-			snapshot.Totals.Downloading++
+			totals.Downloading++
 		case StateFailed, StateBrokenOnline:
-			snapshot.Totals.Failed++
+			totals.Failed++
 		}
 	}
 
-	if usage, err := s.store.DiskUsage(); err == nil {
-		snapshot.DiskUsedBytes = usage
+	for _, id := range ids {
+		// Only reachable on a continuation page (see withTotals): ids
+		// already delivered cost nothing here, which is what keeps a
+		// paged walk from re-reading the whole store per page.
+		if id <= cursor {
+			continue
+		}
+		pageFull := req.TotalsOnly || len(snapshot.Items) == limit
+		if pageFull {
+			if !withTotals {
+				// Nothing left to compute for this page, and ids is
+				// sorted, so everything after this point is out of
+				// scope too.
+				snapshot.Truncated = true
+				break
+			}
+			if !req.TotalsOnly {
+				snapshot.Truncated = true
+			}
+			// Cheap read: this id is only here to be counted, so skip
+			// the per-blob stats recordBytes would do.
+			countTotals(s.itemStatus(id, false))
+			continue
+		}
+
+		item := s.itemStatus(id, true)
+		snapshot.Items = append(snapshot.Items, item)
+		if withTotals {
+			countTotals(item)
+		}
+	}
+
+	if snapshot.Truncated {
+		snapshot.NextCursor = snapshot.Items[len(snapshot.Items)-1].ItemID
+	}
+	if withTotals {
+		snapshot.Totals = &totals
+		usage, err := s.store.DiskUsage()
+		if err != nil {
+			// Reported as 0 rather than omitted so the first page's
+			// shape never depends on a transient store error; the
+			// warning is what makes the 0 diagnosable.
+			s.logger.Warn("offline cache: failed to measure disk usage for status", zap.Error(err))
+		}
+		snapshot.DiskUsedBytes = &usage
 	}
 	return snapshot, nil
 }
 
+// sortedUniqueIDs normalizes a caller-supplied id list into the same
+// ordering allKnownItemIDs produces, which is what lets StatusRequest.
+// Cursor mean "the first id strictly greater than this" for both the
+// explicit-ids and whole-store cases. Empty ids are dropped rather than
+// reported as not_cached entries nobody asked for.
+func sortedUniqueIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // allKnownItemIDs unions on-disk items with anything tracked in memory
 // (e.g. a just-queued item that has not written items/<id>.json yet).
+// The union is sorted as a whole, not as an on-disk run followed by an
+// in-flight run: Status pages by "id strictly greater than the cursor",
+// which silently skips entries unless the sequence is globally ordered.
 func (s *service) allKnownItemIDs() ([]string, error) {
 	diskIDs, err := s.store.ListItemIDs()
 	if err != nil {
@@ -1386,19 +1632,25 @@ func (s *service) allKnownItemIDs() ([]string, error) {
 	}
 
 	s.mu.RLock()
-	var inflight []string
 	for id := range s.state {
 		if _, ok := seen[id]; !ok {
-			inflight = append(inflight, id)
+			seen[id] = struct{}{}
+			ids = append(ids, id)
 		}
 	}
 	s.mu.RUnlock()
 
-	sort.Strings(inflight)
-	return append(ids, inflight...), nil
+	sort.Strings(ids)
+	return ids, nil
 }
 
-func (s *service) itemStatus(itemID string) ItemStatus {
+// itemStatus builds one snapshot entry. withBytes controls whether the
+// Bytes field is populated, which costs one store stat per unique blob
+// this item references (recordBytes) — by far the most expensive part of
+// a large snapshot. Callers that only need the item's state for totals
+// pass false, and must not put the result on the wire: its Bytes would
+// read as 0 rather than as "not measured".
+func (s *service) itemStatus(itemID string, withBytes bool) ItemStatus {
 	s.mu.RLock()
 	trackedState, tracked := s.state[itemID]
 	s.mu.RUnlock()
@@ -1417,14 +1669,17 @@ func (s *service) itemStatus(itemID string) ItemStatus {
 	// re-download attempt over an existing ready/partial capture should
 	// still report that earlier successful capture, not "failed".
 	state := stateFromCoverage(rec.Coverage)
-	return ItemStatus{
+	status := ItemStatus{
 		ItemID:           itemID,
 		State:            state,
 		Percent:          percentForState(state),
-		Bytes:            s.recordBytes(rec),
 		CoverageComplete: rec.Coverage.Complete,
-		Reason:           rec.Coverage.Reason,
+		Reason:           truncateReason(rec.Coverage.Reason),
 	}
+	if withBytes {
+		status.Bytes = s.recordBytes(rec)
+	}
+	return status
 }
 
 // percentForState is coarse (0 or 100): capture is a single bounded-window
@@ -1488,6 +1743,10 @@ func (s *service) notifyObserver(itemID string, state ItemState, coverage Covera
 		State:            state,
 		Percent:          percentForState(state),
 		CoverageComplete: coverage.Complete,
-		Reason:           coverage.Reason,
+		// Truncated for the same reason itemStatus truncates: this
+		// ItemStatus goes straight out over the relayer and the hub
+		// WebSocket, both of which bound how long a single write may
+		// take, not how large it may be.
+		Reason: truncateReason(coverage.Reason),
 	})
 }

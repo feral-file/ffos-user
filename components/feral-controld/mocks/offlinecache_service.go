@@ -188,18 +188,18 @@ func (mr *MockOfflineCacheServiceMockRecorder) Start(ctx interface{}) *gomock.Ca
 }
 
 // Status mocks base method.
-func (m *MockOfflineCacheService) Status(itemIDs []string) (offlinecache.StatusSnapshot, error) {
+func (m *MockOfflineCacheService) Status(req offlinecache.StatusRequest) (offlinecache.StatusSnapshot, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Status", itemIDs)
+	ret := m.ctrl.Call(m, "Status", req)
 	ret0, _ := ret[0].(offlinecache.StatusSnapshot)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Status indicates an expected call of Status.
-func (mr *MockOfflineCacheServiceMockRecorder) Status(itemIDs interface{}) *gomock.Call {
+func (mr *MockOfflineCacheServiceMockRecorder) Status(req interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Status", reflect.TypeOf((*MockOfflineCacheService)(nil).Status), itemIDs)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Status", reflect.TypeOf((*MockOfflineCacheService)(nil).Status), req)
 }
 
 // Stop mocks base method.

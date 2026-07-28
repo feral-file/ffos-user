@@ -2,6 +2,7 @@ package commandrouter_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -728,12 +729,15 @@ func TestCommandHandler_GetOfflineCacheStatus_WithItemIDs(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
+	totals := offlinecache.StatusTotals{Total: 1, Ready: 1}
+	diskUsed := int64(1024)
 	snapshot := offlinecache.StatusSnapshot{
 		Items:         []offlinecache.ItemStatus{{ItemID: "item-1", State: offlinecache.StateReady}},
-		Totals:        offlinecache.StatusTotals{Total: 1, Ready: 1},
-		DiskUsedBytes: 1024,
+		Totals:        &totals,
+		DiskUsedBytes: &diskUsed,
 	}
-	mockOfflineCache.EXPECT().Status([]string{"item-1", "item-2"}).Return(snapshot, nil).Times(1)
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1", "item-2"}}).
+		Return(snapshot, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
@@ -745,6 +749,10 @@ func TestCommandHandler_GetOfflineCacheStatus_WithItemIDs(t *testing.T) {
 	assert.Equal(t, snapshot.Items, resp["items"])
 	assert.Equal(t, snapshot.Totals, resp["totals"])
 	assert.EqualValues(t, 1024, resp["diskUsed"])
+	// Last page: the paging fields must be absent, not present-and-empty,
+	// so a client cannot follow a cursor that does not exist.
+	assert.NotContains(t, resp, "nextCursor")
+	assert.NotContains(t, resp, "truncated")
 }
 
 func TestCommandHandler_GetOfflineCacheStatus_NoFilter(t *testing.T) {
@@ -752,7 +760,7 @@ func TestCommandHandler_GetOfflineCacheStatus_NoFilter(t *testing.T) {
 	defer ts.teardown()
 
 	snapshot := offlinecache.StatusSnapshot{}
-	mockOfflineCache.EXPECT().Status(nil).Return(snapshot, nil).Times(1)
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{}).Return(snapshot, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
@@ -760,14 +768,152 @@ func TestCommandHandler_GetOfflineCacheStatus_NoFilter(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assertOkResponse(t, result)
+	resp := assertOkResponse(t, result)
+	// Totals/diskUsed are pointers on the snapshot; a nil one must be
+	// omitted rather than marshaled as null.
+	assert.NotContains(t, resp, "totals")
+	assert.NotContains(t, resp, "diskUsed")
+}
+
+func TestCommandHandler_GetOfflineCacheStatus_PagingArguments(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	snapshot := offlinecache.StatusSnapshot{
+		Items:      []offlinecache.ItemStatus{{ItemID: "item-9", State: offlinecache.StateReady}},
+		NextCursor: "item-9",
+		Truncated:  true,
+	}
+	// limit arrives as a float64 here, the way encoding/json decodes
+	// every JSON number.
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{Limit: 25, Cursor: "item-8"}).
+		Return(snapshot, nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type: commands.CMD_GET_OFFLINE_CACHE_STATUS,
+		Arguments: map[string]any{
+			"limit":  float64(25),
+			"cursor": "item-8",
+		},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "item-9", resp["nextCursor"])
+	assert.Equal(t, true, resp["truncated"])
+}
+
+func TestCommandHandler_GetOfflineCacheStatus_TotalsOnly(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	totals := offlinecache.StatusTotals{Total: 3, Ready: 2, Failed: 1}
+	diskUsed := int64(4096)
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{TotalsOnly: true}).
+		Return(offlinecache.StatusSnapshot{
+			Items:         []offlinecache.ItemStatus{},
+			Totals:        &totals,
+			DiskUsedBytes: &diskUsed,
+		}, nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
+		Arguments: map[string]any{"totalsOnly": true},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Empty(t, resp["items"])
+	assert.Equal(t, &totals, resp["totals"])
+}
+
+func TestCommandHandler_GetOfflineCacheStatus_RejectsInvalidArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{
+			// The regression this closes: a bare string used to fall
+			// through to "report on every item" instead of erroring.
+			name: "itemIds not an array",
+			args: map[string]any{"itemIds": "item-1"},
+		},
+		{
+			name: "itemIds holds a non-string",
+			args: map[string]any{"itemIds": []interface{}{"item-1", 7}},
+		},
+		{
+			name: "itemIds holds an empty string",
+			args: map[string]any{"itemIds": []interface{}{""}},
+		},
+		{
+			name: "itemIds over the per-request cap",
+			args: map[string]any{"itemIds": tooManyItemIDs()},
+		},
+		{
+			name: "limit is not a number",
+			args: map[string]any{"limit": "25"},
+		},
+		{
+			name: "limit is fractional",
+			args: map[string]any{"limit": 2.5},
+		},
+		{
+			name: "limit is negative",
+			args: map[string]any{"limit": float64(-1)},
+		},
+		{
+			name: "cursor is not a string",
+			args: map[string]any{"cursor": 7},
+		},
+		{
+			name: "cursor is empty",
+			args: map[string]any{"cursor": ""},
+		},
+		{
+			name: "totalsOnly is not a boolean",
+			args: map[string]any{"totalsOnly": "yes"},
+		},
+		{
+			name: "totalsOnly combined with cursor",
+			args: map[string]any{"totalsOnly": true, "cursor": "item-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts, mockOfflineCache := setupOfflineCache(t)
+			defer ts.teardown()
+
+			// The whole point of validating here is that the service is
+			// never asked to do the work.
+			mockOfflineCache.EXPECT().Status(gomock.Any()).Times(0)
+
+			result, err := ts.handler.Process(ts.ctx, commands.Command{
+				Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
+				Arguments: tt.args,
+			})
+
+			require.NoError(t, err)
+			assertErrorResponse(t, result, "invalid_request")
+		})
+	}
+}
+
+func tooManyItemIDs() []interface{} {
+	ids := make([]interface{}, offlinecache.MaxStatusItemIDs+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("item-%d", i)
+	}
+	return ids
 }
 
 func TestCommandHandler_GetOfflineCacheStatus_ServiceError(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().Status(nil).Return(offlinecache.StatusSnapshot{}, assertError("disk error")).Times(1)
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{}).
+		Return(offlinecache.StatusSnapshot{}, assertError("disk error")).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
