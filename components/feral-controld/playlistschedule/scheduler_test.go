@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -799,6 +800,165 @@ func TestRecomputeNow_SnapshotsSourceWithActiveSet(t *testing.T) {
 	).Times(2)
 
 	sched.RecomputeNow(context.Background())
+}
+
+// TestRecompute_RetriesAfterFailedFinalBoundaryPush pins the fix for a
+// rejected cutover push at the *last* displayAt boundary: armTimerLocked
+// finds no future boundary to re-arm in that case, so only an independent
+// push retry can recover the cutover without waiting for an unrelated
+// wake/reconnect/Prepare.
+func TestRecompute_RetriesAfterFailedFinalBoundaryPush(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+
+	retryScheduled := make(chan time.Duration, 1)
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, d time.Duration) error {
+			retryScheduled <- d
+			return nil // simulate the retry delay elapsing immediately
+		},
+	).Times(1)
+
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	var sends int32
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, _ map[string]interface{}) (interface{}, error) {
+			if atomic.AddInt32(&sends, 1) == 1 {
+				return map[string]interface{}{"ok": false}, nil
+			}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(2)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	// A single item already past its displayAt with nothing scheduled after
+	// it: armTimerLocked has no future boundary to arm, matching the "final
+	// cutover" scenario from the bug report.
+	_ = sched.Prepare(displayAtPlaylist(item("today", "2026-07-22T00:00:00Z")))
+
+	sched.RecomputeNow(context.Background())
+
+	select {
+	case <-retryScheduled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a push retry to be armed after the rejected cutover push")
+	}
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&sends) == 2
+	}, 2*time.Second, 10*time.Millisecond, "expected the armed retry to resend the cutover push")
+}
+
+// TestClear_CancelsPendingPushRetry proves a retry armed by a failed push
+// cannot fire after Clear replaces the schedule — otherwise it could push a
+// stale playlist over whatever replaced it.
+func TestClear_CancelsPendingPushRetry(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+
+	retryCanceled := make(chan struct{})
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			close(retryCanceled)
+			return ctx.Err()
+		},
+	).Times(1)
+
+	cdpMock.EXPECT().Initialized().Return(true).Times(1)
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(
+		map[string]interface{}{"ok": false}, nil,
+	).Times(1)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.Prepare(displayAtPlaylist(item("today", "2026-07-22T00:00:00Z")))
+	sched.RecomputeNow(context.Background())
+
+	sched.Clear()
+
+	select {
+	case <-retryCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Clear to cancel the pending push retry")
+	}
+}
+
+// TestPrepare_ResetsPushRetryStateForNewSchedule pins that a new Prepare
+// cancels a still-pending retry from the previous schedule's failed cutover
+// and does not let the new schedule inherit its backoff/attempt count. Without
+// this, a run of failures on an old (possibly now-irrelevant) schedule could
+// leave a brand-new schedule starting retries at an inflated backoff, or
+// already past the give-up threshold.
+func TestPrepare_ResetsPushRetryStateForNewSchedule(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	clock.EXPECT().Now().Return(now).AnyTimes()
+
+	waitDurations := make(chan time.Duration, 2)
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, d time.Duration) error {
+			waitDurations <- d
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).Times(2)
+
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(
+		map[string]interface{}{"ok": false}, nil,
+	).Times(2)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	_ = sched.Prepare(displayAtPlaylist(item("old", "2026-07-22T00:00:00Z")))
+	sched.RecomputeNow(context.Background())
+
+	select {
+	case d := <-waitDurations:
+		assert.Equal(t, 5*time.Second, d, "first failed cutover should retry at the base backoff")
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the first push retry to be armed")
+	}
+
+	// A new schedule must cancel the stale retry and not inherit its backoff
+	// state, even though the previous retry is still "pending" (blocked
+	// above on its now-canceled context).
+	_ = sched.Prepare(displayAtPlaylist(item("new", "2026-07-22T00:00:00Z")))
+	sched.RecomputeNow(context.Background())
+
+	select {
+	case d := <-waitDurations:
+		assert.Equal(t, 5*time.Second, d,
+			"new schedule's first failed cutover must restart backoff at the base delay, "+
+				"not inherit the old schedule's attempt count")
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the new schedule's push retry to be armed at the base backoff")
+	}
 }
 
 func TestPrepare_AllFutureNoEvergreen_EmptyActiveSet(t *testing.T) {

@@ -24,6 +24,16 @@ import (
 
 const displayAtMaxTick = 60 * time.Second
 
+// pushRetryBaseDelay/pushRetryMaxDelay bound the backoff used to resend a
+// cutover push that CDP rejected or failed to deliver. Capped at
+// displayAtMaxTick's granularity so a broken link cannot be hammered, while
+// still guaranteeing the cutover is retried instead of sticking silently.
+const (
+	pushRetryBaseDelay   = 5 * time.Second
+	pushRetryMaxDelay    = 60 * time.Second
+	pushRetryMaxAttempts = 5
+)
+
 //go:generate mockgen -source=scheduler.go -destination=../mocks/playlistschedule.go -package=mocks -mock_names=Scheduler=MockPlaylistScheduler
 
 // Scheduler caches the full displayAt playlist, exposes the active set for
@@ -139,6 +149,19 @@ type scheduler struct {
 	// keep a stale timer after a new cast or after Stop — otherwise a late fire
 	// would push an obsolete active set over the current playlist.
 	cancelTimer context.CancelFunc
+
+	// pushRetryCancel cancels an in-flight cutover-push retry wait. This is
+	// independent of cancelTimer: armTimerLocked only arms for a *future*
+	// displayAt boundary, so once the last boundary in the cache has already
+	// passed there is nothing left for it to re-arm if the cutover push then
+	// fails or is rejected. pushRetry exists specifically to resend that
+	// already-due cutover instead of leaving the player stuck on the
+	// pre-boundary active set until an unrelated wake/reconnect/Prepare.
+	pushRetryCancel context.CancelFunc
+	// pushRetryAttempt counts consecutive failed/rejected cutover pushes since
+	// the last success, Prepare, Clear, or Restore. Drives capped exponential
+	// backoff and a bounded attempt ceiling.
+	pushRetryAttempt int
 }
 
 // New builds a scheduler. locFn may be nil; LocalTimezone is used in that case.
@@ -256,6 +279,7 @@ func (s *scheduler) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cancelTimerLocked()
+	s.cancelPushRetryLocked()
 }
 
 func (s *scheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
@@ -281,6 +305,12 @@ func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp
 	s.full = clonePlaylist(playlist)
 	s.source = source
 	s.restoredPending = false
+	// A newly prepared schedule starts with a clean retry slate: a pending
+	// retry from the previous schedule's failed cutover must not fire against
+	// this one, and this cast must not inherit the previous schedule's
+	// backoff/give-up state.
+	s.cancelPushRetryLocked()
+	s.pushRetryAttempt = 0
 	active := s.activeLocked()
 	s.lastActive = cloneItems(active.Items)
 	s.armTimerLocked()
@@ -342,10 +372,17 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 
 		if err := s.push(ctx, active, source); err != nil {
 			s.logger.Warn("Failed to push recomputed displayAt playlist", zap.Error(err))
+			s.mu.Lock()
+			s.armPushRetryLocked()
+			s.mu.Unlock()
 			return
 		}
 		s.mu.Lock()
 		s.lastActive = cloneItems(active.Items)
+		// A successful push clears any retry armed by a prior failure so it
+		// cannot resend a now-superseded active set later.
+		s.pushRetryAttempt = 0
+		s.cancelPushRetryLocked()
 		s.mu.Unlock()
 		s.logger.Info("Pushed recomputed displayAt active set",
 			zap.Int("activeItems", len(active.Items)))
@@ -362,6 +399,8 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 
 func (s *scheduler) clearLocked() {
 	s.cancelTimerLocked()
+	s.cancelPushRetryLocked()
+	s.pushRetryAttempt = 0
 	s.generation++
 	s.full = nil
 	s.lastActive = nil
@@ -373,6 +412,13 @@ func (s *scheduler) cancelTimerLocked() {
 	if s.cancelTimer != nil {
 		s.cancelTimer()
 		s.cancelTimer = nil
+	}
+}
+
+func (s *scheduler) cancelPushRetryLocked() {
+	if s.pushRetryCancel != nil {
+		s.pushRetryCancel()
+		s.pushRetryCancel = nil
 	}
 }
 
@@ -390,6 +436,8 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 		s.cancelTimer()
 		s.cancelTimer = nil
 	}
+	s.cancelPushRetryLocked()
+	s.pushRetryAttempt = 0
 	s.full = clonePlaylist(snapshot.full)
 	s.lastActive = cloneItems(snapshot.lastActive)
 	s.restoredPending = snapshot.restoredPending
@@ -502,6 +550,52 @@ func (s *scheduler) waitAndFire(timerCtx context.Context, wait time.Duration) {
 	// Recompute from cache (not from the player): the player only holds the
 	// previous active set, so archive/future items must come from s.full.
 	s.recompute(s.ctx, false)
+}
+
+// armPushRetryLocked schedules a resend of the cutover push after it failed
+// or was rejected by the player. This must exist separately from
+// armTimerLocked: that function only arms a wait for a *future* displayAt
+// boundary, so once the schedule's last boundary has already passed (the
+// exact moment a cutover push is being attempted), armTimerLocked installs no
+// timer at all. Without an independent retry, a failed final-boundary push
+// would leave the player on the pre-cutover active set until an unrelated
+// wake, CDP reconnect, or new Prepare happened to trigger a recompute.
+// Bounded exponential backoff avoids hammering CDP while it or the player is
+// unhealthy; giving up after pushRetryMaxAttempts still leaves those other
+// triggers as a backstop.
+func (s *scheduler) armPushRetryLocked() {
+	s.cancelPushRetryLocked()
+	s.pushRetryAttempt++
+	if s.pushRetryAttempt > pushRetryMaxAttempts {
+		s.logger.Error("Giving up on displayAt cutover push retry; relying on next wake/reconnect/cast",
+			zap.Int("attempts", s.pushRetryAttempt-1))
+		return
+	}
+
+	wait := pushRetryBaseDelay << (s.pushRetryAttempt - 1)
+	if wait <= 0 || wait > pushRetryMaxDelay {
+		wait = pushRetryMaxDelay
+	}
+
+	timerCtx, cancel := context.WithCancel(s.ctx)
+	s.pushRetryCancel = cancel
+
+	s.logger.Warn("Scheduling displayAt cutover push retry",
+		zap.Int("attempt", s.pushRetryAttempt), zap.Duration("wait", wait))
+
+	go s.waitAndRetryPush(timerCtx, wait)
+}
+
+// waitAndRetryPush fires the retry after wait elapses. Like waitAndFire, it
+// recomputes against s.ctx (the scheduler's own lifetime), not whatever ctx
+// happened to trigger the failed push — that caller may have already
+// returned (e.g. a request-scoped RecomputeNow), and this retry can fire long
+// after that call completed.
+func (s *scheduler) waitAndRetryPush(timerCtx context.Context, wait time.Duration) {
+	if err := s.clock.SleepContext(timerCtx, wait); err != nil {
+		return // canceled: success, Prepare, Clear, Restore, or Stop already handled it
+	}
+	s.recompute(s.ctx, true) // force: resend even if the active set looks unchanged from lastActive
 }
 
 func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Source) error {
