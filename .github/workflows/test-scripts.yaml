@@ -38,5 +38,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # The serve-player test's real-binary section is the only end-to-end
+      # verification that darkhttpd emits Cache-Control: no-cache on 404s —
+      # the live-swap negative-cache mitigation from #234. Build the same
+      # version the image ships (Arch packages upstream 1.17) pinned by
+      # commit so a moved tag cannot swap the binary under CI, and require
+      # the section to run: without the binary it would silently skip and
+      # the mitigation would be verified by nothing on this path.
+      - name: Build pinned darkhttpd 1.17
+        run: |
+          git clone https://github.com/emikulic/darkhttpd /tmp/darkhttpd
+          git -C /tmp/darkhttpd checkout 3075d35e1d2deb65ed8b079137c4ae1213de4b48 # v1.17
+          make -C /tmp/darkhttpd darkhttpd
+          # Version echo for the build log; the usage dump's exit status is
+          # version-dependent, so keep it out of pipefail's reach.
+          (/tmp/darkhttpd/darkhttpd 2>&1 || true) | head -1
+          echo /tmp/darkhttpd >> "$GITHUB_PATH"
+
       - name: Run local verification target
         run: make verify-scripts
+        env:
+          FF_REQUIRE_REAL_DARKHTTPD: "1"

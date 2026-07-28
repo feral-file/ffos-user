@@ -120,7 +120,43 @@ start_server() {
 	require_binary curl
 	require_binary systemd-notify
 
-	darkhttpd "${FF_PLAYER_ROOT}" --port "${FF_PLAYER_PORT}" --addr 127.0.0.1 &
+	# darkhttpd emits no Cache-Control headers on its own, so Chromium
+	# heuristically caches the route HTML and even negative (404) responses —
+	# stale entries that outlive bundle swaps and reboots (#234). A single
+	# global no-cache forces revalidation on every use (loopback 304s via
+	# If-Modified-Since, effectively free) and darkhttpd applies custom
+	# headers to error responses too, so a 404 captured mid-swap cannot
+	# poison later loads of a live Chromium session — the one window the
+	# kiosk-side bundle-fingerprint purge cannot close (it only runs between
+	# Chromium instances). Per-path policy (immutable _next/static, no-cache
+	# HTML) is not expressible with darkhttpd; global no-cache is the safe
+	# degradation. Probe for --header support instead of assuming it: an
+	# older binary must degrade to headerless serving (the fingerprint purge
+	# still covers bundle changes), not die in a flag-error restart loop.
+	# ${arr[@]+...} keeps the empty-array expansion safe under `set -u` on
+	# bash < 4.4 (macOS test harness).
+	# The no-arg usage dump MAY exit non-zero (1.17 measures 0; other
+	# builds differ — assume neither). Under `set -e` an unguarded
+	# `var=$(darkhttpd 2>&1)` aborts the script at this line — the
+	# unit would die before ever starting the server and Restart=on-failure
+	# would loop it. `|| true` is what keeps the probe non-fatal; do not
+	# remove it. The match is anchored so a hypothetical --no-header (or a
+	# mention in prose) cannot false-positive into passing an unknown flag,
+	# which would exit darkhttpd and restart-loop the unit.
+	local darkhttpd_usage
+	darkhttpd_usage=$(darkhttpd 2>&1 || true)
+	local -a cache_header_args=()
+	if grep -Eq -- '(^|[^-[:alnum:]])--header([[:space:]]|$)' <<<"$darkhttpd_usage"; then
+		cache_header_args=(--header 'Cache-Control: no-cache')
+	else
+		# Degrading silently would make "is the #234 header mitigation
+		# active?" unanswerable from the journal; the fingerprint purge in
+		# start-kiosk.sh is then the only remaining defense.
+		echo "serve-feral-player: darkhttpd has no --header support; serving without Cache-Control (see #234)" >&2
+	fi
+
+	darkhttpd "${FF_PLAYER_ROOT}" --port "${FF_PLAYER_PORT}" --addr 127.0.0.1 \
+		${cache_header_args[@]+"${cache_header_args[@]}"} &
 	server_pid=$!
 }
 
