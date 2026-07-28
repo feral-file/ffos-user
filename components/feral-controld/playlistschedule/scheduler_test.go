@@ -297,6 +297,101 @@ func TestStop_CancelsTimerWithoutClearingPersistedPlaylist(t *testing.T) {
 	}
 	assert.False(t, store.saved.IsZero(), "service shutdown must preserve restart recovery source")
 	assert.False(t, store.cleared)
+
+	// Stop is a latch, not just a timer cancel: a recompute arriving afterwards
+	// (late wake, CDP reconnect callback, refresher resume) must not write to a
+	// player controld is walking away from.
+	cdpMock.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+	sched.RecomputeNow(context.Background())
+	sched.ResumePersisted(context.Background())
+}
+
+// TestStop_DropsPushFromAlreadyFiredTimer pins the shutdown guarantee that
+// canceling the timer contexts cannot provide on its own: a timer goroutine
+// already released from SleepContext observes no context afterwards, so only
+// the stopped flag can keep it from reaching the player.
+//
+// Stop is latched from inside the CDP Initialized() call, i.e. after recompute
+// has passed its own stopped check and is already inside push. That makes the
+// sequencing deterministic and exercises specifically the gate immediately
+// before the CDP send.
+func TestStop_DropsPushFromAlreadyFiredTimer(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	t1 := time.Date(2026, 7, 23, 0, 0, 0, 0, loc)
+
+	var nowMu sync.Mutex
+	current := t0
+	clock.EXPECT().Now().DoAndReturn(func() time.Time {
+		nowMu.Lock()
+		defer nowMu.Unlock()
+		return current
+	}).AnyTimes()
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	// The first arm crosses the boundary and fires; any later arm just parks.
+	var fireOnce sync.Once
+	clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			fired := false
+			fireOnce.Do(func() {
+				nowMu.Lock()
+				current = t1
+				nowMu.Unlock()
+				fired = true
+			})
+			if fired {
+				return nil
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).AnyTimes()
+
+	stopLatched := make(chan struct{})
+	var stopOnce sync.Once
+	cdpMock.EXPECT().Initialized().DoAndReturn(func() bool {
+		stopOnce.Do(func() {
+			sched.Stop()
+			close(stopLatched)
+		})
+		return true
+	}).AnyTimes()
+	// Nothing may reach the player once Stop has latched.
+	cdpMock.EXPECT().Send(gomock.Any(), gomock.Any()).Times(0)
+
+	_ = sched.Prepare(displayAtPlaylist(
+		item("day22", "2026-07-22T00:00:00Z"),
+		item("day23", "2026-07-23T00:00:00Z"),
+	))
+
+	select {
+	case <-stopLatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fired timer never reached the pre-send shutdown gate")
+	}
+
+	// Acquiring pushMu proves the fired timer's recompute has finished (it held
+	// the lock when Stop latched above); the Send expectation then proves it
+	// dropped the push instead of writing to the player.
+	released := make(chan struct{})
+	go func() {
+		sched.WithPlayerPush(func() {})
+		close(released)
+	}()
+	select {
+	case <-released:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recompute did not release the player-push lock")
+	}
 }
 
 func TestNewWithStore_RestoredSourceDoesNotRecomputeUntilRefresh(t *testing.T) {

@@ -5,6 +5,7 @@ package playlistschedule
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -33,6 +34,11 @@ const (
 	pushRetryMaxDelay    = 60 * time.Second
 	pushRetryMaxAttempts = 5
 )
+
+// errStopped marks a push dropped because the scheduler is shutting down. It
+// must stay distinguishable from a genuine push failure: a stopped push must
+// never arm a retry, or Stop would spawn the very goroutine it is retiring.
+var errStopped = errors.New("playlist scheduler stopped")
 
 //go:generate mockgen -source=scheduler.go -destination=../mocks/playlistschedule.go -package=mocks -mock_names=Scheduler=MockPlaylistScheduler
 
@@ -96,6 +102,10 @@ type Scheduler interface {
 	Restore(Snapshot)
 	// HasCache reports whether a displayAt playlist is currently cached.
 	HasCache() bool
+	// Stop latches shutdown and is not reversible: afterwards no recompute pass
+	// writes to the player and no new transition timer or push retry is armed.
+	// It returns without waiting for a CDP send that is already in flight; see
+	// the scheduler's stopped field for that trade-off.
 	Stop()
 }
 
@@ -162,6 +172,25 @@ type scheduler struct {
 	// the last success, Prepare, Clear, or Restore. Drives capped exponential
 	// backoff and a bounded attempt ceiling.
 	pushRetryAttempt int
+
+	// stopped latches at Stop and gates player writes during shutdown.
+	// Canceling the timer contexts is not enough on its own: a timer or retry
+	// goroutine that already returned from SleepContext observes no context
+	// afterwards, so it must re-read this flag under mu — both at the top of
+	// recompute and again immediately before the CDP send.
+	//
+	// Upheld: once Stop has latched, no further recompute pass writes to the
+	// player, no new timer or retry goroutine is armed, and a goroutine parked
+	// on pushMu drops its push on wake instead of sending.
+	//
+	// Deliberately NOT upheld: a push that already passed the pre-send gate may
+	// still begin its CDP send concurrently with Stop. Linearizing "Stop
+	// returned" against "send started" would require holding a lock across
+	// cdp.Send (bounded at 15s) while main.go force-exits after
+	// SHUTDOWN_TIMEOUT (2s) — blocking Stop there would convert one slow player
+	// write into a failed shutdown. That racing push is a correct cutover
+	// computed from a valid cache, so letting it land is the cheaper trade.
+	stopped bool
 }
 
 // New builds a scheduler. locFn may be nil; LocalTimezone is used in that case.
@@ -278,6 +307,7 @@ func (s *scheduler) Restore(snapshot Snapshot) {
 func (s *scheduler) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stopped = true
 	s.cancelTimerLocked()
 	s.cancelPushRetryLocked()
 }
@@ -356,7 +386,7 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 
 	for {
 		s.mu.Lock()
-		if s.full == nil || s.restoredPending {
+		if s.stopped || s.full == nil || s.restoredPending {
 			s.mu.Unlock()
 			return
 		}
@@ -371,6 +401,10 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 		s.mu.Unlock()
 
 		if err := s.push(ctx, active, source); err != nil {
+			if errors.Is(err, errStopped) {
+				s.logger.Debug("Dropped displayAt push: scheduler stopped")
+				return
+			}
 			s.logger.Warn("Failed to push recomputed displayAt playlist", zap.Error(err))
 			s.mu.Lock()
 			s.armPushRetryLocked()
@@ -513,7 +547,9 @@ func (s *scheduler) armTimerLocked() {
 		s.cancelTimer()
 		s.cancelTimer = nil
 	}
-	if s.full == nil {
+	// Shutdown must not re-arm: recompute arms before it pushes, so a recompute
+	// racing Stop could otherwise leave a live goroutine behind Stop's cancel.
+	if s.stopped || s.full == nil {
 		return
 	}
 
@@ -565,6 +601,9 @@ func (s *scheduler) waitAndFire(timerCtx context.Context, wait time.Duration) {
 // triggers as a backstop.
 func (s *scheduler) armPushRetryLocked() {
 	s.cancelPushRetryLocked()
+	if s.stopped {
+		return
+	}
 	s.pushRetryAttempt++
 	if s.pushRetryAttempt > pushRetryMaxAttempts {
 		s.logger.Error("Giving up on displayAt cutover push retry; relying on next wake/reconnect/cast",
@@ -625,6 +664,16 @@ func (s *scheduler) push(ctx context.Context, playlist *dp1.Playlist, source Sou
 	payload, err := command.JSON()
 	if err != nil {
 		return fmt.Errorf("marshal displayAt playlist command: %w", err)
+	}
+
+	// Last gate before the write leaves controld. A timer or retry goroutine
+	// may have been released from SleepContext just before Stop latched, in
+	// which case it must not reach the player.
+	s.mu.Lock()
+	stopped := s.stopped
+	s.mu.Unlock()
+	if stopped {
+		return errStopped
 	}
 
 	result, err := s.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
