@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/portal"
@@ -364,6 +365,68 @@ func TestActiveLinkGuardIgnoresOwnAP(t *testing.T) {
 		"our own hotspot must not count as a link and suppress the AP it belongs to")
 	assert.Equal(t, 1, h.rec.count("ap.Up"), "AP must not bounce")
 	assert.Equal(t, 0, h.rec.count("ap.Down"), "AP must not be torn down mid-setup")
+}
+
+// TestActiveLinkGuardRedundantOfflineKeepsProvisionedAP is the provisioned
+// twin of TestActiveLinkGuardIgnoresOwnAP: once the sustained link-loss window
+// has raised the AP on a PROVISIONED device, a redundant offline reading must
+// not tear it back down. The unprovisioned flavor is protected by probeLink's
+// apUp short-circuit; the provisioned branch never consulted the probe at all
+// and fell straight through to StateOfflineRetrying, whose reconcile calls
+// ensureAPDown — dropping the portal out from under a phone mid-setup and
+// costing another full five-minute window before it returned. Such readings
+// are routine (a sys-monitord restart re-emits its first probe
+// unconditionally), so the AP must survive them.
+func TestActiveLinkGuardRedundantOfflineKeepsProvisionedAP(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true) // provisioned
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false) // WAN and link both gone
+	h.m.onTick(ctx)                // first confirmed absence arms the window
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx) // sustained absence: AP up
+	require.Equal(t, StateAPActive, h.m.State())
+	require.Equal(t, 1, h.rec.count("ap.Up"))
+
+	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline
+
+	assert.Equal(t, StateAPActive, h.m.State(),
+		"a redundant offline reading must not evict the AP the window just raised")
+	assert.Equal(t, 0, h.rec.count("ap.Down"), "the portal must not drop mid-setup")
+	assert.Equal(t, 1, h.rec.count("ap.Up"), "AP must not bounce")
+}
+
+// TestActiveLinkGuardWindowStartsAtFirstConfirmedAbsence pins the other half of
+// the "continuous confirmed absence" contract: the clock must not start at the
+// connectivity event. Arming there gave the window a head start of one tick —
+// a device offline AND link-less from the event raised the AP after only
+// 4m45s of confirmed absence, since the first probe runs 15s in. The window is
+// armed by the first linkAbsent probe instead, so every raise is backed by a
+// full window of readings that actually confirmed the link was gone.
+func TestActiveLinkGuardWindowStartsAtFirstConfirmedAbsence(t *testing.T) {
+	fl := &fakeLink{up: false} // link already absent when the WAN reading lands
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false) // t0: no probe has run yet
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // t0+15s: FIRST confirmed absence — the clock starts here
+
+	h.clk.advance(4*time.Minute + 45*time.Second)
+	h.m.onTick(ctx) // t0+5m, but only 4m45s of confirmed absence
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"the window must measure confirmed absence, not time since the internet reading")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // t0+5m15s: a full window since the first confirmed absence
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
 
 // TestActiveLinkGuardNilDefaultsToNoSuppression proves the guard is opt-in: with

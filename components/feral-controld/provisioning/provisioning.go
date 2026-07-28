@@ -597,16 +597,37 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 		return
 	}
 
-	// Provisioned but offline: keep NM retrying, arm the sustained-offline
-	// window at the assessment. This entry arming is the nil-guard baseline
-	// ("5m from the offline event"); with a guard wired, the first tick to
-	// sight a link disarms it and only confirmed absence restarts the clock,
-	// so a transient outage below the window never reaches StateAPActive.
-	// (Between this event and the first tick the clock technically runs from
-	// internet loss, not confirmed link loss — closing that would need a ≥5m
-	// stall of the loop goroutine before its next 15s tick, which its bounded
-	// calls cannot produce.)
-	m.startOfflineWindow()
+	// Provisioned but offline. A redundant offline reading arriving while the
+	// setup AP is up carries NO new information — the hotspot holds the radio,
+	// so the device is offline by definition — but falling through to
+	// StateOfflineRetrying would reconcile the AP back DOWN, dropping the
+	// portal out from under a phone mid-setup and costing another full
+	// sustained-offline window before it returns. Such readings are routine
+	// (a sys-monitord restart re-emits its first probe unconditionally; the
+	// connUnknown re-query feeds one in after an assumed-offline boot). This
+	// is the provisioned twin of the apUp short-circuit in probeLink, which
+	// only ever protected the unprovisioned path. Reconcile instead, so a
+	// failed raise (state APActive, apUp false) keeps retrying; StateAPActive
+	// is left only by going online or by a portal join.
+	m.mu.Lock()
+	cur := m.state
+	m.mu.Unlock()
+	if cur == StateAPActive {
+		m.reconcile(ctx)
+		return
+	}
+
+	// Keep NM retrying, and arm the sustained-offline window — but only when
+	// no link guard is wired. That entry arming is the nil-guard baseline
+	// ("5m from the offline event"); with a guard, the clock must start at the
+	// first CONFIRMED link absence, which cannot be known here. Arming at this
+	// event instead of at that first absent probe would let the window expire
+	// after one tick less than its full length of confirmed absence (the first
+	// probe runs a tick after this reading) — the contract is continuous
+	// confirmed absence, so onTick arms it on the first linkAbsent result.
+	if m.activeLink == nil {
+		m.startOfflineWindow()
+	}
 	m.transition(ctx, StateOfflineRetrying, Detail{
 		Reason:  "offline",
 		Message: "Reconnecting to Wi-Fi",
