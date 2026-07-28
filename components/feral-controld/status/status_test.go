@@ -366,7 +366,7 @@ func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
 				"ok":           true,
 				"castCommand":  "displayPlaylist",
 				"index":        1,
-				"renderStatus": 2,
+				"renderStatus": "ready",
 				"isPaused":     false,
 			},
 		},
@@ -398,7 +398,7 @@ func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected payload message to be *PlayerStatus, got %T", payload["message"])
 	}
-	if message.RenderStatus == nil || *message.RenderStatus != 2 {
+	if message.RenderStatus == nil || *message.RenderStatus != "ready" {
 		t.Fatalf("expected renderStatus to survive polling, got %+v", message.RenderStatus)
 	}
 	if message.Index == nil || *message.Index != 1 {
