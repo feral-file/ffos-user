@@ -295,8 +295,8 @@ fi
 if command -v darkhttpd >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   # The capability probe's premise first: the shipped probe greps the usage
   # text for --header, so a real binary must advertise it there. The no-arg
-  # usage dump exits non-zero by design — `|| true` keeps pipefail out of it,
-  # same as the serve script's own probe.
+  # usage dump MAY exit non-zero (1.17 measures 0; assume neither) — `|| true`
+  # keeps pipefail out of it, same as the serve script's own probe.
   real_usage="$(darkhttpd 2>&1 || true)"
   printf '%s' "$real_usage" | grep -q -- "--header" || \
     fail "real darkhttpd usage must advertise --header (capability-probe premise)"
@@ -318,6 +318,12 @@ if command -v darkhttpd >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
     sleep 0.1
   done
   [ "$ready" -eq 1 ] || fail "real darkhttpd did not become ready on :$real_port"
+  # Readiness must have come from OUR process: on a port collision our
+  # darkhttpd exits on the bind failure while curl happily talks to the
+  # squatter, and the assertions below would validate (or falsely blame) an
+  # unrelated server.
+  kill -0 "$real_httpd_pid" 2>/dev/null || \
+    fail "port :$real_port already in use (our darkhttpd exited); readiness came from another server"
 
   hdr200="$(curl -sI "http://127.0.0.1:$real_port/index.html")"
   hdr404="$(curl -sI "http://127.0.0.1:$real_port/no-such-chunk.js")"
@@ -325,10 +331,13 @@ if command -v darkhttpd >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   wait "$real_httpd_pid" 2>/dev/null || true
   real_httpd_pid=""
 
-  printf '%s' "$hdr200" | grep -q "200" || fail "real darkhttpd 200 response missing"
+  # Status asserted on the status LINE, not the whole header block — a bare
+  # "200"/"404" substring can match a Content-Length or date and pass against
+  # the wrong response class.
+  printf '%s' "$hdr200" | grep -Eq '^HTTP/[0-9.]+ 200' || fail "real darkhttpd 200 response missing"
   printf '%s' "$hdr200" | grep -qi "^cache-control: no-cache" || \
     fail "real darkhttpd must emit Cache-Control: no-cache on 200 responses"
-  printf '%s' "$hdr404" | grep -q "404" || fail "real darkhttpd 404 response missing"
+  printf '%s' "$hdr404" | grep -Eq '^HTTP/[0-9.]+ 404' || fail "real darkhttpd 404 response missing"
   printf '%s' "$hdr404" | grep -qi "^cache-control: no-cache" || \
     fail "real darkhttpd must emit Cache-Control: no-cache on 404 responses (the mid-swap negative-cache mitigation)"
 else

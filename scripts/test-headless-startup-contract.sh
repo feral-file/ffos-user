@@ -104,7 +104,7 @@ tmp_dir="$(mktemp -d)"
 # u+rwX first: the cache-guard cases park fixtures at mode 000, and a fail()
 # exit between chmod and restore would otherwise leak the tmp dir (rm -rf
 # cannot descend a non-traversable directory).
-trap 'chmod -R u+rwX "$tmp_dir" 2>/dev/null; rm -rf "$tmp_dir"' EXIT
+trap 'chmod -R u+rwX "$tmp_dir" 2>/dev/null || true; rm -rf "$tmp_dir"' EXIT
 
 drm_root="$tmp_dir/drm"
 mkdir -p "$drm_root/card0-HDMI-A-1" "$drm_root/card1-DP-1"
@@ -420,6 +420,7 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "failed defensive purge must log the delete-retry warning"
   rm -f "$bundle_dir/_next/static/chunks/unreadable2.js"
   run_cache_guard # settle: tree back to the recorded state (keep path)
+  assert_no_purge_logged "settled tree"
 else
   echo "test-headless-startup-contract: SKIPPED unreadable-directory cases (running as root)" >&2
 fi

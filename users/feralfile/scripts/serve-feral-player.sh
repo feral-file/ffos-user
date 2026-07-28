@@ -135,8 +135,9 @@ start_server() {
 	# still covers bundle changes), not die in a flag-error restart loop.
 	# ${arr[@]+...} keeps the empty-array expansion safe under `set -u` on
 	# bash < 4.4 (macOS test harness).
-	# The no-arg usage dump exits non-zero by design. Under `set -e` an
-	# unguarded `var=$(darkhttpd 2>&1)` aborts the script at this line — the
+	# The no-arg usage dump MAY exit non-zero (1.17 measures 0; other
+	# builds differ — assume neither). Under `set -e` an unguarded
+	# `var=$(darkhttpd 2>&1)` aborts the script at this line — the
 	# unit would die before ever starting the server and Restart=on-failure
 	# would loop it. `|| true` is what keeps the probe non-fatal; do not
 	# remove it. The match is anchored so a hypothetical --no-header (or a
