@@ -2093,13 +2093,23 @@ func TestService_Enqueue_NotifiesQueuedOnlyAfterTheJobIsCommitted(t *testing.T) 
 	}).AnyTimes()
 
 	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
-	// Held open so the item is observably still queued/downloading when
-	// Status is asserted below. It must release on ctx cancellation too:
-	// Stop() blocks until the worker exits, so a capture that only ever
-	// waited on the channel would deadlock the test's own teardown.
+	// captureStarted is what makes this test deterministic: the deferred
+	// Stop() must not run until the worker has actually dequeued this
+	// job, or the shutdown drain skips the capture entirely (see
+	// process's ctx.Err() branch) and the Times(1) expectation below is
+	// never satisfied — which is exactly how this test failed on CI,
+	// where the worker lost that race.
+	//
+	// blockCapture then holds the capture open so the item is observably
+	// mid-flight when Status is asserted. It must release on ctx
+	// cancellation too: Stop() blocks until the worker exits, so a
+	// capture that only ever waited on the channel would deadlock the
+	// test's own teardown.
+	captureStarted := make(chan struct{})
 	blockCapture := make(chan struct{})
 	mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
 		func(ctx context.Context, _ dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			close(captureStarted)
 			select {
 			case <-blockCapture:
 			case <-ctx.Done():
@@ -2121,14 +2131,19 @@ func TestService_Enqueue_NotifiesQueuedOnlyAfterTheJobIsCommitted(t *testing.T) 
 		t.Fatal("a genuinely queued item must still produce its queued notification")
 	}
 
+	select {
+	case <-captureStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued item must actually reach the capture worker")
+	}
+
 	// And the state the notification claims is real: Status agrees the
-	// item is scheduled.
+	// item is scheduled. Deterministically downloading, since the capture
+	// above has provably started and is held open.
 	snap, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
-	assert.Contains(t,
-		[]offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateDownloading},
-		snap.Items[0].State)
+	assert.Equal(t, offlinecache.StateDownloading, snap.Items[0].State)
 }
 
 // TestService_Notify_QueuedPrecedesDownloadingEvenWithAnIdleWorker pins

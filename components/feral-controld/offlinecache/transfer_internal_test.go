@@ -73,11 +73,14 @@ func trickleHandler(t *testing.T, chunks, chunkSize int, gap time.Duration, stal
 // that can tell the two designs apart: the phase gate is passed before
 // the fetch starts, then expires mid-body.
 func TestResourceTransfer_SlowButProgressingBodyOutlivesTheFinalizeWindow(t *testing.T) {
-	// Stall allowance comfortably above the inter-chunk gap; ceiling well
-	// above the whole transfer.
-	compressTransferBounds(t, 200*time.Millisecond, 10*time.Second)
+	// Margins sized for a loaded CI runner, not just a quiet laptop: the
+	// stall allowance is 40x the inter-chunk gap and the ceiling ~20x the
+	// whole transfer, so only a pathological stall trips either. What the
+	// test needs to stay true is the ORDER — phase window < transfer
+	// duration — and both of the other bounds sit far outside it.
+	compressTransferBounds(t, 2*time.Second, 30*time.Second)
 
-	srv, payload := trickleHandler(t, 12, 64, 30*time.Millisecond, 0) // ~360ms of steady progress
+	srv, payload := trickleHandler(t, 30, 64, 50*time.Millisecond, 0) // ~1.5s of steady progress
 	url := srv.URL + "/big.bin"
 
 	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t))
@@ -86,10 +89,11 @@ func TestResourceTransfer_SlowButProgressingBodyOutlivesTheFinalizeWindow(t *tes
 	tracker := newCaptureTracker()
 	tracker.recordResource(url, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
 
-	// Long enough to let the fetch START, far too short to let it finish:
-	// under the old design this deadline reached into the transfer and
-	// killed it at 100ms.
-	phaseCtx, phaseCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// Long enough to let the fetch START (the work before it is a map
+	// walk and a sort, microseconds), far too short to let the ~1.5s
+	// transfer finish: under the old design this deadline reached into
+	// the transfer and killed it partway.
+	phaseCtx, phaseCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer phaseCancel()
 
 	resources, coverage := c.resolveResources(context.Background(), phaseCtx, tracker, newCaptureDiskBudget(0, true))
@@ -116,8 +120,10 @@ func TestResourceTransfer_SlowButProgressingBodyOutlivesTheFinalizeWindow(t *tes
 // without a wedged origin holding the single capture worker for it.
 func TestResourceTransfer_StalledBodyIsCutOffPromptly(t *testing.T) {
 	// A ceiling far longer than the stall allowance, so anything but the
-	// stall detector firing would make this test take 10 seconds.
-	compressTransferBounds(t, 150*time.Millisecond, 10*time.Second)
+	// stall detector firing would make this test take 30 seconds. (A
+	// runner slow enough to trip the stall during the healthy chunks
+	// still passes — the assertion is that it fails, and fast.)
+	compressTransferBounds(t, 500*time.Millisecond, 30*time.Second)
 
 	srv, _ := trickleHandler(t, 20, 64, 10*time.Millisecond, 3) // 3 chunks, then silence
 	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t))
@@ -128,7 +134,7 @@ func TestResourceTransfer_StalledBodyIsCutOffPromptly(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "an origin that goes silent mid-body must fail, not hang")
-	assert.Less(t, elapsed, 5*time.Second,
+	assert.Less(t, elapsed, 15*time.Second,
 		"the stall detector must fire long before the absolute ceiling, or a wedged origin would hold the worker for it")
 }
 
@@ -136,9 +142,11 @@ func TestResourceTransfer_StalledBodyIsCutOffPromptly(t *testing.T) {
 // absolute ceiling still exists: a body creeping along just fast enough
 // to keep resetting the stall timer cannot run forever.
 func TestResourceTransfer_CeilingBoundsATrickleThatNeverStalls(t *testing.T) {
-	compressTransferBounds(t, 500*time.Millisecond, 200*time.Millisecond)
+	// Stall allowance far above the gap so the stall detector cannot be
+	// what fires; only the ceiling can.
+	compressTransferBounds(t, 10*time.Second, 200*time.Millisecond)
 
-	srv, _ := trickleHandler(t, 100, 8, 20*time.Millisecond, 0) // never stalls, but runs ~2s
+	srv, _ := trickleHandler(t, 200, 8, 20*time.Millisecond, 0) // never stalls, but runs ~4s
 	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t))
 	c := &capturer{httpClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
@@ -147,5 +155,5 @@ func TestResourceTransfer_CeilingBoundsATrickleThatNeverStalls(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
-	assert.Less(t, elapsed, 2*time.Second, "the ceiling must bound a never-stalling trickle")
+	assert.Less(t, elapsed, 3*time.Second, "the ceiling must bound a never-stalling trickle")
 }
