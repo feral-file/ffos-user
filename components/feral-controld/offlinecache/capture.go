@@ -25,32 +25,33 @@ import (
 // Coverage reflects that.
 const captureWindowDefault = 20 * time.Second
 
-// captureFinalizeWindowDefault bounds resolveResources' finalization
-// phase: fetching bytes for every resource the observation window
-// discovered, one at a time, over real outbound HTTP. Unlike
+// captureFinalizeWindowDefault bounds how long resolveResources' final-
+// ization phase may keep STARTING new resource fetches. Unlike
 // captureWindowDefault (which only bounds PASSIVE CDP observation),
-// finalization makes ACTIVE network calls, each able to block for up to
-// the shared HTTP client's own per-request timeout
-// (wrapper.HTTPClientTimeout, 30s) before failing. With no deadline of
-// its own, finalization was running on the caller's unbounded daemon-
-// lifetime ctx, so a page whose observation window ends with many
-// stalled/slow-responding resources still pending could make this phase
-// take (stalled resource count) x (up to 30s) — and since capture holds
-// the single download worker's slot for its ENTIRE duration (see
-// service.go's captureMu), that could monopolize it far beyond
-// captureWindowMs, starving every other queued download indefinitely.
+// finalization makes ACTIVE network calls, one resource at a time. With
+// no bound of its own it ran on the caller's unbounded daemon-lifetime
+// ctx, so a page whose observation window ends with many stalled or
+// slow-responding resources still pending could keep the phase going
+// indefinitely — and since capture holds the single download worker's
+// slot for its ENTIRE duration (see service.go's captureMu), that starves
+// every other queued download.
 //
-// Deriving a bounded child context here caps the worst case at this
-// constant regardless of how many resources are still outstanding: once
-// it elapses, resolveResources' own ctx.Err() check (see its doc) stops
-// attempting further fetches and marks whatever remains as an explicitly
-// incomplete/partial part of the record, rather than letting the loop
-// keep blocking. A resource-COUNT cap was considered instead of/alongside
-// a time cap, but is unnecessary: that same ctx.Err() check short-
-// circuits BEFORE any per-resource network attempt, so the remaining
-// loop iterations after the deadline are pure bookkeeping (no I/O) no
-// matter how many resources are left — bounding time alone is sufficient
-// to bound total wall-clock cost.
+// It is deliberately a gate on STARTING work, not a bound on the work
+// itself. An earlier revision passed this deadline down into each fetch
+// as well, which meant one healthy multi-hundred-MB asset was canceled
+// mid-stream the moment the phase hit 60s and recorded as a permanent
+// partial no matter how fast it was actually downloading — the exact
+// gigabyte-scale case docs/offline-artwork-capture.md §4.4 documents as
+// supported. One deadline cannot both "stop a pile of stalled resources
+// from monopolizing the worker" and "let a single huge healthy transfer
+// finish"; each transfer now bounds itself on progress instead (see
+// resourceTransfer), leaving this free to do only the first job.
+//
+// Worst-case wall clock for the phase is therefore this window plus one
+// in-flight transfer's own ceiling, not (resource count) x anything:
+// once it elapses, the loop's phaseCtx.Err() check short-circuits BEFORE
+// any further network attempt, so the remaining iterations are pure
+// bookkeeping however many resources are left.
 const captureFinalizeWindowDefault = 60 * time.Second
 
 // clearObservedOriginsStorageWindow bounds the aggregate wall-clock cost
@@ -347,7 +348,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	// deadline no longer has a client-side backstop behind it.
 	finalizeCtx, finalizeCancel := context.WithTimeout(ctx, captureFinalizeWindowDefault)
 	defer finalizeCancel()
-	resources, coverage := c.resolveResources(finalizeCtx, tracker, c.newDiskBudget())
+	resources, coverage := c.resolveResources(ctx, finalizeCtx, tracker, c.newDiskBudget())
 
 	// resetTargetState above only reaches item.Source's OWN origin,
 	// which cannot cover an origin this navigation redirects to or
@@ -532,7 +533,7 @@ var safeIdempotentMethods = map[string]bool{
 // method resolveResources will not re-issue. budget caps the TOTAL bytes
 // fetched across every resource in this call — see captureDiskBudget's
 // doc.
-func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker, budget *captureDiskBudget) ([]Resource, Coverage) {
+func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *captureTracker, budget *captureDiskBudget) ([]Resource, Coverage) {
 	keys, resources, failures, pendingURLs := tracker.snapshot()
 
 	result := make([]Resource, 0, len(keys))
@@ -542,17 +543,23 @@ func (c *capturer) resolveResources(ctx context.Context, tracker *captureTracker
 		if !ok {
 			continue
 		}
-		// ctx is finalizeCtx (see Capture's doc): once its deadline
-		// elapses, stop attempting further fetches entirely rather than
-		// letting fetchAndStoreBody try and fail one-by-one for the same
-		// underlying reason — this is what keeps a page with many
-		// stalled/slow resources from monopolizing the worker beyond
-		// captureFinalizeWindowDefault (see its doc). Checked before
-		// EVERY resource, not once before the loop, so whatever was
-		// already fetched before the deadline hit is kept; only the
-		// remainder becomes an explicit, distinctly-labeled incomplete
-		// entry.
-		if ctx.Err() != nil {
+		// phaseCtx carries captureFinalizeWindowDefault; ctx is the
+		// capture's own. Once the phase deadline elapses, stop STARTING
+		// further fetches rather than letting fetchAndStoreBody try and
+		// fail one-by-one for the same underlying reason — this is what
+		// keeps a page with many stalled/slow resources from
+		// monopolizing the worker. Checked before EVERY resource, not
+		// once before the loop, so whatever was already fetched before
+		// the deadline hit is kept; only the remainder becomes an
+		// explicit, distinctly-labeled incomplete entry.
+		//
+		// Deliberately a gate on starting work, NOT the bound on the
+		// work itself: an earlier revision passed this same deadline
+		// down into each fetch, so a perfectly healthy multi-hundred-MB
+		// asset was canceled mid-stream at 60s and recorded as a
+		// permanent partial however fast it was downloading. Each
+		// transfer bounds itself instead — see resourceTransfer.
+		if phaseCtx.Err() != nil {
 			failureReasons = append(failureReasons, fmt.Sprintf("finalization_deadline_exceeded:%s", res.URL))
 			result = append(result, res)
 			continue
@@ -671,7 +678,14 @@ func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, ca
 	if err != nil {
 		return "", 0, err
 	}
-	resp, err := c.httpClient.Do(req.WithContext(ctx))
+	// Bounded per-transfer rather than by the finalization phase's
+	// deadline (see captureFinalizeWindowDefault): a stalled origin is
+	// cut off promptly while a large asset that keeps delivering bytes
+	// runs to completion.
+	transfer := beginResourceTransfer(ctx)
+	defer transfer.Close()
+
+	resp, err := c.httpClient.Do(req.WithContext(transfer.Context()))
 	if err != nil {
 		return "", 0, err
 	}
@@ -681,7 +695,7 @@ func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, ca
 	}
 	// resp.Body is streamed straight into the store (hashed while it is
 	// copied to disk, never buffered whole in memory first).
-	hash, err := c.store.WriteBlob(resp.Body, capBytes)
+	hash, err := c.store.WriteBlob(transfer.Body(resp.Body), capBytes)
 	if err != nil {
 		return "", 0, err
 	}

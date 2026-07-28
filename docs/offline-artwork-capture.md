@@ -186,9 +186,10 @@ the item's `source`. For each distinct URL:
 
 The out-of-band fetches above (everything in the first bullet, plus the
 206 fallback) happen AFTER `captureWindowMs` closes, in a second,
-separate phase ("finalization") that is itself bounded by its own fixed
-internal deadline (`captureFinalizeWindowDefault`, 60s), independent of
-`captureWindowMs`. `captureWindowMs` only bounds *passive* CDP
+separate phase ("finalization") whose START of new fetches is bounded by
+its own fixed internal deadline (`captureFinalizeWindowDefault`, 60s),
+independent of `captureWindowMs` — each transfer itself is bounded
+separately, see "Why both download paths get their own HTTP client". `captureWindowMs` only bounds *passive* CDP
 observation; finalization makes *active* outbound HTTP requests, one
 resource at a time. Without a
 finalization-phase deadline, a page whose observation window closes with
@@ -223,16 +224,34 @@ slow.
 with `wrapper.NewHTTPClientWithoutTimeout` instead, and each path bounds
 itself explicitly, as that constructor's contract requires:
 
-- **Software** (`capture.go`): the finalization deadline above
-  (`captureFinalizeWindowDefault`, 60s) bounds the whole fetch-bodies
-  phase. It is now the only bound on those fetches — there is no
-  client-side backstop behind it.
-- **Direct media** (`mediacapture.go`): `mediaDownloadTimeout` (30
-  minutes) bounds the one download end-to-end. This path had no deadline
-  of its own at all, so it is what keeps a wedged origin from pinning the
-  single serial capture worker for the life of the process. It is a
-  total-duration ceiling, not a stall detector — see its doc comment for
-  that trade-off.
+Both paths bound each body transfer with the SAME pair of limits
+(`transfer.go`'s `resourceTransfer`), because both are downloading the
+same kind of asset — §4.4's 1.1 GB video is reachable either way — and so
+should tolerate the same slowness and give up on the same stall:
+
+- `resourceStallTimeout` (60s) aborts a transfer that stops delivering
+  bytes. This is the bound that does the real work: a wedged origin is
+  detected in a minute no matter how large the asset is.
+- `resourceTransferTimeout` (30 minutes) is the absolute ceiling, so a
+  byte-per-second trickle that never technically stalls still cannot run
+  forever. Sized for ~1 GB at roughly 5 Mbps, the slow end of a real
+  device uplink.
+
+Splitting "is it stalled?" from "how long may it take?" is what lets the
+ceiling be generous. A single fixed deadline cannot serve both: sized to
+cut off a pile of wedged resources it kills a healthy gigabyte transfer,
+and sized for the gigabyte transfer it lets wedged resources hold the
+single capture worker for half an hour.
+
+The software path additionally keeps its finalization window
+(`captureFinalizeWindowDefault`, 60s), but strictly as a gate on whether
+another fetch may **start** — never as a bound on a transfer already
+streaming. An earlier revision passed it down into each fetch too, which
+meant a healthy multi-hundred-MB asset was cancelled mid-stream at 60s
+and recorded as a permanent `partial` however fast it was downloading:
+the documented §4.4 case could not actually reach `ready`. Worst-case
+wall clock for the phase is therefore the window plus one in-flight
+transfer's own ceiling, not (resource count) x anything.
 
 Everything else in the subsystem keeps the daemon default: the
 classifier's probe and the CDP calls to localhost are small, fast

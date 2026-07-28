@@ -5,7 +5,6 @@ import (
 	"fmt"
 	go_http "net/http"
 	"strings"
-	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"go.uber.org/zap"
@@ -13,27 +12,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
-
-// mediaDownloadTimeout bounds one direct-media download end-to-end.
-//
-// Sized for what this path actually carries: the media class is where
-// the multi-hundred-MB and gigabyte assets live (a video element's
-// source, not a software artwork's scripts), and staticserver.go exists
-// precisely because blobs here can exceed 200 MB. 30 minutes clears a
-// ~1 GB transfer at roughly 5 Mbps, which is the slow end of a real
-// device uplink — deliberately generous, because the failure mode of
-// being too tight is an artwork that can never be cached at all, while
-// the cost of being too loose is bounded by the ceiling itself.
-//
-// It is a total-duration ceiling, not a stall detector: a download
-// creeping along at 1 byte/s still consumes the full window before
-// failing, and holds the single capture worker for that whole time. A
-// read-idle timeout would release a wedged transfer far sooner without
-// penalizing a slow-but-healthy one; it is deliberately not built here
-// because it needs a body-reader wrapper this path does not otherwise
-// justify. Reach for it if real devices start hitting this ceiling on
-// transfers that were making progress the whole time.
-const mediaDownloadTimeout = 30 * time.Minute
 
 // MediaCapturer downloads a single-file, non-software playlist item's
 // source directly over HTTP — no browser involved. See classify.go's
@@ -103,21 +81,7 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 	// service.process's existing StateFailed path apply, matching how
 	// capturer.Capture already reports a failed Page.navigate: the
 	// entry point itself never loaded.
-	// This path's ONLY transfer bound. Bootstrap hands this capturer a
-	// client with no http.Client.Timeout on purpose (see the bodyClient
-	// comment there), and unlike the software path — which finalizes
-	// under captureFinalizeWindowDefault — nothing else here constrains
-	// how long a download may run: ctx is the worker's daemon-lifetime
-	// context. Without this the single serial capture worker could be
-	// pinned by one wedged origin for the life of the process, taking
-	// every queued item behind it down with it.
-	//
-	// Derived from ctx (not context.Background()) so shutdown still
-	// cancels immediately rather than waiting the window out.
-	downloadCtx, cancel := context.WithTimeout(ctx, mediaDownloadTimeout)
-	defer cancel()
-
-	resource, err := c.fetchResource(downloadCtx, item.Source, capBytes)
+	resource, err := c.fetchResource(ctx, item.Source, capBytes)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: download %s: %w", item.Source, err)
 	}
@@ -171,7 +135,20 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 	// CORS enforcement despite byte-correct status/body (see
 	// docs/offline-artwork-capture.md §3.3/§4.6).
 	req.Header.Set("Origin", strings.TrimSuffix(constant.WEBAPP_URL, "/"))
-	resp, err := c.httpClient.Do(req.WithContext(ctx))
+
+	// The only bound on this path: Bootstrap hands this capturer a client
+	// with no http.Client.Timeout (see its bodyClient comment) and ctx is
+	// the worker's daemon-lifetime context, so without this a wedged
+	// origin would pin the single serial capture worker for the life of
+	// the process. Shared with the software path's per-resource fetches
+	// rather than a bespoke ceiling here — the two are downloading the
+	// same kind of asset (§4.4's 1.1 GB video is reachable either way),
+	// so they should tolerate the same slowness and give up on the same
+	// stall.
+	transfer := beginResourceTransfer(ctx)
+	defer transfer.Close()
+
+	resp, err := c.httpClient.Do(req.WithContext(transfer.Context()))
 	if err != nil {
 		return Resource{}, fmt.Errorf("fetch: %w", err)
 	}
@@ -180,7 +157,7 @@ func (c *mediaCapturer) fetchResource(ctx context.Context, sourceURL string, cap
 		return Resource{}, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	hash, err := c.store.WriteBlob(resp.Body, capBytes)
+	hash, err := c.store.WriteBlob(transfer.Body(resp.Body), capBytes)
 	if err != nil {
 		return Resource{}, fmt.Errorf("write blob: %w", err)
 	}

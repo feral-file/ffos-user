@@ -113,10 +113,13 @@ func TestResolveResources_ExpiredFinalizeContextSkipsEveryFetchWithoutNetworkCal
 		tracker.recordResource(fmt.Sprintf("https://example.com/r%d.bin", i), go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	phaseCtx, cancel := context.WithCancel(context.Background())
 	cancel() // stands in for captureFinalizeWindowDefault having already elapsed
 
-	resources, coverage := c.resolveResources(ctx, tracker, newCaptureDiskBudget(0, true))
+	// The capture's own ctx stays live: the phase deadline is what gates
+	// starting fetches now, and it must short-circuit on its own rather
+	// than needing the whole capture to be canceled.
+	resources, coverage := c.resolveResources(context.Background(), phaseCtx, tracker, newCaptureDiskBudget(0, true))
 
 	require.Len(t, resources, resourceCount)
 	for _, res := range resources {
@@ -157,7 +160,7 @@ func TestResolveResources_DeadlineExpiringMidFinalizationPreservesEarlierFetches
 	fastURL := "https://example.com/fast.bin"
 	slowURL := "https://example.com/slow.bin" // never reached: skipped once ctx is canceled
 
-	ctx, cancel := context.WithCancel(context.Background())
+	phaseCtx, cancel := context.WithCancel(context.Background())
 	client := &countingHTTPClient{
 		doFunc: func(req *go_http.Request) (*go_http.Response, error) {
 			resp := &go_http.Response{
@@ -182,7 +185,7 @@ func TestResolveResources_DeadlineExpiringMidFinalizationPreservesEarlierFetches
 	tracker.recordResource(fastURL, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
 	tracker.recordResource(slowURL, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
 
-	resources, coverage := c.resolveResources(ctx, tracker, newCaptureDiskBudget(0, true))
+	resources, coverage := c.resolveResources(context.Background(), phaseCtx, tracker, newCaptureDiskBudget(0, true))
 
 	require.Len(t, resources, 2)
 	byURL := make(map[string]Resource, len(resources))
