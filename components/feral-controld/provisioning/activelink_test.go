@@ -577,6 +577,92 @@ func TestActiveLinkGuardJoinWithoutInternetKeepsAPDown(t *testing.T) {
 		"the AP must never return over a live association")
 }
 
+// TestActiveLinkGuardRecoveredLinkExitsFailedRaise pins the failed-raise
+// recovery path on a PROVISIONED device: after the sustained window raises and
+// softap.Up FAILS (apUp false), the station can re-associate while NM keeps
+// refusing the raise — and on an air-gapped LAN no connectivity event will
+// ever arrive. The tick probe must exit StateAPActive to StateOfflineRetrying
+// on the confirmed sighting, and the later NM recovery must NOT raise the AP
+// over the recovered association; a fresh raise needs a fresh full window.
+func TestActiveLinkGuardRecoveredLinkExitsFailedRaise(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.ap.upErr = errors.New("nm busy") // every raise attempt fails
+	h.m.onConnectivity(ctx, false)
+	h.m.onTick(ctx) // first confirmed absence arms the window
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx) // window expires: the raise is attempted and FAILS
+	require.Equal(t, StateAPActive, h.m.State())
+	require.Equal(t, 0, h.rec.count("portal.Start"), "raise failed: no portal")
+
+	fl.up = true // router returns; NM re-associates while the raise is pending
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"a confirmed link sighting must exit a failed raise")
+
+	h.ap.upErr = nil         // NM recovers — the retry must never fire now
+	for i := 0; i < 4; i++ { // 24+ minutes of link-up-but-offline ticks
+		h.clk.advance(6 * time.Minute)
+		h.m.onTick(ctx)
+	}
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, 0, h.rec.count("portal.Start"),
+		"the recovered association must never be dropped by a late successful raise")
+}
+
+// TestActiveLinkGuardRecoveredLinkExitsFailedRaiseOnRedundantReading is the
+// connectivity-event flavor of the failed-raise recovery: a redundant offline
+// re-emission (monitord restart) arriving after the link recovered must take
+// the probe-gated exit, not blindly reconcile the pending raise. A RAISED AP
+// is unaffected — probeLink short-circuits to linkAbsent while apUp is true —
+// which TestActiveLinkGuardRedundantOfflineKeepsProvisionedAP pins.
+func TestActiveLinkGuardRecoveredLinkExitsFailedRaiseOnRedundantReading(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.ap.upErr = errors.New("nm busy")
+	h.m.onConnectivity(ctx, false)
+	h.m.onTick(ctx)
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx) // raise attempted and failed
+	require.Equal(t, StateAPActive, h.m.State())
+
+	fl.up = true                   // link recovers between retry ticks
+	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"a redundant reading with a recovered link must exit the pending raise")
+	assert.Equal(t, 0, h.rec.count("portal.Start"))
+}
+
+// TestActiveLinkGuardRecoveredWireExitsFailedUnprovisionedRaise covers the
+// unprovisioned twin via the tick: an air-gapped wired frame whose raise is
+// failing gets its cable back — no connectivity event fires — and must park
+// back in StateUnprovisioned instead of letting the retry eventually raise
+// the AP over the healthy wire.
+func TestActiveLinkGuardRecoveredWireExitsFailedUnprovisionedRaise(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.ap.upErr = errors.New("nm busy")
+	h.m.onConnectivity(ctx, false) // boot: link-less unprovisioned -> raise fails
+	require.Equal(t, StateAPActive, h.m.State())
+
+	fl.up = true // cable plugged back in; the device stays offline (air-gapped)
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateUnprovisioned, h.m.State(),
+		"a recovered wire must park the failed raise back in unprovisioned")
+	assert.Equal(t, 0, h.rec.count("portal.Start"))
+}
+
 // TestActiveLinkGuardNilDefaultsToNoSuppression proves the guard is opt-in: with
 // no ActiveLink configured (the newHarness default), an unprovisioned offline
 // device raises the AP exactly as before, so the seam cannot silently change

@@ -634,13 +634,30 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 	// (a sys-monitord restart re-emits its first probe unconditionally; the
 	// connUnknown re-query feeds one in after an assumed-offline boot). This
 	// is the provisioned twin of the apUp short-circuit in probeLink, which
-	// only ever protected the unprovisioned path. Reconcile instead, so a
-	// failed raise (state APActive, apUp false) keeps retrying; StateAPActive
-	// is left only by going online or by a portal join.
+	// only ever protected the unprovisioned path.
+	//
+	// One APActive flavor may exit here: a FAILED/PENDING raise (apUp false)
+	// whose link has recovered. No hotspot is up for the probe to mistake for
+	// an uplink there, and the station can genuinely re-associate while NM
+	// keeps refusing the raise — letting a later retry succeed would drop
+	// that recovered link, the exact harm the guard exists to prevent.
+	// probeLink short-circuits to linkAbsent while the AP is actually up, so
+	// this exit can never evict a RAISED AP; a raised StateAPActive is left
+	// only by going online or by a portal join. Anything short of a
+	// confirmed sighting reconciles instead, so a failed raise keeps
+	// retrying.
 	m.mu.Lock()
 	cur := m.state
 	m.mu.Unlock()
 	if cur == StateAPActive {
+		if m.probeLink(ctx) == linkPresent {
+			m.clearOffline()
+			m.transition(ctx, StateOfflineRetrying, Detail{
+				Reason:  "link-present",
+				Message: "Reconnecting to Wi-Fi",
+			})
+			return
+		}
 		m.reconcile(ctx)
 		return
 	}
@@ -792,6 +809,35 @@ func (m *Machine) onTick(ctx context.Context) {
 				})
 				return
 			}
+		}
+
+	case StateAPActive:
+		// A FAILED/PENDING raise (apUp false) is the one APActive flavor a
+		// link reading may exit: no hotspot is up for the probe to mistake
+		// for an uplink, and the link can genuinely recover while NM keeps
+		// refusing the raise — on an air-gapped LAN no connectivity event
+		// will ever arrive, so without this probe the eventual retry would
+		// SUCCEED and drop the recovered link, the exact harm the guard
+		// exists to prevent. probeLink short-circuits to linkAbsent while
+		// the AP is actually up (no nmcli spend, and the no-link-based-exit
+		// rule for a RAISED AP is preserved); absent/unknown fall through to
+		// reconcile, which keeps retrying the raise. The saved-profile check
+		// routes the exit to the matching resting state, whose tick probes
+		// re-arm the sustained window before any fresh raise.
+		if m.probeLink(ctx) == linkPresent {
+			m.clearOffline()
+			if m.hasProfile(ctx) {
+				m.transition(ctx, StateOfflineRetrying, Detail{
+					Reason:  "link-present",
+					Message: "Reconnecting to Wi-Fi",
+				})
+			} else {
+				m.transition(ctx, StateUnprovisioned, Detail{
+					Reason:  "link-present",
+					Message: "Network link present; Wi-Fi not configured",
+				})
+			}
+			return
 		}
 	}
 
