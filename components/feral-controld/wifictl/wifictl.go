@@ -12,6 +12,7 @@ package wifictl
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,10 +33,40 @@ const (
 	// feral-setupd (constant::SSID_CACHE_TTL, 10 minutes).
 	scanCacheTTL = 10 * time.Minute
 
+	// emptyScanCacheTTL is the much shorter TTL an EMPTY scan result gets when
+	// there is nothing better to serve. An empty result is not trustworthy
+	// enough for the full TTL (see RefreshScanCache), but it still needs some
+	// TTL: CachedScan is called from the captive-portal request path while the
+	// AP holds the radio, and a zero-TTL empty cache would fire a live scan on
+	// every page load — the one thing the cache exists to prevent.
+	emptyScanCacheTTL = 30 * time.Second
+
 	// ssidWaitTimeout / ssidWaitInterval bound the post-AP-bounce wait for the
 	// join target to reappear in NM's scan results (see Join / waitForSSID).
 	ssidWaitTimeout  = 20 * time.Second
 	ssidWaitInterval = 2 * time.Second
+
+	// scanReadyTimeout / scanReadyInterval bound the wait for the Wi-Fi device
+	// to become scannable again after the setup AP is torn down (see
+	// waitForScanReady). Shorter than ssidWaitTimeout on purpose: this waits
+	// only for wpa_supplicant to re-attach the interface, which is a strictly
+	// earlier milestone than "a specific neighboring SSID is visible", and the
+	// AP is down for the whole wait so the phone is stranded meanwhile.
+	scanReadyTimeout  = 10 * time.Second
+	scanReadyInterval = 1 * time.Second
+
+	// nmDeviceStateDisconnected mirrors NM_DEVICE_STATE_DISCONNECTED (30).
+	// NetworkManager rejects RequestScan outright below this state — see
+	// _nm_device_wifi_request_scan in src/core/devices/wifi/nm-device-wifi.c:
+	//
+	//	if (!priv->enabled || !priv->sup_iface
+	//	    || nm_device_get_state(device) < NM_DEVICE_STATE_DISCONNECTED)
+	//	        ... NM_DEVICE_ERROR_NOT_ALLOWED, "Scanning not allowed while unavailable"
+	//
+	// The numeric value is read from nmcli's `device show` output, which prints
+	// the raw enum before the localized name ("30 (disconnected)"), so this
+	// comparison does not depend on the device's locale.
+	nmDeviceStateDisconnected = 30
 
 	// joinCleanupTimeout bounds the detached post-failure profile delete.
 	joinCleanupTimeout = 10 * time.Second
@@ -158,16 +189,156 @@ func (c *Controller) CachedScan(ctx context.Context) ([]string, error) {
 
 // RefreshScanCache performs a forced live scan and stores it for CachedScan.
 // Call this while station mode still owns the radio (before the AP goes up).
+//
+// A successful-but-EMPTY scan never replaces a usable cache. The portal's
+// "search for networks again" button bounces the setup AP, so the refresh that
+// follows always lands moments after the radio flipped from AP back to station
+// mode — with NM's BSS list empty and its rescan request not yet honored,
+// `nmcli device wifi list --rescan yes` exits 0 with no rows. That is
+// indistinguishable at this layer from "no networks exist", and caching it for
+// the full scanCacheTTL blanked the picker (dropping the portal to its manual
+// SSID fallback) for ten minutes — the button reliably destroyed the very list
+// it was pressed to refresh. Keeping the previous entries, with their ORIGINAL
+// expiry so a stale list still ages out, means a transient empty scan costs
+// nothing; with no usable previous entries the empty result is cached only
+// briefly (emptyScanCacheTTL) so the next read retries soon.
+//
+// The returned slice is always the LIVE scan result, empty included, never the
+// retained cache: callers retry on empty (see provisioning.ensureAPUp), and
+// handing back the cache would hide the failed scan from them.
 func (c *Controller) RefreshScanCache(ctx context.Context) ([]string, error) {
+	// Do not ask for a scan the radio cannot serve yet (see waitForScanReady):
+	// asking early does not fail loudly, it returns an empty list.
+	c.waitForScanReady(ctx)
+
 	ssids, err := c.Scan(ctx, true)
 	if err != nil {
 		return nil, err
 	}
+
+	now := c.clock.Now()
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(ssids) == 0 {
+		if len(c.cacheSSIDs) > 0 && !c.cacheExp.IsZero() && now.Before(c.cacheExp) {
+			c.logger.Warn("wifictl: forced scan saw no networks; keeping the previous scan cache",
+				zap.Int("cached_ssids", len(c.cacheSSIDs)))
+			return nil, nil
+		}
+		c.logger.Warn("wifictl: forced scan saw no networks and no usable cache; caching empty briefly",
+			zap.Duration("ttl", emptyScanCacheTTL))
+		c.cacheSSIDs = nil
+		c.cacheExp = now.Add(emptyScanCacheTTL)
+		return nil, nil
+	}
+
 	c.cacheSSIDs = ssids
-	c.cacheExp = c.clock.Now().Add(scanCacheTTL)
-	c.mu.Unlock()
+	c.cacheExp = now.Add(scanCacheTTL)
 	return ssids, nil
+}
+
+// waitForScanReady blocks until NetworkManager will actually honor a scan
+// request on the Wi-Fi device, or the wait window closes.
+//
+// This exists because `nmcli device wifi list --rescan yes` is NOT the
+// "scan and report what is in the air" primitive it reads as. It is "request a
+// scan; print the BSS cache", and it goes quiet in exactly the case that
+// matters here. From nmcli's wifi_list_rescan_cb (src/nmcli/devices.c), when
+// RequestScan is refused with NM_DEVICE_ERROR_NOT_ALLOWED:
+//
+//   - device state >= DISCONNECTED (scan already running, or NM's rate limit):
+//     retry every second until nmcli's own 15s timeout. Self-healing, fine.
+//   - device state < DISCONNECTED (unmanaged, or UNAVAILABLE): give up
+//     immediately and print the cache. nmcli's own comment: "If it's
+//     unavailable, that usually means that we wait for wpa_supplicant to
+//     start. In that case, also quit (without scan results)."
+//
+// That second branch never sets nmcli's return value, so the command exits 0
+// with zero rows — a scan that never ran is indistinguishable from a scan that
+// saw nothing. And it is precisely the state the device is in right after the
+// setup AP comes down: tearing down the AP-mode connection makes NM drop and
+// re-create the supplicant interface, so the device passes through UNAVAILABLE
+// (priv->sup_iface NULL) for as long as wpa_supplicant needs to re-attach.
+//
+// The portal's "search for networks again" button bounces the AP by design, so
+// the refresh behind it lands in that window every single time — which is how
+// the button came to reliably empty the picker it was pressed to refill. The
+// join path hit the same window from the other side and papered over it with
+// waitForSSID; this is the same hazard at the scan.
+//
+// Fail-open in both directions: an unreadable device state proceeds to the scan
+// (an nmcli output shape we do not recognize must never stall provisioning),
+// and so does a timeout — the caller still gets nmcli's real answer, and
+// RefreshScanCache no longer trusts an empty one.
+func (c *Controller) waitForScanReady(ctx context.Context) {
+	deadline := c.clock.Now().Add(scanReadyTimeout)
+	for {
+		state, known := c.wifiDeviceState(ctx)
+		if !known || state >= nmDeviceStateDisconnected {
+			return
+		}
+		if c.clock.Now().Add(scanReadyInterval).After(deadline) {
+			c.logger.Warn("wifictl: wifi device still not scannable; scanning anyway",
+				zap.Int("nm_device_state", state))
+			return
+		}
+		c.logger.Debug("wifictl: wifi device not scannable yet; waiting",
+			zap.Int("nm_device_state", state))
+		if err := c.clock.SleepContext(ctx, scanReadyInterval); err != nil {
+			return
+		}
+	}
+}
+
+// wifiDeviceState returns the NMDeviceState of the Wi-Fi device (pinned to
+// iface when set), and whether it could be determined at all.
+//
+// It reads `device show` rather than `device status` deliberately: status
+// renders STATE as a translated word only, while show renders it as the raw
+// enum followed by that word ("30 (disconnected)"), which is what makes the
+// comparison against nmDeviceStateDisconnected locale-independent. Anything
+// unparseable reports known=false so the caller fails open.
+func (c *Controller) wifiDeviceState(ctx context.Context) (int, bool) {
+	args := []string{"-t", "-f", "GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE", "device", "show"}
+	if c.iface != "" {
+		args = append(args, c.iface)
+	}
+	out, _, err := c.run(ctx, args...)
+	if err != nil {
+		c.logger.Debug("wifictl: wifi device state query failed", zap.Error(err))
+		return 0, false
+	}
+
+	// Terse `device show` emits one "FIELD:value" line per field, grouped per
+	// device in the order requested, so tracking the current block's TYPE is
+	// enough to attribute a STATE line to a Wi-Fi device.
+	var typ string
+	for _, line := range strings.Split(string(out), "\n") {
+		field, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		switch field {
+		case "GENERAL.DEVICE":
+			typ = ""
+		case "GENERAL.TYPE":
+			typ = value
+		case "GENERAL.STATE":
+			if typ != "wifi" {
+				continue
+			}
+			// "30 (disconnected)" — the leading enum is the locale-stable part.
+			num, _, _ := strings.Cut(value, " ")
+			state, convErr := strconv.Atoi(num)
+			if convErr != nil {
+				c.logger.Debug("wifictl: unparseable device state", zap.String("value", value))
+				return 0, false
+			}
+			return state, true
+		}
+	}
+	return 0, false
 }
 
 // -----------------------------------------------------------------------------
