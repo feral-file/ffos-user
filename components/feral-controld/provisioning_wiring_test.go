@@ -178,11 +178,13 @@ func TestExternalLinkProbeExcludesOwnHotspot(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	cmd := mocks.NewMockExecCmd(ctrl)
 	cmd.EXPECT().Output().
-		Return([]byte("wlan0:wifi:connected:ff1-softap\neth0:ethernet:unavailable:"), nil).
+		Return([]byte("GENERAL.DEVICE:wlan0\nGENERAL.TYPE:wifi\nGENERAL.STATE:100 (connected)\nGENERAL.CONNECTION:ff1-softap\n"+
+			"GENERAL.DEVICE:eth0\nGENERAL.TYPE:ethernet\nGENERAL.STATE:20 (unavailable)\nGENERAL.CONNECTION:\n"), nil).
 		AnyTimes()
 	exec := mocks.NewMockExec(ctrl)
 	exec.EXPECT().
-		CommandContext(gomock.Any(), "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device").
+		CommandContext(gomock.Any(), "nmcli", "-t", "-f",
+			"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION", "device", "show").
 		Return(cmd).
 		AnyTimes()
 

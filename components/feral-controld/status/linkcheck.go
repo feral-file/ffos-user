@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,62 +92,100 @@ func (c *LinkChecker) ExternalLink(ctx context.Context, excludeProfile string) (
 	return c.linkProbe(ctx, excludeProfile)
 }
 
+// nmDeviceStateActivated is NetworkManager's NM_DEVICE_STATE_ACTIVATED (100):
+// the device has an active connection with an address — a usable LAN link.
+// Compared numerically because the textual rendering is localized (see
+// linkProbe); the numeric enum also already covers externally-managed devices,
+// which NM ≥1.36 renders as "connected (externally)" but still numbers 100.
+const nmDeviceStateActivated = 100
+
 // linkProbe reports whether any ethernet or wifi device is in NetworkManager's
-// "connected" state, skipping devices whose active connection is
-// excludeProfile (empty = no exclusion). Shared nmcli probe behind HasLink and
-// ExternalLink; error handling is the caller's, since the two have opposite
-// failure biases.
+// ACTIVATED state, skipping devices whose active connection is excludeProfile
+// (empty = no exclusion). Shared nmcli probe behind HasLink and ExternalLink;
+// error handling is the caller's, since the two have opposite failure biases.
 func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, linkCheckTimeout)
 	defer cancel()
 
-	// -t terse, -f DEVICE,TYPE,STATE,CONNECTION yields lines like
-	// "wlp2s0:wifi:connected:HomeWifi". CONNECTION is the active profile name,
-	// which is how the hotspot is told apart from a station association on the
-	// same wifi device. Terse mode backslash-escapes ':' inside values, so
-	// SplitN(4) keeps a connection name containing colons intact in parts[3];
-	// the escaping never affects the comparison against excludeProfile
-	// (ff1-softap contains no ':').
-	cmd := c.exec.CommandContext(probeCtx, "nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device")
+	// `device show` rather than `device status` deliberately: status renders
+	// STATE as a translated word only ("verbunden"), which any English text
+	// match would read as CONFIRMED link absence — the one verdict that
+	// authorizes raising the setup AP — on every non-English locale. show
+	// renders the raw enum first ("100 (connected)"), which is locale-stable;
+	// same approach as wifictl.wifiDeviceState. Terse -t emits one
+	// "FIELD:value" line per field, grouped per device, with GENERAL.DEVICE
+	// opening each block. GENERAL.CONNECTION is the active profile name, which
+	// is how the hotspot is told apart from a station association on the same
+	// wifi device; Cut at the first ':' keeps a name containing colons intact
+	// (terse mode backslash-escapes them, and ff1-softap contains none).
+	cmd := c.exec.CommandContext(probeCtx, "nmcli", "-t", "-f",
+		"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION", "device", "show")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, err
 	}
 
-	parsedAny := false
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		parts := strings.SplitN(line, ":", 4)
-		if len(parts) != 4 {
+	// A "no link" verdict counts as CONFIRMED only if the survey saw at least
+	// one candidate uplink: an ethernet/wifi block with a parseable numeric
+	// state. Corrupt or empty output, or a listing with no ethernet/wifi
+	// devices at all (loopback/p2p only), proves nothing about uplink state —
+	// returning (false, nil) off it would authorize raising the setup AP over
+	// a possibly-healthy link, so it surfaces as a probe failure instead
+	// (ExternalLink defers; HasLink keeps failing closed to false).
+	type record struct {
+		typ, conn string
+		state     int
+		hasState  bool
+	}
+	var cur record
+	surveyed, link := false, false
+	// flush evaluates the finished device block; field order within a block is
+	// not assumed (nmcli emits the requested order, but nothing here breaks if
+	// it ever did not).
+	flush := func() {
+		if cur.typ != "ethernet" && cur.typ != "wifi" {
+			return
+		}
+		if !cur.hasState {
+			return
+		}
+		surveyed = true
+		if cur.state != nmDeviceStateActivated {
+			return
+		}
+		if excludeProfile != "" && cur.conn == excludeProfile {
+			return
+		}
+		link = true
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		field, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
 			continue
 		}
-		parsedAny = true
-		devType, state, conn := parts[1], parts[2], parts[3]
-		if devType != "ethernet" && devType != "wifi" {
-			continue
+		switch field {
+		case "GENERAL.DEVICE":
+			flush()
+			cur = record{}
+		case "GENERAL.TYPE":
+			cur.typ = value
+		case "GENERAL.STATE":
+			// "100 (connected)" — the leading enum is the locale-stable part.
+			num, _, _ := strings.Cut(value, " ")
+			if n, convErr := strconv.Atoi(num); convErr == nil {
+				cur.state, cur.hasState = n, true
+			}
+		case "GENERAL.CONNECTION":
+			cur.conn = value
 		}
-		// nmcli reports GENERAL.STATE as "connected" (numeric 100) once a device
-		// has an active connection with an address — a usable LAN link. Prefix
-		// match, not equality: NM ≥1.36 renders externally-managed devices as
-		// "connected (externally)", and an exact match would read that healthy
-		// wire as a CONFIRMED absence — the one verdict that authorizes raising
-		// the setup AP. "connecting (...)" does not share the prefix, so a
-		// still-negotiating device correctly stays a non-link.
-		if !strings.HasPrefix(state, "connected") {
-			continue
-		}
-		if excludeProfile != "" && conn == excludeProfile {
-			continue
-		}
+	}
+	flush()
+
+	if link {
 		return true, nil
 	}
-	if !parsedAny {
-		// Not one row split into four fields: this is corrupt or empty output,
-		// not a survey that confirmed every device link-less. Returning
-		// (false, nil) here would hand ExternalLink's caller a CONFIRMED
-		// absence — the one verdict that authorizes raising the setup AP —
-		// off data that proved nothing, so surface it as a probe failure
-		// (ExternalLink defers; HasLink keeps failing closed to false).
-		return false, errors.New("nmcli device output had no parseable rows")
+	if !surveyed {
+		return false, errors.New("no ethernet/wifi device rows in nmcli output")
 	}
 	return false, nil
 }
