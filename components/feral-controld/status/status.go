@@ -35,10 +35,13 @@ const (
 )
 
 type PlayerStatus struct {
-	Command        string                      `json:"castCommand,omitempty"`
-	PlaylistURL    *string                     `json:"playlistURL,omitempty"`
-	Playlist       *dp1.Playlist               `json:"playlist,omitempty"`
-	Index          *int                        `json:"index"`
+	Command     string        `json:"castCommand,omitempty"`
+	PlaylistURL *string       `json:"playlistURL,omitempty"`
+	Playlist    *dp1.Playlist `json:"playlist,omitempty"`
+	Index       *int          `json:"index"`
+	// Artwork render outcome reported by the player: 0 pending, 1 loading,
+	// 2 ready, 3 failed. Relayed unchanged; controld does not interpret it.
+	RenderStatus   *int                        `json:"renderStatus,omitempty"`
 	IsPaused       *bool                       `json:"isPaused,omitempty"`
 	Items          *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
 	Ok             bool                        `json:"ok,omitempty"`
