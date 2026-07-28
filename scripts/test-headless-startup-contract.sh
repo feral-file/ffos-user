@@ -214,6 +214,11 @@ assert_contains "$kiosk_script" 'PLAYER_BUNDLE_ROOT="/opt/feral/feral-player"'
 assert_contains "$kiosk_script" 'CHROMIUM_CACHE_DIR="/home/feralfile/.cache/chromium"'
 assert_contains "$kiosk_script" 'PLAYER_FINGERPRINT_FILE="/home/feralfile/.state/player-bundle-fingerprint"'
 
+# The fingerprint is persistent state, so its write must follow the
+# temp-then-rename contract (docs/architecture.md "Persistence and State
+# Ownership") — a crash mid-write must not leave a truncated fingerprint.
+assert_contains "$kiosk_script" 'mv -f "$PLAYER_FINGERPRINT_FILE.tmp" "$PLAYER_FINGERPRINT_FILE"'
+
 fp_fn_file="$tmp_dir/cache_guard.sh"
 sed -n '/^clear_chromium_cache_on_bundle_change() {/,/^}/p' "$kiosk_script" > "$fp_fn_file"
 grep -q 'clear_chromium_cache_on_bundle_change() {' "$fp_fn_file" || \
@@ -296,6 +301,27 @@ run_cache_guard
 [ "$(cat "$fp_file")" = "$fp_before" ] || fail "missing bundle must not rewrite the fingerprint"
 assert_no_purge_logged "missing bundle"
 mv "$bundle_dir.gone" "$bundle_dir"
+
+# A failed cache delete must NOT record the new fingerprint: recording it
+# would mark the purge as done and leave the stale cache in place on every
+# future start — silently reintroducing the bug the guard exists to fix. The
+# retained fingerprint makes the next start retry the purge. Write-bit removal
+# on the containing dir makes unlink fail; root ignores permission bits, so
+# the case only runs unprivileged (CI and dev machines are).
+if [ "$(id -u)" -ne 0 ]; then
+  echo "index-v3" > "$bundle_dir/index.html"
+  fp_before="$(cat "$fp_file")"
+  chmod a-w "$cache_dir/Default/Cache"
+  run_cache_guard
+  chmod u+w "$cache_dir/Default/Cache"
+  [ -e "$cache_dir/Default/Cache/marker" ] || fail "failed-delete fixture did not hold (marker gone)"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "failed delete must not record the new fingerprint"
+  grep -Fq "Could not delete Chromium cache" "$guard_out" || \
+    fail "failed delete must log the retry warning"
+  run_cache_guard
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "retry after failed delete must clear the cache"
+  [ "$(cat "$fp_file")" != "$fp_before" ] || fail "successful retry must record the new fingerprint"
+fi
 
 # --- 6. controld start-limit never latches -------------------------------------
 

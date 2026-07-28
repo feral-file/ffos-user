@@ -106,7 +106,12 @@ clear_chromium_cache_on_bundle_change() {
     # cache on a broken tree helps nothing. An existing-but-empty tree
     # still fingerprints and purges once — fail-safe, self-correcting when
     # the tree returns. Any pipeline failure returns 0: this guard must
-    # never block the Chromium launch.
+    # never block the Chromium launch. Deliberately NO pipefail here: with
+    # it, one persistently unreadable bundle file would fail every run and
+    # silently disable the guard (missed purges — #234 comes back); without
+    # it, the fingerprint covers the readable subset, which is stable for
+    # an unchanged bundle and still moves on real changes. Worst case is a
+    # spurious purge, the fail-safe direction.
     fingerprint=$( (cd "$PLAYER_BUNDLE_ROOT" 2>/dev/null && \
         find . -type f -print0 | LC_ALL=C sort -z | xargs -0 cksum | cksum) 2>/dev/null ) || return 0
     previous=$(cat "$PLAYER_FINGERPRINT_FILE" 2>/dev/null || true)
@@ -114,12 +119,24 @@ clear_chromium_cache_on_bundle_change() {
         return 0
     fi
     echo "$(date '+%F %T') [INFO] Player bundle changed, clearing Chromium cache"
-    rm -rf "$CHROMIUM_CACHE_DIR"
-    # A failed record (read-only /home, full disk) degrades into a purge on
-    # EVERY kiosk restart — the exact cache churn the fingerprint exists to
-    # avoid — so make that state legible in chromium.log instead of silent.
+    # A failed delete (I/O error, immutable entry) must NOT record the new
+    # fingerprint: that would mark the purge as done and leave the stale
+    # cache in place permanently — the exact failure this guard exists to
+    # prevent. Keeping the previous fingerprint retries the purge on every
+    # subsequent start until it succeeds.
+    if ! rm -rf "$CHROMIUM_CACHE_DIR" 2>/dev/null; then
+        echo "$(date '+%F %T') [WARN] Could not delete Chromium cache; will retry on next kiosk start"
+        return 0
+    fi
+    # Temp-then-rename per the state-write contract (docs/architecture.md,
+    # "Persistence and State Ownership"): a crash mid-write must not leave a
+    # truncated fingerprint. A failed record (read-only /home, full disk)
+    # degrades into a purge on EVERY kiosk restart — the exact cache churn
+    # the fingerprint exists to avoid — so make that state legible in
+    # chromium.log instead of silent.
     if ! { mkdir -p "$(dirname "$PLAYER_FINGERPRINT_FILE")" && \
-           printf '%s\n' "$fingerprint" > "$PLAYER_FINGERPRINT_FILE"; } 2>/dev/null; then
+           printf '%s\n' "$fingerprint" > "$PLAYER_FINGERPRINT_FILE.tmp" && \
+           mv -f "$PLAYER_FINGERPRINT_FILE.tmp" "$PLAYER_FINGERPRINT_FILE"; } 2>/dev/null; then
         echo "$(date '+%F %T') [WARN] Could not record player bundle fingerprint; cache will be purged on every kiosk start"
     fi
 }
