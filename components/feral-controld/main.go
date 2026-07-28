@@ -617,8 +617,10 @@ func initializeApp(
 	// unconditionally. The connectivity adapter reads sys-monitord over the shared
 	// D-Bus client; the ActiveLink guard reuses the link checker so a device with
 	// any live local link (ethernet or an associated Wi-Fi station) never pops the
-	// setup AP — the AP raises on link loss, not internet loss (#233). Narration
-	// flows through a setupui.Service.
+	// setup AP — the AP raises on link loss, not internet loss (#233). The probe
+	// excludes the device's own hotspot by NM profile name, so a raised (or
+	// half-torn-down) setup AP never counts as an uplink. Narration flows through
+	// a setupui.Service.
 	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
@@ -648,7 +650,7 @@ func initializeApp(
 		Clock:        clock,
 		Logger:       logger,
 		Notifier:     provisioningNotifier,
-		ActiveLink:   linkChecker.HasLink,
+		ActiveLink:   externalLinkProbe(linkChecker),
 	})
 
 	// Hub status provider. The base provider reads identity/version/claim/topic

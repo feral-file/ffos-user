@@ -10,7 +10,20 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
+	"github.com/feral-file/ffos-user/components/feral-controld/softap"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
+
+// externalLinkProbe adapts the shared LinkChecker to the provisioning
+// ActiveLink seam, excluding the device's own setup hotspot by NM profile name
+// so a raised (or half-torn-down) AP never counts as an uplink. Defined here at
+// file scope because run()'s daemon-lifetime variable named `context` shadows
+// the context package inside that function.
+func externalLinkProbe(lc *status.LinkChecker) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		return lc.ExternalLink(ctx, softap.ProfileName)
+	}
+}
 
 // provisioningRunner is the small lifecycle surface run() drives on the setup-AP
 // state machine. *provisioning.Machine satisfies it; keeping it an interface lets
