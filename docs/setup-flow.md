@@ -77,13 +77,14 @@ Machine states: `starting` (pre-assessment sentinel, held only until the boot co
 stateDiagram-v2
   [*] --> online: online + saved profile
   [*] --> unprovisioned: online, or offline with an active link
-  [*] --> ap_active: unprovisioned + offline + no link
+  [*] --> ap_active: boot: unprovisioned + offline + no link
 
   online --> offline_retrying: lost internet (provisioned)
   offline_retrying --> ap_active: sustained-offline window elapsed with no link
   offline_retrying --> online: internet back
 
-  unprovisioned --> ap_active: goes offline with no link
+  unprovisioned --> ap_active: sustained link absence (5m window)
+  unprovisioned --> offline_retrying: profile appeared while parked (window expiry re-check)
   ap_active --> joining: portal /connect (creds submitted)
   ap_active --> ap_active: portal /rescan (AP bounce + fresh scan)
   joining --> online: join succeeded + internet (AP stays down)
@@ -96,7 +97,7 @@ stateDiagram-v2
 
 **Trigger rules:**
 
-- **Unprovisioned + offline + confirmed no link → raise the AP immediately** *at a connectivity assessment*: a fresh device with no saved Wi-Fi and no ethernet needs the AP right away, and at that moment the absence was just confirmed. A device *parked* unprovisioned-with-a-link that later loses the link (cable unplugged — no connectivity event fires, the device is already offline; the 15s tick probe is what notices) instead gets the same 5-minute continuous-confirmed-absence window as the provisioned flavor, because a 20-second LAN-switch reboot on an air-gapped wired frame must not pop setup — and once the AP is up, only going online or a portal join lowers it (there is deliberately no link-based exit from `ap_active`: while the hotspot may be what the probe sees, a "link returned" reading cannot be trusted under every wiring).
+- **Unprovisioned + offline + confirmed no link → raise the AP immediately at the boot assessment**: a fresh device with no saved Wi-Fi and no ethernet needs the AP right away. Every confirmed link loss *after* boot gets the same 5-minute continuous-confirmed-absence window as the provisioned flavor, however it arrives: as the connectivity edge itself (an online wired frame whose LAN switch reboots for 20 seconds must not flash setup over its artwork), noticed by the 15s tick probe on a parked device (a cable unplug emits no connectivity edge — the device is already offline), or riding in on a redundant offline re-emission (a `feral-sys-monitord` restart re-emits its first probe unconditionally; such a reading counts as one confirmed absence, never an immediate raise). The window matters because once the AP is up, only going online or a portal join lowers it: there is deliberately no link-based exit from a *raised* `ap_active`, since a "link returned" reading cannot be trusted under every wiring while the hotspot may be what the probe sees. (A *failed* raise — `ap_active` with no hotspot actually up — may still resolve to `unprovisioned` on a confirmed link-present reading.) With no link guard wired there is nothing to confirm absence over time, so the immediate raise keeps its original scope.
 - **Provisioned + offline → arm a sustained link-loss window** (`defaultOfflineWindow = 5m`, probed on a `15s` tick). Any tick that sees a link — or gets an inconclusive probe — disarms the window; the clock restarts at the next confirmed absence, so the AP raises only after a full window of **continuous, confirmed link absence**. The window deliberately does not measure time-since-internet-loss — at neither end: it is armed by the *first confirmed-absent probe*, not by the offline reading that preceded it (arming at the reading would let the AP raise after 4m45s of confirmed absence, one tick short), and an association lost moments before an internet-loss deadline still gets its full 5 minutes (a router reboot mid-outage never pops the AP over active artwork). With no link guard wired at all there is nothing to confirm, so the window keeps its original "5m from the offline event" baseline.
 - **Any live local link suppresses the AP** — a wired (ethernet) link or an associated Wi-Fi station — even when the device reports offline. The AP raises on **link loss, not internet loss**: it can only fix "cannot associate" (re-submitting credentials for a network the device is already on just rejoins the same dead network), and the cases it genuinely rescues — a changed Wi-Fi password, a vanished SSID — present as link *down*, not up-but-offline. Raising over a live Wi-Fi association would also drop the station link on the single radio, killing LAN hub control and mDNS on an otherwise healthy LAN (ISP outage, air-gapped gallery) — and on Wi-Fi the raise is a one-way door: the hotspot takes the radio, so reachability can never return on its own to tear the AP down.
 - **The device's own setup hotspot never counts as a link.** The probe (`status.LinkChecker.ExternalLink`) excludes the `ff1-softap` NM profile by name — which also covers a leftover hotspot from a failed teardown — and the machine additionally ignores the guard while it knows its own AP is up.

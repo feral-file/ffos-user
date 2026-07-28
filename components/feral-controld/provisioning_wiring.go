@@ -20,6 +20,14 @@ import (
 // file scope because run()'s daemon-lifetime variable named `context` shadows
 // the context package inside that function.
 func externalLinkProbe(lc *status.LinkChecker) func(context.Context) (bool, error) {
+	if lc == nil {
+		// Fail OPEN (guard disabled) rather than wiring a probe that errors
+		// forever: a permanent error reads as linkUnknown, which defers the AP
+		// on every tick, so first-run provisioning would silently never get
+		// its setup AP. A nil ActiveLink keeps the connectivity-only baseline
+		// (the AP still raises) instead.
+		return nil
+	}
 	return func(ctx context.Context) (bool, error) {
 		return lc.ExternalLink(ctx, softap.ProfileName)
 	}

@@ -113,11 +113,13 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (boo
 		return false, err
 	}
 
+	parsedAny := false
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		parts := strings.SplitN(line, ":", 4)
 		if len(parts) != 4 {
 			continue
 		}
+		parsedAny = true
 		devType, state, conn := parts[1], parts[2], parts[3]
 		if devType != "ethernet" && devType != "wifi" {
 			continue
@@ -136,6 +138,15 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (boo
 			continue
 		}
 		return true, nil
+	}
+	if !parsedAny {
+		// Not one row split into four fields: this is corrupt or empty output,
+		// not a survey that confirmed every device link-less. Returning
+		// (false, nil) here would hand ExternalLink's caller a CONFIRMED
+		// absence — the one verdict that authorizes raising the setup AP —
+		// off data that proved nothing, so surface it as a probe failure
+		// (ExternalLink defers; HasLink keeps failing closed to false).
+		return false, errors.New("nmcli device output had no parseable rows")
 	}
 	return false, nil
 }

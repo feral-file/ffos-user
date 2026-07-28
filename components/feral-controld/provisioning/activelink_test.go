@@ -429,6 +429,154 @@ func TestActiveLinkGuardWindowStartsAtFirstConfirmedAbsence(t *testing.T) {
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
 
+// TestActiveLinkGuardRedundantOfflineRespectsUnprovisionedWindow pins that a
+// redundant offline reading (a sys-monitord restart re-emits its first probe
+// unconditionally) landing on a device parked in StateUnprovisioned must NOT
+// take the immediate-raise path and jump the continuous-confirmed-absence
+// window the tick is measuring: an air-gapped wired frame mid-LAN-switch-reboot
+// would get setup popped by a coincidental re-emission, and with no link-based
+// exit from StateAPActive it would stay wedged there. The reading counts as one
+// confirmed absence — no more — and the raise still needs the full window.
+func TestActiveLinkGuardRedundantOfflineRespectsUnprovisionedWindow(t *testing.T) {
+	fl := &fakeLink{up: true}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false) // air-gapped wired frame: parked with AP down
+	require.Equal(t, StateUnprovisioned, h.m.State())
+
+	fl.up = false   // LAN switch reboots
+	h.m.onTick(ctx) // first confirmed absence arms the window
+
+	h.clk.advance(5 * time.Second)
+	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline mid-blip
+	assert.Equal(t, StateUnprovisioned, h.m.State(),
+		"a redundant offline reading must not jump the sustained-absence window")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	fl.up = true // switch back after ~20s: the blip must never raise the AP
+	h.clk.advance(10 * time.Second)
+	h.m.onTick(ctx)
+	h.clk.advance(30 * time.Minute)
+	h.m.onTick(ctx)
+	assert.Equal(t, 0, h.rec.count("ap.Up"),
+		"the wired blip must ride out entirely, re-emission or not")
+
+	fl.up = false // now a REAL sustained loss, noticed first by a re-emission
+	h.m.onConnectivity(ctx, false)
+	assert.Equal(t, 0, h.rec.count("ap.Up"),
+		"the re-emission arms the window; it must not raise by itself")
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx) // a full window of confirmed absence: NOW the AP raises
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestActiveLinkGuardOnlineWiredEdgeGetsWindow pins that the online→offline
+// edge is windowed too: an ONLINE wired unprovisioned frame whose LAN switch
+// reboots loses link and internet in the same instant, so the connectivity
+// edge arrives with a confirmed-absent probe — and must NOT raise immediately.
+// Flashing the setup QR over artwork for the length of every router reboot is
+// exactly the transient-blip hazard #233 exists to prevent; only the boot
+// assessment (a fresh link-less device) keeps the immediate raise.
+func TestActiveLinkGuardOnlineWiredEdgeGetsWindow(t *testing.T) {
+	fl := &fakeLink{up: false} // the switch is already down when the edge lands
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, true) // online via ethernet: the wired steady state
+	require.Equal(t, StateUnprovisioned, h.m.State())
+
+	h.m.onConnectivity(ctx, false) // switch reboots: link + internet die together
+	assert.Equal(t, StateUnprovisioned, h.m.State(),
+		"the online→offline edge must arm the window, not raise immediately")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	fl.up = true // switch back ~15s later: the blip rides out
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // sighting disarms the window
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	fl.up = false // the wire is now REALLY gone; only ticks will notice
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // first confirmed absence arms a fresh window
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State(),
+		"a full window of confirmed absence must still raise the AP")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestActiveLinkGuardRedundantOfflinePreservesProvisionedWindow pins that a
+// redundant offline reading landing mid-window in StateOfflineRetrying leaves
+// the armed window untouched: onConnectivity's provisioned branch must neither
+// reset the clock (which would let a sys-monitord restart loop postpone the AP
+// forever on a genuinely dead link) nor clear it (which the unprovisioned
+// branches do on sightings). The guard-wired entry path deliberately does not
+// arm — only the first confirmed-absent probe does — so this is the one
+// invariant keeping the window continuous across re-emissions.
+func TestActiveLinkGuardRedundantOfflinePreservesProvisionedWindow(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false) // offline reading; nothing armed yet
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // first confirmed absence arms the window
+
+	h.clk.advance(4 * time.Minute)
+	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline mid-window
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	// 5m10s since arming: if the re-emission had reset (or re-armed) the
+	// window, this tick would still be minutes short and the assert fails.
+	h.clk.advance(70 * time.Second)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State(),
+		"the re-emission must not have reset the confirmed-absence clock")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestActiveLinkGuardJoinWithoutInternetKeepsAPDown pins the post-join
+// re-assessment with the guard wired: joining a network that associates but
+// has no upstream (air-gapped LAN, dead WAN) parks the machine in
+// StateOfflineRetrying with the AP down, and the AP never returns while the
+// association survives — every tick sights the link and disarms the window.
+// This is the accepted #233 trade-off (re-submitting credentials rejoins the
+// same dead network; recovery is physical), previously pinned only by prose in
+// docs/setup-flow.md.
+func TestActiveLinkGuardJoinWithoutInternetKeepsAPDown(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false) // boot: link-less unprovisioned -> AP up
+	require.Equal(t, StateAPActive, h.m.State())
+	require.Equal(t, 1, h.rec.count("ap.Up"))
+
+	h.wifi.setProfile(true) // the join saves a profile...
+	fl.up = true            // ...and brings the association up
+	h.m.applyJoin(ctx, "Net", "pw")
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"associated-but-offline must park provisioned with the AP down")
+	assert.Equal(t, portal.JoinSucceeded, h.m.Status().State,
+		"the association DID succeed; that is the portal's contract")
+
+	for i := 0; i < 4; i++ { // 24+ minutes of ticks, well past the window
+		h.clk.advance(6 * time.Minute)
+		h.m.onTick(ctx)
+	}
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"),
+		"the AP must never return over a live association")
+}
+
 // TestActiveLinkGuardNilDefaultsToNoSuppression proves the guard is opt-in: with
 // no ActiveLink configured (the newHarness default), an unprovisioned offline
 // device raises the AP exactly as before, so the seam cannot silently change

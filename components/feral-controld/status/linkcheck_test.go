@@ -74,6 +74,22 @@ func TestExternalLink(t *testing.T) {
 			want:   false,
 		},
 		{
+			// Terse mode backslash-escapes ':' inside values; SplitN(…, 4)
+			// must keep the whole name in parts[3] rather than truncating at
+			// the escaped colon and mis-reading the line.
+			name:   "colon in connection name stays intact",
+			output: `wlan0:wifi:connected:Guest\:Net`,
+			want:   true,
+		},
+		{
+			// The malformed row is skipped; the verdict comes from the row
+			// that did parse. All-rows-unparseable is an error instead — see
+			// TestExternalLinkUnparseableOutputIsError.
+			name:   "malformed three-field line is skipped",
+			output: "eth0:ethernet:connected\nwlan0:wifi:disconnected:",
+			want:   false,
+		},
+		{
 			// NM >= 1.36 renders externally-managed devices this way; an
 			// exact-equality match would read this healthy wire as CONFIRMED
 			// absence — the one verdict that authorizes raising the AP.
@@ -107,6 +123,29 @@ func TestExternalLinkSurfacesProbeError(t *testing.T) {
 
 	assert.False(t, lc.HasLink(context.Background()),
 		"HasLink keeps the fail-closed bias for the advertiser")
+}
+
+// TestExternalLinkUnparseableOutputIsError pins the parser's failure bias:
+// output where not one row splits into four fields proved nothing, so it must
+// surface as a probe failure (ExternalLink's caller defers the AP) rather than
+// as (false, nil) — a CONFIRMED absence that would authorize raising the setup
+// AP over a possibly-healthy wire. HasLink keeps failing closed to false.
+func TestExternalLinkUnparseableOutputIsError(t *testing.T) {
+	lc := status.NewLinkChecker(probeExec(t, "garbage output", nil), zap.NewNop())
+
+	_, err := lc.ExternalLink(context.Background(), "ff1-softap")
+	assert.Error(t, err, "unparseable output must read as unknown, not confirmed absence")
+
+	assert.False(t, lc.HasLink(context.Background()))
+
+	// Empty output (NetworkManager reports no devices at all) reaches the same
+	// path and gets the same verdict: it proves nothing about link state, so
+	// it must defer the AP, not authorize it. Unreachable on FF1 (the wifi
+	// radio is always listed, even unmanaged) but pinned deliberately.
+	empty := status.NewLinkChecker(probeExec(t, "", nil), zap.NewNop())
+	_, err = empty.ExternalLink(context.Background(), "ff1-softap")
+	assert.Error(t, err, "empty output is not a confirmed absence")
+	assert.False(t, empty.HasLink(context.Background()))
 }
 
 // TestHasLinkCountsOwnHotspot pins that HasLink deliberately does NOT exclude
