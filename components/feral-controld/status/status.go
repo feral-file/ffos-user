@@ -39,12 +39,9 @@ type PlayerStatus struct {
 	PlaylistURL *string       `json:"playlistURL,omitempty"`
 	Playlist    *dp1.Playlist `json:"playlist,omitempty"`
 	Index       *int          `json:"index"`
-	// Artwork render outcome reported by the player: "pending", "loading",
-	// "ready" or "failed". Relayed unchanged; controld does not interpret it.
-	// Must match what the player emits — a type mismatch fails the whole
-	// PlayerStatus unmarshal, not just this field, and every poll then reports
-	// ok:false instead of real status.
-	RenderStatus   *string                     `json:"renderStatus,omitempty"`
+	// Artwork render outcome reported by the player: 0 pending, 1 loading,
+	// 2 ready, 3 failed. Relayed unchanged; controld does not interpret it.
+	RenderStatus   *int                        `json:"renderStatus,omitempty"`
 	IsPaused       *bool                       `json:"isPaused,omitempty"`
 	Items          *[]dp1playlist.PlaylistItem `json:"items,omitempty"`
 	Ok             bool                        `json:"ok,omitempty"`
