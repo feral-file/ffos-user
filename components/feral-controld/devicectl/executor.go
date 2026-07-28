@@ -2096,6 +2096,10 @@ func (e *executor) uploadLogsInProcess(ctx context.Context, apiKey, supportBundl
 	info := e.logUploadBuildInfo(ctx)
 	uploader := e.newLogUploader()
 
+	//nolint:gosec // G118 flags the detached context, which is the entire point
+	// here (see this function's doc): the command ACKs immediately, so the
+	// request ctx would be canceled out from under the transfer. The upload is
+	// bounded by logUploadTimeout instead, not left unbounded.
 	go func() {
 		// Detached from the command ctx: the command returns as soon as the upload
 		// is scheduled, so ctx would be canceled out from under the transfer.

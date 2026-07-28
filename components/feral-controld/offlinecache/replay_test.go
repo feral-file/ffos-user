@@ -1172,6 +1172,8 @@ func TestReplayer_ProcessRequestPaused_StaticServerLookalikeURLsAreNotPassedThro
 		name string
 		url  string
 	}{
+		//nolint:gosec // G101 reads the userinfo below as a credential; it is
+		// the attack fixture this case exists to reject, not a secret.
 		{
 			// "127.0.0.1:8082" is RFC 3986 userinfo here; the real host
 			// is evil.example. url.Host excludes userinfo, so the origin

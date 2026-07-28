@@ -276,7 +276,7 @@ func TestStore_SavePlaylist_ConcurrentDifferentPayloadsNeverCorrupts(t *testing.
 			if j > 0 {
 				items.WriteByte(',')
 			}
-			items.WriteString(fmt.Sprintf(`{"id":"item-%d-%d","source":"https://example.com/%d/%d"}`, i, j, i, j))
+			fmt.Fprintf(&items, `{"id":"item-%d-%d","source":"https://example.com/%d/%d"}`, i, j, i, j)
 		}
 		payloads[i] = json.RawMessage(fmt.Sprintf(`{"id":"playlist-1","marker":%d,"items":[%s]}`, i, items.String()))
 	}
