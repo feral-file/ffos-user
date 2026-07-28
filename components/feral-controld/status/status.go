@@ -51,6 +51,11 @@ type PlayerStatus struct {
 		// override). Must round-trip here or this typed re-marshal drops it
 		// from player_status notifications before controllers can read it.
 		DefaultDuration *float64 `json:"defaultDuration,omitempty"`
+		// Device-level tombstone (museum label) state: "on", "off", or
+		// "timed". Absent means the player never had one set and falls back
+		// to "timed". Same round-trip requirement as DefaultDuration — ff-app
+		// reads it to show the tombstone control's current selection.
+		Tombstone *string `json:"tombstone,omitempty"`
 	} `json:"deviceSettings,omitempty"`
 	LoopMode *LoopMode `json:"loopMode,omitempty"`
 	Shuffle  *bool     `json:"shuffle,omitempty"`
