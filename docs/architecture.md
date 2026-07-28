@@ -145,7 +145,7 @@ Each service owns its own state files exclusively. No service should read or wri
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-count` | Chromium OOM kill count (read by `controld` OOM recoverer) |
 | earlyoom/oom-state | `/var/lib/oom_state/chromium-oom-kill-handled-count` | Handled OOM kill count (written by `controld` OOM recoverer) |
 | `feral-watchdog` | `/home/feralfile/.state/failed_recovery_version` | Version of a recovery candidate that failed to boot |
-| `chromium-kiosk` (`start-kiosk.sh`) | `/home/feralfile/.state/player-bundle-fingerprint` | Content fingerprint of the player bundle at the last successful cache purge (guard for issue #234) |
+| `chromium-kiosk` (`start-kiosk.sh`) | `/home/feralfile/.state/player-bundle-fingerprint` | Content fingerprint of the player bundle at the last purge that resolved a complete fingerprint (guard for issue #234); a defensive purge on an unreadable bundle deliberately leaves it unchanged so the next start retries |
 
 The former `feral-setupd` state file (`/home/feralfile/.state/setupd`, with `setup_phase` / `pre_failure_phase` / `topic_id` / `connected`) is gone. The merged OTA gate (`otagate`) tracks update state in memory (`Mode`/`Result` enums and an in-memory permanent-failure latch) rather than persisting a durable setup-phase machine; the relayer topic lives in `controld.state`; the live setup/provisioning state is derived from the `provisioning` machine, not a file.
 

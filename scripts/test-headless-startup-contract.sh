@@ -101,7 +101,10 @@ assert_contains "$kiosk_script" "for attempt in 1 2 3"
 # extracted verbatim with its DRM glob retargeted, so the assertions exercise
 # the exact shipped logic.
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+# u+rwX first: the cache-guard cases park fixtures at mode 000, and a fail()
+# exit between chmod and restore would otherwise leak the tmp dir (rm -rf
+# cannot descend a non-traversable directory).
+trap 'chmod -R u+rwX "$tmp_dir" 2>/dev/null; rm -rf "$tmp_dir"' EXIT
 
 drm_root="$tmp_dir/drm"
 mkdir -p "$drm_root/card0-HDMI-A-1" "$drm_root/card1-DP-1"
@@ -194,8 +197,9 @@ expect_proceed "no readable status fails open" "fail open"
 # cached headerless — before that header was active, or under the legacy
 # headerless fallback — are reused without revalidation, so the guard in
 # start-kiosk.sh purges the cache exactly when the bundle fingerprint
-# changes; these cases pin both directions (purge on change, keep when
-# unchanged — the keep side is what protects remote-artwork cache warmth).
+# changes; these cases pin all three directions (purge on change, keep when
+# unchanged — the keep side is what protects remote-artwork cache warmth —
+# and purge defensively when the fingerprint cannot be computed at all).
 # The guard must actually be CALLED, and called before Chromium exists —
 # extracting and testing the function alone would stay green if the invocation
 # were deleted or moved after the launch, where a purge races a live browser.
@@ -355,6 +359,45 @@ if [ "$(id -u)" -ne 0 ]; then
   assert_purge_logged "recovered fingerprint"
 else
   echo "test-headless-startup-contract: SKIPPED unreadable-bundle case (running as root)" >&2
+fi
+
+# The failure path must also cover entries find cannot DESCEND — an unreadable
+# directory hides whole files from the digest input, not just one cksum line —
+# and must hold across starts: every launch purges again with the fingerprint
+# parked until the tree reads cleanly (retry-until-readable, not a one-shot).
+# Same root gate as above.
+if [ "$(id -u)" -ne 0 ]; then
+  fp_before="$(cat "$fp_file")"
+  mkdir -p "$bundle_dir/private"
+  echo "hidden-chunk" > "$bundle_dir/private/chunk.js"
+  chmod 000 "$bundle_dir/private"
+  seed_cache
+  run_cache_guard
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "unreadable directory must fail toward purging"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "unreadable directory must not advance the stored fingerprint"
+  # Second start with the tree still unreadable: purge again, still parked,
+  # warning still legible.
+  seed_cache
+  run_cache_guard
+  chmod 755 "$bundle_dir/private"
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "still-unreadable tree must purge on every start"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "retrying starts must keep the stored fingerprint parked"
+  grep -Fq "bundle fingerprint failed" "$guard_out" || fail "retrying starts must keep logging the warning"
+  rm -rf "$bundle_dir/private"
+
+  # A present-but-non-traversable bundle ROOT is unreadable content, not
+  # absence: [ -d ] passes (it needs only the parent traversable), the cd
+  # fails, and the guard must purge defensively — only a MISSING tree skips.
+  run_cache_guard # settle: tree is back to the recorded state (keep path)
+  fp_before="$(cat "$fp_file")"
+  seed_cache
+  chmod 000 "$bundle_dir"
+  run_cache_guard
+  chmod 755 "$bundle_dir"
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "non-traversable bundle root must purge defensively"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "non-traversable root must not advance the stored fingerprint"
+else
+  echo "test-headless-startup-contract: SKIPPED unreadable-directory cases (running as root)" >&2
 fi
 
 # --- 6. controld start-limit never latches -------------------------------------

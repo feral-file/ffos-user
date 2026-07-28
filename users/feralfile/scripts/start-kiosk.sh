@@ -103,7 +103,9 @@ clear_chromium_cache_on_bundle_change() {
     local fingerprint previous fp_err fp_cause
     # A MISSING bundle tree skips the guard entirely:
     # serve-feral-player.service is about to fail readiness anyway, and
-    # churning the cache on an absent tree helps nothing.
+    # churning the cache on an absent tree helps nothing. (A present-but-
+    # non-traversable root passes this check, fails the cd below, and takes
+    # the defensive-purge path — it is unreadable content, not absence.)
     if [ ! -d "$PLAYER_BUNDLE_ROOT" ]; then
         return 0
     fi
