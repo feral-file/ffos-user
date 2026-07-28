@@ -282,14 +282,16 @@ if grep -Fq -- "--header" "$server_args"; then
   fail "legacy darkhttpd without --header support must be started without the flag"
 fi
 
-# --- Real-binary header validation (opt-in) ------------------------------------
+# --- Real-binary header validation ---------------------------------------------
 # Everything above proves argument CONSTRUCTION against a fake darkhttpd; it
 # cannot prove the deployed binary actually honors --header — and the header
 # on 404s is the only forward mitigation for a negative response cached during
-# a live bundle swap. When a real darkhttpd is on PATH (dev machines, image
-# CI), start it exactly as the serve script does and assert Cache-Control
-# lands on BOTH a 200 and a 404. Skipped legibly when the binary is absent,
-# so the fake-based contract above remains the CI floor.
+# a live bundle swap. When a real darkhttpd is on PATH, start it exactly as
+# the serve script does and assert Cache-Control lands on BOTH a 200 and a
+# 404. On a dev machine without the binary this skips legibly; in CI the
+# section is REQUIRED — test-scripts.yaml builds a pinned darkhttpd and sets
+# FF_REQUIRE_REAL_DARKHTTPD=1 so absence fails instead of silently skipping
+# the only end-to-end check of the #234 header mitigation.
 # (Verified against upstream darkhttpd 2026-07-28: usage advertises --header,
 # and the header is emitted on 200 and 404 alike.)
 if command -v darkhttpd >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
@@ -341,6 +343,12 @@ if command -v darkhttpd >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
   printf '%s' "$hdr404" | grep -qi "^cache-control: no-cache" || \
     fail "real darkhttpd must emit Cache-Control: no-cache on 404 responses (the mid-swap negative-cache mitigation)"
 else
+  # In required mode (CI) a missing binary is a broken pipeline, not a skip:
+  # silently dropping this section would leave the 404-header mitigation
+  # verified by nothing on the authoritative path.
+  if [ "${FF_REQUIRE_REAL_DARKHTTPD:-0}" = "1" ]; then
+    fail "real-darkhttpd validation is required (FF_REQUIRE_REAL_DARKHTTPD=1) but darkhttpd or curl is not on PATH"
+  fi
   echo "test-serve-feral-player: SKIPPED real-darkhttpd header validation (darkhttpd or curl not on PATH)" >&2
 fi
 
