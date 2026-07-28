@@ -185,7 +185,119 @@ rmdir "$drm_root/card0-HDMI-A-1/status"
 rm "$drm_root/card1-DP-1/status"
 expect_proceed "no readable status fails open" "fail open"
 
-# --- 5. controld start-limit never latches -------------------------------------
+# --- 5. player-bundle cache guard (#234) ---------------------------------------
+
+# darkhttpd serves the bundle with no Cache-Control headers, so Chromium's
+# disk cache can keep serving a previous player app (or negatively-cached 404s
+# for its chunks) across kiosk restarts AND reboots after a bundle swap. The
+# guard in start-kiosk.sh purges the cache exactly when the bundle fingerprint
+# changes; these cases pin both directions (purge on change, keep when
+# unchanged — the keep side is what protects remote-artwork cache warmth).
+# The guard must actually be CALLED, and called before Chromium exists —
+# extracting and testing the function alone would stay green if the invocation
+# were deleted or moved after the launch, where a purge races a live browser.
+# `|| true` keeps a no-match from tripping pipefail inside the substitution,
+# so the legible fail() below is what reports the regression.
+guard_call_line="$(grep -n '^clear_chromium_cache_on_bundle_change$' "$kiosk_script" | head -1 | cut -d: -f1 || true)"
+[ -n "$guard_call_line" ] || fail "start-kiosk.sh never calls clear_chromium_cache_on_bundle_change"
+cage_line="$(grep -n '^exec cage' "$kiosk_script" | head -1 | cut -d: -f1 || true)"
+[ -n "$cage_line" ] || fail "could not locate exec cage in $kiosk_script"
+[ "$guard_call_line" -lt "$cage_line" ] || \
+  fail "cache guard (line $guard_call_line) must run before Chromium launches (line $cage_line)"
+
+# Pin the production constants: a typo in any of these makes the guard a
+# silent no-op while the functional cases below (which override them) stay
+# green. `.state` is the OTA-surviving location for the fingerprint, and
+# ~/.cache/chromium is Chromium's default cache root for this launch (no
+# --disk-cache-dir flag is passed).
+assert_contains "$kiosk_script" 'PLAYER_BUNDLE_ROOT="/opt/feral/feral-player"'
+assert_contains "$kiosk_script" 'CHROMIUM_CACHE_DIR="/home/feralfile/.cache/chromium"'
+assert_contains "$kiosk_script" 'PLAYER_FINGERPRINT_FILE="/home/feralfile/.state/player-bundle-fingerprint"'
+
+fp_fn_file="$tmp_dir/cache_guard.sh"
+sed -n '/^clear_chromium_cache_on_bundle_change() {/,/^}/p' "$kiosk_script" > "$fp_fn_file"
+grep -q 'clear_chromium_cache_on_bundle_change() {' "$fp_fn_file" || \
+  fail "could not extract clear_chromium_cache_on_bundle_change"
+
+bundle_dir="$tmp_dir/bundle"
+cache_dir="$tmp_dir/chromium-cache"
+fp_file="$tmp_dir/state/player-bundle-fingerprint"
+
+# Captures guard stdout: the "[INFO] Player bundle changed" line is the only
+# field-diagnosable signal the purge fired, so its presence/absence is asserted
+# alongside the filesystem effects.
+guard_out="$tmp_dir/guard.out"
+run_cache_guard() {
+  bash -c "
+    PLAYER_BUNDLE_ROOT='$bundle_dir'
+    CHROMIUM_CACHE_DIR='$cache_dir'
+    PLAYER_FINGERPRINT_FILE='$fp_file'
+    source '$fp_fn_file'
+    clear_chromium_cache_on_bundle_change
+  " > "$guard_out" || fail "cache guard exited non-zero"
+}
+
+assert_purge_logged() {
+  grep -Fq "Player bundle changed" "$guard_out" || \
+    fail "$1: purge must log the bundle-changed line"
+}
+
+assert_no_purge_logged() {
+  if grep -Fq "Player bundle changed" "$guard_out"; then
+    fail "$1: keep path must not log the bundle-changed line"
+  fi
+}
+
+seed_cache() {
+  mkdir -p "$cache_dir/Default/Cache"
+  touch "$cache_dir/Default/Cache/marker"
+}
+
+mkdir -p "$bundle_dir/_next/static/chunks"
+echo "chunk-v1" > "$bundle_dir/_next/static/chunks/a.js"
+echo "index-v1" > "$bundle_dir/index.html"
+
+# First run (no recorded fingerprint) must purge: devices already poisoned by a
+# past swap are healed by the release that ships the guard.
+seed_cache
+run_cache_guard
+[ ! -e "$cache_dir/Default/Cache/marker" ] || fail "first run must clear the cache"
+[ -s "$fp_file" ] || fail "first run must record a fingerprint"
+assert_purge_logged "first run"
+
+# Unchanged bundle must keep the cache.
+seed_cache
+run_cache_guard
+[ -e "$cache_dir/Default/Cache/marker" ] || fail "unchanged bundle must keep the cache"
+assert_no_purge_logged "unchanged bundle"
+
+# In-place content change with an unchanged filename and size (index.html is
+# not content-hashed) must purge — this is why the fingerprint reads contents.
+echo "index-v2" > "$bundle_dir/index.html"
+run_cache_guard
+[ ! -e "$cache_dir/Default/Cache/marker" ] || fail "changed bundle must clear the cache"
+assert_purge_logged "changed bundle"
+
+# Deleting a file (with all remaining contents unchanged) must also purge:
+# filenames are embedded in the cksum lines, so removals change the digest.
+seed_cache
+rm "$bundle_dir/_next/static/chunks/a.js"
+run_cache_guard
+[ ! -e "$cache_dir/Default/Cache/marker" ] || fail "file removal must clear the cache"
+assert_purge_logged "file removal"
+
+# A missing bundle tree must not purge: serve-feral-player.service is about to
+# fail readiness anyway, and the cache may still be wanted when the tree returns.
+seed_cache
+fp_before="$(cat "$fp_file")"
+mv "$bundle_dir" "$bundle_dir.gone"
+run_cache_guard
+[ -e "$cache_dir/Default/Cache/marker" ] || fail "missing bundle must not clear the cache"
+[ "$(cat "$fp_file")" = "$fp_before" ] || fail "missing bundle must not rewrite the fingerprint"
+assert_no_purge_logged "missing bundle"
+mv "$bundle_dir.gone" "$bundle_dir"
+
+# --- 6. controld start-limit never latches -------------------------------------
 
 # controld is the device's only provisioning path (SoftAP portal + LAN hub —
 # no BLE fallback), so a systemd start-limit latch ("start-limit-hit") would

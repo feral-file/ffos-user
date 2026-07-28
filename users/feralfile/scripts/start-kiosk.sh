@@ -77,6 +77,55 @@ wait_for_display() {
 
 wait_for_display
 
+# Chromium's HTTP cache can outlive a player-bundle swap and poison the app
+# shell: darkhttpd serves the bundle with no Cache-Control headers, so Chromium
+# heuristically caches the route HTML and even negative (404) chunk responses
+# captured while a swap is in flight — entries that survive kiosk restarts and
+# full reboots and leave the wall running the previous app or a ChunkLoadError
+# page (#234). The purge is keyed to a content fingerprint of the bundle, not
+# done unconditionally, so an unchanged bundle keeps the cache (remote artwork
+# stays warm across the frequent Restart=always kiosk restarts) and any bundle
+# change — OTA, pacman, or manual dev swap — wipes it exactly once. This must
+# run only where no Chromium instance holds the cache open; this script IS the
+# unit's ExecStart, so systemd has already torn down the previous cgroup and
+# the delete cannot race a live browser. Keep it that way: do not move this
+# into serve-feral-player.sh, which restarts independently of Chromium.
+PLAYER_BUNDLE_ROOT="/opt/feral/feral-player"
+CHROMIUM_CACHE_DIR="/home/feralfile/.cache/chromium"
+PLAYER_FINGERPRINT_FILE="/home/feralfile/.state/player-bundle-fingerprint"
+
+clear_chromium_cache_on_bundle_change() {
+    local fingerprint previous
+    # cksum over file contents, not names/mtimes: chunk filenames are
+    # content-hashed but index.html and other stable-name files change in
+    # place, so contents must be read. The bundle is tens of MB on local
+    # disk — well under a second per kiosk start. LC_ALL=C pins sort to
+    # byte order; collation drift would reorder the digest input and force
+    # one spurious purge. A MISSING bundle skips the purge (cd fails):
+    # serve-feral-player.service is about to fail anyway, and churning the
+    # cache on a broken tree helps nothing. An existing-but-empty tree
+    # still fingerprints and purges once — fail-safe, self-correcting when
+    # the tree returns. Any pipeline failure returns 0: this guard must
+    # never block the Chromium launch.
+    fingerprint=$( (cd "$PLAYER_BUNDLE_ROOT" 2>/dev/null && \
+        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 cksum | cksum) 2>/dev/null ) || return 0
+    previous=$(cat "$PLAYER_FINGERPRINT_FILE" 2>/dev/null || true)
+    if [ "$fingerprint" = "$previous" ]; then
+        return 0
+    fi
+    echo "$(date '+%F %T') [INFO] Player bundle changed, clearing Chromium cache"
+    rm -rf "$CHROMIUM_CACHE_DIR"
+    # A failed record (read-only /home, full disk) degrades into a purge on
+    # EVERY kiosk restart — the exact cache churn the fingerprint exists to
+    # avoid — so make that state legible in chromium.log instead of silent.
+    if ! { mkdir -p "$(dirname "$PLAYER_FINGERPRINT_FILE")" && \
+           printf '%s\n' "$fingerprint" > "$PLAYER_FINGERPRINT_FILE"; } 2>/dev/null; then
+        echo "$(date '+%F %T') [WARN] Could not record player bundle fingerprint; cache will be purged on every kiosk start"
+    fi
+}
+
+clear_chromium_cache_on_bundle_change
+
 # A display is present: from here the CDP readiness probe and cage/Chromium can
 # make real progress, so start the probe now (starting it earlier under headless
 # would just time out and restart the unit for no reason).
