@@ -324,6 +324,37 @@ if [ "$(id -u)" -ne 0 ]; then
   run_cache_guard
   [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "retry after failed delete must clear the cache"
   [ "$(cat "$fp_file")" != "$fp_before" ] || fail "successful retry must record the new fingerprint"
+else
+  echo "test-headless-startup-contract: SKIPPED failed-delete case (running as root)" >&2
+fi
+
+# A fingerprint that cannot read the whole tree must fail toward purging
+# WITHOUT advancing the stored fingerprint. This scenario is the exact
+# collision the pipefail guard exists for: the ONLY change is a newly added
+# unreadable file, so a digest of just the readable subset equals the
+# recorded fingerprint and would mask the change — the purge must fire from
+# the failure path, not the comparison. chmod 000 blocks the owner's read
+# too, but root ignores permission bits, so unprivileged runs only.
+if [ "$(id -u)" -ne 0 ]; then
+  seed_cache
+  fp_before="$(cat "$fp_file")"
+  echo "chunk-v2" > "$bundle_dir/_next/static/chunks/unreadable.js"
+  chmod 000 "$bundle_dir/_next/static/chunks/unreadable.js"
+  run_cache_guard
+  chmod 644 "$bundle_dir/_next/static/chunks/unreadable.js"
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "unreadable bundle file must fail toward purging"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "failed fingerprint must not be recorded"
+  grep -Fq "bundle fingerprint failed" "$guard_out" || \
+    fail "failed fingerprint must log its warning"
+  # The purge must have come from the failure path, not the comparison path.
+  assert_no_purge_logged "unreadable bundle file"
+  # Once the tree reads cleanly the full digest differs from the recorded one
+  # (the new file is now visible), so the normal purge-and-record path runs.
+  run_cache_guard
+  [ "$(cat "$fp_file")" != "$fp_before" ] || fail "recovered fingerprint must be recorded"
+  assert_purge_logged "recovered fingerprint"
+else
+  echo "test-headless-startup-contract: SKIPPED unreadable-bundle case (running as root)" >&2
 fi
 
 # --- 6. controld start-limit never latches -------------------------------------

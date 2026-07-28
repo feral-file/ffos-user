@@ -100,25 +100,52 @@ CHROMIUM_CACHE_DIR="/home/feralfile/.cache/chromium"
 PLAYER_FINGERPRINT_FILE="/home/feralfile/.state/player-bundle-fingerprint"
 
 clear_chromium_cache_on_bundle_change() {
-    local fingerprint previous
+    local fingerprint previous fp_err fp_cause
+    # A MISSING bundle tree skips the guard entirely:
+    # serve-feral-player.service is about to fail readiness anyway, and
+    # churning the cache on an absent tree helps nothing.
+    if [ ! -d "$PLAYER_BUNDLE_ROOT" ]; then
+        return 0
+    fi
     # cksum over file contents, not names/mtimes: chunk filenames are
     # content-hashed but index.html and other stable-name files change in
     # place, so contents must be read. The bundle is tens of MB on local
     # disk — well under a second per kiosk start. LC_ALL=C pins sort to
     # byte order; collation drift would reorder the digest input and force
-    # one spurious purge. A MISSING bundle skips the purge (cd fails):
-    # serve-feral-player.service is about to fail anyway, and churning the
-    # cache on a broken tree helps nothing. An existing-but-empty tree
-    # still fingerprints and purges once — fail-safe, self-correcting when
-    # the tree returns. Any pipeline failure returns 0: this guard must
-    # never block the Chromium launch. Deliberately NO pipefail here: with
-    # it, one persistently unreadable bundle file would fail every run and
-    # silently disable the guard (missed purges — #234 comes back); without
-    # it, the fingerprint covers the readable subset, which is stable for
-    # an unchanged bundle and still moves on real changes. Worst case is a
-    # spurious purge, the fail-safe direction.
-    fingerprint=$( (cd "$PLAYER_BUNDLE_ROOT" 2>/dev/null && \
-        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 cksum | cksum) 2>/dev/null ) || return 0
+    # one spurious purge. An existing-but-empty tree still fingerprints
+    # and purges once — fail-safe, self-correcting when the tree returns.
+    # pipefail (subshell-local) makes ANY stage failure — an unreadable
+    # file, a path vanishing mid-read — yield an empty fingerprint instead
+    # of a silent digest of just the readable subset: a partial digest can
+    # collide with the recorded one (e.g. when the only change is a newly
+    # added unreadable file) and mask a real bundle change.
+    # Pipeline stderr is captured so the WARN below can name the culprit
+    # (e.g. "cksum: ./chunk.js: Permission denied") — the failure state is
+    # permanent until a human fixes the tree, so the journal line must be
+    # actionable, not just present. mktemp failure degrades to a causeless
+    # warning, never to a blocked launch.
+    fp_err=$(mktemp 2>/dev/null) || fp_err=""
+    fingerprint=$( (set -o pipefail; cd "$PLAYER_BUNDLE_ROOT" && \
+        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 cksum | cksum) 2>"${fp_err:-/dev/null}" ) || fingerprint=""
+    fp_cause=""
+    if [ -n "$fp_err" ]; then
+        fp_cause=$(head -n 1 "$fp_err" 2>/dev/null || true)
+        rm -f "$fp_err"
+    fi
+    if [ -z "$fingerprint" ]; then
+        # An unknowable bundle state fails toward purging: a stale cache is
+        # the failure this guard exists to prevent, and an extra purge costs
+        # re-downloads — though on an OFFLINE wall previously cached artwork
+        # is lost until connectivity returns, acceptable only because this
+        # state is a packaging bug that must be fixed regardless. Nothing is
+        # recorded, so every start retries (and re-warns) until the tree
+        # reads cleanly — a broken bundle is legible in chromium.log rather
+        # than silently disabling the guard. The launch is never blocked:
+        # rm failure is tolerated.
+        echo "$(date '+%F %T') [WARN] Player bundle fingerprint failed${fp_cause:+ ($fp_cause)}; clearing Chromium cache, will retry on next kiosk start"
+        rm -rf "$CHROMIUM_CACHE_DIR" 2>/dev/null || true
+        return 0
+    fi
     previous=$(cat "$PLAYER_FINGERPRINT_FILE" 2>/dev/null || true)
     if [ "$fingerprint" = "$previous" ]; then
         return 0
