@@ -548,6 +548,84 @@ func TestDP1_ProcessDynamicPlaylist_SpecDynamicQuery_PaginationTwoPages(t *testi
 	assert.Equal(t, "Page2", result.Items[dp1.MAX_PLAYLIST_ITEMS_LIMIT].Title)
 }
 
+func TestDP1_ProcessDynamicPlaylistForCast_NonScheduledReturnsMinimal(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	firstBatch := make([]string, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+	for i := range firstBatch {
+		firstBatch[i] = fmt.Sprintf(`{"id":"%s","title":"item-%d","source":"https://media.example/%d"}`, uuid.New().String(), i, i)
+	}
+	body := `{"data":{"items":[` + strings.Join(firstBatch, ",") + `]}}`
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			assertGraphQLHydration(t, req, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), "0")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+
+	result, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
+	assert.NoError(t, err)
+	assert.Len(t, result.Items, dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT)
+}
+
+func TestDP1_ProcessDynamicPlaylistForCast_ScheduledStopsAtCastLimit(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	firstBatch := make([]string, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+	displayAt := "2026-07-22T12:30:00Z"
+	for i := range firstBatch {
+		extra := ""
+		if i == dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT+10 {
+			extra = fmt.Sprintf(`,"displayAt":%q`, displayAt)
+		}
+		firstBatch[i] = fmt.Sprintf(`{"id":"%s","title":"item-%d","source":"https://media.example/%d"%s}`, uuid.New().String(), i, i, extra)
+	}
+	body := `{"data":{"items":[` + strings.Join(firstBatch, ",") + `]}}`
+
+	ts.mockHTTP.EXPECT().
+		Do(gomock.Any()).
+		DoAndReturn(func(req *http.Request) (*http.Response, error) {
+			assertGraphQLHydration(t, req, strconv.Itoa(dp1.MAX_PLAYLIST_ITEMS_LIMIT), "0")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+
+	playlist := dp1.Playlist{
+		Playlist: dp1playlist.Playlist{
+			DynamicQuery: &playlists.DynamicQuery{
+				Profile:  dp1playlist.ProfileGraphQLV1,
+				Endpoint: "https://example.com/graphql",
+				Query:    `query { items(limit: {{limit}}, offset: {{offset}}) { id title source displayAt } }`,
+				ResponseMapping: playlists.ResponseMapping{
+					ItemsPath:  "data.items",
+					ItemSchema: "dp1/1.0",
+				},
+			},
+		},
+	}
+
+	result, err := ts.client.ProcessDynamicPlaylistForCast(ts.ctx, playlist)
+	assert.NoError(t, err)
+	assert.Len(t, result.Items, dp1.CAST_PLAYLIST_ITEMS_LIMIT)
+	assert.Equal(t, displayAt, *result.Items[dp1.MINIMAL_PLAYLIST_ITEMS_LIMIT+10].DisplayAt)
+}
+
 func TestDP1_ProcessDynamicPlaylist_MultipleQueriesError(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()

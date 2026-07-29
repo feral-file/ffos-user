@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
@@ -242,4 +243,64 @@ func TestApplyFfpPowerStateAsyncConcurrentEnqueue(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+func TestSetOnAwake_FiresAfterSuccessfulWakeOutsideSleepLock(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+
+	e := &executor{
+		cdp:    mockCDP,
+		logger: zaptest.NewLogger(t),
+	}
+	ctx := context.Background()
+
+	called := make(chan struct{}, 1)
+	SetOnAwake(e, func(callCtx context.Context) {
+		assert.Equal(t, ctx, callCtx)
+		called <- struct{}{}
+	}, zaptest.NewLogger(t))
+
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateAwake, "test-wake"))
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onAwake was not called after successful wake")
+	}
+
+	// Taking sleepApplyMu after the callback returned proves the wake path
+	// released it before invoking onAwake (otherwise this would deadlock with
+	// a callback that also needed the lock).
+	done := make(chan struct{})
+	go func() {
+		e.sleepApplyMu.Lock()
+		_ = e.sleepApplyOK
+		e.sleepApplyMu.Unlock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sleepApplyMu still held after wake+onAwake")
+	}
+}
+
+func TestSetOnAwake_NotCalledOnSleep(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+
+	e := &executor{
+		cdp:    mockCDP,
+		logger: zaptest.NewLogger(t),
+	}
+	called := 0
+	SetOnAwake(e, func(context.Context) { called++ }, zaptest.NewLogger(t))
+
+	require.NoError(t, e.applySleepTransition(context.Background(), sleepschedule.StateSleeping, "test-sleep"))
+	assert.Equal(t, 0, called)
 }

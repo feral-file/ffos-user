@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +15,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -40,6 +45,7 @@ type refresher struct {
 	cdp          cdp.CDP
 	statusPoller status.Poller
 	dp1          dp1.DP1
+	scheduler    playlistschedule.Scheduler
 
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -53,6 +59,7 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	cdp cdp.CDP,
+	scheduler playlistschedule.Scheduler,
 	clock wrapper.Clock,
 	logger *zap.Logger,
 ) Refresher {
@@ -61,6 +68,7 @@ func New(
 		cdp:          cdp,
 		statusPoller: statusPoller,
 		dp1:          dp1,
+		scheduler:    scheduler,
 		clock:        clock,
 		logger:       logger,
 		done:         make(chan struct{}),
@@ -77,19 +85,33 @@ func (r *refresher) Start() {
 
 	r.started = true
 	r.done = make(chan struct{}) // Recreate the done channel for each start
+	done := r.done
 	r.mu.Unlock()
 
-	go r.background()
+	go r.background(done)
 }
 
-func (r *refresher) background() {
+func (r *refresher) background(done <-chan struct{}) {
 	r.logger.Info("Refresher background goroutine started")
+	runCtx, cancel := context.WithCancel(r.context)
+	defer cancel()
+
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-runCtx.Done():
+		}
+	}()
 
 	// Process playing playlist until it succeeds
 	for {
 		if err := r.processPlayingPlaylist(); err != nil {
 			r.logProcessFailure(err)
-			r.clock.Sleep(PLAYER_STATUS_POLLING_INTERVAL)
+			if err := r.clock.SleepContext(runCtx, PLAYER_STATUS_POLLING_INTERVAL); err != nil {
+				r.logger.Info("Refresher background goroutine stopped before initial success")
+				return
+			}
 			continue
 		}
 		break
@@ -104,11 +126,11 @@ func (r *refresher) background() {
 			if err := r.processPlayingPlaylist(); err != nil {
 				r.logProcessFailure(err)
 			}
-		case <-r.done:
+		case <-done:
 			ticker.Stop()
 			r.logger.Info("Refresher background goroutine stopped due to done channel")
 			return
-		case <-r.context.Done():
+		case <-runCtx.Done():
 			ticker.Stop()
 			r.logger.Info("Refresher background goroutine stopped due to context cancellation")
 			return
@@ -125,13 +147,14 @@ func (r *refresher) Stop() {
 	}
 
 	r.started = false
+	done := r.done
 	r.mu.Unlock()
 
 	select {
-	case <-r.done:
+	case <-done:
 		// Already closed
 	default:
-		close(r.done)
+		close(done)
 	}
 
 	r.logger.Info("Refresher stopped")
@@ -159,65 +182,203 @@ func (r *refresher) processPlayingPlaylist() error {
 		return errCDPNotReady
 	}
 
-	// Get player status
-	playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
-	if err != nil {
-		return err
-	}
-	if playerStatus == nil {
-		r.logger.Warn("Player status is nil")
-		return nil
+	var authorityToken uint64
+	if r.scheduler != nil {
+		authorityToken = r.scheduler.AuthorityToken()
 	}
 
-	if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
-		r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
-		return nil
-	}
-
-	// Process playlist
 	var playlist *dp1.Playlist
-	switch {
-	case playerStatus.PlaylistURL != nil:
-		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
+	var schedulerSource playlistschedule.Source
+	var err error
+	if r.scheduler != nil {
+		schedulerSource = r.scheduler.Source()
+	}
+	if schedulerSource.IsZero() {
+		// No scheduler-owned source exists, so the player remains the source of
+		// truth for normal URL/dynamic refreshes.
+		playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
 		if err != nil {
 			return err
 		}
-	case playerStatus.Playlist != nil:
-		if !playerStatus.Playlist.HasDynamicContent() {
-			r.logger.Debug("Playlist has no dynamic queries, skipping")
+		if playerStatus == nil {
+			r.logger.Warn("Player status is nil")
 			return nil
 		}
 
-		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
-		if err != nil {
-			return err
+		if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
+			r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
+			return nil
 		}
-	default:
-		// A displayPlaylist status carrying neither a URL nor an inline playlist
-		// is the player's fresh-boot/unconfigured state (nothing assigned yet),
-		// not a failure. Returning an error here would pin the startup loop at
-		// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
-		// long as the device sits unconfigured — hours on a first boot with no
-		// network. There is nothing to refresh; report success so the refresher
-		// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence.
-		r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
-		return nil
+
+		switch {
+		case playerStatus.PlaylistURL != nil:
+			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
+		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
+			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
+		case playerStatus.Playlist != nil:
+			// Static inline player status only contains the filtered active set and
+			// no refreshable source identity, so it cannot rebuild future items.
+			r.logger.Debug("Playlist has no dynamic queries, skipping")
+			return nil
+		default:
+			// A displayPlaylist status carrying neither a URL nor an inline playlist
+			// is the player's fresh-boot/unconfigured state (nothing assigned yet),
+			// not a failure. Returning an error here would pin the startup loop at
+			// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
+			// long as the device sits unconfigured — hours on a first boot with no
+			// network. There is nothing to refresh; report success so the refresher
+			// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence.
+			r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
+			return nil
+		}
+	}
+
+	var kind string
+	switch {
+	case schedulerSource.PlaylistURL != "":
+		kind = "playlist URL"
+		playlist, err = r.dp1.ProcessPlaylistURL(r.context, schedulerSource.PlaylistURL, false)
+	case schedulerSource.DynamicPlaylist != nil:
+		kind = "dynamic playlist"
+		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *schedulerSource.DynamicPlaylist, false)
+	}
+	if err != nil {
+		return r.handleRefreshError(err, kind, schedulerSource)
+	}
+
+	hadDisplayAtCache := false
+	hadRestoredPending := false
+	var schedulerSnapshot playlistschedule.Snapshot
+	schedulerMutated := false
+	if r.scheduler != nil {
+		hadDisplayAtCache = r.scheduler.HasCache()
+		hadRestoredPending = r.scheduler.RestoredPending()
 	}
 
 	// Send playlist to CDP
+	args := map[string]interface{}{
+		"dp1_call": playlist,
+		"refresh":  true,
+	}
 	command := commands.Command{
-		Type: commands.CMD_DISPLAY_PLAYLIST,
-		Arguments: map[string]interface{}{
-			"dp1_call": playlist,
-			"refresh":  true,
-		},
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: args,
 	}
 
-	if _, err := r.sendCDPRequest(command); err != nil {
-		return err
+	sendErr := error(nil)
+	send := func() {
+		if r.scheduler != nil {
+			if r.scheduler.AuthorityToken() != authorityToken {
+				r.logger.Debug("Skipping obsolete playlist refresh after playlist authority changed")
+				return
+			}
+			schedulerSnapshot = r.scheduler.Snapshot()
+			playlist = r.scheduler.PrepareWithSource(playlist, schedulerSource)
+			schedulerMutated = true
+			if playlist == nil {
+				sendErr = errors.New("playlist has invalid displayAt")
+				r.scheduler.Restore(schedulerSnapshot)
+				return
+			}
+			if len(playlist.Items) == 0 {
+				// Keep the future schedule armed, but do not send an empty list:
+				// the player rejects it and cannot improve the current artwork.
+				r.scheduler.Commit()
+				return
+			}
+			if r.scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending) {
+				// After a controld restart the memory cache may be empty, so
+				// the refresher may be the first path to reconstruct scheduler
+				// ownership from URL/dynamic/player status. Force-cast that first
+				// scheduled reconstruction; a soft refresh can defer when the current
+				// item disappeared from the new set.
+				command.Arguments = map[string]interface{}{
+					"intent": map[string]interface{}{
+						"action": "now_display",
+					},
+					"dp1_call": playlist,
+				}
+				if schedulerSource.PlaylistURL != "" {
+					command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
+				}
+			} else {
+				command.Arguments["dp1_call"] = playlist
+			}
+		}
+		result, err := r.sendCDPRequest(command)
+		sendErr = err
+		// Transport success with ok:false (or a malformed body) must still
+		// fail the refresh pass: otherwise the startup loop treats the reject
+		// as initial success and drops from 5s retries to the 5m ticker while
+		// the player never accepted the playlist.
+		if sendErr == nil && !playerresponse.OK(result) {
+			sendErr = errors.New("player rejected playlist refresh")
+		}
+		if schedulerMutated && sendErr != nil {
+			r.scheduler.Restore(schedulerSnapshot)
+		} else if schedulerMutated {
+			r.scheduler.Commit()
+		}
 	}
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(send)
+	} else {
+		send()
+	}
+	return sendErr
+}
 
-	return nil
+// handleRefreshError degrades to the displayAt cache only for transient fetch
+// failures. Schema/parse/logic errors must surface so a bad feed cannot pin the
+// device on a stale active set forever.
+func (r *refresher) handleRefreshError(err error, kind string, source playlistschedule.Source) error {
+	if r.scheduler != nil &&
+		r.scheduler.HasCache() &&
+		!r.scheduler.RestoredPending() &&
+		r.scheduler.SourceMatches(source) &&
+		isTransientPlaylistRefreshError(err) {
+		r.logger.Warn("Playlist refresh failed transiently; recomputing from displayAt cache",
+			zap.String("kind", kind),
+			zap.Error(err))
+		r.scheduler.ResumePersisted(r.context)
+		return nil
+	}
+	return err
+}
+
+// isTransientPlaylistRefreshError reports transport / upstream-availability
+// failures where retrying from the cached displayAt playlist is safe.
+// Deterministic data/config errors (malformed JSON, invalid dynamicQuery,
+// permanent DNS, non-timeout URL failures) return false.
+func isTransientPlaylistRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		// Prefer DNSError fields over deprecated net.Error.Temporary().
+		return dnsErr.IsTemporary || dnsErr.IsTimeout
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		// Timeouts are the well-defined transient class; Temporary() is
+		// deprecated (SA1019) and not reliable across net implementations.
+		return netErr.Timeout()
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		// url.Error wraps both transport blips and permanent config mistakes
+		// (bad scheme, invalid URL). Only the inner error decides.
+		return isTransientPlaylistRefreshError(urlErr.Err)
+	}
+	// dp1.fetchPlaylist wraps non-2xx as "fetch playlist failed: <Status>".
+	// Treat 5xx / 429 as temporary upstream unavailability; 4xx stays hard-fail.
+	msg := err.Error()
+	if strings.Contains(msg, "fetch playlist failed: 5") ||
+		strings.Contains(msg, "fetch playlist failed: 429") {
+		return true
+	}
+	return false
 }
 
 // sendCDPRequest marshals payload and sends to CDP

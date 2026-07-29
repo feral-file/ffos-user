@@ -982,6 +982,7 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.StatusPoller)
 	assert.NotNil(t, app.Watchdog)
 	assert.NotNil(t, app.PlaylistRefresher)
+	assert.NotNil(t, app.PlaylistScheduler)
 	assert.NotNil(t, app.Hub)
 
 	// Test all wrappers are initialized

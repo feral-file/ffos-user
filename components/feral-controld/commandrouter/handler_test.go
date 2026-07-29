@@ -44,7 +44,7 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -90,7 +90,7 @@ func playerNotOkResponse() map[string]interface{} {
 // displayPlaylist via URL: DP1 processing, CDP send returning ok, and ForceRefresh.
 func expectDisplayPlaylistSuccess(ts *testSetup, playlistURL string, playlist *dp1.Playlist) {
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(playlist, nil).
 		Times(1)
 
@@ -220,7 +220,7 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "started"}
 	mintSvc := &fakeMintPairingService{startResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
@@ -260,7 +260,7 @@ func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "closed"}
 	mintSvc := &fakeMintPairingService{closeResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
@@ -282,7 +282,7 @@ func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testin
 	args := map[string]any{"approvalRequestID": "mpa_1", "decision": "approve"}
 	want := map[string]any{"ok": true, "status": "accepted"}
 	mintSvc := &fakeMintPairingService{approvalResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
@@ -556,7 +556,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, true).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
 		Return(processedPlaylist, nil).
 		Times(1)
 
@@ -646,7 +646,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, true).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
 		Return(processedPlaylist, nil).
 		Times(1)
 
@@ -826,7 +826,7 @@ func TestCommandHandler_Metrics_DisplayPlaylist_CDPFailure(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 
@@ -860,7 +860,7 @@ func TestCommandHandler_Metrics_PlayerResponseNotOk(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 
@@ -898,7 +898,7 @@ func TestCommandHandler_Metrics_PlayerResponseMissingMessage(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 

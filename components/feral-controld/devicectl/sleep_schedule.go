@@ -347,8 +347,15 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 	//
 	//   • Shutdown does not wait for queued or in-flight DDC alignment.
 	e.sleepApplyMu.Lock()
-	defer e.sleepApplyMu.Unlock()
-	return e.applySleepTransitionLocked(ctx, state, reason)
+	err := e.applySleepTransitionLocked(ctx, state, reason)
+	onAwake := e.onAwake
+	e.sleepApplyMu.Unlock()
+	// Fire outside sleepApplyMu: displayAt recompute does its own CDP round-trip
+	// and must not serialize behind (or extend) the sleep-transition critical section.
+	if err == nil && state == sleepschedule.StateAwake && onAwake != nil {
+		onAwake(ctx)
+	}
+	return err
 }
 
 // applySleepTransitionLocked performs the transition assuming e.sleepApplyMu is
@@ -375,6 +382,41 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 	return nil
 }
 
+// SetOnAwake registers a callback invoked after a successful awake transition.
+// Safe before or after the sleep schedule loop starts.
+func SetOnAwake(exec Executor, fn func(context.Context), logger *zap.Logger) {
+	setter, ok := exec.(interface{ setOnAwake(func(context.Context)) })
+	if !ok {
+		logger.Warn("Executor does not support on-awake hook")
+		return
+	}
+	setter.setOnAwake(fn)
+}
+
+func (e *executor) setOnAwake(fn func(context.Context)) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	e.onAwake = fn
+}
+
+// SetWithPlayerPush registers the playlist-write serialization hook shared with
+// displayAt scheduling. It intentionally serializes claim-time default fallback
+// writes without giving devicectl permission to clear scheduler-owned cache.
+func SetWithPlayerPush(exec Executor, fn func(func()), logger *zap.Logger) {
+	setter, ok := exec.(interface{ setWithPlayerPush(func(func())) })
+	if !ok {
+		logger.Warn("Executor does not support player-push serialization hook")
+		return
+	}
+	setter.setWithPlayerPush(fn)
+}
+
+func (e *executor) setWithPlayerPush(fn func(func())) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	e.withPlayerPush = fn
+}
+
 // applySleepTransitionIfChanged drives a transition only when it is not already
 // aligned. It is the schedule loop's entry point: manual overrides
 // (sleepNow/wakeNow/setSleepSchedule) call applySleepTransition directly so an
@@ -388,7 +430,6 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 //     this cheap and a newer transition always supersedes it.
 func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state sleepschedule.State, reason string) error {
 	e.sleepApplyMu.Lock()
-	defer e.sleepApplyMu.Unlock()
 
 	playerAligned := e.sleepApplyOK && e.sleepAppliedState != nil && *e.sleepAppliedState == state
 	// BOTH panel verdicts — the success ("panel already aligned") and the
@@ -404,6 +445,7 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 			(e.sleepPanelOK || e.sleepPanelFailStreak >= panelRetryMax))
 
 	if playerAligned && panelAligned {
+		e.sleepApplyMu.Unlock()
 		return nil
 	}
 	if playerAligned && !panelAligned {
@@ -416,6 +458,7 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 		// the last enqueued job, so the stale panel command would supersede the
 		// manual one.
 		e.applyFfpPowerStateAsync(state, reason)
+		e.sleepApplyMu.Unlock()
 		return nil
 	}
 
@@ -432,10 +475,17 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 		e.logger.Debug("Deferring sleep schedule transition: CDP not connected",
 			zap.String("state", string(state)),
 			zap.String("reason", reason))
+		e.sleepApplyMu.Unlock()
 		return nil
 	}
 
-	return e.applySleepTransitionLocked(ctx, state, reason)
+	err := e.applySleepTransitionLocked(ctx, state, reason)
+	onAwake := e.onAwake
+	e.sleepApplyMu.Unlock()
+	if err == nil && state == sleepschedule.StateAwake && onAwake != nil {
+		onAwake(ctx)
+	}
+	return err
 }
 
 // recordPanelApply stores the state the async FFP power worker last drove the

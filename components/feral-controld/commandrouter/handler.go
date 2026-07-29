@@ -11,6 +11,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -27,6 +29,7 @@ type handler struct {
 	json         wrapper.JSON
 	statusPoller status.Poller
 	mintPairing  mintpairing.Service
+	scheduler    playlistschedule.Scheduler
 	logger       *zap.Logger
 }
 
@@ -36,6 +39,7 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	mintPairing mintpairing.Service,
+	scheduler playlistschedule.Scheduler,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
@@ -45,6 +49,7 @@ func New(
 		dp1:          dp1,
 		statusPoller: statusPoller,
 		mintPairing:  mintPairing,
+		scheduler:    scheduler,
 		json:         json,
 		logger:       logger,
 	}
@@ -118,6 +123,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return result, nil
 	} else {
 		var playlist *dp1.Playlist
+		var schedulerSnapshot playlistschedule.Snapshot
+		var schedulerSource playlistschedule.Source
+		schedulerMutated := false
+		schedulerRestored := false
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -126,7 +135,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				h.logger.Info("result from CDP", zap.Any("result", result))
-				if !isPlayerResponseOk(result) {
+				if !playerresponse.OK(result) {
 					h.logger.Warn("Playback verification failed: player did not respond with ok")
 					status.RecordPlaybackFailure()
 				}
@@ -138,10 +147,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
-				playlist, err = h.dp1.ProcessPlaylistURL(ctx, url, true)
+				playlist, err = h.dp1.ProcessPlaylistURLForCast(ctx, url)
 				if err != nil {
 					return nil, err
 				}
+				schedulerSource = playlistschedule.Source{PlaylistURL: url}
 
 			case command.Arguments["dp1_call"] != nil:
 				playlistMap, ok := command.Arguments["dp1_call"].(map[string]interface{})
@@ -160,7 +170,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 
 				if playlist.HasDynamicContent() {
-					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
+					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
+					playlist, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err
@@ -171,7 +182,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
-			command.Arguments["dp1_call"] = playlist
+			// Player CanvasService rejects displayPlaylist without a known
+			// intent.action ("Unknown DP1 action: undefined" → ok:false).
+			// Controller casts are force-display, same contract as
+			// playlistschedule push (now_display, never soft refresh).
+			ensureDisplayPlaylistIntent(command.Arguments)
 
 		}
 
@@ -182,9 +197,62 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
-		// Forward to CDP (final, full data)
-		result, err = h.sendCDPRequest(command)
+		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
+		// scheduler push lock with RecomputeNow so a stale timed push cannot land
+		// after a newer cast or OOM-recovery fallback.
+		// displayDefaultPlaylist is player-owned fallback today; it may no-op
+		// successfully, so this path must not clear scheduler authority until
+		// controld can prove that default playback replaced the current playlist.
+		switch {
+		case commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil:
+			h.scheduler.WithPlayerPush(func() {
+				schedulerSnapshot = h.scheduler.Snapshot()
+				// Filter displayAt playlists to the active set before the player
+				// sees them. The scheduler keeps the full list for timer/wake updates.
+				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
+				schedulerMutated = true
+				if playlist == nil {
+					err = fmt.Errorf("playlist has invalid displayAt")
+					h.scheduler.Restore(schedulerSnapshot)
+					schedulerRestored = true
+					return
+				}
+				if len(playlist.Items) == 0 {
+					// The scheduler retained and armed the future schedule; the
+					// player rejects an empty displayPlaylist, so leave its current
+					// artwork in place until a cohort becomes eligible.
+					h.scheduler.Commit()
+					// A relayer RPC and hub request both need an explicit acceptance
+					// response even though no CDP write was valid. This also prevents
+					// playback metrics from treating the deferred schedule as a failure.
+					result = map[string]interface{}{
+						"message": map[string]interface{}{"ok": true, "deferred": true},
+					}
+					return
+				}
+				command.Arguments["dp1_call"] = playlist
+				result, err = h.sendCDPRequest(command)
+				if err != nil || !playerresponse.OK(result) {
+					h.scheduler.Restore(schedulerSnapshot)
+					schedulerRestored = true
+				} else {
+					h.scheduler.Commit()
+				}
+			})
+		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
+			h.scheduler.WithPlayerPush(func() {
+				result, err = h.sendCDPRequest(command)
+			})
+		default:
+			if commandType == commands.CMD_DISPLAY_PLAYLIST {
+				command.Arguments["dp1_call"] = playlist
+			}
+			result, err = h.sendCDPRequest(command)
+		}
 		if err != nil {
+			if schedulerMutated && !schedulerRestored && h.scheduler != nil {
+				h.scheduler.Restore(schedulerSnapshot)
+			}
 			// refreshArtwork's evaluate needs a live player page
 			// (window.handleCDPRequest), but a refresh is most needed exactly
 			// when the page is broken — e.g. Chromium serving stale cached
@@ -214,19 +282,25 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	}
 }
 
-// isPlayerResponseOk checks whether the CDP result from the player
-// contains { "message": { "ok": true } }.
-func isPlayerResponseOk(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
+// ensureDisplayPlaylistIntent sets intent.action=now_display when the cast
+// request has no action yet. Controllers historically send only playlistUrl /
+// dp1_call; the player still requires a known DP1 action. Soft refresh keeps
+// its own path (playlist-refresher sets refresh:true and does not use this
+// helper). An explicit controller intent is preserved.
+func ensureDisplayPlaylistIntent(args map[string]interface{}) {
+	if args == nil {
+		return
 	}
-	msg, ok := m["message"].(map[string]interface{})
-	if !ok {
-		return false
+	if intent, ok := args["intent"].(map[string]interface{}); ok {
+		if action, _ := intent["action"].(string); action != "" {
+			return
+		}
+		intent["action"] = "now_display"
+		return
 	}
-	okVal, _ := msg["ok"].(bool)
-	return okVal
+	args["intent"] = map[string]interface{}{
+		"action": "now_display",
+	}
 }
 
 // sendCDPRequest marshals payload and sends to CDP
