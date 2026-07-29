@@ -130,12 +130,15 @@ type Store interface {
 	// that capture. See SweepIncompleteBlobs for the startup-only sweep
 	// that reclaims temp files left by a killed/crashed process instead.
 	GC() (removedBlobs int, freedBytes int64, err error)
-	// DiskUsage sums blob file sizes — blobs/ is the only place binary
-	// payloads live, so this is the whole of maxDiskBytes accounting.
-	// Like GC, it deliberately excludes blobs/*.tmp: an in-progress
-	// capture's temp file is not yet committed content, so counting it
-	// here would make maxDiskBytes accounting flicker based on capture
-	// timing rather than actual stored blobs.
+	// DiskUsage reports every byte this cache has persisted — blobs,
+	// item records, playlist bodies, and the playlist URL index — so
+	// maxDiskBytes bounds the store's real footprint, not just its
+	// binary payloads (see fsStore.DiskUsage's doc for why counting
+	// blobs alone made the budget bound the wrong number). Like GC, it
+	// deliberately excludes blobs/*.tmp: an in-progress capture's temp
+	// file is not yet committed content, so counting it here would make
+	// maxDiskBytes accounting flicker based on capture timing rather
+	// than actual stored content.
 	DiskUsage() (int64, error)
 	// PrunePlaylistRecords bounds stored playlist metadata by count —
 	// see MaxPlaylistRecords for why a byte budget alone cannot.

@@ -1840,6 +1840,17 @@ each one of:
 - `unresolved_at_deadline:<url>` — the page requested this URL but it
   never reached a terminal `Network.responseReceived`/`loadingFailed`
   event before the capture window closed (e.g. a hanging/slow origin).
+- `over_disk_budget:<url>` — the resource was seen but deliberately not
+  stored because writing it would have pushed the cache past its
+  configured `maxDiskBytes` ceiling. Retrying after older items have
+  been evicted (or after the budget is raised) can succeed.
+- `gltf_external_dependency:<uri>` — the item is a JSON `.gltf` manifest
+  whose spec-defined `buffers[].uri`/`images[].uri` entries reference
+  separate external files the direct-download path does not capture
+  (see `offline-artwork-capture.md` §3.3). Like `csp_blocked`, treat
+  this as permanently degraded for this source, not a transient capture
+  failure — re-downloading the same manifest can never capture the
+  missing files.
 
 Clients should match on the fixed prefix before the first `:`/`(` rather
 than the whole string, and must not assume the reason list is exhaustive

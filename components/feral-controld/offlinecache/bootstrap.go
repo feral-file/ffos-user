@@ -198,7 +198,7 @@ func Bootstrap(
 	// non-software item's single-file source directly over HTTP, never
 	// spinning up the headless Chromium capturer/downloader owns (see
 	// mediacapture.go's package doc).
-	mediaCapturer := NewMediaCapturer(bodyClient, store, clockWrapper, opts.MaxDiskBytes, logger)
+	mediaCapturer := NewMediaCapturer(bodyClient, store, jsonWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, jsonWrapper, logger)
 	// The concrete replayer implements the scope-lost setter, but Replayer

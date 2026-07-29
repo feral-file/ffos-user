@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	go_http "net/http"
+	go_url "net/url"
 	"strings"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -34,6 +35,7 @@ type MediaCapturer interface {
 type mediaCapturer struct {
 	httpClient   wrapper.HTTPClient
 	store        Store
+	json         wrapper.JSON
 	clock        wrapper.Clock
 	maxDiskBytes int64 // <=0 means unlimited, mirrors capturer.maxResourceBytes
 	logger       *zap.Logger
@@ -44,6 +46,7 @@ type mediaCapturer struct {
 func NewMediaCapturer(
 	httpClient wrapper.HTTPClient,
 	store Store,
+	jsonWrapper wrapper.JSON,
 	clockWrapper wrapper.Clock,
 	maxDiskBytes int64,
 	logger *zap.Logger,
@@ -51,6 +54,7 @@ func NewMediaCapturer(
 	return &mediaCapturer{
 		httpClient:   httpClient,
 		store:        store,
+		json:         jsonWrapper,
 		clock:        clockWrapper,
 		maxDiskBytes: maxDiskBytes,
 		logger:       logger,
@@ -86,18 +90,125 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 		return nil, fmt.Errorf("offline cache: download %s: %w", item.Source, err)
 	}
 
+	// One downloaded file is normally the WHOLE item for this path (see
+	// MediaCapturer's doc), so Complete=true is the honest default. The
+	// one exception this path can detect without a browser: a JSON .gltf
+	// manifest whose spec-defined buffer/image URIs point at separate
+	// external files. Those dependencies are NOT captured here (see
+	// docs/offline-artwork-capture.md §7's known-limitations entry), and
+	// the fail-closed replay policy will fail them offline — so reporting
+	// such an item as fully cached would tell the controller "ready"
+	// about an item that cannot actually render offline. Downgrading to
+	// partial coverage keeps status honest while still serving what WAS
+	// captured; self-contained .glb and data:-URI-only .gltf manifests
+	// keep Complete=true.
+	coverage := Coverage{Complete: true}
+	if isGLTFManifest(item.Source, resource.ContentType) {
+		if deps := c.gltfExternalDependencies(resource); len(deps) > 0 {
+			reasons := make([]string, 0, len(deps))
+			for _, dep := range deps {
+				reasons = append(reasons, "gltf_external_dependency:"+dep)
+			}
+			coverage = Coverage{Complete: false, Reason: strings.Join(reasons, reasonSeparator)}
+		}
+	}
+
 	rec := &ItemRecord{
 		ItemID:     item.ID,
 		Item:       item,
 		Entry:      item.Source,
 		Resources:  []Resource{resource},
-		Coverage:   Coverage{Complete: true},
+		Coverage:   coverage,
 		CapturedAt: c.clock.Now().UTC(),
 	}
 	if err := c.store.SaveItem(rec); err != nil {
 		return nil, fmt.Errorf("offline cache: save item %s: %w", item.ID, err)
 	}
 	return rec, nil
+}
+
+// maxGLTFManifestParseBytes bounds how much of a just-downloaded blob
+// gltfExternalDependencies will read back into memory. A real .gltf
+// manifest is JSON in the KB-to-MB range; anything larger is mislabeled
+// or pathological, and the check quietly keeps the default complete
+// coverage rather than buffering an arbitrarily large file — the same
+// never-buffer-a-whole-gigabyte posture the download path itself holds.
+const maxGLTFManifestParseBytes = 16 << 20 // 16 MiB
+
+// isGLTFManifest reports whether a fetched resource looks like a JSON
+// .gltf manifest — never binary .glb (model/gltf-binary), which embeds
+// its buffers and is self-contained by design. Content-Type is the
+// primary signal (model/gltf+json), but many CDNs serve .gltf under a
+// generic type (application/json, application/octet-stream, or none at
+// all), so the URL path's extension is accepted as a fallback — the
+// same unreliable-Content-Type reasoning behind classify.go's
+// isStreamingURL.
+func isGLTFManifest(sourceURL, contentType string) bool {
+	ct := strings.ToLower(contentType)
+	if strings.HasPrefix(ct, "model/gltf-binary") {
+		return false
+	}
+	if strings.HasPrefix(ct, "model/gltf+json") {
+		return true
+	}
+	path := sourceURL
+	if u, err := go_url.Parse(sourceURL); err == nil {
+		path = u.Path
+	}
+	return strings.HasSuffix(strings.ToLower(path), ".gltf")
+}
+
+// gltfExternalDependencies parses the just-stored manifest blob and
+// returns the buffer/image URIs that reference separate external files
+// (anything other than an embedded data: URI). Per the glTF 2.0 spec,
+// buffers[].uri and images[].uri are the only places a manifest can
+// point at out-of-band payload files, so this check is exact rather
+// than heuristic — which is exactly why the equivalent check for SVG
+// (where external references can hide in href attributes, CSS url()
+// values, @imports, ...) is deliberately NOT attempted here.
+//
+// Best-effort in the conservative direction: an unreadable, oversized,
+// or non-JSON blob returns nil (keeping the item's default complete
+// coverage) rather than failing the capture — a manifest this check
+// cannot parse is one no renderer will parse either, and inventing a
+// capture failure out of the checker's own limits would turn today's
+// working ready/complete items into failures on any parse edge case.
+func (c *mediaCapturer) gltfExternalDependencies(res Resource) []string {
+	size, err := c.store.BlobSize(res.SHA256)
+	if err != nil || size > maxGLTFManifestParseBytes {
+		return nil
+	}
+	raw, err := c.store.ReadBlob(res.SHA256)
+	if err != nil {
+		c.logger.Warn("offline cache: failed to read back gltf manifest for dependency check, keeping complete coverage",
+			zap.String("sha256", res.SHA256), zap.Error(err))
+		return nil
+	}
+	var doc struct {
+		Buffers []struct {
+			URI string `json:"uri"`
+		} `json:"buffers"`
+		Images []struct {
+			URI string `json:"uri"`
+		} `json:"images"`
+	}
+	if err := c.json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	var deps []string
+	appendExternal := func(uri string) {
+		if uri == "" || strings.HasPrefix(uri, "data:") {
+			return
+		}
+		deps = append(deps, uri)
+	}
+	for _, b := range doc.Buffers {
+		appendExternal(b.URI)
+	}
+	for _, img := range doc.Images {
+		appendExternal(img.URI)
+	}
+	return deps
 }
 
 // fetchResource downloads sourceURL and streams the body straight into

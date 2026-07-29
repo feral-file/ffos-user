@@ -1,8 +1,11 @@
 package commandrouter_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -585,6 +588,117 @@ func TestCommandHandler_ClearPlaylistCache_ResyncSkipsWhenPlaybackGenerationAdva
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
 	assert.Equal(t, "playlist-1", resp["playlistId"])
+}
+
+// lockStepKioskReplay is a hand-rolled offlinecache.KioskReplay (a real
+// mutex, not gomock) for deterministic clear-versus-display interleaving
+// tests. Every LockPlayback attempt signals lockAttempts BEFORE blocking
+// on the mutex, so a test goroutine standing in for an in-flight
+// displayPlaylist critical section can hold the lock until it observes
+// the resync arrive at it — no sleeps, no timing.
+type lockStepKioskReplay struct {
+	mu           sync.Mutex
+	gen          atomic.Uint64
+	lockAttempts chan struct{}
+	syncCalls    chan []string
+}
+
+func newLockStepKioskReplay() *lockStepKioskReplay {
+	return &lockStepKioskReplay{
+		lockAttempts: make(chan struct{}, 4),
+		syncCalls:    make(chan []string, 1),
+	}
+}
+
+func (f *lockStepKioskReplay) AttachOnReconnect(context.Context) error { return nil }
+func (f *lockStepKioskReplay) SyncPlaylist(_ context.Context, ids []string) error {
+	f.syncCalls <- ids
+	return nil
+}
+func (f *lockStepKioskReplay) LockPlayback() {
+	select {
+	case f.lockAttempts <- struct{}{}:
+	default:
+	}
+	f.mu.Lock()
+}
+func (f *lockStepKioskReplay) UnlockPlayback()            { f.mu.Unlock() }
+func (f *lockStepKioskReplay) PlaybackGeneration() uint64 { return f.gen.Load() }
+func (f *lockStepKioskReplay) MarkPlaybackChanged()       { f.gen.Add(1) }
+
+// TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
+// is the deterministic clear-versus-display interleaving regression test
+// for the resync's generation sample being taken UNDER the playback lock.
+//
+// The hazard (feral-file/ffos-user#229 review finding): a displayPlaylist
+// sync+send critical section already holds the playback lock when the
+// clear lands — its SyncPlaylist store reads PREDATE the clear's
+// deletion, so the scope it is installing references just-deleted
+// records/blobs, and it publishes its generation bump only inside that
+// section. If the resync sampled the generation WITHOUT the lock, it
+// could read the pre-bump value, then observe the bump at the post-lock
+// re-check and defer to that stale scope — leaving replay pointed at
+// deleted blobs until the next refresher pass. Sampling under the lock
+// forces the resync to wait that section out, so its baseline includes
+// the bump and the resync proceeds to recompute scope from post-clear
+// store state.
+//
+// The interleaving is deterministic in both directions: with the locked
+// sample, the resync's first LockPlayback attempt signals the
+// display-section goroutine, which bumps the generation and releases —
+// the resync then proceeds and MUST call SyncPlaylist. With an unlocked
+// sample (the regression), the sample reads the pre-bump generation
+// immediately, the first lock attempt only happens at the re-check, and
+// the re-check sees the bumped generation and bails — the missing
+// SyncPlaylist call fails the test.
+func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+
+	playlistURL := "https://example.com/playlist.json"
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
+		{ID: "item-1"}, {ID: "item-2"},
+	}}}
+	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
+		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
+		PlaylistURL: &playlistURL,
+	}, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+
+	fake := newLockStepKioskReplay()
+	// The in-flight display critical section: lock held from BEFORE the
+	// clear starts (its store reads therefore predate the deletion), the
+	// authoritative generation bump published inside the section, and the
+	// lock released only once the resync is observed waiting on it.
+	fake.mu.Lock()
+	displayDone := make(chan struct{})
+	go func() {
+		defer close(displayDone)
+		<-fake.lockAttempts
+		fake.gen.Add(1) // MarkPlaybackChanged, as the display path does under the lock
+		fake.mu.Unlock()
+	}()
+
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, fake, nil, ts.mockJSON, ts.logger)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "item-1"},
+	})
+
+	require.NoError(t, err)
+	assertOkResponse(t, result)
+	<-displayDone
+
+	select {
+	case ids := <-fake.syncCalls:
+		assert.Equal(t, []string{"item-1", "item-2"}, ids,
+			"the resync must recompute scope from post-clear state, not defer to the pre-clear install")
+	default:
+		t.Fatal("resync deferred to a scope installed from pre-clear store reads: SyncPlaylist was never called, replay stays pointed at just-deleted blobs")
+	}
 }
 
 // TestCommandHandler_ClearPlaylistItemCache_ActiveCaptureReturnsBusy is

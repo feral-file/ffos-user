@@ -226,7 +226,25 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	// lock we re-check this generation and bail if it advanced, so this
 	// corrective resync can never install a stale playlist's scope over a
 	// newer authoritative one — see KioskReplay.PlaybackGeneration's doc.
+	//
+	// The sample itself is taken UNDER the playback lock, and that
+	// matters as much as the ordering. A displayPlaylist whose sync+send
+	// critical section is in flight right now did its store reads
+	// (SyncPlaylist -> scopeFor/EnableForPlaylist) before this clear
+	// deleted the records and blobs it references, and it publishes its
+	// generation bump only inside that same section. Sampling without the
+	// lock could read the pre-bump generation, then observe the bump at
+	// the re-check below and defer to that scope — a scope built from
+	// PRE-clear store reads, leaving replay pointed at just-deleted blobs
+	// until the next refresher pass. Waiting for the lock serializes this
+	// sample after every install whose reads could predate the clear
+	// (every installer holds the lock across its store reads — see
+	// LockPlayback's caller contract), so a generation advance observed
+	// at the re-check can only come from an install whose store reads
+	// happened after the clear; deferring to that one is correct.
+	h.kioskReplay.LockPlayback()
 	genBeforeResolve := h.kioskReplay.PlaybackGeneration()
+	h.kioskReplay.UnlockPlayback()
 
 	playerStatus, err := h.statusPoller.FetchPlayerStatus(ctx)
 	if err != nil {

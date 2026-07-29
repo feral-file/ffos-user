@@ -44,7 +44,7 @@ func setupMediaCaptureWithMaxDiskBytes(t *testing.T, maxDiskBytes int64) *mediaC
 	store, _ := newTestStore(t)
 	logger := zaptest.NewLogger(t)
 
-	capturer := offlinecache.NewMediaCapturer(mockHTTP, store, wrapper.NewClock(), maxDiskBytes, logger)
+	capturer := offlinecache.NewMediaCapturer(mockHTTP, store, wrapper.NewJSON(), wrapper.NewClock(), maxDiskBytes, logger)
 
 	return &mediaCaptureTestHarness{ctrl: ctrl, mockHTTP: mockHTTP, store: store, capturer: capturer}
 }
@@ -180,6 +180,102 @@ func TestMediaCapturer_Capture_SendsOriginHeader(t *testing.T) {
 // doc for why: the kiosk's native <img>/<video>/<audio> element only
 // ever requests the bare item.Source, so that is the only URL replay
 // ever needs to answer.
+// TestMediaCapturer_Capture_GLTFManifest covers the one case where this
+// single-file path downgrades its own coverage: a JSON .gltf manifest
+// whose spec-defined buffers[].uri/images[].uri point at separate
+// external files that are NOT captured (see gltfExternalDependencies'
+// doc). Reporting such an item Complete (and therefore `ready`) would
+// tell the controller a fully-cached item exists while fail-closed
+// replay fails its buffer/texture requests offline. Self-contained
+// manifests (data: URIs only), binary .glb, and non-glTF media must all
+// keep Complete=true.
+func TestMediaCapturer_Capture_GLTFManifest(t *testing.T) {
+	const externalDeps = `{"buffers":[{"uri":"scene.bin"}],"images":[{"uri":"https://cdn.example.com/tex.png"},{"uri":"data:image/png;base64,AAAA"}]}`
+	const selfContained = `{"buffers":[{"uri":"data:application/octet-stream;base64,AAAA"}],"images":[{"uri":"data:image/png;base64,AAAA"}]}`
+
+	tests := []struct {
+		name         string
+		source       string
+		contentType  string
+		body         string
+		wantComplete bool
+		wantReason   string
+	}{
+		{
+			name:         "gltf content-type with external buffer and image is partial",
+			source:       "https://example.com/scene",
+			contentType:  "model/gltf+json",
+			body:         externalDeps,
+			wantComplete: false,
+			wantReason:   "gltf_external_dependency:scene.bin; gltf_external_dependency:https://cdn.example.com/tex.png",
+		},
+		{
+			name: "gltf extension under a generic content-type is still checked",
+			// CDNs commonly lose the model/gltf+json type — the URL
+			// extension fallback must catch this (see isGLTFManifest).
+			source:       "https://example.com/scene.gltf",
+			contentType:  "application/octet-stream",
+			body:         externalDeps,
+			wantComplete: false,
+			wantReason:   "gltf_external_dependency:scene.bin; gltf_external_dependency:https://cdn.example.com/tex.png",
+		},
+		{
+			name:         "self-contained gltf manifest stays complete",
+			source:       "https://example.com/scene.gltf",
+			contentType:  "model/gltf+json",
+			body:         selfContained,
+			wantComplete: true,
+		},
+		{
+			name: "binary glb is never parsed and stays complete",
+			// A .glb embeds its payload; the manifest check must not
+			// even attempt to JSON-parse it (its body here would parse
+			// as JSON and yield external deps if it were).
+			source:       "https://example.com/scene.gltf",
+			contentType:  "model/gltf-binary",
+			body:         externalDeps,
+			wantComplete: true,
+		},
+		{
+			name: "unparseable gltf keeps complete coverage",
+			// The checker's own limits must never invent a downgrade —
+			// see gltfExternalDependencies' best-effort doc.
+			source:       "https://example.com/scene.gltf",
+			contentType:  "model/gltf+json",
+			body:         "not json at all {",
+			wantComplete: true,
+		},
+		{
+			name:         "non-gltf media is untouched by the manifest check",
+			source:       "https://example.com/photo.png",
+			contentType:  "image/png",
+			body:         "png bytes",
+			wantComplete: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setupMediaCapture(t)
+			defer h.ctrl.Finish()
+
+			item := dp1playlist.PlaylistItem{ID: "item-1", Source: tc.source}
+			h.expectGET(t, item.Source, newMediaResponse(http.StatusOK, tc.contentType, tc.body, nil))
+
+			rec, err := h.capturer.Capture(context.Background(), item)
+			require.NoError(t, err, "the manifest check must only ever adjust coverage, never fail a successful download")
+			require.NotNil(t, rec)
+
+			assert.Equal(t, tc.wantComplete, rec.Coverage.Complete)
+			assert.Equal(t, tc.wantReason, rec.Coverage.Reason)
+
+			saved, err := h.store.LoadItem("item-1")
+			require.NoError(t, err)
+			assert.Equal(t, rec.Coverage, saved.Coverage, "the persisted record must carry the same coverage verdict")
+		})
+	}
+}
+
 func TestMediaCapturer_Capture_StoresUnderOriginalSourceEvenAfterRedirect(t *testing.T) {
 	h := setupMediaCapture(t)
 	defer h.ctrl.Finish()
@@ -338,7 +434,7 @@ func tricklingServer(t *testing.T, chunks int, chunkSize int, gap time.Duration)
 func newRealClientMediaCapturer(t *testing.T, client wrapper.HTTPClient, maxDiskBytes int64) (offlinecache.MediaCapturer, offlinecache.Store) {
 	t.Helper()
 	store, _ := newTestStore(t)
-	return offlinecache.NewMediaCapturer(client, store, wrapper.NewClock(), maxDiskBytes, zaptest.NewLogger(t)), store
+	return offlinecache.NewMediaCapturer(client, store, wrapper.NewJSON(), wrapper.NewClock(), maxDiskBytes, zaptest.NewLogger(t)), store
 }
 
 // TestMediaCapturer_Capture_SlowBodyOutlivesAWholeRequestTimeout is the

@@ -632,6 +632,14 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 	// corrective resync can never install a stale playlist's scope over
 	// a newer authoritative one — see KioskReplay.PlaybackGeneration's
 	// doc.
+	//
+	// Unlike commandrouter's clear-path resync — whose sample must be
+	// taken UNDER the playback lock because a cache deletion precedes it
+	// and an in-flight installer's pre-clear store reads must not win
+	// (see that function's doc) — this sample deliberately stays
+	// unlocked: no store mutation precedes a refresh-failure resync, so
+	// a concurrent installer's scope was computed from the same store
+	// state this resync would read, and deferring to it is always safe.
 	genBeforeResolve := r.kioskReplay.PlaybackGeneration()
 
 	playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)

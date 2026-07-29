@@ -422,6 +422,21 @@ answer the second time around.
   the same way `capturer.Capture` already reports a failed
   `Page.navigate` as a hard error rather than an honest-partial one — the
   entry point itself never loaded either way.
+- **A JSON `.gltf` manifest with external dependencies is the one case
+  this path downgrades its own coverage.** After a successful download,
+  a manifest identified by Content-Type (`model/gltf+json`) or URL
+  extension is parsed for its spec-defined `buffers[].uri`/
+  `images[].uri` entries; any non-`data:` URI is a separate external
+  file this path does not capture, so the record is saved with
+  `Coverage.Complete=false` (`gltf_external_dependency:<uri>` reasons)
+  and the item reports `partial` instead of dishonestly claiming
+  `ready` while fail-closed replay would fail those requests offline.
+  glTF is checked because its manifest makes the dependency set exact
+  and enumerable; SVG's cannot be (see §7's known-limitations entry).
+  Binary `.glb` (self-contained by design) and manifests whose URIs are
+  all embedded `data:` payloads keep complete coverage, and a manifest
+  the checker cannot read or parse also keeps it — the checker's own
+  limits must never turn a working download into a downgrade.
 - **Reuses `capture.go`'s disk-budget machinery**, factored out as
   `newDiskBudgetFromStore` (seeded with the store's REMAINING room —
   `maxDiskBytes` minus current usage, never the full configured ceiling
@@ -1541,11 +1556,25 @@ identical cache state.
   `.glb`/inline-everything SVG is fully cached, but an SVG with an
   external `<image href="...">` or a `.gltf` (as opposed to binary
   `.glb`) referencing separate external buffer/texture files has those
-  further dependencies silently uncached, since discovering them would
-  require the same "run the code and observe" approach §1 restricts to
-  `ClassSoftware`. This is a known, accepted limitation rather than a
-  special case worth the cost of routing these through the headless
-  browser.
+  further dependencies uncached, since capturing them would require the
+  same "run the code and observe" approach §1 restricts to
+  `ClassSoftware`. Not capturing them is a known, accepted limitation
+  rather than a special case worth the cost of routing these through
+  the headless browser — but the two formats REPORT it differently:
+  - `.gltf` is no longer silent about it: the manifest's
+    `buffers[].uri`/`images[].uri` entries are the exact, spec-defined
+    list of out-of-band files, so `MediaCapturer` parses them and saves
+    honest partial coverage when any are external (§3.3).
+  - SVG keeps `Coverage.Complete=true`, deliberately. The kiosk player
+    renders an `image/*` item with an `<img>` element, and Chromium's
+    SVG-as-image mode never loads external references at all — so the
+    single cached file replays exactly what the live render showed, and
+    downgrading every SVG to `partial` for references that would not
+    have loaded online either would be the dishonest direction. There
+    is also no exact dependency list to parse: external references can
+    hide in `href`/`xlink:href` attributes, CSS `url()` values and
+    `@import`s, so any check would be a heuristic with false verdicts
+    in both directions.
 - **Personalized/authenticated responses** captured once may not be valid
   to replay for a different session; this pipeline does not attempt to
   detect or special-case per-session content beyond what URL-keying already
