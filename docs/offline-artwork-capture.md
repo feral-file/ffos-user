@@ -1234,8 +1234,27 @@ interception scoped to whichever of those IDs are actually cached
 *new* playlist **before** asking CDP to actually display it — deliberately,
 so `Fetch` interception is already scoped correctly by the time the kiosk
 starts requesting that playlist's resources, rather than racing the first
-few requests against a scope switch that has not happened yet. If the CDP
-send itself then fails, or the player rejects the command (`ok:false`),
+few requests against a scope switch that has not happened yet. "Before
+the send" never means "before the send is even certain to happen",
+though: the sync runs only after the `displayAt` scheduler has filtered
+the cast and something will actually be pushed. A future-only cast that
+the scheduler defers (`ok: true, deferred: true`, no player write)
+leaves scope untouched, because the previous playlist keeps displaying
+and switching interception to the deferred playlist would — under a
+fail_closed scope — block the on-screen playlist's own requests even
+with live network. When a filtered cast IS pushed, the scope is synced
+with the FULL playlist's item IDs rather than the active cohort: the
+scheduler's timer/wake/retry cutovers push later cohorts of the same
+playlist directly with no replay-scope hook of their own, so the
+cast-time scope must already cover every cohort a cutover can display
+(uncached future items only dilute the scope to `mixed`, whose miss
+policy is pass-through — the safe direction — and the
+`playlist-refresher`'s periodic pass re-syncs as downloads complete).
+The refresher guards its own pre-send sync the same way it already
+guards the send: a playlist-authority change observed under the
+playback lock skips both, so a stale refresh pass can no longer
+overwrite the scope a newer scheduler-owned cast just installed. If the
+CDP send itself then fails, or the player rejects the command (`ok:false`),
 the kiosk never actually switched — it is still genuinely showing whatever
 it displayed before — so that early scope switch left replay pointed at a
 playlist that never loaded. `Process`'s `CMD_DISPLAY_PLAYLIST` branch

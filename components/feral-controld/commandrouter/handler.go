@@ -258,41 +258,57 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// playlistschedule push (now_display, never soft refresh).
 			ensureDisplayPlaylistIntent(command.Arguments)
 
-			// Sync replay's Fetch-interception scope to this playlist's
-			// currently-cached items before forwarding to CDP below.
-			// feral-player advances through a multi-item playlist
-			// client-side without telling controld which item is on
-			// screen at any instant, so scope covers every cached item
-			// in the playlist rather than a single "current" one (see
-			// Replayer.EnableForPlaylist's doc). Best-effort: a sync
-			// failure must never block the actual display command, since
-			// offline replay is a strict enhancement over the live path.
+			// Acquire the playback coordinator here and hold it (via the
+			// deferred unlock above) across both the replay scope sync
+			// (syncReplayScope below) and the CDP send, so scope-sync +
+			// navigation cannot interleave with another display/refresh's
+			// own sync+send. Deliberately acquired AFTER the (possibly
+			// slow, network-bound) DP-1 resolution above, which does not
+			// touch scope.
 			if h.kioskReplay != nil && playlist != nil {
-				// Acquire the playback coordinator here and hold it (via
-				// the deferred unlock above) across the CDP send below,
-				// so scope-sync + navigation cannot interleave with
-				// another display/refresh's own sync+send. Deliberately
-				// acquired AFTER the (possibly slow, network-bound) DP-1
-				// resolution above, which does not touch scope.
 				h.kioskReplay.LockPlayback()
 				heldPlaybackLock = true
-				itemIDs := make([]string, 0, len(playlist.Items))
-				for _, item := range playlist.Items {
-					itemIDs = append(itemIDs, item.ID)
-				}
-				if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
-					h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
-				}
-				// Announce this authoritative scope change (under the
-				// lock) so a concurrent corrective resync that sampled
-				// the generation earlier will defer to it instead of
-				// clobbering it with a stale playlist's scope — see
-				// KioskReplay.PlaybackGeneration's doc. Bumped even if the
-				// sync above logged an error: this path is authoritative
-				// for what SHOULD be on screen, and the resync must not
-				// override that intent with an older snapshot.
-				h.kioskReplay.MarkPlaybackChanged()
 			}
+		}
+
+		// syncReplayScope points replay's Fetch-interception scope at p's
+		// currently-cached items. feral-player advances through a
+		// multi-item playlist client-side without telling controld which
+		// item is on screen at any instant, so scope covers every cached
+		// item in the playlist rather than a single "current" one (see
+		// Replayer.EnableForPlaylist's doc). Best-effort: a sync failure
+		// must never block the actual display command, since offline
+		// replay is a strict enhancement over the live path.
+		//
+		// Callers invoke this ONLY once a CDP send for p is actually
+		// going to happen, immediately before it — never for a cast the
+		// scheduler defers or rejects. Scope must keep tracking what is
+		// genuinely on screen: a deferred (future-only) cast leaves the
+		// previous playlist displaying, and switching interception to the
+		// new playlist anyway would — under a fail_closed scope — start
+		// blocking the on-screen playlist's own requests even with live
+		// network, until a later corrective pass noticed
+		// (feral-file/ffos-user#229 review finding).
+		syncReplayScope := func(p *dp1.Playlist) {
+			if h.kioskReplay == nil || p == nil {
+				return
+			}
+			itemIDs := make([]string, 0, len(p.Items))
+			for _, item := range p.Items {
+				itemIDs = append(itemIDs, item.ID)
+			}
+			if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
+				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
+			}
+			// Announce this authoritative scope change (under the
+			// lock) so a concurrent corrective resync that sampled
+			// the generation earlier will defer to it instead of
+			// clobbering it with a stale playlist's scope — see
+			// KioskReplay.PlaybackGeneration's doc. Bumped even if the
+			// sync above logged an error: this path is authoritative
+			// for what SHOULD be on screen, and the resync must not
+			// override that intent with an older snapshot.
+			h.kioskReplay.MarkPlaybackChanged()
 		}
 
 		if commandType == commands.CMD_REFRESH_ARTWORK {
@@ -314,6 +330,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				schedulerSnapshot = h.scheduler.Snapshot()
 				// Filter displayAt playlists to the active set before the player
 				// sees them. The scheduler keeps the full list for timer/wake updates.
+				fullPlaylist := playlist
 				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
 				schedulerMutated = true
 				if playlist == nil {
@@ -325,7 +342,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if len(playlist.Items) == 0 {
 					// The scheduler retained and armed the future schedule; the
 					// player rejects an empty displayPlaylist, so leave its current
-					// artwork in place until a cohort becomes eligible.
+					// artwork in place until a cohort becomes eligible. Replay
+					// scope is deliberately NOT synced on this path (see
+					// syncReplayScope's caller contract): nothing new reaches
+					// the screen, so interception must stay pointed at the
+					// playlist that keeps displaying.
 					h.scheduler.Commit()
 					// A relayer RPC and hub request both need an explicit acceptance
 					// response even though no CDP write was valid. This also prevents
@@ -335,6 +356,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					}
 					return
 				}
+				// Scope the FULL playlist's items, not just the filtered
+				// active cohort: the scheduler's own timer/wake/retry
+				// cutovers push later cohorts of this same playlist
+				// directly (playlistschedule's push), with no replay-scope
+				// hook of their own, so the scope installed here must
+				// already cover every cohort a cutover can display. The
+				// cost is only precision, in the safe direction: uncached
+				// future items keep the scope "mixed", whose miss policy
+				// is pass-through rather than fail_closed (see
+				// Replayer.EnableForPlaylist), and the playlist-refresher's
+				// periodic pass re-syncs as downloads complete.
+				syncReplayScope(fullPlaylist)
 				command.Arguments["dp1_call"] = playlist
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
@@ -350,6 +383,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
+				// No scheduler configured: every cast reaches the player
+				// unfiltered, so scope-sync immediately precedes the send.
+				syncReplayScope(playlist)
 				command.Arguments["dp1_call"] = playlist
 			}
 			result, err = h.sendCDPRequest(command)

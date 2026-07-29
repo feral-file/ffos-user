@@ -387,6 +387,19 @@ func (r *refresher) processPlayingPlaylist() (err error) {
 	if r.kioskReplay != nil {
 		r.kioskReplay.LockPlayback()
 		defer r.kioskReplay.UnlockPlayback()
+		// Skip the sync when playlist authority moved while this pass was
+		// resolving: the send below will be skipped for the exact same
+		// token mismatch, and syncing anyway would overwrite — under this
+		// same lock, AFTER it ran — the scope the new authority's own
+		// cast just installed, leaving interception pointed at the
+		// previous playlist while the new one is on screen until the next
+		// pass (feral-file/ffos-user#229 review finding). Checked under
+		// the playback lock so it strictly orders against that cast's own
+		// locked sync+send.
+		if r.scheduler != nil && r.scheduler.AuthorityToken() != authorityToken {
+			r.logger.Debug("Skipping replay scope sync: playlist authority changed during refresh resolution")
+			return nil
+		}
 		r.syncReplayScopeLocked(playlist)
 	}
 

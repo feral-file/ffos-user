@@ -482,6 +482,73 @@ func TestRefresher_ProcessPlayingPlaylist_SyncsKioskReplayScope(t *testing.T) {
 	r.Stop()
 }
 
+// TestRefresher_ProcessPlayingPlaylist_SkipsScopeSyncWhenAuthorityChangesMidResolution
+// is the regression test for the scope-overwrite hole the refresher's
+// authority guard closes (feral-file/ffos-user#229 review finding): the
+// pass samples the scheduler's AuthorityToken, then does slow URL/dynamic
+// resolution; if a scheduler-owned cast lands in that window, the send is
+// already skipped on the token mismatch — but the scope sync used to run
+// anyway, overwriting (under the same playback lock, after it ran) the
+// scope that cast just installed, and leaving interception pointed at the
+// previous playlist until the next pass. The guard must skip BOTH.
+//
+// The interleaving is deterministic: the DP1 resolution mock — the exact
+// step the token window spans — stands in for the concurrent cast by
+// bumping playlist authority (a real scheduler's PrepareWithSource)
+// before returning. The strict kiosk-replay mock then pins the fix: any
+// SyncPlaylist (or CDP send, also unexpected) fails the test, while the
+// MinTimes(1) resolution expectation proves passes genuinely ran into
+// the guard rather than short-circuiting earlier.
+func TestRefresher_ProcessPlayingPlaylist_SkipsScopeSyncWhenAuthorityChangesMidResolution(t *testing.T) {
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ctrl)
+	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
+	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
+	// No SyncPlaylist / MarkPlaybackChanged expectations: either call is an
+	// unexpected mock invocation and fails the test.
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	// No mockCDP.Send expectation either: the pass must not reach the send.
+
+	mockTicker := mocks.NewMockTicker(ctrl)
+	mockTicker.EXPECT().C().Return(make(chan time.Time, 1)).AnyTimes()
+	mockTicker.EXPECT().Stop().AnyTimes()
+	mockClock.EXPECT().NewTicker(gomock.Any()).Return(mockTicker).AnyTimes()
+	mockClock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	mockClock.EXPECT().Now().Return(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)).AnyTimes()
+
+	sched := playlistschedule.New(ctx, mockCDP, mockClock, func() *time.Location { return time.UTC }, logger)
+
+	playlistURL := "http://example.com/playlist.json"
+	mockPlaylist := createMockPlaylist()
+	mockStatusPoller.EXPECT().
+		FetchPlayerStatus(ctx).
+		Return(createMockPlayerStatus(string(commands.CMD_DISPLAY_PLAYLIST), &playlistURL, nil), nil).
+		AnyTimes()
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		DoAndReturn(func(context.Context, string, bool) (*dp1.Playlist, error) {
+			// The concurrent scheduler-owned cast: bumps AuthorityToken
+			// exactly inside the pass's sample→guard window.
+			sched.PrepareWithSource(mockPlaylist, playlistschedule.Source{})
+			return mockPlaylist, nil
+		}).
+		MinTimes(1)
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, mockKioskReplay, nil, wrapper.NewJSON(), sched, mockClock, logger)
+	r.Start()
+	time.Sleep(100 * time.Millisecond)
+	r.Stop()
+}
+
 // TestRefresher_ProcessPlayingPlaylist_HoldsPlaybackLockAcrossSyncAndSend
 // is the refresher-side regression test for the "replay scope and kiosk
 // navigation are not serialized" hazard (its commandrouter twin lives in
