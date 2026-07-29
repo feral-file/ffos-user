@@ -175,6 +175,16 @@ type executor struct {
 	// the mid-life daemon-restart case the process latch cannot.
 	bootPlayerRecoveryDone atomic.Bool
 
+	// bootPlayerRecoveryPending parks a WAN-confirmed boot player recovery that
+	// arrived before the CDP supervisor's first successful connection. The
+	// provisioning domain starts before CDP.Start (main.go's P2.5 ordering), so
+	// the boot online transition routinely fires while Chromium has already
+	// painted its page (offline) but DevTools is not attached yet — the exact
+	// boot this recovery exists to repair. The CDP on-connect callback drains
+	// this flag (CompletePendingBootPlayerRecovery); together with
+	// bootPlayerRecoveryDone it still guarantees at most one recovery per boot.
+	bootPlayerRecoveryPending atomic.Bool
+
 	// logUploaderFactory builds the in-process log uploader. Overridable in tests
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
@@ -846,6 +856,26 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 // parking states), so this fires only when the fetches can actually succeed,
 // never on a LAN without internet.
 //
+// Settled devices only: on an unclaimed device the auto-claim flow owns the
+// screen (finalizing narration, then the claim QR), and there is no playlist —
+// refreshArtwork would refuse ("No active artwork to refresh") and escalate to
+// a Page.reload that can erase the concurrently painted claim overlay with
+// nothing guaranteed to restore it (narration re-syncs only on a CDP
+// reconnect, which a same-target reload does not force). The latch is still
+// consumed: anything cast after a claim loads with the network already up, so
+// an unclaimed boot has nothing this hook could ever need to repair.
+//
+// CDP ordering: the provisioning domain starts before the CDP supervisor
+// (main.go's P2.5 ordering), so this transition routinely precedes the first
+// DevTools connection even though Chromium painted its page long before —
+// DevTools attach lag says nothing about page-load timing. When CDP is not
+// connected yet the recovery is therefore PARKED (bootPlayerRecoveryPending),
+// and the CDP on-connect callback completes it
+// (CompletePendingBootPlayerRecovery). The arm-then-probe order below is what
+// makes that race-free: connectLoop marks the client Initialized before firing
+// onConnect, so observing Initialized()==false here guarantees the connect
+// callback has not run yet and will see the pending flag.
+//
 // ctx is unused: the body is at most two bounded CDP Sends, not a wait loop,
 // so there is nothing for cancellation to interrupt (contrast the gate and
 // claim hooks, whose retry/backoff waits must observe daemon shutdown).
@@ -857,12 +887,34 @@ func (e *executor) MaybeRecoverPlayerOnBootOnline(_ context.Context) {
 	if !e.bootPlayerRecoveryDone.CompareAndSwap(false, true) {
 		return
 	}
+	if !e.claimSettled() {
+		e.logger.Info("Boot player recovery: device unclaimed; claim flow owns the screen, nothing to recover")
+		return
+	}
+	e.bootPlayerRecoveryPending.Store(true)
 	if e.cdp == nil || !e.cdp.Initialized() {
-		// No page yet: Chromium lost the race instead of the network — its
-		// first load will happen with connectivity already up, which is the
-		// healthy path. Consuming the latch is correct; there is nothing to
-		// recover.
-		e.logger.Info("Boot player recovery: player page not up yet; first load will see the network")
+		e.logger.Info("Boot player recovery: WAN confirmed before DevTools attached; recovery pending until CDP connects")
+		return
+	}
+	e.CompletePendingBootPlayerRecovery()
+}
+
+// CompletePendingBootPlayerRecovery executes a parked boot player recovery
+// exactly once. Two callers: MaybeRecoverPlayerOnBootOnline inline (CDP was
+// already connected at the online transition) and main.go's CDP on-connect
+// callback (the transition preceded the first DevTools connection). The CAS
+// makes the two race-safe, and a callback firing with nothing parked — every
+// reconnect for the rest of the process, and all of them outside the boot
+// window — is a no-op.
+func (e *executor) CompletePendingBootPlayerRecovery() {
+	if !e.bootPlayerRecoveryPending.CompareAndSwap(true, false) {
+		return
+	}
+	// Re-check between park and completion: a factory reset in the gap flips
+	// the device back to unclaimed, where a reload could wipe the claim
+	// overlay (see the settled-devices-only rationale above).
+	if !e.claimSettled() {
+		e.logger.Info("Boot player recovery: device no longer settled; dropping pending recovery")
 		return
 	}
 

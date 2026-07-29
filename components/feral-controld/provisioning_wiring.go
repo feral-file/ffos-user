@@ -114,8 +114,12 @@ type startupOTAGateFlow interface {
 
 // bootPlayerRecoveryFlow is the narrow slice of the executor the boot-online
 // player recovery needs. Asserted at wiring time like the other two flows.
+// The completion half is called from the CDP on-connect callback: provisioning
+// starts before the CDP supervisor, so the boot online transition can precede
+// the first DevTools connection, and the recovery is parked until it arrives.
 type bootPlayerRecoveryFlow interface {
 	MaybeRecoverPlayerOnBootOnline(ctx context.Context)
+	CompletePendingBootPlayerRecovery()
 }
 
 // bootLifecycleWindow bounds how long after kernel boot a controld start still
@@ -266,7 +270,10 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 		// A player page that loaded before the network was up gets one
 		// recovery pass (in-app artwork refresh, page reload as fallback) now
 		// that WAN reachability is confirmed (monitord's probe drives this
-		// transition). One-shot; nil outside the boot lifecycle.
+		// transition). One-shot; nil outside the boot lifecycle. Settled
+		// devices only, and when DevTools is not attached yet the recovery
+		// parks until the CDP supervisor's first connection — see
+		// MaybeRecoverPlayerOnBootOnline.
 		if n.playerRecovery != nil && wanConfirmed {
 			go n.playerRecovery(n.claimCtx)
 		}

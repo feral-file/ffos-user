@@ -403,6 +403,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		if app.SetupUI != nil {
 			app.SetupUI.Resync()
 		}
+		// A WAN-confirmed boot player recovery may be parked waiting for this
+		// first DevTools connection (provisioning starts before this supervisor,
+		// so its online transition can precede it). Complete it now; a no-op on
+		// every connect with nothing parked. Own goroutine for the same reason
+		// the provisioning notifier hooks get one: its CDP sends must not stall
+		// the connect loop's other resync work.
+		if pr, ok := app.Executor.(bootPlayerRecoveryFlow); ok {
+			go pr.CompletePendingBootPlayerRecovery()
+		}
 	})
 	defer app.CDP.Close()
 
