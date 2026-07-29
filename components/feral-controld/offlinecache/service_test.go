@@ -24,6 +24,7 @@ import (
 )
 
 type serviceTestSetup struct {
+	t                 *testing.T
 	ctrl              *gomock.Controller
 	store             offlinecache.Store
 	mockClassifier    *mocks.MockOfflineCacheClassifier
@@ -55,9 +56,27 @@ func setupService(t *testing.T, maxDiskBytes int64, observer offlinecache.Progre
 	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, observer, zaptest.NewLogger(t))
 
 	return &serviceTestSetup{
-		ctrl: ctrl, store: store, mockClassifier: mockClassifier, mockCapturer: mockCapturer,
+		t: t, ctrl: ctrl, store: store, mockClassifier: mockClassifier, mockCapturer: mockCapturer,
 		mockMediaCapturer: mockMediaCapturer, service: svc,
 	}
+}
+
+// setupServiceDeferredBudget is setupService with the disk budget left
+// open, paired with setMaxDiskBytes so a test can size the budget from
+// what it has actually seeded. DiskUsage counts item and playlist
+// records as well as blobs (see its doc), and a record dwarfs the
+// handful of bytes these tests use as blob payloads, so a hardcoded byte
+// budget no longer expresses anything meaningful about blob-driven
+// eviction.
+func setupServiceDeferredBudget(t *testing.T) *serviceTestSetup {
+	return setupService(t, 0, nil)
+}
+
+// setMaxDiskBytes rebuilds the Service under test with a known budget.
+// Must be called before Start.
+func (ts *serviceTestSetup) setMaxDiskBytes(maxDiskBytes int64) {
+	ts.service = offlinecache.NewService(ts.store, ts.mockClassifier, ts.mockCapturer,
+		ts.mockMediaCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, nil, zaptest.NewLogger(ts.t))
 }
 
 func seedItemWithCapturedAt(t *testing.T, store offlinecache.Store, itemID, blobContent string, capturedAt time.Time) offlinecache.Resource {
@@ -1408,7 +1427,12 @@ func TestService_Status_AggregatesTotalsAndDiskUsage(t *testing.T) {
 	assert.Equal(t, 2, snap.Totals.Total)
 	assert.Equal(t, 2, snap.Totals.Ready)
 	require.NotNil(t, snap.DiskUsedBytes)
-	assert.Equal(t, int64(20), *snap.DiskUsedBytes)
+	// Everything the cache persisted, not just blobs — item records are
+	// cache data too (see Store.DiskUsage). Cross-checked against an
+	// independent full walk of the store root rather than a hardcoded
+	// number, which would only restate the implementation.
+	assert.Equal(t, allCacheBytesOnDisk(t, ts.store.RootDir()), *snap.DiskUsedBytes)
+	assert.Greater(t, *snap.DiskUsedBytes, int64(20), "the two seeded blobs alone are 20 bytes")
 	assert.False(t, snap.Truncated)
 	assert.Empty(t, snap.NextCursor)
 }
@@ -1523,7 +1547,7 @@ func TestService_Status_TotalsOnlyOmitsItems(t *testing.T) {
 	assert.Equal(t, 2, snap.Totals.Total)
 	assert.Equal(t, 1, snap.Totals.Ready)
 	require.NotNil(t, snap.DiskUsedBytes)
-	assert.Equal(t, int64(10), *snap.DiskUsedBytes)
+	assert.Equal(t, allCacheBytesOnDisk(t, ts.store.RootDir()), *snap.DiskUsedBytes)
 }
 
 func TestService_Status_SortsAndDedupesRequestedIDs(t *testing.T) {
@@ -1653,13 +1677,33 @@ func TestService_Stop_ClosesCapturer(t *testing.T) {
 }
 
 func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
-	ts := setupService(t, 12, nil)
+	// The budget is derived from what the seeded items actually occupy
+	// rather than hardcoded, because DiskUsage counts item records as
+	// well as blobs (see its doc) and a record is an order of magnitude
+	// larger than these test blobs — a fixed byte budget would be
+	// consumed entirely by record overhead and evict everything,
+	// including the item under test, which is not what this is about.
+	// Setting it to exactly the pre-capture footprint means the new
+	// capture is what pushes it over, and the question the test asks is
+	// which items get evicted to get back under.
+	ts := setupServiceDeferredBudget(t)
 	defer ts.ctrl.Finish()
 
-	seedItemWithCapturedAt(t, ts.store, "old-1", "0123456789", time.Now().Add(-2*time.Hour))
-	seedItemWithCapturedAt(t, ts.store, "old-2", "abcdefghij", time.Now().Add(-1*time.Hour))
+	// Blob payloads deliberately far larger than an item record, so the
+	// budget arithmetic below is about blob bytes (what eviction is for)
+	// rather than about record overhead.
+	const blobSize = 1000
+	seedItemWithCapturedAt(t, ts.store, "old-1", strings.Repeat("a", blobSize), time.Now().Add(-2*time.Hour))
+	seedItemWithCapturedAt(t, ts.store, "old-2", strings.Repeat("b", blobSize), time.Now().Add(-1*time.Hour))
 
-	newHash := writeBlobString(t, ts.store, "zzzzzzzzzz")
+	// One blob's worth below what the two seeded items occupy: the new
+	// capture pushes usage to three items, and getting back under
+	// requires evicting BOTH old ones — which is what makes "oldest
+	// first" observable rather than incidental.
+	budget := allCacheBytesOnDisk(t, ts.store.RootDir()) - blobSize
+	ts.setMaxDiskBytes(budget)
+
+	newHash := writeBlobString(t, ts.store, strings.Repeat("z", blobSize))
 	newItem := dp1playlist.PlaylistItem{ID: "new-item", Source: "https://example.com/new"}
 	newRec := &offlinecache.ItemRecord{
 		ItemID: "new-item", Item: newItem, Entry: newItem.Source,
@@ -1683,7 +1727,7 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		usage, err := ts.store.DiskUsage()
-		return err == nil && usage <= 12
+		return err == nil && usage <= budget
 	}, 2*time.Second, 10*time.Millisecond, "disk usage should settle back under budget")
 
 	_, err := ts.store.LoadItem("old-1")

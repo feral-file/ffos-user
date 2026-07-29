@@ -13,10 +13,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
+	go_os "os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/stretchr/testify/assert"
@@ -455,4 +458,125 @@ func (r *repeatingReader) Read(p []byte) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// blobBytesOnDisk sums only the blob payloads under a store root. Store.
+// DiskUsage deliberately counts item and playlist records too (see its
+// doc), so a test whose subject is specifically "how many blob bytes did
+// this write" needs its own measure rather than reusing that one.
+func blobBytesOnDisk(t *testing.T, root string) int64 {
+	t.Helper()
+	entries, err := go_os.ReadDir(filepath.Join(root, "blobs"))
+	if go_os.IsNotExist(err) {
+		return 0
+	}
+	require.NoError(t, err)
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		info, err := e.Info()
+		require.NoError(t, err)
+		total += info.Size()
+	}
+	return total
+}
+
+// allCacheBytesOnDisk walks the whole store root, which is an independent
+// way of arriving at what DiskUsage sums directory by directory — so an
+// assertion using it actually cross-checks that accounting rather than
+// restating it.
+func allCacheBytesOnDisk(t *testing.T, root string) int64 {
+	t.Helper()
+	var total int64
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || strings.HasSuffix(d.Name(), ".tmp") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	}))
+	return total
+}
+
+// TestStore_DiskUsage_CountsRecordsNotJustBlobs pins the accounting half
+// of the maxDiskBytes fix. DiskUsage once summed blobs/ alone, so
+// playlist bodies and item records — real persisted cache data — sat
+// entirely outside the configured ceiling.
+func TestStore_DiskUsage_CountsRecordsNotJustBlobs(t *testing.T) {
+	store, root := newTestStore(t)
+
+	require.NoError(t, store.SavePlaylist("playlist-1", json.RawMessage(`{"id":"playlist-1","items":[]}`)))
+	require.NoError(t, store.SavePlaylistURLIndex("https://feed.example.com/p1", "playlist-1"))
+
+	usage, err := store.DiskUsage()
+	require.NoError(t, err)
+	assert.Zero(t, blobBytesOnDisk(t, root), "fixture writes no blobs at all")
+	assert.Positive(t, usage, "a store holding only metadata must still report usage, or the budget cannot see it")
+	assert.Equal(t, allCacheBytesOnDisk(t, root), usage)
+}
+
+// TestStore_PrunePlaylistRecords_BoundsMetadataGrowth is the regression
+// test for the unbounded-metadata finding: a device asked to download a
+// series of distinct playlists whose items are all non-cacheable writes
+// a playlist body every time and queues nothing, so no capture ever runs
+// and eviction — which only walks items and their blobs — never sees any
+// of it.
+func TestStore_PrunePlaylistRecords_BoundsMetadataGrowth(t *testing.T) {
+	store, root := newTestStore(t)
+
+	const written = 40
+	const keep = 10
+	for i := 0; i < written; i++ {
+		id := fmt.Sprintf("playlist-%02d", i)
+		require.NoError(t, store.SavePlaylist(id, json.RawMessage(`{"id":"`+id+`","items":[]}`)))
+		require.NoError(t, store.SavePlaylistURLIndex("https://feed.example.com/"+id, id))
+		// Distinct mtimes, oldest first, so "which ones survive" is a
+		// question about age rather than about filesystem timestamp
+		// granularity.
+		path := filepath.Join(root, "playlists", id+".json")
+		age := time.Duration(written-i) * time.Minute
+		require.NoError(t, go_os.Chtimes(path, time.Now().Add(-age), time.Now().Add(-age)))
+	}
+
+	beforeUsage, err := store.DiskUsage()
+	require.NoError(t, err)
+
+	removed, err := store.PrunePlaylistRecords(keep)
+	require.NoError(t, err)
+	assert.Equal(t, written-keep, removed)
+
+	ids, err := store.ListPlaylistIDs()
+	require.NoError(t, err)
+	require.Len(t, ids, keep, "metadata must be bounded by the retention limit")
+
+	// The newest survive; the oldest are gone.
+	for i := 0; i < written-keep; i++ {
+		_, err := store.LoadPlaylist(fmt.Sprintf("playlist-%02d", i))
+		assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound, "oldest playlist bodies must be pruned first")
+	}
+	for i := written - keep; i < written; i++ {
+		_, err := store.LoadPlaylist(fmt.Sprintf("playlist-%02d", i))
+		assert.NoError(t, err, "the most recent playlists must survive")
+	}
+
+	// The by-url index is pruned alongside, or it would grow unbounded
+	// on its own while every lookup through it failed closed.
+	_, err = store.LoadPlaylistIDForURL("https://feed.example.com/playlist-00")
+	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
+	id, err := store.LoadPlaylistIDForURL(fmt.Sprintf("https://feed.example.com/playlist-%02d", written-1))
+	require.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf("playlist-%02d", written-1), id)
+
+	afterUsage, err := store.DiskUsage()
+	require.NoError(t, err)
+	assert.Less(t, afterUsage, beforeUsage, "pruning must actually reclaim accounted bytes")
 }

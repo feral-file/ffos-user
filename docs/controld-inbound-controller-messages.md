@@ -1804,43 +1804,44 @@ to local hub WebSocket clients.
 }
 ```
 
-Delivery is best-effort on both transports, but the two transports are no
-longer symmetric in how they are decoupled from the offline-cache
-service's single capture-worker goroutine (the same one that runs
-captures — see `service.notify`):
+Delivery is best-effort on both transports, and **neither one runs on the
+goroutine that produced the notification**. Both are enqueued
+(non-blocking) onto one bounded background queue (`notifyQueueCapacity`,
+256 entries in `notifier.go`), drained one notification at a time, in
+order, by a dedicated worker that performs the relayer send and then the
+hub-WS send for each.
 
-- **Relayer** delivery is silently skipped (no log) when the relayer is
-  not connected, and otherwise still runs synchronously on the capture
-  worker, write-deadline-bounded to 5s via `notifySendTimeout` in
-  `notifier.go` rather than able to block indefinitely on a
-  backpressured relayer connection; only a failed `Send` itself is
-  logged.
-- **Hub WS** delivery is unconditionally enqueued (non-blocking, never
-  gated on whether any hub client happens to be connected right now)
-  onto a bounded background queue (`notifyQueueCapacity`, 256 entries in
-  `notifier.go`) drained one notification at a time, in order, by a
-  dedicated background worker goroutine — never sent inline on the
-  capture worker. That worker's `ws.WS.SendAll` call is itself a no-op
-  (debug-logged, not a drop/warning) when there are no connected hub
-  clients at delivery time; skip-if-no-clients is `SendAll`'s own
-  behavior (`ws.go`), not a decision `Notifier` makes before enqueueing.
-  Queueing exists because `SendAll`'s per-connection writes are each
-  individually bounded (`ws.go`'s `sendWriteWait`), but the loop over
-  however many hub clients are connected has no aggregate bound;
-  without queueing, several slow/wedged clients could block the capture
-  worker for `(client count) * sendWriteWait`, stalling the entire
-  download queue behind what is meant to be a best-effort side-channel.
-  Two situations still drop a notification outright, logged as a
-  warning each time: the queue is full (the worker has fallen far
-  enough behind that 256 notifications are already pending — see
-  `notifyQueueCapacity`'s doc for why that bound is not expected to be
-  hit in normal use), or the notification was still queued when the
-  daemon began shutting down (`Notifier.Close` does not drain the
-  remainder — see its doc for why flushing to a client the process is
-  about to stop serving has no value). A connection that hits its write
-  deadline (either transport) is dropped as a failed write and closed,
-  same as any other write error; the queued/downloading captures behind
-  it in the worker's queue are unaffected either way.
+That matters because notifications are produced from two places that
+must not pay for delivery: the single capture worker (which would
+otherwise stall the whole download queue behind a slow transport) and
+command admission itself — `enqueue` emits `queued` per item, and
+`downloadPlaylist` drives that in a loop, so an inline relayer send
+bounded at 5s each turned one playlist request into (item count) x 5s of
+blocking, minutes past the LAN hub's own response deadline.
+
+Per transport, at delivery time:
+
+- **Relayer**: skipped silently (no log) when the relayer is not
+  connected; otherwise write-deadline-bounded to 5s via
+  `notifySendTimeout`, and only a failed `Send` is logged.
+- **Hub WS**: `ws.WS.SendAll` is itself a no-op (debug-logged, not a
+  drop/warning) when no hub clients are connected — that is `SendAll`'s
+  own behavior (`ws.go`), not a decision `Notifier` makes before
+  enqueueing. Its per-connection writes are each bounded
+  (`ws.go`'s `sendWriteWait`), but the loop across however many clients
+  are connected has no aggregate bound, which is the other reason
+  delivery cannot run inline.
+
+Two situations drop a notification outright, logged as a warning each
+time: the queue is full (the worker has fallen far enough behind that
+256 notifications are already pending — see `notifyQueueCapacity`'s doc
+for why that bound is not expected to be hit in normal use), or the
+notification was still queued when the daemon began shutting down
+(`Notifier.Close` does not drain the remainder — see its doc for why
+flushing to a client the process is about to stop serving has no value).
+A connection that hits its write deadline (either transport) is dropped
+as a failed write and closed, same as any other write error; the
+queued/downloading captures behind it are unaffected either way.
 
 The `message` body is one `items[]` entry of `getOfflineCacheStatus` and
 follows the same rules, including the ~512-byte `reason` truncation

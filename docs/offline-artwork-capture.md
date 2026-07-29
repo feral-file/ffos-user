@@ -1167,6 +1167,33 @@ just because it happens to share a CDP target with a cached item.
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.
 
+### What `maxDiskBytes` actually bounds
+
+`Store.DiskUsage` sums **every** directory the cache persists — blobs,
+item records, playlist bodies, and the by-url index — not just `blobs/`.
+It once counted blobs alone, which left real cache data outside the
+ceiling `offlineCache.maxDiskBytes` is documented to enforce.
+
+Playlist metadata was the sharp edge: `downloadPlaylist` persists a
+playlist's raw JSON (and its URL-index entry) *before* any item is
+queued, and does so even when nothing in the playlist is cacheable at
+all. A device asked to download a series of distinct all-streaming
+playlists therefore accumulated metadata that no eviction pass could
+see — `enforceDiskLimit` walks items by `CapturedAt` and GCs the blobs
+they release, and a playlist body is neither.
+
+Counting it is only half the fix, since counting alone would make the
+overage visible while leaving nothing able to act on it. Playlist bodies
+are additionally bounded **by count** (`MaxPlaylistRecords`, 256) at the
+point they are written, oldest pruned first, along with any by-url entry
+left pointing at a pruned body. The cost of pruning is the
+displayPlaylist-by-URL offline fallback for playlists that far back —
+`CachedPlaylistForURL` already fails closed when a record is absent.
+
+Item records are counted but not separately bounded: unlike playlist
+bodies they are deleted with their item, so they scale with a population
+eviction already controls.
+
 ### A child target is only resumed once interception is armed
 
 Flat-mode child targets (cross-origin OOPIF iframes) attach paused, and

@@ -197,3 +197,63 @@ func TestNotifier_Close_IsSafeToCallMultipleTimesAndWhenWSDisabled(t *testing.T)
 		withWS.Close()
 	})
 }
+
+// TestNotifier_OnItemStateChanged_DoesNotBlockOnSlowRelayerDelivery is
+// the regression test for admission paying for delivery. The relayer
+// send used to run inline here, bounded per send by notifySendTimeout
+// (5s) — and this is called once per item from enqueue, which
+// DownloadPlaylist drives in a serial loop, so one playlist request
+// against a connected-but-backpressured relayer became (item count) x 5s
+// of blocking inside command admission: minutes past the LAN hub's own
+// response deadline for a command documented to acknowledge promptly.
+//
+// The relayer Send here blocks until the test releases it, standing in
+// for that backpressure. Each call must still return immediately.
+func TestNotifier_OnItemStateChanged_DoesNotBlockOnSlowRelayerDelivery(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockRelayer := mocks.NewMockRelayer(ctrl)
+	release := make(chan struct{})
+	blocked := make(chan struct{}, 1)
+
+	mockRelayer.EXPECT().IsConnected().Return(true).AnyTimes()
+	mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(context.Context, interface{}) error {
+			select {
+			case blocked <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		}).AnyTimes()
+
+	notifier := offlinecache.NewNotifier(mockRelayer, nil, zaptest.NewLogger(t))
+	defer func() {
+		close(release)
+		notifier.Close()
+	}()
+
+	// Wait until a send is genuinely stuck, so the timing below is
+	// measuring "queued behind a wedged transport" and not a race.
+	notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-0", State: offlinecache.StateQueued})
+	select {
+	case <-blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never reached the relayer send")
+	}
+
+	// A playlist's worth of admissions, every one of them while the
+	// relayer is wedged.
+	const items = 200
+	start := time.Now()
+	for i := 0; i < items; i++ {
+		notifier.OnItemStateChanged(offlinecache.ItemStatus{
+			ItemID: fmt.Sprintf("item-%d", i+1), State: offlinecache.StateQueued,
+		})
+	}
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 2*time.Second,
+		"admission must not pay for delivery: %d notifications took %s with the relayer wedged", items, elapsed)
+}

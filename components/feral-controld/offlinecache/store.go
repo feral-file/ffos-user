@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -128,6 +129,9 @@ type Store interface {
 	// here would make maxDiskBytes accounting flicker based on capture
 	// timing rather than actual stored blobs.
 	DiskUsage() (int64, error)
+	// PrunePlaylistRecords bounds stored playlist metadata by count —
+	// see MaxPlaylistRecords for why a byte budget alone cannot.
+	PrunePlaylistRecords(keep int) (int, error)
 	// SweepIncompleteBlobs removes every blobs/*.tmp file and is safe to
 	// call ONLY when no capture can possibly be in flight (i.e. once at
 	// daemon startup, before the offline-cache worker starts processing
@@ -563,26 +567,173 @@ func (s *fsStore) GC() (int, int64, error) {
 	return removed, freed, nil
 }
 
+// DiskUsage reports every byte this cache has persisted, not just its
+// blobs.
+//
+// Blobs dominate, but they were once the whole of it — which made
+// maxDiskBytes a bound on the wrong number. Item records and playlist
+// bodies are cache data too: DownloadPlaylist persists a playlist's raw
+// JSON (and its URL-index entry) BEFORE any item is queued, and does so
+// even when nothing in it is cacheable at all, so a device asked to
+// download a series of distinct all-streaming playlists accumulated
+// metadata that no eviction pass could see and no budget accounted for
+// (feral-file/ffos-user#229 review finding). Counting all three
+// directories is what makes the configured ceiling mean what
+// OptionsFromConfig's DefaultMaxDiskBytes doc says it means.
+//
+// See MaxPlaylistRecords for the separate bound that keeps that
+// metadata evictable rather than merely visible.
 func (s *fsStore) DiskUsage() (int64, error) {
-	entries, err := s.os.ReadDir(s.blobsDir())
+	total, err := s.dirSize(s.blobsDir())
+	if err != nil {
+		return 0, fmt.Errorf("offline cache: measure blobs for disk usage: %w", err)
+	}
+	items, err := s.dirSize(s.itemsDir())
+	if err != nil {
+		return 0, fmt.Errorf("offline cache: measure item records for disk usage: %w", err)
+	}
+	playlists, err := s.dirSize(s.playlistsDir())
+	if err != nil {
+		return 0, fmt.Errorf("offline cache: measure playlist records for disk usage: %w", err)
+	}
+	byURL, err := s.dirSize(s.playlistsByURLDir())
+	if err != nil {
+		return 0, fmt.Errorf("offline cache: measure playlist URL index for disk usage: %w", err)
+	}
+	return total + items + playlists + byURL, nil
+}
+
+// dirSize sums the regular files directly inside dir, skipping
+// subdirectories (playlistsDir contains by-url, which callers measure
+// separately) and the .tmp files writeFileAtomic/WriteBlob leave
+// mid-write. A missing directory is 0, not an error: the store creates
+// each lazily on first write.
+func (s *fsStore) dirSize(dir string) (int64, error) {
+	entries, err := s.os.ReadDir(dir)
 	if s.os.IsNotExist(err) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("offline cache: list blobs for disk usage: %w", err)
+		return 0, err
 	}
 	var total int64
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".tmp") {
+		if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
 			continue
 		}
-		info, err := s.os.Stat(filepath.Join(s.blobsDir(), e.Name()))
+		info, err := s.os.Stat(filepath.Join(dir, e.Name()))
 		if err != nil {
 			continue
 		}
 		total += info.Size()
 	}
 	return total, nil
+}
+
+// MaxPlaylistRecords bounds how many playlist bodies the store keeps.
+//
+// Playlist records are not reachable by enforceDiskLimit's eviction,
+// which walks ITEMS (by CapturedAt) and then GCs the blobs they
+// released — a playlist body is neither, so it would otherwise persist
+// until an explicit ClearPlaylist that may never come. Counting them in
+// DiskUsage alone would make the overage visible while leaving nothing
+// able to act on it, so they are bounded by count at the point they are
+// written instead.
+//
+// Sized so that a device's realistic working set of playlists is never
+// pruned, while an unbounded series of one-off downloads cannot grow
+// without limit. Pruning the oldest costs only the
+// displayPlaylist-by-URL offline fallback for playlists that far back —
+// see CachedPlaylistForURL, which already fails closed when a record is
+// absent.
+const MaxPlaylistRecords = 256
+
+// PrunePlaylistRecords deletes the oldest playlist bodies beyond
+// MaxPlaylistRecords, plus any by-url index entry left pointing at one.
+// Returns how many bodies were removed. Best-effort: a failure to delete
+// any single record is logged and skipped rather than failing the caller,
+// since this runs after the write it is bounding has already succeeded.
+func (s *fsStore) PrunePlaylistRecords(keep int) (int, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	entries, err := s.os.ReadDir(s.playlistsDir())
+	if s.os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("offline cache: list playlists for pruning: %w", err)
+	}
+
+	type record struct {
+		id      string
+		modTime time.Time
+	}
+	records := make([]record, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		info, err := s.os.Stat(filepath.Join(s.playlistsDir(), name))
+		if err != nil {
+			continue
+		}
+		records = append(records, record{id: strings.TrimSuffix(name, ".json"), modTime: info.ModTime()})
+	}
+	if len(records) <= keep {
+		return 0, nil
+	}
+
+	// Newest first, so everything past the keep window is the oldest.
+	sort.Slice(records, func(i, j int) bool { return records[i].modTime.After(records[j].modTime) })
+
+	removed := make(map[string]bool, len(records)-keep)
+	for _, rec := range records[keep:] {
+		if err := s.DeletePlaylist(rec.id); err != nil {
+			s.logger.Warn("offline cache: failed to prune old playlist record",
+				zap.String("playlist_id", rec.id), zap.Error(err))
+			continue
+		}
+		removed[rec.id] = true
+	}
+	if len(removed) == 0 {
+		return 0, nil
+	}
+	s.pruneURLIndexEntriesFor(removed)
+	return len(removed), nil
+}
+
+// pruneURLIndexEntriesFor drops by-url entries pointing at a playlist
+// that no longer exists. Without this the index grows on its own: a
+// stale entry still fails closed at lookup time (LoadPlaylistIDForURL's
+// doc), but it is unbounded metadata all the same.
+func (s *fsStore) pruneURLIndexEntriesFor(removedPlaylistIDs map[string]bool) {
+	entries, err := s.os.ReadDir(s.playlistsByURLDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		path := filepath.Join(s.playlistsByURLDir(), name)
+		data, err := s.os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rec playlistURLIndexRecord
+		if err := s.json.Unmarshal(data, &rec); err != nil {
+			continue
+		}
+		if !removedPlaylistIDs[rec.PlaylistID] {
+			continue
+		}
+		if err := s.os.Remove(path); err != nil && !s.os.IsNotExist(err) {
+			s.logger.Warn("offline cache: failed to prune stale playlist URL index entry", zap.Error(err))
+		}
+	}
 }
 
 func (s *fsStore) SweepIncompleteBlobs() (int, int64, error) {

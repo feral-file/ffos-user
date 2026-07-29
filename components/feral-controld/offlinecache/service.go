@@ -1237,6 +1237,17 @@ func (s *service) savePlaylistAndURLIndex(playlistID string, playlistRaw json.Ra
 				zap.String("playlist_id", playlistID), zap.Error(err))
 		}
 	}
+	// Bound the metadata this just wrote. A playlist body is persisted
+	// even when nothing in the playlist is cacheable, and eviction only
+	// ever walks items and their blobs, so without this a series of
+	// distinct downloads grows playlists/ without limit and outside any
+	// budget — see Store.MaxPlaylistRecords.
+	if pruned, err := s.store.PrunePlaylistRecords(MaxPlaylistRecords); err != nil {
+		s.logger.Warn("offline cache: failed to prune old playlist records", zap.Error(err))
+	} else if pruned > 0 {
+		s.logger.Info("offline cache: pruned old playlist records past the retention bound",
+			zap.Int("pruned", pruned), zap.Int("keep", MaxPlaylistRecords))
+	}
 	return true, nil
 }
 

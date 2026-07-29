@@ -108,6 +108,21 @@ func (mr *MockOfflineCacheStoreMockRecorder) DiskUsage() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DiskUsage", reflect.TypeOf((*MockOfflineCacheStore)(nil).DiskUsage))
 }
 
+// PrunePlaylistRecords mocks base method.
+func (m *MockOfflineCacheStore) PrunePlaylistRecords(keep int) (int, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PrunePlaylistRecords", keep)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// PrunePlaylistRecords indicates an expected call of PrunePlaylistRecords.
+func (mr *MockOfflineCacheStoreMockRecorder) PrunePlaylistRecords(keep interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrunePlaylistRecords", reflect.TypeOf((*MockOfflineCacheStore)(nil).PrunePlaylistRecords), keep)
+}
+
 // GC mocks base method.
 func (m *MockOfflineCacheStore) GC() (int, int64, error) {
 	m.ctrl.T.Helper()

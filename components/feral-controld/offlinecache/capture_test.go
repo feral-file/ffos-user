@@ -248,10 +248,8 @@ func TestCapturer_Capture_CumulativeDiskBudgetCapsLaterResourceEvenBelowPerResou
 	assert.False(t, rec.Coverage.Complete)
 	assert.Contains(t, rec.Coverage.Reason, "fetch_failed:https://example.com/c.bin")
 
-	usage, err := h.store.DiskUsage()
-	require.NoError(t, err)
-	assert.LessOrEqual(t, usage, int64(12),
-		"total bytes written across every resource in this single capture must never exceed maxDiskBytes")
+	assert.LessOrEqual(t, blobBytesOnDisk(t, h.store.RootDir()), int64(12),
+		"blob bytes written across every resource in this single capture must never exceed maxDiskBytes")
 }
 
 // TestCapturer_Capture_DiskBudgetExhaustedSkipsFetchEntirely pins the
@@ -361,10 +359,11 @@ func TestCapturer_Capture_BudgetSubtractsExistingStoreUsage(t *testing.T) {
 		"a capture starting against an already-full store must fetch nothing")
 	assert.Contains(t, rec.Coverage.Reason, "over_disk_budget:https://example.com/a.bin")
 
-	usage, err := h.store.DiskUsage()
-	require.NoError(t, err)
-	assert.EqualValues(t, 10, usage,
-		"total on-disk usage must stay at the seeded budget; the capture must not have added any blob bytes")
+	// Blob bytes specifically: DiskUsage also counts item/playlist
+	// records now (see its doc), and this assertion is about what the
+	// capture wrote, not about the store's total footprint.
+	assert.EqualValues(t, 10, blobBytesOnDisk(t, h.store.RootDir()),
+		"blob bytes must stay at the seeded budget; the capture must not have added any")
 }
 
 // TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort

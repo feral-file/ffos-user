@@ -58,13 +58,12 @@ type Notifier struct {
 	ws      ws.WS
 	logger  *zap.Logger
 
-	// wsQueue, done, and workerDone are all nil when ws is nil (hub
-	// disabled): no background worker is started, and
-	// OnItemStateChanged's ws branch is unreachable in that case anyway
-	// (see its own nil guard), so there is nothing to enqueue into or
-	// wait on.
-	wsQueue chan wsNotification
-	done    chan struct{}
+	// queue, done, and workerDone are all nil only when NEITHER
+	// transport is configured: no background worker is started, and
+	// OnItemStateChanged returns early (see its own nil guard), so there
+	// is nothing to enqueue into or wait on.
+	queue chan wsNotification
+	done  chan struct{}
 	// workerDone is closed by runWSWorker right before it returns, so
 	// Close can block until the worker has actually stopped — mirroring
 	// Service.Stop's own "blocks until the worker goroutine has exited"
@@ -94,8 +93,11 @@ type wsNotification struct {
 // wires this through Runtime.Notifier for main.go's shutdown sequence.
 func NewNotifier(r relayer.Relayer, w ws.WS, logger *zap.Logger) *Notifier {
 	n := &Notifier{relayer: r, ws: w, logger: logger}
-	if w != nil {
-		n.wsQueue = make(chan wsNotification, notifyQueueCapacity)
+	// The worker now backs BOTH transports (see OnItemStateChanged), so
+	// it is started whenever either one is configured — not just for the
+	// hub WS as it was when only that path was queued.
+	if w != nil || r != nil {
+		n.queue = make(chan wsNotification, notifyQueueCapacity)
 		n.done = make(chan struct{})
 		n.workerDone = make(chan struct{})
 		go n.runWSWorker()
@@ -111,53 +113,81 @@ func (n *Notifier) OnItemStateChanged(status ItemStatus) {
 		"persist_record_count": 1,
 	}
 
-	if n.relayer != nil && n.relayer.IsConnected() {
-		ctx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
-		if err := n.relayer.Send(ctx, data); err != nil {
-			n.logger.Warn("offline cache: failed to send offline_cache_status via relayer",
-				zap.String("item_id", status.ItemID), zap.String("state", string(status.State)), zap.Error(err))
-		}
-		cancel()
+	// Both transports go through the same bounded queue, so this call
+	// never blocks its caller.
+	//
+	// The relayer send used to run inline here, write-deadline-bounded to
+	// notifySendTimeout. That bound is per send, and this is called once
+	// per item from enqueue — which DownloadPlaylist drives in a serial
+	// loop — so a connected-but-backpressured relayer turned one
+	// playlist request into (item count) x 5s of blocking inside command
+	// admission, minutes past the LAN hub's own response deadline
+	// (feral-file/ffos-user#229 review finding). Admission must not pay
+	// for delivery.
+	//
+	// Queueing both also keeps the two transports in one order, and
+	// keeps a slow relayer from delaying WS clients (and vice versa),
+	// since one worker drains them together per notification.
+	if n.queue == nil {
+		return
 	}
-
-	if n.ws != nil {
-		// Non-blocking: a full queue means runWSWorker has fallen far
-		// enough behind that notifyQueueCapacity notifications are
-		// already pending (see that constant's doc for how generous
-		// that bound already is) — dropping this one and logging is
-		// preferable to blocking the capture worker waiting for room,
-		// which would defeat the entire point of queueing in the first
-		// place.
-		select {
-		case n.wsQueue <- wsNotification{envelope: data, status: status}:
-		default:
-			n.logger.Warn("offline cache: dropped offline_cache_status websocket notification, delivery queue full",
-				zap.String("item_id", status.ItemID), zap.String("state", string(status.State)))
-		}
+	// Non-blocking: a full queue means the worker has fallen far enough
+	// behind that notifyQueueCapacity notifications are already pending
+	// (see that constant's doc for how generous that bound already is) —
+	// dropping this one and logging is preferable to blocking the caller
+	// waiting for room, which would defeat the entire point of queueing.
+	select {
+	case n.queue <- wsNotification{envelope: data, status: status}:
+	default:
+		n.logger.Warn("offline cache: dropped offline_cache_status notification, delivery queue full",
+			zap.String("item_id", status.ItemID), zap.String("state", string(status.State)))
 	}
 }
 
-// runWSWorker drains wsQueue and calls ws.SendAll one notification at a
-// time, in enqueue order, until Close is called — see Notifier's own doc
-// for why this runs off OnItemStateChanged's caller's goroutine. Select
-// is checked between every notification (not just once at the top), so
-// a Close that arrives while several notifications are still queued
-// stops delivery promptly rather than draining everything first — see
-// Close's own doc on why that is the intended, documented drop behavior,
-// not a bug.
+// deliver performs both transports' sends for one queued notification,
+// on the worker goroutine. Relayer first, mirroring the order the inline
+// implementation used.
+func (n *Notifier) deliver(item wsNotification) {
+	if n.relayer != nil && n.relayer.IsConnected() {
+		ctx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
+		if err := n.relayer.Send(ctx, item.envelope); err != nil {
+			n.logger.Warn("offline cache: failed to send offline_cache_status via relayer",
+				zap.String("item_id", item.status.ItemID), zap.String("state", string(item.status.State)), zap.Error(err))
+		}
+		cancel()
+	}
+	if n.ws != nil {
+		n.sendWS(item)
+	}
+}
+
+// runWSWorker drains the queue and performs both transports' sends one
+// notification at a time, in enqueue order, until Close is called — see
+// Notifier's own doc for why this runs off OnItemStateChanged's caller's
+// goroutine. Select is checked between every notification (not just once
+// at the top), so a Close that arrives while several notifications are
+// still queued stops delivery promptly rather than draining everything
+// first — see Close's own doc on why that is the intended, documented
+// drop behavior, not a bug.
 func (n *Notifier) runWSWorker() {
 	defer close(n.workerDone)
 	for {
 		select {
-		case notification := <-n.wsQueue:
-			if err := n.ws.SendAll(notification.envelope); err != nil {
-				n.logger.Warn("offline cache: failed to send offline_cache_status via websocket",
-					zap.String("item_id", notification.status.ItemID),
-					zap.String("state", string(notification.status.State)), zap.Error(err))
-			}
+		case notification := <-n.queue:
+			n.deliver(notification)
 		case <-n.done:
 			return
 		}
+	}
+}
+
+// sendWS is the hub-WebSocket half of deliver, kept separate so the
+// relayer half above reads as its own step.
+func (n *Notifier) sendWS(notification wsNotification) {
+	if err := n.ws.SendAll(notification.envelope); err != nil {
+		n.logger.Warn("offline cache: failed to send offline_cache_status via websocket",
+			zap.String("item_id", notification.status.ItemID),
+			zap.String("state", string(notification.status.State)), zap.Error(err))
 	}
 }
 
@@ -170,7 +200,7 @@ func (n *Notifier) runWSWorker() {
 // started).
 //
 // Best-effort in what it delivers, not in whether it returns: any
-// notifications still buffered in wsQueue when Close is called are
+// notifications still buffered in the queue when Close is called are
 // simply dropped rather than drained (the worker's own select can react
 // to done before or after draining what is left — see runWSWorker's
 // doc), since this only runs at daemon shutdown (see main.go's defer
