@@ -141,8 +141,9 @@ This tear-down-then-rejoin, with a re-raise on failure, is the "AP bounce" the p
 
 Once the device is online (whether just provisioned, or booted with a saved profile), setup runs through `otagate` before showing the claim QR.
 
-- **Single-flight** across both entry points via one key (`"ota"`); concurrent callers coalesce onto the in-flight update.
+- **Single-flight** across all entry points via one key (`"ota"`); concurrent callers coalesce onto the in-flight update.
   - `EnsureLatestBeforeClaim` (mode `Required`) is the mandatory pre-claim gate: it updates only if a mandatory/minimum version demands it.
+  - `EnsureLatestAtStartup` (mode `Required`) is the boot-time gate for a device that is **already settled** (claimed or pairing-confirmed) — the restored Ready-phase leg of setupd's every-boot check. Triggered by the provisioning machine's `→online`/`→unprovisioned` transitions (`MaybeRunStartupOTAGateOnOnline`), it runs once per process lifetime; a `VersionCheckFailed` outcome retries with the auto-claim backoff (30s doubling to 5m) up to a bounded attempt budget (8 attempts, ~22m of backoff), after which the boot check gives up and the nightly updater timer is the fallback. Only a ctx-aborted retry leaves the once-latch clear for the next online transition. Without this gate, a force release (`min_runtime_version` above the running build) waits for the nightly updater timer — many hours after the reboot an operator performed expecting the update.
   - `RequestUpdate` (mode `Available`) is the user-triggered `updateToLatestVersion` command: update to any newer version.
 - **Always local:** the gate starts the updater systemd unit on-device and tails its log. There is no remote/BLE-triggered path.
 - **Version-check ladder:** 3 attempts, fixed 2s wait, 10s per-request cap; a failed check returns `VersionCheckFailed` and does not latch.

@@ -16,6 +16,7 @@ package otagate
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -70,6 +71,23 @@ const (
 	// process latches update_failed, not a failed version check).
 	ResultVersionCheckFailed
 )
+
+// String names the result for structured logs (zap.Stringer), so field
+// diagnosis never requires knowing the iota ordering.
+func (r Result) String() string {
+	switch r {
+	case ResultNoUpdateNeeded:
+		return "no-update-needed"
+	case ResultUpdateStarted:
+		return "update-started"
+	case ResultTooOldToUpgrade:
+		return "too-old-to-upgrade"
+	case ResultVersionCheckFailed:
+		return "version-check-failed"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(r))
+	}
+}
 
 // FailureState is the latched permanent-failure snapshot, surfaced to a future
 // setupui package via Failure() or the OnPermanentFailure callback. The zero
@@ -127,6 +145,22 @@ func (g *Gate) RequestUpdate(ctx context.Context) (Result, error) {
 // claimed; it always drives the updater locally (this is the new controld-owned
 // path the port exists to create) and coalesces with any in-flight update.
 func (g *Gate) EnsureLatestBeforeClaim(ctx context.Context) (Result, error) {
+	res, err, _ := g.do(ctx, func() (Result, error) {
+		return g.runLocal(ctx, ModeRequired)
+	})
+	return res, err
+}
+
+// EnsureLatestAtStartup is entry point (c): the boot-time mandatory gate for a
+// device that is already claimed (ModeRequired). Ported from feral-setupd
+// startup.rs::on_startup_with_internet, which ran the Required-mode check on
+// EVERY boot with internet — Idle, Pairing, and Ready alike. The pre-claim gate
+// reproduces the unclaimed legs; this reproduces the Ready leg that was lost
+// when setupd retired. Without it a force release (min_runtime_version above
+// the running build) is not enforced on a claimed device until the next
+// scheduled updater timer fires (nightly, ffos-owned units) — many hours
+// after the reboot an operator performed expecting the update to run.
+func (g *Gate) EnsureLatestAtStartup(ctx context.Context) (Result, error) {
 	res, err, _ := g.do(ctx, func() (Result, error) {
 		return g.runLocal(ctx, ModeRequired)
 	})

@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -147,6 +148,32 @@ type executor struct {
 	// player keeps rendering the PREVIOUS life's overlay (e.g. a claim QR
 	// painted before a crash on a device that has since been claimed).
 	staleOverlaySwept atomic.Bool
+
+	// startupOTAGateDone latches the once-per-process boot OTA gate for claimed
+	// devices (MaybeRunStartupOTAGateOnOnline): later connectivity flaps must
+	// not re-run a check the boot already settled. Deliberately left clear
+	// only when the retry loop is aborted by ctx (shutdown, or the backoff
+	// sleep interrupted) so a later online transition retries; an exhausted
+	// VersionCheckFailed budget DOES latch — see startupOTAGateMaxCheckAttempts.
+	startupOTAGateDone atomic.Bool
+
+	// startupOTAGateInFlight single-flights the boot OTA gate the same way
+	// autoClaimInFlight guards the claim flow: online flaps must not stack
+	// concurrent gate runs (each holds a retry-backoff loop).
+	startupOTAGateInFlight atomic.Bool
+
+	// startupOTAGate is the gate call MaybeRunStartupOTAGateOnOnline drives.
+	// Overridable in tests (same pattern as logUploaderFactory); nil in
+	// production, where it resolves to otaGateInstance().EnsureLatestAtStartup.
+	startupOTAGate func(ctx context.Context) (otagate.Result, error)
+
+	// bootPlayerRecoveryDone latches the once-per-boot player recovery
+	// (MaybeRecoverPlayerOnBootOnline). Once-per-process is the exhibition
+	// safety invariant: a later connectivity flap must never re-mount — and so
+	// visibly restart — playing artwork. The boot-lifecycle scoping (main only
+	// wires the trigger when the daemon started within the boot window) covers
+	// the mid-life daemon-restart case the process latch cannot.
+	bootPlayerRecoveryDone atomic.Bool
 
 	// logUploaderFactory builds the in-process log uploader. Overridable in tests
 	// to avoid a real network transfer; nil in production, where newLogUploader
@@ -548,12 +575,12 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		// convergence) and failed update ladders (the ladder clears its own
 		// latch on the next explicit run).
 		e.logger.Warn("Pre-claim OTA gate did not pass; withholding claim QR",
-			zap.Error(err), zap.Int("gateResult", int(result)))
+			zap.Error(err), zap.Stringer("gateResult", result))
 		return false, false
 	}
 	if result != otagate.ResultNoUpdateNeeded {
 		e.logger.Info("Pre-claim OTA gate did not settle on no-update; withholding claim QR",
-			zap.Int("gateResult", int(result)))
+			zap.Stringer("gateResult", result))
 		// UpdateStarted: the updating narration owns the screen via OnProgress
 		// and the device reboots. TooOldToUpgrade: nothing further happens this
 		// boot, so don't leave a stale finalizing overlay implying progress.
@@ -694,6 +721,197 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 			backoff = autoClaimRetryMax
 		}
 	}
+}
+
+// startupOTAGateMaxCheckAttempts bounds the VersionCheckFailed retry loop in
+// MaybeRunStartupOTAGateOnOnline: with the auto-claim backoff (30s doubling,
+// 5m cap) 8 attempts sleep seven times for ~22m of backoff (~27m wall clock
+// once each attempt's internal version-check ladder is counted) — generous
+// for boot-time DNS/route convergence, after which the failure is structural
+// (corrupt local build config, distributor outage) and the nightly updater
+// timer is the correct owner. This bound is the deliberate asymmetry with the auto-claim loop,
+// which retries forever because it has no fallback: an unclaimed device
+// without the claim QR is unusable, while a claimed device that misses the
+// boot check merely updates later.
+const startupOTAGateMaxCheckAttempts = 8
+
+// MaybeRunStartupOTAGateOnOnline is the boot-time mandatory update check for a
+// settled device, restoring the Ready-phase leg of feral-setupd's
+// on_startup_with_internet (v1.0.21 startup.rs), which ran a Required-mode
+// check on every boot with internet for all phases.
+//
+// The guard predicate is deliberately claimSettled() — the exact predicate
+// MaybeShowClaimQROnOnline returns early on — so for any device state exactly
+// one of the two online-triggered flows owns the gate (that flow runs
+// EnsureLatestBeforeClaim, and the shared otagate single-flight key coalesces
+// any overlap). Changing either predicate without the other opens a hole
+// where no boot-time gate runs at all.
+//
+// Triggered on every provisioning →Online/Unprovisioned transition; the gate
+// runs once per process lifetime. Outcome handling:
+//   - NoUpdateNeeded / TooOldToUpgrade: settled for this boot.
+//   - UpdateStarted: on success the device reboots into the new build. On
+//     error the ladder latched OnPermanentFailure (already narrated); still
+//     settled — the nightly updater timer is the fallback, and re-running a
+//     failing update ladder on every connectivity flap would hammer the
+//     distributor for a failure that needs intervention anyway.
+//   - VersionCheckFailed: usually transient (the boot online transition
+//     routinely races fresh-network DNS convergence — the same race the
+//     auto-claim loop documents), so retry with the auto-claim backoff; but
+//     bounded by startupOTAGateMaxCheckAttempts because the same result also
+//     covers deterministic failures (unreadable/unparseable local build
+//     config) that would otherwise spin the loop for the daemon's lifetime.
+//     Only a ctx-aborted loop leaves the done latch clear (shutdown, or the
+//     backoff sleep interrupted) so the next online transition retries.
+func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
+	if e.startupOTAGateDone.Load() || !e.claimSettled() {
+		return
+	}
+	if !e.startupOTAGateInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	defer e.startupOTAGateInFlight.Store(false)
+	// Re-check under the guard: the cheap pre-check above can go stale while a
+	// concurrent run settles the latch and releases the in-flight flag —
+	// without this a second runner could spawn an update ladder against a
+	// device already rebooting into the new build.
+	if e.startupOTAGateDone.Load() {
+		return
+	}
+
+	gate := e.startupOTAGate
+	if gate == nil {
+		gate = e.otaGateInstance().EnsureLatestAtStartup
+	}
+	backoff := autoClaimRetryMin
+	for attempt := 1; ; attempt++ {
+		result, err := gate(ctx)
+		if result != otagate.ResultVersionCheckFailed {
+			e.startupOTAGateDone.Store(true)
+			if err != nil {
+				e.logger.Warn("Startup OTA gate: update failed; nightly updater timer is the fallback",
+					zap.Error(err), zap.Stringer("gateResult", result))
+			} else {
+				e.logger.Info("Startup OTA gate settled", zap.Stringer("gateResult", result))
+			}
+			return
+		}
+		if attempt >= startupOTAGateMaxCheckAttempts {
+			e.startupOTAGateDone.Store(true)
+			e.logger.Warn("Startup OTA gate: version check kept failing; giving up until the nightly updater timer",
+				zap.Error(err), zap.Int("attempts", attempt))
+			return
+		}
+		e.logger.Warn("Startup OTA gate: version check failed; retrying",
+			zap.Error(err), zap.Duration("backoff", backoff))
+		if err := e.clock.SleepContext(ctx, backoff); err != nil {
+			return
+		}
+		backoff *= 2
+		if backoff > autoClaimRetryMax {
+			backoff = autoClaimRetryMax
+		}
+	}
+}
+
+// MaybeRecoverPlayerOnBootOnline recovers the bundled player page exactly
+// once, on the first provisioning →Online/→Unprovisioned transition of a BOOT
+// lifecycle. main.go wires this trigger only when the daemon itself started
+// within the boot window (startedWithinBootWindow), so a mid-life controld
+// restart can never disturb a healthy, possibly-playing page.
+//
+// Why: chromium-kiosk deliberately does not gate on the network (a blocked
+// kiosk is a black screen), so on Wi-Fi boots the player routinely paints
+// before association finishes. Per the ff-player source: the remote-config
+// fetch falls back to bundled defaults (rendering is not gated on it), but
+// each artwork's asset fetches are single-attempt — offline they die into
+// black slots or in-iframe error pages, with no network-regain retry. Only a
+// manual kiosk restart recovered this in the field (chromium.log:
+// "[API] Failed to load config: Network Error" seconds before NetworkManager
+// reports the connection).
+//
+// Recovery escalation mirrors refreshArtwork's command path
+// (commandrouter/handler.go): first an in-app refreshArtwork evaluate, which
+// re-mounts the current artwork slot — re-running exactly the fetches that
+// died pre-network, with the player's own crossfade and no page navigation
+// (later playlist items re-fetch naturally when their turn comes). Only when
+// that evaluate fails or the player does not ACK (page never booted) does the
+// browser-level Page.reload run, which needs no page JS. Cache stays enabled
+// on the reload: this is a network race, not the cache poisoning
+// refreshArtwork's own recovery targets with ignoreCache.
+//
+// The online transition is driven by sys-monitord's real WAN probe, and the
+// notifier positively matches the WAN-confirmed shapes only (StateOnline, or
+// StateUnprovisioned's ReasonUnprovisioned leg — its link-* legs are offline
+// parking states), so this fires only when the fetches can actually succeed,
+// never on a LAN without internet.
+//
+// ctx is unused: the body is at most two bounded CDP Sends, not a wait loop,
+// so there is nothing for cancellation to interrupt (contrast the gate and
+// claim hooks, whose retry/backoff waits must observe daemon shutdown).
+//
+// If/when the player learns to render its bundled offline background and
+// drive its own reconnect recovery from the connectivity pushes it already
+// receives (window.handleConnectivityChange), this hook should be retired.
+func (e *executor) MaybeRecoverPlayerOnBootOnline(_ context.Context) {
+	if !e.bootPlayerRecoveryDone.CompareAndSwap(false, true) {
+		return
+	}
+	if e.cdp == nil || !e.cdp.Initialized() {
+		// No page yet: Chromium lost the race instead of the network — its
+		// first load will happen with connectivity already up, which is the
+		// healthy path. Consuming the latch is correct; there is nothing to
+		// recover.
+		e.logger.Info("Boot player recovery: player page not up yet; first load will see the network")
+		return
+	}
+
+	refreshErr := e.evaluateRefreshArtwork()
+	if refreshErr == nil {
+		e.logger.Info("Boot player recovery: in-app artwork refresh re-ran the pre-network fetches")
+		return
+	}
+	if _, reloadErr := e.cdp.Send("Page.reload", map[string]interface{}{}); reloadErr != nil {
+		e.logger.Warn("Boot player recovery failed; player may keep its pre-network page until refreshed",
+			zap.NamedError("refreshError", refreshErr), zap.NamedError("reloadError", reloadErr))
+		return
+	}
+	e.logger.Info("Boot player recovery: page reloaded (in-app refresh unavailable)",
+		zap.NamedError("refreshError", refreshErr))
+}
+
+// evaluateRefreshArtwork asks the live player app to re-mount the current
+// artwork via the same window.handleCDPRequest envelope every player command
+// uses. A transport error or a non-ACK response both mean the app cannot be
+// assumed to have refreshed (e.g. the page never booted), which the caller
+// escalates to a browser-level reload.
+func (e *executor) evaluateRefreshArtwork() error {
+	command := commands.Command{Type: commands.CMD_REFRESH_ARTWORK}
+	payload, err := command.JSON()
+	if err != nil {
+		return fmt.Errorf("marshal refreshArtwork payload: %w", err)
+	}
+	result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
+		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+	})
+	if err != nil {
+		return fmt.Errorf("send refreshArtwork to player: %w", err)
+	}
+	if !playerresponse.OK(result) {
+		// Surface the player's own refusal reason when it sent one: it is what
+		// distinguishes the EXPECTED escalation ("No active artwork to
+		// refresh" — page booted with no playlist, reload is right) from an
+		// unexpected refusal when reading logs after a bad boot.
+		if m, ok := result.(map[string]interface{}); ok {
+			if msg, ok := m["message"].(map[string]interface{}); ok {
+				if s, _ := msg["error"].(string); s != "" {
+					return fmt.Errorf("player refused refreshArtwork: %s", s)
+				}
+			}
+		}
+		return fmt.Errorf("player did not acknowledge refreshArtwork")
+	}
+	return nil
 }
 
 // claimSettled reports whether the claim journey is over for this device —

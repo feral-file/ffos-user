@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -109,6 +110,166 @@ func TestSetupNotifierTriggersAutoClaimWhenReachable(t *testing.T) {
 	case <-fired:
 		t.Fatal("auto claim must not fire on StateAPActive")
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// TestSetupNotifierTriggersStartupGateWhenReachable: the claimed-device boot
+// OTA gate mirrors the auto-claim trigger exactly — Online and Unprovisioned
+// fire it (on its own goroutine, the Notifier must not block), AP states must
+// not: while the setup AP is up there is no route to the distributor, and the
+// gate would only burn its bounded version-check attempts.
+func TestSetupNotifierTriggersStartupGateWhenReachable(t *testing.T) {
+	spy := &spyNarrationUI{}
+	fired := make(chan struct{}, 2)
+	n := &setupNotifier{
+		ui:          spy,
+		claimCtx:    context.Background(),
+		startupGate: func(context.Context) { fired <- struct{}{} },
+	}
+
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup OTA gate not triggered on StateOnline")
+	}
+
+	n.OnStateChange(provisioning.StateUnprovisioned, provisioning.Detail{Reason: provisioning.ReasonUnprovisioned})
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup OTA gate not triggered on StateUnprovisioned")
+	}
+
+	// AP states must not trigger it.
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{Reason: "scanning"})
+	select {
+	case <-fired:
+		t.Fatal("startup OTA gate must not fire on StateAPActive")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The OFFLINE legs of StateUnprovisioned (WAN probe failed; local link
+	// present, unknown, or lost) must not fire it either: a version check
+	// there provably cannot succeed and would burn the bounded attempt
+	// budget. The guard is a positive match on ReasonUnprovisioned, so all
+	// three — and any future offline leg — fail closed.
+	for _, reason := range []string{"link-present", "link-unknown", "link-lost"} {
+		n.OnStateChange(provisioning.StateUnprovisioned, provisioning.Detail{Reason: reason})
+		select {
+		case <-fired:
+			t.Fatalf("startup OTA gate must not fire on the offline %s leg", reason)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// TestSetupNotifierStartupGateContextObservesShutdown: the gate's waits
+// (version-check ladder, retry backoff) run on the context the notifier hands
+// it; cancellation must reach the spawned goroutine so daemon shutdown is not
+// held up by a backoff sleep.
+func TestSetupNotifierStartupGateContextObservesShutdown(t *testing.T) {
+	spy := &spyNarrationUI{}
+	ctx, cancel := context.WithCancel(context.Background())
+	unblocked := make(chan struct{})
+	n := &setupNotifier{
+		ui:       spy,
+		claimCtx: ctx,
+		startupGate: func(c context.Context) {
+			<-c.Done()
+			close(unblocked)
+		},
+	}
+
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
+	cancel()
+
+	select {
+	case <-unblocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup OTA gate did not observe daemon-context cancellation")
+	}
+}
+
+// TestSetupNotifierTriggersPlayerRecoveryWhenReachable: the boot-online
+// player recovery fires on the same reachable transitions as the other two
+// hooks and never on AP states (no route to anything worth recovering for).
+func TestSetupNotifierTriggersPlayerRecoveryWhenReachable(t *testing.T) {
+	spy := &spyNarrationUI{}
+	fired := make(chan struct{}, 2)
+	n := &setupNotifier{
+		ui:             spy,
+		claimCtx:       context.Background(),
+		playerRecovery: func(context.Context) { fired <- struct{}{} },
+	}
+
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("player recovery not triggered on StateOnline")
+	}
+
+	n.OnStateChange(provisioning.StateUnprovisioned, provisioning.Detail{Reason: provisioning.ReasonUnprovisioned})
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("player recovery not triggered on StateUnprovisioned")
+	}
+
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{Reason: "scanning"})
+	select {
+	case <-fired:
+		t.Fatal("player recovery must not fire on StateAPActive")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The OFFLINE legs of StateUnprovisioned must not fire it: a recovery
+	// there burns the one-shot latch on fetches that cannot succeed, and the
+	// real online transition then finds nothing left to recover with (the
+	// Ethernet-only boot regression the positive-match guard prevents).
+	for _, reason := range []string{"link-present", "link-unknown", "link-lost"} {
+		n.OnStateChange(provisioning.StateUnprovisioned, provisioning.Detail{Reason: reason})
+		select {
+		case <-fired:
+			t.Fatalf("player recovery must not fire on the offline %s leg", reason)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// TestStartedWithinBootWindow pins the boot-lifecycle gate: only a readable,
+// parseable /proc/uptime below the window arms the boot player recovery;
+// everything else fails CLOSED (a spurious mid-exhibition reload is worse
+// than a missed boot recovery).
+func TestStartedWithinBootWindow(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		readErr error
+		want    bool
+	}{
+		{name: "fresh boot", content: "12.34 45.67\n", want: true},
+		{name: "just inside window", content: "119.9 200.0\n", want: true},
+		{name: "past window", content: "120.1 300.0\n", want: false},
+		{name: "long-running system", content: "864000.00 1700000.00\n", want: false},
+		{name: "unreadable fails closed", readErr: errors.New("no procfs"), want: false},
+		{name: "garbage fails closed", content: "not-a-number\n", want: false},
+		{name: "empty fails closed", content: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			readFile := func(string) ([]byte, error) {
+				if tc.readErr != nil {
+					return nil, tc.readErr
+				}
+				return []byte(tc.content), nil
+			}
+			got := startedWithinBootWindow(readFile, zap.NewNop())
+			if got != tc.want {
+				t.Errorf("startedWithinBootWindow = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

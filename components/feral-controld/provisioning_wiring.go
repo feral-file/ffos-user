@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/feral-file/godbus"
@@ -102,6 +104,51 @@ type autoClaimFlow interface {
 	MaybeShowClaimQROnOnline(ctx context.Context)
 }
 
+// startupOTAGateFlow is the narrow slice of the executor the online startup
+// update trigger needs (the claimed-device counterpart of autoClaimFlow).
+// Asserted at wiring time so test doubles without the method simply leave the
+// trigger disabled.
+type startupOTAGateFlow interface {
+	MaybeRunStartupOTAGateOnOnline(ctx context.Context)
+}
+
+// bootPlayerRecoveryFlow is the narrow slice of the executor the boot-online
+// player recovery needs. Asserted at wiring time like the other two flows.
+type bootPlayerRecoveryFlow interface {
+	MaybeRecoverPlayerOnBootOnline(ctx context.Context)
+}
+
+// bootLifecycleWindow bounds how long after kernel boot a controld start still
+// counts as part of the boot. The boot-online player recovery is only wired
+// inside this window: outside it, a controld (re)start coexists with a player
+// page that already loaded with the network up, and re-mounting it would
+// visibly restart playing artwork for no reason.
+const bootLifecycleWindow = 2 * time.Minute
+
+// startedWithinBootWindow reports whether this daemon process started within
+// bootLifecycleWindow of kernel boot, read from /proc/uptime at wiring time
+// (moments after process start). readFile is injected for tests. Fails
+// CLOSED on any read/parse problem: a spurious mid-exhibition reload is worse
+// than a missed boot recovery (which a kiosk restart also fixes), and on FF1
+// /proc/uptime is always readable, so the closed path is dev-host-only.
+func startedWithinBootWindow(readFile func(string) ([]byte, error), logger *zap.Logger) bool {
+	b, err := readFile("/proc/uptime")
+	if err != nil {
+		logger.Debug("boot window: /proc/uptime unreadable; treating start as mid-life", zap.Error(err))
+		return false
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) == 0 {
+		return false
+	}
+	up, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		logger.Debug("boot window: unparseable /proc/uptime; treating start as mid-life", zap.Error(err))
+		return false
+	}
+	return time.Duration(up*float64(time.Second)) < bootLifecycleWindow
+}
+
 // setupNotifier maps provisioning state changes to on-screen setup narration.
 // Every Show* call is fire-and-forget (setupui enqueues and returns), so calling
 // them inline on the machine's event-loop goroutine satisfies the Notifier
@@ -132,6 +179,21 @@ type setupNotifier struct {
 	// daemon lifetime.
 	claim    func(context.Context)
 	claimCtx context.Context
+
+	// startupGate, when set, is the executor's boot-time mandatory update check
+	// for claimed devices (MaybeRunStartupOTAGateOnOnline): the setupd-era
+	// "Required-mode check on every boot with internet" restored for the Ready
+	// phase. Run on its own goroutine for the same reason as claim — it waits
+	// on network state (version check, possibly an update ladder) and the
+	// Notifier must not block. Shares claimCtx (both are daemon-lifetime).
+	startupGate func(context.Context)
+
+	// playerRecovery, when set, is the executor's one-shot boot-online player
+	// recovery (MaybeRecoverPlayerOnBootOnline). Only wired when the daemon
+	// started inside the boot window (startedWithinBootWindow) — the trigger
+	// existing at all is what encodes "this is a boot, not a mid-life
+	// restart". Same goroutine/ctx contract as the other two hooks.
+	playerRecovery func(context.Context)
 }
 
 // OnStateChange renders the least-surprising narration for each provisioning
@@ -179,6 +241,34 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 		// relayer topic never arrives (e.g. wired link without internet).
 		if n.claim != nil {
 			go n.claim(n.claimCtx)
+		}
+		// StateUnprovisioned carries OFFLINE legs too (link-present,
+		// link-unknown, link-lost: the machine parks there when the WAN probe
+		// failed but a local link exists or is being probed). The two hooks
+		// below exist to do network work the moment WAN is confirmed —
+		// running them on an offline leg would burn the player recovery's
+		// one-shot latch (and the OTA gate's bounded version-check budget) on
+		// fetches that provably cannot succeed, leaving nothing for the real
+		// online transition. Hence a POSITIVE match on the two WAN-confirmed
+		// shapes only — StateOnline, or StateUnprovisioned's online leg
+		// (ReasonUnprovisioned) — so any future offline leg fails closed by
+		// default. The claim hook above is deliberately NOT filtered: it
+		// self-heals (topic wait no-ops offline, and later transitions
+		// re-trigger it), which is its pre-existing contract.
+		wanConfirmed := s == provisioning.StateOnline || d.Reason == provisioning.ReasonUnprovisioned
+		// A claimed device that just became reachable runs the boot-time
+		// mandatory update check (force-released builds must not wait for the
+		// daily updater timer). No-ops for unclaimed devices, when already
+		// settled this boot, and while a run is in flight.
+		if n.startupGate != nil && wanConfirmed {
+			go n.startupGate(n.claimCtx)
+		}
+		// A player page that loaded before the network was up gets one
+		// recovery pass (in-app artwork refresh, page reload as fallback) now
+		// that WAN reachability is confirmed (monitord's probe drives this
+		// transition). One-shot; nil outside the boot lifecycle.
+		if n.playerRecovery != nil && wanConfirmed {
+			go n.playerRecovery(n.claimCtx)
 		}
 	case provisioning.StateOfflineRetrying:
 		// Transient provisioned-device outage: leave the screen as-is rather than

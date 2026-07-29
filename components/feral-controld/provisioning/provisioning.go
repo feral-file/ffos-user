@@ -65,6 +65,16 @@ const (
 	StateJoining State = "joining"
 )
 
+// ReasonUnprovisioned marks the ONLINE leg of StateUnprovisioned: sys-monitord
+// confirmed WAN reachability and the device merely has no Wi-Fi profile
+// (wired). Exported — unlike the narration-only Reason strings — because
+// consumers key network-work decisions on it: the wiring notifier runs its
+// WAN-dependent hooks only on StateOnline or on THIS reason, so every offline
+// leg of StateUnprovisioned (link-present, link-unknown, link-lost, and any
+// future one) fails closed by default. Renaming the literal must therefore
+// break the build, not silently disarm that positive match.
+const ReasonUnprovisioned = "unprovisioned"
+
 // Detail is the side-channel context published alongside a State change: enough
 // for a narration UI to explain WHY the state changed without re-deriving it.
 type Detail struct {
@@ -536,7 +546,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 		} else {
 			// Reachable without a saved Wi-Fi profile: Ethernet. Never raise the AP.
 			m.transition(ctx, StateUnprovisioned, Detail{
-				Reason:  "unprovisioned",
+				Reason:  ReasonUnprovisioned,
 				Message: "Online via wired network; Wi-Fi not configured",
 			})
 		}

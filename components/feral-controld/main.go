@@ -667,6 +667,20 @@ func initializeApp(
 		// harmless.
 		mediator.SetTopicObserver(func() { go ac.MaybeShowClaimQROnOnline(context) })
 	}
+	// The claimed-device counterpart: a boot online transition re-runs the
+	// setupd-era mandatory (Required-mode) update check so a force release is
+	// applied on reboot instead of waiting for the daily updater timer.
+	if sg, ok := executor.(startupOTAGateFlow); ok {
+		provisioningNotifier.startupGate = sg.MaybeRunStartupOTAGateOnOnline
+	}
+	// Boot-online player recovery: the kiosk deliberately does not gate on the
+	// network, so a Wi-Fi boot's first page load routinely predates
+	// association and dies without retry. Wired ONLY inside the boot window —
+	// the absent hook is what guarantees a mid-life controld restart can
+	// never disturb playing artwork.
+	if pr, ok := executor.(bootPlayerRecoveryFlow); ok && startedWithinBootWindow(go_os.ReadFile, logger) {
+		provisioningNotifier.playerRecovery = pr.MaybeRecoverPlayerOnBootOnline
+	}
 	provMachine := provisioning.New(provisioning.Config{
 		AP:           softAP,
 		Wifi:         wifiCtl,
