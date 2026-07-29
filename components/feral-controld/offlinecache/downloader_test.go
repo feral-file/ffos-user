@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -311,6 +312,48 @@ func TestDownloader_Acquire_WaitsForPriorGenerationReapBeforeStartingReplacement
 	}
 }
 
+// expectRestartableStarts wires an unbounded number of
+// CommandContext+Start+Wait cycles, each capturing its own process
+// context, and reports the most recently started one.
+//
+// Unlike expectSuccessfulStart's Times(1), this tolerates the downloader
+// legitimately tearing itself down when idle and starting a fresh
+// process on the next Acquire — which is the idle teardown working as
+// designed, and therefore cannot on its own be treated as a failure.
+func (ts *downloaderTestSetup) expectRestartableStarts(t *testing.T) func() context.Context {
+	t.Helper()
+	var mu sync.Mutex
+	var current context.Context
+
+	ts.mockExec.EXPECT().
+		CommandContext(gomock.Any(), "/usr/bin/chromium", gomock.Any()).
+		DoAndReturn(func(ctx context.Context, name string, args ...string) wrapper.ExecCmd {
+			mockCmd := mocks.NewMockExecCmd(ts.ctrl)
+			mockCmd.EXPECT().Start().Return(nil).AnyTimes()
+			mockCmd.EXPECT().Wait().DoAndReturn(func() error {
+				<-ctx.Done()
+				return context.Canceled
+			}).AnyTimes()
+			mu.Lock()
+			current = ctx
+			mu.Unlock()
+			return mockCmd
+		}).AnyTimes()
+
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:9223/json/version", nil)
+	require.NoError(t, err)
+	ts.mockHTTP.EXPECT().NewRequest(http.MethodGet, "http://127.0.0.1:9223/json/version", nil).Return(req, nil).AnyTimes()
+	ts.mockHTTP.EXPECT().Do(gomock.Any()).DoAndReturn(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}).AnyTimes()
+
+	return func() context.Context {
+		mu.Lock()
+		defer mu.Unlock()
+		return current
+	}
+}
+
 // TestDownloader_ConcurrentReleaseAndAcquire_NeverTearsDownReacquiredProcess
 // is the regression test for a Release/Acquire interleaving bug: Release
 // used to free the semaphore slot BEFORE recording its idle-teardown
@@ -323,44 +366,38 @@ func TestDownloader_Acquire_WaitsForPriorGenerationReapBeforeStartingReplacement
 // under the new job. See downloader.go's Release doc for the fix (the
 // slot is now freed strictly after the teardown decision is recorded).
 //
-// idleTeardown is set to 1ms (as tight as a duration can practically be)
-// specifically to make the buggy window's failure mode manifest almost
-// immediately rather than requiring luck on timing; many goroutines run
-// tight Acquire/Release loops with no delay between iterations, which is
-// exactly the shape needed to land in that window if it still exists.
-// This is a probabilistic stress test, not a hand-forced single
-// interleaving — Go's scheduler decides how much the race is actually
-// exercised — but it reliably reproduces the bug on the pre-fix code
-// (verified by hand before committing this test) and cannot produce a
-// false failure on the fixed code, since the fix's ordering guarantee
-// (via Go's channel memory-model semantics — see Release's doc) holds
-// unconditionally, not just usually.
+// WHAT IS ASSERTED, and why it is not a restart count: an earlier version
+// pinned CommandContext to Times(1) across the whole test, reasoning that
+// any teardown-and-restart cycle had to be the bug. It does not. With a
+// 1ms idle timer the downloader legitimately tears itself down after any
+// 1ms gap with no job holding the slot, and such gaps really do occur
+// mid-loop — reliably so under GOMAXPROCS=1, where a worker can run well
+// ahead of its peers. That is the feature working, and pinning the count
+// made this test fail spuriously on CI and under -count/-cpu 1.
 //
-// The regression is caught deterministically, not just observed as a
-// symptom: expectSuccessfulStart wires CommandContext to exactly
-// Times(1) for the whole test. Any wrongful teardown-and-restart cycle
-// calls CommandContext a second time, which gomock fails immediately —
-// so if this test passes at all, no teardown ever raced an active job.
+// The invariant that actually distinguishes the bug is narrower: a
+// teardown must never kill the process a job is CURRENTLY holding. Each
+// iteration therefore holds the slot across a short sleep — comfortably
+// longer than idleTeardown, so a teardown wrongly scheduled by a
+// concurrent Release fires DURING someone's hold rather than in a gap —
+// and checks that the process it was handed is still alive when it lets
+// go. Holding also keeps the downloader busy, which is what makes a
+// legitimate idle teardown rare rather than routine.
 //
-// The wait below is deliberately bounded (rather than a plain
-// wg.Wait()): on the pre-fix code this test hangs rather than merely
-// failing an assertion — a teardown that wins the race tears down a
-// process a queued Acquire is still waiting to reuse, and the resulting
-// state corruption can leave that Acquire (and everything queued behind
-// it) blocked forever on the semaphore. A bounded wait turns "the whole
-// test binary hangs until CI kills the job" into a fast, clear failure.
+// The bounded wait is the other half: on the pre-fix code a teardown that
+// wins the race can leave a queued Acquire (and everything behind it)
+// blocked forever, so a plain wg.Wait() would hang the whole binary until
+// CI killed the job.
 func TestDownloader_ConcurrentReleaseAndAcquire_NeverTearsDownReacquiredProcess(t *testing.T) {
-	ts := setupDownloader(t, time.Millisecond)
+	const idleTeardown = time.Millisecond
+	ts := setupDownloader(t, idleTeardown)
 	defer ts.ctrl.Finish()
 	defer func() { _ = ts.downloader.Close() }()
-	ts.expectSuccessfulStart(t) // Times(1): must never restart across the whole stress loop below
+	liveProcess := ts.expectRestartableStarts(t)
 
-	_, err := ts.downloader.Acquire(context.Background())
-	require.NoError(t, err)
-	ts.downloader.Release()
-
+	var tornDownUnderAJob atomic.Bool
 	const goroutines = 8
-	const iterationsPerGoroutine = 300
+	const iterationsPerGoroutine = 40
 	var wg sync.WaitGroup
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
@@ -370,6 +407,13 @@ func TestDownloader_ConcurrentReleaseAndAcquire_NeverTearsDownReacquiredProcess(
 				_, err := ts.downloader.Acquire(context.Background())
 				if !assert.NoError(t, err) {
 					return
+				}
+				held := liveProcess()
+				// Long enough that a teardown scheduled by another
+				// goroutine's Release lands inside this hold.
+				time.Sleep(3 * idleTeardown)
+				if held != nil && held.Err() != nil {
+					tornDownUnderAJob.Store(true)
 				}
 				ts.downloader.Release()
 			}
@@ -387,10 +431,11 @@ func TestDownloader_ConcurrentReleaseAndAcquire_NeverTearsDownReacquiredProcess(
 		t.Fatal("stress loop did not finish: a teardown likely raced an active job and wedged the semaphore (see this test's doc)")
 	}
 
-	// A final Acquire confirms the SAME generation (endpoint identity is
-	// stable across restarts too, so this alone would not catch a
-	// restart — the Times(1) CommandContext expectation above is what
-	// actually pins that) is still reachable after the stress loop.
+	assert.False(t, tornDownUnderAJob.Load(),
+		"a teardown killed the headless Chromium while a job was still holding it — the exact interleaving this test exists to catch")
+
+	// Still usable afterwards, whatever legitimate teardown/restart
+	// cycles the loop went through.
 	endpoint, err := ts.downloader.Acquire(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "http://127.0.0.1:9223", endpoint)
