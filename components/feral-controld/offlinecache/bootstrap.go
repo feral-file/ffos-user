@@ -124,8 +124,16 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 // component constructor in this codebase (systemd-services.mdc: startup
 // must be explicit and observable, not hidden inside a constructor).
 type Runtime struct {
-	Service      Service
-	KioskReplay  KioskReplay
+	Service     Service
+	KioskReplay KioskReplay
+	// ScopeLost is exposed for the same reason Notifier below is: main.go
+	// needs a method the narrower dependency it otherwise holds does not
+	// carry. It is deliberately the one-method ScopeLostRegistrar rather
+	// than the whole Replayer — main.go has no business calling
+	// Attach/EnableForPlaylist/Disable. Wiring it can only happen once
+	// PlaylistRefresher exists, and that is constructed after this
+	// Bootstrap call since it depends on KioskReplay.
+	ScopeLost    ScopeLostRegistrar
 	StaticServer StaticServer
 	// Notifier is exposed so main.go can Close its background WS-
 	// delivery worker at shutdown (see Notifier.Close's doc) — the
@@ -193,11 +201,20 @@ func Bootstrap(
 	mediaCapturer := NewMediaCapturer(bodyClient, store, clockWrapper, opts.MaxDiskBytes, logger)
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
 	replayer := NewReplayer(store, staticServer, opts.MissPolicy, jsonWrapper, logger)
+	// The concrete replayer implements the scope-lost setter, but Replayer
+	// deliberately does not declare it (see ScopeLostRegistrar). Asserted
+	// once here rather than exposing a wider interface from Bootstrap; a
+	// failed assertion leaves Runtime.ScopeLost nil, which main.go's guard
+	// treats as "no prompt recovery wired", not as a startup failure.
+	scopeLost, _ := replayer.(ScopeLostRegistrar)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
 	service := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, logger)
 	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, clockWrapper, logger)
 
-	return Runtime{Service: service, KioskReplay: kioskReplay, StaticServer: staticServer, Notifier: notifier}
+	return Runtime{
+		Service: service, KioskReplay: kioskReplay, ScopeLost: scopeLost,
+		StaticServer: staticServer, Notifier: notifier,
+	}
 }
 
 // safeHeadlessDebugPort defends against offlineCache.headlessDebugPort

@@ -1178,8 +1178,10 @@ no new per-target machinery was needed for this.
   governed by `offlineCache.missPolicy` (`MissPolicy` in `replay.go`) when
   the scope is a single item or a playlist whose every item is cached:
   `fail_closed` (default) fails the request visibly rather than silently
-  substituting or passing through, which guarantees deterministic offline
-  behavior and surfaces partial captures honestly; `pass_through` lets the
+  substituting or passing through, which makes offline behavior
+  deterministic and surfaces partial captures honestly (with one
+  deliberate exception — see "Admission saturation suspends interception"
+  below); `pass_through` lets the
   request continue to the real network and is only sensible when the
   device is known to be online (progressive capture) — it is a config
   toggle, not the default, and today is a plain pass-through rather than
@@ -1277,6 +1279,75 @@ visibly stalled iframe is the honest outcome; an invisible bypass of the
 guarantee offline mode exists to make is not. The one exception is a
 scope where the network is already permitted for a miss —
 `pass_through`, or a `mixed` scope — where a hung iframe buys nothing.
+
+### Admission saturation suspends interception
+
+There is one path that knowingly stops enforcing `fail_closed`, and it is
+deliberately the opposite call from the stalled-iframe rule above.
+`onRequestPaused` admits at most `RequestPausedAdmission` (64) concurrent
+handlers plus `OverflowAdmission` (512) cheap overflow resolutions. When
+*both* fill, `retireOnSaturation` closes the **root** CDP session, which
+makes Chromium release every request it had paused — on every target on
+that connection — to the live network.
+
+The root specifically, whichever target's event tripped it. Saturation is
+a property of the socket, not the target: both semaphores are
+per-replayer, and every flat-mode child shares the one connection's write
+path, so exhausting them means that connection has stopped serving replay
+for everything on it. Retiring the tripping target instead would be a hang
+rather than a release when that target is a child — `flatSession.Close` is
+a per-target detach that only unregisters handlers (it must never close
+the shared socket), so Chromium would keep the connection, keep `Fetch`
+armed at `"*"` on that iframe, and keep its requests paused, with no
+handler left to answer them and no `targets` entry to re-arm. `RootAttached`
+would still report true, so `SyncPlaylist` — including the one the
+scope-lost recovery below triggers — would re-arm scope on the still-live
+root and return without ever re-dialing, leaving that iframe stranded. On
+a real device the burst comes from the cross-origin artwork iframe, so
+that is the likely path into saturation, not an exotic one.
+
+The two cases differ in what the alternative buys. A child that cannot be
+armed is one iframe: stalling it costs that iframe and keeps the guarantee
+for everything else. Saturation means 576 sends are already outstanding on
+one socket — replay has stopped answering *anything*, and answering is
+itself a `Send`, which is exactly what has run out. The options are a page
+whose every request hangs (an earlier revision did this, and the hang
+persists until something else retires that session — not something the
+daemon guarantees will happen) or a page that proceeds unintercepted.
+Neither preserves `fail_closed`; only one leaves a usable screen.
+
+Consequences to be aware of when reasoning about a device in this state:
+
+- The scope is **not enforced at all** until the next `SyncPlaylist`
+  re-arms it. Scope is deliberately never re-applied from cached state
+  (see `AttachOnReconnect`'s doc for why), so recovery has to be
+  caller-driven — which is why retirement fires `SetOnScopeLost`
+  (`ScopeLostRegistrar`), wired in `main.go` to
+  `PlaylistRefresher.ForceRefresh`. That is the same recovery the
+  kiosk-reconnect path uses for the identical problem.
+- That acceleration is **best-effort, not a bound**. It usually replaces
+  the up-to-`PLAYLIST_REFRESH_INTERVAL` (5 minute) wait with a re-dial,
+  but several paths fall back to the periodic tick: `redialIfDue` has a
+  30-second cooldown and skips the dial entirely if a replay-owned re-dial
+  happened recently, and the single buffered signal is consumed by one
+  refresher pass, so if that pass returns early (CDP not initialized, a
+  player-status or DP-1 resolve failure, nothing being displayed) nothing
+  retries it. Re-arming also still needs a working CDP dial, and the page
+  runs unintercepted until it completes.
+- A fully cached artwork can therefore render from the network during that
+  window, so "it played" is not evidence it is genuinely offline-capable.
+  On a device with no connectivity the requests simply fail instead.
+- `getOfflineCacheStatus` keeps reporting those items `ready`, because they
+  genuinely are cached — the degradation is in interception, not in the
+  cache.
+- The operator-visible signal is the retirement warning
+  `offline cache replay: retiring CDP session` with reason
+  `admission saturated; releasing paused requests to the network rather
+  than hanging them`. That log line is currently the *only* surface for
+  this state; there is no wire-level degraded/unavailable signal, so a
+  controller cannot tell the difference. Adding one is a coordinated
+  cross-repository change (see the `offline_cache_status` compatibility
+  work) rather than something this daemon can do unilaterally.
 
 ### The replay session recovers independently of the primary CDP connection
 

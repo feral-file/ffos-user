@@ -674,6 +674,7 @@ func initializeApp(
 	// before this feature existed.
 	var offlineCache offlinecache.Service
 	var kioskReplay offlinecache.KioskReplay
+	var offlineCacheScopeLost offlinecache.ScopeLostRegistrar
 	var offlineCacheStaticServer offlinecache.StaticServer
 	var offlineCacheNotifier *offlinecache.Notifier
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
@@ -684,6 +685,7 @@ func initializeApp(
 		)
 		offlineCache = ocRuntime.Service
 		kioskReplay = ocRuntime.KioskReplay
+		offlineCacheScopeLost = ocRuntime.ScopeLost
 		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
 	}
@@ -707,6 +709,23 @@ func initializeApp(
 
 	// Playlist refresher
 	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, clock, logger)
+
+	// Replay saturation invalidates Fetch-interception scope exactly the way
+	// a kiosk restart does: retireOnSaturation closes the root CDP session so
+	// the page stops hanging, which also means a fail_closed scope is
+	// enforced by nothing until something re-arms it. Without this the
+	// "something" is only this refresher's periodic pass, up to
+	// PLAYLIST_REFRESH_INTERVAL away, with the artwork silently served from
+	// the live network for that whole window. ForceRefresh is the same
+	// recovery the onConnect hook below already uses for the identical
+	// problem — best-effort acceleration rather than a bound (see
+	// docs/offline-artwork-capture.md for the paths that still fall back to
+	// the periodic tick). Wired here rather than in offlinecache.Bootstrap
+	// because the refresher depends on KioskReplay and so cannot exist until
+	// after that call.
+	if offlineCacheScopeLost != nil {
+		offlineCacheScopeLost.SetOnScopeLost(playlistRefresher.ForceRefresh)
+	}
 
 	// OOM Recoverer — internal lifecycle flow, uses the raw (ungated) handler.
 	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)

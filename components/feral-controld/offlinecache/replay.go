@@ -34,9 +34,23 @@ type MissPolicy string
 
 const (
 	// MissPolicyFailClosed fails the request as a network error. This is
-	// the recommended default: it guarantees deterministic offline
-	// behavior and surfaces a partial capture honestly instead of quietly
-	// depending on connectivity that offline mode is supposed to remove.
+	// the recommended default: it makes offline behavior deterministic and
+	// surfaces a partial capture honestly instead of quietly depending on
+	// connectivity that offline mode is supposed to remove.
+	//
+	// It holds for as long as replay is actually intercepting. There is
+	// exactly one path that knowingly suspends it — retireOnSaturation,
+	// when BOTH admission bounds are exhausted and the CDP connection can
+	// no longer answer anything — and it is a suspension of interception
+	// itself, not a per-request policy decision: the ROOT session is closed,
+	// so Chromium releases what it had paused across every target on that
+	// connection and the page runs unintercepted against the live network
+	// until SyncPlaylist re-arms scope. That re-arm is nudged rather than
+	// waited for — see SetOnScopeLost — but that is best-effort
+	// acceleration, not a bound on the window. See
+	// retireOnSaturation's doc for why the alternative on offer there is a
+	// hung page rather than an enforced one, and
+	// docs/offline-artwork-capture.md for the operator-visible signal.
 	MissPolicyFailClosed MissPolicy = "fail_closed"
 	// MissPolicyPassThrough lets the request continue to the real network.
 	// Only sensible when the device is known to be online (progressive
@@ -172,6 +186,36 @@ type Replayer interface {
 	RootAttached() bool
 }
 
+// ScopeLostRegistrar is the one-method view of the replayer that startup
+// wiring needs, kept separate from Replayer so main.go gets only the
+// setter rather than Attach/EnableForPlaylist/Disable as well — see
+// Runtime.ScopeLost.
+type ScopeLostRegistrar interface {
+	// SetOnScopeLost registers a callback fired when replay stops
+	// enforcing scope for a reason only a re-arm can fix — today only
+	// admission saturation (see retireOnSaturation), which closes the
+	// root session and lets the page run unintercepted until something
+	// calls SyncPlaylist again.
+	//
+	// It exists because that "something" is otherwise
+	// playlist-refresher's periodic pass, up to PLAYLIST_REFRESH_INTERVAL
+	// away, and a fail_closed scope is enforced by nothing for that whole
+	// window. main.go wires this to PlaylistRefresher.ForceRefresh, the
+	// same recovery the kiosk-reconnect path already uses for the
+	// identical "scope was invalidated and the loop has not noticed"
+	// problem — see that interface's doc.
+	//
+	// Optional: a nil handler (never set) simply means recovery waits for
+	// the periodic pass, which is the pre-existing behavior.
+	//
+	// The handler MUST NOT block. It runs on the retirement goroutine,
+	// which still holds the saturationRetiring latch — so a handler that
+	// never returns does not merely delay this recovery, it permanently
+	// prevents any future saturation on any session from ever being
+	// retired again.
+	SetOnScopeLost(fn func())
+}
+
 type replayer struct {
 	store        Store
 	staticServer StaticServer
@@ -255,6 +299,36 @@ type replayer struct {
 	// saturationRetiring keeps one saturation episode to one retirement
 	// goroutine — see retireOnSaturation.
 	saturationRetiring atomic.Bool
+	// onScopeLost is SetOnScopeLost's handler. Atomic rather than
+	// mutex-guarded because it is read from the retirement goroutine
+	// while main.go may still be setting it during startup wiring.
+	// Reading it is cheap and lock-order-free; it is the INVOCATION that
+	// must stay outside transitionMu — see notifyScopeLost.
+	onScopeLost atomic.Pointer[func()]
+}
+
+func (r *replayer) SetOnScopeLost(fn func()) {
+	if fn == nil {
+		r.onScopeLost.Store(nil)
+		return
+	}
+	r.onScopeLost.Store(&fn)
+}
+
+// notifyScopeLost invokes the registered handler, if any.
+//
+// Callers must NOT hold transitionMu. The handler wired today cannot
+// deadlock on it — ForceRefresh is a non-blocking send on a buffered
+// channel, and the SyncPlaylist it schedules runs on the refresher's own
+// goroutine — but the recovery this triggers does take transitionMu to
+// re-attach and re-arm, so any handler that ever waits for that recovery
+// to finish would deadlock against it. Keeping the call outside the lock
+// makes that a property of this seam rather than of one caller's current
+// implementation.
+func (r *replayer) notifyScopeLost() {
+	if fn := r.onScopeLost.Load(); fn != nil {
+		(*fn)()
+	}
 }
 
 // NewReplayer constructs a Replayer. staticServer's BaseURL is used to let
@@ -435,8 +509,13 @@ func (r *replayer) attachChild(sessionID string, session CDPSession) (resumable 
 		r.logger.Warn("offline cache replay: Fetch.enable on newly attached child target failed",
 			zap.String("session_id", sessionID), zap.Error(err))
 		// A transport failure means this session is finished — retire it
-		// (which also closes it, so Chromium releases anything it has
-		// paused) rather than leaving a corpse in the target set.
+		// rather than leaving a corpse in the target set. Note that for a
+		// CHILD this does NOT release anything Chromium has paused:
+		// flatSession.Close is a per-target detach that only unregisters
+		// handlers (see its doc, and retireOnSaturation for where that
+		// distinction is load-bearing). Benign here — under fail_closed
+		// this child is deliberately left paused anyway, and the socket
+		// carrying it is already dead — but do not read this as a release.
 		r.retireIfDeadLocked(sessionID, session, err, "Fetch.enable (child attach)")
 
 		r.mu.RLock()
@@ -791,14 +870,28 @@ func (r *replayer) onRequestPaused(sessionID string, session CDPSession, params 
 				r.resolveOverflow(sessionID, session, params)
 			}()
 		default:
-			r.retireOnSaturation(sessionID, session)
+			r.retireOnSaturation()
 		}
 	}
 }
 
-// retireOnSaturation gives up on a session that has saturated BOTH
-// admission bounds, closing it so Chromium releases everything it has
-// paused on that target.
+// retireOnSaturation gives up once BOTH admission bounds are saturated,
+// retiring the ROOT session — deliberately, whichever target's event
+// happened to trip it.
+//
+// Saturation is a property of the SOCKET, not of a target: both
+// semaphores are per-replayer and every flat-mode child target shares the
+// one connection's write path, so 576 outstanding sends means that
+// connection has stopped serving replay for everything on it. Retiring
+// the tripping target instead would be a no-op at best and a hang at
+// worst — flatSession.Close is a per-target detach that only unregisters
+// handlers (it must never close the shared socket, see its doc), so
+// Chromium would keep the connection, keep Fetch armed at "*" on that
+// iframe, and keep its requests paused, while this replayer no longer has
+// a handler to answer them or an entry in targets to re-arm. Closing the
+// root closes the actual websocket, which is what makes Chromium release
+// every paused request on EVERY target on it, and what makes
+// RootAttached() false so SyncPlaylist knows to re-dial.
 //
 // An earlier revision simply dropped the event with a warning. That was
 // wrong in a way the warning hid: a paused request that is never
@@ -808,8 +901,8 @@ func (r *replayer) onRequestPaused(sessionID string, session CDPSession, params 
 // answering means Send and Send is exactly what has run out of capacity.
 //
 // Retiring is the honest way out: the page gets every pending request
-// back and proceeds against the live network, and the next
-// KioskReplay.SyncPlaylist re-dials and re-arms scope (see RootAttached).
+// back and proceeds against the live network, and SyncPlaylist re-dials
+// and re-arms scope (see RootAttached and SetOnScopeLost).
 // That does mean a window where a fail_closed scope is not enforced —
 // accepted here, unlike the unarmed-child case, because there is no
 // working offline path left to protect: 576 concurrent CDP sends
@@ -823,16 +916,31 @@ func (r *replayer) onRequestPaused(sessionID string, session CDPSession, params 
 // saturation episode to one retirement goroutine rather than spawning
 // one per dropped event, which would reintroduce the unbounded growth
 // the admission bounds exist to stop.
-func (r *replayer) retireOnSaturation(sessionID string, session CDPSession) {
+func (r *replayer) retireOnSaturation() {
 	if !r.saturationRetiring.CompareAndSwap(false, true) {
 		return
 	}
 	go func() {
 		defer r.saturationRetiring.Store(false)
-		r.transitionMu.Lock()
-		defer r.transitionMu.Unlock()
-		r.retireLocked(sessionID, session,
-			"admission saturated; releasing paused requests to the network rather than hanging them")
+		func() {
+			r.transitionMu.Lock()
+			defer r.transitionMu.Unlock()
+			r.mu.RLock()
+			root, ok := r.targets[""]
+			r.mu.RUnlock()
+			if !ok {
+				// Already retired by another path (a transport failure, or
+				// a reconnect swap). Whatever did it left recovery owing
+				// either way, so still notify below.
+				return
+			}
+			r.retireLocked("", root,
+				"admission saturated; releasing paused requests to the network rather than hanging them")
+		}()
+		// Deliberately after transitionMu is released — see
+		// notifyScopeLost's doc. Without a handler wired this does nothing
+		// and recovery waits for playlist-refresher's periodic pass.
+		r.notifyScopeLost()
 	}()
 }
 

@@ -1641,3 +1641,178 @@ func TestReplayer_OnRequestPaused_OverflowGoroutinesAreBounded(t *testing.T) {
 
 	close(release)
 }
+
+// TestReplayer_OnRequestPaused_SaturationNotifiesScopeLost pins the
+// recovery half of the saturation trade-off. Retiring the session is what
+// keeps the page from hanging, but it also means Fetch interception is
+// gone: a fail_closed scope is enforced by NOTHING until something calls
+// SyncPlaylist again. Left to itself that something is playlist-refresher's
+// periodic pass, up to PLAYLIST_REFRESH_INTERVAL (5 minutes) away, and for
+// that whole window a fully cached artwork is served from the live network
+// while getOfflineCacheStatus still reports it ready.
+//
+// main.go wires this handler to PlaylistRefresher.ForceRefresh — the same
+// recovery the kiosk-reconnect path already uses for the identical "scope
+// was invalidated and the periodic loop has not noticed" problem. That is
+// best-effort acceleration of the window, not a bound on it (see
+// docs/offline-artwork-capture.md for the paths that still fall back to
+// the periodic tick).
+//
+// The handler must fire AFTER the root is actually retired. Notifying
+// first would send the recovery pass at a root still present in targets:
+// it would re-arm scope on a session about to be closed and see
+// RootAttached() == true, so it would never re-dial — spending the one
+// buffered ForceRefresh signal without recovering anything.
+func TestReplayer_OnRequestPaused_SaturationNotifiesScopeLost(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-hot", "hot payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+
+	release := make(chan struct{})
+	stuck := func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
+		<-release
+		return json.RawMessage(`{}`), nil
+	}
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.failRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+	ts.mockSession.EXPECT().Close().Return(nil).Times(1)
+
+	// Records whether the session was already retired when the handler
+	// ran, which is the ordering the recovery depends on.
+	attachedAtCallback := make(chan bool, 1)
+	ts.replayer.(offlinecache.ScopeLostRegistrar).SetOnScopeLost(func() {
+		select {
+		case attachedAtCallback <- ts.replayer.RootAttached():
+		default:
+		}
+	})
+
+	const flood = offlinecache.RequestPausedAdmission + offlinecache.OverflowAdmission + 500
+	for i := 0; i < flood; i++ {
+		ts.handler(requestPausedEvent(t, fmt.Sprintf("req-%d", i), res.URL))
+	}
+
+	select {
+	case rootStillAttached := <-attachedAtCallback:
+		assert.False(t, rootStillAttached,
+			"the scope-lost handler must run after the session is retired, or the re-arm it triggers races the retirement")
+	case <-time.After(2 * time.Second):
+		t.Fatal("saturation must notify the scope-lost handler, or a fail_closed scope stays unenforced until playlist-refresher's next periodic pass")
+	}
+
+	close(release)
+}
+
+// TestReplayer_SetOnScopeLost_NilHandlerIsSafe pins that the handler is
+// genuinely optional: unset (or explicitly cleared), saturation must still
+// retire cleanly and simply fall back to the periodic-pass recovery that
+// existed before this hook.
+func TestReplayer_SetOnScopeLost_NilHandlerIsSafe(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-hot", "hot payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+
+	ts.replayer.(offlinecache.ScopeLostRegistrar).SetOnScopeLost(func() {})
+	ts.replayer.(offlinecache.ScopeLostRegistrar).SetOnScopeLost(nil) // cleared again
+
+	release := make(chan struct{})
+	stuck := func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
+		<-release
+		return json.RawMessage(`{}`), nil
+	}
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.failRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+	closed := make(chan struct{})
+	ts.mockSession.EXPECT().Close().DoAndReturn(func() error {
+		close(closed)
+		return nil
+	}).Times(1)
+
+	const flood = offlinecache.RequestPausedAdmission + offlinecache.OverflowAdmission + 500
+	for i := 0; i < flood; i++ {
+		ts.handler(requestPausedEvent(t, fmt.Sprintf("req-%d", i), res.URL))
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("saturation must still retire the session with no scope-lost handler wired")
+	}
+
+	close(release)
+}
+
+// TestReplayer_OnRequestPaused_ChildSaturationRetiresTheRootSession is the
+// regression test for saturation delivered on a CHILD (flat-mode OOPIF)
+// target. onRequestPaused is registered per target, and the admission
+// semaphores are per-replayer, so whichever target's event happens to lose
+// the race is the one that trips saturation — and on a real device the
+// burst comes from the cross-origin artwork iframe, so that is the LIKELY
+// case, not an exotic one.
+//
+// Retiring the tripping target would be worse than useless there.
+// flatSession.Close is a per-target detach that only unregisters handlers
+// (it must never close the shared socket), so Chromium would keep the
+// connection, keep Fetch armed at "*" on that iframe, and keep its
+// requests paused — while the replayer no longer has a handler to answer
+// them or a targets entry to re-arm. That is exactly the permanent hang
+// retiring exists to prevent, and RootAttached() would still be true, so
+// SyncPlaylist would not re-dial and the scope-lost recovery could not fix
+// it either.
+//
+// Saturation is a property of the SOCKET, so the ROOT is what must be
+// retired: closing it closes the real websocket, which is what makes
+// Chromium release every paused request on every target on it.
+func TestReplayer_OnRequestPaused_ChildSaturationRetiresTheRootSession(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-hot", "hot payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+
+	// Attach a child and capture ITS Fetch.requestPaused handler, so the
+	// flood below is delivered on the child session exactly as Chromium
+	// would deliver an iframe's paused requests.
+	var childHandler func(json.RawMessage)
+	child := mocks.NewMockCDPSession(ts.ctrl)
+	child.EXPECT().On("Fetch.requestPaused", gomock.Any()).
+		Do(func(_ string, h func(json.RawMessage)) { childHandler = h }).Times(1)
+	child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
+	require.True(t, ts.replayer.AttachChild(ts.mockSession, "child-1", child))
+	require.NotNil(t, childHandler)
+
+	release := make(chan struct{})
+	stuck := func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
+		<-release
+		return json.RawMessage(`{}`), nil
+	}
+	child.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+	child.EXPECT().Send(gomock.Any(), "Fetch.failRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+
+	// The ROOT is what must be closed. The child must NOT be: closing it
+	// releases nothing and strands its paused requests permanently.
+	rootClosed := make(chan struct{})
+	ts.mockSession.EXPECT().Close().DoAndReturn(func() error {
+		close(rootClosed)
+		return nil
+	}).Times(1)
+
+	const flood = offlinecache.RequestPausedAdmission + offlinecache.OverflowAdmission + 500
+	for i := 0; i < flood; i++ {
+		childHandler(requestPausedEvent(t, fmt.Sprintf("req-%d", i), res.URL))
+	}
+
+	select {
+	case <-rootClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("saturation tripped by a child target must retire the ROOT session: closing the child only unregisters handlers, so Chromium releases nothing and that iframe's requests hang forever")
+	}
+	assert.Eventually(t, func() bool { return !ts.replayer.RootAttached() }, 2*time.Second, 10*time.Millisecond,
+		"the root must leave the target set so SyncPlaylist knows to re-dial; otherwise no recovery path fires at all")
+
+	close(release)
+}
