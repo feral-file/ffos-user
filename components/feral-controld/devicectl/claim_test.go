@@ -57,6 +57,33 @@ func (s *narratorSpy) ShowUpdating(progress int) {
 }
 func (s *narratorSpy) Hide() { s.calls = append(s.calls, "hide") }
 
+// SweepStaleOverlay mirrors setupui.Service: the hide runs only when THIS
+// process has no narration intent yet — an overlay this process painted (or
+// already hid) is by definition not stale.
+func (s *narratorSpy) SweepStaleOverlay() {
+	if len(s.calls) == 0 {
+		s.calls = append(s.calls, "hide")
+	}
+}
+
+// HideIfShowing mirrors setupui.Service: hide only when the current intent
+// (the last recorded call) is one of states. Caveat for future callers: most
+// spy labels match the wire state names ("finalizing", "updating",
+// "factory_reset"), but ShowClaimQR records "claim" while the wire state is
+// "claim_qr" — a HideIfShowing(claim_qr) test through this spy would no-op.
+func (s *narratorSpy) HideIfShowing(states ...string) {
+	if len(s.calls) == 0 {
+		return
+	}
+	current := s.calls[len(s.calls)-1]
+	for _, st := range states {
+		if current == st {
+			s.calls = append(s.calls, "hide")
+			return
+		}
+	}
+}
+
 // narrating mirrors setupui.Service's intent semantics: something has been
 // shown and the last intent was not a hide.
 func (s *narratorSpy) narrating() bool {
@@ -228,12 +255,78 @@ func TestPairingConfirmationSettlesAutoClaim(t *testing.T) {
 	assert.Equal(t, CmdOK, res)
 	require.Equal(t, []string{"ready", "hide"}, spy.calls)
 
-	// A later online transition must treat the device as settled: only the
-	// one-time boot sweep runs, no finalizing, no gate, no claim QR.
+	// A later online transition must treat the device as settled: the boot
+	// sweep no-ops (this process already narrated ready→hide, so the on-screen
+	// state is not stale), no finalizing, no gate, no claim QR.
 	e.MaybeShowClaimQROnOnline(context.Background())
-	assert.Equal(t, []string{"ready", "hide", "hide"}, spy.calls)
+	assert.Equal(t, []string{"ready", "hide"}, spy.calls)
 	assert.NotContains(t, spy.calls, "claim")
 	assert.NotContains(t, spy.calls, "finalizing")
+}
+
+// TestMaybeShowClaimQROnOnline_SweepYieldsToLiveOTANarration is the
+// cross-flow regression: on a settled device's online transition the claim
+// flow's stale-overlay sweep and the startup OTA gate run as UNORDERED
+// goroutines, and a sweep landing after the gate's ShowUpdating must not
+// erase the live update narration (an unconditional Hide also blinded the
+// reload safeguard, which keys on the same narration intent). Modeled here
+// with the sweep maximally delayed: the gate has already narrated when the
+// sweep runs.
+func TestMaybeShowClaimQROnOnline_SweepYieldsToLiveOTANarration(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().
+		Return(&state.State{ConnectedDevice: &state.Device{ID: "phone-1"}}).
+		AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
+
+	spy.ShowUpdating(40) // the concurrent OTA gate narrated first
+	e.MaybeShowClaimQROnOnline(context.Background())
+	assert.Equal(t, []string{"updating"}, spy.calls,
+		"the delayed sweep must not erase live OTA narration")
+}
+
+// TestMaybeShowClaimQROnOnline_MidBackoffSettleYieldsToLiveNarration pins the
+// HideIfShowing call site at the mid-backoff settled re-check — the branch
+// reachable minutes after the flow started, which is exactly when another
+// narrator can own the screen. The device is claimed DURING the backoff sleep
+// while a concurrent update ladder narrates; the flow's clear must yield (its
+// finalizing overlay is already superseded), never blanket-Hide. Reverting
+// the call site to Hide() fails this test with a trailing "hide".
+func TestMaybeShowClaimQROnOnline_MidBackoffSettleYieldsToLiveNarration(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	// Mutable shared state: unclaimed with a topic, so the flow passes the
+	// topic wait and enters the pre-claim gate loop.
+	st := &state.State{Relayer: &state.RelayerState{TopicID: "topic-abc"}}
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(st).AnyTimes()
+	// No local build config: the gate's version check fails, which is the
+	// retryable shape that reaches the backoff sleep.
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).
+		Return(nil, errors.New("no local config")).
+		AnyTimes()
+
+	spy := &narratorSpy{}
+	clk := &autoClaimClock{}
+	clk.onSleep = func() {
+		// During the backoff sleep: the phone claims the device, and a
+		// concurrent updateToLatestVersion ladder takes the screen.
+		st.ConnectedDevice = &state.Device{ID: "phone-1"}
+		spy.ShowUpdating(30)
+	}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: clk, os: mockOS}
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Equal(t, []string{"finalizing", "updating"}, spy.calls,
+		"the settled-mid-backoff clear must not erase live update narration")
 }
 
 // TestConnectClaimTransitionHidesOverlay: the claim landing is the moment the

@@ -217,3 +217,25 @@ func TestStartupOTAGate_CanceledRetryLeavesLatchClear(t *testing.T) {
 	e.MaybeRunStartupOTAGateOnOnline(context.Background())
 	assert.Equal(t, 2, gate.calls())
 }
+
+// TestStartupOTAGate_EntryGatedOnBootWindow: the hook stays wired for the
+// whole process, so a claimed device that BOOTED offline and only gains WAN
+// hours later would otherwise launch a Required-mode update — and its reboot
+// — mid-exhibition. Entry must defer to the nightly updater timer once the
+// boot window closes, without latching the done flag (deferral is not a
+// settled boot check). A nil probe (tests, doubles) means no gating.
+func TestStartupOTAGate_EntryGatedOnBootWindow(t *testing.T) {
+	gate := &fakeStartupGate{results: []otagate.Result{otagate.ResultNoUpdateNeeded}}
+	e := startupGateExecutor(t, true, gate)
+
+	e.bootLifecycleProbe = func() bool { return false } // WAN arrived after the window
+	e.MaybeRunStartupOTAGateOnOnline(context.Background())
+	assert.Equal(t, 0, gate.calls(), "a post-window online transition must not run the gate")
+	assert.False(t, e.startupOTAGateDone.Load(), "deferral must not latch the boot check as done")
+
+	// Within the window the same entry runs normally.
+	e.bootLifecycleProbe = func() bool { return true }
+	e.MaybeRunStartupOTAGateOnOnline(context.Background())
+	assert.Equal(t, 1, gate.calls())
+	assert.True(t, e.startupOTAGateDone.Load())
+}

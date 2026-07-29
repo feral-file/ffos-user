@@ -399,3 +399,33 @@ func TestExternalLinkProbeExcludesOwnHotspot(t *testing.T) {
 		t.Fatal("the adapter must exclude the ff1-softap hotspot from external-link detection")
 	}
 }
+
+// fakeOTAOnlyFlow satisfies the startup-OTA interface and the probe sink but
+// NOT bootPlayerRecoveryFlow, discriminating where fakeBootFlows cannot.
+type fakeOTAOnlyFlow struct {
+	probe func() bool
+}
+
+func (f *fakeOTAOnlyFlow) MaybeRunStartupOTAGateOnOnline(context.Context) {}
+func (f *fakeOTAOnlyFlow) SetBootLifecycleProbe(p func() bool)            { f.probe = p }
+
+// TestWireBootLifecycleHooksProbeInjectionIsIndependent enforces the "neither
+// hook can end up wired but unguarded" invariant structurally: a flow that
+// implements only the OTA gate (no player recovery) must still receive the
+// boot-window probe. Regression: injecting the probe inside the
+// bootPlayerRecoveryFlow assertion would leave exactly this shape wired with
+// a nil probe — an OTA hook that never expires, finding 2 all over again.
+func TestWireBootLifecycleHooksProbeInjectionIsIndependent(t *testing.T) {
+	n := &setupNotifier{ui: &spyNarrationUI{}, claimCtx: context.Background()}
+	flow := &fakeOTAOnlyFlow{}
+	wireBootLifecycleHooks(n, flow, func() bool { return true })
+	if n.startupGate == nil {
+		t.Fatal("the OTA hook must be wired for an OTA-only flow")
+	}
+	if flow.probe == nil {
+		t.Fatal("the OTA gate must never be wired without its boot-window guard")
+	}
+	if n.playerRecovery != nil {
+		t.Fatal("an OTA-only flow must not have a player recovery wired")
+	}
+}

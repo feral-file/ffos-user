@@ -256,6 +256,52 @@ func (s *Service) Hide() {
 	s.push(map[string]any{"state": stateHidden})
 }
 
+// SweepStaleOverlay hides the on-screen overlay ONLY if this process has not
+// narrated anything yet. It exists for boot reconciliation: narration intent
+// is in-memory, so after a daemon restart the player may still render the
+// PREVIOUS life's overlay (e.g. a claim QR painted before a crash on a device
+// that has since been claimed) — but an overlay THIS process painted is, by
+// definition, not stale. last == nil is exactly the complement of what
+// Resync can repair: any non-nil intent gets re-pushed on the next CDP
+// (re)connect — even one whose original send failed, since a send failure
+// triggers the reconnect that fires Resync — so the sweep covers precisely
+// the one state Resync cannot, no more. The no-intent check and the hide are
+// one critical section under the same mutex every push takes (pushIf), so a
+// concurrent narrator (the startup OTA gate's ShowUpdating, a factory reset)
+// can never have its live narration erased by the sweep: if its push wins
+// the lock, the sweep no-ops; if the sweep wins, the push is enqueued after
+// the hide and the screen still ends on the narration. A caller-side
+// Narrating() probe followed by Hide() would reintroduce exactly that
+// check-then-act race.
+func (s *Service) SweepStaleOverlay() {
+	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool { return last == nil })
+}
+
+// HideIfShowing hides only when the current narration intent is one of
+// states, so a flow can clear the narration IT painted without erasing a
+// concurrent narrator's. Same atomicity argument as SweepStaleOverlay: the
+// state comparison and the hide share every push's critical section, so a
+// racing ShowUpdating/ShowFactoryReset either lands first (the hide then
+// no-ops) or is queued behind the hide (and the screen still ends on it).
+// The canonical caller is the auto-claim flow clearing its own finalizing
+// overlay after discovering mid-flow that the device settled — the exact
+// moment another narrator may have taken the screen.
+func (s *Service) HideIfShowing(states ...string) {
+	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool {
+		current := stringField(last, "state")
+		for _, st := range states {
+			if current == st {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// StateFinalizing is exported for HideIfShowing callers that need to name the
+// narration they own (the auto-claim flow's post-join gap overlay).
+const StateFinalizing = stateFinalizing
+
 // Narrating reports whether the last intended narration state is a visible
 // overlay — something has been shown and it was not subsequently hidden. It
 // reflects INTENT (the last push), not delivery: a push whose CDP send failed
@@ -455,7 +501,29 @@ func (s *Service) Resync() {
 // next change", not a hot loop: a failed send is not re-attempted on its own.
 // The last state is retained for Resync so a later CDP reconnect can recover it.
 func (s *Service) push(req map[string]any) {
+	s.pushIf(req, nil)
+}
+
+// pushIf is the single enqueue-and-start path every narration intent takes:
+// when ok is non-nil it is evaluated UNDER the queue mutex and a false answer
+// drops the push entirely. Keeping the conditional ops (SweepStaleOverlay,
+// HideIfShowing) on this exact path — rather than duplicating the tail — is
+// what makes their "atomic with every push" claim structural: a future change
+// to queue policy or worker-spawn discipline cannot apply to plain pushes
+// alone and leave the conditional ops silently divergent.
+//
+// ok receives the current intent (s.last) as its argument BECAUSE it runs
+// while s.mu is held: handing the guarded state in leaves the predicate no
+// reason to reach back into the Service, whose exported methods take the same
+// non-reentrant mutex — a predicate calling one (e.g. Narrating) would
+// deadlock holding s.mu and wedge every push from every goroutine, breaking
+// the package's pushes-never-block contract.
+func (s *Service) pushIf(req map[string]any, ok func(last map[string]any) bool) {
 	s.mu.Lock()
+	if ok != nil && !ok(s.last) {
+		s.mu.Unlock()
+		return
+	}
 	s.last = req
 	dropped := s.enqueueLocked(req)
 	starting := !s.running

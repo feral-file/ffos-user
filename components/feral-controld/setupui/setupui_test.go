@@ -757,3 +757,82 @@ func TestReloadHoldsNarrationUntilReplacementDocumentReady(t *testing.T) {
 	assert.Equal(t, 0, lost, "no narration may evaluate into the dying document")
 	assert.GreaterOrEqual(t, probes, 4, "readiness must be polled until the replacement document answers")
 }
+
+// TestSweepStaleOverlay pins the boot-reconciliation sweep's atomicity with
+// live narration: it hides only when THIS process has no narration intent
+// yet, and both race directions with a concurrent narrator preserve the
+// narration (the reviewer's cross-flow hazard: the claim flow's sweep and
+// the startup OTA gate run as unordered goroutines on the same transition).
+func TestSweepStaleOverlay(t *testing.T) {
+	t.Run("no intent yet: sweeps the previous life's overlay", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.SweepStaleOverlay()
+		sender.waitForCalls(t, 1)
+		assert.Equal(t, stateHidden, sender.lastRequest()["state"])
+	})
+
+	t.Run("narration first, sweep delayed: narration stays authoritative", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowUpdating(40)
+		sender.waitForCalls(t, 1)
+		svc.SweepStaleOverlay() // maximally delayed sweep: must no-op
+
+		assert.True(t, svc.Narrating(), "sweep must not clear live narration intent")
+		assert.Equal(t, stateUpdating, sender.lastRequest()["state"])
+		assert.Equal(t, 1, sender.callCount(), "the sweep must not deliver a hide")
+	})
+
+	t.Run("sweep first, narration racing in behind: screen ends on narration", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.SweepStaleOverlay()
+		svc.ShowUpdating(10) // queued behind the hide on the same lane
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateUpdating, sender.lastRequest()["state"])
+		assert.True(t, svc.Narrating())
+	})
+}
+
+// TestHideIfShowing pins the owned-narration clear: a flow may hide the
+// overlay it painted (finalizing) but must never erase a concurrent
+// narrator's (updating), and with no intent at all it must not push a
+// spurious hide.
+func TestHideIfShowing(t *testing.T) {
+	t.Run("hides its own narration", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowFinalizing()
+		svc.HideIfShowing(StateFinalizing)
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateHidden, sender.lastRequest()["state"])
+		assert.False(t, svc.Narrating())
+	})
+
+	t.Run("yields to a concurrent narrator", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowFinalizing()
+		svc.ShowUpdating(20) // another narrator took the screen mid-flow
+		svc.HideIfShowing(StateFinalizing)
+		sender.waitForCalls(t, 2)
+		assert.True(t, svc.Narrating(), "updating must survive the finalizing owner's clear")
+		assert.Equal(t, stateUpdating, sender.lastRequest()["state"])
+		assert.Equal(t, 2, sender.callCount(), "no hide may be delivered")
+	})
+
+	t.Run("no intent: no spurious hide", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.HideIfShowing(StateFinalizing)
+		assert.Equal(t, 0, sender.callCount())
+		assert.False(t, svc.Narrating())
+	})
+}

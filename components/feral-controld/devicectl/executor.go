@@ -162,6 +162,12 @@ type executor struct {
 	// concurrent gate runs (each holds a retry-backoff loop).
 	startupOTAGateInFlight atomic.Bool
 
+	// startupOTAGateDeferLogged bounds the post-window deferral log to once
+	// per process: deferral deliberately does NOT latch the done flag, and
+	// the notifier re-fires the hook on every WAN-confirmed transition, so a
+	// flapping WAN would otherwise emit the Info line unboundedly.
+	startupOTAGateDeferLogged atomic.Bool
+
 	// startupOTAGate is the gate call MaybeRunStartupOTAGateOnOnline drives.
 	// Overridable in tests (same pattern as logUploaderFactory); nil in
 	// production, where it resolves to otaGateInstance().EnsureLatestAtStartup.
@@ -186,13 +192,19 @@ type executor struct {
 	bootPlayerRecoveryPending atomic.Bool
 
 	// bootLifecycleProbe reports whether the kernel is still within the boot
-	// window (main wires it to re-read /proc/uptime). It expires a PARKED
-	// recovery at the deferred completion only: a CDP connection arriving
-	// hours after boot means Chromium just started (display plugged in) and
-	// its page loaded with the network already up — reloading it would be
-	// exactly the mid-exhibition disturbance the boot scoping forbids. The
-	// INLINE path is deliberately not expired: however late WAN arrives, the
-	// page it repairs loaded broken at boot and stays broken until repaired.
+	// window (main wires it to re-read /proc/uptime). It scopes the two
+	// boot-hook paths whose late execution would be a mid-exhibition
+	// disturbance, and deliberately NOT the one whose late execution is the
+	// repair itself:
+	//   - the startup OTA gate's ENTRY: a device that booted offline and
+	//     gains WAN hours later must not launch a Required-mode update (and
+	//     reboot) mid-exhibition — that update belongs to the nightly timer;
+	//   - the parked player recovery's DEFERRED completion: a CDP connection
+	//     arriving hours after boot means Chromium just started (display
+	//     plugged in) and its page loaded with the network already up;
+	//   - but NOT the player recovery's INLINE path: however late WAN
+	//     arrives, the page it repairs loaded broken at boot and stays
+	//     broken until repaired.
 	// nil (tests, doubles) means no expiry.
 	bootLifecycleProbe func() bool
 
@@ -614,8 +626,13 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 	// device may have been claimed or pairing-confirmed while it ran. The
 	// auto loop must never repaint the QR over a settled device; the relayer
 	// command path opts out (an explicit cloud show=true is a re-pair).
+	// Settling mid-flow is exactly when ANOTHER narrator may own the screen
+	// (an updateToLatestVersion ladder's ShowUpdating, a factory reset), so
+	// clear only the finalizing overlay this flow painted — an unconditional
+	// Hide would erase live narration and blind the reload safeguard keyed on
+	// the same intent.
 	if skipIfSettled && e.claimSettled() {
-		e.setupUI().Hide()
+		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true
 	}
 	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
@@ -645,6 +662,8 @@ type setupNarrator interface {
 	ShowJoinFailed(reason string)
 	ShowUpdating(progress int)
 	Hide()
+	SweepStaleOverlay()
+	HideIfShowing(states ...string)
 	RequestPageReload(done func(executed bool, err error))
 }
 
@@ -699,11 +718,15 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 		// Boot reconciliation: narration is in-memory, so after a daemon
 		// restart the player may still render the PREVIOUS life's overlay
 		// (e.g. claim_qr painted before a crash on a device that has since
-		// been claimed). Sweep it once — and only once: later online flaps on
-		// a settled device must not wipe a live updating/factory-reset
-		// narration.
+		// been claimed). Sweep it once — and only once. The sweep itself is
+		// conditional-and-atomic on the narration lane (SweepStaleOverlay
+		// hides only when THIS process has no narration intent yet): this
+		// goroutine races the startup OTA gate's on the same transition, and
+		// an unconditional Hide landing after the gate's ShowUpdating would
+		// erase live update narration — and blind the reload safeguard, which
+		// keys on that same intent.
 		if e.staleOverlaySwept.CompareAndSwap(false, true) {
-			e.setupUI().Hide()
+			e.setupUI().SweepStaleOverlay()
 		}
 		return
 	}
@@ -718,8 +741,10 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 		return
 	}
 	// Re-check: the device may have settled while waiting (LAN connect).
+	// Clear only our own finalizing overlay — see runPreClaimGateAndPaint's
+	// settled branch for why an unconditional Hide races other narrators.
 	if e.claimSettled() {
-		e.setupUI().Hide()
+		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return
 	}
 
@@ -735,7 +760,9 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 			return
 		}
 		if e.claimSettled() {
-			e.setupUI().Hide() // clear finalizing; the device settled mid-backoff
+			// The device settled mid-backoff: clear only our finalizing
+			// overlay (see runPreClaimGateAndPaint's settled branch).
+			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 			return
 		}
 		backoff *= 2
@@ -774,8 +801,12 @@ const startupOTAGateMaxCheckAttempts = 8
 // window: feral-controld.service is Restart=always, so without that gate a
 // mid-exhibition crash-restart would re-run this check and could spring a
 // required update — and its reboot — on a healthy playing device; mid-life
-// updates belong to the nightly updater timer. The gate runs once per process
-// lifetime. Outcome handling:
+// updates belong to the nightly updater timer. Wiring-time scoping alone is
+// not enough, though: the wired hook lives for the whole process, so entry is
+// ALSO gated on the boot window still being open (bootLifecycleProbe) — a
+// device that booted offline and gains WAN hours later gets the same
+// nightly-timer deferral, not a mid-exhibition reboot. The gate runs once per
+// process lifetime. Outcome handling:
 //   - NoUpdateNeeded / TooOldToUpgrade: settled for this boot.
 //   - UpdateStarted: on success the device reboots into the new build. On
 //     error the ladder latched OnPermanentFailure (already narrated); still
@@ -792,6 +823,23 @@ const startupOTAGateMaxCheckAttempts = 8
 //     backoff sleep interrupted) so the next online transition retries.
 func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 	if e.startupOTAGateDone.Load() || !e.claimSettled() {
+		return
+	}
+	// Boot-window entry gate, matching the parked player recovery's deferred
+	// expiry: the hook stays wired for the process lifetime, so a device that
+	// BOOTED offline and only gains WAN hours later would otherwise run a
+	// Required-mode update — and its reboot — mid-exhibition. That late
+	// update belongs to the nightly updater timer. Checked at ENTRY only: a
+	// gate that started inside the window may keep retrying a failing
+	// version check past it (boot-time DNS convergence is the common cause).
+	// The resulting worst case is bounded at ~22.5 minutes of backoff across
+	// startupOTAGateMaxCheckAttempts — an update can launch ~25 minutes after
+	// boot, never hours; per-retry probing would cap the ladder at ~3
+	// attempts and defeat the DNS-convergence rationale.
+	if probe := e.bootLifecycleProbe; probe != nil && !probe() {
+		if e.startupOTAGateDeferLogged.CompareAndSwap(false, true) {
+			e.logger.Info("Startup OTA gate: boot window elapsed before WAN; deferring to the nightly updater timer")
+		}
 		return
 	}
 	if !e.startupOTAGateInFlight.CompareAndSwap(false, true) {
