@@ -354,6 +354,24 @@ this as the item transitioning to `not_cached` immediately after
 appearing to complete, with `Coverage.Reason` explaining that it alone
 exceeded the disk budget.
 
+The bound is enforced on BOTH sides of a capture, because eviction only
+on the way out is not enough for a cache that must roll over.
+Post-capture, `enforceDiskLimit` trims back under `maxDiskBytes` as
+above. Pre-capture, `service.process` first runs
+`Service.reclaimDiskForCapture`, which evicts oldest-first (never the
+item about to be captured, and returning quietly rather than warning
+when the target is unreachable — see its doc) until at least
+`maxDiskBytes/8` of the budget is free. Without that step, a store
+sitting at its ceiling starved every new capture up front: both
+capture pipelines seed their disk
+budget with the store's *remaining* room, and the post-capture eviction
+only runs after a *successful* capture, so once full the cache froze on
+its oldest contents forever (feral-file/ffos-user#229 review finding).
+An item larger than the 1/8th headroom floor still captures with
+whatever room eviction actually freed — degrading only itself (partial
+coverage) rather than wiping the rest of the cache for one oversized
+item.
+
 ### 3.3 Direct-download path for media and other single-file items
 
 `mediacapture.go`'s `MediaCapturer` is the browser-free counterpart to

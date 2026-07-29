@@ -1591,6 +1591,19 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	// doc on why the observer call is never made under that lock).
 	s.notifyObserver(j.itemID, StateDownloading, Coverage{})
 
+	// Make room BEFORE the capture starts, not only after it succeeds:
+	// both capture pipelines seed their disk budget with the store's
+	// CURRENT remaining room (newDiskBudgetFromStore), and
+	// enforceDiskLimit below only ever runs after a successful capture,
+	// so a store already sitting at maxDiskBytes would otherwise starve
+	// every new capture of budget before eviction ever got a chance to
+	// run — freezing the cache on its oldest contents forever instead of
+	// rolling over to newer ones. Must run before captureMu is taken:
+	// the eviction loop's GC goes through s.gc(), which locks captureMu
+	// itself. That ordering is safe against a concurrent capture because
+	// this single worker goroutine is the only place captures run.
+	s.reclaimDiskForCapture(j.itemID)
+
 	// Held for the full Capture call, not just its final SaveItem — see
 	// captureMu's doc on why the whole blob-writing window must be
 	// fenced, not only the save.
@@ -1623,13 +1636,9 @@ func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecor
 	return s.mediaCapturer.Capture(ctx, j.item)
 }
 
-// enforceDiskLimit evicts the oldest-captured item (by CapturedAt),
-// preferring anything OTHER than justCapturedID, and re-runs GC until
-// usage is back under maxDiskBytes or nothing more can be evicted. Blobs
-// are deduped, so an item's disk contribution is only knowable after GC
-// reclaims blobs no other item still references — hence the
-// delete-then-GC-then-recheck loop rather than trying to precompute how
-// much one eviction will free.
+// enforceDiskLimit evicts oldest-first (via evictDownTo, preferring
+// anything OTHER than justCapturedID) until usage is back under
+// maxDiskBytes or nothing more can be evicted.
 //
 // justCapturedID is only PREFERRED to survive, never permanently
 // exempted: capture enforces a per-resource size cap
@@ -1640,30 +1649,98 @@ func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecor
 // ceiling — exactly the "flip offlineCache.enabled on and it can still
 // fill the disk" failure mode this budget exists to prevent (see
 // OptionsFromConfig's DefaultMaxDiskBytes doc). So once
-// oldestEvictableItem has nothing else left to offer, this deliberately
-// evicts justCapturedID too — but that fallback fires at most once per
-// call (protectedID is cleared right after), so a store that is over
-// budget with truly nothing left on disk still terminates instead of
-// looping forever trying to re-evict an item that is already gone.
+// oldestEvictableItem has nothing else left to offer, evictDownTo's
+// last-resort mode deliberately evicts justCapturedID too.
 func (s *service) enforceDiskLimit(justCapturedID string) {
 	if s.maxDiskBytes <= 0 {
 		return
 	}
+	s.evictDownTo(s.maxDiskBytes, justCapturedID, true)
+}
 
-	protectedID := justCapturedID
+// captureReclaimHeadroomDivisor sizes the free-space floor
+// reclaimDiskForCapture guarantees before each capture:
+// maxDiskBytes/8, i.e. 1.25 GiB at the DefaultMaxDiskBytes of 10 GiB.
+// The value is a trade-off between two failure directions: a floor too
+// small starves large multi-resource artworks of budget on a full
+// store (they capture partial and need further rollover passes to
+// converge), while a floor too large preemptively evicts cached items
+// a bulk playlist download is going to want again minutes later —
+// at 1/8th, a full store keeps ~87.5% of its working set across a
+// capture while still guaranteeing room for a typical artwork.
+const captureReclaimHeadroomDivisor = 8
+
+// reclaimDiskForCapture makes room for a capture that has NOT started
+// yet, evicting oldest-first until at least
+// maxDiskBytes/captureReclaimHeadroomDivisor of the byte budget is
+// free. It exists because both capture pipelines seed their disk
+// budget with the store's REMAINING room (newDiskBudgetFromStore) and
+// enforceDiskLimit only runs after a capture SUCCEEDS: without a
+// pre-capture reclaim, a store that once reached maxDiskBytes rejected
+// every subsequent capture up front, and with no successful captures
+// the post-capture eviction never ran again — the cache froze on its
+// oldest contents instead of rolling over to newer ones
+// (feral-file/ffos-user#229 review finding).
+//
+// itemID (the item about to be captured) is never evicted here, with
+// no last-resort fallback: for a RECAPTURE of an already-ready item,
+// evicting its existing record now would flip it to not_cached while
+// the replacement download is still in flight, and "this item alone
+// exceeds the budget" cannot be known before its capture has even
+// started — enforceDiskLimit still owns that verdict afterwards.
+// Running out of victims before reaching the target is likewise a
+// normal, quiet outcome here (a store whose remaining contents are
+// itemID itself plus playlist metadata no item eviction can reclaim),
+// not an over-budget alarm: the capture then simply runs with whatever
+// room is actually left, exactly as it would have before this reclaim
+// existed.
+func (s *service) reclaimDiskForCapture(itemID string) {
+	if s.maxDiskBytes <= 0 {
+		return
+	}
+	s.evictDownTo(s.maxDiskBytes-s.maxDiskBytes/captureReclaimHeadroomDivisor, itemID, false)
+}
+
+// evictDownTo is the shared eviction loop behind enforceDiskLimit
+// (post-capture, target = the hard ceiling itself) and
+// reclaimDiskForCapture (pre-capture, target = ceiling minus a
+// headroom floor). It evicts the oldest-captured item (by CapturedAt,
+// via oldestEvictableItem), preferring anything OTHER than
+// protectedID, and re-runs GC until usage is back under targetBytes or
+// nothing more can be evicted. Blobs are deduped, so an item's disk
+// contribution is only knowable after GC reclaims blobs no other item
+// still references — hence the delete-then-GC-then-recheck loop rather
+// than trying to precompute how much one eviction will free.
+//
+// evictProtectedAsLastResort selects what "nothing else left" means:
+//   - true (enforceDiskLimit): protectedID is only PREFERRED to
+//     survive, never permanently exempted — see enforceDiskLimit's doc
+//     for why the just-captured item must ultimately be evictable too.
+//     The fallback fires at most once per call (protectedID is cleared
+//     right after), so a store that is over budget with truly nothing
+//     left on disk still terminates instead of looping forever trying
+//     to re-evict an item that is already gone.
+//   - false (reclaimDiskForCapture): missing the target is a normal
+//     outcome, so the loop returns quietly without touching
+//     protectedID and without the over-budget warning — the hard
+//     ceiling is enforceDiskLimit's job, not this reclaim's.
+func (s *service) evictDownTo(targetBytes int64, protectedID string, evictProtectedAsLastResort bool) {
 	for {
 		usage, err := s.store.DiskUsage()
 		if err != nil {
 			s.logger.Warn("offline cache: disk usage check failed", zap.Error(err))
 			return
 		}
-		if usage <= s.maxDiskBytes {
+		if usage <= targetBytes {
 			return
 		}
 
 		victim, ok := s.oldestEvictableItem(protectedID)
 		reason := ""
 		if !ok {
+			if !evictProtectedAsLastResort {
+				return
+			}
 			if protectedID == "" {
 				// Already gave up the just-captured item's protection
 				// above and there is STILL nothing left to evict:

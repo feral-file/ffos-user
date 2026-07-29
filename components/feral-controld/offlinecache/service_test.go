@@ -1968,22 +1968,30 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 	// One blob's worth below what the two seeded items occupy: the new
 	// capture pushes usage to three items, and getting back under
 	// requires evicting BOTH old ones — which is what makes "oldest
-	// first" observable rather than incidental.
+	// first" observable rather than incidental. (The pre-capture reclaim
+	// takes old-1 first — oldest, to free its headroom floor — and the
+	// post-capture enforceDiskLimit takes old-2; this test asserts the
+	// combined outcome, not which phase evicted which.)
 	budget := allCacheBytesOnDisk(t, ts.store.RootDir()) - blobSize
 	ts.setMaxDiskBytes(budget)
 
-	newHash := writeBlobString(t, ts.store, strings.Repeat("z", blobSize))
 	newItem := dp1playlist.PlaylistItem{ID: "new-item", Source: "https://example.com/new"}
-	newRec := &offlinecache.ItemRecord{
-		ItemID: "new-item", Item: newItem, Entry: newItem.Source,
-		Resources:  []offlinecache.Resource{{URL: newItem.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
-		Coverage:   offlinecache.Coverage{Complete: true},
-		CapturedAt: time.Now(),
-	}
 
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), newItem.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	// The new blob is written INSIDE the mock capture, as a real capturer
+	// does, never seeded beforehand: an unreferenced blob sitting on disk
+	// before the capture starts would be swept by the pre-capture
+	// reclaim's GC pass (reclaimDiskForCapture) rather than surviving to
+	// become the new item's content.
 	ts.mockCapturer.EXPECT().Capture(gomock.Any(), newItem, 5000).DoAndReturn(
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			newHash := writeBlobString(t, ts.store, strings.Repeat("z", blobSize))
+			newRec := &offlinecache.ItemRecord{
+				ItemID: "new-item", Item: newItem, Entry: newItem.Source,
+				Resources:  []offlinecache.Resource{{URL: newItem.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
+				Coverage:   offlinecache.Coverage{Complete: true},
+				CapturedAt: time.Now(),
+			}
 			require.NoError(t, ts.store.SaveItem(newRec))
 			return newRec, nil
 		}).Times(1)
@@ -2056,6 +2064,150 @@ func TestService_EnforceDiskLimit_EvictsJustCapturedItemWhenNoOtherVictimRemains
 	_, err = ts.store.LoadItem("new-item")
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound,
 		"an item that alone exceeds maxDiskBytes with no older item to evict instead must be rejected, not silently kept over budget forever")
+}
+
+// TestService_ReclaimBeforeCapture_ReplacesOldestWhenCacheFull is the
+// regression test for reclaimDiskForCapture: the capture budget is
+// seeded with the store's REMAINING room (maxDiskBytes minus current
+// usage) and enforceDiskLimit only ran after a SUCCESSFUL capture, so a
+// store already at its byte ceiling used to starve every new capture of
+// budget before eviction could ever free space — normal cache rollover
+// (evict the oldest to admit the newest) was impossible once full. The
+// service must now evict oldest-first BEFORE the capture starts so the
+// new item downloads with real room, while the newest of the old items
+// survives (rollover, not a wipe).
+func TestService_ReclaimBeforeCapture_ReplacesOldestWhenCacheFull(t *testing.T) {
+	ts := setupServiceDeferredBudget(t)
+	defer ts.ctrl.Finish()
+
+	// Blob payloads deliberately far larger than an item record so the
+	// budget arithmetic is about blob bytes rather than record overhead
+	// (same reasoning as TestService_EnforceDiskLimit_EvictsOldestItemsFirst).
+	const blobSize = 1000
+	seedItemWithCapturedAt(t, ts.store, "old-1", strings.Repeat("a", blobSize), time.Now().Add(-2*time.Hour))
+	seedItemWithCapturedAt(t, ts.store, "old-2", strings.Repeat("b", blobSize), time.Now().Add(-1*time.Hour))
+
+	// Budget = the seeded footprint plus slack far smaller than one blob:
+	// the store counts as full (remaining room is way under the new
+	// item's blob), which is exactly the state that used to freeze the
+	// cache. The slack keeps the end-state assertion below robust to the
+	// new item's record being a few bytes larger than an evicted one's.
+	budget := allCacheBytesOnDisk(t, ts.store.RootDir()) + 100
+	ts.setMaxDiskBytes(budget)
+
+	newItem := dp1playlist.PlaylistItem{ID: "new-item", Source: "https://example.com/new"}
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), newItem.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), newItem, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			// The whole point of the fix: by the time a real capturer
+			// would size its budget from DiskUsage, eviction must
+			// already have freed the pre-capture headroom floor
+			// (maxDiskBytes/8) — with the old post-capture-only
+			// eviction, usage here would still equal the full seeded
+			// footprint and the budget would be effectively zero.
+			usage, err := ts.store.DiskUsage()
+			require.NoError(t, err)
+			require.LessOrEqual(t, usage, budget-budget/8,
+				"pre-capture reclaim must free the headroom floor before Capture runs")
+
+			newHash := writeBlobString(t, ts.store, strings.Repeat("z", blobSize))
+			rec := &offlinecache.ItemRecord{
+				ItemID: "new-item", Item: newItem, Entry: newItem.Source,
+				Resources:  []offlinecache.Resource{{URL: newItem.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
+				Coverage:   offlinecache.Coverage{Complete: true},
+				CapturedAt: time.Now(),
+			}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), newItem))
+	waitForState(t, ts.service, "new-item", offlinecache.StateReady)
+
+	require.Eventually(t, func() bool {
+		usage, err := ts.store.DiskUsage()
+		return err == nil && usage <= budget
+	}, 2*time.Second, 10*time.Millisecond, "disk usage should settle at or under budget")
+
+	_, err := ts.store.LoadItem("old-1")
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound,
+		"the oldest item must be evicted pre-capture to make room for the new one")
+	_, err = ts.store.LoadItem("old-2")
+	assert.NoError(t, err,
+		"rollover must evict only what the headroom floor needs, not wipe the whole cache")
+	_, err = ts.store.LoadItem("new-item")
+	assert.NoError(t, err, "the new item must be cached on a previously-full store")
+}
+
+// TestService_ReclaimBeforeCapture_NeverEvictsTheItemBeingRecaptured pins
+// the evictProtectedAsLastResort=false half of evictDownTo's contract,
+// which the rollover test above cannot reach (its new item has no
+// pre-existing record to protect): when the store is full and the ONLY
+// evictable item is the one about to be recaptured, the pre-capture
+// reclaim must give up quietly — no last-resort eviction of the
+// protected item — so the existing ready record stays servable while
+// the replacement download runs, and the capture proceeds with whatever
+// room is left. Flipping reclaimDiskForCapture to last-resort mode (or
+// dropping its protected-ID argument) fails this test inside the mock
+// Capture below.
+func TestService_ReclaimBeforeCapture_NeverEvictsTheItemBeingRecaptured(t *testing.T) {
+	ts := setupServiceDeferredBudget(t)
+	defer ts.ctrl.Finish()
+
+	const blobSize = 1000
+	seeded := seedItemWithCapturedAt(t, ts.store, "item-1", strings.Repeat("a", blobSize), time.Now().Add(-2*time.Hour))
+
+	// Slack of 100 bytes over the seeded footprint: small enough that the
+	// reclaim's headroom target (budget/8, ~a blob's eighth above that
+	// footprint) is still unreachable without evicting item-1 itself, yet
+	// enough that re-saving item-1's record (whose serialized size can
+	// drift by a few bytes with the new CapturedAt) cannot push the store
+	// over budget after the capture and trigger enforceDiskLimit's OWN
+	// last-resort eviction of it — this test is about the reclaim's
+	// protection, not that separate hard-ceiling fallback.
+	budget := allCacheBytesOnDisk(t, ts.store.RootDir()) + 100
+	ts.setMaxDiskBytes(budget)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: seeded.URL}
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			// The reclaim ran (the store is over its headroom target) but
+			// must have given up quietly rather than evicting the very
+			// item this capture is refreshing: the existing ready record
+			// — blob included — is still fully on disk when the capture
+			// starts.
+			existing, err := ts.store.LoadItem("item-1")
+			require.NoError(t, err,
+				"the pre-capture reclaim must never evict the item it is making room FOR")
+			require.Equal(t, seeded.SHA256, existing.Resources[0].SHA256)
+
+			newHash := writeBlobString(t, ts.store, strings.Repeat("a", blobSize))
+			require.Equal(t, seeded.SHA256, newHash, "same content must dedup onto the existing blob")
+			rec := &offlinecache.ItemRecord{
+				ItemID: "item-1", Item: item, Entry: item.Source,
+				Resources:  []offlinecache.Resource{{URL: item.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
+				Coverage:   offlinecache.Coverage{Complete: true},
+				CapturedAt: time.Now(),
+			}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+
+	_, err := ts.store.LoadItem("item-1")
+	assert.NoError(t, err, "the recaptured item must survive both the reclaim and the post-capture limit pass")
+	usage, err := ts.store.DiskUsage()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, usage, budget, "the hard ceiling still holds after the recapture")
 }
 
 func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
