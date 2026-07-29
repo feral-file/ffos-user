@@ -2,6 +2,8 @@ package status
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,67 +56,136 @@ func NewLinkChecker(exec wrapper.Exec, logger *zap.Logger) *LinkChecker {
 // HasLink returns true when at least one ethernet or wifi device is in
 // NetworkManager's "connected" state. It is best-effort: any probe failure is
 // treated as "no link" so callers fail closed (advertiser stays down) rather
-// than advertising on an interface that cannot actually carry traffic.
+// than advertising on an interface that cannot actually carry traffic. Note it
+// counts the device's own setup hotspot as a link — deliberate for mDNS/hub
+// discoverability (a phone joined to the hotspot is a LAN peer); the
+// provisioning AP-trigger guard must use ExternalLink instead.
 func (c *LinkChecker) HasLink(ctx context.Context) bool {
 	if c == nil || c.exec == nil {
 		return false
 	}
-	return c.hasLinkOfType(ctx, "ethernet", "wifi")
-}
-
-// HasWiredLink reports whether at least one ETHERNET device is in
-// NetworkManager's "connected" state. It is the wired-only sibling of HasLink,
-// used by the provisioning AP-trigger guard: an unprovisioned device with a live
-// ethernet link must never raise the setup AP even when reported offline, but a
-// wifi-only link (which may be up with broken credentials) must still reach the
-// AP path. Like HasLink it fails closed to false on any probe error.
-func (c *LinkChecker) HasWiredLink(ctx context.Context) bool {
-	if c == nil || c.exec == nil {
-		return false
-	}
-	return c.hasLinkOfType(ctx, "ethernet")
-}
-
-// hasLinkOfType reports whether any device whose TYPE is in wantTypes is in
-// NetworkManager's "connected" state. Shared nmcli probe behind HasLink and
-// HasWiredLink; best-effort, returning false on any probe failure.
-func (c *LinkChecker) hasLinkOfType(ctx context.Context, wantTypes ...string) bool {
-	probeCtx, cancel := context.WithTimeout(ctx, linkCheckTimeout)
-	defer cancel()
-
-	// -t terse, -f DEVICE,TYPE,STATE yields lines like "wlp2s0:wifi:connected".
-	cmd := c.exec.CommandContext(probeCtx, "nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device")
-	output, err := cmd.Output()
+	up, err := c.linkProbe(ctx, "")
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Warn("Link-state probe failed, assuming no link", zap.Error(err))
 		}
 		return false
 	}
-
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		parts := strings.SplitN(line, ":", 3)
-		if len(parts) != 3 {
-			continue
-		}
-		devType, state := parts[1], parts[2]
-		if !containsString(wantTypes, devType) {
-			continue
-		}
-		// nmcli reports GENERAL.STATE as "connected" (numeric 100) once a device
-		// has an active connection with an address — a usable LAN link.
-		if state == "connected" {
-			return true
-		}
-	}
-	return false
+	return up
 }
 
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
+// ExternalLink reports whether the device has a usable local link on a
+// connection OTHER than excludeProfile (the device's own setup hotspot): an
+// ethernet or wifi device in NetworkManager's "connected" state whose active
+// connection name differs. It exists for the provisioning AP-trigger guard,
+// which must never count the hotspot it raised — or failed to tear down — as
+// an uplink and suppress the AP off its own residue.
+//
+// Unlike HasLink it surfaces probe failures instead of failing closed: for the
+// guard, a false "no link" is destructive (it authorizes raising the AP, which
+// drops a live Wi-Fi association on the single radio and cannot be undone
+// without a human), so the caller treats an error as "unknown" and defers.
+func (c *LinkChecker) ExternalLink(ctx context.Context, excludeProfile string) (bool, error) {
+	if c == nil || c.exec == nil {
+		return false, errors.New("link checker not initialized")
+	}
+	return c.linkProbe(ctx, excludeProfile)
+}
+
+// nmDeviceStateActivated is NetworkManager's NM_DEVICE_STATE_ACTIVATED (100):
+// the device has an active connection with an address — a usable LAN link.
+// Compared numerically because the textual rendering is localized (see
+// linkProbe); the numeric enum also already covers externally-managed devices,
+// which NM ≥1.36 renders as "connected (externally)" but still numbers 100.
+const nmDeviceStateActivated = 100
+
+// linkProbe reports whether any ethernet or wifi device is in NetworkManager's
+// ACTIVATED state, skipping devices whose active connection is excludeProfile
+// (empty = no exclusion). Shared nmcli probe behind HasLink and ExternalLink;
+// error handling is the caller's, since the two have opposite failure biases.
+func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, linkCheckTimeout)
+	defer cancel()
+
+	// `device show` rather than `device status` deliberately: status renders
+	// STATE as a translated word only ("verbunden"), which any English text
+	// match would read as CONFIRMED link absence — the one verdict that
+	// authorizes raising the setup AP — on every non-English locale. show
+	// renders the raw enum first ("100 (connected)"), which is locale-stable;
+	// same approach as wifictl.wifiDeviceState. Terse -t emits one
+	// "FIELD:value" line per field, grouped per device, with GENERAL.DEVICE
+	// opening each block. GENERAL.CONNECTION is the active profile name, which
+	// is how the hotspot is told apart from a station association on the same
+	// wifi device; Cut at the first ':' keeps a name containing colons intact
+	// (terse mode backslash-escapes them, and ff1-softap contains none).
+	cmd := c.exec.CommandContext(probeCtx, "nmcli", "-t", "-f",
+		"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION", "device", "show")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+
+	// A "no link" verdict counts as CONFIRMED only if the survey saw at least
+	// one candidate uplink: an ethernet/wifi block with a parseable numeric
+	// state. Corrupt or empty output, or a listing with no ethernet/wifi
+	// devices at all (loopback/p2p only), proves nothing about uplink state —
+	// returning (false, nil) off it would authorize raising the setup AP over
+	// a possibly-healthy link, so it surfaces as a probe failure instead
+	// (ExternalLink defers; HasLink keeps failing closed to false).
+	type record struct {
+		typ, conn string
+		state     int
+		hasState  bool
+	}
+	var cur record
+	surveyed, link := false, false
+	// flush evaluates the finished device block; field order within a block is
+	// not assumed (nmcli emits the requested order, but nothing here breaks if
+	// it ever did not).
+	flush := func() {
+		if cur.typ != "ethernet" && cur.typ != "wifi" {
+			return
+		}
+		if !cur.hasState {
+			return
+		}
+		surveyed = true
+		if cur.state != nmDeviceStateActivated {
+			return
+		}
+		if excludeProfile != "" && cur.conn == excludeProfile {
+			return
+		}
+		link = true
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		field, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		switch field {
+		case "GENERAL.DEVICE":
+			flush()
+			cur = record{}
+		case "GENERAL.TYPE":
+			cur.typ = value
+		case "GENERAL.STATE":
+			// "100 (connected)" — the leading enum is the locale-stable part.
+			num, _, _ := strings.Cut(value, " ")
+			if n, convErr := strconv.Atoi(num); convErr == nil {
+				cur.state, cur.hasState = n, true
+			}
+		case "GENERAL.CONNECTION":
+			cur.conn = value
 		}
 	}
-	return false
+	flush()
+
+	if link {
+		return true, nil
+	}
+	if !surveyed {
+		return false, errors.New("no ethernet/wifi device rows in nmcli output")
+	}
+	return false, nil
 }

@@ -171,10 +171,10 @@ func TestUp(t *testing.T) {
 	// leftover from an ungraceful previous run can never become a duplicate.
 	calls := exec.recorded()
 	require.Len(t, calls, 2)
-	assert.Equal(t, []string{"nmcli", "connection", "delete", conName}, calls[0])
+	assert.Equal(t, []string{"nmcli", "connection", "delete", ProfileName}, calls[0])
 	call := strings.Join(calls[1], " ")
 	assert.Contains(t, call, "device wifi hotspot")
-	assert.Contains(t, call, "con-name "+conName)
+	assert.Contains(t, call, "con-name "+ProfileName)
 	assert.Contains(t, call, "ssid FF1-a1b2c3d4e5f6")
 	assert.Contains(t, call, "password 86106003")
 }
@@ -204,7 +204,7 @@ func TestDown(t *testing.T) {
 		return []byte("successfully deleted"), nil
 	})
 	require.NoError(t, b.Down(context.Background()))
-	assert.Equal(t, []string{"nmcli", "connection", "delete", conName}, exec.recorded()[0])
+	assert.Equal(t, []string{"nmcli", "connection", "delete", ProfileName}, exec.recorded()[0])
 }
 
 func TestDownIdempotentWhenMissing(t *testing.T) {
@@ -228,7 +228,7 @@ func TestDownPropagatesRealError(t *testing.T) {
 
 func TestStatusActive(t *testing.T) {
 	b, _ := newBackend("a1b2c3d4e5f6", func(argv []string) ([]byte, error) {
-		return []byte("preconfigured\n" + conName + "\nEth0\n"), nil
+		return []byte("preconfigured\n" + ProfileName + "\nEth0\n"), nil
 	})
 	st, err := b.Status(context.Background())
 	require.NoError(t, err)

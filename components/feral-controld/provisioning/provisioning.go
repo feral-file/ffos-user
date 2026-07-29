@@ -111,9 +111,9 @@ type WifiController interface {
 //
 // This conflates "online via Ethernet" with "online via Wi-Fi", which is exactly
 // what the AP decision needs (either way, no AP) and is what sys-monitord's
-// GetConnectivityStatus / connectivity_change actually expose. The finer
-// link-type-aware gating (mediator's LinkState seam) is a future refinement;
-// this machine deliberately does not depend on it.
+// GetConnectivityStatus / connectivity_change actually expose. Offline readings
+// alone do NOT raise the AP: Config.ActiveLink refines them with link state, so
+// only link LOSS (no wire, no Wi-Fi association) reaches the AP path.
 type Connectivity interface {
 	Online(ctx context.Context) (bool, error)
 	Subscribe(fn func(online bool)) (unsubscribe func())
@@ -163,23 +163,44 @@ type Config struct {
 	// Notifier is optional.
 	Notifier Notifier
 
-	// WiredLink is an optional guard against raising the setup AP on a device
-	// that has an active WIRED (ethernet) link but is reported offline. The
-	// Connectivity source is internet-reachability only, so a wired device whose
-	// upstream/router is momentarily down looks identical to a truly disconnected
-	// one — and an unprovisioned wired device would otherwise pop the setup AP even
-	// though ethernet is its intended path. When WiredLink reports true the machine
-	// treats the device as reachable-by-wire and keeps the AP down (exactly as an
-	// ethernet-online device does). It is deliberately wired-ONLY: a wifi link that
-	// is up but offline must still reach the AP path, because that is the
-	// broken-credentials case the AP exists to fix. Nil disables the guard
+	// ActiveLink is an optional guard against raising the setup AP on a device
+	// that has an active local link (ethernet OR an associated Wi-Fi station) but
+	// is reported offline. The Connectivity source is internet-reachability only,
+	// so a device whose upstream/router is down looks identical to a truly
+	// disconnected one — yet the AP can only fix "cannot associate": re-submitting
+	// credentials for a network the device is already on rejoins the same dead
+	// network, and the cases the AP genuinely rescues (changed password, vanished
+	// SSID) present as link DOWN, not up-but-offline. Raising the AP over a live
+	// Wi-Fi association is actively harmful on single-radio hardware: it drops
+	// the station link, killing LAN hub control and mDNS on an otherwise healthy
+	// LAN. When ActiveLink reports true the machine keeps the AP down (exactly as
+	// an online device does).
+	//
+	// The probe MUST exclude the device's own setup hotspot (production wires
+	// status.LinkChecker.ExternalLink with the softap profile name): a leftover
+	// hotspot from a failed teardown looks like a connected wifi device but is
+	// not an uplink, and counting it would suppress the AP off its own residue.
+	// As defense in depth the machine also ignores the guard entirely while it
+	// knows its own AP is up (see probeLink).
+	//
+	// A non-nil error means the link state is UNKNOWN (nmcli failed or timed
+	// out), and unknown never authorizes a raise: raising the AP is a one-way
+	// door on Wi-Fi (the hotspot takes the radio, so the station can never
+	// re-associate on its own), while deferring costs one 15s tick. The machine
+	// defers the AP and re-probes on the next tick — the same bias hasProfile
+	// applies to a failed nmcli profile listing. Nil disables the guard
 	// (preserving the Connectivity-only behavior).
-	WiredLink func(ctx context.Context) bool
+	ActiveLink func(ctx context.Context) (bool, error)
 
 	// PortalAddr is the portal bind address (default ":80").
 	PortalAddr string
-	// OfflineWindow is the sustained-offline duration before a provisioned device
-	// raises the AP (default 5m).
+	// OfflineWindow is how long an offline device must go WITHOUT a confirmed
+	// local link before the AP raises (default 5m). It arms at the offline
+	// assessment; from then on any tick that sees a link (or gets an
+	// inconclusive probe) disarms it and the clock restarts at the first
+	// confirmed absence, so past the first tick the window measures
+	// continuous confirmed link absence — not time since the internet was
+	// lost, and not time since the probe last ran.
 	OfflineWindow time.Duration
 	// CheckInterval is how often the machine re-evaluates the offline window and
 	// retries a deferred AP operation (default 15s).
@@ -192,14 +213,14 @@ type Config struct {
 
 // Machine is the setup-AP trigger state machine.
 type Machine struct {
-	ap        softap.Backend
-	wifi      WifiController
-	conn      Connectivity
-	clock     wrapper.Clock
-	logger    *zap.Logger
-	notifier  Notifier
-	wiredLink func(ctx context.Context) bool
-	newPortal func(portal.Config) PortalServer
+	ap         softap.Backend
+	wifi       WifiController
+	conn       Connectivity
+	clock      wrapper.Clock
+	logger     *zap.Logger
+	notifier   Notifier
+	activeLink func(ctx context.Context) (bool, error)
+	newPortal  func(portal.Config) PortalServer
 
 	portalAddr    string
 	offlineWindow time.Duration
@@ -240,6 +261,23 @@ type Machine struct {
 	// corrects the guess. Touched only on the loop goroutine (loop /
 	// onConnectivity / onTick), so it needs no lock.
 	connUnknown bool
+
+	// online is the last connectivity reading, kept so onTick can tell an
+	// ONLINE unprovisioned device (ethernet steady state — never probe, never
+	// raise) from an OFFLINE one (whose link must be re-checked every tick:
+	// unplugging the cable of an already-offline device emits no
+	// connectivity_change edge, so without the tick probe it would sit in
+	// StateUnprovisioned forever instead of raising the AP). Touched only on
+	// the loop goroutine, like connUnknown, so it needs no lock.
+	online bool
+
+	// linkProbeFailing throttles the failed-probe log: the probe runs every
+	// 15s tick in the offline resting states, which are documented as
+	// indefinite (air-gapped LAN), so a persistently broken nmcli would
+	// otherwise emit 4 warnings/minute forever into logs that ship via
+	// uploadLogs. Warn on the transition into failure, Debug on repeats.
+	// Loop-goroutine-only, like connUnknown.
+	linkProbeFailing bool
 }
 
 type eventKind int
@@ -282,7 +320,7 @@ func New(cfg Config) *Machine {
 		clock:         cfg.Clock,
 		logger:        logger,
 		notifier:      cfg.Notifier,
-		wiredLink:     cfg.WiredLink,
+		activeLink:    cfg.ActiveLink,
 		newPortal:     cfg.NewPortal,
 		portalAddr:    cfg.PortalAddr,
 		offlineWindow: cfg.OfflineWindow,
@@ -490,6 +528,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 	// resolves an assumed-offline boot. (The loop re-arms the flag itself for
 	// the one call it makes on a FAILED initial query.)
 	m.connUnknown = false
+	m.online = online
 	if online {
 		m.clearOffline()
 		if m.hasProfile(ctx) {
@@ -506,22 +545,76 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 
 	// Offline.
 	if !m.hasProfile(ctx) {
-		// Wired-link guard: a device with an active ethernet link is reachable by
-		// wire even when sys-monitord reports offline (e.g. a WAN/router blip), and
-		// ethernet is its intended path — it must never pop the setup AP, exactly as
-		// an ethernet-ONLINE device never does. Treat it as unprovisioned-but-wired
-		// (AP stays down). Wifi-link-up-but-offline is deliberately NOT caught here:
-		// that is the broken-credentials case the AP exists to fix.
-		if m.hasWiredLink(ctx) {
+		// Link guard: a device with an active local link — in this no-profile
+		// branch that is ethernet in practice, since NM cannot hold a station
+		// association without a profile and the probe excludes our own hotspot
+		// — is reachable on its LAN even when sys-monitord reports offline
+		// (e.g. a WAN/router blip). It must never pop the setup AP, exactly as
+		// an ONLINE device never does. Treat it as unprovisioned-but-linked
+		// (AP stays down). Only a CONFIRMED absence of any link raises the AP;
+		// a failed probe defers to the tick, which re-probes StateUnprovisioned
+		// while offline (see onTick).
+		m.mu.Lock()
+		cur := m.state
+		m.mu.Unlock()
+		switch m.probeLink(ctx) {
+		case linkPresent:
 			m.clearOffline()
 			m.transition(ctx, StateUnprovisioned, Detail{
-				Reason:  "wired-link",
-				Message: "Wired network present; Wi-Fi not configured",
+				Reason:  "link-present",
+				Message: "Network link present; Wi-Fi not configured",
 			})
 			return
+		case linkUnknown:
+			// A failed probe must never EVICT an active AP: after a failed
+			// raise (state APActive with apUp false) the apUp short-circuit
+			// does not apply, and bouncing APActive → Unprovisioned →
+			// APActive at event/tick cadence would flap the on-screen setup
+			// narration and spawn claim-flow goroutines each round trip.
+			// Reconcile keeps retrying the raise instead; a CONFIRMED link
+			// reading (either way) still resolves the state normally.
+			if cur == StateAPActive {
+				m.reconcile(ctx)
+				return
+			}
+			m.clearOffline()
+			m.transition(ctx, StateUnprovisioned, Detail{
+				Reason:  "link-unknown",
+				Message: "Checking the network link",
+			})
+			return
+		case linkAbsent:
+			// Confirmed absence. Raise immediately only where deferring has no
+			// value: the boot assessment (StateStarting — a fresh device with
+			// no profile and no link needs the AP right away) and StateAPActive
+			// (the raise below is a state no-op that keeps a failed raise
+			// retrying). Every other confirmed-absent reading routes through
+			// the continuous-confirmed-absence window the tick measures — the
+			// online→offline edge included, because a 20s LAN-switch reboot
+			// must not flash setup over artwork on an ONLINE wired frame any
+			// more than on a parked one (#233), and redundant offline
+			// re-emissions (a sys-monitord restart re-emits its first probe
+			// unconditionally; the connUnknown re-query feeds one in) must not
+			// jump a window already running. This probe counts as ONE
+			// confirmed absence: it arms the window if it is the first, and
+			// only the tick — a full window later — raises. With no guard
+			// wired there is no probe to confirm anything (probeLink
+			// fabricates the absence), so the nil-guard baseline keeps the
+			// original immediate raise.
+			if m.activeLink != nil && cur != StateStarting && cur != StateAPActive {
+				m.startOfflineWindow()
+				// From StateUnprovisioned (the common case) this transition is
+				// a state no-op and deliberately does not notify; it narrates
+				// only on a genuine entry into the parked state.
+				m.transition(ctx, StateUnprovisioned, Detail{
+					Reason:  "link-lost",
+					Message: "Network link lost; watching for it to return",
+				})
+				return
+			}
 		}
 
-		// Unprovisioned AND no other connectivity: the device cannot self-heal,
+		// Unprovisioned AND confirmed link-less: the device cannot self-heal,
 		// so raise the AP immediately.
 		m.clearOffline()
 		m.resetJoinStatus()
@@ -532,9 +625,54 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 		return
 	}
 
-	// Provisioned but offline: keep NM retrying, arm the sustained-offline window.
-	// A transient outage below the window never reaches StateAPActive.
-	m.startOfflineWindow()
+	// Provisioned but offline. A redundant offline reading arriving while the
+	// setup AP is up carries NO new information — the hotspot holds the radio,
+	// so the device is offline by definition — but falling through to
+	// StateOfflineRetrying would reconcile the AP back DOWN, dropping the
+	// portal out from under a phone mid-setup and costing another full
+	// sustained-offline window before it returns. Such readings are routine
+	// (a sys-monitord restart re-emits its first probe unconditionally; the
+	// connUnknown re-query feeds one in after an assumed-offline boot). This
+	// is the provisioned twin of the apUp short-circuit in probeLink, which
+	// only ever protected the unprovisioned path.
+	//
+	// One APActive flavor may exit here: a FAILED/PENDING raise (apUp false)
+	// whose link has recovered. No hotspot is up for the probe to mistake for
+	// an uplink there, and the station can genuinely re-associate while NM
+	// keeps refusing the raise — letting a later retry succeed would drop
+	// that recovered link, the exact harm the guard exists to prevent.
+	// probeLink short-circuits to linkAbsent while the AP is actually up, so
+	// this exit can never evict a RAISED AP; a raised StateAPActive is left
+	// only by going online or by a portal join. Anything short of a
+	// confirmed sighting reconciles instead, so a failed raise keeps
+	// retrying.
+	m.mu.Lock()
+	cur := m.state
+	m.mu.Unlock()
+	if cur == StateAPActive {
+		if m.probeLink(ctx) == linkPresent {
+			m.clearOffline()
+			m.transition(ctx, StateOfflineRetrying, Detail{
+				Reason:  "link-present",
+				Message: "Reconnecting to Wi-Fi",
+			})
+			return
+		}
+		m.reconcile(ctx)
+		return
+	}
+
+	// Keep NM retrying, and arm the sustained-offline window — but only when
+	// no link guard is wired. That entry arming is the nil-guard baseline
+	// ("5m from the offline event"); with a guard, the clock must start at the
+	// first CONFIRMED link absence, which cannot be known here. Arming at this
+	// event instead of at that first absent probe would let the window expire
+	// after one tick less than its full length of confirmed absence (the first
+	// probe runs a tick after this reading) — the contract is continuous
+	// confirmed absence, so onTick arms it on the first linkAbsent result.
+	if m.activeLink == nil {
+		m.startOfflineWindow()
+	}
 	m.transition(ctx, StateOfflineRetrying, Detail{
 		Reason:  "offline",
 		Message: "Reconnecting to Wi-Fi",
@@ -562,29 +700,145 @@ func (m *Machine) onTick(ctx context.Context) {
 	since := m.offlineSince
 	m.mu.Unlock()
 
-	if st == StateOfflineRetrying && !since.IsZero() &&
-		m.clock.Now().Sub(since) >= m.offlineWindow {
-		// Wired-link guard, provisioned flavor: the sustained-offline AP exists to
-		// fix broken Wi-Fi credentials, but a device on active ethernet is already
-		// on its intended path — popping the setup AP would only add noise (and an
-		// open WPA2 surface). Re-arm the window instead of raising: if the wire is
-		// later unplugged while still offline, the NEXT expiry raises the AP, which
-		// keeps the "sustained offline" semantics relative to losing the wire.
-		if m.hasWiredLink(ctx) {
-			// clearOffline+start = reset to a FRESH window: startOfflineWindow alone
-			// is a no-op on an armed window, which would leave a stale expiry that
-			// raises the AP instantly the moment the wire disappears.
+	switch st {
+	case StateOfflineRetrying:
+		// Link guard, provisioned flavor: the sustained-offline AP exists to
+		// fix "cannot associate" (changed password, vanished SSID — both
+		// present as link DOWN). A device still holding a link — ethernet, or
+		// a Wi-Fi association whose WAN died — is on its intended path and
+		// stays reachable on its LAN; raising the AP would drop that link on
+		// single-radio hardware and cannot fix an upstream outage anyway.
+		//
+		// The probe runs EVERY tick, not just at expiry; a sighting of a link
+		// (or an inconclusive probe) disarms the window and the clock
+		// restarts at the next confirmed absence. That is what makes
+		// OfflineWindow measure continuous LINK absence: sampling only at
+		// expiry would let an association lost moments before the deadline
+		// raise the AP after seconds of link loss — and on Wi-Fi that raise
+		// is unrecoverable without a human (the hotspot takes the radio, so
+		// reachability can never return on its own to tear it down).
+		switch m.probeLink(ctx) {
+		case linkPresent, linkUnknown:
+			// A sighting DISARMS the window entirely; the next confirmed
+			// absence arms a fresh one below. Disarm-then-rearm (rather than
+			// re-arming to "now" here) matters twice over: a stale armed
+			// window would raise the AP instantly the moment the link
+			// disappears, and re-arming to the sighting time would let a tick
+			// gap (a stalled loop, coarse test clocks) satisfy the expiry off
+			// a SINGLE absent sample — the window must measure confirmed
+			// absence, not time since the probe last ran. Fall through to
+			// reconcile rather than returning: a pending AP-profile teardown
+			// (apDownPending) must keep retrying on guarded ticks too.
 			m.clearOffline()
-			m.startOfflineWindow()
+		case linkAbsent:
+			switch {
+			case since.IsZero():
+				// First confirmed absence since the last sighting (or since
+				// entry): start the clock. The raise below needs the window
+				// to elapse between this arming and a later absent tick, so
+				// the AP only ever rises off repeated confirmations.
+				m.startOfflineWindow()
+			case m.clock.Now().Sub(since) >= m.offlineWindow:
+				m.clearOffline()
+				m.resetJoinStatus()
+				m.transition(ctx, StateAPActive, Detail{
+					Reason:  "sustained-offline",
+					Message: "Wi-Fi unavailable; starting setup",
+				})
+				return
+			}
+		}
+
+	case StateUnprovisioned:
+		// An OFFLINE unprovisioned device parked here by the link guard emits
+		// no further connectivity event when its cable is later unplugged (it
+		// is already offline, so there is no edge) — without this tick probe
+		// it would sit here forever instead of raising the AP. ONLINE
+		// unprovisioned devices (ethernet steady state) are skipped entirely:
+		// no 15s nmcli probe in the healthy case, and losing that link
+		// surfaces as a connectivity_change event instead.
+		//
+		// Link loss detected here gets the SAME continuous-confirmed-absence
+		// window as the provisioned flavor, not the immediate raise the
+		// connectivity-event path applies: a 20s LAN-switch reboot on an
+		// air-gapped wired frame must not pop the AP, because once the AP is
+		// up nothing can lower it while the device stays offline (there is
+		// deliberately no link-based exit from StateAPActive — the probe
+		// cannot be trusted to distinguish a returned wire from the machine's
+		// own hotspot under every wiring, so exits are online events and
+		// portal joins only). The immediate-raise rule survives only at the
+		// boot assessment (StateStarting), where a fresh link-less device
+		// needs the AP right away; onConnectivity routes every later
+		// confirmed-absent reading — online→offline edges and redundant
+		// re-emissions alike — to this windowed path instead.
+		if m.online {
+			break
+		}
+		switch m.probeLink(ctx) {
+		case linkPresent, linkUnknown:
+			// Same disarm-on-sighting as above: the next confirmed absence
+			// starts a fresh clock.
+			m.clearOffline()
+		case linkAbsent:
+			switch {
+			case since.IsZero():
+				// First confirmed absence after being parked (entry paths
+				// clear the window): start the clock; the raise needs a full
+				// window of absence, at tick granularity.
+				m.startOfflineWindow()
+			case m.clock.Now().Sub(since) >= m.offlineWindow:
+				// Re-check the profile at the raise boundary: a profile
+				// acquired out-of-band while parked (e.g. a hub-driven join
+				// attempt) makes this the PROVISIONED flavor — NM can retry
+				// it, so hand the device the provisioned resting state and a
+				// fresh window rather than an unprovisioned-style raise.
+				if m.hasProfile(ctx) {
+					m.clearOffline()
+					m.startOfflineWindow()
+					m.transition(ctx, StateOfflineRetrying, Detail{
+						Reason:  "offline",
+						Message: "Reconnecting to Wi-Fi",
+					})
+					return
+				}
+				m.clearOffline()
+				m.resetJoinStatus()
+				m.transition(ctx, StateAPActive, Detail{
+					Reason:  "unprovisioned",
+					Message: "Set up Wi-Fi to continue",
+				})
+				return
+			}
+		}
+
+	case StateAPActive:
+		// A FAILED/PENDING raise (apUp false) is the one APActive flavor a
+		// link reading may exit: no hotspot is up for the probe to mistake
+		// for an uplink, and the link can genuinely recover while NM keeps
+		// refusing the raise — on an air-gapped LAN no connectivity event
+		// will ever arrive, so without this probe the eventual retry would
+		// SUCCEED and drop the recovered link, the exact harm the guard
+		// exists to prevent. probeLink short-circuits to linkAbsent while
+		// the AP is actually up (no nmcli spend, and the no-link-based-exit
+		// rule for a RAISED AP is preserved); absent/unknown fall through to
+		// reconcile, which keeps retrying the raise. The saved-profile check
+		// routes the exit to the matching resting state, whose tick probes
+		// re-arm the sustained window before any fresh raise.
+		if m.probeLink(ctx) == linkPresent {
+			m.clearOffline()
+			if m.hasProfile(ctx) {
+				m.transition(ctx, StateOfflineRetrying, Detail{
+					Reason:  "link-present",
+					Message: "Reconnecting to Wi-Fi",
+				})
+			} else {
+				m.transition(ctx, StateUnprovisioned, Detail{
+					Reason:  "link-present",
+					Message: "Network link present; Wi-Fi not configured",
+				})
+			}
 			return
 		}
-		m.clearOffline()
-		m.resetJoinStatus()
-		m.transition(ctx, StateAPActive, Detail{
-			Reason:  "sustained-offline",
-			Message: "Wi-Fi unavailable; starting setup",
-		})
-		return
 	}
 
 	// Idempotent retry: a prior ensureAPUp/Down that failed converges here.
@@ -639,11 +893,14 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
 		// emits no change event and nothing would ever correct the state (AP
 		// down, offline window cleared, setup stranded). Route the outcome
 		// through the same assessment the loop's startup uses: online confirms
-		// StateOnline; offline files the device as provisioned-but-offline,
-		// arming the sustained-offline window so the AP comes back if the
-		// network stays dark. The /status outcome above stays JoinSucceeded
-		// either way — the association DID succeed, which is the portal's
-		// contract.
+		// StateOnline; offline files the device as provisioned-but-offline
+		// with the AP down. From there the AP returns only after a full
+		// window of confirmed LINK absence — an association that survives
+		// (air-gapped LAN, dead WAN) keeps the AP down indefinitely by
+		// design, because re-submitting credentials cannot fix a dead
+		// upstream (see Config.ActiveLink). The /status outcome above stays
+		// JoinSucceeded either way — the association DID succeed, which is
+		// the portal's contract.
 		online, oerr := m.conn.Online(ctx)
 		if oerr != nil {
 			m.logger.Warn("provisioning: post-join connectivity query failed; assuming offline until a query succeeds", zap.Error(oerr))
@@ -921,14 +1178,63 @@ func (m *Machine) hasProfile(ctx context.Context) bool {
 	return ok
 }
 
-// hasWiredLink reports whether the optional WiredLink guard sees an active
-// ethernet link. A nil guard reports false, preserving the Connectivity-only
-// behavior (no wired suppression).
-func (m *Machine) hasWiredLink(ctx context.Context) bool {
-	if m.wiredLink == nil {
-		return false
+// linkProbe is the tri-state outcome of one ActiveLink reading. The third
+// state exists because the two errors have opposite costs: treating a failed
+// probe as "absent" raises the AP — a one-way door on Wi-Fi that drops a
+// possibly-healthy association — while treating it as unknown merely defers
+// the decision one 15s tick.
+type linkProbe int
+
+const (
+	// linkAbsent: the probe confirmed no external link. The only reading that
+	// can authorize raising the AP.
+	linkAbsent linkProbe = iota
+	// linkPresent: an external link (ethernet or Wi-Fi station) is up.
+	linkPresent
+	// linkUnknown: the probe failed; defer any AP decision to the next tick.
+	linkUnknown
+)
+
+// probeLink runs the optional ActiveLink guard. A nil guard reports absent,
+// preserving the Connectivity-only behavior (no link suppression, AP raises as
+// before).
+//
+// The machine's OWN setup AP never counts as a link. The production probe
+// (status.LinkChecker.ExternalLink) already excludes the hotspot by its NM
+// profile name — which also covers the apDownPending window where a leftover
+// hotspot is still connected while apUp is false — but the apUp short-circuit
+// stays as defense in depth for naive wirings: with a probe that matches the
+// hotspot's wifi device, a redundant offline reading arriving with the AP
+// raised (a monitord restart re-emits its first probe unconditionally; the
+// connUnknown re-query path feeds one in after an assumed-offline boot) would
+// take the link-present branch, transition away from StateAPActive and tear
+// down the AP mid-setup — with no further connectivity event to ever re-raise
+// it. The hotspot holds the radio; it is not an uplink.
+func (m *Machine) probeLink(ctx context.Context) linkProbe {
+	if m.activeLink == nil {
+		return linkAbsent
 	}
-	return m.wiredLink(ctx)
+	m.mu.Lock()
+	apUp := m.apUp
+	m.mu.Unlock()
+	if apUp {
+		return linkAbsent
+	}
+	up, err := m.activeLink(ctx)
+	if err != nil {
+		if m.linkProbeFailing {
+			m.logger.Debug("provisioning: link probe still failing; link state remains unknown", zap.Error(err))
+		} else {
+			m.linkProbeFailing = true
+			m.logger.Warn("provisioning: link probe failed; treating link state as unknown", zap.Error(err))
+		}
+		return linkUnknown
+	}
+	m.linkProbeFailing = false
+	if up {
+		return linkPresent
+	}
+	return linkAbsent
 }
 
 // resetJoinStatus drops any prior join outcome before a FRESH AP raise
