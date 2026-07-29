@@ -78,7 +78,15 @@ type Store interface {
 
 	SaveItem(rec *ItemRecord) error
 	LoadItem(itemID string) (*ItemRecord, error)
-	DeleteItem(itemID string) error
+	// DeleteItem removes itemID's record if it exists, reporting whether
+	// there was one to remove. It stays a Remove-if-exists primitive —
+	// "already absent" is success, never an error — so removed is the ONLY
+	// signal a caller has that this particular call is what made the item
+	// stop being cached. Service uses it for exactly that: to distinguish a
+	// clear that really settled an item at not_cached (announce it, see
+	// ClearItem) from one that found nothing to do, without paying for a
+	// LoadItem read+unmarshal of a record it is about to delete anyway.
+	DeleteItem(itemID string) (removed bool, err error)
 	ListItemIDs() ([]string, error)
 
 	SavePlaylist(playlistID string, raw json.RawMessage) error
@@ -390,15 +398,18 @@ func (s *fsStore) LoadItem(itemID string) (*ItemRecord, error) {
 	return &rec, nil
 }
 
-func (s *fsStore) DeleteItem(itemID string) error {
+func (s *fsStore) DeleteItem(itemID string) (bool, error) {
 	path, err := s.itemPath(itemID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := s.os.Remove(path); err != nil && !s.os.IsNotExist(err) {
-		return fmt.Errorf("offline cache: delete item %s: %w", itemID, err)
+	if err := s.os.Remove(path); err != nil {
+		if s.os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("offline cache: delete item %s: %w", itemID, err)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *fsStore) ListItemIDs() ([]string, error) {

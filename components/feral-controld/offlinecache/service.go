@@ -326,6 +326,16 @@ func truncateUTF8(s string, maxBytes int) string {
 // packages — see AGENTS.md's "communicate through visible boundaries"
 // principle.
 //
+// Implementations MUST NOT block: OnItemStateChanged is called from the
+// single capture worker (stalling it stalls the whole download queue), from
+// command admission itself (enqueue emits "queued" per item), and — since
+// clears must be ordered against a racing enqueue's notification — from
+// inside ClearItem/ClearPlaylist, which have no ctx to escape a wedged
+// observer through (see clearReservation.awaitQueuedNotifications). The
+// production implementation (notifier.go) satisfies this by enqueuing onto
+// a bounded queue drained by its own worker; anything doing transport I/O
+// inline would put a network round trip on all three of those paths.
+//
 //go:generate mockgen -source=service.go -destination=../mocks/offlinecache_service.go -package=mocks -mock_names=Service=MockOfflineCacheService,ProgressObserver=MockOfflineCacheProgressObserver
 type ProgressObserver interface {
 	OnItemStateChanged(status ItemStatus)
@@ -400,7 +410,19 @@ type Service interface {
 	// bytes, so this does not affect signature validity — see
 	// docs/offline-artwork-capture.md.
 	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (queued, total int, err error)
+	// ClearItem removes itemID from the cache: its record, any blob it was
+	// the last referent of, and any not-yet-started download queued for it.
+	// ErrItemNotFound means the device had NOTHING for itemID — not cached,
+	// not queued, not otherwise tracked; commandrouter maps it to a
+	// non-retryable not_found, so canceling a queued download must not (and
+	// does not) report it. ErrItemBusy means itemID is the one item
+	// currently mid-capture and the caller should retry. See the
+	// implementation's doc for the full contract.
 	ClearItem(itemID string) error
+	// ClearPlaylist removes a cached playlist's record and every one of its
+	// member items, all-or-nothing: if any member is mid-capture the whole
+	// call is rejected with ErrItemBusy before anything is deleted.
+	// ErrPlaylistNotFound means the playlist itself is not cached.
 	ClearPlaylist(playlistID string) error
 	// Status reports on req.ItemIDs, or on every item this process knows
 	// about (on-disk + in-flight) when req.ItemIDs is empty. The result
@@ -534,21 +556,27 @@ func (q *jobQueue) len() int {
 	return len(q.items)
 }
 
-// removeItems drops any not-yet-started job for one of ids. Used by
-// ClearItem/ClearPlaylist so a clear that races an item still sitting in
-// the queue (as opposed to actively capturing — see service.captureMu)
-// does not get silently undone once that queued job eventually runs and
-// calls SaveItem again.
-func (q *jobQueue) removeItems(ids map[string]bool) {
+// removeItems drops any not-yet-started job for one of ids and returns the
+// jobs it dropped. Used by ClearItem/ClearPlaylist so a clear that races an
+// item still sitting in the queue (as opposed to actively capturing — see
+// service.captureMu) does not get silently undone once that queued job
+// eventually runs and calls SaveItem again. The returned jobs carry the
+// queuedNotified barriers the clear must wait on before announcing
+// not_cached — see clearReservation.awaitQueuedNotifications.
+func (q *jobQueue) removeItems(ids map[string]bool) []captureJob {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	var removed []captureJob
 	kept := q.items[:0]
 	for _, j := range q.items {
-		if !ids[j.itemID] {
-			kept = append(kept, j)
+		if ids[j.itemID] {
+			removed = append(removed, j)
+			continue
 		}
+		kept = append(kept, j)
 	}
 	q.items = kept
+	return removed
 }
 
 type service struct {
@@ -845,15 +873,22 @@ func (s *service) dequeueForProcessing() (captureJob, bool) {
 // this shared helper existed. Otherwise every id's queued job (if any)
 // is dropped and its tracked state cleared, atomically with the check
 // that just passed.
-func (s *service) reserveForClear(itemIDs map[string]bool) (busyItemID string, err error) {
+//
+// The returned clearReservation describes what the reservation actually
+// took away from clients — see its own doc.
+func (s *service) reserveForClear(itemIDs map[string]bool) (res clearReservation, busyItemID string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id := range itemIDs {
 		if s.state[id] == StateDownloading {
-			return id, ErrItemBusy
+			return clearReservation{}, id, ErrItemBusy
 		}
 	}
+	res.settled = make(map[string]bool, len(itemIDs))
 	for id := range itemIDs {
+		if st, tracked := s.state[id]; tracked && st != StateNotCached {
+			res.settled[id] = true
+		}
 		delete(s.state, id)
 		// Invalidate any download of this id that is still in its
 		// pre-enqueue classify window: bumping the epoch here (under the
@@ -866,8 +901,94 @@ func (s *service) reserveForClear(itemIDs map[string]bool) (busyItemID string, e
 		// epoch.
 		s.downloadEpoch[id]++
 	}
-	s.queue.removeItems(itemIDs)
-	return "", nil
+	for _, j := range s.queue.removeItems(itemIDs) {
+		if j.queuedNotified != nil {
+			res.queuedNotified = append(res.queuedNotified, j.queuedNotified)
+		}
+	}
+	return res, "", nil
+}
+
+// clearReservation is what a reserveForClear call took away from clients,
+// handed to ClearItem/ClearPlaylist so they can report and announce the
+// outcome truthfully.
+type clearReservation struct {
+	// settled names the ids the reservation actually moved TO not_cached:
+	// those that had a tracked state other than not_cached (queued, or a
+	// terminal ready/partial/failed/broken_online). Callers use it for the
+	// two things that must not treat "no record on disk" as "this clear did
+	// nothing":
+	//   - ClearItem's not_found decision — a first-time download still
+	//     sitting in the queue has no record yet, but canceling it is real
+	//     work.
+	//   - which ids warrant a not_cached notification, ALONGSIDE the store's
+	//     own "a record really was removed" signal (see Store.DeleteItem):
+	//     an id that was neither tracked nor on disk was already not_cached
+	//     to every client, so there is no transition to announce and
+	//     emitting one would be pure noise (a playlist clear would otherwise
+	//     fan out one notification per never-cached member item).
+	//
+	// Tracked state is the right source of truth for the first, rather than
+	// the queue: it is exactly what this service last pushed to observers,
+	// it is seeded from the on-disk records at Start (see start's rebuild
+	// loop), and enqueue writes StateQueued in the SAME critical section as
+	// its queue.push (see its phase 2), so "state[id] == StateQueued" and "a
+	// job for id is still in the queue" cannot disagree.
+	settled map[string]bool
+	// queuedNotified holds the barriers of the queued jobs this reservation
+	// dropped — see awaitQueuedNotifications for why a clear must wait on
+	// them.
+	queuedNotified []chan struct{}
+}
+
+// awaitQueuedNotifications blocks until every queued job this reservation
+// dropped has finished emitting its own state:"queued" notification.
+//
+// enqueue commits a job under s.mu but emits its "queued" notification
+// AFTER releasing the lock (it must never call the observer under that
+// lock — see notify's doc). A clear only needs s.mu, so it can slip in
+// between: it would cancel the job and announce not_cached, and only then
+// would the enqueuing goroutine emit "queued" — leaving every client on a
+// terminal-looking queued entry for work that no longer exists and for
+// which no further notification is ever coming. That is precisely the
+// failure mode enqueue's own notify-ordering comment exists to prevent, so
+// the clear side must respect the same barrier rather than reintroduce it
+// from the other direction.
+//
+// This is the identical mechanism (and identical justification) as
+// process()'s wait before emitting "downloading" — see
+// captureJob.queuedNotified. enqueue closes the channel unconditionally
+// once it has pushed, so a job that is in the queue is always guaranteed to
+// have its barrier closed; waiting here can only be as slow as one observer
+// callback, the same bound the capture worker already accepts. Unlike
+// process()'s wait, this one has no ctx to escape through — ClearItem/
+// ClearPlaylist take none — so it relies on ProgressObserver honoring its
+// "must not block" contract (see that interface's doc).
+//
+// This closes the enqueue-vs-clear inversion specifically, NOT notification
+// ordering in general. One window remains: a clear cannot pass
+// reserveForClear's busy check until process's notify has already written
+// the capture's terminal state (dequeueForProcessing holds StateDownloading
+// from the pop until then, and Capture's SaveItem runs before it), but
+// notify releases s.mu before calling the observer — so a clear can slip in
+// there, delete the record that capture just saved, emit not_cached, and
+// have the capture's own ready/failed land afterwards. The item really is
+// gone; the client is simply left on a stale terminal state until its next
+// getOfflineCacheStatus.
+//
+// That is deliberately not fixed here, for two reasons: the window is a few
+// instructions wide rather than a whole observer callback (nothing analogous
+// to enqueue's post-unlock transport call sits inside it), and the outcome
+// is no worse than before clears notified at all — the client kept that
+// terminal state regardless. Closing it would mean ordering against
+// process's notify too, which has no barrier to reuse. Do not read this
+// barrier as making the observer stream totally ordered.
+//
+// Callers must call this only after releasing s.mu.
+func (r clearReservation) awaitQueuedNotifications() {
+	for _, ch := range r.queuedNotified {
+		<-ch
+	}
 }
 
 // currentEpoch reads an item's clear-epoch under mu. Callers sample it
@@ -1542,7 +1663,7 @@ func (s *service) enforceDiskLimit(justCapturedID string) {
 			protectedID = ""
 			reason = "offline cache: evicted the just-captured item itself; it alone exceeds the disk budget with no older item left to evict"
 		}
-		if err := s.store.DeleteItem(victim); err != nil {
+		if _, err := s.store.DeleteItem(victim); err != nil {
 			s.logger.Warn("offline cache: evict item failed", zap.String("item_id", victim), zap.Error(err))
 			return
 		}
@@ -1590,13 +1711,10 @@ func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 }
 
 // ClearItem deletes itemID's record and GCs any blob it was the last
-// referent of. It returns ErrItemNotFound (wrapped) if itemID has no
-// record on disk, matching ClearPlaylist's existing not-cached behavior
-// and the not_found contract documented in
-// docs/controld-inbound-controller-messages.md — store.DeleteItem itself
-// stays a low-level idempotent primitive (Remove-if-exists), so the
-// existence check happens here via LoadItem, the same way ClearPlaylist
-// already checks via LoadPlaylist.
+// referent of. It returns ErrItemNotFound (wrapped) only when itemID had
+// nothing to clear at all — no record on disk AND nothing tracked in
+// memory — matching the not_found contract documented in
+// docs/controld-inbound-controller-messages.md.
 //
 // Any job for itemID still sitting in the queue (not yet started) is
 // dropped, atomically with the busy check, so it cannot silently
@@ -1611,26 +1729,80 @@ func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 // delete-then-let-GC-run approach would let the item's record
 // legitimately reappear once the capture finishes.
 //
-// reserveForClear runs BEFORE the LoadItem existence check below,
-// unconditionally: for an itemID this service has never heard of, that
-// is a harmless no-op (nothing tracked, nothing queued), and for one
-// whose only trace is a not-yet-started first-time download (no record
-// on disk yet, so the LoadItem check right after will still report
-// ErrItemNotFound), it has the desirable side effect of also canceling
-// that queued job — closing a related gap where such an item could
-// never be canceled via ClearItem at all before, only a re-download of
-// an item that already has a record.
+// reserveForClear runs FIRST and unconditionally: for an itemID this
+// service has never heard of, that is a harmless no-op (nothing tracked,
+// nothing queued), and for one whose only trace is a not-yet-started
+// first-time download it cancels that queued job — closing a related gap
+// where such an item could never be canceled via ClearItem at all before,
+// only a re-download of an item that already has a record.
+//
+// That cancellation is why "no record on disk" alone is NOT reported as
+// not_found: a first-time download has no record yet, so answering
+// not_found would tell the client its clear did nothing while the
+// download it asked to cancel is in fact gone and the item has genuinely
+// settled at not_cached. Worse, the router maps not_found to a
+// NON-retryable error (see offlineCacheErrorResponse), so the client
+// would keep showing the stale queued entry with no reason to re-issue.
+// reserveForClear's settled set is what distinguishes that case from a
+// truly unknown id.
+//
+// Whether a record existed is then decided by DeleteItem's own removed
+// flag, NOT by a LoadItem probe in front of the delete (which is what this
+// function used to do, and what ClearPlaylist still does one level up for
+// the PLAYLIST record via LoadPlaylist — it needs that record's contents,
+// not just its existence). The record is about to be deleted either way,
+// so reading and unmarshaling it to learn only whether it exists is wasted
+// work — and a record too corrupt to unmarshal would fail the probe,
+// leaving the client permanently unable to clear the very record most in
+// need of clearing. Do not reintroduce that probe.
+//
+// Both success paths emit not_cached to the observer, since the clear is
+// a per-item state transition and that notification is the documented
+// push mechanism for those (see the offline_cache_status notification in
+// docs/controld-inbound-controller-messages.md); without it a connected
+// controller keeps displaying queued/ready until it happens to poll
+// getOfflineCacheStatus. It is notifyObserver, NOT notify: notify would
+// write s.state[itemID] = not_cached, re-adding the very entry
+// reserveForClear just deleted, and s.state doubles as the in-memory
+// half of the known-item set (see allKnownItemIDs), so every cleared item
+// would linger forever in whole-store Status pages — and grow s.state
+// without bound — purely as a side effect of having been cleared.
 func (s *service) ClearItem(itemID string) error {
-	if _, err := s.reserveForClear(map[string]bool{itemID: true}); err != nil {
+	res, _, err := s.reserveForClear(map[string]bool{itemID: true})
+	if err != nil {
 		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
 	}
-	if _, err := s.store.LoadItem(itemID); err != nil {
+	removed, err := s.store.DeleteItem(itemID)
+	if err != nil {
+		// Knowingly silent on the observer: the record survived, so the
+		// item is still whatever the record says (see itemStatus) and
+		// announcing not_cached would be a lie. A queued job canceled just
+		// above stays canceled, so a client that had a queued entry for it
+		// keeps one until it polls — the honest alternative is re-emitting
+		// the record-derived status, which is more machinery than this
+		// already-failing I/O path warrants. The error itself is the
+		// caller's signal to retry.
 		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
 	}
-	if err := s.store.DeleteItem(itemID); err != nil {
-		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
+	if !removed && !res.settled[itemID] {
+		return fmt.Errorf("offline cache: clear item %s: %w", itemID, ErrItemNotFound)
 	}
+	// Ordered against a racing enqueue's own "queued" notification, then
+	// emitted as soon as the record is gone and ahead of GC: the record is
+	// what every client-visible state is derived from (see itemStatus), so
+	// the item is already not_cached here whether or not the blob sweep
+	// below succeeds.
+	res.awaitQueuedNotifications()
+	s.notifyObserver(itemID, StateNotCached, Coverage{})
 
+	if !removed {
+		// Cancel-only clear: this call deleted no record, so it orphaned no
+		// blobs, and s.gc() would block on captureMu behind any unrelated
+		// in-flight capture (see gc's doc) — a wait with nothing to collect.
+		// Blobs left behind by an EARLIER failed capture are not this call's
+		// to reclaim; the next clear or disk-limit eviction sweeps them.
+		return nil
+	}
 	if _, _, err := s.gc(); err != nil {
 		return fmt.Errorf("offline cache: GC after clearing item %s: %w", itemID, err)
 	}
@@ -1666,9 +1838,13 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	for _, item := range playlist.Items {
 		itemIDs[item.ID] = true
 	}
-	if busyID, err := s.reserveForClear(itemIDs); err != nil {
+	res, busyID, err := s.reserveForClear(itemIDs)
+	if err != nil {
 		return fmt.Errorf("offline cache: clear playlist %s: item %s: %w", playlistID, busyID, err)
 	}
+	// Before any not_cached is emitted below — see
+	// awaitQueuedNotifications' doc for the inversion it prevents.
+	res.awaitQueuedNotifications()
 
 	// Every step below (each item's delete, the playlist record's own
 	// delete, and GC) still runs even if an earlier one failed — one bad
@@ -1679,10 +1855,31 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	// deletion failure (permissions, I/O); reporting ok:true to the
 	// caller while that item's record (and therefore its blobs) may
 	// still be on disk would misreport what this call actually did.
+	//
+	// Each item that this call actually settled at not_cached gets the same
+	// observer notification ClearItem sends, on the same two signals it
+	// uses (a record really was removed, or in-memory state was taken away)
+	// and for the same reason — see ClearItem's doc for why it is
+	// notifyObserver rather than notify, and why silence would strand a
+	// connected controller on a stale queued/ready entry. Both signals are
+	// needed, not just settled: an item can be on disk yet untracked (a
+	// record Start's rebuild could not read, or one left behind by an
+	// earlier clear whose DeleteItem failed after its tracked state was
+	// already dropped), and that item still transitions here. An item that
+	// was neither on disk nor tracked emits nothing, which is what keeps a
+	// mostly-uncached playlist from fanning out one no-op notification per
+	// member item. A failed delete emits nothing either: the record — and
+	// therefore a ready/partial status — is still on disk, so announcing
+	// not_cached would be a lie the next getOfflineCacheStatus contradicts.
 	var errs []error
 	for _, item := range playlist.Items {
-		if err := s.store.DeleteItem(item.ID); err != nil {
+		removed, err := s.store.DeleteItem(item.ID)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("delete item %s: %w", item.ID, err))
+			continue
+		}
+		if removed || res.settled[item.ID] {
+			s.notifyObserver(item.ID, StateNotCached, Coverage{})
 		}
 	}
 	// Bump the playlist clear-epoch and delete the record as ONE critical

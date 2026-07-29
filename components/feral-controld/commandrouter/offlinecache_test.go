@@ -355,6 +355,11 @@ func TestCommandHandler_DownloadPlaylist_ServiceError(t *testing.T) {
 	assertErrorResponse(t, result, "offline_cache_error")
 }
 
+// TestCommandHandler_ClearPlaylistItemCache_Success also covers the
+// cancel-a-queued-first-time-download case: Service reports that as a plain
+// nil (see ClearItem's doc for why it is a success, not not_found), so the
+// client sees this same settled ok:true response rather than a
+// non-retryable error for a clear that really did cancel work.
 func TestCommandHandler_ClearPlaylistItemCache_Success(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
@@ -708,6 +713,28 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEi
 
 	require.NoError(t, err)
 	assertOkResponse(t, result)
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_NotFound pins the other side of
+// the same contract: an id the device never heard of is still the
+// non-retryable not_found it always was. That mapping is exactly why
+// Service must NOT return ErrItemNotFound for a clear that canceled a
+// queued first-time download — the client would be told, non-retryably,
+// that nothing happened.
+func TestCommandHandler_ClearPlaylistItemCache_NotFound(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	mockOfflineCache.EXPECT().ClearItem("missing").Return(offlinecache.ErrItemNotFound).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"itemId": "missing"},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "not_found")
+	assert.Equal(t, false, resp["error"].(map[string]any)["retryable"])
 }
 
 func TestCommandHandler_ClearPlaylistCache_NotFound(t *testing.T) {

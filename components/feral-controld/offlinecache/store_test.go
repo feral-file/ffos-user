@@ -147,7 +147,9 @@ func TestStore_Item_SaveLoadDelete(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"item-1"}, ids)
 
-	require.NoError(t, store.DeleteItem("item-1"))
+	removed, err := store.DeleteItem("item-1")
+	require.NoError(t, err)
+	assert.True(t, removed, "deleting an existing record must report that it removed one")
 
 	_, err = store.LoadItem("item-1")
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
@@ -155,6 +157,13 @@ func TestStore_Item_SaveLoadDelete(t *testing.T) {
 	ids, err = store.ListItemIDs()
 	require.NoError(t, err)
 	assert.Empty(t, ids)
+
+	// Remove-if-exists: a second delete is still success, but must NOT
+	// claim it removed anything — Service reads that flag to decide whether
+	// a clear settled the item at not_cached (see ClearItem).
+	removed, err = store.DeleteItem("item-1")
+	require.NoError(t, err)
+	assert.False(t, removed, "deleting an already-absent record must report that it removed nothing")
 }
 
 func TestStore_LoadItem_NotFound(t *testing.T) {

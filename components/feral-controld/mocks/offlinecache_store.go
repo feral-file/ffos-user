@@ -66,11 +66,12 @@ func (mr *MockOfflineCacheStoreMockRecorder) BlobSize(sha256Hex interface{}) *go
 }
 
 // DeleteItem mocks base method.
-func (m *MockOfflineCacheStore) DeleteItem(itemID string) error {
+func (m *MockOfflineCacheStore) DeleteItem(itemID string) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "DeleteItem", itemID)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // DeleteItem indicates an expected call of DeleteItem.

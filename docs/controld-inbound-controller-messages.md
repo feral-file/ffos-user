@@ -1416,8 +1416,13 @@ Common error codes across this command family:
 - `resolve_failed`: DP1 playlist resolution failed (bad URL, fetch failure,
   malformed `dp1_call`); `retryable: true`.
 - `not_found`: the requested `itemId` was not found in the resolved
-  playlist (`downloadPlaylistItem`), or the item/playlist being *cleared*
-  is not cached (`clearPlaylistItemCache`/`clearPlaylistCache`).
+  playlist (`downloadPlaylistItem`), the item being *cleared* is entirely
+  unknown to the device — neither cached nor queued nor otherwise tracked
+  (`clearPlaylistItemCache`; see that command for why a clear that cancels
+  a still-queued download is a success instead) — or the playlist being
+  cleared is not cached (`clearPlaylistCache`, which is unaffected by that
+  distinction: `downloadPlaylist` writes the playlist record before queuing
+  any item, so a cached playlist always has a record).
   `getOfflineCacheStatus` never returns `not_found` for an unrecognized
   `itemId` — it always answers `ok: true` with that item reported as
   `state: "not_cached"` (see below), since querying an item that simply
@@ -1599,10 +1604,22 @@ Success response:
 }
 ```
 
-Error cases: `invalid_request` (missing `itemId`), `not_found` (item is not
-cached), `busy` (retryable — `itemId` is the one item currently mid-capture;
-retry once its in-flight download finishes, typically within a few seconds
-up to the configured capture window), `offline_cache_error`.
+A clear that finds no cached record but *does* cancel a still-queued
+download for `itemId` — including a first-time download that has not
+captured anything yet — is also a success, not a `not_found`: work really
+was canceled, and the item ends up `not_cached` either way.
+
+Every item this command settles at `not_cached` (a deleted record, or a
+canceled queued download) is pushed as an `offline_cache_status`
+notification, so a connected controller does not have to poll
+`getOfflineCacheStatus` to learn the item is gone. An item that was already
+`not_cached` produces no notification — nothing transitioned.
+
+Error cases: `invalid_request` (missing `itemId`), `not_found` (the device
+has no cached record, queued download, or other tracked state for `itemId`
+— nothing to clear), `busy` (retryable — `itemId` is the one item currently
+mid-capture; retry once its in-flight download finishes, typically within a
+few seconds up to the configured capture window), `offline_cache_error`.
 
 ### clearPlaylistCache
 
@@ -1631,6 +1648,12 @@ Success response:
   "playlistId": "playlist-1"
 }
 ```
+
+As with `clearPlaylistItemCache`, each member item this command settles at
+`not_cached` is pushed as its own `offline_cache_status` notification.
+Member items that were already `not_cached`, and any whose deletion failed
+(the record — and therefore its `ready`/`partial` status — is still on
+disk), are deliberately not announced.
 
 Error cases: `invalid_request` (missing `playlistId`), `not_found` (playlist
 is not cached), `busy` (retryable — one of the playlist's items is
@@ -1785,6 +1808,14 @@ Error cases: `invalid_request` (an argument of the wrong type, more than
 Purpose: push per-item state transitions (queued, downloading, terminal
 state) to the mobile app as they happen, so it does not need to poll
 `getOfflineCacheStatus`.
+
+That includes transitions the app did not itself cause or cannot see the
+result of: an item evicted by the disk-budget sweep, and an item cleared by
+`clearPlaylistItemCache`/`clearPlaylistCache`, both push `not_cached`.
+Clears are pushed even though the clearing client already got an `ok: true`
+response, because *other* connected controllers (and local hub WebSocket
+clients) would otherwise keep rendering a stale `queued`/`ready` entry
+until they next poll.
 
 Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`, and mirrored
 to local hub WebSocket clients.

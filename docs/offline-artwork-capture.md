@@ -839,7 +839,10 @@ There is deliberately **no** top-level manifest, no separate
   `captureMu` that the active `Capture` call also holds for its whole
   duration, so a clear that races an unrelated in-flight capture simply
   waits for that capture to finish saving before sweeping, rather than
-  risking deleting its not-yet-referenced blobs. `ClearItem`/`ClearPlaylist`
+  risking deleting its not-yet-referenced blobs. (A `ClearItem` that only
+  cancelled a queued download deleted no record, so it orphaned no blobs and
+  skips `GC()` entirely rather than waiting on that fence for nothing.)
+  `ClearItem`/`ClearPlaylist`
   additionally drop any same-item job still sitting in the (single-worker)
   capture queue, so a clear cannot be silently undone by a re-download that
   was merely queued, not yet running. A capture that is already *active*
@@ -854,6 +857,70 @@ There is deliberately **no** top-level manifest, no separate
   queue; `ClearPlaylist` checks every item in the playlist for this before
   deleting anything, so the outcome is all-or-nothing rather than leaving
   one item partially cleared.
+- A clear reports **`not_found` only when the item is entirely unknown** —
+  no record on disk *and* nothing tracked in memory. Dropping a queued job
+  (above) is real work, so an item whose only trace is a not-yet-started
+  first-time download — which has no record on disk yet — is cleared
+  successfully rather than reported as `not_found`, which the router maps
+  to a *non-retryable* error. Answering `not_found` there told the client
+  its clear did nothing while the download it asked to cancel was in fact
+  gone, leaving a queued entry the client had no reason to ever re-issue or
+  retire. The same holds for an item whose only trace is a *failed* capture
+  (tracked `failed`, no record): clearing it retires an entry every client
+  can still see. Two signals decide this, and the notification below:
+  `reserveForClear` reports the ids it actually moved to `not_cached`
+  (tracked state removed, queued job dropped), and `store.DeleteItem`
+  reports whether a record really was removed. `ClearItem` deliberately has
+  no `LoadItem` existence probe in front of the delete — the record is
+  about to be deleted either way, so reading and unmarshaling it to learn
+  only whether it exists is wasted work, and a record too corrupt to
+  unmarshal would fail the probe and leave the client unable to ever clear
+  it. An item already tracked as `not_cached` (the disk-budget eviction
+  path leaves exactly that) is *not* settled by a clear: it transitioned to
+  nothing, so it stays `not_found`.
+- Both clears **emit an `offline_cache_status` `not_cached` notification**
+  per item they settle, matching what the disk-budget eviction path already
+  does. The clearing client already has its `ok:true` response, but that
+  notification is the documented push mechanism for per-item transitions,
+  so without it every *other* connected controller (and every local hub WS
+  client) keeps rendering a stale `queued`/`ready` entry until it next
+  polls `getOfflineCacheStatus`. Two deliberate exclusions keep the push
+  honest: items that were neither tracked nor on disk (nothing transitioned
+  — this is what stops a mostly-uncached playlist from fanning out one
+  no-op notification per member), and items whose `DeleteItem` failed (the
+  record is still on disk, so `not_cached` would be contradicted by the
+  next status query). The call is `notifyObserver`, *not* `notify`:
+  `notify` would write the state back into `s.state`, re-adding the entry
+  the clear just removed — and since `s.state` is also the in-memory half
+  of the known-item set (`allKnownItemIDs`), every cleared item would then
+  linger in whole-store status pages, and grow that map without bound,
+  purely as a side effect of having been cleared.
+- That push is **ordered against a racing `enqueue`'s own `queued`
+  notification** via the existing `captureJob.queuedNotified` barrier
+  (`clearReservation.awaitQueuedNotifications`). `enqueue` commits a job to
+  the queue under `s.mu` but emits its `queued` notification only after
+  releasing that lock — it must never call the observer while holding it —
+  and a clear needs nothing but the same lock, so without the barrier a
+  clear could cancel the job and announce `not_cached` first, with the
+  `queued` arriving afterwards. The client would then be parked forever on
+  a `queued` entry for work that no longer exists: the exact failure mode
+  `enqueue`'s own notify-ordering already guards against on the worker side
+  (`process` waits on the same barrier before emitting `downloading`). The
+  barrier closes *that* inversion, not notification ordering in general.
+  One window is knowingly left open: a clear cannot pass the busy check
+  until `process`'s `notify` has already written the capture's terminal
+  state, but `notify` releases `s.mu` before calling the observer, so a
+  clear can slip in there, delete the record the capture just saved, emit
+  `not_cached`, and have that capture's `ready`/`failed` arrive afterwards.
+  The item really is gone and the client is merely left on a stale terminal
+  state until its next `getOfflineCacheStatus` — which is exactly what
+  happened before clears notified at all — and the window is a few
+  instructions wide rather than a whole observer callback. Closing it would
+  additionally mean ordering against `process`'s `notify`, which has no
+  existing barrier to reuse. Two paths are also knowingly left silent:
+  a `ClearItem` whose `DeleteItem` failed (the record survived, so
+  `not_cached` would be false; the error is the caller's signal), and
+  `ClearPlaylist`'s per-item failures, for the same reason.
 - `ClearPlaylist`'s deletion sweep itself (each item's `store.DeleteItem`,
   the playlist record's own `DeletePlaylist`, and `GC()`) is best-effort
   *per step* — one bad item, or a `GC()` hiccup, does not stop the rest

@@ -1,7 +1,9 @@
 package offlinecache
 
 import (
+	"sync"
 	"testing"
+	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/stretchr/testify/assert"
@@ -41,10 +43,12 @@ func TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive(t *
 		assert.Equal(t, StateDownloading, s.state["item-1"],
 			"dequeueForProcessing must mark the item downloading in the SAME step as the pop")
 
-		busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
+		res, busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
 		assert.Equal(t, "item-1", busyID)
 		assert.ErrorIs(t, err, ErrItemBusy,
 			"a clear landing after the worker already dequeued this exact job must be rejected, never silently succeed")
+		assert.Empty(t, res.settled,
+			"a rejected clear settled nothing: reporting the item as settled would make ClearItem announce a not_cached that never happened")
 		assert.Equal(t, StateDownloading, s.state["item-1"],
 			"a rejected clear must leave the now-active item's tracked state untouched")
 	})
@@ -54,9 +58,11 @@ func TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive(t *
 		s.state["item-1"] = StateQueued
 		s.queue.push(captureJob{itemID: "item-1", item: item})
 
-		busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
+		res, busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
 		require.NoError(t, err)
 		assert.Empty(t, busyID)
+		assert.True(t, res.settled["item-1"],
+			"a winning clear must report the queued item as settled: it is what tells ClearItem this was a real cancellation and not a not_found no-op")
 		_, tracked := s.state["item-1"]
 		assert.False(t, tracked, "a winning clear must clear the item's tracked state")
 
@@ -64,6 +70,117 @@ func TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive(t *
 		assert.False(t, ok,
 			"the worker must never dequeue a job reserveForClear already removed, or the clear it just reported as successful would be silently undone")
 	})
+}
+
+// blockingObserver holds the FIRST notification it receives inside
+// OnItemStateChanged until released, recording every state it is handed in
+// call order. That models the real observer's cost honestly: the notifier
+// sends over the relayer and the hub WebSocket, so a notification is not
+// instantaneous, and the window between enqueue committing a job and
+// enqueue actually emitting its "queued" is exactly what the barrier under
+// test has to cover.
+type blockingObserver struct {
+	release chan struct{}
+	mu      sync.Mutex
+	states  []ItemState
+	blocked bool
+}
+
+func (o *blockingObserver) OnItemStateChanged(status ItemStatus) {
+	o.mu.Lock()
+	o.states = append(o.states, status.State)
+	first := !o.blocked
+	o.blocked = true
+	o.mu.Unlock()
+	if first {
+		<-o.release
+	}
+}
+
+func (o *blockingObserver) recorded() []ItemState {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]ItemState(nil), o.states...)
+}
+
+// TestService_ClearReservation_WaitsForARacingEnqueuesQueuedNotification is
+// the whitebox regression test for the notification inversion a review
+// round flagged in the clear-side not_cached push: enqueue commits a job to
+// the queue under s.mu but emits its state:"queued" notification only AFTER
+// releasing that lock (it must never call the observer while holding it).
+// reserveForClear needs the same lock and nothing more, so it can cancel
+// that job and announce not_cached in between — and the client would then
+// receive not_cached FOLLOWED BY queued, leaving it parked forever on a
+// queued entry for work that no longer exists.
+//
+// The fix reuses the barrier that already exists for the symmetric
+// worker-side inversion (captureJob.queuedNotified, which process() waits
+// on before emitting "downloading"). This test drives the two calls
+// directly, with the observer wedged open inside the queued notification,
+// so the ordering is pinned by construction rather than by timing luck.
+func TestService_ClearReservation_WaitsForARacingEnqueuesQueuedNotification(t *testing.T) {
+	obs := &blockingObserver{release: make(chan struct{})}
+	s := &service{
+		queue: newJobQueue(), state: make(map[string]ItemState),
+		downloadEpoch: make(map[string]uint64), maxQueueLen: 4, observer: obs,
+	}
+	s.started.Store(true)
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+
+	enqueueDone := make(chan struct{})
+	go func() {
+		defer close(enqueueDone)
+		_, err := s.enqueue(item, 0, ClassSoftware)
+		assert.NoError(t, err)
+	}()
+	// Wait for the commit, not for the notification: this is precisely the
+	// window in which a clear can observe the job and cancel it while its
+	// "queued" is still unsent.
+	require.Eventually(t, func() bool { return s.queue.len() == 1 }, time.Second, time.Millisecond,
+		"the enqueue goroutine must commit its job before this test can race it")
+
+	res, _, err := s.reserveForClear(map[string]bool{"item-1": true})
+	require.NoError(t, err)
+	require.Len(t, res.queuedNotified, 1, "the clear must have dropped the queued job, barrier included")
+
+	waited := make(chan struct{})
+	go func() {
+		res.awaitQueuedNotifications()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("the clear announced not_cached while the racing enqueue's state:\"queued\" was still unsent; the client would end up parked on queued for a canceled job")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(obs.release)
+	select {
+	case <-waited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the clear never resumed after the queued notification completed")
+	}
+	s.notifyObserver("item-1", StateNotCached, Coverage{})
+	<-enqueueDone
+
+	assert.Equal(t, []ItemState{StateQueued, StateNotCached}, obs.recorded(),
+		"the client must see the cancellation settle AFTER the queued entry it settles, never before it")
+}
+
+// TestService_ReserveForClear_DoesNotSettleAnAlreadyNotCachedItem pins the
+// other side of the settled contract: an item the disk-budget eviction
+// already reported as not_cached (enforceDiskLimit's notify leaves that
+// state tracked) transitioned to nothing, so a clear for it must stay a
+// not_found no-op rather than re-announcing a state the client already has.
+func TestService_ReserveForClear_DoesNotSettleAnAlreadyNotCachedItem(t *testing.T) {
+	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64)}
+	s.state["item-1"] = StateNotCached
+
+	res, busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
+	require.NoError(t, err)
+	assert.Empty(t, busyID)
+	assert.Empty(t, res.settled)
+	assert.Empty(t, res.queuedNotified)
 }
 
 // TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain is

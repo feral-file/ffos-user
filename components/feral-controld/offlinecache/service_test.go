@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -92,6 +93,37 @@ func seedItemWithCapturedAt(t *testing.T, store offlinecache.Store, itemID, blob
 		CapturedAt: capturedAt,
 	}))
 	return res
+}
+
+// recordingObserver captures the ProgressObserver callbacks a Service
+// makes, so a test can assert on the exact sequence a connected controller
+// would have received. Mutex-guarded because those callbacks come from the
+// capture worker goroutine as well as from the calling test goroutine.
+// Preferred over a gomock expectation wherever the assertion is about the
+// SEQUENCE of states rather than about a single call happening.
+type recordingObserver struct {
+	mu       sync.Mutex
+	statuses []offlinecache.ItemStatus
+}
+
+func (o *recordingObserver) OnItemStateChanged(status offlinecache.ItemStatus) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.statuses = append(o.statuses, status)
+}
+
+// statesFor returns, in order, the states pushed for itemID — nil when
+// nothing was pushed for it at all.
+func (o *recordingObserver) statesFor(itemID string) []offlinecache.ItemState {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var states []offlinecache.ItemState
+	for _, status := range o.statuses {
+		if status.ItemID == itemID {
+			states = append(states, status.State)
+		}
+	}
+	return states
 }
 
 func waitForState(t *testing.T, svc offlinecache.Service, itemID string, want offlinecache.ItemState) {
@@ -885,14 +917,172 @@ func TestService_ClearItem_RemovesRecordAndBlob(t *testing.T) {
 }
 
 func TestService_ClearItem_MissingReturnsNotFound(t *testing.T) {
-	ts := setupService(t, 0, nil)
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
 	defer ts.ctrl.Finish()
 
 	// Matches docs/controld-inbound-controller-messages.md's documented
 	// not_found contract for clearPlaylistItemCache, and ClearPlaylist's
-	// existing not-cached behavior below.
+	// existing not-cached behavior below. An id the service was tracking
+	// nothing for is the ONLY remaining not_found case (see ClearItem's
+	// doc) — and it must stay silent on the observer: the item was already
+	// not_cached to every client, so there is no transition to announce.
 	err := ts.service.ClearItem("does-not-exist")
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
+	assert.Empty(t, obs.statesFor("does-not-exist"),
+		"clearing an id nothing is known about must not push a state transition that never happened")
+}
+
+// TestService_ClearItem_NotifiesNotCachedAfterClearingCachedItem pins the
+// push half of the clear contract: offline_cache_status is the documented
+// mechanism for per-item state transitions (see
+// docs/controld-inbound-controller-messages.md), and a clear is one. Without
+// it a connected controller keeps rendering the item as ready until it
+// happens to poll getOfflineCacheStatus.
+func TestService_ClearItem_NotifiesNotCachedAfterClearingCachedItem(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "payload", time.Now())
+
+	// Started so the item is tracked in memory as ready (Start rebuilds
+	// s.state from the on-disk records), matching a real device where the
+	// controller was last told "ready".
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.ClearItem("item-1"))
+
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"))
+}
+
+// TestService_ClearItem_ClearsARecordTooCorruptToParse pins the behavior
+// that dropping ClearItem's old LoadItem existence probe bought: existence
+// is now decided by DeleteItem's removed flag, so a record whose JSON no
+// longer parses can still be cleared. Under the probe it could not — the
+// probe's own unmarshal failed, ClearItem surfaced that as
+// offline_cache_error, and the client was permanently stuck with the one
+// record most in need of being deleted. This is also the guard against
+// someone re-adding that probe: the test fails immediately if they do.
+func TestService_ClearItem_ClearsARecordTooCorruptToParse(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "payload", time.Now())
+
+	// Truncated mid-object: on disk, non-empty, and unparseable — what a
+	// power cut or a corrupted filesystem block leaves behind.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(ts.store.RootDir(), "items", "item-1.json"), []byte(`{"itemId":"item-1"`), 0o600))
+	_, err := ts.store.LoadItem("item-1")
+	require.Error(t, err, "precondition: the record must be unreadable")
+
+	require.NoError(t, ts.service.ClearItem("item-1"),
+		"a record too corrupt to parse must still be clearable")
+
+	_, err = ts.store.LoadItem("item-1")
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"))
+}
+
+// TestService_ClearItem_CancelsAFailedItemsTrackedStateAndReportsSuccess
+// covers the other id whose only trace is in memory: an item whose capture
+// failed with no prior successful capture has no record on disk, but every
+// client was told "failed" and Status still reports it. Clearing it retires
+// that entry, so — exactly like the queued case — it is a success that must
+// be announced, not a not_found no-op.
+func TestService_ClearItem_CancelsAFailedItemsTrackedStateAndReportsSuccess(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).
+		Return(nil, errors.New("capture failed (simulated)")).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+	waitForState(t, ts.service, "item-1", offlinecache.StateFailed)
+
+	require.NoError(t, ts.service.ClearItem("item-1"),
+		"retiring a failed item's tracked entry is real work, not a not_found no-op")
+
+	assert.Equal(t,
+		[]offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateDownloading, offlinecache.StateFailed, offlinecache.StateNotCached},
+		obs.statesFor("item-1"))
+	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State)
+}
+
+// TestService_ClearItem_CancelsQueuedFirstTimeDownloadAndReportsSuccess is
+// the regression test for a clear that lands on an item whose only trace is
+// a not-yet-started FIRST-time download: there is no record on disk yet, so
+// an existence-check-only ClearItem answered ErrItemNotFound — which the
+// router maps to a NON-retryable not_found — even though the call really did
+// cancel the queued job. The client was told its clear did nothing while its
+// download was in fact gone, and had no reason to ever re-issue. The clear
+// must instead report success and push the resulting not_cached, so the
+// client's queued entry settles instead of hanging.
+func TestService_ClearItem_CancelsQueuedFirstTimeDownloadAndReportsSuccess(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+
+	// A separate busyItem occupies the single worker goroutine so item-1's
+	// job provably sits in the queue rather than racing into capture — the
+	// same device the sibling queued-job tests above use.
+	busyItem := dp1playlist.PlaylistItem{ID: "busy-item", Source: "https://example.com/busy-item"}
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	busyStarted := make(chan struct{})
+	proceedBusy := make(chan struct{})
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), busyItem.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), busyItem, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			close(busyStarted)
+			<-proceedBusy
+			return &offlinecache.ItemRecord{ItemID: busyItem.ID, Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
+		}).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	// No Capture expectation for item-1: the worker reaching it at all
+	// would mean the clear failed to cancel the queued job, and gomock
+	// fails the test on the unexpected call.
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), busyItem))
+	<-busyStarted // worker is now blocked; item-1's job below is guaranteed to stay queued
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+	require.Equal(t, []offlinecache.ItemState{offlinecache.StateQueued}, obs.statesFor("item-1"),
+		"precondition: the client has been told item-1 is queued, and nothing has been captured for it yet")
+
+	// Synchronous, unlike the sibling tests that must background their
+	// clear: with no record on disk there is nothing to delete or GC, so
+	// this path never blocks on captureMu behind busyItem's capture.
+	require.NoError(t, ts.service.ClearItem("item-1"),
+		"canceling a queued first-time download is real work, not a not_found no-op")
+
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateNotCached}, obs.statesFor("item-1"),
+		"the canceled item must settle at not_cached for the client, not sit on a queued entry forever")
+	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State,
+		"the pushed state must agree with what a subsequent getOfflineCacheStatus reports")
+
+	close(proceedBusy) // let the worker drain and reach item-1's (removed) queue slot
+	require.Never(t, func() bool {
+		_, loadErr := ts.store.LoadItem("item-1")
+		return loadErr == nil
+	}, 200*time.Millisecond, 10*time.Millisecond,
+		"the canceled download must not run and save a record after the clear reported success")
 }
 
 // TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC is the
@@ -1338,6 +1528,69 @@ func TestService_ClearPlaylist_RemovesPlaylistAndItsItems(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
+// TestService_ClearPlaylist_NotifiesNotCachedForClearedItemsOnly is the
+// playlist-level twin of
+// TestService_ClearItem_NotifiesNotCachedAfterClearingCachedItem: every
+// member item the clear actually settles must be pushed to the observer, or
+// a connected controller keeps rendering them as ready until it polls. The
+// "only" half matters just as much — a playlist is cleared as a whole, so
+// gating on what was really tracked is what keeps a mostly-uncached
+// playlist from fanning out one no-op not_cached per member item.
+func TestService_ClearPlaylist_NotifiesNotCachedForClearedItemsOnly(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-cached", "payload-1", time.Now())
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1",
+		"items": []map[string]interface{}{
+			{"id": "item-cached", "source": "x"},
+			{"id": "item-never-cached", "source": "y"},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
+
+	// Started so Start's rebuild tracks item-cached as ready — the state a
+	// real device would last have pushed to the controller.
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-cached"))
+	assert.Empty(t, obs.statesFor("item-never-cached"),
+		"an item that was already not_cached transitioned to nothing; announcing it is pure noise on the relayer/hub transports")
+}
+
+// TestService_ClearPlaylist_NotifiesForAnUntrackedRecordOnDisk pins that the
+// notification gate is not tracked-state-only. A record can be on disk with
+// nothing tracked for it in memory — Start's rebuild skips records it cannot
+// read, and a ClearItem whose DeleteItem failed has already dropped the
+// item's tracked state while leaving the record behind — and clearing it is
+// still a real ready -> not_cached transition every other controller needs
+// to hear about. The service is deliberately left unstarted here, which is
+// the simplest faithful way to produce "on disk, untracked".
+func TestService_ClearPlaylist_NotifiesForAnUntrackedRecordOnDisk(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "payload-1", time.Now())
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1",
+		"items": []map[string]interface{}{{"id": "item-1", "source": "x"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
+
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"),
+		"a record that really was removed must be announced even when nothing was tracked for it in memory")
+}
+
 // removeFailingOS wraps the real wrapper.OS and fails Remove for any path
 // containing failPathSubstr, simulating a genuine deletion failure
 // (permissions, I/O) rather than store.DeleteItem's own already-handled
@@ -1364,6 +1617,11 @@ func (o removeFailingOS) Remove(path string) error {
 // still on disk. The rest of the sweep (item-1, the playlist record, GC)
 // must still run — a caller retrying the clear should not have to
 // re-clear things that already succeeded — but the failure must surface.
+//
+// It doubles as the negative case for the clear's not_cached push: the
+// item whose delete failed still has its record (and therefore a ready
+// status) on disk, so announcing not_cached for it would be a lie the very
+// next getOfflineCacheStatus contradicts.
 func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	root := t.TempDir()
 	logger := zaptest.NewLogger(t)
@@ -1374,8 +1632,9 @@ func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	defer ctrl.Finish()
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+	obs := &recordingObserver{}
 	svc := offlinecache.NewService(store, mocks.NewMockOfflineCacheClassifier(ctrl), mockCapturer,
-		mocks.NewMockOfflineCacheMediaCapturer(ctrl), wrapper.NewJSON(), 5000, 0, nil, logger)
+		mocks.NewMockOfflineCacheMediaCapturer(ctrl), wrapper.NewJSON(), 5000, 0, obs, logger)
 
 	seedItemWithCapturedAt(t, store, "item-1", "payload-1", time.Now())
 	seedItemWithCapturedAt(t, store, "item-2", "payload-2", time.Now())
@@ -1387,6 +1646,11 @@ func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.SavePlaylist("playlist-1", raw))
 
+	// Started so both items are tracked as ready before the clear, which is
+	// what makes the per-item notification assertions below meaningful.
+	require.NoError(t, svc.Start(context.Background()))
+	defer svc.Stop()
+
 	err = svc.ClearPlaylist("playlist-1")
 	assert.Error(t, err, "a genuine per-item delete failure must not be swallowed into a successful clear")
 
@@ -1394,6 +1658,11 @@ func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "item-1's delete succeeded and must still take effect")
 	_, loadErr = store.LoadItem("item-2")
 	assert.NoError(t, loadErr, "item-2's record must remain since its delete genuinely failed")
+
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"),
+		"the items that really were cleared must still be pushed, even though the call as a whole failed")
+	assert.Empty(t, obs.statesFor("item-2"),
+		"an item whose record survived a failed delete must never be announced as not_cached")
 }
 
 func TestService_ClearPlaylist_NotFound(t *testing.T) {
@@ -1736,6 +2005,13 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "second-oldest item should also be evicted to get under budget")
 	_, err = ts.store.LoadItem("new-item")
 	assert.NoError(t, err, "the item that was just captured must never be evicted by its own capture when evicting OTHER items already brings usage back under budget")
+
+	// An evicted item was already announced as not_cached (eviction's own
+	// notify), so a later clear for it settles nothing and must stay the
+	// not_found no-op it always was — the queued/failed cancellation cases
+	// are successes precisely because they DO retire a live entry.
+	assert.ErrorIs(t, ts.service.ClearItem("old-1"), offlinecache.ErrItemNotFound,
+		"clearing an already-evicted item must not report a transition that already happened")
 }
 
 // TestService_EnforceDiskLimit_EvictsJustCapturedItemWhenNoOtherVictimRemains
@@ -2099,13 +2375,21 @@ func TestService_DownloadItem_ClearWinningTheRaceNotifiesNothingAndReportsIt(t *
 		"the caller must learn nothing was queued; the command layer maps this to a retryable busy, not ok/queued")
 
 	// Give any stray asynchronous notification a chance to land before
-	// asserting none did.
+	// asserting none did. The clear's OWN not_cached notification is
+	// expected and excluded here (see ClearItem's doc): what must never
+	// appear is a notification describing the aborted download — above all
+	// state:"queued".
 	require.Never(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(notified) > 0
+		for _, status := range notified {
+			if status.State != offlinecache.StateNotCached {
+				return true
+			}
+		}
+		return false
 	}, 200*time.Millisecond, 10*time.Millisecond,
-		"a clear that won the race must produce no state notification at all for that item, least of all state:\"queued\"")
+		"a clear that won the race must produce no state notification for the aborted download, least of all state:\"queued\"")
 
 	_, err := store.LoadItem("item-1")
 	require.Error(t, err, "the cleared record must stay deleted")
