@@ -55,7 +55,19 @@ for relayer topic assignment:
 
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
-  through CDP as `window.handleCDPRequest(...)`.
+  through CDP as `window.handleCDPRequest(...)`. Controld defaults missing CDP
+  `intent.action` to `now_display` so the player accepts the cast. When the
+  playlist contains item-level `displayAt` values, controld filters them to the
+  current active set before CDP, commits only the refreshable source identity to
+  durable cache after the player accepts that filtered cast, keeps the resolved
+  full playlist in memory, and advances the player on the next `displayAt`
+  (timer), sleep-schedule wake, or CDP reconnect with a force cast
+  (`intent.action=now_display`, not `refresh: true`) so cutover is not deferred
+  until the current artwork duration ends. URL / dynamic playlist refresh still
+  uses `refresh: true`, except the first scheduled reconstruction after a
+  controld restart force-casts because scheduler ownership may need to be
+  restored from persisted state. Playlists without item-level `displayAt` are
+  otherwise forwarded unchanged.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
@@ -259,6 +271,39 @@ Current relayer error response: none standardized; command failure is logged.
 
 Purpose: display a DP1 playlist on the FF1 player.
 
+When forwarding to Chromium, controld sets `intent.action=now_display` on the
+CDP payload if the controller request did not already include an intent action.
+The player rejects `displayPlaylist` without a known DP1 action
+(`Unknown DP1 action: undefined` → `ok: false`). Soft refresh remains on the
+5-minute URL/dynamic refresher path (`refresh: true`), which does not use this
+cast default.
+
+When the resolved playlist contains item-level `displayAt` values, controld
+computes an active set
+(`max(displayAt <= now)` items plus items without `displayAt`) and sends only
+that filtered playlist to Chromium. Timezone-less `displayAt` values use device
+local time; values with `Z`/offset are absolute. Date-only (`YYYY-MM-DD`) is
+rejected per DP-1 §3.5.2 (not evergreen). If no playlist item has `displayAt`,
+controld forwards the full playlist unchanged. Controld keeps the resolved full
+playlist in memory while casting, persists only its refreshable source identity
+after the player accepts the filtered cast, and uses the in-memory playlist to
+arm the next `displayAt` transition and to recompute after wake or CDP
+reconnect. After a controld-only restart, the refresher must fetch the source
+again before scheduler cutovers resume; if that fetch fails, controld leaves the
+current player artwork alone and retries later. Static inline player status
+contains only the filtered active set and no stable full-playlist identity, so
+controld does not restart-resume a persisted static inline schedule from player
+status alone.
+Initial casts and timed / wake / reconnect pushes are force casts
+(`intent.action=now_display`
+without `refresh`) so the player applies the playlist immediately even if the
+current artwork still has remaining duration; the 5-minute URL/dynamic
+playlist-refresher path continues to use `refresh: true`. The legacy
+`displayDefaultPlaylist` command is forwarded to the player as a player-owned
+fallback and does not clear controld's displayAt cache; with
+`onlyIfNoPlaylist`, a successful response may mean the player no-opped because
+content was already playing.
+
 Playlist URL example:
 
 ```json
@@ -376,7 +421,9 @@ command failure is logged.
 ### displayDefaultPlaylist
 
 Purpose: tell the player to resume or display its default playlist. This is
-forwarded to Chromium through CDP.
+forwarded to Chromium through CDP as a legacy player-owned fallback. It does
+not clear controld's cached `displayAt` playlist because a successful player
+response does not prove that default playback replaced the current playlist.
 
 Example:
 
@@ -416,12 +463,22 @@ Example:
 }
 ```
 
-Current success response: Chromium/player response.
+Current success response: Chromium/player response — or, when the player page
+is unresponsive, a synthesized `{"message": {"ok": true, "recovered": "reload"}}`
+(see below).
 
 Current error cases:
 
 - Cache clear failure is logged as a warning and does not stop the command.
-- CDP command forwarding failure causes command failure.
+- CDP page-evaluate failure does NOT fail the command: controld falls back to
+  a browser-level `Page.reload` (`ignoreCache: true`), which needs no page JS.
+  A refresh is most needed exactly when the page is broken (e.g. Chromium
+  serving stale cached chunks after a player bundle swap), so cache clear +
+  forced reload is the complete recovery. The synthesized success response
+  carries `recovered: "reload"` so controllers can distinguish it from a
+  normal player reply.
+- Only when the fallback `Page.reload` also fails (dead CDP connection) does
+  the command fail, surfacing the original evaluate error.
 
 Current relayer error response: none standardized; command failure is logged.
 

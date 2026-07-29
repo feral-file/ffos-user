@@ -20,7 +20,10 @@ assert_contains "$unit_file" "Type=notify"
 assert_contains "$unit_file" "NotifyAccess=all"
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+# real_httpd_pid: set only while the opt-in real-darkhttpd section below has a
+# server running, so a fail() mid-section cannot leak the process.
+real_httpd_pid=""
+trap 'if [ -n "$real_httpd_pid" ]; then kill "$real_httpd_pid" 2>/dev/null || true; fi; rm -rf "$tmp_dir"' EXIT
 
 missing_root="$tmp_dir/missing"
 output_file="$tmp_dir/missing-tree.log"
@@ -49,6 +52,20 @@ cat >"$bin_dir/darkhttpd" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+# A no-arg invocation is the serve script's --header capability probe: like
+# the real binary, print usage and exit non-zero. Whether the usage text
+# advertises --header is scenario-controlled so both a modern and a legacy
+# darkhttpd can be modeled.
+if (($# == 0)); then
+  echo "usage: darkhttpd /path/to/wwwroot [options]"
+  if [[ "${FF_PLAYER_TEST_HEADER_SUPPORT:-1}" == "1" ]]; then
+    echo "  --header 'X-Header: Value'  add a custom response header"
+  fi
+  exit 1
+fi
+
+printf '%s\n' "$@" >"${FF_PLAYER_TEST_SERVER_ARGS:?missing server args file}"
+
 root="${1:?missing root}"
 shift
 
@@ -62,6 +79,10 @@ while (($#)); do
       ;;
     --addr)
       addr="${2:?missing addr}"
+      shift 2
+      ;;
+    --header)
+      : "${2:?missing header value}"
       shift 2
       ;;
     *)
@@ -108,21 +129,25 @@ EOF
 
 chmod +x "$bin_dir/darkhttpd" "$bin_dir/curl" "$bin_dir/systemd-notify"
 
+server_args="$tmp_dir/server.args"
+
 run_ready_server() {
-  rm -f "$pid_file" "$notify_file" "$notify_args" "$output_file"
+  rm -f "$pid_file" "$notify_file" "$notify_args" "$output_file" "$server_args"
 
   FF_PLAYER_STATIC_ROOT="$root_dir" \
   FF_PLAYER_STATIC_PORT="$port" \
   FF_PLAYER_READY_TIMEOUT_SECONDS=5 \
   FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}" \
   FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT="${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT:-1}" \
+  FF_PLAYER_TEST_HEADER_SUPPORT="${FF_PLAYER_TEST_HEADER_SUPPORT:-1}" \
   FF_PLAYER_TEST_ROOT="$root_dir" \
   FF_PLAYER_TEST_PORT="$port" \
   FF_PLAYER_TEST_PID_FILE="$pid_file" \
   FF_PLAYER_TEST_NOTIFY_FILE="$notify_file" \
   FF_PLAYER_TEST_NOTIFY_ARGS="$notify_args" \
+  FF_PLAYER_TEST_SERVER_ARGS="$server_args" \
   PATH="$bin_dir:$PATH" \
-  "$@" >"$output_file" 2>&1
+  "$@" >"$output_file" 2>&1 || fail "serve script exited non-zero; see $output_file"
 
   assert_contains "$notify_args" "--ready"
   assert_contains "$notify_args" "feral-player static ready on http://127.0.0.1:${port}/"
@@ -238,5 +263,93 @@ FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT=1 run_ready_server bash "$script_under_t
 assert_contains "$notify_args" "--ready"
 assert_contains "$notify_args" "feral-player static ready on http://127.0.0.1:${port}/"
 [ -s "$pid_file" ] || fail "expected fake darkhttpd pid file to be written"
+
+# Cache policy (#234): with a --header-capable darkhttpd the server must be
+# started with a global "Cache-Control: no-cache" — darkhttpd applies custom
+# headers to 404s too, which is what stops a mid-swap negative response from
+# being heuristically cached by a live Chromium session.
+assert_contains "$server_args" "--header"
+assert_contains "$server_args" "Cache-Control: no-cache"
+
+# A darkhttpd without --header support (probe finds no such flag in its usage
+# text) must degrade to headerless serving — passing the flag anyway would
+# fail startup and put the unit in a restart loop, which is strictly worse
+# than serving without cache headers.
+FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=1 \
+FF_PLAYER_TEST_HEADER_SUPPORT=0 \
+  run_ready_server bash "$script_under_test"
+if grep -Fq -- "--header" "$server_args"; then
+  fail "legacy darkhttpd without --header support must be started without the flag"
+fi
+
+# --- Real-binary header validation ---------------------------------------------
+# Everything above proves argument CONSTRUCTION against a fake darkhttpd; it
+# cannot prove the deployed binary actually honors --header — and the header
+# on 404s is the only forward mitigation for a negative response cached during
+# a live bundle swap. When a real darkhttpd is on PATH, start it exactly as
+# the serve script does and assert Cache-Control lands on BOTH a 200 and a
+# 404. On a dev machine without the binary this skips legibly; in CI the
+# section is REQUIRED — test-scripts.yaml builds a pinned darkhttpd and sets
+# FF_REQUIRE_REAL_DARKHTTPD=1 so absence fails instead of silently skipping
+# the only end-to-end check of the #234 header mitigation.
+# (Verified against upstream darkhttpd 2026-07-28: usage advertises --header,
+# and the header is emitted on 200 and 404 alike.)
+if command -v darkhttpd >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+  # The capability probe's premise first: the shipped probe greps the usage
+  # text for --header, so a real binary must advertise it there. The no-arg
+  # usage dump MAY exit non-zero (1.17 measures 0; assume neither) — `|| true`
+  # keeps pipefail out of it, same as the serve script's own probe.
+  real_usage="$(darkhttpd 2>&1 || true)"
+  printf '%s' "$real_usage" | grep -q -- "--header" || \
+    fail "real darkhttpd usage must advertise --header (capability-probe premise)"
+
+  real_root="$tmp_dir/real-root"
+  mkdir -p "$real_root"
+  echo "real-binary smoke" > "$real_root/index.html"
+  real_port=$((18100 + $$ % 1800))
+  darkhttpd "$real_root" --port "$real_port" --addr 127.0.0.1 \
+    --header 'Cache-Control: no-cache' >/dev/null 2>&1 &
+  real_httpd_pid=$!
+
+  ready=0
+  for _ in $(seq 1 50); do
+    if curl -s -o /dev/null "http://127.0.0.1:$real_port/index.html"; then
+      ready=1
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$ready" -eq 1 ] || fail "real darkhttpd did not become ready on :$real_port"
+  # Readiness must have come from OUR process: on a port collision our
+  # darkhttpd exits on the bind failure while curl happily talks to the
+  # squatter, and the assertions below would validate (or falsely blame) an
+  # unrelated server.
+  kill -0 "$real_httpd_pid" 2>/dev/null || \
+    fail "port :$real_port already in use (our darkhttpd exited); readiness came from another server"
+
+  hdr200="$(curl -sI "http://127.0.0.1:$real_port/index.html")"
+  hdr404="$(curl -sI "http://127.0.0.1:$real_port/no-such-chunk.js")"
+  kill "$real_httpd_pid" 2>/dev/null || true
+  wait "$real_httpd_pid" 2>/dev/null || true
+  real_httpd_pid=""
+
+  # Status asserted on the status LINE, not the whole header block — a bare
+  # "200"/"404" substring can match a Content-Length or date and pass against
+  # the wrong response class.
+  printf '%s' "$hdr200" | grep -Eq '^HTTP/[0-9.]+ 200' || fail "real darkhttpd 200 response missing"
+  printf '%s' "$hdr200" | grep -qi "^cache-control: no-cache" || \
+    fail "real darkhttpd must emit Cache-Control: no-cache on 200 responses"
+  printf '%s' "$hdr404" | grep -Eq '^HTTP/[0-9.]+ 404' || fail "real darkhttpd 404 response missing"
+  printf '%s' "$hdr404" | grep -qi "^cache-control: no-cache" || \
+    fail "real darkhttpd must emit Cache-Control: no-cache on 404 responses (the mid-swap negative-cache mitigation)"
+else
+  # In required mode (CI) a missing binary is a broken pipeline, not a skip:
+  # silently dropping this section would leave the 404-header mitigation
+  # verified by nothing on the authoritative path.
+  if [ "${FF_REQUIRE_REAL_DARKHTTPD:-0}" = "1" ]; then
+    fail "real-darkhttpd validation is required (FF_REQUIRE_REAL_DARKHTTPD=1) but darkhttpd or curl is not on PATH"
+  fi
+  echo "test-serve-feral-player: SKIPPED real-darkhttpd header validation (darkhttpd or curl not on PATH)" >&2
+fi
 
 echo "test-serve-feral-player: OK"

@@ -20,6 +20,7 @@ const (
 	DEFAULT_DURATION             = 300
 	MINIMAL_PLAYLIST_ITEMS_LIMIT = 50
 	MAX_PLAYLIST_ITEMS_LIMIT     = 255
+	CAST_PLAYLIST_ITEMS_LIMIT    = MAX_PLAYLIST_ITEMS_LIMIT
 	// Namespace UUID for generating deterministic UUIDs from token identifiers
 	//nolint:gosec
 	TOKEN_NAMESPACE_UUID = "8c95b1c2-4ef7-4ad9-a89a-84e410c1b4b1"
@@ -64,6 +65,13 @@ type DP1 interface {
 	// ProcessDynamicPlaylist with the minimal flag.
 	ProcessPlaylistURL(ctx context.Context, url string, minimal bool) (*Playlist, error)
 
+	// ProcessPlaylistURLForCast processes a playlist URL for an initial
+	// displayPlaylist command. Dynamic playlists hydrate only to a bounded
+	// scheduling cap; if no item-level displayAt is discovered, the returned
+	// playlist is trimmed back to the legacy minimal size before sending to the
+	// player.
+	ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playlist, error)
+
 	// ProcessDynamicPlaylist processes a dynamic playlist.
 	// If the playlist has dynamic queries, it will process them
 	// and construct a playlist with the items.
@@ -71,6 +79,10 @@ type DP1 interface {
 	// If minimal is true, it will only process some first items
 	// and return the playlist quickly
 	ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error)
+
+	// ProcessDynamicPlaylistForCast applies the initial-cast bounded hydration
+	// policy described on ProcessPlaylistURLForCast.
+	ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error)
 }
 
 type dp1 struct {
@@ -109,6 +121,21 @@ func (d *dp1) ProcessPlaylistURL(ctx context.Context, url string, minimal bool) 
 	return &playlist, nil
 }
 
+func (d *dp1) ProcessPlaylistURLForCast(ctx context.Context, url string) (*Playlist, error) {
+	d.logger.Info("Processing playlist from URL for initial cast", zap.String("url", url))
+
+	playlist, err := d.fetchPlaylist(url)
+	if err != nil {
+		return nil, err
+	}
+
+	if playlist.HasDynamicContent() {
+		return d.ProcessDynamicPlaylistForCast(ctx, playlist)
+	}
+
+	return &playlist, nil
+}
+
 func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
 	d.logger.Info("Processing dynamic playlist", zap.String("playlist_id", playlist.ID))
 
@@ -117,15 +144,52 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 			d.logger.Warn("playlist has both dynamicQuery and legacy dynamicQueries; using dynamicQuery only",
 				zap.String("playlist_id", playlist.ID))
 		}
-		return d.processDynamicPlaylistSpec(ctx, playlist, minimal)
+		return d.processDynamicPlaylistSpec(ctx, playlist, minimal, 0)
 	}
 
 	// --- LEGACY: dynamicQueries[] + FFIndexer (remove with LegacyDynamicQuery) ---
 	if len(playlist.DynamicQueries) > 0 {
-		return d.processDynamicPlaylistLegacy(ctx, playlist, minimal)
+		return d.processDynamicPlaylistLegacy(ctx, playlist, minimal, 0)
 	}
 
 	return nil, fmt.Errorf("playlist has no dynamic query configuration")
+}
+
+func (d *dp1) ProcessDynamicPlaylistForCast(ctx context.Context, playlist Playlist) (*Playlist, error) {
+	resolved, err := d.processDynamicPlaylist(ctx, playlist, false, CAST_PLAYLIST_ITEMS_LIMIT)
+	if err != nil {
+		return nil, err
+	}
+	if hasDisplayAtItems(resolved.Items) || len(resolved.Items) <= MINIMAL_PLAYLIST_ITEMS_LIMIT {
+		return resolved, nil
+	}
+	resolved.Items = resolved.Items[:MINIMAL_PLAYLIST_ITEMS_LIMIT]
+	return resolved, nil
+}
+
+func (d *dp1) processDynamicPlaylist(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
+	if playlist.DynamicQuery != nil {
+		if len(playlist.DynamicQueries) > 0 {
+			d.logger.Warn("playlist has both dynamicQuery and legacy dynamicQueries; using dynamicQuery only",
+				zap.String("playlist_id", playlist.ID))
+		}
+		return d.processDynamicPlaylistSpec(ctx, playlist, minimal, maxItems)
+	}
+
+	if len(playlist.DynamicQueries) > 0 {
+		return d.processDynamicPlaylistLegacy(ctx, playlist, minimal, maxItems)
+	}
+
+	return nil, fmt.Errorf("playlist has no dynamic query configuration")
+}
+
+func hasDisplayAtItems(items []dp1playlist.PlaylistItem) bool {
+	for _, item := range items {
+		if item.DisplayAt != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // processDynamicPlaylistSpec resolves items using DP-1 playlists extension dynamicQuery and
@@ -133,7 +197,7 @@ func (d *dp1) ProcessDynamicPlaylist(ctx context.Context, playlist Playlist, min
 // {{offset}} placeholders in dynamicQuery.query, matching MINIMAL/MAX batch sizes used by legacy.
 //
 // Replacement behavior matches legacy: playlist.Items is replaced by resolved dynamic items only (no merge with static items).
-func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
+func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
 	if playlist.DynamicQuery == nil {
 		return nil, fmt.Errorf("internal: dynamicQuery is nil")
 	}
@@ -162,6 +226,10 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 			return nil, err
 		}
 		accumulated = append(accumulated, batch...)
+		if maxItems > 0 && len(accumulated) >= maxItems {
+			accumulated = accumulated[:maxItems]
+			break
+		}
 
 		if len(batch) < limit {
 			break
@@ -181,7 +249,7 @@ func (d *dp1) processDynamicPlaylistSpec(ctx context.Context, playlist Playlist,
 // --- LEGACY REMOVAL ---
 // Delete this function when "dynamicQueries" is no longer published. Depends on: LegacyDynamicQuery,
 // DynamicQueries field, ffIndexer.QueryTokens loop, buildPlaylistItems from Token.
-func (d *dp1) processDynamicPlaylistLegacy(ctx context.Context, playlist Playlist, minimal bool) (*Playlist, error) {
+func (d *dp1) processDynamicPlaylistLegacy(ctx context.Context, playlist Playlist, minimal bool, maxItems int) (*Playlist, error) {
 	if len(playlist.DynamicQueries) != 1 {
 		return nil, fmt.Errorf("playlist should have exactly 1 dynamic queries, but has %d", len(playlist.DynamicQueries))
 	}
@@ -209,6 +277,10 @@ func (d *dp1) processDynamicPlaylistLegacy(ctx context.Context, playlist Playlis
 			return nil, err
 		}
 		ffTokens = append(ffTokens, tokens...)
+		if maxItems > 0 && len(ffTokens) >= maxItems {
+			ffTokens = ffTokens[:maxItems]
+			break
+		}
 
 		if len(tokens) < limit || (minimal && len(ffTokens) >= MINIMAL_PLAYLIST_ITEMS_LIMIT) {
 			break

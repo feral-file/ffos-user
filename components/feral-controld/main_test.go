@@ -1155,6 +1155,7 @@ func TestInitializeApp(t *testing.T) {
 	assert.NotNil(t, app.StatusPoller)
 	assert.NotNil(t, app.Watchdog)
 	assert.NotNil(t, app.PlaylistRefresher)
+	assert.NotNil(t, app.PlaylistScheduler)
 	assert.NotNil(t, app.Hub)
 
 	// offlineCacheConfig was nil, so the feature stays fully disabled.

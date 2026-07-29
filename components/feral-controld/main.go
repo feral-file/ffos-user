@@ -34,6 +34,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
@@ -88,6 +89,7 @@ type app struct {
 	StatusPoller      status.Poller
 	Watchdog          watchdog.Watchdog
 	PlaylistRefresher playlist_refresher.Refresher
+	PlaylistScheduler playlistschedule.Scheduler
 	MintPairing       mintpairing.Service
 	// KioskReplay, OfflineCacheService, and OfflineCacheStaticServer may
 	// all be nil (feature disabled via config.OfflineCacheConfig).
@@ -368,6 +370,13 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// established one — and Close is a no-op on a nil conn.
 	defer app.Relayer.Close()
 
+	// Register scheduler Stop before refresher Stop so LIFO shutdown stops the
+	// refresher first — otherwise a late Prepare could re-arm a displayAt
+	// timer after the scheduler already canceled timers on Stop.
+	if app.PlaylistScheduler != nil {
+		defer app.PlaylistScheduler.Stop()
+	}
+
 	// Start Playlist Refresher
 	app.PlaylistRefresher.Start()
 	defer app.PlaylistRefresher.Stop()
@@ -469,8 +478,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// invalidate the sleep tracker's player leg so the schedule loop re-drives it (the old
 	// PartOf=chromium-ready.target design got this for free by restarting controld), then
 	// force a status re-poll so upstream re-syncs to what a fresh boot would produce.
+	// Recompute displayAt from the in-memory cache as well: after a kiosk restart the
+	// player no longer holds the last filtered list, and a threshold may have crossed
+	// while CDP was down.
 	app.CDP.Start(ctx, func() {
 		devicectl.InvalidatePlayerSleepState(app.Executor, app.Logger)
+		if app.PlaylistScheduler != nil {
+			app.PlaylistScheduler.RecomputeNow(ctx)
+		}
 		app.StatusPoller.ForceRefresh()
 
 		// Re-attach offline-cache replay interception on every (re)connect —
@@ -683,6 +698,15 @@ func initializeApp(
 	// DP1
 	dp1 := dp1.New(ffIndexer, httpClient, json, io, logger, debug)
 
+	// displayAt scheduler: filters playlists with displayAt items before CDP
+	// and advances them on timer / wake / CDP reconnect. Durable state stores
+	// only the refreshable source identity; after a controld-only restart the
+	// source must be fetched again before scheduled cutovers resume.
+	playlistScheduler := playlistschedule.NewWithStore(context, cdp, clock, nil,
+		playlistschedule.NewFileStore(os, json), logger)
+	devicectl.SetWithPlayerPush(executor, playlistScheduler.WithPlayerPush, logger)
+	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)
+
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
 	mintPairing := mintpairing.New(mintPairingOpts, relayer, cdp, httpClient, relayerAPIKey, json, logger)
@@ -715,7 +739,7 @@ func initializeApp(
 	// wrapped with command-storm protection so both paths share one set of
 	// rate/concurrency guards (see feral-file/ffos-user#208). Internal recovery
 	// must never be shed by external client traffic, so it bypasses the gate.
-	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, json, logger)
+	rawCmdHandler := commandrouter.New(executor, cdp, dp1, poller, mintPairing, offlineCache, kioskReplay, playlistScheduler, json, logger)
 	gateCfg := commandrouter.DefaultGateConfig()
 	if cs := config.Get().CommandStorm; cs != nil {
 		if cs.Disabled {
@@ -728,7 +752,7 @@ func initializeApp(
 	cmdHandler := commandrouter.NewGate(rawCmdHandler, gateCfg, logger)
 
 	// Playlist refresher
-	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, clock, logger)
+	playlistRefresher := playlist_refresher.New(context, dp1, poller, cdp, kioskReplay, offlineCache, json, playlistScheduler, clock, logger)
 
 	// Replay saturation invalidates Fetch-interception scope exactly the way
 	// a kiosk restart does: retireOnSaturation closes the root CDP session so
@@ -768,9 +792,12 @@ func initializeApp(
 
 	// Provisioning domain (SoftAP setup). controld owns setup, so run() starts it
 	// unconditionally. The connectivity adapter reads sys-monitord over the shared
-	// D-Bus client; the WiredLink guard reuses the link checker so an unprovisioned
-	// ethernet device never pops the setup AP. Narration flows through a
-	// setupui.Service.
+	// D-Bus client; the ActiveLink guard reuses the link checker so a device with
+	// any live local link (ethernet or an associated Wi-Fi station) never pops the
+	// setup AP — the AP raises on link loss, not internet loss (#233). The probe
+	// excludes the device's own hotspot by NM profile name, so a raised (or
+	// half-torn-down) setup AP never counts as an uplink. Narration flows through
+	// a setupui.Service.
 	setupNarrator := setupui.New(cdp, setupui.DefaultContractPath, logger)
 	// One narration surface for the whole process: the executor's controld-owned
 	// claim / factory-reset / OTA-failure narration shares this exact instance with
@@ -800,7 +827,7 @@ func initializeApp(
 		Clock:        clock,
 		Logger:       logger,
 		Notifier:     provisioningNotifier,
-		WiredLink:    linkChecker.HasWiredLink,
+		ActiveLink:   externalLinkProbe(linkChecker),
 	})
 
 	// Hub status provider. The base provider reads identity/version/claim/topic
@@ -838,6 +865,7 @@ func initializeApp(
 		StatusPoller:             poller,
 		Watchdog:                 watchdog,
 		PlaylistRefresher:        playlistRefresher,
+		PlaylistScheduler:        playlistScheduler,
 		MintPairing:              mintPairing,
 		KioskReplay:              kioskReplay,
 		OfflineCacheService:      offlineCache,

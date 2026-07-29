@@ -5,8 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/mock/gomock"
+	"go.uber.org/zap"
+
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
+	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
 // spyNarrationUI records the narration calls the notifier makes.
@@ -160,5 +165,35 @@ func TestProvisioningStatusProviderSuppliesInternet(t *testing.T) {
 	unwired := &provisioningStatusProvider{base: base}
 	if unwired.Status(context.Background()).Internet {
 		t.Fatal("no probe wired: Internet must stay false")
+	}
+}
+
+// TestExternalLinkProbeExcludesOwnHotspot pins the production wiring for the
+// provisioning ActiveLink guard: the adapter must pass softap.ProfileName so
+// the machine's own hotspot — including a leftover from a failed teardown —
+// never counts as an external link. Mutating the excluded profile name (e.g.
+// to "") silently reverts that fix; this is the only test that joins the
+// adapter to the constant.
+func TestExternalLinkProbeExcludesOwnHotspot(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	cmd := mocks.NewMockExecCmd(ctrl)
+	cmd.EXPECT().Output().
+		Return([]byte("GENERAL.DEVICE:wlan0\nGENERAL.TYPE:wifi\nGENERAL.STATE:100 (connected)\nGENERAL.CONNECTION:ff1-softap\n"+
+			"GENERAL.DEVICE:eth0\nGENERAL.TYPE:ethernet\nGENERAL.STATE:20 (unavailable)\nGENERAL.CONNECTION:\n"), nil).
+		AnyTimes()
+	exec := mocks.NewMockExec(ctrl)
+	exec.EXPECT().
+		CommandContext(gomock.Any(), "nmcli", "-t", "-f",
+			"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION", "device", "show").
+		Return(cmd).
+		AnyTimes()
+
+	probe := externalLinkProbe(status.NewLinkChecker(exec, zap.NewNop()))
+	up, err := probe(context.Background())
+	if err != nil {
+		t.Fatalf("probe returned error: %v", err)
+	}
+	if up {
+		t.Fatal("the adapter must exclude the ff1-softap hotspot from external-link detection")
 	}
 }

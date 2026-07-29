@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +16,8 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -63,6 +68,7 @@ type refresher struct {
 	// below): also nil-able when offline caching is disabled/not wired.
 	offlineCache offlinecache.Service
 	json         wrapper.JSON
+	scheduler    playlistschedule.Scheduler
 
 	clock  wrapper.Clock
 	logger *zap.Logger
@@ -88,6 +94,7 @@ func New(
 	kioskReplay offlinecache.KioskReplay,
 	offlineCache offlinecache.Service,
 	jsonWrapper wrapper.JSON,
+	scheduler playlistschedule.Scheduler,
 	clock wrapper.Clock,
 	logger *zap.Logger,
 ) Refresher {
@@ -99,6 +106,7 @@ func New(
 		kioskReplay:  kioskReplay,
 		offlineCache: offlineCache,
 		json:         jsonWrapper,
+		scheduler:    scheduler,
 		clock:        clock,
 		logger:       logger,
 		done:         make(chan struct{}),
@@ -147,14 +155,27 @@ func (r *refresher) Start() {
 	go r.background(done)
 }
 
-func (r *refresher) background(done chan struct{}) {
+func (r *refresher) background(done <-chan struct{}) {
 	r.logger.Info("Refresher background goroutine started")
+	runCtx, cancel := context.WithCancel(r.context)
+	defer cancel()
+
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-runCtx.Done():
+		}
+	}()
 
 	// Process playing playlist until it succeeds
 	for {
 		if err := r.processPlayingPlaylist(); err != nil {
 			r.logProcessFailure(err)
-			r.clock.Sleep(PLAYER_STATUS_POLLING_INTERVAL)
+			if err := r.clock.SleepContext(runCtx, PLAYER_STATUS_POLLING_INTERVAL); err != nil {
+				r.logger.Info("Refresher background goroutine stopped before initial success")
+				return
+			}
 			continue
 		}
 		break
@@ -177,7 +198,7 @@ func (r *refresher) background(done chan struct{}) {
 			ticker.Stop()
 			r.logger.Info("Refresher background goroutine stopped due to done channel")
 			return
-		case <-r.context.Done():
+		case <-runCtx.Done():
 			ticker.Stop()
 			r.logger.Info("Refresher background goroutine stopped due to context cancellation")
 			return
@@ -237,139 +258,304 @@ func (r *refresher) processPlayingPlaylist() (err error) {
 		return errCDPNotReady
 	}
 
-	// Get player status
-	playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
-	if err != nil {
-		return err
-	}
-	if playerStatus == nil {
-		r.logger.Warn("Player status is nil")
-		return nil
+	var authorityToken uint64
+	if r.scheduler != nil {
+		authorityToken = r.scheduler.AuthorityToken()
 	}
 
-	if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
-		r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
-		return nil
-	}
-
-	// result is set only once the CDP re-send below actually runs, so
-	// the deferred revert (registered next) can tell "never attempted a
-	// send" (result stays nil, e.g. the skipCDPResend early return) apart
-	// from "sent but the player rejected it".
-	var result interface{}
 	// Revert replay's Fetch-interception scope to whatever the player
-	// actually still displays if the CDP re-send below fails outright or
-	// is rejected by the player (ok:false) — see
-	// resyncKioskReplayScopeToCurrentDisplay's doc for why: the
-	// SyncPlaylist call further down already committed the NEW
-	// playlist's scope before the send ran, so a failure/rejection
-	// there leaves scope pointed at a playlist the kiosk never actually
-	// switched to while it is still genuinely showing the old one.
+	// actually still displays if this pass fails: the SyncPlaylist call
+	// further down commits the NEW playlist's scope before the CDP send
+	// runs, so a failure there leaves scope pointed at a playlist the kiosk
+	// never actually switched to while it is still genuinely showing the
+	// old one — see resyncKioskReplayScopeToCurrentDisplay's doc.
+	//
+	// Keyed on the named return alone, which is enough because a player
+	// rejection (ok:false) is itself turned into an error below rather than
+	// reported as success — see the send closure. An earlier revision also
+	// inspected the raw CDP result here to tell "never attempted a send"
+	// apart from "sent but rejected"; folding the rejection into the error
+	// makes that distinction unnecessary.
 	//
 	// Registered BEFORE the kioskReplay LockPlayback/defer UnlockPlayback
 	// pair below so that, on return, Go's LIFO defer order runs THAT
-	// unlock first and only then this revert — which needs to
-	// re-acquire the same non-reentrant lock itself (see
-	// KioskReplay.LockPlayback's doc on why nesting would deadlock).
+	// unlock first and only then this revert — which needs to re-acquire
+	// the same non-reentrant lock itself (see KioskReplay.LockPlayback's
+	// doc on why nesting would deadlock).
 	defer func() {
 		if err != nil {
-			r.resyncKioskReplayScopeToCurrentDisplay()
-			return
-		}
-		if result != nil && !isPlayerResponseOk(result) {
-			r.logger.Warn("offline cache: playlist refresh rejected by player, reverting replay scope",
-				zap.Any("result", result))
 			r.resyncKioskReplayScopeToCurrentDisplay()
 		}
 	}()
 
-	// A displayPlaylist status carrying neither a URL nor an inline playlist
-	// is the player's fresh-boot/unconfigured state (nothing assigned yet),
-	// not a failure. Returning an error here would pin the startup loop at
-	// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
-	// long as the device sits unconfigured — hours on a first boot with no
-	// network. There is nothing to refresh; report success so the refresher
-	// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence. This check
-	// must stay in sync with resolveDisplayedPlaylist's own default case
-	// (which returns an error instead, for resyncKioskReplayScopeToCurrentDisplay's
-	// best-effort caller where an error is simply logged and swallowed).
-	if playerStatus.PlaylistURL == nil && playerStatus.Playlist == nil {
-		r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
+	var schedulerSource playlistschedule.Source
+	if r.scheduler != nil {
+		schedulerSource = r.scheduler.Source()
+	}
+
+	// staticInline is the "inline playlist with nothing dynamic to
+	// re-resolve" case. It never needs a CDP re-send (the playlist cannot
+	// have changed), but it DOES still need the replay-scope sync below: a
+	// background downloadPlaylistItem/downloadPlaylist can finish, or a
+	// cache can be cleared, while this exact static playlist keeps looping
+	// on screen, and this periodic pass is the only thing that would ever
+	// notice. So it is carried out of the source-derivation switch rather
+	// than returned from inside it.
+	var staticInline *dp1.Playlist
+
+	if schedulerSource.IsZero() {
+		// No scheduler-owned source exists, so the player remains the source of
+		// truth for normal URL/dynamic refreshes.
+		playerStatus, statusErr := r.statusPoller.FetchPlayerStatus(r.context)
+		if statusErr != nil {
+			return statusErr
+		}
+		if playerStatus == nil {
+			r.logger.Warn("Player status is nil")
+			return nil
+		}
+
+		if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
+			r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
+			return nil
+		}
+
+		switch {
+		case playerStatus.PlaylistURL != nil:
+			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
+		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
+			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
+		case playerStatus.Playlist != nil:
+			// Static inline player status only contains the filtered active set and
+			// no refreshable source identity, so it cannot rebuild future items.
+			r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
+			staticInline = playerStatus.Playlist
+		default:
+			// A displayPlaylist status carrying neither a URL nor an inline playlist
+			// is the player's fresh-boot/unconfigured state (nothing assigned yet),
+			// not a failure. Returning an error here would pin the startup loop at
+			// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
+			// long as the device sits unconfigured — hours on a first boot with no
+			// network. There is nothing to refresh; report success so the refresher
+			// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence. This check
+			// must stay in sync with resolveDisplayedPlaylist's own default case
+			// (which returns an error instead, for
+			// resyncKioskReplayScopeToCurrentDisplay's best-effort caller where an
+			// error is simply logged and swallowed).
+			r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
+			return nil
+		}
+	}
+
+	if staticInline != nil {
+		if r.kioskReplay != nil {
+			r.kioskReplay.LockPlayback()
+			defer r.kioskReplay.UnlockPlayback()
+			r.syncReplayScopeLocked(staticInline)
+		}
 		return nil
 	}
 
-	playlist, err := r.resolveDisplayedPlaylist(playerStatus)
+	var playlist *dp1.Playlist
+	var kind string
+	switch {
+	case schedulerSource.PlaylistURL != "":
+		kind = "playlist URL"
+		playlist, err = r.dp1.ProcessPlaylistURL(r.context, schedulerSource.PlaylistURL, false)
+		if err != nil {
+			// Offline fallback: serve the last successfully cached body for
+			// this URL rather than failing the pass outright, mirroring
+			// resolveDisplayedPlaylist's own URL branch. Only a cache miss
+			// leaves the live error standing.
+			if cached, cacheErr := r.loadCachedPlaylistForURL(schedulerSource.PlaylistURL); cacheErr == nil {
+				playlist, err = cached, nil
+			}
+		}
+	case schedulerSource.DynamicPlaylist != nil:
+		kind = "dynamic playlist"
+		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *schedulerSource.DynamicPlaylist, false)
+	}
 	if err != nil {
-		return err
+		return r.handleRefreshError(err, kind, schedulerSource)
 	}
 
-	// skipCDPResend preserves the original "a static inline playlist never
-	// changes, so do not re-send it to CDP every refresh pass" behavior —
-	// mirrors resolveDisplayedPlaylist's own no-dynamic-content branch
-	// (only reachable when PlaylistURL is unset, matching that switch's
-	// case-priority order). It must NOT also skip the offline-cache
-	// resync below: a background downloadPlaylistItem/downloadPlaylist
-	// can finish, or a cache can be cleared, while this exact static
-	// playlist keeps looping on screen, and the periodic refresher is
-	// the only thing that would ever notice that for a playlist with
-	// nothing dynamic to re-resolve.
-	skipCDPResend := playerStatus.PlaylistURL == nil &&
-		playerStatus.Playlist != nil && !playerStatus.Playlist.HasDynamicContent()
-	if skipCDPResend {
-		r.logger.Debug("Playlist has no dynamic queries, skipping CDP resend")
-	}
-
-	// Re-sync offline-cache replay scope before every re-send: this is
-	// the periodic path (see plan "display-integration") that keeps
-	// interception coherent while a playlist keeps looping — a
-	// background download can finish, or a cache can be cleared, between
-	// refresh passes. Best-effort: never let a sync failure block the
-	// actual refresh, since offline replay is a strict enhancement over
-	// the live path this loop exists to maintain.
-	//
-	// The playback coordinator is held across BOTH this scope sync and
-	// the CDP re-send below (or the skipCDPResend early return), so this
-	// refresher pass cannot interleave its sync+send with a concurrent
-	// displayPlaylist command's own sync+send and leave scope pointing
-	// at a different playlist than the one actually on screen (see
-	// KioskReplay.LockPlayback's doc). Acquired only now, after the
-	// network-bound DP-1 resolution above, which does not touch scope.
+	// Re-sync offline-cache replay scope before the re-send: this is the
+	// periodic path that keeps interception coherent while a playlist keeps
+	// looping. Best-effort — never let a sync failure block the actual
+	// refresh, since offline replay is a strict enhancement over the live
+	// path this loop exists to maintain.
 	if r.kioskReplay != nil {
 		r.kioskReplay.LockPlayback()
 		defer r.kioskReplay.UnlockPlayback()
-		itemIDs := make([]string, 0, len(playlist.Items))
-		for _, item := range playlist.Items {
-			itemIDs = append(itemIDs, item.ID)
-		}
-		if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
-			r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))
-		}
-		// Announce this authoritative scope change (under the lock) so a
-		// concurrent corrective resync defers to it rather than clobbering
-		// it with a stale playlist's scope — see
-		// KioskReplay.PlaybackGeneration's doc.
-		r.kioskReplay.MarkPlaybackChanged()
+		r.syncReplayScopeLocked(playlist)
 	}
 
-	if skipCDPResend {
-		return nil
+	hadDisplayAtCache := false
+	hadRestoredPending := false
+	var schedulerSnapshot playlistschedule.Snapshot
+	schedulerMutated := false
+	if r.scheduler != nil {
+		hadDisplayAtCache = r.scheduler.HasCache()
+		hadRestoredPending = r.scheduler.RestoredPending()
 	}
 
 	// Send playlist to CDP
+	args := map[string]interface{}{
+		"dp1_call": playlist,
+		"refresh":  true,
+	}
 	command := commands.Command{
-		Type: commands.CMD_DISPLAY_PLAYLIST,
-		Arguments: map[string]interface{}{
-			"dp1_call": playlist,
-			"refresh":  true,
-		},
+		Type:      commands.CMD_DISPLAY_PLAYLIST,
+		Arguments: args,
 	}
 
-	result, err = r.sendCDPRequest(command)
-	if err != nil {
-		return err
+	sendErr := error(nil)
+	send := func() {
+		if r.scheduler != nil {
+			if r.scheduler.AuthorityToken() != authorityToken {
+				r.logger.Debug("Skipping obsolete playlist refresh after playlist authority changed")
+				return
+			}
+			schedulerSnapshot = r.scheduler.Snapshot()
+			playlist = r.scheduler.PrepareWithSource(playlist, schedulerSource)
+			schedulerMutated = true
+			if playlist == nil {
+				sendErr = errors.New("playlist has invalid displayAt")
+				r.scheduler.Restore(schedulerSnapshot)
+				return
+			}
+			if len(playlist.Items) == 0 {
+				// Keep the future schedule armed, but do not send an empty list:
+				// the player rejects it and cannot improve the current artwork.
+				r.scheduler.Commit()
+				return
+			}
+			if r.scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending) {
+				// After a controld restart the memory cache may be empty, so
+				// the refresher may be the first path to reconstruct scheduler
+				// ownership from URL/dynamic/player status. Force-cast that first
+				// scheduled reconstruction; a soft refresh can defer when the current
+				// item disappeared from the new set.
+				command.Arguments = map[string]interface{}{
+					"intent": map[string]interface{}{
+						"action": "now_display",
+					},
+					"dp1_call": playlist,
+				}
+				if schedulerSource.PlaylistURL != "" {
+					command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
+				}
+			} else {
+				command.Arguments["dp1_call"] = playlist
+			}
+		}
+		result, sendCDPErr := r.sendCDPRequest(command)
+		sendErr = sendCDPErr
+		// Transport success with ok:false (or a malformed body) must still
+		// fail the refresh pass: otherwise the startup loop treats the reject
+		// as initial success and drops from 5s retries to the 5m ticker while
+		// the player never accepted the playlist. It is also what makes the
+		// replay-scope revert at the top of this function fire on a rejection,
+		// not just on a transport failure.
+		if sendErr == nil && !playerresponse.OK(result) {
+			sendErr = errors.New("player rejected playlist refresh")
+		}
+		if schedulerMutated && sendErr != nil {
+			r.scheduler.Restore(schedulerSnapshot)
+		} else if schedulerMutated {
+			r.scheduler.Commit()
+		}
 	}
+	if r.scheduler != nil {
+		r.scheduler.WithPlayerPush(send)
+	} else {
+		send()
+	}
+	// Assigned to the named return so the deferred replay-scope revert above
+	// observes it.
+	err = sendErr
+	return err
+}
 
-	return nil
+// syncReplayScopeLocked points offline-cache replay at playlist's items and
+// announces the change. Callers MUST already hold the playback coordinator
+// (KioskReplay.LockPlayback) and keep holding it across whatever CDP send
+// follows, so this pass's scope commit and send cannot interleave with a
+// concurrent displayPlaylist's own pair — see that lock's doc. Kept
+// lock-free itself so the two call sites keep their LockPlayback/defer
+// UnlockPlayback visibly adjacent rather than hiding half the pair.
+//
+// Best-effort by design: a sync failure is logged, never returned, since
+// offline replay is an enhancement over the live path.
+func (r *refresher) syncReplayScopeLocked(playlist *dp1.Playlist) {
+	if playlist == nil {
+		return
+	}
+	itemIDs := make([]string, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		itemIDs = append(itemIDs, item.ID)
+	}
+	if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
+		r.logger.Warn("offline cache: failed to sync kiosk replay scope during refresh", zap.Error(syncErr))
+	}
+	// Announce this authoritative scope change (under the lock) so a
+	// concurrent corrective resync defers to it rather than clobbering it
+	// with a stale playlist's scope — see KioskReplay.PlaybackGeneration's
+	// doc.
+	r.kioskReplay.MarkPlaybackChanged()
+}
+
+// handleRefreshError degrades to the displayAt cache only for transient fetch
+// failures. Schema/parse/logic errors must surface so a bad feed cannot pin the
+// device on a stale active set forever.
+func (r *refresher) handleRefreshError(err error, kind string, source playlistschedule.Source) error {
+	if r.scheduler != nil &&
+		r.scheduler.HasCache() &&
+		!r.scheduler.RestoredPending() &&
+		r.scheduler.SourceMatches(source) &&
+		isTransientPlaylistRefreshError(err) {
+		r.logger.Warn("Playlist refresh failed transiently; recomputing from displayAt cache",
+			zap.String("kind", kind),
+			zap.Error(err))
+		r.scheduler.ResumePersisted(r.context)
+		return nil
+	}
+	return err
+}
+
+// isTransientPlaylistRefreshError reports transport / upstream-availability
+// failures where retrying from the cached displayAt playlist is safe.
+// Deterministic data/config errors (malformed JSON, invalid dynamicQuery,
+// permanent DNS, non-timeout URL failures) return false.
+func isTransientPlaylistRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		// Prefer DNSError fields over deprecated net.Error.Temporary().
+		return dnsErr.IsTemporary || dnsErr.IsTimeout
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		// Timeouts are the well-defined transient class; Temporary() is
+		// deprecated (SA1019) and not reliable across net implementations.
+		return netErr.Timeout()
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		// url.Error wraps both transport blips and permanent config mistakes
+		// (bad scheme, invalid URL). Only the inner error decides.
+		return isTransientPlaylistRefreshError(urlErr.Err)
+	}
+	// dp1.fetchPlaylist wraps non-2xx as "fetch playlist failed: <Status>".
+	// Treat 5xx / 429 as temporary upstream unavailability; 4xx stays hard-fail.
+	msg := err.Error()
+	if strings.Contains(msg, "fetch playlist failed: 5") ||
+		strings.Contains(msg, "fetch playlist failed: 429") {
+		return true
+	}
+	return false
 }
 
 // resolveDisplayedPlaylist resolves the playlist described by playerStatus
@@ -491,29 +677,6 @@ func (r *refresher) resyncKioskReplayScopeToCurrentDisplay() {
 	if syncErr := r.kioskReplay.SyncPlaylist(r.context, itemIDs); syncErr != nil {
 		r.logger.Warn("offline cache: failed to sync kiosk replay scope after refresh failure", zap.Error(syncErr))
 	}
-}
-
-// isPlayerResponseOk mirrors commandrouter's own isPlayerResponseOk (see
-// resyncKioskReplayScopeToCurrentDisplay's doc for why this is an
-// independent copy rather than a shared helper): ff-player's
-// window.handleCDPRequest response is a {"message":{"ok":bool,...}}
-// envelope, and anything that does not match that exact shape (a
-// transport-level nil, a malformed reply, ...) is treated as NOT ok —
-// this must fail closed toward "assume rejected, revert scope" rather
-// than "assume accepted", since a false negative here only costs one
-// redundant-but-harmless corrective resync, while a false positive would
-// leave scope pointed at a playlist the kiosk never actually switched to.
-func isPlayerResponseOk(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	msg, ok := m["message"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	okVal, _ := msg["ok"].(bool)
-	return okVal
 }
 
 // loadCachedPlaylistForURL mirrors commandrouter's handler.loadCachedPlaylistForURL

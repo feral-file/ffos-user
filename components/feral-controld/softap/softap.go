@@ -52,9 +52,12 @@ type Backend interface {
 const (
 	nmcliBin = "nmcli"
 
-	// conName is the fixed NetworkManager profile name for the setup AP, so Up
-	// and Down always target the same connection regardless of SSID.
-	conName = "ff1-softap"
+	// ProfileName is the fixed NetworkManager profile name for the setup AP, so
+	// Up and Down always target the same connection regardless of SSID.
+	// Exported so the provisioning link probe (status.LinkChecker.ExternalLink)
+	// can exclude the device's own hotspot from external-link detection —
+	// including the window where a failed teardown leaves the profile behind.
+	ProfileName = "ff1-softap"
 
 	// ssidPrefix namespaces the setup SSID by product.
 	ssidPrefix = "FF1-"
@@ -115,12 +118,12 @@ func (b *nmBackend) Up(ctx context.Context) (Info, error) {
 	// whole raise on its tick, so refusing here is safe. Down itself still
 	// tolerates a missing profile (that is the common case).
 	if err := b.Down(ctx); err != nil {
-		return Info{}, fmt.Errorf("cleanup of existing %s profile before create: %w", conName, err)
+		return Info{}, fmt.Errorf("cleanup of existing %s profile before create: %w", ProfileName, err)
 	}
 
 	// `device wifi hotspot` creates an AP-mode connection with shared IPv4 in
 	// one call; con-name pins it so Down/Status can find it deterministically.
-	args := []string{"device", "wifi", "hotspot", "con-name", conName,
+	args := []string{"device", "wifi", "hotspot", "con-name", ProfileName,
 		"ssid", info.SSID, "password", info.PSK}
 	if b.iface != "" {
 		args = append(args, "ifname", b.iface)
@@ -134,7 +137,7 @@ func (b *nmBackend) Up(ctx context.Context) (Info, error) {
 func (b *nmBackend) Down(ctx context.Context) error {
 	// Deleting the profile deactivates it too. Tolerate "unknown connection" so
 	// Down is idempotent when the AP was never up or already torn down.
-	out, err := b.run(ctx, "connection", "delete", conName)
+	out, err := b.run(ctx, "connection", "delete", ProfileName)
 	if err == nil {
 		return nil
 	}
@@ -151,7 +154,7 @@ func (b *nmBackend) Status(ctx context.Context) (Status, error) {
 	}
 	active := false
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == conName {
+		if line == ProfileName {
 			active = true
 			break
 		}

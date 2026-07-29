@@ -213,6 +213,19 @@ type executor struct {
 	// give-up on the OLD panel never sticks to a NEW one — the next tick
 	// re-drives the panel leg instead of waiting for the next schedule boundary.
 	sleepPanelGen uint64
+
+	// onAwake is an optional hook fired after a successful transition into the
+	// awake state. Used by displayAt scheduling to recompute the active set
+	// immediately on wake (a timer that fired while sleeping must not leave a
+	// stale playlist on screen). Not part of the exported Executor interface so
+	// mocks stay unchanged; wire via SetOnAwake.
+	onAwake func(context.Context)
+
+	// withPlayerPush, when set, serializes claim-time default playlist fallback
+	// writes with displayAt timer/wake/reconnect pushes. The fallback remains
+	// player-owned and must not clear scheduler authority because
+	// onlyIfNoPlaylist:true can succeed as a no-op.
+	withPlayerPush func(func())
 }
 
 func New(
@@ -435,24 +448,40 @@ func (e *executor) sendDisplayDefaultPlaylist() error {
 		return fmt.Errorf("cdp client is not configured")
 	}
 
-	command := commands.Command{
-		Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
-		Arguments: map[string]any{
-			"onlyIfNoPlaylist": true,
-		},
-	}
-	payload, err := command.JSON()
-	if err != nil {
-		return fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+	send := func() (interface{}, error) {
+		command := commands.Command{
+			Type: commands.CMD_DISPLAY_DEFAULT_PLAYLIST,
+			Arguments: map[string]any{
+				"onlyIfNoPlaylist": true,
+			},
+		}
+		payload, err := command.JSON()
+		if err != nil {
+			return nil, fmt.Errorf("marshal displayDefaultPlaylist payload: %w", err)
+		}
+
+		result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
+			"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
+		}
+		return result, nil
 	}
 
-	_, err = e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-	})
-	if err != nil {
-		return fmt.Errorf("send displayDefaultPlaylist command to player: %w", err)
+	e.sleepApplyMu.Lock()
+	withPlayerPush := e.withPlayerPush
+	e.sleepApplyMu.Unlock()
+
+	var err error
+	if withPlayerPush != nil {
+		withPlayerPush(func() {
+			_, err = send()
+		})
+		return err
 	}
-	return nil
+	_, err = send()
+	return err
 }
 
 func (e *executor) showPairingQRCode(ctx context.Context, args []byte) (interface{}, error) {

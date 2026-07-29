@@ -45,7 +45,7 @@ func setup(t *testing.T) *testSetup {
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockJSON := mocks.NewMockJSON(ctrl)
-	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, mockJSON, logger)
+	handler := commandrouter.New(mockExecutor, mockCDP, mockDP1, mockStatusPoller, nil, nil, nil, nil, mockJSON, logger)
 
 	return &testSetup{
 		ctrl:             ctrl,
@@ -91,7 +91,7 @@ func playerNotOkResponse() map[string]interface{} {
 // displayPlaylist via URL: DP1 processing, CDP send returning ok, and ForceRefresh.
 func expectDisplayPlaylistSuccess(ts *testSetup, playlistURL string, playlist *dp1.Playlist) {
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(playlist, nil).
 		Times(1)
 
@@ -221,7 +221,7 @@ func TestCommandHandler_Process_StartMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "started"}
 	mintSvc := &fakeMintPairingService{startResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_START_MINT_PAIRING_SESSION,
@@ -261,7 +261,7 @@ func TestCommandHandler_Process_CloseMintPairingSessionRoutesToMintPairing(t *te
 	args := map[string]any{"source": "controller"}
 	want := map[string]any{"ok": true, "status": "closed"}
 	mintSvc := &fakeMintPairingService{closeResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLOSE_MINT_PAIRING_SESSION,
@@ -283,7 +283,7 @@ func TestCommandHandler_Process_MintPairingApprovalRoutesToMintPairing(t *testin
 	args := map[string]any{"approvalRequestID": "mpa_1", "decision": "approve"}
 	want := map[string]any{"ok": true, "status": "accepted"}
 	mintSvc := &fakeMintPairingService{approvalResult: want}
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, mintSvc, nil, nil, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_MINT_PAIRING_APPROVAL,
@@ -418,7 +418,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1", "item2"}).Return(nil).Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -450,7 +450,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 	mockPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item1", Source: "https://example.com/video.mp4"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, true).Return(mockPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, playlistURL).Return(mockPlaylist, nil).Times(1)
 	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
@@ -464,7 +464,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 	unlock := mockKioskReplay.EXPECT().UnlockPlayback().Times(1)
 	gomock.InOrder(lock, sync, mark, send, unlock)
 
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -501,7 +501,7 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 	// guard. The display itself succeeds here, so the failure-path resync
 	// (the only other MarkPlaybackChanged-adjacent caller) never runs.
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	command := commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -529,7 +529,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, newURL, true).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -537,7 +537,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -576,7 +576,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
 	}}
-	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, newURL, true).Return(newPlaylist, nil).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
@@ -584,7 +584,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
 	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
 		Send(cdp.METHOD_EVALUATE, gomock.Any()).
@@ -629,10 +629,10 @@ func TestCommandHandler_Process_DisplayPlaylist_FallsBackToCachedPlaylistWhenOff
 	}}
 
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
-	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, ts.mockJSON, ts.logger)
+	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(nil, errors.New("network unreachable")).
 		Times(1)
 
@@ -674,7 +674,7 @@ func TestCommandHandler_Process_DisplayPlaylist_ReturnsOriginalErrorWhenNoCached
 	playlistURL := "https://example.com/playlist.json"
 	liveErr := errors.New("network unreachable")
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(nil, liveErr).
 		Times(1)
 
@@ -847,7 +847,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithDynamicQueries(t *testing.T)
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, true).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
 		Return(processedPlaylist, nil).
 		Times(1)
 
@@ -937,7 +937,7 @@ func TestCommandHandler_Process_DisplayPlaylist_WithSpecDynamicQuery(t *testing.
 		Times(1)
 
 	ts.mockDP1.EXPECT().
-		ProcessDynamicPlaylist(ts.ctx, *mockPlaylist, true).
+		ProcessDynamicPlaylistForCast(ts.ctx, *mockPlaylist).
 		Return(processedPlaylist, nil).
 		Times(1)
 
@@ -1117,7 +1117,7 @@ func TestCommandHandler_Metrics_DisplayPlaylist_CDPFailure(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 
@@ -1151,7 +1151,7 @@ func TestCommandHandler_Metrics_PlayerResponseNotOk(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 
@@ -1189,7 +1189,7 @@ func TestCommandHandler_Metrics_PlayerResponseMissingMessage(t *testing.T) {
 	beforeFailures := status.PlaybackStartFailures()
 
 	ts.mockDP1.EXPECT().
-		ProcessPlaylistURL(ts.ctx, playlistURL, true).
+		ProcessPlaylistURLForCast(ts.ctx, playlistURL).
 		Return(mockPlaylist, nil).
 		Times(1)
 
@@ -1258,4 +1258,92 @@ func TestCommandHandler_Metrics_NonPlaybackCommand_NoMetrics(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Equal(t, beforeAttempts, status.PlaybackStartTotal(), "non-playback command should not increment attempt counter")
+}
+
+// refreshArtwork must survive a dead player page: the evaluate path needs
+// window.handleCDPRequest, which is exactly what's missing when Chromium is
+// serving a stale/broken bundle (#234) — the situation a refresh exists to
+// fix. Cache clear + browser-level Page.reload is the recovery.
+func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaReload(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	command := commands.Command{
+		Type:      commands.CMD_REFRESH_ARTWORK,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockCDP.EXPECT().
+		Send("Network.clearBrowserCache", map[string]interface{}{}).
+		Return(nil, nil).
+		Times(1)
+
+	// Page evaluate fails — no live player app.
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, errors.New("evaluate failed: handleCDPRequest is not defined")).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send("Page.reload", map[string]interface{}{"ignoreCache": true}).
+		Return(nil, nil).
+		Times(1)
+
+	ts.mockStatusPoller.EXPECT().
+		ForceRefresh().
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.NoError(t, err)
+	assert.True(t, isPlayerResponseOkForTest(result))
+}
+
+// When both the evaluate and the reload fail, the command must report the
+// original failure — a dead CDP connection is not recoverable here.
+func TestCommandHandler_Process_RefreshArtwork_ReloadAlsoFails(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	command := commands.Command{
+		Type:      commands.CMD_REFRESH_ARTWORK,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockCDP.EXPECT().
+		Send("Network.clearBrowserCache", map[string]interface{}{}).
+		Return(nil, nil).
+		Times(1)
+
+	evalErr := errors.New("evaluate failed")
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, evalErr).
+		Times(1)
+
+	ts.mockCDP.EXPECT().
+		Send("Page.reload", map[string]interface{}{"ignoreCache": true}).
+		Return(nil, errors.New("no CDP connection")).
+		Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.Error(t, err)
+	assert.Equal(t, evalErr, err)
+	assert.Nil(t, result)
+}
+
+// Non-refresh commands must NOT get the reload fallback — a failed
+// displayPlaylist evaluate is a real failure the caller needs to see.
+func isPlayerResponseOkForTest(result interface{}) bool {
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	msg, ok := m["message"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	okVal, _ := msg["ok"].(bool)
+	return okVal
 }
