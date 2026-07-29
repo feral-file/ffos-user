@@ -268,6 +268,17 @@ func (r *refresher) processPlayingPlaylist() error {
 			schedulerSnapshot = r.scheduler.Snapshot()
 			playlist = r.scheduler.PrepareWithSource(playlist, schedulerSource)
 			schedulerMutated = true
+			if playlist == nil {
+				sendErr = errors.New("playlist has invalid displayAt")
+				r.scheduler.Restore(schedulerSnapshot)
+				return
+			}
+			if len(playlist.Items) == 0 {
+				// Keep the future schedule armed, but do not send an empty list:
+				// the player rejects it and cannot improve the current artwork.
+				r.scheduler.Commit()
+				return
+			}
 			if r.scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending) {
 				// After a controld restart the memory cache may be empty, so
 				// the refresher may be the first path to reconstruct scheduler

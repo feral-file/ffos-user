@@ -211,6 +211,25 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// sees them. The scheduler keeps the full list for timer/wake updates.
 				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
 				schedulerMutated = true
+				if playlist == nil {
+					err = fmt.Errorf("playlist has invalid displayAt")
+					h.scheduler.Restore(schedulerSnapshot)
+					schedulerRestored = true
+					return
+				}
+				if len(playlist.Items) == 0 {
+					// The scheduler retained and armed the future schedule; the
+					// player rejects an empty displayPlaylist, so leave its current
+					// artwork in place until a cohort becomes eligible.
+					h.scheduler.Commit()
+					// A relayer RPC and hub request both need an explicit acceptance
+					// response even though no CDP write was valid. This also prevents
+					// playback metrics from treating the deferred schedule as a failure.
+					result = map[string]interface{}{
+						"message": map[string]interface{}{"ok": true, "deferred": true},
+					}
+					return
+				}
 				command.Arguments["dp1_call"] = playlist
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {

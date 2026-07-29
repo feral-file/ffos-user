@@ -323,6 +323,16 @@ func (s *scheduler) PrepareWithSource(playlist *dp1.Playlist, source Source) *dp
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, item := range playlist.Items {
+		if item.DisplayAt != nil && !displayat.Parse(*item.DisplayAt, s.locFn()).IsValid() {
+			// Do not let an invalid scheduling value quietly remove an item from
+			// playback. Returning nil makes the cast/refresh fail before CDP sees
+			// a filtered (possibly empty) playlist.
+			s.logger.Warn("Rejecting playlist with invalid displayAt",
+				zap.String("itemID", item.ID), zap.String("displayAt", *item.DisplayAt))
+			return nil
+		}
+	}
 
 	if !HasDisplayAtSchedule(playlist) {
 		// A non-scheduled cast must cancel any prior Daily timer; otherwise the
@@ -356,7 +366,12 @@ func (s *scheduler) RecomputeNow(ctx context.Context) {
 }
 
 func (s *scheduler) ResumePersisted(ctx context.Context) {
-	_ = s.resumePersisted(ctx)
+	if s.resumePersisted(ctx) {
+		// A transient source outage must not restart the current artwork just
+		// because the cached active set is unchanged. Timers, wakes, and CDP
+		// reconnects still use RecomputeNow's force-cast semantics.
+		s.recompute(ctx, false)
+	}
 }
 
 func (s *scheduler) resumePersisted(ctx context.Context) bool {
@@ -372,7 +387,6 @@ func (s *scheduler) resumePersisted(ctx context.Context) bool {
 	}
 	s.mu.Unlock()
 
-	s.recompute(ctx, true)
 	return true
 }
 
@@ -394,6 +408,15 @@ func (s *scheduler) recompute(ctx context.Context, force bool) {
 		active := s.activeLocked()
 		source := snapshotSource(s.source)
 		s.armTimerLocked()
+		if len(active.Items) == 0 {
+			// The player rejects an empty displayPlaylist. Keep the complete
+			// schedule and its timer so the first future cohort can take over,
+			// but never turn an empty active set into a retry storm.
+			s.lastActive = cloneItems(active.Items)
+			s.mu.Unlock()
+			s.logger.Debug("Skipping empty displayAt active set")
+			return
+		}
 		if !force && reflect.DeepEqual(active.Items, s.lastActive) {
 			s.mu.Unlock()
 			return
@@ -725,5 +748,8 @@ func clonePlaylist(p *dp1.Playlist) *dp1.Playlist {
 }
 
 func cloneItems(items []dp1playlist.PlaylistItem) []dp1playlist.PlaylistItem {
-	return append([]dp1playlist.PlaylistItem(nil), items...)
+	if items == nil {
+		return nil
+	}
+	return append(make([]dp1playlist.PlaylistItem, 0, len(items)), items...)
 }

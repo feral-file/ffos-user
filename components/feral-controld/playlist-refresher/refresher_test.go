@@ -1042,6 +1042,7 @@ type fakePlaylistScheduler struct {
 	restores        int
 	commits         int
 	source          playlistschedule.Source
+	restored        chan struct{}
 }
 
 func (f *fakePlaylistScheduler) Prepare(playlist *dp1.Playlist) *dp1.Playlist {
@@ -1110,9 +1111,16 @@ func (f *fakePlaylistScheduler) Snapshot() playlistschedule.Snapshot {
 }
 func (f *fakePlaylistScheduler) Restore(playlistschedule.Snapshot) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.restores++
 	f.token++
+	restored := f.restored
+	f.mu.Unlock()
+	if restored != nil {
+		select {
+		case restored <- struct{}{}:
+		default:
+		}
+	}
 }
 func (f *fakePlaylistScheduler) HasCache() bool {
 	f.mu.Lock()
@@ -1509,7 +1517,7 @@ func TestRefresher_DisplayAtCacheRebuild_ForceCasts(t *testing.T) {
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
-	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
+	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true, restored: make(chan struct{}, 1)}
 
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
@@ -1888,7 +1896,7 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockClock := mocks.NewMockClock(ctrl)
-	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true}
+	fakeSched := &fakePlaylistScheduler{cacheOnPrepare: true, restored: make(chan struct{}, 1)}
 
 	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
 	// Reject must stay on the startup fast-retry loop (Sleep), not settle into
@@ -1916,7 +1924,11 @@ func TestRefresher_PlayerReject_RestoresSchedulerCache(t *testing.T) {
 	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, fakeSched, mockClock,
 		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 	r.Start()
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-fakeSched.restored:
+	case <-time.After(2 * time.Second):
+		t.Fatal("player rejection did not restore the scheduler cache")
+	}
 	r.Stop()
 
 	assert.GreaterOrEqual(t, fakeSched.restoresCount(), 1, "player rejection must restore scheduler snapshot")

@@ -628,7 +628,7 @@ func TestRecomputeNow_WakePathForceCastsNowDisplay(t *testing.T) {
 	sched.RecomputeNow(context.Background())
 }
 
-func TestPrepare_DateOnlyDisplayAt_NotEligible(t *testing.T) {
+func TestPrepare_DateOnlyDisplayAt_IsRejected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -648,16 +648,18 @@ func TestPrepare_DateOnlyDisplayAt_NotEligible(t *testing.T) {
 		return loc
 	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
 
-	// §3.5.2: date-only is rejected — present but unresolvable, not evergreen.
+	// §3.5.2 rejects date-only values before the scheduler can silently drop
+	// the malformed item from the active set.
 	active := sched.Prepare(displayAtPlaylist(
 		item("bad-date", "2026-07-21"),
 		item("ok", "2026-07-22T00:00:00Z"),
 		item("intro", ""),
 	))
-	require.Equal(t, []string{"ok", "intro"}, itemIDs(active.Items))
+	require.Nil(t, active)
+	assert.False(t, sched.HasCache())
 }
 
-func TestPrepare_InvalidPresentDisplayAt_StillSchedules(t *testing.T) {
+func TestPrepare_InvalidPresentDisplayAt_IsRejected(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -680,8 +682,8 @@ func TestPrepare_InvalidPresentDisplayAt_StillSchedules(t *testing.T) {
 			},
 		},
 	})
-	require.Equal(t, []string{"intro"}, itemIDs(active.Items))
-	assert.True(t, sched.HasCache())
+	require.Nil(t, active)
+	assert.False(t, sched.HasCache())
 }
 
 func TestPrepare_AllFuture_ReturnsOnlyEvergreen(t *testing.T) {
