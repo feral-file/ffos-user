@@ -1600,6 +1600,13 @@ func TestReplayer_OnRequestPaused_OverflowGoroutinesAreBounded(t *testing.T) {
 	// (overflow slots).
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.failRequest", gomock.Any()).DoAndReturn(stuck).AnyTimes()
+	// Saturating both bounds retires the session, which closes it — see
+	// the assertion at the end for why closing is the point.
+	closed := make(chan struct{})
+	ts.mockSession.EXPECT().Close().DoAndReturn(func() error {
+		close(closed)
+		return nil
+	}).Times(1)
 
 	// Far more paused requests than both bounds combined.
 	const flood = offlinecache.RequestPausedAdmission + offlinecache.OverflowAdmission + 500
@@ -1614,6 +1621,23 @@ func TestReplayer_OnRequestPaused_OverflowGoroutinesAreBounded(t *testing.T) {
 	require.Eventually(t, func() bool { return sends.Load() > 0 }, 2*time.Second, 10*time.Millisecond)
 	require.Never(t, func() bool { return sends.Load() > maxInFlight }, 300*time.Millisecond, 20*time.Millisecond,
 		"concurrent responses must be capped by the two admission bounds, not by how many requests Chromium paused")
+
+	// Bounding alone is not enough. Everything past the bounds was once
+	// dropped with a warning, which did not shed load — a paused request
+	// that is never continued, fulfilled or failed stays paused forever,
+	// hanging that resource and any page waiting on it. There is no way
+	// to answer those requests either, since answering means Send and
+	// Send is what ran out. So the session is retired and CLOSED, which
+	// is what makes Chromium release every request it has paused on this
+	// target: the page proceeds against the live network instead of
+	// hanging, and the next SyncPlaylist re-dials.
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a session that saturated both admission bounds must be closed, or the requests it can no longer answer stay paused forever")
+	}
+	assert.Eventually(t, func() bool { return !ts.replayer.RootAttached() }, 2*time.Second, 10*time.Millisecond,
+		"the retired session must be dropped from the target set so SyncPlaylist knows to re-dial")
 
 	close(release)
 }

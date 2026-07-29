@@ -24,6 +24,22 @@ in only one of them is a bug — the next session will read the other one.
 Component-level rules live only in `components/*/AGENTS.md`; do not copy them
 here, read them there.
 
+**Which file wins.** These are one contract written for different readers, so a
+divergence is always a defect to fix, never a choice to make. When you find one:
+
+| Subject | Authority |
+|---|---|
+| Architecture, API/protocol direction | `docs/architecture.md`, `docs/api-design.md` |
+| A specific component's rules | that component's `AGENTS.md` |
+| Release rails, review posture, plans | `RELEASES.md`, `prompts/code-review.md`, `PLANS.md` |
+| Everything else repository-wide | `AGENTS.md`, with this file as its consolidated copy |
+
+Fix the divergence in the same change rather than following whichever copy you
+happened to read — that is exactly how two entry points end up enforcing
+incompatible rules. This is not hypothetical: the architecture/API sections
+below sat contradicting `AGENTS.md` for exactly that reason (see the note
+there).
+
 ---
 
 ## Repository overview
@@ -168,8 +184,10 @@ is applied here by the same judgment.
 - Add intent-rich comments for non-obvious logic, especially around lifecycle,
   retries, race prevention, state transitions, protocol details, and operational
   trade-offs.
-- When architecture or API rules are unclear, reference the TBD docs instead of
-  silently inventing permanent repository policy.
+- When architecture or API rules are unclear, reference `docs/architecture.md`
+  and `docs/api-design.md` instead of silently inventing permanent repository
+  policy; if they genuinely do not cover the case, say so rather than deciding
+  it in passing.
 - Completion checks: relevant lint, format, and test gates were considered and
   run where possible; new complexity is justified in comments or docs when future
   maintainers would otherwise have to rediscover the rationale.
@@ -298,24 +316,31 @@ CI posture:
   service names, or state paths, update the relevant docs or service notes in the
   same change.
 
-### Architecture — TBD placeholder
+### Architecture — applies to `components/**`
 
-The canonical repository architecture contract has not been finalized. For now:
+`docs/architecture.md` is the canonical contract and is filled in. Read it
+before cross-service changes. Alongside it:
 - keep service boundaries explicit
 - avoid cross-cutting abstractions without strong justification
 - record trade-offs in comments when changing architecture-sensitive paths
-- update `docs/architecture.md` if you discover a stable rule that the repo owner
-  should ratify
+- update `docs/architecture.md` when you establish a rule it does not yet state
 
-### API and protocol design — TBD placeholder
+### API and protocol design — applies to `components/**`
 
-The canonical repository API and protocol design contract has not been finalized.
-For now:
+`docs/api-design.md` is the canonical contract and is filled in. Read it before
+adding or changing an interface. Alongside it:
 - keep interfaces explicit and narrow
 - prefer additive changes over ambiguous field reuse
 - comment on compatibility assumptions near protocol code
-- update `docs/api-design.md` if you discover stable design rules the repo owner
-  should ratify
+- update `docs/api-design.md` when you establish a rule it does not yet state
+
+> Both sections above previously read "the canonical contract has not been
+> finalized", copied verbatim from `.cursor/rules/architecture-tbd.mdc` and
+> `api-design-tbd.mdc`. Those rule files predated the docs being written and
+> contradicted this file's own "Both docs are filled" statement — a conflict
+> that only became visible once the rules were consolidated here. They have
+> been corrected and renamed to `architecture.mdc` / `api-design.mdc`, since
+> the `-tbd` suffix was itself part of the stale claim.
 
 ### Debugging and troubleshooting — apply on demand, not always
 
@@ -446,8 +471,9 @@ component `AGENTS.md`. Summarizes the current service flow, interfaces,
 lifecycle, and operational invariants before proposing anything. Surfaces
 unknowns instead of guessing. Prefers simplification, deletion, or boundary
 cleanup before additive complexity. For CI work, inspects trigger coverage,
-permissions, lint strategy, and failure modes. Calls out the TBD architecture/API
-placeholders explicitly when guidance is missing. Output shape: the six-part plan
+permissions, lint strategy, and failure modes. Says so explicitly when
+`docs/architecture.md`/`docs/api-design.md` do not cover a case, rather than
+settling it silently. Output shape: the six-part plan
 listed under the execution-plan contract. Does not implement unless asked.
 
 **`go-rust-maintainer`** — implementation/review specialist for daemon code.

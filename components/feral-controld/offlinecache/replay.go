@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -251,6 +252,9 @@ type replayer struct {
 	// is cheap per goroutine but not instantaneous — see
 	// OverflowAdmission's doc.
 	overflowAdmission chan struct{}
+	// saturationRetiring keeps one saturation episode to one retirement
+	// goroutine — see retireOnSaturation.
+	saturationRetiring atomic.Bool
 }
 
 // NewReplayer constructs a Replayer. staticServer's BaseURL is used to let
@@ -597,6 +601,17 @@ func (r *replayer) retireIfDeadLocked(sessionID string, session CDPSession, err 
 		return
 	}
 
+	r.retireLocked(sessionID, session, "transport failure on "+op)
+}
+
+// retireLocked drops a session from the target set and closes it. Caller
+// holds transitionMu.
+//
+// Closing is the load-bearing half. CDP releases every request a client
+// has paused when that client DISCONNECTS, so closing is what hands the
+// page back its pending requests; merely forgetting the session would
+// leave them paused with nobody left to answer.
+func (r *replayer) retireLocked(sessionID string, session CDPSession, reason string) {
 	r.mu.Lock()
 	// Only forget it if it is still the session we were given: a
 	// concurrent Attach may already have superseded this entry, and
@@ -608,8 +623,8 @@ func (r *replayer) retireIfDeadLocked(sessionID string, session CDPSession, err 
 	delete(r.targets, sessionID)
 	r.mu.Unlock()
 
-	r.logger.Warn("offline cache replay: retiring CDP session after transport failure",
-		zap.String("session_id", sessionID), zap.String("op", op), zap.Error(err))
+	r.logger.Warn("offline cache replay: retiring CDP session",
+		zap.String("session_id", sessionID), zap.String("reason", reason))
 	if closeErr := session.Close(); closeErr != nil {
 		r.logger.Warn("offline cache replay: failed to close retired CDP session",
 			zap.String("session_id", sessionID), zap.Error(closeErr))
@@ -776,15 +791,49 @@ func (r *replayer) onRequestPaused(sessionID string, session CDPSession, params 
 				r.resolveOverflow(sessionID, session, params)
 			}()
 		default:
-			// Both semaphores are full: the CDP socket is not draining
-			// fast enough to answer what Chromium is pausing. Dropping
-			// leaves this one request pending in the page — see
-			// OverflowAdmission's doc for why that beats the two
-			// alternatives.
-			r.logger.Warn("offline cache replay: dropped a paused request, both admission bounds are full",
-				zap.String("session_id", sessionID))
+			r.retireOnSaturation(sessionID, session)
 		}
 	}
+}
+
+// retireOnSaturation gives up on a session that has saturated BOTH
+// admission bounds, closing it so Chromium releases everything it has
+// paused on that target.
+//
+// An earlier revision simply dropped the event with a warning. That was
+// wrong in a way the warning hid: a paused request that is never
+// continued, fulfilled or failed stays paused forever, so dropping did
+// not shed load — it hung that resource, and with it any page waiting on
+// it. There is no third option that answers the request, either, since
+// answering means Send and Send is exactly what has run out of capacity.
+//
+// Retiring is the honest way out: the page gets every pending request
+// back and proceeds against the live network, and the next
+// KioskReplay.SyncPlaylist re-dials and re-arms scope (see RootAttached).
+// That does mean a window where a fail_closed scope is not enforced —
+// accepted here, unlike the unarmed-child case, because there is no
+// working offline path left to protect: 576 concurrent CDP sends
+// outstanding on one socket is a connection that has stopped serving
+// replay altogether, and the alternative on offer is a hung page rather
+// than a correct one.
+//
+// Runs on its own goroutine because this is called from the CDP read
+// pump, which must never take transitionMu (see its doc — a Send held
+// under that lock could not have its reply read). The CAS keeps one
+// saturation episode to one retirement goroutine rather than spawning
+// one per dropped event, which would reintroduce the unbounded growth
+// the admission bounds exist to stop.
+func (r *replayer) retireOnSaturation(sessionID string, session CDPSession) {
+	if !r.saturationRetiring.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer r.saturationRetiring.Store(false)
+		r.transitionMu.Lock()
+		defer r.transitionMu.Unlock()
+		r.retireLocked(sessionID, session,
+			"admission saturated; releasing paused requests to the network rather than hanging them")
+	}()
 }
 
 // processRequestPaused always responds using session — the SAME CDP
