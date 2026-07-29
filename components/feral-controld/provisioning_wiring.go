@@ -120,6 +120,7 @@ type startupOTAGateFlow interface {
 type bootPlayerRecoveryFlow interface {
 	MaybeRecoverPlayerOnBootOnline(ctx context.Context)
 	CompletePendingBootPlayerRecovery()
+	SetBootLifecycleProbe(probe func() bool)
 }
 
 // bootLifecycleWindow bounds how long after kernel boot a controld start still
@@ -140,8 +141,15 @@ const bootLifecycleWindow = 2 * time.Minute
 // class the player-recovery gate exists to prevent). The absent hooks are what
 // encode "this is a boot, not a mid-life restart". Type assertions keep test
 // doubles without the methods harmlessly unwired, as with the claim flow.
-func wireBootLifecycleHooks(n *setupNotifier, ex any, withinBootWindow bool) {
-	if !withinBootWindow {
+//
+// stillWithinBootWindow is consulted twice: once here for the wiring decision
+// (moments after process start, so it doubles as "the process started within
+// the window"), and again — via SetBootLifecycleProbe — at the deferred
+// recovery completion, where it expires a recovery parked for a CDP
+// connection that only arrived after the boot window closed (a
+// display-plugged-in-later Chromium whose page loaded with the network up).
+func wireBootLifecycleHooks(n *setupNotifier, ex any, stillWithinBootWindow func() bool) {
+	if stillWithinBootWindow == nil || !stillWithinBootWindow() {
 		return
 	}
 	if sg, ok := ex.(startupOTAGateFlow); ok {
@@ -149,15 +157,19 @@ func wireBootLifecycleHooks(n *setupNotifier, ex any, withinBootWindow bool) {
 	}
 	if pr, ok := ex.(bootPlayerRecoveryFlow); ok {
 		n.playerRecovery = pr.MaybeRecoverPlayerOnBootOnline
+		pr.SetBootLifecycleProbe(stillWithinBootWindow)
 	}
 }
 
-// startedWithinBootWindow reports whether this daemon process started within
-// bootLifecycleWindow of kernel boot, read from /proc/uptime at wiring time
-// (moments after process start). readFile is injected for tests. Fails
-// CLOSED on any read/parse problem: a spurious mid-exhibition reload is worse
-// than a missed boot recovery (which a kiosk restart also fixes), and on FF1
-// /proc/uptime is always readable, so the closed path is dev-host-only.
+// startedWithinBootWindow reports whether the kernel is currently within
+// bootLifecycleWindow of boot, read from /proc/uptime. Called at wiring time
+// (moments after process start, where it means "this process started within
+// the window") and again by the parked-recovery expiry probe at the deferred
+// CDP-connect completion (where it means "the boot window has not closed
+// yet"). readFile is injected for tests. Fails CLOSED on any read/parse
+// problem: a spurious mid-exhibition reload is worse than a missed boot
+// recovery (which a kiosk restart also fixes), and on FF1 /proc/uptime is
+// always readable, so the closed path is dev-host-only.
 func startedWithinBootWindow(readFile func(string) ([]byte, error), logger *zap.Logger) bool {
 	b, err := readFile("/proc/uptime")
 	if err != nil {

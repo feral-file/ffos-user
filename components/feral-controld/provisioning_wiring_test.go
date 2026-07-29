@@ -239,11 +239,14 @@ func TestSetupNotifierTriggersPlayerRecoveryWhenReachable(t *testing.T) {
 }
 
 // fakeBootFlows satisfies both boot-scoped flow interfaces for wiring tests.
-type fakeBootFlows struct{}
+type fakeBootFlows struct {
+	probe func() bool
+}
 
 func (f *fakeBootFlows) MaybeRunStartupOTAGateOnOnline(context.Context) {}
 func (f *fakeBootFlows) MaybeRecoverPlayerOnBootOnline(context.Context) {}
 func (f *fakeBootFlows) CompletePendingBootPlayerRecovery()             {}
+func (f *fakeBootFlows) SetBootLifecycleProbe(probe func() bool)        { f.probe = probe }
 
 // TestWireBootLifecycleHooksGatesOnBootWindow: BOTH boot-scoped hooks — the
 // startup OTA gate and the player recovery — must stay unwired for a process
@@ -254,7 +257,7 @@ func (f *fakeBootFlows) CompletePendingBootPlayerRecovery()             {}
 // was originally wired unconditionally.
 func TestWireBootLifecycleHooksGatesOnBootWindow(t *testing.T) {
 	midLife := &setupNotifier{ui: &spyNarrationUI{}, claimCtx: context.Background()}
-	wireBootLifecycleHooks(midLife, &fakeBootFlows{}, false)
+	wireBootLifecycleHooks(midLife, &fakeBootFlows{}, func() bool { return false })
 	if midLife.startupGate != nil {
 		t.Fatal("startup OTA gate must not be wired on a mid-life (non-boot) restart")
 	}
@@ -263,12 +266,16 @@ func TestWireBootLifecycleHooksGatesOnBootWindow(t *testing.T) {
 	}
 
 	boot := &setupNotifier{ui: &spyNarrationUI{}, claimCtx: context.Background()}
-	wireBootLifecycleHooks(boot, &fakeBootFlows{}, true)
+	flows := &fakeBootFlows{}
+	wireBootLifecycleHooks(boot, flows, func() bool { return true })
 	if boot.startupGate == nil {
 		t.Fatal("startup OTA gate must be wired on a boot-window start")
 	}
 	if boot.playerRecovery == nil {
 		t.Fatal("player recovery must be wired on a boot-window start")
+	}
+	if flows.probe == nil {
+		t.Fatal("the boot-window probe must be handed to the recovery flow so a parked recovery can expire")
 	}
 }
 

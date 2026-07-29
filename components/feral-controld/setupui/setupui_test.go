@@ -53,12 +53,33 @@ type fakeCDP struct {
 	// gate, when non-nil, is received from at the START of every NoLogSend so
 	// tests can hold the worker inside a send and control interleaving.
 	gate chan struct{}
+	// navigating models the document-replacement window a Page.reload opens:
+	// while set, narration evaluates execute in the DYING context — they are
+	// counted in lostEvaluates and fail, never reaching requests. It is set by
+	// a Page.reload send and cleared once readyAfterProbes readiness probes
+	// have been answered (the probe that crosses the threshold observes the
+	// replacement document).
+	navigating       bool
+	readyAfterProbes int
+	probeCount       int
+	lostEvaluates    int
+	// stampedNonce is the reload nonce the stamp evaluate wrote into the "old
+	// document"; while navigating, a probe reads false only when it carries
+	// THIS value (a probe with a different or absent nonce is fooled by the
+	// old document — the HIGH-severity hazard the nonce exists to prevent).
+	stampedNonce string
 }
 
 func newFakeCDP() *fakeCDP {
 	return &fakeCDP{signal: make(chan struct{}, 64)}
 }
 
+// NoLogSend mimics the REAL cdp client's post-processed contract, not the raw
+// wire envelope: evaluate results arrive already decoded (a JSON-string
+// expression comes back as its unmarshaled map), and shapes the client cannot
+// decode are errors. Divergence here previously let an on-device-inert
+// readiness probe pass a green suite — keep this fake honest against
+// cdp.send's switch when adding evaluate shapes.
 func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
 	if f.gate != nil {
 		<-f.gate
@@ -66,12 +87,60 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 	f.mu.Lock()
 	f.calls++
 	f.methods = append(f.methods, method)
+	if method == "Page.reload" {
+		f.navigating = true
+	}
+	var result interface{} = map[string]any{"ok": true}
+	err := f.err
 	if method == cdp.METHOD_EVALUATE {
-		if req, ok := parseSetupRequest(params); ok {
-			f.requests = append(f.requests, req)
+		expression, _ := params["expression"].(string)
+		switch {
+		case !strings.HasPrefix(expression, "JSON.stringify(") &&
+			!strings.HasPrefix(expression, "window.handleCDPRequest("):
+			// Structural guard, not just documentation: cdp.send decodes only
+			// type:"string" (JSON-unmarshaled) and type:"object" evaluate
+			// results and ERRORS on everything else, so any expression this
+			// package sends must evaluate to a JSON string or an object. A
+			// bare-boolean probe — the exact on-device-inert defect a prior
+			// round shipped — fails here instead of passing green.
+			err = errors.New("CDP response type mismatch: boolean")
+		case strings.HasPrefix(expression, "JSON.stringify({nonce:"):
+			// The reload nonce stamp: record what the "old document" now holds
+			// so probes can be answered the way a real dying document would.
+			if start := strings.Index(expression, `= "`); start >= 0 {
+				rest := expression[start+len(`= "`):]
+				if end := strings.Index(rest, `"`); end >= 0 {
+					f.stampedNonce = rest[:end]
+				}
+			}
+			result = map[string]any{"nonce": f.stampedNonce}
+		case strings.Contains(expression, "typeof window.handleCDPRequest"):
+			// Readiness probe. The dying document runs the SAME player app, so
+			// it answers handler-presence questions too: while navigating, a
+			// probe reads false only when it carries the exact stamped nonce —
+			// a probe with a different or absent nonce is fooled by the old
+			// document and reports ready, which downstream assertions surface
+			// as lost narration.
+			f.probeCount++
+			if f.navigating && f.probeCount > f.readyAfterProbes {
+				f.navigating = false // navigation commits; replacement document answers now
+			}
+			ready := true
+			if f.navigating {
+				ready = f.stampedNonce == "" || !strings.Contains(expression, f.stampedNonce)
+			}
+			result = map[string]any{"ready": ready}
+		case f.navigating:
+			// A narration evaluate landed in the document being torn down: it
+			// never reaches the replacement page's handler.
+			f.lostEvaluates++
+			err = errors.New("Execution context was destroyed")
+		default:
+			if req, ok := parseSetupRequest(params); ok {
+				f.requests = append(f.requests, req)
+			}
 		}
 	}
-	err := f.err
 	f.mu.Unlock()
 
 	select {
@@ -82,7 +151,7 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 	if err != nil {
 		return nil, err
 	}
-	return okResult(), nil
+	return result, nil
 }
 
 func (f *fakeCDP) callCount() int {
@@ -139,17 +208,6 @@ func parseSetupRequest(params map[string]interface{}) (map[string]any, bool) {
 		return nil, false
 	}
 	return payload.Request, true
-}
-
-func okResult() map[string]any {
-	return map[string]any{
-		"result": map[string]any{
-			"result": map[string]any{
-				"type":  "string",
-				"value": `{"ok":true}`,
-			},
-		},
-	}
 }
 
 func writeContract(t *testing.T, body string) string {
@@ -648,4 +706,54 @@ func TestRequestPageReloadInterleavingPreservesRacingNarration(t *testing.T) {
 	last := sender.lastRequest()
 	require.NotNil(t, last)
 	assert.Equal(t, "updating", last["state"], "the racing overlay must still be delivered")
+}
+
+// TestReloadHoldsNarrationUntilReplacementDocumentReady models the
+// navigation/context-replacement window a real Page.reload opens: the reload
+// only ACCEPTS the navigation, and an evaluate sent immediately afterward
+// executes in the dying document and is lost (a same-target reload never
+// drops the DevTools socket, so no reconnect Resync repairs it). Narration
+// queued behind an executed reload must therefore be held until the
+// replacement document reports ready, then delivered — losing zero pushes.
+func TestReloadHoldsNarrationUntilReplacementDocumentReady(t *testing.T) {
+	sender := newFakeCDP()
+	sender.readyAfterProbes = 3 // page becomes ready on the 4th probe
+	svc := newTestService(t, sender, validContract)
+	svc.readyPollInterval = 5 * time.Millisecond
+	svc.readyPollTimeout = 2 * time.Second
+
+	// Nothing narrating: the reload executes and opens the navigation window.
+	executed := make(chan struct{})
+	svc.RequestPageReload(func(ok bool, err error) {
+		assert.True(t, ok)
+		assert.NoError(t, err)
+		close(executed)
+	})
+	select {
+	case <-executed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reload execution")
+	}
+
+	// Narration arrives while the replacement document is still loading.
+	svc.ShowUpdating(10)
+
+	// The lane must deliver it exactly once, AFTER readiness — never into the
+	// dying document.
+	deadline := time.After(2 * time.Second)
+	for {
+		if last := sender.lastRequest(); last != nil && last["state"] == "updating" {
+			break
+		}
+		select {
+		case <-sender.signal:
+		case <-deadline:
+			t.Fatalf("updating overlay never reached the replacement document; lostEvaluates=%d", sender.lostEvaluates)
+		}
+	}
+	sender.mu.Lock()
+	lost, probes := sender.lostEvaluates, sender.probeCount
+	sender.mu.Unlock()
+	assert.Equal(t, 0, lost, "no narration may evaluate into the dying document")
+	assert.GreaterOrEqual(t, probes, 4, "readiness must be polled until the replacement document answers")
 }

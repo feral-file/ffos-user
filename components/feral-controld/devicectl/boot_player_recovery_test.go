@@ -130,6 +130,78 @@ func TestBootPlayerRecovery_WANBeforeCDPConnectRunsOnceOnConnect(t *testing.T) {
 	assert.False(t, e.bootPlayerRecoveryPending.Load())
 }
 
+// TestBootPlayerRecovery_ParkedRecoveryExpiresWithBootWindow is the
+// delayed-CDP regression test: a recovery parked for a CDP connection that
+// only arrives AFTER the kernel boot window closed (display plugged into a
+// headless device hours later, mid-exhibition kiosk restart) must be DROPPED,
+// not run — that late a first connection means Chromium just started and its
+// page loaded with the network already up, a healthy load the boot scoping
+// promises never to disturb. The INLINE path (WAN arriving late while CDP is
+// already up) is deliberately not expired: the page it repairs loaded broken
+// at boot and stays broken until repaired.
+func TestBootPlayerRecovery_ParkedRecoveryExpiresWithBootWindow(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(false)
+	// No Send expectations: an expired recovery must not touch the page.
+
+	e := settledExecutor(mockCDP)
+	e.bootLifecycleProbe = func() bool { return false } // window already closed
+
+	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	assert.True(t, e.bootPlayerRecoveryPending.Load())
+
+	// CDP's first connection arrives after the boot window: parked recovery
+	// expires; nothing runs now or on any later reconnect.
+	e.CompletePendingBootPlayerRecovery()
+	assert.False(t, e.bootPlayerRecoveryPending.Load())
+	e.CompletePendingBootPlayerRecovery()
+	assert.True(t, e.bootPlayerRecoveryDone.Load(), "the boot's one-shot latch stays consumed")
+}
+
+// TestBootPlayerRecovery_ParkedRecoveryRunsWithinBootWindow: the probe
+// answering "still within the window" lets the deferred completion run — the
+// normal boot ordering (provisioning online at boot+10s, CDP at boot+30s).
+func TestBootPlayerRecovery_ParkedRecoveryRunsWithinBootWindow(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(false)
+
+	e := settledExecutor(mockCDP)
+	e.bootLifecycleProbe = func() bool { return true }
+
+	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	expectRefreshEvaluate(t, mockCDP, playerACK(), nil).Times(1)
+	e.CompletePendingBootPlayerRecovery()
+	assert.False(t, e.bootPlayerRecoveryPending.Load())
+}
+
+// TestBootPlayerRecovery_InlinePathIgnoresBootWindowExpiry pins the deliberate
+// asymmetry: with CDP already connected at the online transition, the recovery
+// runs even when the probe reports the boot window closed — a late WAN arrival
+// (Wi-Fi fixed hours after boot) repairs a page that loaded broken at boot and
+// stayed broken. Only the DEFERRED (CDP-connect) completion expires. A future
+// "cleanup" that routes the inline path through CompletePendingBootPlayerRecovery
+// would break this test.
+func TestBootPlayerRecovery_InlinePathIgnoresBootWindowExpiry(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true)
+	expectRefreshEvaluate(t, mockCDP, playerACK(), nil).Times(1)
+
+	e := settledExecutor(mockCDP)
+	e.bootLifecycleProbe = func() bool { return false } // window long closed
+
+	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	assert.False(t, e.bootPlayerRecoveryPending.Load())
+}
+
 // TestBootPlayerRecovery_UnclaimedDoesNotTouchPlayer: on an unclaimed device
 // the claim flow owns the screen (finalizing narration, claim QR), and with
 // no playlist the refresh would refuse and escalate to a Page.reload that can

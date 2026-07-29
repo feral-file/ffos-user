@@ -387,10 +387,11 @@ RPCs that timeout should log the error and either fail the calling operation or 
 
 ### OTA gate (`otagate`)
 
-The OTA gate is single-flight across both its entry points via one `singleflight` key (`"ota"`): concurrent callers **coalesce** onto the one in-flight update and share its result rather than being rejected. The entry points are:
+The OTA gate is single-flight across its entry points via one `singleflight` key (`"ota"`): concurrent callers **coalesce** onto the one in-flight update and share its result rather than being rejected. The entry points are:
 
 - `RequestUpdate` — the user-triggered `updateToLatestVersion` command, mode `Available` (update to any newer version).
 - `EnsureLatestBeforeClaim` — the mandatory pre-claim gate, mode `Required` (update only if a mandatory/minimum version demands it).
+- `EnsureLatestAtStartup` — the boot-time mandatory check for **settled (claimed)** devices, mode `Required`, restoring the setupd-era "Required-mode check on every boot with internet" for the Ready phase. Triggered by the provisioning notifier's WAN-confirmed transitions (`StateOnline`, or `StateUnprovisioned` with reason `unprovisioned`), it runs once per process; a `VersionCheckFailed` outcome retries with the auto-claim backoff bounded at 8 attempts, after which the nightly updater timer owns the update. The trigger is wired **only when controld started within the two-minute kernel boot window** (`feral-controld.service` is `Restart=always`, so an ungated hook would let a mid-exhibition daemon crash-restart spring a required update and reboot on a healthy playing device). Its guard predicate is `claimSettled()` — the exact complement of the pre-claim gate's early return — so for any device state exactly one of the two online-triggered flows owns the boot gate.
 
 Updates are **always driven locally** now — the gate starts the updater systemd unit on-device and tails its log. There is no remote/BLE-triggered update path, and the setupd `setup_phase` machine and `pre_failure_phase` persistence were deliberately not ported; the gate tracks only in-memory `Mode`/`Result` enums and a permanent-failure latch.
 

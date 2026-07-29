@@ -686,7 +686,7 @@ func initializeApp(
 	// wireBootLifecycleHooks for why the Restart=always service makes the
 	// ungated variants a mid-exhibition hazard.
 	wireBootLifecycleHooks(provisioningNotifier, executor,
-		startedWithinBootWindow(go_os.ReadFile, logger))
+		func() bool { return startedWithinBootWindow(go_os.ReadFile, logger) })
 	provMachine := provisioning.New(provisioning.Config{
 		AP:           softAP,
 		Wifi:         wifiCtl,

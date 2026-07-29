@@ -185,6 +185,17 @@ type executor struct {
 	// bootPlayerRecoveryDone it still guarantees at most one recovery per boot.
 	bootPlayerRecoveryPending atomic.Bool
 
+	// bootLifecycleProbe reports whether the kernel is still within the boot
+	// window (main wires it to re-read /proc/uptime). It expires a PARKED
+	// recovery at the deferred completion only: a CDP connection arriving
+	// hours after boot means Chromium just started (display plugged in) and
+	// its page loaded with the network already up — reloading it would be
+	// exactly the mid-exhibition disturbance the boot scoping forbids. The
+	// INLINE path is deliberately not expired: however late WAN arrives, the
+	// page it repairs loaded broken at boot and stays broken until repaired.
+	// nil (tests, doubles) means no expiry.
+	bootLifecycleProbe func() bool
+
 	// logUploaderFactory builds the in-process log uploader. Overridable in tests
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
@@ -902,17 +913,49 @@ func (e *executor) MaybeRecoverPlayerOnBootOnline(_ context.Context) {
 		e.logger.Info("Boot player recovery: WAN confirmed before DevTools attached; recovery pending until CDP connects")
 		return
 	}
-	e.CompletePendingBootPlayerRecovery()
+	// Inline completion: no boot-window expiry (see bootLifecycleProbe) — WAN
+	// just arrived, so the page on screen predates it and is the broken load
+	// this hook repairs, however late that is.
+	e.finishPendingBootPlayerRecovery()
 }
 
-// CompletePendingBootPlayerRecovery executes a parked boot player recovery
-// exactly once. Two callers: MaybeRecoverPlayerOnBootOnline inline (CDP was
-// already connected at the online transition) and main.go's CDP on-connect
-// callback (the transition preceded the first DevTools connection). The CAS
-// makes the two race-safe, and a callback firing with nothing parked — every
-// reconnect for the rest of the process, and all of them outside the boot
-// window — is a no-op.
+// SetBootLifecycleProbe injects the still-within-boot-window check used to
+// expire a parked recovery at the deferred completion (see bootLifecycleProbe).
+// Wired by wireBootLifecycleHooks alongside the hook itself. The field is a
+// plain (non-atomic) func on purpose, which makes call ORDER the safety
+// invariant: this must run during initializeApp wiring, before run() calls
+// CDP.Start and spawns the connect loop that reads it — never afterwards.
+func (e *executor) SetBootLifecycleProbe(probe func() bool) {
+	e.bootLifecycleProbe = probe
+}
+
+// CompletePendingBootPlayerRecovery is the CDP on-connect entry point for a
+// parked boot player recovery. A callback firing with nothing parked — every
+// reconnect for the rest of the process — is a no-op. A callback firing AFTER
+// the boot window elapsed drops the parked recovery instead of running it:
+// that late a first connection means Chromium just started (display plugged
+// into a headless device, mid-exhibition kiosk restart) and its page loaded
+// with the network already up — a healthy load the boot scoping promises
+// never to disturb.
 func (e *executor) CompletePendingBootPlayerRecovery() {
+	if !e.bootPlayerRecoveryPending.Load() {
+		return
+	}
+	if probe := e.bootLifecycleProbe; probe != nil && !probe() {
+		if e.bootPlayerRecoveryPending.CompareAndSwap(true, false) {
+			e.logger.Info("Boot player recovery: boot window elapsed before CDP connected; dropping parked recovery")
+		}
+		return
+	}
+	e.finishPendingBootPlayerRecovery()
+}
+
+// finishPendingBootPlayerRecovery executes a parked boot player recovery
+// exactly once. Two callers: MaybeRecoverPlayerOnBootOnline inline (CDP was
+// already connected at the online transition; no expiry) and
+// CompletePendingBootPlayerRecovery (the CDP on-connect path; expiry-checked
+// above). The CAS makes the two race-safe.
+func (e *executor) finishPendingBootPlayerRecovery() {
 	if !e.bootPlayerRecoveryPending.CompareAndSwap(true, false) {
 		return
 	}

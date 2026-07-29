@@ -15,8 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -76,6 +78,15 @@ const (
 	reloadDoneKey = "__done"
 )
 
+// defaultReadyPollInterval / defaultReadyPollTimeout bound the post-reload
+// readiness poll (see awaitPageReady). The timeout is generous relative to a
+// kiosk page boot (~seconds); after it, narration resumes best-effort — the
+// pre-reload world, no worse.
+const (
+	defaultReadyPollInterval = 250 * time.Millisecond
+	defaultReadyPollTimeout  = 15 * time.Second
+)
+
 // support tracks the one-shot manifest capability decision for the process
 // lifetime. Once resolved it never flips: an older player that predates the
 // setupDisplay contract yields a permanent no-narration fallback.
@@ -105,6 +116,13 @@ type Service struct {
 	// narrationSupported).
 	warnedUnreadable bool
 	logger           *zap.Logger
+
+	// readyPollInterval / readyPollTimeout override the post-reload readiness
+	// poll bounds (zero means the defaults). Immutable after construction:
+	// read lock-free on the worker goroutine, so tests must set them before
+	// the first push/reload spawns a worker.
+	readyPollInterval time.Duration
+	readyPollTimeout  time.Duration
 
 	mu      sync.Mutex
 	support support
@@ -255,9 +273,11 @@ func (s *Service) Narrating() bool {
 // narration queue is what makes the check atomic: the worker is the sole
 // executor, so any narration push racing the caller's decision either landed
 // BEFORE the reload entry (the execution-time check then sees it and skips)
-// or sits BEHIND it in the queue (and repaints after the reload). Neither
-// interleaving can erase an overlay — the caller-side probe-then-Send pattern
-// this replaces could.
+// or sits BEHIND it in the queue and repaints after the reload — reliably so,
+// because an executed reload holds the lane until the replacement document is
+// ready (awaitPageReady), so the repaint cannot evaluate into the dying
+// document and be lost. Neither interleaving can erase an overlay — the
+// caller-side probe-then-Send pattern this replaces could.
 //
 // The skip decision reads INTENT (the last push), not delivery, the same
 // conservative bias Narrating documents. done, when non-nil, is invoked
@@ -310,10 +330,91 @@ func (s *Service) execPageReload(req map[string]any) {
 		}
 		return
 	}
+	// Stamp a per-reload nonce into the CURRENT document before navigating.
+	// The old and new documents run the SAME player app, so handler presence
+	// alone cannot tell them apart — a readiness probe answered by the dying
+	// document would resume narration into it (the exact loss this gate
+	// prevents). The nonce cannot survive the navigation, so "handler present
+	// AND nonce absent" provably identifies the replacement document.
+	// Best-effort: the common reload reason is a dead page, where this
+	// evaluate may fail — a failed stamp only weakens the probe back to
+	// handler-presence (the dead page has no handler to answer with), it
+	// never blocks the reload.
+	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
+	if _, stampErr := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression":    fmt.Sprintf(`JSON.stringify({nonce: window.__ffosReloadNonce = %q})`, nonce),
+		"returnByValue": true,
+	}); stampErr != nil {
+		// Keep the degraded mode diagnosable: a transient failure on a LIVE
+		// page (socket blip) silently weakens the probe, and any narration
+		// lost to a fooled probe would otherwise be untraceable in the field.
+		s.logger.Debug("Reload nonce stamp failed; readiness probe degraded to handler presence",
+			zap.Error(stampErr))
+	}
 	_, err := s.cdp.NoLogSend("Page.reload", map[string]interface{}{})
 	if done != nil {
 		done(true, err)
 	}
+	if err == nil {
+		// Page.reload only ACCEPTS the navigation — the old document is still
+		// being torn down when it returns, and an evaluate sent now can execute
+		// in that dying context and be silently lost (a same-target reload
+		// never drops the DevTools socket, so no reconnect Resync would repair
+		// it). Hold the lane until the REPLACEMENT document is ready before any
+		// queued narration is delivered. Blocking is safe here: this runs on
+		// the worker goroutine, and pushes stay non-blocking enqueues.
+		s.awaitPageReady(nonce)
+	}
+}
+
+// awaitPageReady polls the reloaded page until the player app has installed
+// its command handler in a document that is NOT the pre-reload one (see the
+// nonce rationale in execPageReload), bounding the wait with readyPollTimeout.
+// On timeout, narration resumes best-effort — exactly the delivery guarantee
+// it had before the reload existed.
+//
+// The probe deliberately evaluates to a JSON STRING: the cdp client decodes
+// only type:"string" (JSON-unmarshaled) and type:"object" evaluate results and
+// rejects everything else, so a bare boolean expression would error on every
+// poll and the gate would never pass on a real device.
+func (s *Service) awaitPageReady(nonce string) {
+	interval := s.readyPollInterval
+	if interval <= 0 {
+		interval = defaultReadyPollInterval
+	}
+	timeout := s.readyPollTimeout
+	if timeout <= 0 {
+		timeout = defaultReadyPollTimeout
+	}
+	probe := fmt.Sprintf(
+		`JSON.stringify({ready: typeof window.handleCDPRequest === 'function' && window.__ffosReloadNonce !== %q})`,
+		nonce)
+	deadline := time.Now().Add(timeout)
+	for {
+		result, err := s.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+			"expression":    probe,
+			"returnByValue": true,
+		})
+		if err == nil && readyReported(result) {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.logger.Info("Reloaded page did not report ready in time; narration resumes best-effort")
+			return
+		}
+		time.Sleep(interval)
+	}
+}
+
+// readyReported reads the readiness probe's decoded answer ({"ready": bool},
+// arriving as the map the cdp client produces for JSON-string evaluates).
+func readyReported(result any) bool {
+	m, ok := result.(map[string]any)
+	if !ok {
+		return false
+	}
+	v, _ := m["ready"].(bool)
+	return v
 }
 
 // Resync re-pushes the last intended narration state. It is the "CDP became
