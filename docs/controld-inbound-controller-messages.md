@@ -1807,7 +1807,9 @@ Error cases: `invalid_request` (an argument of the wrong type, more than
 
 Purpose: push per-item state transitions (queued, downloading, terminal
 state) to the mobile app as they happen, so it does not need to poll
-`getOfflineCacheStatus`.
+`getOfflineCacheStatus` to keep a live view current. Delivery is
+best-effort, not guaranteed — see the delivery rules below, and prefer
+`getOfflineCacheStatus` whenever a definitive answer is needed.
 
 That includes transitions the app did not itself cause or cannot see the
 result of: an item evicted by the disk-budget sweep, and an item cleared by
@@ -1838,9 +1840,34 @@ to local hub WebSocket clients.
 Delivery is best-effort on both transports, and **neither one runs on the
 goroutine that produced the notification**. Both are enqueued
 (non-blocking) onto one bounded background queue (`notifyQueueCapacity`,
-256 entries in `notifier.go`), drained one notification at a time, in
-order, by a dedicated worker that performs the relayer send and then the
-hub-WS send for each.
+1024 entries in `notifier.go` — the DP-1 per-playlist item cap), drained
+one notification at a time by a dedicated worker that performs the relayer
+send and then the hub-WS send for each.
+
+**Successive states of the same item coalesce while queued.** The queue
+holds at most one pending notification per `itemId` — the latest state
+that item has reached — so an item may go straight from `queued` to
+`ready` on the wire with no `downloading` in between, and may appear only
+once for a whole burst of transitions. Clients must therefore treat each
+notification as *the item's current state*, never as a step in a sequence
+they can count on receiving in full. Delivered notifications are never
+reordered — one worker sends them in queue order, so `downloading` can
+never arrive after `ready` for the same item — intermediate states are
+simply skipped.
+
+This is what keeps the bound safe: the queue's capacity counts in-flight
+*items*, which a single command's playlist size bounds, rather than
+*transitions*, which nothing bounds. A max-size playlist emits 1024 `queued` notifications from
+command admission alone, before any `downloading`/terminal transitions —
+with one slot per transition, those overran the buffer and accepted items
+silently lost progress.
+
+The capacity is one max-size playlist, which is the largest burst a single
+command can produce — not a guarantee that drops cannot happen. Several
+back-to-back `downloadPlaylist` calls (the rate limiter admits a burst of
+3), or a disk-budget eviction sweep (bounded by the device's record count,
+not by any playlist size), can exceed it in aggregate. That is what the
+reconciliation advice below is for.
 
 That matters because notifications are produced from two places that
 must not pay for delivery: the single capture worker (which would
@@ -1864,10 +1891,11 @@ Per transport, at delivery time:
   delivery cannot run inline.
 
 Two situations drop a notification outright, logged as a warning each
-time: the queue is full (the worker has fallen far enough behind that
-256 notifications are already pending — see `notifyQueueCapacity`'s doc
-for why that bound is not expected to be hit in normal use), or the
-notification was still queued when the daemon began shutting down
+time: the queue is full (more than 1024 *distinct items* are pending
+delivery at once — more than a whole max-size playlist; an update to an
+already-pending item is coalesced into its existing slot and so is never
+dropped for lack of room), or the notification was still queued when the
+daemon began shutting down
 (`Notifier.Close` does not drain the remainder — see its doc for why
 flushing to a client the process is about to stop serving has no value).
 A connection that hits its write deadline (either transport) is dropped

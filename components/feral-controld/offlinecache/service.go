@@ -68,26 +68,40 @@ var ErrItemBusy = errors.New("offline cache: item is currently downloading and c
 // the same reasoning applied here.
 var ErrQueueFull = errors.New("offline cache: download queue is full, try again later")
 
+// dp1MaxPlaylistItems is the DP-1 spec's cap on how many items a single
+// playlist may contain, and therefore the largest burst any ONE command
+// can produce: downloadPlaylist enqueues up to this many jobs, and
+// clearPlaylistCache settles up to this many items, in one shot.
+//
+// Three separate bounds in this package are derived from it rather than
+// each spelling out 1024: defaultMaxQueueLen at 4x (a backlog safety
+// valve, deliberately sized for several bursts), MaxStatusItemIDs and
+// notifyQueueCapacity at 1x (each absorbing exactly one burst). All three
+// exist because of a per-playlist burst, so a future spec change must move
+// them together; naming the shared origin is what makes that lockstep
+// visible instead of leaving it to prose.
+const dp1MaxPlaylistItems = 1024
+
 // defaultMaxQueueLen bounds jobQueue's length (see ErrQueueFull's doc).
 // Not currently exposed via config: unlike maxDiskBytes (a real
 // per-device hardware constraint operators need to tune), this is a
 // pure software safety valve against unbounded backlog growth, not a
 // limit callers are meant to ever actually hit in normal use.
 //
-// The DP-1 playlist spec caps a single playlist at 1024 items, so one
-// DownloadPlaylist call — in the worst case where every item classifies
-// as cacheable (anything but ClassStreaming, see ErrUnsupportedMediaClass's
-// doc) — can enqueue up to 1024 jobs in one shot. Sized at 4x that (4096)
-// so a full-size playlist with every item queued, plus a reasonable
-// burst of other DownloadItem/DownloadPlaylist calls queued behind it
-// before the single serial worker drains them, is never rejected with
-// ErrQueueFull under realistic use. Each queued captureJob only holds
-// item metadata (dp1playlist.PlaylistItem), never resource bytes, so
-// even 4096 entries is a small, bounded amount of memory — this cap
-// exists purely to stop a truly pathological backlog (e.g. a caller
-// bug that re-enqueues in a loop) from growing without bound, not to
-// meaningfully constrain legitimate traffic.
-const defaultMaxQueueLen = 4096
+// One DownloadPlaylist call — in the worst case where every item
+// classifies as cacheable (anything but ClassStreaming, see
+// ErrUnsupportedMediaClass's doc) — can enqueue a whole playlist's worth
+// of jobs in one shot. Sized at 4x that so a full-size playlist with every
+// item queued, plus a reasonable burst of other DownloadItem/
+// DownloadPlaylist calls queued behind it before the single serial worker
+// drains them, is never rejected with ErrQueueFull under realistic use.
+// Each queued captureJob only holds item metadata
+// (dp1playlist.PlaylistItem), never resource bytes, so even 4096 entries
+// is a small, bounded amount of memory — this cap exists purely to stop a
+// truly pathological backlog (e.g. a caller bug that re-enqueues in a
+// loop) from growing without bound, not to meaningfully constrain
+// legitimate traffic.
+const defaultMaxQueueLen = 4 * dp1MaxPlaylistItems
 
 // ErrClearedDuringDownload is returned by DownloadItem when a
 // ClearItem/ClearPlaylist for the same item landed between the epoch
@@ -193,12 +207,11 @@ const maxReasonBytes = 512
 // (nextCursor) rather than into a multi-hundred-MB response.
 const MaxStatusItems = 1000
 
-// MaxStatusItemIDs bounds StatusRequest.ItemIDs. The DP-1 spec caps a
-// playlist at 1024 items (see defaultMaxQueueLen's doc), so no
-// legitimate caller needs to ask about more identifiers than that in one
-// request, while an unbounded list would let a single 4 MiB hub body
+// MaxStatusItemIDs bounds StatusRequest.ItemIDs. No legitimate caller
+// needs to ask about more identifiers than a single playlist can hold,
+// while an unbounded list would let a single 4 MiB hub body
 // (hub.MAX_REQUEST_BODY_BYTES) drive ~100k store reads.
-const MaxStatusItemIDs = 1024
+const MaxStatusItemIDs = dp1MaxPlaylistItems
 
 // StatusRequest is the input to Service.Status.
 //

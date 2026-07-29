@@ -18,15 +18,43 @@ import (
 // connection.
 const notifySendTimeout = 5 * time.Second
 
-// notifyQueueCapacity bounds Notifier's background WS-send queue (see
-// wsQueue's doc). Sized well above what a single playlist's captures
-// could plausibly enqueue in a burst (each item transitions through at
-// most a handful of states — queued/downloading/ready/failed) so the
-// common case never drops a notification; it exists only to cap memory
-// if the background worker somehow falls permanently behind (e.g. every
-// hub client wedged for the whole ws.go sendWriteWait-bounded duration,
-// repeatedly, across many items).
-const notifyQueueCapacity = 256
+// notifyQueueCapacity bounds how many DISTINCT items may have a pending
+// notification at once — NOT how many state transitions may be pending.
+// notifyQueue coalesces per item (see its doc), so this is the real
+// dimension that grows.
+//
+// Sized at one max-size playlist (dp1MaxPlaylistItems): the largest burst
+// a SINGLE command can produce, so no one downloadPlaylist or
+// clearPlaylistCache can overrun it on its own.
+//
+// This is emphatically NOT a guarantee that drops cannot happen. Several
+// producers can exceed it in aggregate, and the design accepts that:
+//   - commandrouter's `heavy` rate-limit gate admits downloadPlaylist in
+//     bursts, so several max-size playlists can be accepted back to back,
+//     each emitting its whole "queued" burst synchronously from admission.
+//   - enforceDiskLimit's eviction sweep emits one not_cached per evicted
+//     item, bounded by the store's record count — which MaxStatusItems'
+//     doc notes can reach tens of thousands — not by any playlist cap.
+//
+// Raising this to cover those would cost several times the worst-case
+// memory to buy a guarantee the eviction sweep still would not honor. The
+// drop path (logged, non-blocking) and getOfflineCacheStatus
+// reconciliation are the deliberate answer instead — and coalescing makes
+// what is lost benign, since a mega-burst's drops land on "queued"
+// announcements while each item's later downloading/terminal states
+// arrive at capture speed, long after slots have freed. Do not read this
+// bound as "drops are impossible" and delete either of those paths.
+//
+// An earlier revision sized this at 256 "well above what a single
+// playlist could plausibly enqueue in a burst". That was wrong in the
+// direction that matters: enqueue emits one "queued" per item and
+// downloadPlaylist drives it in a tight serial loop, so a full-size
+// playlist produced 1024 notifications — 4x that queue — before the
+// worker, which does a relayer round trip plus a hub-WS fan-out per
+// notification, could plausibly drain even a fraction. Accepted items
+// silently lost their state transitions on a completely healthy
+// transport, not just a wedged one.
+const notifyQueueCapacity = dp1MaxPlaylistItems
 
 // Notifier implements ProgressObserver by dual-sending offline_cache_status
 // over the relayer (remote) and hub WS (local) paths, mirroring
@@ -46,13 +74,21 @@ const notifyQueueCapacity = 256
 // (client count) * sendWriteWait, stalling the entire download queue
 // behind what is meant to be a best-effort notification side-channel.
 // Queueing decouples that: OnItemStateChanged only does a non-blocking
-// enqueue (see wsQueue's doc for the full-queue drop trade-off), and the
-// actual SendAll call happens on this Notifier's own goroutine, one
-// notification at a time — preserving delivery ORDER (so a hub client is
-// guaranteed to observe "downloading" before "ready" for the same item)
-// without ever blocking the capture worker on however long SendAll itself
-// takes. The relayer path above needs no equivalent change: relayer.Send
-// already takes an explicit ctx and is bounded by notifySendTimeout.
+// enqueue (see notifyQueue's doc), and the actual SendAll call happens on
+// this Notifier's own goroutine, one notification at a time, without ever
+// blocking the capture worker on however long SendAll itself takes. The
+// relayer path above needs no equivalent change: relayer.Send already
+// takes an explicit ctx and is bounded by notifySendTimeout.
+//
+// Delivery order is preserved: notifications leave in queue order
+// (first-pending-first-out), one at a time, on this one worker, so a
+// client never observes an item's states out of sequence. What coalescing
+// changes is that intermediate states may be SKIPPED — an item can jump
+// straight from nothing to "ready" with no "downloading" in between — not
+// that "downloading" could arrive after "ready". See notifyQueue's doc for
+// why skipping a superseded state costs a client (almost) nothing, while
+// dropping an arbitrary one once a per-event buffer filled cost it real
+// progress.
 type Notifier struct {
 	relayer relayer.Relayer
 	ws      ws.WS
@@ -62,7 +98,7 @@ type Notifier struct {
 	// transport is configured: no background worker is started, and
 	// OnItemStateChanged returns early (see its own nil guard), so there
 	// is nothing to enqueue into or wait on.
-	queue chan wsNotification
+	queue *notifyQueue
 	done  chan struct{}
 	// workerDone is closed by runWSWorker right before it returns, so
 	// Close can block until the worker has actually stopped — mirroring
@@ -73,15 +109,120 @@ type Notifier struct {
 	closeOnce  sync.Once
 }
 
-// wsNotification pairs the exact envelope OnItemStateChanged already
-// built (so runWSWorker sends byte-for-byte what a synchronous send
-// would have) with the ItemStatus it was built from, purely so
-// runWSWorker's own failure log keeps the same item_id/state fields
-// OnItemStateChanged's inline log used to have — decoding them back out
-// of the generic envelope map on the worker side would be more fragile.
-type wsNotification struct {
-	envelope map[string]interface{}
-	status   ItemStatus
+// notifyQueue is the Notifier's pending-delivery buffer: a FIFO over item
+// IDs holding at most ONE pending notification per item — the latest state
+// that item has reached.
+//
+// Coalescing, rather than buffering every transition, is what makes a
+// bounded queue safe here. An item's states are successive (queued ->
+// downloading -> ready/partial/failed, or -> not_cached), so a pending
+// "queued" that has not been delivered by the time the item reaches
+// "ready" tells a client nothing the "ready" does not already imply.
+// Superseding it in place is therefore almost always a pure win, and the
+// alternative — keeping both and dropping something once the buffer fills
+// — is what silently lost accepted items' progress: with one slot per
+// EVENT, a 1024-item playlist overran the buffer on its "queued" burst
+// alone and the drops landed on whatever arrived last, terminal states
+// included.
+//
+// "Almost always" because these notifications are attempt-level, not
+// cache-level (see docs/controld-inbound-controller-messages.md): a failed
+// re-download of an already-ready item reports "failed" while the earlier
+// successful capture is still on disk and playable. A "failed" superseding
+// an undelivered "ready" therefore does discard something. It is not a
+// regression — the per-event FIFO's own last message was equally
+// attempt-level — and the wire contract already directs clients to
+// getOfflineCacheStatus for a cache-level answer, but it is the one case
+// where the latest state is not the whole truth.
+//
+// With one slot per ITEM the buffer holds "the current state of everything
+// not yet delivered", so its bound is a count of items in flight rather
+// than of transitions, which nothing bounds. push drops only when more
+// DISTINCT items than notifyQueueCapacity are pending at once — see that
+// constant's doc for which producers can still reach it, and why
+// getOfflineCacheStatus rather than a bigger buffer is the answer.
+//
+// Ordering: an item keeps the queue position of its FIRST pending
+// notification rather than moving to the back on each update, so a
+// steadily-updating item cannot starve items queued behind it.
+type notifyQueue struct {
+	mu       sync.Mutex
+	capacity int
+	// order holds item IDs awaiting delivery; pending holds each one's
+	// latest status. The two are always mutated together under mu — an id
+	// in order always has an entry in pending and vice versa.
+	order   []string
+	pending map[string]ItemStatus
+	// wake is a 1-buffered signal channel, not a data channel: the worker
+	// always re-reads order/pending under mu rather than racing two
+	// sources of truth (same shape as jobQueue's own wake).
+	wake chan struct{}
+}
+
+func newNotifyQueue(capacity int) *notifyQueue {
+	return &notifyQueue{
+		capacity: capacity,
+		pending:  make(map[string]ItemStatus),
+		wake:     make(chan struct{}, 1),
+	}
+}
+
+// push records status as itemID's pending notification, superseding any
+// undelivered one for the same item. It never blocks. dropped is true only
+// when this is a NEW item and capacity distinct items are already pending
+// — an update to an already-pending item is always accepted, since it
+// consumes no additional slot. pending is how many items are awaiting
+// delivery after this call, sampled inside the same critical section so a
+// caller logging it alongside dropped cannot report a count that
+// contradicts the decision (a re-read afterwards could show room the
+// worker has since freed).
+func (q *notifyQueue) push(status ItemStatus) (dropped bool, pending int) {
+	q.mu.Lock()
+	if _, queued := q.pending[status.ItemID]; queued {
+		q.pending[status.ItemID] = status
+		pending = len(q.order)
+		q.mu.Unlock()
+		// No wake: the entry was already queued, so the worker either has
+		// not reached it yet (it will see this newer status) or is about
+		// to be woken by the signal that queued it.
+		return false, pending
+	}
+	if len(q.order) >= q.capacity {
+		pending = len(q.order)
+		q.mu.Unlock()
+		return true, pending
+	}
+	q.order = append(q.order, status.ItemID)
+	q.pending[status.ItemID] = status
+	pending = len(q.order)
+	q.mu.Unlock()
+
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+	return false, pending
+}
+
+// pop removes and returns the next pending notification in queue order.
+func (q *notifyQueue) pop() (ItemStatus, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.order) == 0 {
+		return ItemStatus{}, false
+	}
+	id := q.order[0]
+	q.order = q.order[1:]
+	status := q.pending[id]
+	delete(q.pending, id)
+	return status, true
+}
+
+// len reports how many items are currently awaiting delivery.
+func (q *notifyQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.order)
 }
 
 // NewNotifier constructs a Notifier and, when w is non-nil, starts its
@@ -97,7 +238,7 @@ func NewNotifier(r relayer.Relayer, w ws.WS, logger *zap.Logger) *Notifier {
 	// it is started whenever either one is configured — not just for the
 	// hub WS as it was when only that path was queued.
 	if w != nil || r != nil {
-		n.queue = make(chan wsNotification, notifyQueueCapacity)
+		n.queue = newNotifyQueue(notifyQueueCapacity)
 		n.done = make(chan struct{})
 		n.workerDone = make(chan struct{})
 		go n.runWSWorker()
@@ -106,13 +247,6 @@ func NewNotifier(r relayer.Relayer, w ws.WS, logger *zap.Logger) *Notifier {
 }
 
 func (n *Notifier) OnItemStateChanged(status ItemStatus) {
-	data := map[string]interface{}{
-		"type":                 "notification",
-		"notification_type":    string(relayer.NOTIFICATION_TYPE_OFFLINE_CACHE_STATUS),
-		"message":              status,
-		"persist_record_count": 1,
-	}
-
 	// Both transports go through the same bounded queue, so this call
 	// never blocks its caller.
 	//
@@ -131,50 +265,82 @@ func (n *Notifier) OnItemStateChanged(status ItemStatus) {
 	if n.queue == nil {
 		return
 	}
-	// Non-blocking: a full queue means the worker has fallen far enough
-	// behind that notifyQueueCapacity notifications are already pending
-	// (see that constant's doc for how generous that bound already is) —
-	// dropping this one and logging is preferable to blocking the caller
-	// waiting for room, which would defeat the entire point of queueing.
-	select {
-	case n.queue <- wsNotification{envelope: data, status: status}:
-	default:
+	// Non-blocking. A drop here means more DISTINCT items than
+	// notifyQueueCapacity are pending delivery at once — more than a whole
+	// max-size playlist — since an update to an already-pending item is
+	// coalesced into its existing slot rather than needing a new one (see
+	// notifyQueue's doc). Dropping and logging beats blocking the caller
+	// for room, which would defeat the entire point of queueing; the
+	// client's reconciliation path is getOfflineCacheStatus.
+	if dropped, pending := n.queue.push(status); dropped {
 		n.logger.Warn("offline cache: dropped offline_cache_status notification, delivery queue full",
-			zap.String("item_id", status.ItemID), zap.String("state", string(status.State)))
+			zap.String("item_id", status.ItemID), zap.String("state", string(status.State)),
+			zap.Int("pending_items", pending))
+	}
+}
+
+// envelopeFor builds the wire envelope for one notification. Built at
+// DELIVERY time rather than at enqueue time so notifyQueue stores only the
+// small ItemStatus value it coalesces on, not a per-notification map that
+// would be thrown away the moment a newer state superseded it. Mirrors
+// status.go's sendNotification envelope shape exactly so mobile clients
+// can reuse the same parsing.
+func envelopeFor(status ItemStatus) map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "notification",
+		"notification_type":    string(relayer.NOTIFICATION_TYPE_OFFLINE_CACHE_STATUS),
+		"message":              status,
+		"persist_record_count": 1,
 	}
 }
 
 // deliver performs both transports' sends for one queued notification,
 // on the worker goroutine. Relayer first, mirroring the order the inline
 // implementation used.
-func (n *Notifier) deliver(item wsNotification) {
+func (n *Notifier) deliver(status ItemStatus) {
+	envelope := envelopeFor(status)
 	if n.relayer != nil && n.relayer.IsConnected() {
 		ctx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
-		if err := n.relayer.Send(ctx, item.envelope); err != nil {
+		if err := n.relayer.Send(ctx, envelope); err != nil {
 			n.logger.Warn("offline cache: failed to send offline_cache_status via relayer",
-				zap.String("item_id", item.status.ItemID), zap.String("state", string(item.status.State)), zap.Error(err))
+				zap.String("item_id", status.ItemID), zap.String("state", string(status.State)), zap.Error(err))
 		}
 		cancel()
 	}
 	if n.ws != nil {
-		n.sendWS(item)
+		n.sendWS(envelope, status)
 	}
 }
 
 // runWSWorker drains the queue and performs both transports' sends one
-// notification at a time, in enqueue order, until Close is called — see
-// Notifier's own doc for why this runs off OnItemStateChanged's caller's
-// goroutine. Select is checked between every notification (not just once
-// at the top), so a Close that arrives while several notifications are
-// still queued stops delivery promptly rather than draining everything
-// first — see Close's own doc on why that is the intended, documented
-// drop behavior, not a bug.
+// notification at a time, in first-pending order (an item's position is
+// the one its earliest undelivered notification took — see notifyQueue),
+// until Close is called; see Notifier's own doc for why this runs off
+// OnItemStateChanged's caller's goroutine. done is checked before every
+// single delivery, not just once per wake, so a Close arriving while many
+// notifications are still queued stops delivery at the next notification
+// rather than draining everything first — see Close's own doc on why that
+// is the intended, documented drop behavior, not a bug.
 func (n *Notifier) runWSWorker() {
 	defer close(n.workerDone)
 	for {
+		// Drain everything currently pending before waiting again: wake is
+		// a 1-buffered signal, so a burst of pushes can coalesce into a
+		// single token and waiting per token would strand the rest.
+		for {
+			select {
+			case <-n.done:
+				return
+			default:
+			}
+			status, ok := n.queue.pop()
+			if !ok {
+				break
+			}
+			n.deliver(status)
+		}
 		select {
-		case notification := <-n.queue:
-			n.deliver(notification)
+		case <-n.queue.wake:
 		case <-n.done:
 			return
 		}
@@ -183,11 +349,11 @@ func (n *Notifier) runWSWorker() {
 
 // sendWS is the hub-WebSocket half of deliver, kept separate so the
 // relayer half above reads as its own step.
-func (n *Notifier) sendWS(notification wsNotification) {
-	if err := n.ws.SendAll(notification.envelope); err != nil {
+func (n *Notifier) sendWS(envelope map[string]interface{}, status ItemStatus) {
+	if err := n.ws.SendAll(envelope); err != nil {
 		n.logger.Warn("offline cache: failed to send offline_cache_status via websocket",
-			zap.String("item_id", notification.status.ItemID),
-			zap.String("state", string(notification.status.State)), zap.Error(err))
+			zap.String("item_id", status.ItemID),
+			zap.String("state", string(status.State)), zap.Error(err))
 	}
 }
 
@@ -201,9 +367,9 @@ func (n *Notifier) sendWS(notification wsNotification) {
 //
 // Best-effort in what it delivers, not in whether it returns: any
 // notifications still buffered in the queue when Close is called are
-// simply dropped rather than drained (the worker's own select can react
-// to done before or after draining what is left — see runWSWorker's
-// doc), since this only runs at daemon shutdown (see main.go's defer
+// simply dropped rather than drained — the worker checks done before
+// every delivery (see runWSWorker), so it stops at the next notification
+// and abandons the rest — since this only runs at daemon shutdown (see main.go's defer
 // ordering, registered to run once Service.Stop has already guaranteed
 // no further OnItemStateChanged calls are coming) and there is no value
 // in guaranteeing every buffered notification is flushed to a client the
