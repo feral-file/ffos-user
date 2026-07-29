@@ -129,6 +129,29 @@ type bootPlayerRecoveryFlow interface {
 // visibly restart playing artwork for no reason.
 const bootLifecycleWindow = 2 * time.Minute
 
+// wireBootLifecycleHooks attaches the executor's boot-scoped online hooks to
+// the notifier — the startup OTA gate and the boot player recovery — and ONLY
+// when this process started within the kernel boot window. Both restore
+// boot-time behaviors, and the gate matters beyond taste: feral-controld.service
+// is Restart=always, so a mid-exhibition daemon crash-restart re-delivers the
+// initial online state, and an ungated OTA hook would let that restart spring a
+// required update — and its reboot — on a healthy playing device whose
+// mid-life updates belong to the nightly updater timer (the same disturbance
+// class the player-recovery gate exists to prevent). The absent hooks are what
+// encode "this is a boot, not a mid-life restart". Type assertions keep test
+// doubles without the methods harmlessly unwired, as with the claim flow.
+func wireBootLifecycleHooks(n *setupNotifier, ex any, withinBootWindow bool) {
+	if !withinBootWindow {
+		return
+	}
+	if sg, ok := ex.(startupOTAGateFlow); ok {
+		n.startupGate = sg.MaybeRunStartupOTAGateOnOnline
+	}
+	if pr, ok := ex.(bootPlayerRecoveryFlow); ok {
+		n.playerRecovery = pr.MaybeRecoverPlayerOnBootOnline
+	}
+}
+
 // startedWithinBootWindow reports whether this daemon process started within
 // bootLifecycleWindow of kernel boot, read from /proc/uptime at wiring time
 // (moments after process start). readFile is injected for tests. Fails

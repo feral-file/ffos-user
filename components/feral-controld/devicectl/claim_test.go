@@ -51,6 +51,12 @@ func (s *narratorSpy) ShowUpdating(progress int) {
 }
 func (s *narratorSpy) Hide() { s.calls = append(s.calls, "hide") }
 
+// Narrating mirrors setupui.Service: something has been shown and the last
+// intent was not a hide.
+func (s *narratorSpy) Narrating() bool {
+	return len(s.calls) > 0 && s.calls[len(s.calls)-1] != "hide"
+}
+
 func strPtr(s string) *string { return &s }
 
 func TestFormatDeviceConnectURL_ByteCompatible(t *testing.T) {

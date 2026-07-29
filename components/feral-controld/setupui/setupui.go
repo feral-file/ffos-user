@@ -228,6 +228,17 @@ func (s *Service) Hide() {
 	s.push(map[string]any{"state": stateHidden})
 }
 
+// Narrating reports whether the last intended narration state is a visible
+// overlay — something has been shown and it was not subsequently hidden. It
+// reflects INTENT (the last push), not delivery: a push whose CDP send failed
+// still counts, which is the conservative reading for callers deciding whether
+// a destructive page operation would erase someone's narration.
+func (s *Service) Narrating() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last != nil && stringField(s.last, "state") != stateHidden
+}
+
 // Resync re-pushes the last intended narration state. It is the "CDP became
 // available" trigger: wire it to the CDP client's on-connect callback so a
 // reconnecting or freshly-loaded player catches up to the current setup state.

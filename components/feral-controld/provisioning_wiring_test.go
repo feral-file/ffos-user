@@ -238,6 +238,40 @@ func TestSetupNotifierTriggersPlayerRecoveryWhenReachable(t *testing.T) {
 	}
 }
 
+// fakeBootFlows satisfies both boot-scoped flow interfaces for wiring tests.
+type fakeBootFlows struct{}
+
+func (f *fakeBootFlows) MaybeRunStartupOTAGateOnOnline(context.Context) {}
+func (f *fakeBootFlows) MaybeRecoverPlayerOnBootOnline(context.Context) {}
+func (f *fakeBootFlows) CompletePendingBootPlayerRecovery()             {}
+
+// TestWireBootLifecycleHooksGatesOnBootWindow: BOTH boot-scoped hooks — the
+// startup OTA gate and the player recovery — must stay unwired for a process
+// that started outside the kernel boot window. feral-controld.service is
+// Restart=always, so a mid-exhibition crash-restart re-delivers the initial
+// online state; an ungated OTA hook would let that restart spring a required
+// update (and reboot) on a healthy playing device. Regression: the OTA hook
+// was originally wired unconditionally.
+func TestWireBootLifecycleHooksGatesOnBootWindow(t *testing.T) {
+	midLife := &setupNotifier{ui: &spyNarrationUI{}, claimCtx: context.Background()}
+	wireBootLifecycleHooks(midLife, &fakeBootFlows{}, false)
+	if midLife.startupGate != nil {
+		t.Fatal("startup OTA gate must not be wired on a mid-life (non-boot) restart")
+	}
+	if midLife.playerRecovery != nil {
+		t.Fatal("player recovery must not be wired on a mid-life (non-boot) restart")
+	}
+
+	boot := &setupNotifier{ui: &spyNarrationUI{}, claimCtx: context.Background()}
+	wireBootLifecycleHooks(boot, &fakeBootFlows{}, true)
+	if boot.startupGate == nil {
+		t.Fatal("startup OTA gate must be wired on a boot-window start")
+	}
+	if boot.playerRecovery == nil {
+		t.Fatal("player recovery must be wired on a boot-window start")
+	}
+}
+
 // TestStartedWithinBootWindow pins the boot-lifecycle gate: only a readable,
 // parseable /proc/uptime below the window arms the boot player recovery;
 // everything else fails CLOSED (a spurious mid-exhibition reload is worse

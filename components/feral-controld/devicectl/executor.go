@@ -634,6 +634,7 @@ type setupNarrator interface {
 	ShowJoinFailed(reason string)
 	ShowUpdating(progress int)
 	Hide()
+	Narrating() bool
 }
 
 // setupUI lazily builds the setup-narration surface from the executor's CDP
@@ -757,8 +758,13 @@ const startupOTAGateMaxCheckAttempts = 8
 // any overlap). Changing either predicate without the other opens a hole
 // where no boot-time gate runs at all.
 //
-// Triggered on every provisioning →Online/Unprovisioned transition; the gate
-// runs once per process lifetime. Outcome handling:
+// Triggered on every provisioning →Online/Unprovisioned transition, but wired
+// (wireBootLifecycleHooks) only when the daemon started within the kernel boot
+// window: feral-controld.service is Restart=always, so without that gate a
+// mid-exhibition crash-restart would re-run this check and could spring a
+// required update — and its reboot — on a healthy playing device; mid-life
+// updates belong to the nightly updater timer. The gate runs once per process
+// lifetime. Outcome handling:
 //   - NoUpdateNeeded / TooOldToUpgrade: settled for this boot.
 //   - UpdateStarted: on success the device reboots into the new build. On
 //     error the ladder latched OnPermanentFailure (already narrated); still
@@ -921,6 +927,21 @@ func (e *executor) CompletePendingBootPlayerRecovery() {
 	refreshErr := e.evaluateRefreshArtwork()
 	if refreshErr == nil {
 		e.logger.Info("Boot player recovery: in-app artwork refresh re-ran the pre-network fetches")
+		return
+	}
+	// Shared guard immediately before the destructive step: a Page.reload
+	// erases whatever setup narration is on screen (a required-update ladder's
+	// "updating" progress started by the concurrent startup OTA gate, or a
+	// factory reset that raced past the claimSettled check above), and a
+	// same-target reload does NOT drop the DevTools websocket, so the
+	// on-connect Resync that normally restores narration never fires. When the
+	// narration surface owns the screen, the artwork behind it does not matter
+	// this instant — skip the reload rather than fight over the display. The
+	// in-app refresh above is safe regardless: it re-mounts artwork BEHIND the
+	// overlay without touching page state.
+	if e.setupUI().Narrating() {
+		e.logger.Info("Boot player recovery: setup narration on screen; skipping page reload to preserve it",
+			zap.NamedError("refreshError", refreshErr))
 		return
 	}
 	if _, reloadErr := e.cdp.Send("Page.reload", map[string]interface{}{}); reloadErr != nil {
