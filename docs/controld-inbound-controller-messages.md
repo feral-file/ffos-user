@@ -1898,8 +1898,19 @@ dropped for lack of room), or the notification was still queued when the
 daemon began shutting down
 (`Notifier.Close` does not drain the remainder — see its doc for why
 flushing to a client the process is about to stop serving has no value).
-A connection that hits its write deadline (either transport) is dropped
-as a failed write and closed, same as any other write error; the
+Shutdown bounds how long it waits on the delivery already in flight:
+`main.go` uses `Notifier.CloseWithin` with a budget well inside the
+daemon's own shutdown timeout, because neither leg finishes fast enough
+for it — the relayer send waits on that connection's mutex (bounded, but
+several times over the whole shutdown timeout), and the hub fan-out
+bounds each per-connection write but not the loop across clients, so that
+leg grows with client count. Note this bounds that *step*, not shutdown
+as a whole: the abandoned delivery keeps the transport mutex it was
+using, and both transports take that same mutex for their own teardown
+later in the shutdown sequence, so a wedged delivery delays shutdown
+either way. A connection that hits its write deadline (either transport)
+is dropped as a failed write and closed, same as any other write error;
+the
 queued/downloading captures behind it are unaffected either way.
 
 The `message` body is one `items[]` entry of `getOfflineCacheStatus` and

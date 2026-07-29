@@ -11,12 +11,33 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
 )
 
-// notifySendTimeout bounds how long relayer.Send may block for one
-// offline_cache_status push. OnItemStateChanged runs on Service's worker
-// goroutine (see service.go's notify), so an unbounded block here would
-// stall the entire download queue behind a slow/backpressured relayer
-// connection.
+// notifySendTimeout is the deadline deliver puts on the ctx it hands
+// relayer.Send.
+//
+// It does NOT currently bound anything: relayer.Send never reads its ctx
+// (relayer.go — it takes the connection mutex, sets its own WRITE_WAIT
+// write deadline, and writes). What actually bounds that leg is WRITE_WAIT
+// plus however long the connection mutex is contended, not this value, so
+// do not size anything (a shutdown budget, say) against it as though it
+// were enforced today. Kept because the ctx parameter is part of that
+// interface and a future implementation honoring it should get this bound
+// rather than none; making it real belongs in relayer.Send.
+//
+// Delivery runs on Notifier's own worker goroutine, so an unbounded block
+// no longer stalls the capture queue the way it did when the send was
+// inline on OnItemStateChanged's caller — see Notifier's doc.
 const notifySendTimeout = 5 * time.Second
+
+// ShutdownCloseBudget is the budget main.go passes to CloseWithin at
+// daemon shutdown. Not a "default" — CloseWithin always takes an explicit
+// budget and has exactly this one caller; the name says what the value is
+// for. It lives here, next to the method whose contract it bounds, rather
+// than in main.go so a test asserting that the idle path fits inside it
+// can name the production value instead of a generous stand-in.
+//
+// Deliberately a small fraction of main.go's SHUTDOWN_TIMEOUT, which
+// covers every cleanup step, not just this one.
+const ShutdownCloseBudget = 250 * time.Millisecond
 
 // notifyQueueCapacity bounds how many DISTINCT items may have a pending
 // notification at once — NOT how many state transitions may be pending.
@@ -77,8 +98,11 @@ const notifyQueueCapacity = dp1MaxPlaylistItems
 // enqueue (see notifyQueue's doc), and the actual SendAll call happens on
 // this Notifier's own goroutine, one notification at a time, without ever
 // blocking the capture worker on however long SendAll itself takes. The
-// relayer path above needs no equivalent change: relayer.Send already
-// takes an explicit ctx and is bounded by notifySendTimeout.
+// relayer path goes through that same worker, which is what decouples it
+// too — NOT a deadline of its own: relayer.Send ignores the ctx deliver
+// hands it, so that leg is bounded only by WRITE_WAIT plus however long
+// the relayer's connection mutex is contended (see notifySendTimeout, and
+// Close for why neither leg is fast enough for a shutdown budget).
 //
 // Delivery order is preserved: notifications leave in queue order
 // (first-pending-first-out), one at a time, on this one worker, so a
@@ -377,6 +401,31 @@ func (n *Notifier) sendWS(envelope map[string]interface{}, status ItemStatus) {
 // FLIGHT when Close is called is allowed to finish normally (ws.WS.SendAll
 // takes no ctx to cancel it early) — Close waits for that one call, not
 // for the whole queue.
+//
+// Neither leg of that call finishes fast enough for a shutdown budget,
+// though they fail differently and the difference matters:
+//
+//   - The relayer leg IS bounded, just far too loosely. deliver waits on
+//     that connection's mutex (IsConnected takes it before Send is even
+//     reached), and every holder bounds its own critical section —
+//     WRITE_WAIT for a write, an explicit deadline for ping, the dialer's
+//     HandshakeTimeout for a reconnect — and Go's mutex hands off FIFO
+//     once a waiter has blocked long enough, so nothing can starve this
+//     wait indefinitely. But a waiter joins the TAIL of that queue: the
+//     floor is WRITE_WAIT plus one contended section, and it grows with
+//     however many holders are already queued ahead. Even the floor is
+//     several times the whole daemon shutdown timeout. Note it is NOT
+//     notifySendTimeout that produces any of this: relayer.Send ignores
+//     the ctx deliver builds (see that constant's doc).
+//   - The hub leg is unbounded in aggregate, which is the categorically
+//     worse shape: ws.WS.SendAll caps each per-connection write at its own
+//     sendWriteWait but not the loop, so the wait grows with however many
+//     clients are connected. Interrupting an in-flight write in ws is the
+//     only thing that would fix that, which is why it is the real
+//     follow-up rather than a bigger number here.
+//
+// Daemon shutdown must not spend its whole budget on either — see
+// CloseWithin, which is what main.go actually calls.
 func (n *Notifier) Close() {
 	if n.done == nil {
 		return
@@ -385,4 +434,54 @@ func (n *Notifier) Close() {
 		close(n.done)
 	})
 	<-n.workerDone
+}
+
+// CloseWithin is Close bounded to budget, reporting whether the worker
+// actually stopped in time. It signals the worker exactly as Close does —
+// so no further notification is ever picked up either way — and only the
+// WAIT is abandoned when budget expires.
+//
+// It exists because Close's wait is far longer than the daemon's shutdown
+// allows (see its doc): main.go force-exits SHUTDOWN_TIMEOUT after
+// cancellation, and every cleanup step registered before the notifier's
+// runs AFTER it in defer order, so blocking here strands all of them.
+//
+// It does NOT make shutdown bounded end to end, and must not be read that
+// way. Both transports take, for their own teardown, the very mutex the
+// abandoned delivery still holds — hub.Stop -> ws.Close takes each
+// connection's write mutex, and relayer.Close takes the relayer's — so a
+// wedge simply blocks at whichever of those comes next in LIFO order. The
+// slow step is relocated, not removed; removing it means interrupting an
+// in-flight write, which belongs in ws and relayer, not here.
+//
+// What giving up actually buys is therefore leg-dependent. A wedge on the
+// hub leg lets mint-pairing, the playlist refresher, the relayer,
+// provisioning and the mDNS advertiser run before blocking at hub.Stop; a
+// wedge on the relayer leg lets only mint-pairing and the playlist
+// refresher run before blocking at relayer.Close. Those two are the only
+// steps guaranteed to run in both cases — do not extend this list without
+// re-checking main.go's defer registration order against which mutex the
+// wedged leg holds.
+//
+// The trade when budget expires: an in-flight delivery may still be
+// running on the worker goroutine after this returns, so the "no further
+// SendAll after close" guarantee Close provides no longer holds. That is
+// fine for the one caller that accepts it — a process on its way out — and
+// is exactly why Close itself is left strict for tests and any caller that
+// needs the guarantee rather than the bound.
+func (n *Notifier) CloseWithin(budget time.Duration) (stopped bool) {
+	if n.done == nil {
+		return true
+	}
+	n.closeOnce.Do(func() {
+		close(n.done)
+	})
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-n.workerDone:
+		return true
+	case <-timer.C:
+		return false
+	}
 }

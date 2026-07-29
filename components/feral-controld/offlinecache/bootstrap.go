@@ -135,8 +135,8 @@ type Runtime struct {
 	// Bootstrap call since it depends on KioskReplay.
 	ScopeLost    ScopeLostRegistrar
 	StaticServer StaticServer
-	// Notifier is exposed so main.go can Close its background WS-
-	// delivery worker at shutdown (see Notifier.Close's doc) — the
+	// Notifier is exposed so main.go can stop its background WS-delivery
+	// worker at shutdown (via CloseWithin — see its doc) — the
 	// Service itself only holds it through the narrower ProgressObserver
 	// interface (OnItemStateChanged only), which has no Close method, so
 	// Service cannot own this shutdown step itself.

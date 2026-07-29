@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -449,4 +450,123 @@ func TestNotifier_OnItemStateChanged_ConcurrentProducersLoseNoItem(t *testing.T)
 		return true
 	}, 10*time.Second, 10*time.Millisecond,
 		"every item must reach the transport at its final state; a stranded item means the wake handoff dropped a signal")
+}
+
+// TestNotifier_CloseWithin_ReturnsOnBudgetWhenDeliveryIsWedged is the
+// regression test for shutdown budget exhaustion. Close waits for an
+// in-flight delivery to finish, and neither leg finishes fast enough for
+// that: the relayer send waits on that connection's mutex (bounded, but
+// several times over the whole shutdown timeout), and ws.WS.SendAll bounds
+// each per-connection write but not the loop across however many hub
+// clients are connected. main.go force-exits SHUTDOWN_TIMEOUT after
+// cancellation, and every cleanup step registered before the notifier runs
+// AFTER it (LIFO), so waiting it out here strands all of them.
+//
+// Bounding the wait does not save all of them — both transports take, for
+// their own teardown, the very mutex the abandoned delivery still holds,
+// so it just blocks at whichever comes next (see CloseWithin's doc) — but
+// mint-pairing and the playlist refresher run either way, and a hub-leg
+// wedge additionally frees the relayer, provisioning and mDNS.
+//
+// CloseWithin must therefore return on its budget while the delivery is
+// still wedged, and must still have signaled the worker so nothing new is
+// picked up.
+func TestNotifier_CloseWithin_ReturnsOnBudgetWhenDeliveryIsWedged(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockRelayer := mocks.NewMockRelayer(ctrl)
+	mockWS := mocks.NewMockWS(ctrl)
+	mockRelayer.EXPECT().IsConnected().Return(false).AnyTimes()
+
+	release := make(chan struct{})
+	sendStarted := make(chan struct{}, 1)
+	var sends atomic.Int64
+	mockWS.EXPECT().SendAll(gomock.Any()).DoAndReturn(func(interface{}) error {
+		sends.Add(1)
+		select {
+		case sendStarted <- struct{}{}:
+		default:
+		}
+		<-release // stands in for a wedged hub client
+		return nil
+	}).AnyTimes()
+
+	notifier := offlinecache.NewNotifier(mockRelayer, mockWS, zaptest.NewLogger(t))
+	// Released only after the assertions, so the wedge is genuinely still
+	// in flight while CloseWithin returns. Released explicitly below rather
+	// than only here, since the drop-on-close assertion needs the worker to
+	// have actually finished; this stays as the failure-path safety net.
+	var releaseOnce sync.Once
+	unwedge := func() { releaseOnce.Do(func() { close(release) }) }
+	defer func() {
+		unwedge()
+		notifier.Close()
+	}()
+
+	notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-1", State: offlinecache.StateQueued})
+	select {
+	case <-sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never reached its deliberately-wedged delivery")
+	}
+	// Queue more work behind the wedge: none of it may be picked up after
+	// CloseWithin signals, budget expiry notwithstanding.
+	for i := 0; i < 10; i++ {
+		notifier.OnItemStateChanged(offlinecache.ItemStatus{
+			ItemID: fmt.Sprintf("item-%d", i+2), State: offlinecache.StateReady,
+		})
+	}
+
+	const budget = 100 * time.Millisecond
+	start := time.Now()
+	stopped := notifier.CloseWithin(budget)
+	elapsed := time.Since(start)
+
+	assert.False(t, stopped, "CloseWithin must report that the worker did not stop, not silently claim a clean shutdown")
+	assert.Less(t, elapsed, time.Second,
+		"CloseWithin must return on its budget rather than waiting out a wedged SendAll: shutdown has %s for everything", budget)
+
+	// Asserting the drop-on-close behavior requires letting the wedge go
+	// and waiting for the worker to actually exit. Asserting the count
+	// while it is still blocked inside the first SendAll would be vacuous:
+	// a single worker cannot have made a second call yet whether or not it
+	// honors done at all.
+	unwedge()
+	notifier.Close()
+	assert.Equal(t, int64(1), sends.Load(),
+		"the worker must abandon the 10 notifications queued behind the wedge once CloseWithin signaled, not deliver them on the way out")
+}
+
+// TestNotifier_CloseWithin_ReturnsImmediatelyWhenIdle pins the happy path
+// (the overwhelmingly common one at shutdown): an idle worker stops well
+// inside the budget and is reported as stopped, so the warning main.go
+// logs on expiry stays meaningful rather than firing on every shutdown.
+func TestNotifier_CloseWithin_ReturnsImmediatelyWhenIdle(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockWS := mocks.NewMockWS(ctrl)
+	mockWS.EXPECT().SendAll(gomock.Any()).Return(nil).AnyTimes()
+
+	// Deliberately the PRODUCTION budget, not a generous test value: this
+	// is what demonstrates that 250ms is actually sufficient for the path
+	// every healthy shutdown takes, so main.go's expiry warning stays
+	// meaningful rather than firing routinely.
+	notifier := offlinecache.NewNotifier(nil, mockWS, zaptest.NewLogger(t))
+	assert.True(t, notifier.CloseWithin(offlinecache.ShutdownCloseBudget), "an idle worker must stop well inside the production budget")
+
+	// Idempotent, and safe alongside Close, matching Close's own contract.
+	assert.True(t, notifier.CloseWithin(offlinecache.ShutdownCloseBudget))
+	assert.NotPanics(t, notifier.Close)
+}
+
+// TestNotifier_CloseWithin_NoTransportsIsANoop mirrors Close's nil-guard:
+// with neither transport configured no worker was ever started, so there
+// is nothing to wait on and the call must report success rather than
+// burning its budget.
+func TestNotifier_CloseWithin_NoTransportsIsANoop(t *testing.T) {
+	notifier := offlinecache.NewNotifier(nil, nil, zaptest.NewLogger(t))
+	start := time.Now()
+	assert.True(t, notifier.CloseWithin(offlinecache.ShutdownCloseBudget))
+	assert.Less(t, time.Since(start), time.Second)
 }

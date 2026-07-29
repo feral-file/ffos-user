@@ -94,11 +94,11 @@ type app struct {
 	KioskReplay              offlinecache.KioskReplay
 	OfflineCacheService      offlinecache.Service
 	OfflineCacheStaticServer offlinecache.StaticServer
-	// OfflineCacheNotifier's Close (background WS-delivery worker
-	// shutdown) is driven directly here rather than through
-	// OfflineCacheService: Service only holds it via the narrower
-	// ProgressObserver interface, which has no Close method — see
-	// offlinecache.Runtime.Notifier's doc.
+	// OfflineCacheNotifier's shutdown (its background WS-delivery worker,
+	// stopped via CloseWithin — see run's defer) is driven directly here
+	// rather than through OfflineCacheService: Service only holds it via
+	// the narrower ProgressObserver interface, which has no Close method —
+	// see offlinecache.Runtime.Notifier's doc.
 	OfflineCacheNotifier *offlinecache.Notifier
 	Hub                  hub.Hub
 	LinkChecker          *status.LinkChecker
@@ -383,17 +383,37 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// the daemon's core playback/command path never depended on this
 	// feature before it existed.
 	if app.OfflineCacheService != nil {
-		// OfflineCacheNotifier's Close is deferred BEFORE
+		// OfflineCacheNotifier's shutdown is deferred BEFORE
 		// OfflineCacheService.Stop below (registered first), so Go's
 		// LIFO defer order runs Stop FIRST on shutdown: Stop's own doc
 		// guarantees no further ProgressObserver callbacks (so no more
 		// notifications will ever be enqueued) only once it returns.
-		// Closing the notifier's background delivery worker before that
+		// Stopping the notifier's background delivery worker before that
 		// would risk dropping an in-flight final notification for no
-		// benefit — the notifier's own worker is just an idle goroutine
-		// until Close runs anyway.
+		// benefit — that worker is just an idle goroutine until it is
+		// stopped anyway.
+		//
+		// Bounded (CloseWithin, not Close): the notifier's in-flight
+		// delivery can take far longer than this whole shutdown allows on
+		// either transport — see CloseWithin's doc for the two shapes —
+		// so waiting it out would blow past SHUTDOWN_TIMEOUT's forced exit
+		// and strand every cleanup step registered BEFORE this one (LIFO
+		// again).
+		//
+		// This is NOT an end-to-end shutdown bound. Both transports take,
+		// for their own teardown, the very mutex the abandoned delivery
+		// still holds — Relayer.Close and hub.Stop's ws.Close, both later
+		// in LIFO order — so the wedge just blocks at whichever comes
+		// next. Only mint-pairing and the playlist refresher are
+		// guaranteed to run either way. Abandoning the wait leaves at most
+		// one delivery still running in a process that is exiting anyway.
 		if app.OfflineCacheNotifier != nil {
-			defer app.OfflineCacheNotifier.Close()
+			defer func() {
+				if !app.OfflineCacheNotifier.CloseWithin(offlinecache.ShutdownCloseBudget) {
+					app.Logger.Warn("Offline cache notifier did not stop within its shutdown budget; continuing shutdown",
+						zap.Duration("budget", offlinecache.ShutdownCloseBudget))
+				}
+			}()
 		}
 		if err := app.OfflineCacheService.Start(ctx); err != nil {
 			app.Logger.Error("Failed to start offline cache service", zap.Error(err))
