@@ -75,6 +75,12 @@ type Scheduler interface {
 	// supplied refreshable source. Callers use it before falling back to cached
 	// displayAt state after a transient refresh failure.
 	SourceMatches(source Source) bool
+	// Source returns the refreshable identity owned by the scheduler. While it
+	// is non-zero, refreshers must resolve this source instead of trusting the
+	// player's filtered (and potentially stale) status. It also lets startup
+	// reconstruct a persisted schedule before the player has crossed its first
+	// displayAt boundary.
+	Source() Source
 	// Clear drops the cached displayAt playlist and cancels the transition
 	// timer under the player-push lock so an in-flight RecomputeNow cannot
 	// start a new push after the clear.
@@ -246,6 +252,12 @@ func (s *scheduler) SourceMatches(source Source) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.source.Matches(source)
+}
+
+func (s *scheduler) Source() Source {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return snapshotSource(s.source)
 }
 
 func (s *scheduler) WithPlayerPush(fn func()) {

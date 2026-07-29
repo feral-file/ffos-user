@@ -294,7 +294,8 @@ func (t *trackingScheduler) RestoredPending() bool               { return t.inne
 func (t *trackingScheduler) SourceMatches(s playlistschedule.Source) bool {
 	return t.inner.SourceMatches(s)
 }
-func (t *trackingScheduler) Stop() { t.inner.Stop() }
+func (t *trackingScheduler) Source() playlistschedule.Source { return t.inner.Source() }
+func (t *trackingScheduler) Stop()                           { t.inner.Stop() }
 
 func TestCommandHandler_Process_DisplayPlaylist_UsesWithPlayerPush(t *testing.T) {
 	ctrl := gomock.NewController(t)

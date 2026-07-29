@@ -187,56 +187,63 @@ func (r *refresher) processPlayingPlaylist() error {
 		authorityToken = r.scheduler.AuthorityToken()
 	}
 
-	// Get player status
-	playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
-	if err != nil {
-		return err
-	}
-	if playerStatus == nil {
-		r.logger.Warn("Player status is nil")
-		return nil
-	}
-
-	if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
-		r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
-		return nil
-	}
-
-	// Process playlist
 	var playlist *dp1.Playlist
 	var schedulerSource playlistschedule.Source
-	switch {
-	case playerStatus.PlaylistURL != nil:
-		schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
-		playlist, err = r.dp1.ProcessPlaylistURL(r.context, *playerStatus.PlaylistURL, false)
+	var err error
+	if r.scheduler != nil {
+		schedulerSource = r.scheduler.Source()
+	}
+	if schedulerSource.IsZero() {
+		// No scheduler-owned source exists, so the player remains the source of
+		// truth for normal URL/dynamic refreshes.
+		playerStatus, err := r.statusPoller.FetchPlayerStatus(r.context)
 		if err != nil {
-			return r.handleRefreshError(err, "playlist URL", schedulerSource)
+			return err
 		}
-	case playerStatus.Playlist != nil:
-		if playerStatus.Playlist.HasDynamicContent() {
-			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
-			playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *playerStatus.Playlist, false)
-			if err != nil {
-				return r.handleRefreshError(err, "dynamic playlist", schedulerSource)
-			}
-		} else {
-			// Static inline displayAt player status only contains the filtered
-			// active set and no refreshable source identity. After restart,
-			// controld cannot rebuild future items from that status, so only
-			// URL/dynamic statuses can reconstruct scheduler ownership.
-			r.logger.Debug("Playlist has no dynamic queries, skipping")
+		if playerStatus == nil {
+			r.logger.Warn("Player status is nil")
 			return nil
 		}
-	default:
-		// A displayPlaylist status carrying neither a URL nor an inline playlist
-		// is the player's fresh-boot/unconfigured state (nothing assigned yet),
-		// not a failure. Returning an error here would pin the startup loop at
-		// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
-		// long as the device sits unconfigured — hours on a first boot with no
-		// network. There is nothing to refresh; report success so the refresher
-		// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence.
-		r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
-		return nil
+
+		if playerStatus.Command != string(commands.CMD_DISPLAY_PLAYLIST) {
+			r.logger.Debug("Player command is not display any playlist", zap.String("command", string(playerStatus.Command)))
+			return nil
+		}
+
+		switch {
+		case playerStatus.PlaylistURL != nil:
+			schedulerSource = playlistschedule.Source{PlaylistURL: *playerStatus.PlaylistURL}
+		case playerStatus.Playlist != nil && playerStatus.Playlist.HasDynamicContent():
+			schedulerSource = playlistschedule.Source{DynamicPlaylist: playerStatus.Playlist}
+		case playerStatus.Playlist != nil:
+			// Static inline player status only contains the filtered active set and
+			// no refreshable source identity, so it cannot rebuild future items.
+			r.logger.Debug("Playlist has no dynamic queries, skipping")
+			return nil
+		default:
+			// A displayPlaylist status carrying neither a URL nor an inline playlist
+			// is the player's fresh-boot/unconfigured state (nothing assigned yet),
+			// not a failure. Returning an error here would pin the startup loop at
+			// PLAYER_STATUS_POLLING_INTERVAL and emit an Error every pass for as
+			// long as the device sits unconfigured — hours on a first boot with no
+			// network. There is nothing to refresh; report success so the refresher
+			// settles into its normal PLAYLIST_REFRESH_INTERVAL cadence.
+			r.logger.Debug("Player has no playlist URL or playlist; nothing to refresh")
+			return nil
+		}
+	}
+
+	var kind string
+	switch {
+	case schedulerSource.PlaylistURL != "":
+		kind = "playlist URL"
+		playlist, err = r.dp1.ProcessPlaylistURL(r.context, schedulerSource.PlaylistURL, false)
+	case schedulerSource.DynamicPlaylist != nil:
+		kind = "dynamic playlist"
+		playlist, err = r.dp1.ProcessDynamicPlaylist(r.context, *schedulerSource.DynamicPlaylist, false)
+	}
+	if err != nil {
+		return r.handleRefreshError(err, kind, schedulerSource)
 	}
 
 	hadDisplayAtCache := false
