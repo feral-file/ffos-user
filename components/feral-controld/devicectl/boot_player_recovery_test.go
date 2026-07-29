@@ -64,7 +64,9 @@ func TestBootPlayerRecovery_InAppRefreshSuffices(t *testing.T) {
 
 // TestBootPlayerRecovery_EscalatesToReload covers both dead-page shapes: the
 // evaluate transport failing, and the evaluate succeeding without a player
-// ACK (page up, app never booted). Each must escalate to one Page.reload.
+// ACK (page up, app never booted). Each must escalate to one page reload,
+// requested through the narration surface (which serializes it against
+// narration pushes — see setupui.RequestPageReload).
 func TestBootPlayerRecovery_EscalatesToReload(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -82,12 +84,15 @@ func TestBootPlayerRecovery_EscalatesToReload(t *testing.T) {
 			mockCDP := mocks.NewMockCDP(ctrl)
 			mockCDP.EXPECT().Initialized().Return(true)
 			expectRefreshEvaluate(t, mockCDP, tc.refreshResult, tc.refreshErr).Times(1)
-			mockCDP.EXPECT().Send("Page.reload", gomock.Any()).Return(nil, nil).Times(1)
 
 			e := settledExecutor(mockCDP)
+			spy := &narratorSpy{}
+			e.setupNarrator = spy
 
 			e.MaybeRecoverPlayerOnBootOnline(context.Background())
 			e.MaybeRecoverPlayerOnBootOnline(context.Background()) // flap: latch holds
+			assert.Equal(t, 1, spy.reloads, "exactly one reload must be requested")
+			assert.Equal(t, 0, spy.reloadSkips)
 		})
 	}
 }
@@ -154,10 +159,13 @@ func TestBootPlayerRecovery_UnclaimedDoesNotTouchPlayer(t *testing.T) {
 // the destructive step — it erases whatever setup narration is on screen, and
 // a same-target reload does not drop the DevTools websocket, so the on-connect
 // Resync that normally restores narration never fires. When the narration
-// surface owns the screen the reload must be skipped. Covers both concurrent
-// owners: the startup OTA gate's required-update progress, and a factory reset
-// that raced past the completion-entry claimSettled check (settled at entry,
-// reset narration painted before the reload would land).
+// surface owns the screen the reload must be skipped (the skip decision lives
+// on the narration lane itself — setupui.RequestPageReload — so it is atomic
+// against concurrent narrators; this test pins the executor honoring the
+// skipped outcome). Covers both concurrent owners: the startup OTA gate's
+// required-update progress, and a factory reset that raced past the
+// completion-entry claimSettled check (settled at entry, reset narration
+// painted before the reload would land).
 func TestBootPlayerRecovery_NarrationOnScreenSkipsReload(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -175,7 +183,6 @@ func TestBootPlayerRecovery_NarrationOnScreenSkipsReload(t *testing.T) {
 			mockCDP.EXPECT().Initialized().Return(true)
 			// Refresh is refused (no playlist) — the shape that escalates.
 			expectRefreshEvaluate(t, mockCDP, map[string]interface{}{}, nil).Times(1)
-			// No Page.reload expectation: the overlay must survive.
 
 			e := settledExecutor(mockCDP)
 			spy := &narratorSpy{}
@@ -183,6 +190,8 @@ func TestBootPlayerRecovery_NarrationOnScreenSkipsReload(t *testing.T) {
 			e.setupNarrator = spy
 
 			e.MaybeRecoverPlayerOnBootOnline(context.Background())
+			assert.Equal(t, 0, spy.reloads, "the overlay must survive: no reload may execute")
+			assert.Equal(t, 1, spy.reloadSkips)
 		})
 	}
 }
@@ -197,7 +206,6 @@ func TestBootPlayerRecovery_HiddenNarrationAllowsReload(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true)
 	expectRefreshEvaluate(t, mockCDP, map[string]interface{}{}, nil).Times(1)
-	mockCDP.EXPECT().Send("Page.reload", gomock.Any()).Return(nil, nil).Times(1)
 
 	e := settledExecutor(mockCDP)
 	spy := &narratorSpy{}
@@ -206,6 +214,8 @@ func TestBootPlayerRecovery_HiddenNarrationAllowsReload(t *testing.T) {
 	e.setupNarrator = spy
 
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	assert.Equal(t, 1, spy.reloads)
+	assert.Equal(t, 0, spy.reloadSkips)
 }
 
 // TestBootPlayerRecovery_TotalFailureDoesNotRetry: refresh AND reload both
@@ -219,11 +229,13 @@ func TestBootPlayerRecovery_TotalFailureDoesNotRetry(t *testing.T) {
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true)
 	expectRefreshEvaluate(t, mockCDP, nil, errors.New("target closed")).Times(1)
-	mockCDP.EXPECT().Send("Page.reload", gomock.Any()).Return(nil, errors.New("target closed")).Times(1)
 
 	e := settledExecutor(mockCDP)
+	spy := &narratorSpy{reloadErr: errors.New("target closed")}
+	e.setupNarrator = spy
 
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
 	assert.True(t, e.bootPlayerRecoveryDone.Load())
+	assert.Equal(t, 1, spy.reloads, "the failed reload must not be retried")
 }

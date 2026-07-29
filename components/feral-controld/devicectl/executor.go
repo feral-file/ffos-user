@@ -634,7 +634,7 @@ type setupNarrator interface {
 	ShowJoinFailed(reason string)
 	ShowUpdating(progress int)
 	Hide()
-	Narrating() bool
+	RequestPageReload(done func(executed bool, err error))
 }
 
 // setupUI lazily builds the setup-narration surface from the executor's CDP
@@ -929,28 +929,32 @@ func (e *executor) CompletePendingBootPlayerRecovery() {
 		e.logger.Info("Boot player recovery: in-app artwork refresh re-ran the pre-network fetches")
 		return
 	}
-	// Shared guard immediately before the destructive step: a Page.reload
-	// erases whatever setup narration is on screen (a required-update ladder's
+	// The reload fallback is the destructive step: a Page.reload erases
+	// whatever setup narration is on screen (a required-update ladder's
 	// "updating" progress started by the concurrent startup OTA gate, or a
 	// factory reset that raced past the claimSettled check above), and a
 	// same-target reload does NOT drop the DevTools websocket, so the
-	// on-connect Resync that normally restores narration never fires. When the
-	// narration surface owns the screen, the artwork behind it does not matter
-	// this instant — skip the reload rather than fight over the display. The
-	// in-app refresh above is safe regardless: it re-mounts artwork BEHIND the
-	// overlay without touching page state.
-	if e.setupUI().Narrating() {
-		e.logger.Info("Boot player recovery: setup narration on screen; skipping page reload to preserve it",
-			zap.NamedError("refreshError", refreshErr))
-		return
-	}
-	if _, reloadErr := e.cdp.Send("Page.reload", map[string]interface{}{}); reloadErr != nil {
-		e.logger.Warn("Boot player recovery failed; player may keep its pre-network page until refreshed",
-			zap.NamedError("refreshError", refreshErr), zap.NamedError("reloadError", reloadErr))
-		return
-	}
-	e.logger.Info("Boot player recovery: page reloaded (in-app refresh unavailable)",
-		zap.NamedError("refreshError", refreshErr))
+	// on-connect Resync that normally restores narration never fires. A probe-
+	// then-Send here would be check-then-act against narrators running on other
+	// goroutines, so the reload is routed THROUGH the narration surface
+	// instead: setupui executes it on the same serialized lane as narration
+	// pushes and skips it if visible narration is intended by execution time —
+	// any racing overlay either wins (reload skipped) or repaints after the
+	// reload (queued behind it). The in-app refresh above needs no such care:
+	// it re-mounts artwork BEHIND the overlay without touching page state.
+	e.setupUI().RequestPageReload(func(executed bool, err error) {
+		switch {
+		case !executed:
+			e.logger.Info("Boot player recovery: setup narration on screen; skipped page reload to preserve it",
+				zap.NamedError("refreshError", refreshErr))
+		case err != nil:
+			e.logger.Warn("Boot player recovery failed; player may keep its pre-network page until refreshed",
+				zap.NamedError("refreshError", refreshErr), zap.NamedError("reloadError", err))
+		default:
+			e.logger.Info("Boot player recovery: page reloaded (in-app refresh unavailable)",
+				zap.NamedError("refreshError", refreshErr))
+		}
+	})
 }
 
 // evaluateRefreshArtwork asks the live player app to re-mount the current

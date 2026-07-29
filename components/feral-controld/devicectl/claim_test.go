@@ -31,6 +31,12 @@ type narratorSpy struct {
 	lastURL      string
 	lastName     string
 	lastProgress int
+	// reloads / reloadSkips count RequestPageReload outcomes (kept out of
+	// calls so narration-ordering assertions stay undisturbed); reloadErr,
+	// when set, is reported to an executed reload's done callback.
+	reloads     int
+	reloadSkips int
+	reloadErr   error
 }
 
 func (s *narratorSpy) ShowFinalizing() { s.calls = append(s.calls, "finalizing") }
@@ -51,10 +57,27 @@ func (s *narratorSpy) ShowUpdating(progress int) {
 }
 func (s *narratorSpy) Hide() { s.calls = append(s.calls, "hide") }
 
-// Narrating mirrors setupui.Service: something has been shown and the last
-// intent was not a hide.
-func (s *narratorSpy) Narrating() bool {
+// narrating mirrors setupui.Service's intent semantics: something has been
+// shown and the last intent was not a hide.
+func (s *narratorSpy) narrating() bool {
 	return len(s.calls) > 0 && s.calls[len(s.calls)-1] != "hide"
+}
+
+// RequestPageReload mirrors setupui.Service's contract — execute only when no
+// visible narration is intended, done fired exactly once — but synchronously,
+// which keeps executor tests deterministic (no narration-lane goroutine).
+func (s *narratorSpy) RequestPageReload(done func(executed bool, err error)) {
+	if s.narrating() {
+		s.reloadSkips++
+		if done != nil {
+			done(false, nil)
+		}
+		return
+	}
+	s.reloads++
+	if done != nil {
+		done(true, s.reloadErr)
+	}
 }
 
 func strPtr(s string) *string { return &s }

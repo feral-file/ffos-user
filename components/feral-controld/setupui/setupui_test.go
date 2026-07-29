@@ -47,8 +47,12 @@ type fakeCDP struct {
 	mu       sync.Mutex
 	err      error
 	requests []map[string]any
+	methods  []string
 	calls    int
 	signal   chan struct{}
+	// gate, when non-nil, is received from at the START of every NoLogSend so
+	// tests can hold the worker inside a send and control interleaving.
+	gate chan struct{}
 }
 
 func newFakeCDP() *fakeCDP {
@@ -56,8 +60,12 @@ func newFakeCDP() *fakeCDP {
 }
 
 func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
+	if f.gate != nil {
+		<-f.gate
+	}
 	f.mu.Lock()
 	f.calls++
+	f.methods = append(f.methods, method)
 	if method == cdp.METHOD_EVALUATE {
 		if req, ok := parseSetupRequest(params); ok {
 			f.requests = append(f.requests, req)
@@ -81,6 +89,14 @@ func (f *fakeCDP) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *fakeCDP) sentMethods() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.methods))
+	copy(out, f.methods)
+	return out
 }
 
 func (f *fakeCDP) lastRequest() map[string]any {
@@ -535,4 +551,101 @@ func TestUnreadableContractDefersWithoutLatching(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
 	svc.ShowJoining()
 	sender.waitForCalls(t, 1)
+}
+
+// reloadOutcome collects a RequestPageReload done callback for test
+// synchronization with the narration-lane worker.
+type reloadOutcome struct {
+	executed bool
+	err      error
+}
+
+func awaitReload(t *testing.T, ch <-chan reloadOutcome) reloadOutcome {
+	t.Helper()
+	select {
+	case out := <-ch:
+		return out
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for RequestPageReload outcome")
+		return reloadOutcome{}
+	}
+}
+
+// TestRequestPageReloadExecutesWhenIdle: with no visible narration intended,
+// the reload executes. Uses the no-setupDisplay contract on purpose: the
+// reload is a page operation, not narration, and must work against players
+// that predate the narration contract (narrationSupported must not gate it).
+func TestRequestPageReloadExecutesWhenIdle(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, contractWithoutSetupDisplay)
+
+	ch := make(chan reloadOutcome, 1)
+	svc.RequestPageReload(func(executed bool, err error) {
+		ch <- reloadOutcome{executed, err}
+	})
+
+	out := awaitReload(t, ch)
+	assert.True(t, out.executed)
+	assert.NoError(t, out.err)
+	assert.Contains(t, sender.sentMethods(), "Page.reload")
+}
+
+// TestRequestPageReloadSkipsWhenNarrationIntended: narration intent present
+// before the request means the reload is refused — the overlay owns the
+// screen. Intent, not delivery: the no-setupDisplay contract means the
+// updating push never actually painted, and the skip must still hold (the
+// conservative bias Narrating documents).
+func TestRequestPageReloadSkipsWhenNarrationIntended(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, contractWithoutSetupDisplay)
+
+	svc.ShowUpdating(40)
+	ch := make(chan reloadOutcome, 1)
+	svc.RequestPageReload(func(executed bool, err error) {
+		ch <- reloadOutcome{executed, err}
+	})
+
+	out := awaitReload(t, ch)
+	assert.False(t, out.executed)
+	assert.NoError(t, out.err)
+	assert.NotContains(t, sender.sentMethods(), "Page.reload")
+}
+
+// TestRequestPageReloadInterleavingPreservesRacingNarration is the TOCTOU
+// regression test: narration painted AFTER a reload was requested but BEFORE
+// it executed must survive. The worker is held inside an earlier narration
+// send while the reload is queued and an updating overlay is pushed behind
+// it; when the lane drains, the reload must observe the newer intent and
+// skip, and the overlay must still be delivered. This is exactly the
+// interleaving a caller-side Narrating() probe followed by a raw Page.reload
+// lost the race on.
+func TestRequestPageReloadInterleavingPreservesRacingNarration(t *testing.T) {
+	sender := newFakeCDP()
+	sender.gate = make(chan struct{})
+	svc := newTestService(t, sender, validContract)
+
+	// Hold the worker inside a benign narration send (hidden: not narrating,
+	// so it cannot itself cause the skip).
+	svc.Hide()
+
+	// While the worker is blocked: the recovery requests its reload, then the
+	// OTA gate paints its update overlay — the reviewer's race, made
+	// deterministic.
+	ch := make(chan reloadOutcome, 1)
+	svc.RequestPageReload(func(executed bool, err error) {
+		ch <- reloadOutcome{executed, err}
+	})
+	svc.ShowUpdating(10)
+
+	// Release the lane: hidden send completes, then the reload entry runs.
+	sender.gate <- struct{}{} // hidden
+	out := awaitReload(t, ch)
+	assert.False(t, out.executed, "reload must yield to narration that raced in behind it")
+	sender.gate <- struct{}{} // updating
+	sender.waitForCalls(t, 2)
+
+	assert.NotContains(t, sender.sentMethods(), "Page.reload")
+	last := sender.lastRequest()
+	require.NotNil(t, last)
+	assert.Equal(t, "updating", last["state"], "the racing overlay must still be delivered")
 }

@@ -64,6 +64,16 @@ const (
 	// ff-player adds the state it renders. This is the contract-level extensibility
 	// path in action.
 	stateFactoryReset = "factory_reset"
+
+	// statePageReload is an INTERNAL queue sentinel, never sent to the player:
+	// it marks a RequestPageReload entry riding the narration lane so the
+	// worker executes it in order with narration pushes. It is not narration
+	// intent — enqueueing it does not touch last, and it is invisible to
+	// Narrating/Resync.
+	statePageReload = "__page_reload"
+
+	// reloadDoneKey holds a RequestPageReload entry's outcome callback.
+	reloadDoneKey = "__done"
 )
 
 // support tracks the one-shot manifest capability decision for the process
@@ -239,6 +249,73 @@ func (s *Service) Narrating() bool {
 	return s.last != nil && stringField(s.last, "state") != stateHidden
 }
 
+// RequestPageReload enqueues a browser-level Page.reload into the SAME
+// serialized lane as narration pushes, executing it only if no visible
+// narration is intended by the time the worker reaches it. Riding the
+// narration queue is what makes the check atomic: the worker is the sole
+// executor, so any narration push racing the caller's decision either landed
+// BEFORE the reload entry (the execution-time check then sees it and skips)
+// or sits BEHIND it in the queue (and repaints after the reload). Neither
+// interleaving can erase an overlay — the caller-side probe-then-Send pattern
+// this replaces could.
+//
+// The skip decision reads INTENT (the last push), not delivery, the same
+// conservative bias Narrating documents. done, when non-nil, is invoked
+// exactly once — executed=false/err=nil when the reload was skipped (visible
+// narration, or the entry was superseded by a Resync/queue-overflow drop:
+// both mean the page state was or is being repainted anyway), executed=true
+// with the send's error otherwise. It runs on the narration lane and must not
+// block.
+func (s *Service) RequestPageReload(done func(executed bool, err error)) {
+	req := map[string]any{"state": statePageReload, reloadDoneKey: done}
+	s.mu.Lock()
+	var dropped func(executed bool, err error)
+	if len(s.pending) >= maxPendingStates {
+		dropped = reloadDoneOf(s.pending[0])
+		s.pending = s.pending[1:]
+	}
+	s.pending = append(s.pending, req)
+	starting := !s.running
+	s.running = true
+	s.mu.Unlock()
+	if dropped != nil {
+		dropped(false, nil)
+	}
+	if starting {
+		go s.worker()
+	}
+}
+
+// reloadDoneOf extracts a queue entry's RequestPageReload callback, or nil for
+// narration entries (and sentinel entries whose caller passed no callback).
+func reloadDoneOf(req map[string]any) func(executed bool, err error) {
+	if stringField(req, "state") != statePageReload {
+		return nil
+	}
+	fn, _ := req[reloadDoneKey].(func(executed bool, err error))
+	return fn
+}
+
+// execPageReload runs a dequeued RequestPageReload entry on the worker
+// goroutine. The narration re-check happens HERE, ordered after every earlier
+// push's effect on last — see RequestPageReload for the atomicity argument.
+// Deliberately not gated on narrationSupported: this is a page operation, not
+// narration, and must work against players that predate the setupDisplay
+// contract.
+func (s *Service) execPageReload(req map[string]any) {
+	done := reloadDoneOf(req)
+	if s.Narrating() {
+		if done != nil {
+			done(false, nil)
+		}
+		return
+	}
+	_, err := s.cdp.NoLogSend("Page.reload", map[string]interface{}{})
+	if done != nil {
+		done(true, err)
+	}
+}
+
 // Resync re-pushes the last intended narration state. It is the "CDP became
 // available" trigger: wire it to the CDP client's on-connect callback so a
 // reconnecting or freshly-loaded player catches up to the current setup state.
@@ -250,15 +327,25 @@ func (s *Service) Resync() {
 		return
 	}
 	// A reconnect only needs the CURRENT intent; anything still queued is
-	// superseded by re-painting the latest state.
-	s.pending = []map[string]any{s.last}
-	if s.running {
-		s.mu.Unlock()
-		return
+	// superseded by re-painting the latest state. A superseded reload sentinel
+	// resolves as skipped: a reconnect means the page just (re)loaded, so the
+	// reload it was queued for is moot.
+	var skipped []func(executed bool, err error)
+	for _, q := range s.pending {
+		if fn := reloadDoneOf(q); fn != nil {
+			skipped = append(skipped, fn)
+		}
 	}
+	s.pending = []map[string]any{s.last}
+	starting := !s.running
 	s.running = true
 	s.mu.Unlock()
-	go s.worker()
+	for _, fn := range skipped {
+		fn(false, nil)
+	}
+	if starting {
+		go s.worker()
+	}
 }
 
 // push enqueues req (see the pending field for the coalescing rule) and ensures
@@ -269,15 +356,18 @@ func (s *Service) Resync() {
 func (s *Service) push(req map[string]any) {
 	s.mu.Lock()
 	s.last = req
-	s.enqueueLocked(req)
-	if s.running {
-		// The in-flight worker will drain this entry too.
-		s.mu.Unlock()
-		return
-	}
+	dropped := s.enqueueLocked(req)
+	starting := !s.running
 	s.running = true
 	s.mu.Unlock()
-	go s.worker()
+	if dropped != nil {
+		// An overflow-evicted reload sentinel resolves as skipped (see
+		// RequestPageReload); narration entries drop silently as before.
+		dropped(false, nil)
+	}
+	if starting {
+		go s.worker()
+	}
 }
 
 // enqueueLocked applies the coalescing rule: a push matching the TRAILING
@@ -289,16 +379,22 @@ func (s *Service) push(req map[string]any) {
 // always END on the newest state, so a repeat after intervening states
 // re-appends. Bursts that matter for coalescing (OTA progress) are contiguous,
 // so they still collapse to one trailing entry. Caller holds mu.
-func (s *Service) enqueueLocked(req map[string]any) {
+//
+// The returned callback is non-nil only when the overflow guard evicted a
+// reload sentinel; the caller must invoke it after releasing mu.
+func (s *Service) enqueueLocked(req map[string]any) func(executed bool, err error) {
 	state := stringField(req, "state")
 	if n := len(s.pending); n > 0 && stringField(s.pending[n-1], "state") == state {
 		s.pending[n-1] = req
-		return
+		return nil
 	}
+	var dropped func(executed bool, err error)
 	if len(s.pending) >= maxPendingStates {
+		dropped = reloadDoneOf(s.pending[0])
 		s.pending = s.pending[1:]
 	}
 	s.pending = append(s.pending, req)
+	return dropped
 }
 
 // worker drains pending narration states one at a time, in order, until the
@@ -317,6 +413,10 @@ func (s *Service) worker() {
 		s.pending = s.pending[1:]
 		s.mu.Unlock()
 
+		if stringField(req, "state") == statePageReload {
+			s.execPageReload(req)
+			continue
+		}
 		s.trySend(req)
 	}
 }
