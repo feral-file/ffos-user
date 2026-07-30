@@ -491,8 +491,9 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// Re-attach offline-cache replay interception on every (re)connect —
 		// this covers plain kiosk restarts AND OOM-recovery restarts alike,
 		// since both funnel through this same reconnect loop (see
-		// offlinecache.KioskReplay.AttachOnReconnect's doc). Nil until the
-		// config/wiring todo constructs a real KioskReplay.
+		// offlinecache.KioskReplay.AttachOnReconnect's doc). Nil whenever
+		// the offline cache is switched off (offlineCache.enabled unset or
+		// false), which is the default — see the Bootstrap call below.
 		if app.KioskReplay != nil {
 			if err := app.KioskReplay.AttachOnReconnect(ctx); err != nil {
 				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))

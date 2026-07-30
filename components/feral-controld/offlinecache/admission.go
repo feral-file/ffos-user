@@ -181,6 +181,25 @@ type AdmissionPolicy struct {
 	// the gate was supposed to prevent. Deriving the threshold from the
 	// cap keeps the two settings correct together on any device and
 	// under any reconfiguration of either one.
+	//
+	// The "worst case fits under the ceiling" guarantee is CONDITIONAL on
+	// the cgroup cap actually being applied. It is configured from
+	// intent, and the downloader degrades to an uncapped spawn when
+	// transient systemd scopes are unavailable (no session bus, no
+	// systemd-run — it warns and continues rather than failing captures
+	// outright; see ensureScopeSupport). On that path the capture is
+	// unbounded and the projection no longer holds.
+	//
+	// That degradation is safe by construction rather than by luck:
+	// softwareMemoryBlockPercent takes the MINIMUM of this derived value
+	// and the static threshold, so the coupling can only ever tighten
+	// admission, never loosen it. An uncapped capture therefore runs
+	// under a threshold at least as strict as the one that governed
+	// before the cap existed, with feral-watchdog as the same backstop it
+	// always was. Do NOT "fix" this by falling back to the static
+	// threshold when the cap is inactive — static is the LOOSER of the
+	// two, so that would relax admission exactly when the process is
+	// unbounded.
 	SoftwareReserveBytes int64
 	// MemorySafetyCeilingPercent is the projected-usage line
 	// SoftwareReserveBytes is measured against. <=0 disables the derived

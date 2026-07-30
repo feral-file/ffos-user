@@ -208,6 +208,46 @@ func TestAdmissionGateSoftwareMemoryDerivedFromReserve(t *testing.T) {
 	}
 }
 
+// TestAdmissionGateReserveCouplingOnlyEverTightens pins the property that
+// makes the uncapped-fallback path safe. SoftwareReserveBytes is
+// configured from INTENT (headlessLimits.memoryMaxBytes), but the
+// downloader degrades to an uncapped spawn when transient systemd scopes
+// are unavailable, so a capture can exceed the reserve the gate assumed.
+// That is tolerable only because the derived threshold can never be
+// LOOSER than the static one: whatever happens to the cap, admission
+// stays at least as strict as it was before the cap existed.
+//
+// If this ever regresses, the failure mode is silent — admission quietly
+// relaxes at exactly the moment the capture process became unbounded.
+func TestAdmissionGateReserveCouplingOnlyEverTightens(t *testing.T) {
+	const gib = 1 << 30
+	// Sweep RAM sizes and cap sizes, including combinations where the
+	// derived term would land above the static threshold.
+	for _, totalMB := range []float64{2000, 4000, 8000, 16000, 32000, 64000} {
+		for _, reserve := range []int64{0, 256 << 20, gib, 2 * gib, 4 * gib, 8 * gib} {
+			policy := testAdmissionPolicy()
+			policy.SoftwareReserveBytes = reserve
+			policy.MemorySafetyCeilingPercent = 90
+			gate := offlinecache.NewAdmissionGate(policy, newAdmissionFakeClock(), wrapper.NewJSON(), zaptest.NewLogger(t))
+
+			// Probe the effective threshold by bisecting on Admit: find
+			// the lowest whole-percent usage that is refused.
+			gate.Observe(sysMetricsJSONTotal(totalMB, 0, 40))
+			effective := 101.0
+			for pct := 1.0; pct <= 100; pct++ {
+				g2 := offlinecache.NewAdmissionGate(policy, newAdmissionFakeClock(), wrapper.NewJSON(), zaptest.NewLogger(t))
+				g2.Observe(sysMetricsJSONTotal(totalMB, pct, 40))
+				if !g2.Admit(offlinecache.ClassSoftware).Allowed {
+					effective = pct
+					break
+				}
+			}
+			assert.LessOrEqual(t, effective, policy.SoftwareBlockMemoryPercent+1,
+				"reserve coupling must never admit above the static threshold (total=%vMB reserve=%dB)", totalMB, reserve)
+		}
+	}
+}
+
 func TestAdmissionGateFailsOpenWithoutMetrics(t *testing.T) {
 	gate, _ := newTestGate(t)
 
