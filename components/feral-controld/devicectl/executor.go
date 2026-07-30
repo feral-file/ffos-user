@@ -616,9 +616,13 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 			zap.Stringer("gateResult", result))
 		// UpdateStarted: the updating narration owns the screen via OnProgress
 		// and the device reboots. TooOldToUpgrade: nothing further happens this
-		// boot, so don't leave a stale finalizing overlay implying progress.
+		// boot, so don't leave a stale finalizing overlay implying progress —
+		// but clear ONLY that overlay: the gate's live version check is a
+		// window in which another narrator can take the screen (a link drop
+		// re-raises the setup AP and paints softap_qr), and an unconditional
+		// Hide would erase it. See the settled branch below for the same rule.
 		if result == otagate.ResultTooOldToUpgrade {
-			e.setupUI().Hide()
+			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		}
 		return false, true
 	}
@@ -737,7 +741,13 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 
 	if !e.waitForRelayerTopic(ctx) {
 		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
-		e.setupUI().Hide() // clear our finalizing narration; nothing is coming
+		// Clear only our own finalizing narration; nothing is coming. The
+		// topic wait is 60s — the longest window in this flow for another
+		// narrator to take the screen (a link drop re-raises the setup AP
+		// and paints softap_qr), so an unconditional Hide here would blank
+		// an active setup surface. See runPreClaimGateAndPaint's settled
+		// branch for the shared rationale.
+		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return
 	}
 	// Re-check: the device may have settled while waiting (LAN connect).
@@ -961,9 +971,15 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 // so there is nothing for cancellation to interrupt (contrast the gate and
 // claim hooks, whose retry/backoff waits must observe daemon shutdown).
 //
-// If/when the player learns to render its bundled offline background and
-// drive its own reconnect recovery from the connectivity pushes it already
-// receives (window.handleConnectivityChange), this hook should be retired.
+// The player build now drives its own reconnect recovery from the
+// connectivity pushes (window.handleConnectivityChange) — but that recovery
+// is gated on the player having DETECTED the failure, and two artwork shapes
+// cannot signal one (a cross-origin iframe fires load even on Chromium's
+// network-error page; HLS network errors are deliberately non-fatal). This
+// hook therefore stays: it is the only repair for an undetected broken load,
+// and for the page that painted before DevTools attached. When both fire on
+// the same boot edge the cost is one duplicate crossfade, not a conflict —
+// the player's refresh and this one converge on the same re-mount path.
 func (e *executor) MaybeRecoverPlayerOnBootOnline(_ context.Context) {
 	if !e.bootPlayerRecoveryDone.CompareAndSwap(false, true) {
 		return
@@ -1055,7 +1071,17 @@ func (e *executor) finishPendingBootPlayerRecovery() {
 			e.logger.Info("Boot player recovery: setup narration on screen; skipped page reload to preserve it",
 				zap.NamedError("refreshError", refreshErr))
 		case err != nil:
-			e.logger.Warn("Boot player recovery failed; player may keep its pre-network page until refreshed",
+			// A transport-level failure means the recovery never ran (the
+			// send died, e.g. the connection tore down between the connect
+			// callback and this worker executing). Re-arm the park so the
+			// NEXT CDP connect retries — still bounded by the boot-window
+			// probe in CompletePendingBootPlayerRecovery and by
+			// bootPlayerRecoveryDone, so this cannot outlive the boot or
+			// stack runs. Without the re-arm a single mid-recovery
+			// disconnect leaves the broken pre-network page for the whole
+			// exhibition.
+			e.bootPlayerRecoveryPending.Store(true)
+			e.logger.Warn("Boot player recovery failed; re-armed to retry on the next CDP connect",
 				zap.NamedError("refreshError", refreshErr), zap.NamedError("reloadError", err))
 		default:
 			e.logger.Info("Boot player recovery: page reloaded (in-app refresh unavailable)",
@@ -1070,6 +1096,9 @@ func (e *executor) finishPendingBootPlayerRecovery() {
 // assumed to have refreshed (e.g. the page never booted), which the caller
 // escalates to a browser-level reload.
 func (e *executor) evaluateRefreshArtwork() error {
+	if e.cdp == nil {
+		return fmt.Errorf("cdp client is not configured")
+	}
 	command := commands.Command{Type: commands.CMD_REFRESH_ARTWORK}
 	payload, err := command.JSON()
 	if err != nil {

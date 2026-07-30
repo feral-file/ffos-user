@@ -412,6 +412,18 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		if pr, ok := app.Executor.(bootPlayerRecoveryFlow); ok {
 			go pr.CompletePendingBootPlayerRecovery()
 		}
+		// Re-seed the player's connectivity view (level, not edge). The
+		// mediator forwards connectivity_change edges fire-and-forget, so an
+		// edge that fired before DevTools attached — routine on Wi-Fi boots,
+		// where association finishes while Chromium is still starting — is
+		// simply dropped, and sys-monitord emits nothing further while the
+		// state holds steady. A freshly (re)loaded page also resets to its
+		// optimistic isOnline=true seed. The player's online-keyed recovery
+		// (display.json refetch, degraded artwork refresh, offline backdrop)
+		// keys on this notification, so without the re-push those paths wait
+		// for a transition that may never come. Own goroutine: the D-Bus
+		// round-trip must not stall the connect loop's resync work.
+		go reseedPlayerConnectivity(ctx, app)
 	})
 	defer app.CDP.Close()
 
@@ -502,6 +514,36 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 	}
 
 	return connected, nil
+}
+
+// reseedPlayerConnectivity pushes the CURRENT connectivity state to a freshly
+// connected player page. The mediator owns the edge-triggered forwarding of
+// connectivity_change; this is the level-triggered reconciliation leg of the
+// same contract — the house discipline SYSMETRICS applies to mDNS and the
+// relayer (see mediator.reconcileRelayer) — covering the page that missed its
+// edge because DevTools was not attached when it fired. An unknown state
+// (D-Bus down) pushes nothing: the player's optimistic online default plus
+// the next real edge beat guessing offline, which would pause streaming
+// playback on a healthy wall.
+func reseedPlayerConnectivity(ctx context.Context, app *app) {
+	connected, err := getConnectivityStatus(ctx, app.DBus, app.Logger)
+	if err != nil {
+		app.Logger.Warn("Player connectivity re-seed skipped: status unavailable", zap.Error(err))
+		return
+	}
+	_, err = app.CDP.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+		"expression": fmt.Sprintf("window.handleConnectivityChange(%t)", connected),
+	})
+	if err != nil {
+		// Notify-only hook: player builds that return nothing surface as
+		// "type mismatch: undefined" — delivered, just no return value (same
+		// tolerance as the mediator's edge forwarding).
+		if strings.Contains(err.Error(), "type mismatch: undefined") {
+			app.Logger.Debug("Player connectivity re-seed delivered; handler returned no value")
+		} else {
+			app.Logger.Warn("Failed to re-seed player connectivity", zap.Error(err))
+		}
+	}
 }
 
 // initializeApp initializes the app with real dependencies

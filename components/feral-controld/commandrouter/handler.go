@@ -125,8 +125,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		var playlist *dp1.Playlist
 		var schedulerSnapshot playlistschedule.Snapshot
 		var schedulerSource playlistschedule.Source
-		schedulerMutated := false
-		schedulerRestored := false
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -210,11 +208,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				// Filter displayAt playlists to the active set before the player
 				// sees them. The scheduler keeps the full list for timer/wake updates.
 				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
-				schedulerMutated = true
 				if playlist == nil {
 					err = fmt.Errorf("playlist has invalid displayAt")
 					h.scheduler.Restore(schedulerSnapshot)
-					schedulerRestored = true
 					return
 				}
 				if len(playlist.Items) == 0 {
@@ -234,7 +230,6 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
 					h.scheduler.Restore(schedulerSnapshot)
-					schedulerRestored = true
 				} else {
 					h.scheduler.Commit()
 				}
@@ -250,9 +245,15 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			result, err = h.sendCDPRequest(command)
 		}
 		if err != nil {
-			if schedulerMutated && !schedulerRestored && h.scheduler != nil {
-				h.scheduler.Restore(schedulerSnapshot)
-			}
+			// No restore-on-error here: every CMD_DISPLAY_PLAYLIST failure path
+			// above already calls scheduler.Restore before returning from the
+			// WithPlayerPush closure, so there is nothing left to undo by the
+			// time control reaches this point. That is also load-bearing, not
+			// just a redundancy removal — a restore here would run outside
+			// pushMu, violating the scheduler's documented pushMu-before-mu lock
+			// ordering (Restore must run under the same push lock as the failed
+			// send it is undoing).
+			//
 			// refreshArtwork's evaluate needs a live player page
 			// (window.handleCDPRequest), but a refresh is most needed exactly
 			// when the page is broken — e.g. Chromium serving stale cached

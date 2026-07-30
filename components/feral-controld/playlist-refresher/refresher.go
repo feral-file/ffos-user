@@ -26,11 +26,24 @@ const (
 	PLAYER_STATUS_POLLING_INTERVAL = 5 * time.Second
 )
 
+// startupForceCastEscalationThreshold bounds how many consecutive
+// errPlayerRejectedRefresh failures the startup loop tolerates from the
+// normal soft-refresh path before it escalates to a forced now_display cast.
+// See the loop in background() for the scenario this guards against.
+const startupForceCastEscalationThreshold = 3
+
 // errCDPNotReady marks a refresh pass skipped because CDP is not connected. On a
 // headless boot (no monitor) Chromium never starts, so CDP can stay absent for
 // hours; that is an expected state, not a failure, and must not surface as
 // Error-level log spam every retry interval.
 var errCDPNotReady = errors.New("CDP not connected")
+
+// errPlayerRejectedRefresh marks a transport-successful CDP send that the
+// player rejected (ok:false). Distinguished from other processPlayingPlaylist
+// errors so the startup loop in background() can recognize a permanently
+// rejected soft refresh (see there) instead of only counting failures
+// generically.
+var errPlayerRejectedRefresh = errors.New("player rejected playlist refresh")
 
 //go:generate mockgen -source=refresher.go -destination=../mocks/refresher.go -package=mocks -mock_names=Refresher=MockRefresher
 type Refresher interface {
@@ -104,10 +117,32 @@ func (r *refresher) background(done <-chan struct{}) {
 		}
 	}()
 
-	// Process playing playlist until it succeeds
+	// Process playing playlist until it succeeds. A soft refresh (refresh:true)
+	// can be a PERMANENT rejection rather than a transient one: the player
+	// returns ok:false when it has no active playlist to refresh, and that
+	// state persists across retries on its own. PrepareWithSource's own
+	// force-cast escape (scheduler.HasCache() && (!hadDisplayAtCache ||
+	// hadRestoredPending), see processPlayingPlaylist) does not fire here
+	// because the scheduler cache is already warm — only the player's live
+	// state is empty. Without escalation this loop would then retry the same
+	// rejected soft refresh at PLAYER_STATUS_POLLING_INTERVAL forever. After
+	// startupForceCastEscalationThreshold consecutive rejections, force a
+	// now_display cast instead, which hydrates an empty player regardless of
+	// prior cache state. Transport/fetch errors are a different error value
+	// and do not count toward this escalation.
+	consecutiveRejects := 0
+	forceCast := false
 	for {
-		if err := r.processPlayingPlaylist(); err != nil {
+		if err := r.processPlayingPlaylist(forceCast); err != nil {
 			r.logProcessFailure(err)
+			if errors.Is(err, errPlayerRejectedRefresh) {
+				consecutiveRejects++
+				if consecutiveRejects >= startupForceCastEscalationThreshold {
+					forceCast = true
+				}
+			} else {
+				consecutiveRejects = 0
+			}
 			if err := r.clock.SleepContext(runCtx, PLAYER_STATUS_POLLING_INTERVAL); err != nil {
 				r.logger.Info("Refresher background goroutine stopped before initial success")
 				return
@@ -123,7 +158,7 @@ func (r *refresher) background(done <-chan struct{}) {
 	for {
 		select {
 		case <-ticker.C():
-			if err := r.processPlayingPlaylist(); err != nil {
+			if err := r.processPlayingPlaylist(false); err != nil {
 				r.logProcessFailure(err)
 			}
 		case <-done:
@@ -171,8 +206,11 @@ func (r *refresher) logProcessFailure(err error) {
 	r.logger.Error("Failed to process playing playlist", zap.Error(err))
 }
 
-// processPlayingPlaylist processes the playing playlist and sends it to CDP
-func (r *refresher) processPlayingPlaylist() error {
+// processPlayingPlaylist processes the playing playlist and sends it to CDP.
+// forceCast, when true, sends a forced now_display cast unconditionally
+// instead of the normal soft refresh — used by background()'s startup loop to
+// escalate out of a permanently rejected soft refresh (see there).
+func (r *refresher) processPlayingPlaylist(forceCast bool) error {
 	// FetchPlayerStatus and the final Send both need a live CDP connection; bail
 	// out before them while it is absent so headless boots do not poll Chromium
 	// that intentionally is not running. The connection can still drop between
@@ -246,14 +284,8 @@ func (r *refresher) processPlayingPlaylist() error {
 		return r.handleRefreshError(err, kind, schedulerSource)
 	}
 
-	hadDisplayAtCache := false
-	hadRestoredPending := false
 	var schedulerSnapshot playlistschedule.Snapshot
 	schedulerMutated := false
-	if r.scheduler != nil {
-		hadDisplayAtCache = r.scheduler.HasCache()
-		hadRestoredPending = r.scheduler.RestoredPending()
-	}
 
 	// Send playlist to CDP
 	args := map[string]interface{}{
@@ -267,11 +299,20 @@ func (r *refresher) processPlayingPlaylist() error {
 
 	sendErr := error(nil)
 	send := func() {
+		effectiveForceCast := forceCast
 		if r.scheduler != nil {
 			if r.scheduler.AuthorityToken() != authorityToken {
 				r.logger.Debug("Skipping obsolete playlist refresh after playlist authority changed")
 				return
 			}
+			// Sampled here, under the same push lock as the PrepareWithSource
+			// call below, not earlier at the top of this function: an earlier,
+			// unlocked read could be flipped by a concurrent cast/RecomputeNow in
+			// the window before this closure runs, which would force-cast a soft
+			// refresh (a visible artwork restart) off a stale "cache was cold"
+			// reading even though the cache is actually already warm.
+			hadDisplayAtCache := r.scheduler.HasCache()
+			hadRestoredPending := r.scheduler.RestoredPending()
 			schedulerSnapshot = r.scheduler.Snapshot()
 			playlist = r.scheduler.PrepareWithSource(playlist, schedulerSource)
 			schedulerMutated = true
@@ -286,24 +327,29 @@ func (r *refresher) processPlayingPlaylist() error {
 				r.scheduler.Commit()
 				return
 			}
-			if r.scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending) {
-				// After a controld restart the memory cache may be empty, so
-				// the refresher may be the first path to reconstruct scheduler
-				// ownership from URL/dynamic/player status. Force-cast that first
-				// scheduled reconstruction; a soft refresh can defer when the current
-				// item disappeared from the new set.
-				command.Arguments = map[string]interface{}{
-					"intent": map[string]interface{}{
-						"action": "now_display",
-					},
-					"dp1_call": playlist,
-				}
-				if schedulerSource.PlaylistURL != "" {
-					command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
-				}
-			} else {
-				command.Arguments["dp1_call"] = playlist
+			effectiveForceCast = effectiveForceCast ||
+				(r.scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending))
+		}
+		if effectiveForceCast {
+			// effectiveForceCast is true for either of two reasons. (1) After a
+			// controld restart the memory cache may be empty, so the refresher may
+			// be the first path to reconstruct scheduler ownership from
+			// URL/dynamic/player status; force-cast that first scheduled
+			// reconstruction, since a soft refresh can defer when the current item
+			// disappeared from the new set. (2) The caller (background()'s startup
+			// loop) is escalating out of a soft refresh the player has rejected
+			// repeatedly, forceCast, independent of scheduler cache state.
+			command.Arguments = map[string]interface{}{
+				"intent": map[string]interface{}{
+					"action": "now_display",
+				},
+				"dp1_call": playlist,
 			}
+			if schedulerSource.PlaylistURL != "" {
+				command.Arguments["playlistUrl"] = schedulerSource.PlaylistURL
+			}
+		} else {
+			command.Arguments["dp1_call"] = playlist
 		}
 		result, err := r.sendCDPRequest(command)
 		sendErr = err
@@ -312,7 +358,7 @@ func (r *refresher) processPlayingPlaylist() error {
 		// as initial success and drops from 5s retries to the 5m ticker while
 		// the player never accepted the playlist.
 		if sendErr == nil && !playerresponse.OK(result) {
-			sendErr = errors.New("player rejected playlist refresh")
+			sendErr = errPlayerRejectedRefresh
 		}
 		if schedulerMutated && sendErr != nil {
 			r.scheduler.Restore(schedulerSnapshot)
@@ -329,8 +375,15 @@ func (r *refresher) processPlayingPlaylist() error {
 }
 
 // handleRefreshError degrades to the displayAt cache only for transient fetch
-// failures. Schema/parse/logic errors must surface so a bad feed cannot pin the
-// device on a stale active set forever.
+// failures (see isTransientPlaylistRefreshError): those recompute from the
+// still-valid cached schedule and report success. Schema/parse/permanent
+// errors are returned as-is instead of being swallowed here, so the caller
+// logs them at Error level and a persistently bad feed stays visible in the
+// journal — but this function never clears the scheduler's cached active set
+// (s.full/s.source) either way, for either error class. A wall display
+// deliberately keeps showing its last-known-good playlist through a broken
+// feed rather than going blank; only Clear or a new Prepare/PrepareWithSource
+// ever drops that cache.
 func (r *refresher) handleRefreshError(err error, kind string, source playlistschedule.Source) error {
 	if r.scheduler != nil &&
 		r.scheduler.HasCache() &&

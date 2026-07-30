@@ -347,12 +347,22 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 	//
 	//   • Shutdown does not wait for queued or in-flight DDC alignment.
 	e.sleepApplyMu.Lock()
+	wasSleeping := e.sleepAppliedState != nil && *e.sleepAppliedState == sleepschedule.StateSleeping
 	err := e.applySleepTransitionLocked(ctx, state, reason)
 	onAwake := e.onAwake
 	e.sleepApplyMu.Unlock()
 	// Fire outside sleepApplyMu: displayAt recompute does its own CDP round-trip
 	// and must not serialize behind (or extend) the sleep-transition critical section.
-	if err == nil && state == sleepschedule.StateAwake && onAwake != nil {
+	// Fire only on the sleep→awake EDGE, never on a successful re-drive of an
+	// already-awake player: the hook's job is to catch a displayAt timer that
+	// fired while the player slept, and re-drives are routine (every CDP
+	// reconnect invalidates the tracker; wakeNow re-drives unconditionally).
+	// Firing on those would force-push — and visibly remount — a byte-identical
+	// active set on top of the on-connect RecomputeNow that already serves a
+	// reloaded page. A FAILED previous sleep apply still counts as the edge:
+	// the player state is unknown and a timer may have fired into it, so the
+	// recompute errs toward one redundant push over a stale playlist.
+	if err == nil && state == sleepschedule.StateAwake && wasSleeping && onAwake != nil {
 		onAwake(ctx)
 	}
 	return err
@@ -382,8 +392,9 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 	return nil
 }
 
-// SetOnAwake registers a callback invoked after a successful awake transition.
-// Safe before or after the sleep schedule loop starts.
+// SetOnAwake registers a callback invoked after a successful sleep→awake
+// transition (the edge, not every awake re-drive). Safe before or after the
+// sleep schedule loop starts.
 func SetOnAwake(exec Executor, fn func(context.Context), logger *zap.Logger) {
 	setter, ok := exec.(interface{ setOnAwake(func(context.Context)) })
 	if !ok {
@@ -479,10 +490,14 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 		return nil
 	}
 
+	wasSleeping := e.sleepAppliedState != nil && *e.sleepAppliedState == sleepschedule.StateSleeping
 	err := e.applySleepTransitionLocked(ctx, state, reason)
 	onAwake := e.onAwake
 	e.sleepApplyMu.Unlock()
-	if err == nil && state == sleepschedule.StateAwake && onAwake != nil {
+	// Sleep→awake edge only — see applySleepTransition for why re-drives
+	// (tracker invalidated on CDP reconnect, or a failed awake retry) must
+	// not re-fire the displayAt recompute.
+	if err == nil && state == sleepschedule.StateAwake && wasSleeping && onAwake != nil {
 		onAwake(ctx)
 	}
 	return err

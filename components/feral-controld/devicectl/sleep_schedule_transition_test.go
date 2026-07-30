@@ -263,6 +263,9 @@ func TestSetOnAwake_FiresAfterSuccessfulWakeOutsideSleepLock(t *testing.T) {
 		called <- struct{}{}
 	}, zaptest.NewLogger(t))
 
+	// The hook fires on the sleep→awake EDGE only, so the wake must end a
+	// recorded sleep.
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateSleeping, "test-sleep"))
 	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateAwake, "test-wake"))
 
 	select {
@@ -303,4 +306,75 @@ func TestSetOnAwake_NotCalledOnSleep(t *testing.T) {
 
 	require.NoError(t, e.applySleepTransition(context.Background(), sleepschedule.StateSleeping, "test-sleep"))
 	assert.Equal(t, 0, called)
+}
+
+// The hook must fire only on the sleep→awake edge: awake applies with no
+// recorded sleep (boot, or a CDP reconnect that invalidated the tracker) and
+// awake→awake re-drives (wakeNow on an already-awake device) are routine and
+// would otherwise force-push — and visibly remount — an unchanged displayAt
+// set on every reconnect, doubling the on-connect RecomputeNow.
+func TestSetOnAwake_NotCalledWithoutSleepEdge(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).Return(map[string]any{"result": map[string]any{}}, nil).AnyTimes()
+
+	e := &executor{
+		cdp:    mockCDP,
+		logger: zaptest.NewLogger(t),
+	}
+	ctx := context.Background()
+	called := 0
+	SetOnAwake(e, func(context.Context) { called++ }, zaptest.NewLogger(t))
+
+	// Boot / post-invalidation shape: no recorded prior state.
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateAwake, "boot-awake"))
+	assert.Equal(t, 0, called, "awake with no recorded sleep must not fire the hook")
+
+	// Awake→awake re-drive (wakeNow on an already-awake device).
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateAwake, "redundant-wake"))
+	assert.Equal(t, 0, called, "awake→awake re-drive must not fire the hook")
+
+	// CDP reconnect invalidates the tracker; the loop's awake re-drive of the
+	// reloaded (awake) page must not fire either — the on-connect RecomputeNow
+	// already serves that page.
+	e.invalidatePlayerSleepState()
+	require.NoError(t, e.applySleepTransitionIfChanged(ctx, sleepschedule.StateAwake, "reconnect-redrive"))
+	assert.Equal(t, 0, called, "post-reconnect awake re-drive must not fire the hook")
+
+	// A real edge still fires.
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateSleeping, "sleep"))
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateAwake, "wake"))
+	assert.Equal(t, 1, called, "sleep→awake edge must fire the hook")
+}
+
+// A FAILED sleep apply still records StateSleeping (not-applied), and the
+// player state behind it is unknown — a displayAt timer may have fired into
+// it. The subsequent awake must treat that as the edge and fire the hook:
+// one redundant push is the safe direction, a stale playlist is not.
+func TestSetOnAwake_FiresAfterFailedSleepApply(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	failNext := true
+	mockCDP.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(string, map[string]interface{}) (interface{}, error) {
+			if failNext {
+				failNext = false
+				return nil, assert.AnError
+			}
+			return map[string]any{"result": map[string]any{}}, nil
+		}).AnyTimes()
+
+	e := &executor{
+		cdp:    mockCDP,
+		logger: zaptest.NewLogger(t),
+	}
+	ctx := context.Background()
+	called := 0
+	SetOnAwake(e, func(context.Context) { called++ }, zaptest.NewLogger(t))
+
+	require.Error(t, e.applySleepTransition(ctx, sleepschedule.StateSleeping, "failing-sleep"))
+	require.NoError(t, e.applySleepTransition(ctx, sleepschedule.StateAwake, "wake-after-failed-sleep"))
+	assert.Equal(t, 1, called)
 }
