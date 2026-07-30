@@ -240,6 +240,38 @@ func TestStartupOTAGate_EntryGatedOnBootWindow(t *testing.T) {
 	assert.True(t, e.startupOTAGateDone.Load())
 }
 
+// TestStartupOTAGate_EntryUsesOwnWiderWindow pins the power-restore fix: WAN
+// routinely trails boot past the 2-minute boot-lifecycle window on a
+// site-wide power restore (the FF1 is up in under a minute, the building's
+// router re-converges in several), and gating entry on that shared window
+// silently skipped the boot force-OTA in exactly the scenario reboots most
+// often happen. The gate's own probe (startupOTAGateEntryWindow) must take
+// precedence over the tighter boot-lifecycle probe.
+func TestStartupOTAGate_EntryUsesOwnWiderWindow(t *testing.T) {
+	gate := &fakeStartupGate{results: []otagate.Result{otagate.ResultNoUpdateNeeded}}
+	e := startupGateExecutor(t, true, gate)
+
+	e.bootLifecycleProbe = func() bool { return false } // recovery window closed (boot+4min)
+	e.otaGateEntryProbe = func() bool { return true }   // gate's own wider window still open
+	e.MaybeRunStartupOTAGateOnOnline(context.Background())
+	assert.Equal(t, 1, gate.calls(), "the gate must run inside its own wider entry window")
+	assert.True(t, e.startupOTAGateDone.Load())
+}
+
+// TestStartupOTAGate_EntryOwnWindowClosedDefers: past the gate's OWN window
+// (booted offline, WAN arrives mid-exhibition) entry still defers to the
+// nightly updater timer without latching done.
+func TestStartupOTAGate_EntryOwnWindowClosedDefers(t *testing.T) {
+	gate := &fakeStartupGate{results: []otagate.Result{otagate.ResultNoUpdateNeeded}}
+	e := startupGateExecutor(t, true, gate)
+
+	e.bootLifecycleProbe = func() bool { return true } // would pass — must not be consulted
+	e.otaGateEntryProbe = func() bool { return false }
+	e.MaybeRunStartupOTAGateOnOnline(context.Background())
+	assert.Equal(t, 0, gate.calls(), "entry must honor the gate's own window, not the recovery's")
+	assert.False(t, e.startupOTAGateDone.Load())
+}
+
 // TestStartupOTAGate_ResetMidRetryStopsWithoutLatching: a factory reset can
 // clear the claim state while the VersionCheckFailed retry loop sleeps (the
 // reset's staged reboot can be delayed or fail). The next attempt must NOT

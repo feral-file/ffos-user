@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -30,6 +31,12 @@ func settledExecutor(mockCDP *mocks.MockCDP) *executor {
 	return e
 }
 
+// playerRefusal is the { message: { ok: false, error: reason } } envelope a
+// live player returns for a refused command.
+func playerRefusal(reason string) interface{} {
+	return map[string]interface{}{"message": map[string]interface{}{"ok": false, "error": reason}}
+}
+
 // expectRefreshEvaluate registers the in-app refreshArtwork evaluate and
 // asserts the expression really carries the refreshArtwork command envelope.
 func expectRefreshEvaluate(t *testing.T, mockCDP *mocks.MockCDP, result interface{}, err error) *gomock.Call {
@@ -44,6 +51,21 @@ func expectRefreshEvaluate(t *testing.T, mockCDP *mocks.MockCDP, result interfac
 		})
 }
 
+// expectHandlerReadyProbe answers the pre-refresh handler-readiness poll
+// (awaitPlayerCommandHandlerReady) with "installed", so the recovery proceeds
+// without waiting — the hydrated-page baseline every pre-poll test assumed.
+func expectHandlerReadyProbe(t *testing.T, mockCDP *mocks.MockCDP) *gomock.Call {
+	t.Helper()
+	return mockCDP.EXPECT().
+		NoLogSend(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			assert.True(t, strings.Contains(expr, "handleCDPRequest"),
+				"readiness probe must check the command handler, got: %s", expr)
+			return map[string]interface{}{"ready": true}, nil
+		}).AnyTimes()
+}
+
 // TestBootPlayerRecovery_InAppRefreshSuffices: a live, ACKing player is
 // recovered by the in-app artwork refresh alone — no page reload, so the
 // player's own crossfade owns the transition.
@@ -53,6 +75,7 @@ func TestBootPlayerRecovery_InAppRefreshSuffices(t *testing.T) {
 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true)
+	expectHandlerReadyProbe(t, mockCDP)
 	expectRefreshEvaluate(t, mockCDP, playerACK(), nil).Times(1)
 	// No Page.reload expectation: escalation must not happen on an ACK.
 
@@ -83,6 +106,7 @@ func TestBootPlayerRecovery_EscalatesToReload(t *testing.T) {
 
 			mockCDP := mocks.NewMockCDP(ctrl)
 			mockCDP.EXPECT().Initialized().Return(true)
+			expectHandlerReadyProbe(t, mockCDP)
 			expectRefreshEvaluate(t, mockCDP, tc.refreshResult, tc.refreshErr).Times(1)
 
 			e := settledExecutor(mockCDP)
@@ -121,6 +145,7 @@ func TestBootPlayerRecovery_WANBeforeCDPConnectRunsOnceOnConnect(t *testing.T) {
 
 	// CDP's first successful connection completes the parked recovery: exactly
 	// one in-app refresh.
+	expectHandlerReadyProbe(t, mockCDP)
 	expectRefreshEvaluate(t, mockCDP, playerACK(), nil).Times(1)
 	e.CompletePendingBootPlayerRecovery()
 
@@ -175,6 +200,7 @@ func TestBootPlayerRecovery_ParkedRecoveryRunsWithinBootWindow(t *testing.T) {
 	e.bootLifecycleProbe = func() bool { return true }
 
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	expectHandlerReadyProbe(t, mockCDP)
 	expectRefreshEvaluate(t, mockCDP, playerACK(), nil).Times(1)
 	e.CompletePendingBootPlayerRecovery()
 	assert.False(t, e.bootPlayerRecoveryPending.Load())
@@ -193,6 +219,7 @@ func TestBootPlayerRecovery_InlinePathIgnoresBootWindowExpiry(t *testing.T) {
 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true)
+	expectHandlerReadyProbe(t, mockCDP)
 	expectRefreshEvaluate(t, mockCDP, playerACK(), nil).Times(1)
 
 	e := settledExecutor(mockCDP)
@@ -253,7 +280,9 @@ func TestBootPlayerRecovery_NarrationOnScreenSkipsReload(t *testing.T) {
 
 			mockCDP := mocks.NewMockCDP(ctrl)
 			mockCDP.EXPECT().Initialized().Return(true)
-			// Refresh is refused (no playlist) — the shape that escalates.
+			expectHandlerReadyProbe(t, mockCDP)
+			// Refresh refused with NO reason (bare non-ACK) — the shape that
+			// escalates (a reasoned "player alive" refusal no longer does).
 			expectRefreshEvaluate(t, mockCDP, map[string]interface{}{}, nil).Times(1)
 
 			e := settledExecutor(mockCDP)
@@ -277,6 +306,7 @@ func TestBootPlayerRecovery_HiddenNarrationAllowsReload(t *testing.T) {
 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true)
+	expectHandlerReadyProbe(t, mockCDP)
 	expectRefreshEvaluate(t, mockCDP, map[string]interface{}{}, nil).Times(1)
 
 	e := settledExecutor(mockCDP)
@@ -290,24 +320,138 @@ func TestBootPlayerRecovery_HiddenNarrationAllowsReload(t *testing.T) {
 	assert.Equal(t, 0, spy.reloadSkips)
 }
 
-// TestBootPlayerRecovery_TotalFailureDoesNotRetry: refresh AND reload both
-// failing consumes the latch anyway — retrying on the next flap would
-// reintroduce the mid-exhibition disturbance hazard, and the page is no worse
-// off than before.
-func TestBootPlayerRecovery_TotalFailureDoesNotRetry(t *testing.T) {
+// TestBootPlayerRecovery_ReloadTransportFailureRearmsForNextConnect: a
+// transport-level reload failure means the recovery never ran, so the done
+// callback re-arms the park and the NEXT CDP connect retries the whole
+// refresh-then-reload sequence — the only path that can legitimately run the
+// recovery machinery twice in one boot. Online flaps must still find the
+// done latch held (no third entry point), and once a retry's reload goes
+// through the park is consumed for good.
+func TestBootPlayerRecovery_ReloadTransportFailureRearmsForNextConnect(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().Initialized().Return(true)
-	expectRefreshEvaluate(t, mockCDP, nil, errors.New("target closed")).Times(1)
+	expectHandlerReadyProbe(t, mockCDP)
+	expectRefreshEvaluate(t, mockCDP, nil, errors.New("target closed")).Times(2)
 
 	e := settledExecutor(mockCDP)
 	spy := &narratorSpy{reloadErr: errors.New("target closed")}
 	e.setupNarrator = spy
 
+	// First attempt: refresh dies at transport, reload dies at transport —
+	// the park re-arms for the next connect instead of stranding the broken
+	// pre-network page for the whole exhibition.
 	e.MaybeRecoverPlayerOnBootOnline(context.Background())
-	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	assert.Equal(t, 1, spy.reloads)
+	assert.True(t, e.bootPlayerRecoveryPending.Load(),
+		"a transport-failed reload must re-arm the park for the next CDP connect")
 	assert.True(t, e.bootPlayerRecoveryDone.Load())
-	assert.Equal(t, 1, spy.reloads, "the failed reload must not be retried")
+
+	// An online flap in the gap must not run anything: the done latch holds.
+	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	assert.Equal(t, 1, spy.reloads)
+
+	// Next CDP connect: transport healthy now — exactly one more
+	// refresh(escalation)+reload, and the park is consumed.
+	spy.reloadErr = nil
+	e.CompletePendingBootPlayerRecovery()
+	assert.Equal(t, 2, spy.reloads)
+	assert.False(t, e.bootPlayerRecoveryPending.Load())
+
+	// Later reconnects find nothing parked.
+	e.CompletePendingBootPlayerRecovery()
+	assert.Equal(t, 2, spy.reloads)
+}
+
+// TestBootPlayerRecovery_PlayerAliveRefusalSkipsReload pins the cross-repo
+// contract fix: the player's reasoned refusals mean the app is ALIVE — it
+// either parked the refresh for its own replay ("No playlist handler
+// registered yet", replayed when the playlist route mounts) or has no artwork
+// a reload could repair ("No active artwork to refresh", castInfo still
+// hydrating or genuinely empty). Escalating either to Page.reload killed a
+// healthy in-flight page load and discarded the queued replay. The one-shot
+// latch stays consumed: the player owns the recovery from here.
+func TestBootPlayerRecovery_PlayerAliveRefusalSkipsReload(t *testing.T) {
+	for _, reason := range []string{
+		"No playlist handler registered yet",
+		"No active artwork to refresh",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockCDP := mocks.NewMockCDP(ctrl)
+			mockCDP.EXPECT().Initialized().Return(true)
+			expectHandlerReadyProbe(t, mockCDP)
+			expectRefreshEvaluate(t, mockCDP, playerRefusal(reason), nil).Times(1)
+
+			e := settledExecutor(mockCDP)
+			spy := &narratorSpy{}
+			e.setupNarrator = spy
+
+			e.MaybeRecoverPlayerOnBootOnline(context.Background())
+			assert.Equal(t, 0, spy.reloads, "an alive player's refusal must not be answered with a reload")
+			assert.Equal(t, 0, spy.reloadSkips, "no reload may even be requested")
+			assert.True(t, e.bootPlayerRecoveryDone.Load())
+			assert.False(t, e.bootPlayerRecoveryPending.Load())
+		})
+	}
+}
+
+// TestBootPlayerRecovery_WaitsForHydratingHandler: the first CDP connect
+// routinely precedes the player app installing window.handleCDPRequest (the
+// connect loop needs only a page target). The recovery must poll the handler
+// into existence and then succeed in-app — not misread the young page as
+// dead and reload it (which roughly doubled boot-to-artwork on healthy
+// boots).
+func TestBootPlayerRecovery_WaitsForHydratingHandler(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true)
+	probes := 0
+	mockCDP.EXPECT().
+		NoLogSend(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, _ map[string]interface{}) (interface{}, error) {
+			probes++
+			if probes < 3 {
+				return map[string]interface{}{"ready": false}, nil
+			}
+			return map[string]interface{}{"ready": true}, nil
+		}).Times(3)
+	expectRefreshEvaluate(t, mockCDP, playerACK(), nil).Times(1)
+	// No reload expectation: a hydrating page is not a dead page.
+
+	e := settledExecutor(mockCDP)
+	e.playerReadyPollInterval = time.Millisecond
+
+	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+}
+
+// TestBootPlayerRecovery_HandlerNeverReadyEscalatesToReload: a page that never
+// installs the command handler is the dead page the reload exists for — the
+// poll timing out must fall through to the escalation, not park forever.
+func TestBootPlayerRecovery_HandlerNeverReadyEscalatesToReload(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true)
+	mockCDP.EXPECT().
+		NoLogSend(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(map[string]interface{}{"ready": false}, nil).
+		AnyTimes()
+	expectRefreshEvaluate(t, mockCDP, nil, errors.New("target closed")).Times(1)
+
+	e := settledExecutor(mockCDP)
+	e.playerReadyPollInterval = time.Millisecond
+	e.playerReadyPollTimeout = 5 * time.Millisecond
+	spy := &narratorSpy{}
+	e.setupNarrator = spy
+
+	e.MaybeRecoverPlayerOnBootOnline(context.Background())
+	assert.Equal(t, 1, spy.reloads, "a handler that never appears must escalate to the reload")
 }

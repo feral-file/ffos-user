@@ -208,6 +208,24 @@ type executor struct {
 	// nil (tests, doubles) means no expiry.
 	bootLifecycleProbe func() bool
 
+	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
+	// (main wires it to re-read /proc/uptime against the wider
+	// startupOTAGateEntryWindow). Split from bootLifecycleProbe because the
+	// two consumers tolerate very different lateness: the parked player
+	// recovery expiry guards a page that loaded with the network already up
+	// (minutes matter), while the gate's entry only needs to exclude a WAN
+	// arriving mid-exhibition, hours later — and WAN routinely trails boot
+	// past the 2-minute window on a site-wide power restore, which must still
+	// force the boot OTA. nil falls back to bootLifecycleProbe (older wiring,
+	// test doubles), preserving the tighter gating rather than none.
+	otaGateEntryProbe func() bool
+
+	// playerReadyPoll{Interval,Timeout} pace awaitPlayerCommandHandlerReady;
+	// zero means the package defaults. Overridable in tests so the
+	// handler-never-appears path needn't wait out the real timeout.
+	playerReadyPollInterval time.Duration
+	playerReadyPollTimeout  time.Duration
+
 	// logUploaderFactory builds the in-process log uploader. Overridable in tests
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
@@ -835,18 +853,24 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 	if e.startupOTAGateDone.Load() || !e.claimSettled() {
 		return
 	}
-	// Boot-window entry gate, matching the parked player recovery's deferred
-	// expiry: the hook stays wired for the process lifetime, so a device that
-	// BOOTED offline and only gains WAN hours later would otherwise run a
-	// Required-mode update — and its reboot — mid-exhibition. That late
-	// update belongs to the nightly updater timer. Checked at ENTRY only: a
-	// gate that started inside the window may keep retrying a failing
-	// version check past it (boot-time DNS convergence is the common cause).
-	// The resulting worst case is bounded at ~22.5 minutes of backoff across
-	// startupOTAGateMaxCheckAttempts — an update can launch ~25 minutes after
-	// boot, never hours; per-retry probing would cap the ladder at ~3
-	// attempts and defeat the DNS-convergence rationale.
-	if probe := e.bootLifecycleProbe; probe != nil && !probe() {
+	// Boot-window entry gate: the hook stays wired for the process lifetime,
+	// so a device that BOOTED offline and only gains WAN hours later would
+	// otherwise run a Required-mode update — and its reboot — mid-exhibition.
+	// That late update belongs to the nightly updater timer. The window is
+	// the gate's OWN (startupOTAGateEntryWindow, wider than the player
+	// recovery's bootLifecycleWindow): WAN routinely trails boot by several
+	// minutes on a site-wide power restore — the boot this gate most needs to
+	// cover — and the 2-minute window silently deferred exactly those boots.
+	// Checked at ENTRY only: a gate that started inside the window may keep
+	// retrying a failing version check past it (boot-time DNS convergence is
+	// the common cause). The resulting worst case is bounded at ~22.5 minutes
+	// of backoff across startupOTAGateMaxCheckAttempts; per-retry probing
+	// would cap the ladder and defeat the DNS-convergence rationale.
+	probe := e.otaGateEntryProbe
+	if probe == nil {
+		probe = e.bootLifecycleProbe
+	}
+	if probe != nil && !probe() {
 		if e.startupOTAGateDeferLogged.CompareAndSwap(false, true) {
 			e.logger.Info("Startup OTA gate: boot window elapsed before WAN; deferring to the nightly updater timer")
 		}
@@ -918,7 +942,7 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 // MaybeRecoverPlayerOnBootOnline recovers the bundled player page exactly
 // once, on the first provisioning →Online/→Unprovisioned transition of a BOOT
 // lifecycle. main.go wires this trigger only when the daemon itself started
-// within the boot window (startedWithinBootWindow), so a mid-life controld
+// within the boot window (uptimeWithin), so a mid-life controld
 // restart can never disturb a healthy, possibly-playing page.
 //
 // Why: chromium-kiosk deliberately does not gate on the network (a blocked
@@ -948,13 +972,13 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 // never on a LAN without internet.
 //
 // Settled devices only: on an unclaimed device the auto-claim flow owns the
-// screen (finalizing narration, then the claim QR), and there is no playlist —
-// refreshArtwork would refuse ("No active artwork to refresh") and escalate to
-// a Page.reload that can erase the concurrently painted claim overlay with
-// nothing guaranteed to restore it (narration re-syncs only on a CDP
-// reconnect, which a same-target reload does not force). The latch is still
-// consumed: anything cast after a claim loads with the network already up, so
-// an unclaimed boot has nothing this hook could ever need to repair.
+// screen (finalizing narration, then the claim QR), there is no playlist to
+// repair, and a dead-page escalation would run a Page.reload that can erase
+// the concurrently painted claim overlay with nothing guaranteed to restore
+// it (narration re-syncs only on a CDP reconnect, which a same-target reload
+// does not force). The latch is still consumed: anything cast after a claim
+// loads with the network already up, so an unclaimed boot has nothing this
+// hook could ever need to repair.
 //
 // CDP ordering: the provisioning domain starts before the CDP supervisor
 // (main.go's P2.5 ordering), so this transition routinely precedes the first
@@ -967,9 +991,11 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 // onConnect, so observing Initialized()==false here guarantees the connect
 // callback has not run yet and will see the pending flag.
 //
-// ctx is unused: the body is at most two bounded CDP Sends, not a wait loop,
-// so there is nothing for cancellation to interrupt (contrast the gate and
-// claim hooks, whose retry/backoff waits must observe daemon shutdown).
+// ctx is unused: the body is a bounded handler-readiness poll (~20s worst
+// case, on its own goroutine) plus at most two CDP Sends; nothing WaitGroups
+// this goroutine, so shutdown simply orphans it rather than waiting (contrast
+// the gate and claim hooks, whose retry/backoff waits must observe daemon
+// shutdown).
 //
 // The player build now drives its own reconnect recovery from the
 // connectivity pushes (window.handleConnectivityChange) — but that recovery
@@ -1007,6 +1033,13 @@ func (e *executor) MaybeRecoverPlayerOnBootOnline(_ context.Context) {
 // CDP.Start and spawns the connect loop that reads it — never afterwards.
 func (e *executor) SetBootLifecycleProbe(probe func() bool) {
 	e.bootLifecycleProbe = probe
+}
+
+// SetStartupOTAGateEntryProbe injects the startup OTA gate's own entry-window
+// check (see otaGateEntryProbe for why it is wider than the boot-lifecycle
+// probe). Same wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetStartupOTAGateEntryProbe(probe func() bool) {
+	e.otaGateEntryProbe = probe
 }
 
 // CompletePendingBootPlayerRecovery is the CDP on-connect entry point for a
@@ -1047,9 +1080,29 @@ func (e *executor) finishPendingBootPlayerRecovery() {
 		return
 	}
 
+	// The refresh evaluate needs window.handleCDPRequest, which the player app
+	// installs only once React has hydrated — and the first CDP connect
+	// routinely precedes that (the connect loop needs only a page TARGET,
+	// which exists from navigation start). Without this wait, a healthy
+	// still-hydrating page fails the evaluate at transport level and gets the
+	// destructive reload on nearly every in-window boot. A page that never
+	// installs the handler is the dead page the reload exists for, so a
+	// timeout simply falls through to the escalation below.
+	if !e.awaitPlayerCommandHandlerReady() {
+		e.logger.Info("Boot player recovery: player command handler never appeared; treating the page as dead")
+	}
 	refreshErr := e.evaluateRefreshArtwork()
 	if refreshErr == nil {
 		e.logger.Info("Boot player recovery: in-app artwork refresh re-ran the pre-network fetches")
+		return
+	}
+	if errors.Is(refreshErr, errPlayerAliveRefusal) {
+		// The player app answered and either queued the refresh for its own
+		// replay or has no artwork a reload could repair — reloading here
+		// would kill a healthy page mid-boot and discard the queued replay.
+		// The one-shot latch stays consumed: the player owns it from here.
+		e.logger.Info("Boot player recovery: player is alive and owns the refresh; skipping reload",
+			zap.Error(refreshErr))
 		return
 	}
 	// The reload fallback is the destructive step: a Page.reload erases
@@ -1090,11 +1143,31 @@ func (e *executor) finishPendingBootPlayerRecovery() {
 	})
 }
 
+// Player refusal reasons that mean the app is ALIVE and the reload must not
+// run. Wire contract with ff-player CanvasService.refreshArtwork — these
+// strings must match its `error` reply fields byte-for-byte:
+//   - "No playlist handler registered yet": the playlist route has not
+//     mounted its handler; CanvasService parked pendingRefreshArtwork and
+//     replays the refresh itself the moment the handler lands.
+//   - "No active artwork to refresh": no castInfo (still hydrating from
+//     storage, or genuinely nothing cast) — a reload would boot the very
+//     same empty page while killing an in-flight hydration.
+const (
+	playerRefusalHandlerPending = "No playlist handler registered yet"
+	playerRefusalNoArtwork      = "No active artwork to refresh"
+)
+
+// errPlayerAliveRefusal marks a refreshArtwork refusal whose reason proves the
+// player app is running and owns the recovery from here; the caller must not
+// escalate it to the destructive Page.reload.
+var errPlayerAliveRefusal = errors.New("player alive; reload not warranted")
+
 // evaluateRefreshArtwork asks the live player app to re-mount the current
 // artwork via the same window.handleCDPRequest envelope every player command
-// uses. A transport error or a non-ACK response both mean the app cannot be
-// assumed to have refreshed (e.g. the page never booted), which the caller
-// escalates to a browser-level reload.
+// uses. A transport error or a bare non-ACK response both mean the app cannot
+// be assumed to have refreshed (e.g. the page never booted), which the caller
+// escalates to a browser-level reload — EXCEPT the refusal reasons above,
+// which prove the app is alive and wrap errPlayerAliveRefusal instead.
 func (e *executor) evaluateRefreshArtwork() error {
 	if e.cdp == nil {
 		return fmt.Errorf("cdp client is not configured")
@@ -1111,13 +1184,17 @@ func (e *executor) evaluateRefreshArtwork() error {
 		return fmt.Errorf("send refreshArtwork to player: %w", err)
 	}
 	if !playerresponse.OK(result) {
-		// Surface the player's own refusal reason when it sent one: it is what
-		// distinguishes the EXPECTED escalation ("No active artwork to
-		// refresh" — page booted with no playlist, reload is right) from an
-		// unexpected refusal when reading logs after a bad boot.
+		// Surface the player's own refusal reason when it sent one — and
+		// classify it: the two known-alive reasons must not trigger the
+		// reload escalation (see errPlayerAliveRefusal), while an unknown
+		// reason or a bare non-ACK still reads as "cannot assume the app
+		// refreshed".
 		if m, ok := result.(map[string]interface{}); ok {
 			if msg, ok := m["message"].(map[string]interface{}); ok {
 				if s, _ := msg["error"].(string); s != "" {
+					if s == playerRefusalHandlerPending || s == playerRefusalNoArtwork {
+						return fmt.Errorf("player refused refreshArtwork: %s: %w", s, errPlayerAliveRefusal)
+					}
 					return fmt.Errorf("player refused refreshArtwork: %s", s)
 				}
 			}
@@ -1125,6 +1202,53 @@ func (e *executor) evaluateRefreshArtwork() error {
 		return fmt.Errorf("player did not acknowledge refreshArtwork")
 	}
 	return nil
+}
+
+// Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
+// connectivity re-seed's: on timeout this path still proceeds (and escalates
+// to the reload), so it only delays the dead-page repair, never skips it.
+const (
+	defaultPlayerReadyPollInterval = 500 * time.Millisecond
+	defaultPlayerReadyPollTimeout  = 20 * time.Second
+)
+
+// awaitPlayerCommandHandlerReady polls the page until the player app has
+// installed window.handleCDPRequest, bounding the wait with the executor's
+// poll seams (package defaults when zero). Returns whether the handler was
+// observed; callers treat a timeout as the dead page it indicates. The probe
+// evaluates to a JSON STRING because the cdp client decodes only string and
+// object evaluate results (the constraint setupui.awaitPageReady pins), and
+// typeof never throws, so polling a still-hydrating page is error-free.
+// Blocking is safe: both callers run on dedicated goroutines (the notifier's
+// hook spawn and main's on-connect spawn), never on the CDP connect loop.
+func (e *executor) awaitPlayerCommandHandlerReady() bool {
+	interval := e.playerReadyPollInterval
+	if interval <= 0 {
+		interval = defaultPlayerReadyPollInterval
+	}
+	timeout := e.playerReadyPollTimeout
+	if timeout <= 0 {
+		timeout = defaultPlayerReadyPollTimeout
+	}
+	const probe = `JSON.stringify({ready: typeof window.handleCDPRequest === 'function'})`
+	deadline := time.Now().Add(timeout)
+	for {
+		result, err := e.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+			"expression":    probe,
+			"returnByValue": true,
+		})
+		if err == nil {
+			if m, ok := result.(map[string]interface{}); ok {
+				if ready, _ := m["ready"].(bool); ready {
+					return true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(interval)
+	}
 }
 
 // claimSettled reports whether the claim journey is over for this device —

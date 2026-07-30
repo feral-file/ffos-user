@@ -516,6 +516,15 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 	return connected, nil
 }
 
+// connectivityReseedPoll{Interval,Timeout} pace awaitConnectivityHandlerReady.
+// The timeout is generous: it only delays the re-seed on a page that never
+// installs the handler (a broken load, already Warn-logged), while a healthy
+// hydration clears the poll in a few ticks.
+const (
+	connectivityReseedPollInterval = 500 * time.Millisecond
+	connectivityReseedPollTimeout  = 45 * time.Second
+)
+
 // reseedPlayerConnectivity pushes the CURRENT connectivity state to a freshly
 // connected player page. The mediator owns the edge-triggered forwarding of
 // connectivity_change; this is the level-triggered reconciliation leg of the
@@ -525,7 +534,23 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 // (D-Bus down) pushes nothing: the player's optimistic online default plus
 // the next real edge beat guessing offline, which would pause streaming
 // playback on a healthy wall.
+//
+// The push waits for the page to install the handler first: the first CDP
+// connect routinely lands before the player app has hydrated (the connect
+// loop only needs a page TARGET to exist, which is true from navigation
+// start), and window.handleConnectivityChange is installed by a React effect.
+// An unguarded evaluate there raises a TypeError — a RemoteError, not the
+// tolerated "type mismatch: undefined" — and with sys-monitord silent while
+// the state holds steady, the page would then never learn its connectivity
+// for its whole lifetime. Same discipline as setupui.awaitPageReady.
 func reseedPlayerConnectivity(ctx context.Context, app *app) {
+	if !awaitConnectivityHandlerReady(ctx, app.CDP,
+		connectivityReseedPollInterval, connectivityReseedPollTimeout) {
+		if ctx.Err() == nil {
+			app.Logger.Warn("Player connectivity re-seed skipped: page never installed handleConnectivityChange")
+		}
+		return
+	}
 	connected, err := getConnectivityStatus(ctx, app.DBus, app.Logger)
 	if err != nil {
 		app.Logger.Warn("Player connectivity re-seed skipped: status unavailable", zap.Error(err))
@@ -542,6 +567,40 @@ func reseedPlayerConnectivity(ctx context.Context, app *app) {
 			app.Logger.Debug("Player connectivity re-seed delivered; handler returned no value")
 		} else {
 			app.Logger.Warn("Failed to re-seed player connectivity", zap.Error(err))
+		}
+	}
+}
+
+// awaitConnectivityHandlerReady polls the connected page until the player app
+// has installed window.handleConnectivityChange, bounding the wait with
+// `timeout` and observing ctx (daemon shutdown); intervals are parameters so
+// tests needn't wait out production pacing. The probe evaluates to a JSON
+// STRING because the cdp client decodes only string and object evaluate
+// results (see setupui.awaitPageReady, which pins the same constraint);
+// typeof never throws, so polling a still-hydrating page is error-free rather
+// than a RemoteError per tick.
+func awaitConnectivityHandlerReady(ctx context.Context, client cdp.CDP, interval, timeout time.Duration) bool {
+	const probe = `JSON.stringify({ready: typeof window.handleConnectivityChange === 'function'})`
+	deadline := time.Now().Add(timeout)
+	for {
+		result, err := client.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+			"expression":    probe,
+			"returnByValue": true,
+		})
+		if err == nil {
+			if m, ok := result.(map[string]interface{}); ok {
+				if ready, _ := m["ready"].(bool); ready {
+					return true
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
 		}
 	}
 }
@@ -728,7 +787,8 @@ func initializeApp(
 	// wireBootLifecycleHooks for why the Restart=always service makes the
 	// ungated variants a mid-exhibition hazard.
 	wireBootLifecycleHooks(provisioningNotifier, executor,
-		func() bool { return startedWithinBootWindow(go_os.ReadFile, logger) })
+		func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
+		func() bool { return uptimeWithin(startupOTAGateEntryWindow, go_os.ReadFile, logger) })
 	provMachine := provisioning.New(provisioning.Config{
 		AP:           softAP,
 		Wifi:         wifiCtl,
