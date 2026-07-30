@@ -47,8 +47,11 @@ const (
 	// stateScanning is an extension state narrating the pre-AP Wi-Fi scan (the
 	// device is looking for nearby networks before advertising its setup
 	// hotspot). Like stateFactoryReset below it is deliberately NOT in the
-	// required validation set: fielded players that predate it accept it as a
-	// no-op ({ok:true}, renders nothing) and keep full narration support.
+	// required validation set that validateSetupDisplayContract checks: the
+	// shipping player manifest lists it today, but the requirement is kept
+	// loose so an older manifest that predates it — which accepts it as a
+	// no-op ({ok:true}, renders nothing) — still passes the gate and keeps
+	// full narration support.
 	stateScanning = "scanning"
 
 	// stateFinalizing is an extension state covering the gap between a
@@ -59,12 +62,14 @@ const (
 
 	// stateFactoryReset is an extension state used by the in-process factory-reset
 	// flow. It is deliberately NOT in the required set that
-	// validateSetupDisplayContract checks: the currently-shipping player manifest
-	// does not list it, and requiring it would fail the gate and disable ALL setup
-	// narration on fielded players. Players that predate the corresponding
-	// ff-player renderer accept it as a no-op ({ok:true}, renders nothing); once
-	// ff-player adds the state it renders. This is the contract-level extensibility
-	// path in action.
+	// validateSetupDisplayContract checks: the shipping player manifest lists
+	// it today (ff-player added the renderer), but requiring it in the gate
+	// would fail validation and disable ALL setup narration against any
+	// fielded player whose manifest predates it — those older manifests
+	// accept it as a no-op ({ok:true}, renders nothing). This is the
+	// contract-level extensibility path in action: the required set names
+	// only the states every fielded manifest is guaranteed to list; states
+	// that shipped later, or states still to come, stay optional forever.
 	stateFactoryReset = "factory_reset"
 )
 
@@ -327,7 +332,7 @@ const StateFinalizing = stateFinalizing
 // StateUpdating is exported for HideIfShowing callers that need to name the
 // OTA update narration (the narrator-policy dispatch's settled-device
 // permanent-failure path and the post-ladder reboot watchdog — design doc
-// §3.3 — both clear "updating" without erasing a concurrent narrator's
+// §6 — both clear "updating" without erasing a concurrent narrator's
 // overlay).
 const StateUpdating = stateUpdating
 
@@ -352,7 +357,7 @@ func (s *Service) Resync() {
 		s.mu.Unlock()
 		return
 	}
-	// [minor #14] Resync now also runs as a generation-ready reconciler (on
+	// Resync now also runs as a generation-ready reconciler (on
 	// EVERY document replacement, not just the original CDP on-connect
 	// wiring), so it can fire while a genuine multi-state sequence is still
 	// queued (e.g. the claim flow's ShowReady()+Hide(), two DISTINCT states
@@ -463,7 +468,7 @@ func (s *Service) worker() {
 }
 
 // parkForNavigation blocks the worker while a playersession.Session recovery
-// navigation is pending [NV4], so a narration send cannot race the page
+// navigation is pending, so a narration send cannot race the page
 // underneath it. It is a no-op when no session is wired (SetSession never
 // called), which is every existing test and any pre-session build. The park
 // exits on whichever comes FIRST: the navigation's TARGET generation reaching
@@ -474,8 +479,8 @@ func (s *Service) worker() {
 // the SoftAP-QR-goes-dark failure the positive-only barrier cache (NV1)
 // removed.
 //
-// [Park predicate fix] Uses NavigationTargetGeneration, NOT a
-// Generation()-snapshot-at-entry comparison [former M2 fix]: that older
+// Uses NavigationTargetGeneration, NOT a
+// Generation()-snapshot-at-entry comparison: that older
 // approach broke when the park was entered AFTER the bump already happened
 // (a real, common timing — parkForNavigation runs once per queued item, and
 // NavigationPending stays true for the navigation's entire ~20s verifyCap
@@ -691,9 +696,9 @@ type playerContractAcceptedResponse struct {
 // conflated: unreadable may be transient (boot ordering, an OTA mid-replace
 // of the player bundle) and must be re-checked on the next attempt, never
 // latched; a manifest that WAS read but lacks the contract means the
-// connected player's build genuinely does not support it [W8]. Exported so
+// connected player's build genuinely does not support it. Exported so
 // other packages' capability fuses can apply the identical distinction —
-// devicectl's boot-recovery classification (design doc §3.2) checks
+// devicectl's boot-recovery classification (design doc §5) checks
 // errors.Is(err, setupui.ErrPlayerContractUnreadable) against
 // ValidatePlayerStatusContract exactly as this package's own
 // narrationSupported does against validateSetupDisplayContract.
@@ -726,7 +731,7 @@ func readPlayerContractManifest(path string) (playerContractManifest, error) {
 }
 
 // PlayerStatusContractVersion is the version ValidatePlayerStatusContract
-// requires for contracts.playerStatus (design doc §4.3).
+// requires for contracts.playerStatus (design doc §5.3).
 const PlayerStatusContractVersion = 1
 
 // ValidatePlayerStatusContract reports whether the player manifest at path

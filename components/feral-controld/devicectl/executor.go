@@ -173,7 +173,7 @@ type executor struct {
 	startupOTAGate func(ctx context.Context) (otagate.Result, error)
 
 	// bootRecoveryMu serializes EVERY boot player recovery state-machine
-	// transition (design doc §3.2): state, executed-attempt count, the
+	// transition (design doc §5): state, executed-attempt count, the
 	// backoff-ladder index, the conservative-mode capability-fuse latch, the
 	// preview_update_failed one-shot-tolerance flag, and the pending backoff
 	// timer's cancel func. See boot_recovery.go.
@@ -190,7 +190,7 @@ type executor struct {
 	bootRecoveryAttempts int
 	// bootRecoveryAttemptRecordedThisRound latches once
 	// recordBootRecoveryAttemptExecuted has counted an attempt for the
-	// CURRENT round [minor #9], so a round that reaches both an
+	// CURRENT round, so a round that reaches both an
 	// evaluateRefreshArtwork refusal AND an escalated navigateForRecovery
 	// call only ever consumes one budget slot. Cleared at the start of every
 	// new round (enterBootRecoveryRound).
@@ -200,13 +200,13 @@ type executor struct {
 	// still backs off even when it doesn't count as an attempt.
 	bootRecoveryDeferCount int
 	// bootRecoveryConservative latches once the player contract manifest is
-	// READ but lacks contracts.playerStatus (§3.2/§4.3 capability fuse): from
+	// READ but lacks contracts.playerStatus (§5.3 capability fuse): from
 	// then on an unclassifiable refusal is logged and deferred, never escalated
 	// to NavigateHome. A read FAILURE (unreadable manifest) never latches this —
 	// see checkPlayerStatusCapability.
 	bootRecoveryConservative bool
 	// bootRecoveryPreviewUpdateFailedSeen tracks the "once" in code=
-	// preview_update_failed → Deferred once, then attempt: NavigateHome (§3.2
+	// preview_update_failed → Deferred once, then attempt: NavigateHome (§5.2
 	// row). Scoped to one Arm→terminal cycle (the machine only Arms once per
 	// boot), so it never needs resetting.
 	bootRecoveryPreviewUpdateFailedSeen bool
@@ -217,7 +217,7 @@ type executor struct {
 	bootRecoveryBackoffCancel context.CancelFunc
 	// bootRecoverySession, when set (devicectl.SetBootRecoverySession), is the
 	// playersession.Session the state machine escalates dead-page classification
-	// to via NavigateHome (§3.2). nil (tests, builds that predate the session)
+	// to via NavigateHome (§5). nil (tests, builds that predate the session)
 	// makes every escalation degrade to a counted, deferred attempt instead of
 	// navigating — never panics.
 	bootRecoverySession BootRecoverySession
@@ -226,7 +226,7 @@ type executor struct {
 	// only; production never sets it.
 	bootRecoveryContractPath string
 	// bootRecoveryDaemonCtx, when set (SetBootRecoveryDaemonContext), roots the
-	// backoff timer's sleep [minor #4] so process shutdown cancels a pending
+	// backoff timer's sleep so process shutdown cancels a pending
 	// sleep instead of leaking the goroutine until it naturally elapses (up to
 	// 240s). nil (tests, builds that predate the wiring) falls back to
 	// context.Background() — the timer is then only ever canceled by a newer
@@ -310,7 +310,7 @@ type executor struct {
 	// the other. It also guards every tracker field, so the last completed apply
 	// deterministically owns both the player command and the recorded state.
 	sleepApplyMu sync.Mutex
-	// Player (CDP) leg: the four-value tracker (design doc §3.4). sleepPlayerState
+	// Player (CDP) leg: the four-value tracker (design doc §7). sleepPlayerState
 	// is the resting record; sleepAttempted/sleepLastGood/sleepDesiredAtInvalidate
 	// are context fields each meaningful only for one specific state value (see
 	// playerSleepState's doc). The zero value (playerAwake, with every context
@@ -328,7 +328,7 @@ type executor struct {
 	sleepLastGood sleepschedule.State
 	// sleepDesiredAtInvalidate is valid only when
 	// sleepPlayerState==playerFreshDocument: the schedule's desired state at
-	// invalidation time ([NV8]), read from sleepScheduleDesiredCache — never a
+	// invalidation time, read from sleepScheduleDesiredCache — never a
 	// fresh schedule read (see invalidatePlayerSleepState).
 	sleepDesiredAtInvalidate sleepschedule.State
 	// sleepScheduleDesiredCache is the schedule loop's per-tick desired state
@@ -374,7 +374,7 @@ type executor struct {
 	// sessionGeneration, when set (SetSessionGeneration), is
 	// playersession.Session.Generation narrowed to a func() uint64 seam so
 	// this package needs no import of playersession and tests need no real
-	// session (design doc §2.4 generation re-check contract). nil reads as
+	// session (design doc §4 generation re-check contract). nil reads as
 	// generation 0 always, which never appears to move.
 	sessionGeneration func() uint64
 }
@@ -1010,7 +1010,7 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 }
 
 // MaybeRecoverPlayerOnBootOnline, CompletePendingBootPlayerRecovery, and the
-// boot player recovery state machine itself (design doc §3.2) live in
+// boot player recovery state machine itself (design doc §5) live in
 // boot_recovery.go. This split keeps the boot-lifecycle probe setters here,
 // beside bootLifecycleProbe/otaGateEntryProbe, since both are shared wiring
 // seams (SetStartupOTAGateEntryProbe is not boot-recovery-specific).
@@ -1049,7 +1049,14 @@ const (
 // typeof never throws, so polling a still-hydrating page is error-free.
 // Blocking is safe: both callers run on dedicated goroutines (the notifier's
 // hook spawn and main's on-connect spawn), never on the CDP connect loop.
-func (e *executor) awaitPlayerCommandHandlerReady() bool {
+//
+// Uses e.clock — the same seam every other retry loop in this package uses
+// (scheduleBootRecoveryBackoffLocked, the sleep power-align worker) —
+// instead of the raw time package, and observes ctx (the one
+// attemptBootRecovery already threads through runBootRecoveryRound): a ctx
+// cancellation (process shutdown) must interrupt this wait instead of
+// running out its own up-to-20s timeout regardless.
+func (e *executor) awaitPlayerCommandHandlerReady(ctx context.Context) bool {
 	interval := e.playerReadyPollInterval
 	if interval <= 0 {
 		interval = defaultPlayerReadyPollInterval
@@ -1059,7 +1066,7 @@ func (e *executor) awaitPlayerCommandHandlerReady() bool {
 		timeout = defaultPlayerReadyPollTimeout
 	}
 	const probe = `JSON.stringify({ready: typeof window.handleCDPRequest === 'function'})`
-	deadline := time.Now().Add(timeout)
+	deadline := e.clock.Now().Add(timeout)
 	for {
 		result, err := e.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
 			"expression":    probe,
@@ -1072,10 +1079,14 @@ func (e *executor) awaitPlayerCommandHandlerReady() bool {
 				}
 			}
 		}
-		if time.Now().After(deadline) {
+		if e.clock.Now().After(deadline) {
 			return false
 		}
-		time.Sleep(interval)
+		if err := e.clock.SleepContext(ctx, interval); err != nil {
+			// ctx done (shutdown, or a caller-scoped cancellation): treat as
+			// not-ready, the same outcome as a plain timeout.
+			return false
+		}
 	}
 }
 
@@ -2332,14 +2343,14 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 			// Narrate update progress on-screen: the gate hands each parsed percent
 			// to setupui's updating overlay via this callback.
 			OnProgress: e.narrateUpdateProgress,
-			// Post-ladder watchdog (design doc §3.3 [W10]): a successful ladder
+			// Post-ladder watchdog (design doc §6): a successful ladder
 			// that somehow never reboots must not leave "updating" on screen
 			// forever.
 			OnUpdateSucceededNoReboot: e.clearStuckUpdatingOverlay,
 		})
 		// Narrator policy on a latched permanent OTA failure — decided at emit
-		// time (otaPermanentFailureNarration), claim-PRIMARY (design doc §3.3
-		// [N-I]): all three entry points
+		// time (otaPermanentFailureNarration), claim-PRIMARY (design doc §6):
+		// all three entry points
 		// (RequestUpdate/EnsureLatestBeforeClaim/EnsureLatestAtStartup) share
 		// this ONE gate and this ONE callback, so a settled-device
 		// updateToLatest that happens to join a flight another (pre-claim)
@@ -2351,7 +2362,7 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 }
 
 // otaPermanentFailureNarration is the OTA gate's OnPermanentFailure callback
-// (design doc §3.3): claim NOT settled gets today's behavior (the pairing
+// (design doc §6): claim NOT settled gets today's behavior (the pairing
 // flow's own ShowJoinFailed); claim settled clears the stuck "updating"
 // overlay and logs instead — a settled/claimed device has no "join failed"
 // to report, that narration belongs to the pre-claim pairing flow only.
@@ -2372,7 +2383,7 @@ func (e *executor) otaPermanentFailureNarration(fs otagate.FailureState) {
 }
 
 // clearStuckUpdatingOverlay is the post-ladder watchdog's fired callback
-// (Deps.OnUpdateSucceededNoReboot, design doc §3.3 [W10]): a successful
+// (Deps.OnUpdateSucceededNoReboot, design doc §6): a successful
 // update ladder normally ends in a reboot within seconds, so still being
 // alive PostLadderWatchdogTimeout later means that reboot did not happen.
 // Unconditional (not claim-gated): whichever entry point's "updating"

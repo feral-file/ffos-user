@@ -117,7 +117,7 @@ const (
 // --- checkStatus replies (the stamp transport) ------------------------------
 //
 // Envelope: same {messageID, message: ...} wrapping as the refusal replies
-// above. message shape: ff-player src/services/CanvasService.ts:700-720
+// above. message shape: ff-player src/services/CanvasService.ts:700-742
 // (CanvasService.getStatus(), the checkStatus command handler — dispatch at
 // :634-635); the `stamp` field's contract is documented at
 // ff-player src/models/cast_request_reply.model.ts:68-75 and
@@ -125,21 +125,34 @@ const (
 // the `stamp` key — "" when the session hasn't stamped the document yet,
 // the stamp string once it has. Only a player that predates the stamp
 // contract entirely omits the key.
+//
+// Every real getStatus reply also carries deviceSettings/isPaused/sleepMode/
+// loopMode/shuffle (CanvasService.ts:722-741) regardless of stamp support —
+// these three fixtures include them at their idle-player defaults
+// (Scaling.Fit="fit", ViewMode.landscape="landscape",
+// TombstoneMode.Timed="timed", LoopMode.playlist="playlist") to stay
+// byte-accurate to the real reply shape, per this package's copied-verbatim
+// invariant. castCommand/playlist/playlistUrl/items/defaultDuration are
+// omitted because they decode from `undefined` fields on an idle player with
+// nothing cast, and JSON.stringify drops undefined object properties.
 
 const (
 	// CheckStatusReplyStampPresentEmpty: a new player whose current document
 	// has no stamp of its own yet (a fresh mount, or a document the session
 	// never stamped — e.g. right after a feral-watchdog-driven navigation).
-	CheckStatusReplyStampPresentEmpty = `{"messageID":"1","message":{"ok":true,"index":0,"stamp":""}}`
+	CheckStatusReplyStampPresentEmpty = `{"messageID":"1","message":{"ok":true,"index":0,"stamp":"","deviceSettings":{"scaling":"fit","orientation":"landscape","tombstone":"timed"},"isPaused":false,"sleepMode":false,"loopMode":"playlist","shuffle":false}}`
 
 	// CheckStatusReplyStampPresentValue: a new player echoing back a real
 	// stamp the session previously wrote.
-	CheckStatusReplyStampPresentValue = `{"messageID":"1","message":{"ok":true,"index":0,"stamp":"42-1a2b3c"}}`
+	CheckStatusReplyStampPresentValue = `{"messageID":"1","message":{"ok":true,"index":0,"stamp":"42-1a2b3c","deviceSettings":{"scaling":"fit","orientation":"landscape","tombstone":"timed"},"isPaused":false,"sleepMode":false,"loopMode":"playlist","shuffle":false}}`
 
 	// CheckStatusReplyStampAbsent: an OLD player that predates the stamp
 	// contract entirely — the `stamp` key is not present at all, not merely
 	// empty. This is the ONLY shape that must classify as "source
 	// unavailable" (present == false); both stamp variants above must
-	// classify as present == true regardless of the string value.
-	CheckStatusReplyStampAbsent = `{"messageID":"1","message":{"ok":true,"index":0}}`
+	// classify as present == true regardless of the string value. The
+	// sibling deviceSettings/isPaused/sleepMode/loopMode/shuffle fields
+	// predate the stamp contract by a wide margin, so an old player still
+	// carries them; only `stamp` itself is missing.
+	CheckStatusReplyStampAbsent = `{"messageID":"1","message":{"ok":true,"index":0,"deviceSettings":{"scaling":"fit","orientation":"landscape","tombstone":"timed"},"isPaused":false,"sleepMode":false,"loopMode":"playlist","shuffle":false}}`
 )

@@ -49,7 +49,7 @@ type Mediator interface {
 	// readiness. The mediator registers itself as a connectivity reconciler
 	// (run on every generation-ready) and routes every connectivity push —
 	// both the edge-triggered ones and the reconciler ones — through it
-	// (§3.1): pushes wait AwaitStage(StageHandler) with the fail-fast, so a
+	// (§4): pushes wait AwaitStage(StageHandler) with the fail-fast, so a
 	// push never races a page that has not installed its handler yet. Call
 	// once at wiring time, before Start.
 	//
@@ -70,7 +70,7 @@ type Mediator interface {
 }
 
 type mediator struct {
-	// daemonCtx is the app-lifetime context [minor #16]: used for the
+	// daemonCtx is the app-lifetime context: used for the
 	// singleflighted connectivity cold probe (coldProbeConnectivity) so it
 	// is never tied to whichever single caller's ctx happened to win the
 	// singleflight race.
@@ -107,7 +107,7 @@ type mediator struct {
 	mdnsStarted bool
 
 	// session, when set (SetSession), is the playersession.Session the
-	// connectivity owner routes every push through (§3.1). Nil until wired;
+	// connectivity owner routes every push through (§4). Nil until wired;
 	// pushConnectivity no-ops when nil (headless test/wiring paths).
 	session *playersession.Session
 
@@ -122,7 +122,7 @@ type mediator struct {
 	// connSeq increments on every edge update. The single-flight cold probe's
 	// result is merged back into the cache only if connSeq has not moved
 	// since the probe started — a fresher edge arriving mid-probe must win,
-	// never be clobbered by a stale in-flight read [W1].
+	// never be clobbered by a stale in-flight read.
 	connSeq uint64
 
 	// connProbeFlight single-flights the cold (!known) connectivity probe so
@@ -189,7 +189,7 @@ func (m *mediator) reconcileMDNSLocked(ctx context.Context) {
 	}
 }
 
-// New builds a Mediator. ctx is the daemon-lifetime context [minor #16]: the
+// New builds a Mediator. ctx is the daemon-lifetime context: the
 // singleflighted connectivity cold probe (coldProbeConnectivity) runs on
 // THIS context, never on a caller-supplied one — a probe shared by every
 // waiter must not be cancelable by whichever single caller happened to win
@@ -259,7 +259,7 @@ func (m *mediator) SetTopicObserver(observer func()) {
 // SetSession injects the session and registers the connectivity reconciler.
 // See the Mediator interface doc.
 //
-// [M6] The reconciler enqueues through enqueueConnectivityPush — the SAME
+// The reconciler enqueues through enqueueConnectivityPush — the SAME
 // single worker the edge-triggered connectivity_change handler uses — rather
 // than calling pushConnectivity directly. Registering pushConnectivity itself
 // as the reconciler would let it run CONCURRENTLY with the edge worker's own
@@ -329,8 +329,8 @@ func (m *mediator) runConnectivityPushWorker() {
 }
 
 // pushConnectivity is the connectivity edge-triggered push worker's body
-// (§3.1), run ONLY on the single worker enqueueConnectivityPush/
-// runConnectivityPushWorker serialize [M6] — the connectivity reconciler
+// (§4), run ONLY on the single worker enqueueConnectivityPush/
+// runConnectivityPushWorker serialize — the connectivity reconciler
 // (registered on the session, run on every generation-ready) enqueues
 // through that same worker rather than calling this directly, so
 // cache-read+send only ever happens in one place at a time. It reads the
@@ -368,11 +368,11 @@ func (m *mediator) pushConnectivity(ctx context.Context) {
 // coldProbeConnectivity issues ONE single-flighted refresh=true D-Bus query
 // when the cache has never learned a level (a fresh boot, or a process that
 // started before the first connectivity_change edge ever fired). The result
-// merges into the cache by seq [W1]: if a fresher edge raced in and updated
+// merges into the cache by seq: if a fresher edge raced in and updated
 // the cache while the probe was in flight, that edge's value wins and the
 // stale cold-probe result is discarded.
 //
-// [minor #16] The shared probe runs on m.daemonCtx, NOT a caller-supplied
+// The shared probe runs on m.daemonCtx, NOT a caller-supplied
 // ctx: singleflight.Do fans one in-flight call out to every concurrent
 // caller, so tying it to whichever caller happened to win the race would let
 // that one caller's own cancellation (e.g. a superseded reconciler's scoped
@@ -618,7 +618,7 @@ func (m *mediator) handleDBusSignal(
 		)
 
 		// Update the mediator-owned connectivity cache and arm an async push
-		// through the session worker (§3.1). The edge handler no longer sends
+		// through the session worker (§4). The edge handler no longer sends
 		// to CDP directly: pushConnectivity reads this cache AT EXECUTION
 		// TIME (never a value snapshotted here) and waits for the player's
 		// command handler first, so an edge that fires before DevTools

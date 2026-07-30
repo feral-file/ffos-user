@@ -16,7 +16,7 @@ func OK(result interface{}) bool {
 	return okVal
 }
 
-// Refusal codes (cross-repo recovery design §4.2), mirroring ff-player's
+// Refusal codes (cross-repo recovery design §8), mirroring ff-player's
 // CanvasService.refreshArtwork `code` field byte-for-byte.
 const (
 	CodeHandlerPending      = "handler_pending"
@@ -24,7 +24,7 @@ const (
 	CodePreviewUpdateFailed = "preview_update_failed"
 )
 
-// [minor #18] These are NOT legacy/pre-`code` strings — that premise was
+// These are NOT legacy/pre-`code` strings — that premise was
 // wrong: origin/main's refreshArtwork refusal sent a bare {ok:false} with no
 // `error` reason string at all, and CanvasService.refreshArtwork started
 // shipping BOTH the `error` reason string and the `code` field together, in
@@ -42,7 +42,7 @@ const (
 )
 
 // Refusal extracts a refused player response's reason text and classified
-// code (design doc §3.2's classification table, §4.2). This is the single
+// code (design doc §5.2's classification table, §8). This is the single
 // place that boundary-classifies a player refusal — every consumer (boot
 // recovery's evaluateRefreshArtwork, and any future caller) must go through
 // here so the reason-string fallback never has to be reimplemented
@@ -56,7 +56,7 @@ const (
 // the reason* constants' doc for why this is same-release redundancy, not a
 // backward-compatibility path). code is "" when the refusal is genuine but
 // unclassifiable (an unrecognized reason, or no reason at all) — design doc
-// §3.2 rows 15/16 ("bare non-ACK / unknown code").
+// §5.2 rows 17/18 ("bare non-ACK / unknown code").
 func Refusal(result interface{}) (reason string, code string, ok bool) {
 	m, isMap := result.(map[string]interface{})
 	if !isMap {

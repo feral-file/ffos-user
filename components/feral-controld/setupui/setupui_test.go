@@ -494,13 +494,15 @@ func TestMissingManifestDisablesNarration(t *testing.T) {
 }
 
 // TestFactoryResetIsSafeAgainstCurrentManifest proves the extension-state
-// contract: the currently-shipping 7-state manifest (no factory_reset) still
-// passes the gate, and ShowFactoryReset is delivered to CDP anyway. Requiring
-// factory_reset in the gate would instead disable ALL narration on fielded
-// players, so this guards against that regression.
+// contract: a manifest listing only the 7 required states (predating
+// factory_reset, which the shipping manifest lists today) still passes the
+// gate, and ShowFactoryReset is delivered to CDP anyway. Requiring
+// factory_reset in the gate would instead disable ALL narration on any
+// fielded player whose manifest predates it, so this guards against that
+// regression.
 func TestFactoryResetIsSafeAgainstCurrentManifest(t *testing.T) {
 	sender := newFakeCDP()
-	svc := newTestService(t, sender, validContract) // validContract has the 7 shipping states, not factory_reset
+	svc := newTestService(t, sender, validContract) // validContract models a manifest predating the factory_reset extension state
 
 	svc.ShowFactoryReset()
 	sender.waitForCalls(t, 1)

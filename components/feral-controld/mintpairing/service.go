@@ -96,7 +96,7 @@ type Service interface {
 	// never erases a QR mid-pairing.
 	DisplayActive() bool
 	// SetSession wires the playersession.Session the display sends park
-	// against while a recovery navigation is pending [M13], mirroring
+	// against while a recovery navigation is pending, mirroring
 	// setupui.Service.SetSession's discipline. Call once at wiring time,
 	// before Start; nil (never called) preserves pre-session behavior
 	// exactly — the sends never park.
@@ -142,7 +142,7 @@ type service struct {
 
 	// session, when set (SetSession), is the playersession.Session the
 	// display sends park against while a recovery navigation is pending
-	// [M13] — same generation-snapshot park discipline setupui.Service gets
+	// — same generation-snapshot park discipline setupui.Service gets
 	// (see parkForNavigation). Nil in every existing test and any wiring
 	// that predates the session — the sends then never park, preserving
 	// pre-session behavior exactly. Immutable after construction.
@@ -333,7 +333,7 @@ func newService(
 
 // defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
 // display-send park while a playersession.Session recovery navigation is
-// pending [M13] — same values and rationale as setupui's identical constants.
+// pending — same values and rationale as setupui's identical constants.
 const (
 	defaultNavigationParkPollInterval = 100 * time.Millisecond
 	defaultNavigationParkTimeout      = 15 * time.Second
@@ -346,7 +346,7 @@ func (s *service) SetSession(session NavigationSession) {
 }
 
 // parkForNavigation blocks the caller while a playersession.Session recovery
-// navigation is pending [NV4][M13], so a display send cannot race the page
+// navigation is pending, so a display send cannot race the page
 // underneath it — the same discipline setupui.Service.parkForNavigation
 // applies to narration sends. No-op when no session is wired (SetSession
 // never called), which is every existing test and any pre-session build.
@@ -448,6 +448,13 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 	}
 	if err := validatePlayerContractFile(s.opts.PlayerContractPath); err != nil {
 		s.logger.Warn("Mint pairing player contract validation failed", zap.Error(err), zap.String("path", s.opts.PlayerContractPath))
+		// A read FAILURE (unreadable — boot ordering, an OTA mid-replace of
+		// the player bundle) is transient: report it retryable, not the same
+		// permanent invalid_config a manifest that WAS read but genuinely
+		// lacks mint pairing support gets. See ErrPlayerContractUnreadable.
+		if errors.Is(err, ErrPlayerContractUnreadable) {
+			return commandError("player_contract_unreadable", "mint pairing player contract is not readable yet", true), nil
+		}
 		return commandError("invalid_config", "mint pairing player contract is not valid", false), nil
 	}
 	topicID := strings.TrimSpace(state.ClaimSnapshot().TopicID)
@@ -1033,7 +1040,7 @@ func (s *service) setActivePendingApproval(active *activePairing, browserName st
 }
 
 func (s *service) showPairingCode(ctx context.Context, active *activePairing) error {
-	// [M13] Park BEFORE taking displayMu — parking can take up to the full
+	// Park BEFORE taking displayMu — parking can take up to the full
 	// timeout, and holding displayMu across it would serialize every OTHER
 	// display mutation behind an unrelated navigation.
 	s.parkForNavigation()
@@ -1053,7 +1060,7 @@ func (s *service) showPairingCode(ctx context.Context, active *activePairing) er
 }
 
 func (s *service) showRequestReceived(ctx context.Context, active *activePairing, browserName string) error {
-	// [M13] See showPairingCode's comment: park before taking displayMu.
+	// See showPairingCode's comment: park before taking displayMu.
 	s.parkForNavigation()
 	s.displayMu.Lock()
 	defer s.displayMu.Unlock()
@@ -1092,7 +1099,7 @@ func (s *service) closeChannel(channel brokerChannel) {
 }
 
 func (s *service) restoreDefaultDisplay(channelID string, displayGeneration uint64) {
-	// [M13] See showPairingCode's comment: park before taking displayMu.
+	// See showPairingCode's comment: park before taking displayMu.
 	s.parkForNavigation()
 	s.displayMu.Lock()
 	defer s.displayMu.Unlock()
@@ -1129,6 +1136,17 @@ type playerContractAcceptedResponse struct {
 	OK bool `json:"ok"`
 }
 
+// ErrPlayerContractUnreadable marks a validation failure caused by failing to
+// READ the player contract manifest, as opposed to a successfully-read
+// manifest that lacks (or fails) the mintPairingDisplay contract. The two
+// must not be conflated: unreadable is transient (boot ordering, an OTA
+// mid-replace of the player bundle) and the caller should ask again; a
+// manifest that WAS read but is invalid means the connected player's build
+// genuinely does not support mint pairing. Mirrors
+// setupui.ErrPlayerContractUnreadable's identical distinction for the same
+// on-disk manifest.
+var ErrPlayerContractUnreadable = errors.New("player contract unreadable")
+
 func validatePlayerContractFile(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -1136,7 +1154,7 @@ func validatePlayerContractFile(path string) error {
 	}
 	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
 	if err != nil {
-		return fmt.Errorf("read player contract: %w", err)
+		return fmt.Errorf("%w: %w", ErrPlayerContractUnreadable, err)
 	}
 	var manifest playerContractManifest
 	if err := json.Unmarshal(raw, &manifest); err != nil {

@@ -297,6 +297,41 @@ func TestBootRecovery_HandlerNeverReadyOnLiveConnectionNavigates(t *testing.T) {
 	assert.Equal(t, 1, e.bootRecoveryAttempts)
 }
 
+// TestBootRecovery_HandlerReadyWaitObservesCtxCancellation pins that
+// awaitPlayerCommandHandlerReady observes the ctx attemptBootRecovery
+// threads through: with playerReadyPollTimeout set far longer than the
+// caller's ctx, a canceled/expired ctx must interrupt the wait promptly
+// instead of running out the full timeout.
+func TestBootRecovery_HandlerReadyWaitObservesCtxCancellation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	installCDPDispatch(mockCDP, cdpDispatch{
+		handlerReady: func() (interface{}, error) { return map[string]interface{}{"ready": false}, nil },
+	})
+
+	e := settledExecutor(mockCDP)
+	e.playerReadyPollInterval = time.Millisecond
+	e.playerReadyPollTimeout = 2 * time.Second // much longer than the ctx below
+	sess := &fakeBootRecoverySession{}
+	e.bootRecoverySession = sess
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	e.MaybeRecoverPlayerOnBootOnline(ctx)
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 500*time.Millisecond,
+		"ctx cancellation must interrupt the wait, not run out the full playerReadyPollTimeout")
+	// Falls through to navigateForRecovery exactly as a plain timeout would
+	// (handler never ready, connection still Initialized) — ctx-done and
+	// timeout are the same outcome from the caller's side.
+	assert.Equal(t, 1, sess.callCount())
+}
+
 // --- structured status classification (rows 3,4,6,7,8,9,10) ----------------
 
 func TestBootRecovery_StructuredStatusClassification(t *testing.T) {
@@ -666,6 +701,16 @@ func TestBootRecovery_NavResultClassification(t *testing.T) {
 		{
 			name:         "row 21: NavEvicted defers, no count",
 			navFn:        navResultDone(playersession.NavEvicted, nil),
+			wantState:    bootRecDeferred,
+			wantAttempts: 0,
+		},
+		{
+			// A NavOutcome this switch does not recognize (a future addition
+			// to the playersession package) must not silently wedge the
+			// machine in Attempting with no timer scheduled — see
+			// navigateForRecovery's default case.
+			name:         "unrecognized NavOutcome defers conservatively, no count",
+			navFn:        navResultDone(playersession.NavOutcome(99), nil),
 			wantState:    bootRecDeferred,
 			wantAttempts: 0,
 		},

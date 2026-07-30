@@ -16,7 +16,7 @@ import (
 )
 
 // Package boot_recovery.go implements the boot player recovery state machine
-// (design doc §3.2), replacing the Phase-1 atomics choreography
+// (design doc §5), replacing the Phase-1 atomics choreography
 // (bootPlayerRecoveryDone/bootPlayerRecoveryPending +
 // MaybeRecoverPlayerOnBootOnline/CompletePendingBootPlayerRecovery/
 // finishPendingBootPlayerRecovery) with a bounded, re-entrant machine:
@@ -79,7 +79,7 @@ func (s bootRecoveryState) String() string {
 const bootRecoveryMaxExecuted = 3
 
 // bootRecoveryBackoffLadder is the Deferred re-entry backoff (design doc
-// §3.2): 15s, 60s, 240s, then holds at 240s for any further deferral.
+// §5.1): 15s, 60s, 240s, then holds at 240s for any further deferral.
 var bootRecoveryBackoffLadder = []time.Duration{15 * time.Second, 60 * time.Second, 240 * time.Second}
 
 // BootRecoverySession is the narrow slice of playersession.Session the boot
@@ -92,7 +92,7 @@ type BootRecoverySession interface {
 }
 
 // SetBootRecoverySession wires the playersession.Session escalations call
-// (design doc §3.2: "Escalations call session.NavigateHome"). A nil-wired
+// (design doc §5: "Escalations call session.NavigateHome"). A nil-wired
 // executor (test doubles, or a build wired before Phase 2b) degrades every
 // escalation to a counted, deferred attempt rather than navigating — never
 // panics.
@@ -129,7 +129,7 @@ func (e *executor) setBootRecoveryContractPath(path string) {
 }
 
 // SetBootRecoveryDaemonContext injects the daemon-lifetime context the
-// backoff timer's sleep roots on [minor #4], so process shutdown cancels a
+// backoff timer's sleep roots on, so process shutdown cancels a
 // pending backoff sleep instead of leaking the goroutine until it naturally
 // elapses (up to 240s). Wired once at composition time.
 func SetBootRecoveryDaemonContext(exec Executor, ctx context.Context, logger *zap.Logger) {
@@ -148,7 +148,7 @@ func (e *executor) setBootRecoveryDaemonContext(ctx context.Context) {
 }
 
 // RetryBootRecovery re-enters the boot recovery state machine early — the
-// generation-bump and wake-edge ACCELERATORS design doc §3.2 describes.
+// generation-bump and wake-edge ACCELERATORS design doc §5.1 describes.
 // Backoff remains the PRIMARY re-entry trigger; this only makes re-entry
 // happen sooner when a signal suggests the page or player state likely
 // changed (a new document generation, or a confirmed wake). A no-op outside
@@ -170,8 +170,8 @@ func (e *executor) retryBootRecoveryEarly() {
 		e.bootRecoveryMu.Unlock()
 		return
 	}
-	// [M3] The accelerator (a generation bump or a confirmed wake edge —
-	// both wired via RetryBootRecovery, design doc §3.2) is EARLY re-entry,
+	// The accelerator (a generation bump or a confirmed wake edge —
+	// both wired via RetryBootRecovery, design doc §5.1) is EARLY re-entry,
 	// same as every other trigger; it must consult the boot-window probe too.
 	// Without this, a device that boots into its sleep window keeps a
 	// generation/wake-driven probe loop alive all night and NavigateHomes a
@@ -186,7 +186,7 @@ func (e *executor) retryBootRecoveryEarly() {
 
 // bootWindowExpiredLocked consults the boot lifecycle probe and, if the
 // window has closed, transitions the machine straight to Expired (canceling
-// any pending backoff timer) and returns true — matching design doc §3.2's
+// any pending backoff timer) and returns true — matching design doc §5.1's
 // "boot-window expiry while parked/deferred = Expired". A nil probe (no
 // lifecycle wiring, e.g. some test doubles) never expires. Caller holds
 // bootRecoveryMu.
@@ -206,7 +206,7 @@ func (e *executor) bootWindowExpiredLocked(reason string) bool {
 // (main.go wires it only when the daemon started within the boot window —
 // see wireBootLifecycleHooks). It ARMS the machine exactly once per boot
 // (Idle -> Armed is the one-shot latch, replacing bootPlayerRecoveryDone) and
-// immediately attempts a round. See the package doc and design doc §3.2 for
+// immediately attempts a round. See the package doc and design doc §5 for
 // the full rationale (chromium-kiosk not gating on the network, the
 // settled-devices-only scope, CDP-ordering vs. the provisioning domain).
 func (e *executor) MaybeRecoverPlayerOnBootOnline(ctx context.Context) {
@@ -274,7 +274,7 @@ func (e *executor) enterBootRecoveryRound(reason string) bool {
 	case bootRecArmed, bootRecDeferred:
 		e.cancelBootRecoveryBackoffLocked()
 		e.transitionBootRecoveryLocked(bootRecAttempting, reason)
-		// [minor #9] Fresh round: clear the per-round record-once latch so
+		// Fresh round: clear the per-round record-once latch so
 		// THIS round's first recordBootRecoveryAttemptExecuted() call
 		// counts. See that function's doc for why a round can otherwise
 		// consume two budget slots.
@@ -295,7 +295,7 @@ func (e *executor) cancelBootRecoveryBackoffLocked() {
 }
 
 // transitionBootRecoveryLocked records a state transition and emits the
-// structured log design doc §3.2 requires: {from, to, reason, attempt,
+// structured log design doc §5 requires: {from, to, reason, attempt,
 // generation}. Caller holds bootRecoveryMu.
 func (e *executor) transitionBootRecoveryLocked(to bootRecoveryState, reason string) {
 	from := e.bootRecoveryState
@@ -330,7 +330,7 @@ func (e *executor) bootRecoveryTerminalLocked() bool {
 func (e *executor) deferBootRecovery(reason string) {
 	e.bootRecoveryMu.Lock()
 	defer e.bootRecoveryMu.Unlock()
-	// [minor #12] Guard against a late NavigateHome NavResult callback (or
+	// Guard against a late NavigateHome NavResult callback (or
 	// any other stray caller) moving an already-terminal state: the machine
 	// settled via some other path in the meantime, and re-deferring (or
 	// worse, exhausting) it now would corrupt the terminal invariant and
@@ -355,7 +355,7 @@ func (e *executor) scheduleBootRecoveryBackoffLocked() {
 	}
 	d := bootRecoveryBackoffLadder[idx]
 	e.bootRecoveryDeferCount++
-	// [minor #4] Root the sleep on the daemon-lifetime ctx (falling back to
+	// Root the sleep on the daemon-lifetime ctx (falling back to
 	// Background for callers that predate the wiring) so process shutdown
 	// cancels it too, not just a newer trigger superseding this timer.
 	root := e.bootRecoveryDaemonCtx
@@ -369,7 +369,7 @@ func (e *executor) scheduleBootRecoveryBackoffLocked() {
 		if err := clk.SleepContext(ctx, d); err != nil {
 			return // canceled: a newer trigger (or shutdown) superseded this timer
 		}
-		// [M3] The backoff timer is EARLY-ELIGIBLE re-entry same as every
+		// The backoff timer is EARLY-ELIGIBLE re-entry same as every
 		// other trigger — it must consult the boot-window probe too, or a
 		// device that boots into its sleep window keeps a 240s probe loop
 		// alive all night and NavigateHomes a healthy page at the wake edge,
@@ -390,7 +390,7 @@ func (e *executor) scheduleBootRecoveryBackoffLocked() {
 }
 
 // recordBootRecoveryAttemptExecuted counts AT MOST ONE executed attempt per
-// ROUND [minor #9], even though a single round's classification can reach
+// ROUND, even though a single round's classification can reach
 // TWO distinct CDP-level actions: an evaluateRefreshArtwork call that gets
 // refused, followed by an escalated navigateForRecovery call whose async
 // NavResult callback ALSO calls this. Without the latch that pair would
@@ -409,7 +409,7 @@ func (e *executor) recordBootRecoveryAttemptExecuted() {
 func (e *executor) succeedBootRecovery(reason string) {
 	e.bootRecoveryMu.Lock()
 	defer e.bootRecoveryMu.Unlock()
-	// [minor #12] See deferBootRecovery's identical guard doc.
+	// See deferBootRecovery's identical guard doc.
 	if e.bootRecoveryTerminalLocked() {
 		e.logger.Debug("Boot player recovery: ignoring late succeed against an already-terminal state",
 			zap.String("reason", reason), zap.Stringer("state", e.bootRecoveryState))
@@ -421,7 +421,7 @@ func (e *executor) succeedBootRecovery(reason string) {
 func (e *executor) expireBootRecovery(reason string) {
 	e.bootRecoveryMu.Lock()
 	defer e.bootRecoveryMu.Unlock()
-	// [minor #12] See deferBootRecovery's identical guard doc.
+	// See deferBootRecovery's identical guard doc.
 	if e.bootRecoveryTerminalLocked() {
 		e.logger.Debug("Boot player recovery: ignoring late expire against an already-terminal state",
 			zap.String("reason", reason), zap.Stringer("state", e.bootRecoveryState))
@@ -431,7 +431,7 @@ func (e *executor) expireBootRecovery(reason string) {
 }
 
 // capabilityState is checkPlayerStatusCapability's verdict (design doc
-// §3.2/§4.3 capability fuse).
+// §5.3 capability fuse).
 type capabilityState int
 
 const (
@@ -447,13 +447,13 @@ const (
 // read latches conservative mode for the rest of this boot's recovery
 // lifecycle (bootRecoveryConservative).
 //
-// [minor #19] The precise scope of what conservative mode gates, since
+// The precise scope of what conservative mode gates, since
 // "never navigates" overstates it: it gates ONLY runBootRecoveryRound's own
 // unclassified-refusal fallback row (the bare non-ACK / unknown code default
 // case that calls this function) — the caller there defers instead of
 // escalating when this returns capabilityAbsent. It does NOT fuse the
 // handler-never-ready row or the preview_update_failed-repeat row: both
-// navigate UNCONDITIONALLY per the design doc §3.2 total table, regardless
+// navigate UNCONDITIONALLY per the design doc §5.2 total table, regardless
 // of bootRecoveryConservative's value, because those two rows already have
 // their own independent evidence a dead/wedged page is the problem (a timed-
 // out StageHandler probe, or a second identical live-page refusal) that does
@@ -487,7 +487,7 @@ func (e *executor) checkPlayerStatusCapability() capabilityState {
 }
 
 // playerStatus is the decoded window.__ffosPlayerStatus payload (design doc
-// §4.1) this classifier needs.
+// §5.2) this classifier needs.
 type playerStatus struct {
 	Route             string
 	HandlerRegistered bool
@@ -510,7 +510,7 @@ const (
 )
 
 // statusProtocolVersion is the __ffosPlayerStatus protocol version this
-// classifier understands (design doc §4.1); mirrors
+// classifier understands (design doc §5.2); mirrors
 // playersession.statusProtocolVersion.
 const statusProtocolVersion = 1
 
@@ -519,7 +519,7 @@ const statusProtocolVersion = 1
 // false only when the probe truly did not answer (CDP down, old player
 // without the structured status carrier, or a malformed/absent response) —
 // never because of the protocol field's value. Shared by runBootRecoveryRound's
-// [NV2] route-error safety pre-check (deliberately protocol-independent —
+// route-error safety pre-check (deliberately protocol-independent —
 // route is a plain string, stable across protocol versions, and the "never
 // navigate over /error" invariant must hold even against a future protocol
 // bump decodePlayerStatus cannot otherwise decode) and decodePlayerStatus
@@ -546,7 +546,7 @@ func (e *executor) readPlayerStatusRaw() (map[string]any, bool) {
 
 // decodePlayerStatus applies the protocol gate and the full precondition
 // field decode to an already-fetched raw status payload (see
-// readPlayerStatusRaw) — split out so the NV2 pre-check and this
+// readPlayerStatusRaw) — split out so the route-error pre-check and this
 // classification can share one evaluate result. ok is false when the raw
 // fetch itself failed, OR the protocol advertised is one this classifier
 // doesn't understand (never misread against a payload shape it may no
@@ -572,7 +572,7 @@ func decodePlayerStatus(m map[string]any, rawOK bool) (playerStatus, bool) {
 }
 
 // runBootRecoveryRound performs ONE classification-and-action round (design
-// doc §3.2's total table). Called with the machine already transitioned to
+// doc §5.2's total table). Called with the machine already transitioned to
 // Attempting; every exit path below calls exactly one of
 // succeedBootRecovery/deferBootRecovery/expireBootRecovery/navigateForRecovery,
 // leaving the machine in a well-defined resting state.
@@ -583,16 +583,16 @@ func (e *executor) runBootRecoveryRound(ctx context.Context) {
 		return
 	}
 
-	// ONE evaluate of window.__ffosPlayerStatus per round, shared by the NV2
-	// pre-check below and the protocol-gated classification that follows —
+	// ONE evaluate of window.__ffosPlayerStatus per round, shared by the
+	// route-error pre-check below and the protocol-gated classification that follows —
 	// see readPlayerStatusRaw/decodePlayerStatus's doc for why this must not
 	// cost two CDP round-trips.
 	rawStatus, rawOK := e.readPlayerStatusRaw()
 
-	// [NV2 fail-open fix] Read route independently of protocol version
+	// Read route independently of protocol version
 	// BEFORE anything else: this must hold even against a future protocol
 	// bump the protocol-gated classification below cannot otherwise decode.
-	// The daemon-chosen error page deliberately owns the wall (§2.3's
+	// The daemon-chosen error page deliberately owns the wall (§3.1's
 	// error-page gate would refuse a navigate here too); nothing this
 	// machine can repair.
 	if rawOK {
@@ -603,7 +603,7 @@ func (e *executor) runBootRecoveryRound(ctx context.Context) {
 	}
 
 	// statusProbedThisRound is LIVE PROOF the connected player supports the
-	// structured status probe [minor #10]: when true, the unclassified-
+	// structured status probe: when true, the unclassified-
 	// refusal fallback below skips the on-disk manifest fuse entirely — a
 	// stale/misread manifest file has nothing to add once this round already
 	// has direct evidence, and consulting it anyway risks the fuse's own
@@ -612,21 +612,21 @@ func (e *executor) runBootRecoveryRound(ctx context.Context) {
 	statusProbedThisRound := false
 	if status, ok := decodePlayerStatus(rawStatus, rawOK); ok {
 		statusProbedThisRound = true
-		// [minor #7] Route gates are checked FIRST, before any hydration or
+		// Route gates are checked FIRST, before any hydration or
 		// artwork classification — they are safety, not just another
-		// signal. This is a deliberate divergence from the §3.2 table's row
+		// signal. This is a deliberate divergence from the §5.2 table's row
 		// ORDER (which lists bootHydration=failed and hasArtwork=false
 		// above the route rows): a hydration-failed page AND an
 		// error-routed wall can co-occur (e.g. the watchdog's own restart
 		// path, or a stale error carrying into a fresh hydration attempt),
-		// and [NV2] — NEVER navigate on /error — must hold regardless of
+		// and NEVER navigate on /error — must hold regardless of
 		// what bootHydration says. The route==/error row itself is handled
 		// by the protocol-independent pre-check above (unreachable here as
 		// a result — route-sleep is the only route row left in this
 		// protocol-gated switch); checking route first, unconditionally, is
-		// what makes NV2 true structurally instead of relying on it being
+		// what makes that invariant true structurally instead of relying on it being
 		// re-derived correctly at every future callsite (the downstream
-		// §2.3 error-page gate is defense-in-depth, not the only place this
+		// §3.1 error-page gate is defense-in-depth, not the only place this
 		// is enforced).
 		switch status.Route {
 		case statusRouteSleep:
@@ -645,7 +645,7 @@ func (e *executor) runBootRecoveryRound(ctx context.Context) {
 			e.navigateForRecovery(ctx, "boot-hydration-failed")
 			return
 		case bootHydrationHaltedPreserving:
-			// [NV9]: already classified by route above (sleep/error) when
+			// Already classified by route above (sleep/error) when
 			// applicable — neither fired here, so there is nothing further
 			// tied to halted_preserving itself; fall through to the
 			// hasArtwork/handler checks below like any other route.
@@ -665,7 +665,7 @@ func (e *executor) runBootRecoveryRound(ctx context.Context) {
 	}
 
 	// Row: StageHandler timeout on a LIVE connection -> attempt: NavigateHome.
-	if !e.awaitPlayerCommandHandlerReady() {
+	if !e.awaitPlayerCommandHandlerReady(ctx) {
 		if e.cdp.Initialized() {
 			e.navigateForRecovery(ctx, "handler-never-ready")
 			return
@@ -693,10 +693,10 @@ func (e *executor) runBootRecoveryRound(ctx context.Context) {
 		}
 		e.navigateForRecovery(ctx, "refusal-preview-update-failed-repeat")
 	default:
-		// Bare non-ACK / unknown code (design doc §3.2 rows 15/16): the
+		// Bare non-ACK / unknown code (design doc §5.2 rows 17/18): the
 		// capability fuse decides whether an unclassifiable refusal is safe
 		// to escalate — UNLESS this round already read the structured status
-		// successfully [minor #10], which is live proof of the same
+		// successfully, which is live proof of the same
 		// capability and makes the on-disk manifest fuse redundant.
 		if statusProbedThisRound || e.checkPlayerStatusCapability() == capabilityPresent {
 			e.navigateForRecovery(ctx, "unclassified-refusal")
@@ -722,7 +722,7 @@ func (e *executor) consumeBootRecoveryPreviewUpdateFailedTolerance() bool {
 }
 
 // navigateForRecovery escalates to the session's recovery navigation
-// primitive. The NavResult rows (design doc §3.2) drive the machine from the
+// primitive. The NavResult rows (design doc §5.2) drive the machine from the
 // done callback, which runs asynchronously — this function returns
 // immediately.
 func (e *executor) navigateForRecovery(ctx context.Context, reason string) {
@@ -754,6 +754,15 @@ func (e *executor) navigateForRecovery(ctx context.Context, reason string) {
 			e.deferBootRecovery("navigate-skipped-asleep:" + reason)
 		case playersession.NavSuperseded, playersession.NavEvicted:
 			e.deferBootRecovery("navigate-superseded-or-evicted:" + reason)
+		default:
+			// A NavOutcome this switch doesn't recognize (a future addition
+			// to the playersession package) must not silently wedge the
+			// machine in Attempting with no timer scheduled and no terminal
+			// transition — defer conservatively so the backoff ladder still
+			// re-enters instead of hanging until process restart.
+			e.logger.Warn("Boot player recovery: unrecognized NavResult outcome; deferring conservatively",
+				zap.String("reason", reason), zap.Stringer("outcome", res.Outcome))
+			e.deferBootRecovery("navigate-unrecognized-outcome:" + reason)
 		}
 	})
 }
@@ -761,7 +770,7 @@ func (e *executor) navigateForRecovery(ctx context.Context, reason string) {
 // evaluateRefreshArtwork asks the live player app to re-mount the current
 // artwork via the same window.handleCDPRequest envelope every player command
 // uses. code is the classified refusal code (playerresponse.Refusal; "" for
-// a transport failure or an ACKed refresh) so the caller can drive the §3.2
+// a transport failure or an ACKed refresh) so the caller can drive the §5.2
 // classification table without re-parsing the reply. err is nil only on an
 // ACK.
 func (e *executor) evaluateRefreshArtwork() (code string, err error) {

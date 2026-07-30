@@ -116,7 +116,7 @@ type Deps struct {
 	// OnUpdateSucceededNoReboot, when non-nil, fires once
 	// PostLadderWatchdogTimeout elapses after a successful update ladder with
 	// this process STILL RUNNING — meaning the reboot the ladder triggered has
-	// not happened (design doc §3.3 [W10]). A real reboot kills the process
+	// not happened (design doc §6). A real reboot kills the process
 	// before the timer ever fires, so no separate "did it reboot" detection is
 	// needed: still being alive to fire the callback IS the signal. devicectl
 	// wires this to hide a stuck "updating" overlay so a failed/delayed reboot
@@ -269,7 +269,7 @@ func (g *Gate) runLocal(ctx context.Context, mode Mode) (Result, error) {
 const postLadderWatchdogDefault = 5 * time.Minute
 
 // scheduleLadderRebootWatchdog arms the post-ladder watchdog (design doc
-// §3.3 [W10]) after a successful update ladder. Detached from the caller's
+// §6) after a successful update ladder. Detached from the caller's
 // ctx deliberately: both entry points typically pass a request-scoped ctx
 // (e.g. the relayer command that triggered RequestUpdate), which is canceled
 // the moment the handler returns — long before a real reboot would land —

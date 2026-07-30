@@ -68,7 +68,7 @@ const (
 	// NavExecuted means the session attempted the navigation (Page.navigate
 	// was sent successfully and the generation bumped). Err carries a
 	// transport or verification failure; nil Err means verified success
-	// (§2.3 step 6).
+	// (§3.3).
 	NavExecuted NavOutcome = iota
 	// NavSkippedOverlay means a registered overlay owner had the screen (or
 	// the error-page gate fired pre-nav — the daemon-chosen error page is
@@ -113,7 +113,7 @@ type NavOptions struct {
 	// PurgeCache issues Network.clearBrowserCache before navigating. This is
 	// the authoritative cache bypass for recovery navigation (commandrouter's
 	// pre-refresh clearBrowserCache and darkhttpd's Cache-Control: no-cache
-	// stay as their own, separate defenses — see the design doc's [NV13]).
+	// stay as their own, separate defenses — see design doc §3.1 step 5).
 	PurgeCache bool
 }
 
@@ -134,7 +134,7 @@ var (
 	ErrNavEvicted        = fmt.Errorf("playersession: navigation evicted (session shutting down)")
 
 	// ErrNotConnected is AwaitStage's immediate, no-wait error when the CDP
-	// transport is not currently live (§2 AwaitStage doc).
+	// transport is not currently live (§2.2 AwaitStage doc).
 	ErrNotConnected = fmt.Errorf("playersession: CDP is not connected")
 	// ErrNoGeneration is AwaitStage's error when no generation has been
 	// established yet (no CDP-connect, navigation, or stamp-mismatch bump has
@@ -159,7 +159,7 @@ type CDPSender interface {
 // additionally requires the nonce to be GONE, so an evaluate answered by the
 // pre-navigate document (still tearing down) does not fool the barrier — the
 // same hazard setupui's execPageReload nonce closes. The nonce rides its OWN
-// global (window.__ffosNavNonce), never window.__ffosDocStamp [M4]: that
+// global (window.__ffosNavNonce), never window.__ffosDocStamp: that
 // global is the source-3 stamp carrier the status poller echoes back every
 // 5s, and a nonce planted there would be visible to ObserveStatusStamp during
 // the pre-bump window (stamp written, Page.navigate sent, but the bump that
@@ -195,7 +195,7 @@ func defaultStageProbe(st Stage, navNonce string) string {
 const defaultPollInterval = 250 * time.Millisecond
 
 // defaultReadyPollBackoffAfter / defaultReadyPollBackoffInterval pace back
-// onGenerationReady's own indefinite background retry (design doc [NV1]:
+// onGenerationReady's own indefinite background retry (design doc §2.2:
 // never latches a negative, so it keeps polling at whatever cadence for the
 // entire life of a generation whose page never installs its command
 // handler). A page that hasn't installed the handler within a minute is
@@ -209,14 +209,14 @@ const (
 )
 
 // defaultVerifyCap bounds NavigateHomeInline's total synchronous wait
-// (gates+navigate+bump+barrier+route verification) — [NV7] caps it at 20s,
+// (gates+navigate+bump+barrier+route verification) — caps it at 20s,
 // comfortably under hub's 30s HTTP timeouts. NavigateHome (async) reuses the
 // same cap for its own verification wait so a wedged page cannot hang the
 // session worker forever.
 const defaultVerifyCap = 20 * time.Second
 
 // routePlaylist / routeSleep / routeError are the structured status probe's
-// route values this package classifies against (§2.3 steps 1-2 and 6).
+// route values this package classifies against (§3.1 steps 2-3, §3.3).
 const (
 	routePlaylist = "/playlist"
 	routeSleep    = "/sleep"
@@ -224,7 +224,7 @@ const (
 )
 
 // statusProtocolVersion is the __ffosPlayerStatus protocol version this
-// package understands (design doc §4.1). A response advertising anything
+// package understands (design doc §5.2). A response advertising anything
 // else is treated as unavailable rather than decoded against a shape it may
 // no longer match.
 const statusProtocolVersion = 1
@@ -274,7 +274,7 @@ type navRequest struct {
 }
 
 // Session is the single cross-cutting authority described in package doc and
-// design §2. Safe for concurrent use.
+// design §1. Safe for concurrent use.
 type Session struct {
 	rootCtx context.Context
 	cdp     CDPSender
@@ -283,7 +283,7 @@ type Session struct {
 
 	// asleep reports the schedule's desired sleeping state. Production wires
 	// devicectl.PlayerSleepGate, backed by the four-value sleep tracker
-	// (§3.4); a nil asleep (test doubles, a build wired without the tracker)
+	// (§7); a nil asleep (test doubles, a build wired without the tracker)
 	// is treated as always-false — never blocking navigation.
 	asleep func() bool
 
@@ -307,7 +307,7 @@ type Session struct {
 	overlayOwners []overlayOwner
 	reconcilers   []reconcilerEntry
 
-	// navPending is a REFCOUNT, not a bool [M1]: NavigateHomeInline can run
+	// navPending is a REFCOUNT, not a bool: NavigateHomeInline can run
 	// concurrently with an async NavigateHome (Inline's own concurrency
 	// guard — see claimNavSlot/finishNavSlot — closes most of that window,
 	// but this stays a counter as the structural fix regardless of how many
@@ -324,7 +324,7 @@ type Session struct {
 	// underneath one another. It is session-private and never held across a
 	// barrier wait, an overlay-owner probe's OWN locking, or anything that
 	// could re-enter the session — Inline's caller-holds-no-external-lock
-	// contract [NV7] only has teeth because of that.
+	// contract only has teeth because of that.
 	navMu sync.Mutex
 
 	navSlotMu sync.Mutex
@@ -333,7 +333,7 @@ type Session struct {
 
 	// navTargetGen is the generation ID an in-flight navigation bumped TO,
 	// or 0 when no navigation has bumped one yet (pre-bump) or none is in
-	// flight at all. [Park predicate fix] Off-lane parkers (setupui,
+	// flight at all. Off-lane parkers (setupui,
 	// mintpairing) cannot reliably use "Generation() != <snapshot taken at
 	// park entry>" to detect the bump: a park entered AFTER the bump already
 	// happened snapshots the NEW generation as its baseline, so that
@@ -518,7 +518,7 @@ func (s *Session) runReconciler(gen *genState, r reconcilerEntry) {
 
 // RegisterOverlayOwner registers a probe an off-lane narrator uses to claim
 // screen ownership (setupui's Narrating(), qrdisplay/mintpairing's live
-// display flag, ...). NavigateHome/Inline's overlay gate (§2.3 step 3) treats
+// display flag, ...). NavigateHome/Inline's overlay gate (§3.1 step 4) treats
 // ANY registered owner reporting true as "the screen is owned" and skips the
 // navigation (NavSkippedOverlay). Not safe to call concurrently with itself
 // from multiple goroutines at true parallel-init time; production wiring
@@ -564,7 +564,7 @@ func (s *Session) StageReady(st Stage) bool {
 // once at call entry), ctx is done, or the generation is superseded.
 // POSITIVE results are cached once per generation and never re-probed. A
 // NEGATIVE resolution (ctx deadline reached while still not ready on a live
-// connection) is NOT cached [NV1]: the cache is a write-once-true flag with no
+// connection) is NOT cached: the cache is a write-once-true flag with no
 // "false" state, so the very next AwaitStage call for the same
 // generation/stage simply re-polls from scratch — this is what lets a slow
 // cold boot (a cache purge, #234) delay readiness instead of latching a
@@ -591,7 +591,7 @@ func (s *Session) AwaitStage(ctx context.Context, st Stage) error {
 // (onGenerationReady's), so calling awaitStageOn a second time here would
 // double the CDP evaluate traffic for the entire pre-ready window. ctx bounds
 // only THIS wait — the generation's own worker is unaffected by ctx expiring
-// and keeps retrying past it (see onGenerationReady / [NV1]).
+// and keeps retrying past it (see onGenerationReady's doc).
 func (s *Session) awaitGenerationReady(ctx context.Context, gen *genState) error {
 	select {
 	case <-gen.readyDone:
@@ -699,7 +699,7 @@ func probeReady(result any) bool {
 }
 
 // NavigationPending reports an armed-or-executing navigation. See the package
-// doc and design §2 for the full parking contract; off-lane senders (setupui,
+// doc and design §3.2 for the full parking contract; off-lane senders (setupui,
 // qrdisplay/mintpairing) consult this inside their OWN send critical sections
 // before each send and park while it is true.
 func (s *Session) NavigationPending() bool {
@@ -765,13 +765,13 @@ func (s *Session) runNavWorker(opts NavOptions, done func(NavResult)) {
 // NavigateHomeInline runs gates + optional purge + Page.navigate + generation
 // bump SYNCHRONOUSLY on the caller's own goroutine, then waits (bounded by the
 // 20s cap) for the same generation-ready worker every bump spawns to reach
-// StageHandler, plus a best-effort route check (§2.3 step 6). It is for
+// StageHandler, plus a best-effort route check (§3.3). It is for
 // callers that owe a synchronous reply (commandrouter's relayer contract) and
-// hold no external lock while calling it [NV7] — every lock this path takes
+// hold no external lock while calling it — every lock this path takes
 // (navMu, per-generation state) is session-private, so a pushMu-holding caller
 // cannot self-deadlock through it.
 //
-// [M1] Inline claims the SAME navBusy slot NavigateHome's async worker uses
+// Inline claims the SAME navBusy slot NavigateHome's async worker uses
 // (claimNavSlot), so the two paths can never run navigateAndVerify
 // concurrently against the page. Unlike NavigateHome, a loss here is never
 // queued: Inline's caller owes a bounded synchronous reply, so a
@@ -846,8 +846,8 @@ func (s *Session) verifyCap() time.Duration {
 }
 
 // navigateAndVerify is the shared implementation behind NavigateHome and
-// NavigateHomeInline (§2.3). NavigationPending is set BEFORE any gate probe —
-// in particular before the overlay probe [NV4] — and cleared on every
+// NavigateHomeInline (§3). NavigationPending is set BEFORE any gate probe —
+// in particular before the overlay probe — and cleared on every
 // terminal outcome via the deferred Store(false), closing the check-then-act
 // window against an overlay owner's own send worker: a push racing past the
 // owner's probe parks at its own send site (see setupui's worker) and is
@@ -862,7 +862,7 @@ func (s *Session) navigateAndVerify(ctx context.Context, opts NavOptions) NavRes
 	if s.isAsleep() {
 		return s.logNavOutcome(NavResult{Outcome: NavSkippedAsleep}, "sleep-gate")
 	}
-	// Error-page gate [NV2]: the daemon-chosen error page deliberately takes
+	// Error-page gate: the daemon-chosen error page deliberately takes
 	// the wall off playback; navigating to "/" would resume playback over it.
 	// The NavOutcome enum has no dedicated "error page" member, so this is
 	// classified as NavSkippedOverlay — the error page is, for outcome
@@ -900,7 +900,7 @@ func (s *Session) navigateAndVerify(ctx context.Context, opts NavOptions) NavRes
 	gen := s.bump(navNonce, "navigate")
 	s.navMu.Unlock()
 
-	// [Park predicate fix] Publish the specific generation THIS navigation
+	// Publish the specific generation THIS navigation
 	// produced so off-lane parkers can identify it independent of when they
 	// entered their own park (see navTargetGen's doc). Reset to 0 once this
 	// navigation finishes, regardless of outcome — no navigation is
@@ -912,8 +912,8 @@ func (s *Session) navigateAndVerify(ctx context.Context, opts NavOptions) NavRes
 		return s.logNavOutcome(NavResult{Outcome: NavExecuted, Err: fmt.Errorf("verification: %w", err)}, "verify-handler-timeout")
 	}
 	if err := s.awaitRouteSettled(ctx); err != nil {
-		// [Finding 4] A navigation that lands on /error is not a broken
-		// navigation to retry: the [NV2] error-page gate would have refused
+		// A navigation that lands on /error is not a broken
+		// navigation to retry: the error-page gate would have refused
 		// it as a pre-nav check too had the daemon already been showing it,
 		// so a post-nav landing there is classified identically —
 		// NavSkippedOverlay, reason "error-page-gate" — rather than
@@ -933,7 +933,7 @@ func (s *Session) navigateAndVerify(ctx context.Context, opts NavOptions) NavRes
 // navigateAndVerify call site for how it is classified.
 var errRouteLandedOnErrorPage = fmt.Errorf("playersession: navigation landed on the error page")
 
-// awaitRouteSettled is §2.3 step 6's post-navigation verification, corrected:
+// awaitRouteSettled is §3.3's post-navigation verification, corrected:
 // Page.navigate always lands the document on "/" first, and the auto-route to
 // /playlist (AppWrapper.tsx) only fires once hydration finishes (isInitialized) —
 // well after StageHandler resolves. "/" is ALSO a legitimate steady state
@@ -963,7 +963,7 @@ func (s *Session) awaitRouteSettled(ctx context.Context) error {
 		case routePlaylist, routeSleep:
 			return nil
 		case routeError:
-			// [Finding 4] Landed on /error: not a mismatch to retry — see
+			// Landed on /error: not a mismatch to retry — see
 			// the navigateAndVerify call site for how this is classified.
 			return errRouteLandedOnErrorPage
 		case "/":
@@ -988,7 +988,7 @@ func (s *Session) awaitRouteSettled(ctx context.Context) error {
 // tell them apart during the transition window; a StageHandler probe answered
 // by the dying document would resolve the barrier early (the exact loss the
 // nonce prevents). The nonce is written to window.__ffosNavNonce, a SEPARATE
-// global from window.__ffosDocStamp [M4] — see StageProbeFunc's doc for why
+// global from window.__ffosDocStamp — see StageProbeFunc's doc for why
 // reusing the stamp carrier here would cause spurious generation bumps. This
 // also means a FAILED Page.navigate (the nonce left behind in the still-live
 // document) can no longer cause one either, since ObserveStatusStamp never
@@ -1071,7 +1071,7 @@ func (s *Session) currentRoute(ctx context.Context) (string, bool) {
 	return route, true
 }
 
-// isErrorPage is the [NV2] error-page safety gate: it reads route directly
+// isErrorPage is the error-page safety gate: it reads route directly
 // from the raw status payload, INDEPENDENT of protocol version. Gating this
 // specific safety check behind "protocol == statusProtocolVersion" (as
 // currentRoute does for the rest of the classifier) would let a future

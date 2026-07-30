@@ -257,29 +257,42 @@ func TestOptionsFromConfig_SetsDefaultPlayerContractPathWhenEnabled(t *testing.T
 
 func TestHandleStartPairingSession_ValidatesPlayerContractBeforeBrokerStart(t *testing.T) {
 	tests := []struct {
-		name     string
-		manifest string
-		missing  bool
+		name      string
+		manifest  string
+		missing   bool
+		wantCode  string
+		wantRetry bool
 	}{
 		{
-			name:    "missing manifest",
-			missing: true,
+			// A missing file IS the unreadable case (§: ErrPlayerContractUnreadable)
+			// — the shape a pairing request during an OTA bundle swap or
+			// boot-ordering race takes — so it must be retryable, not the
+			// permanent invalid_config a genuinely malformed/incomplete
+			// manifest gets.
+			name:      "missing manifest is retryable (unreadable, not invalid)",
+			missing:   true,
+			wantCode:  "player_contract_unreadable",
+			wantRetry: true,
 		},
 		{
 			name:     "malformed json",
 			manifest: `{`,
+			wantCode: "invalid_config",
 		},
 		{
 			name:     "wrong contract path with loose token",
 			manifest: `{"contracts":{"other":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":true}}},"loose":"mintPairingDisplay"}`,
+			wantCode: "invalid_config",
 		},
 		{
 			name:     "missing state",
 			manifest: `{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token"],"acceptedResponse":{"ok":true}}}}`,
+			wantCode: "invalid_config",
 		},
 		{
 			name:     "wrong accepted response",
 			manifest: `{"contracts":{"mintPairingDisplay":{"version":1,"requestKey":"request","states":["pairing_code","request_received","creating_token","hidden"],"acceptedResponse":{"ok":false}}}}`,
+			wantCode: "invalid_config",
 		},
 	}
 
@@ -310,7 +323,7 @@ func TestHandleStartPairingSession_ValidatesPlayerContractBeforeBrokerStart(t *t
 
 			result, err := s.HandleStartPairingSession(context.Background(), nil)
 			require.NoError(t, err)
-			assertCommandError(t, result, "invalid_config", false)
+			assertCommandError(t, result, tt.wantCode, tt.wantRetry)
 			assert.Equal(t, 0, starter.StartCount())
 			assert.Empty(t, cdpClient.displayRequestsSnapshot())
 		})

@@ -414,7 +414,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		if app.Session != nil {
 			app.Session.OnConnect()
 		}
-		// The boot player recovery state machine (design doc §3.2,
+		// The boot player recovery state machine (design doc §5,
 		// devicectl/boot_recovery.go) has two connect-edge entry points:
 		// MaybeRecoverPlayerOnBootOnline arms it on the first WAN-confirmed
 		// online transition (wired into the provisioning notifier, may run
@@ -522,7 +522,7 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 
 // sleepInvalidateReconciler / playlistRecomputeReconciler /
 // statusForceRefreshReconciler / setupUIResyncReconciler build the
-// session.RegisterReconciler closures initializeApp wires (design doc §2.4).
+// session.RegisterReconciler closures initializeApp wires (design doc §4).
 // Defined at FILE scope, not as inline closures inside initializeApp, for the
 // same reason externalLinkProbe lives in provisioning_wiring.go:
 // initializeApp's own local `context` variable (the daemon-lifetime ctx)
@@ -667,7 +667,7 @@ func initializeApp(
 		playlistschedule.NewFileStore(os, json), logger)
 	devicectl.SetWithPlayerPush(executor, playlistScheduler.WithPlayerPush, logger)
 	// onAwake composes the displayAt recompute with the boot recovery
-	// early-re-entry accelerator (design doc §3.2: the sleep tracker's
+	// early-re-entry accelerator (design doc §5.1: the sleep tracker's
 	// onAwake is one of the two accelerators, alongside a generation bump,
 	// that let a Deferred round re-enter before its backoff timer — which
 	// stays the PRIMARY trigger — fires). A named file-scope function, not an
@@ -684,13 +684,13 @@ func initializeApp(
 	// coordination, and the navigate-to-entry recovery primitive. Off-lane
 	// producers (setupui, mediator connectivity, mintpairing, commandrouter)
 	// are wired to it below, once their own components exist. The asleep
-	// gate is devicectl's four-value sleep tracker (design doc §3.4): built
+	// gate is devicectl's four-value sleep tracker (design doc §7): built
 	// AFTER executor so PlayerSleepGate can read its live tracker state.
 	session := playersession.New(context, cdp, clock, devicectl.PlayerSleepGate(executor), logger)
-	// Boot recovery's escalation primitive (design doc §3.2: "Escalations
+	// Boot recovery's escalation primitive (design doc §5: "Escalations
 	// call session.NavigateHome").
 	devicectl.SetBootRecoverySession(executor, session, logger)
-	// Roots the backoff timer's sleep on the daemon-lifetime ctx [minor #4]
+	// Roots the backoff timer's sleep on the daemon-lifetime ctx
 	// so shutdown cancels a pending sleep instead of leaking the goroutine.
 	devicectl.SetBootRecoveryDaemonContext(executor, context, logger)
 
@@ -753,7 +753,7 @@ func initializeApp(
 	// Chromium reconnects mid-setup.
 	executor.SetSetupUI(setupNarrator)
 
-	// Wire every off-lane producer to the session (design doc §2.4), now that
+	// Wire every off-lane producer to the session (design doc §4), now that
 	// they all exist. Registration ORDER is the reconciler execution order on
 	// every generation-ready: sleep invalidate+poke, playlist recompute,
 	// status force-refresh, setup-narration resync, boot-recovery retry,
@@ -765,13 +765,13 @@ func initializeApp(
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
-	// Boot recovery's generation-bump accelerator (design doc §3.2): a new
+	// Boot recovery's generation-bump accelerator (design doc §5.1): a new
 	// generation (CDP reconnect, a recovery navigation, a stamp-mismatch
 	// bump) is a signal the page or player state likely changed, so a
 	// Deferred round re-enters early instead of waiting out its backoff
 	// timer (which stays the PRIMARY trigger either way).
 	session.RegisterReconciler("boot-recovery-retry", bootRecoveryRetryReconciler(executor, logger))
-	// setupui integration (§2.4 disposition table): the narration worker
+	// setupui integration (§4 disposition table): the narration worker
 	// parks sends while a recovery navigation is pending, and setupui
 	// registers its own Narrating() as an overlay owner so NavigateHome never
 	// erases live narration.
@@ -779,22 +779,22 @@ func initializeApp(
 	session.RegisterOverlayOwner("setupui", setupNarrator.Narrating)
 	// mintpairing/qrdisplay: a live mint-pairing display (pairing code or
 	// request-received) is an overlay owner too, for the same reason. It also
-	// parks its own display sends while a recovery navigation is pending
-	// [M13], mirroring setupui's park discipline above.
+	// parks its own display sends while a recovery navigation is pending,
+	// mirroring setupui's park discipline above.
 	session.RegisterOverlayOwner("mintpairing", mintPairing.DisplayActive)
 	mintPairing.SetSession(session)
-	// mediator connectivity ownership (§3.1): SetSession registers the
+	// mediator connectivity ownership (§4): SetSession registers the
 	// "connectivity" reconciler internally, so it runs last among the five
 	// above, and routes the edge-triggered pushes from connectivity_change
 	// through the session's handler-readiness discipline too.
 	mediator.SetSession(session)
-	// Generation re-check seams (§2.4): a moved generation across an
+	// Generation re-check seams (§4): a moved generation across an
 	// in-flight setSleepMode send or CDP command reply means the ack may not
 	// describe the current document.
 	devicectl.SetSessionGeneration(executor, session.Generation, logger)
 	commandrouter.SetSessionGeneration(rawCmdHandler, session.Generation, logger)
 	// commandrouter's refreshArtwork dead-page recovery escalates to
-	// NavigateHomeInline instead of Page.reload (design doc §5).
+	// NavigateHomeInline instead of Page.reload (design doc §3).
 	commandrouter.SetRecoverySession(rawCmdHandler, session, logger)
 	// Status-poller stamp carrier (§2.1 source 3): every checkStatus
 	// round-trip reports its observed document stamp so the session can

@@ -71,10 +71,18 @@ rather than tracking its own notion of page identity.
      resolves (`onGenerationReady`), and remembers that value as the
      generation's baseline.
    - ff-player's `checkStatus` reply echoes `stamp: window.__ffosDocStamp ?? ''`
-     — **the key is always present** on a player that ships this feature,
-     even when the document hasn't been stamped yet (a fresh mount, or a
-     document the session doesn't own). An **old** player (pre-stamp code)
-     omits the key entirely.
+     on `CanvasService.getStatus`'s normal-path return — present even when
+     the document hasn't been stamped yet (a fresh mount, or a document the
+     session doesn't own). This is **not unconditional**: `getStatus` has
+     two earlier-returning branches — the overheating check
+     (`isOverheating` → `{ok:false, error:Overheating}`) and the top-level
+     `catch` (`{ok:false, error:StatusCheckFailed}`) — that both return
+     before ever reaching the `stamp` field, on a player that ships this
+     feature just the same as one that doesn't. controld cannot tell those
+     two branches apart from a genuinely **old** player (pre-stamp code,
+     which omits the key on every reply): all three decode as
+     `present == false`. See §10 for the residual this leaves (source 3
+     going dark specifically while overheating).
    - `ObserveStatusStamp(stamp string, present bool)` carries the
      nil/absent-vs-empty distinction through: `present == false` means "old
      player, source unavailable" and never bumps, regardless of the string
@@ -167,9 +175,13 @@ this order, before ever sending `Page.navigate`:
 ### 3.2 `NavigationPending` park contract
 
 `NavigationPending() bool` reports an armed-or-executing navigation.
-Off-lane producers that own their own send path (setupui narration,
-mintpairing/qrdisplay display sends) consult it **inside their own send
-critical section**, immediately before each send, and park while it's true.
+Off-lane producers that own their own send path consult it immediately
+before each send and park while it's true — setupui narration parks inside
+its own queue-worker loop, right before each `trySend`; mintpairing/qrdisplay
+display sends park *before* taking their own display lock (never while
+holding it), since a park can run for the full timeout and holding that lock
+across it would serialize every other display mutation behind an unrelated
+navigation (see §4).
 
 The flag is a **refcount**, not a bool: `NavigateHomeInline` claims the same
 single-flight slot the async `NavigateHome` worker uses
@@ -216,7 +228,15 @@ currently cast), not only a transient. `awaitRouteSettled` polls the route
   report failure to a relayer caller.
 
 An unavailable status probe (old player, CDP hiccup) is "not classifiable"
-throughout — never treated as a specific route or a mismatch.
+throughout — never treated as a specific route or a mismatch. One honest
+consequence: against an old player, `awaitRouteSettled` returns success on
+its FIRST route read (immediately "not classifiable," no polling, no retry),
+so "verified success" is a fiction there — there is no actual route
+confirmation at all, only the `StageHandler` barrier from the step before.
+`NavExecuted` with a nil `Err` means "the barrier resolved and, if a route
+could be read, it looked right" — not "the route was confirmed" — and that
+distinction only matters in practice for players old enough to have no
+status probe to read.
 
 ### 3.4 `NavigateHome` vs `NavigateHomeInline`
 
@@ -487,17 +507,33 @@ never destructively:
   controld, old player) is the one that actually ships in practice during a
   rollout window and is the one this section is about.
 - **New controld against an old player enters conservative mode by
-  design.** An old player's manifest lacks `contracts.playerStatus`
-  (§5.3): boot recovery's capability fuse latches conservative
-  (log-only for the one row it gates), the structured-status probe is
+  design — but "conservative" is narrower than "never navigates," and this
+  section must not overclaim it.** An old player's manifest lacks
+  `contracts.playerStatus` (§5.3): the structured-status probe is
   unavailable everywhere it's consulted (never misread — every decode path
   treats "unavailable" as "not classifiable," never as a specific value),
   and the stamp contract's source 3 (§2.1) is permanently inert (an old
-  player never echoes the `stamp` key at all). This is **safety over
-  coverage, by design**: a build that can't confirm what an old player is
-  doing must not escalate to a destructive navigation on its behalf. The
-  accepted cost is reduced recovery coverage against old players, never
-  incorrect recovery.
+  player never echoes the `stamp` key at all). The boot-recovery capability
+  fuse latches conservative and gates **only** rows 17/18 (the unclassified-
+  refusal fallback, §5.3) — rows 6, 11, and 16 (hydration failed,
+  handler-never-ready, repeat `preview_update_failed`) still escalate to
+  `NavigateHome` against an old player exactly as they would against a new
+  one, since each already has its own independent evidence of a dead page
+  that doesn't depend on the status probe at all. The `/error` safety gate
+  (§3.1 step 3) is itself **fail-open** against an old player: with no
+  status probe to read `route` from, `isErrorPage` reads "unavailable" and
+  never gates. This is mitigated, not closed: an `/error` page — even on an
+  old player — is still a live React page with `window.handleCDPRequest`
+  installed, so the classifier's own dead-page rows (11, and the
+  handler-presence check inside row 17/18) never see the "genuinely dead
+  document" evidence they require, and an unclassified refusal off that
+  page is conservatively deferred anyway. The net effect is real but
+  narrow: a build that can't confirm what an old player is doing withholds
+  escalation specifically from the one row that has no independent evidence
+  of its own, while every row with independent evidence — including the
+  liveness check that stands in for the fail-open `/error` gate — behaves
+  identically to a new player. The accepted cost is reduced recovery
+  coverage against old players, never incorrect recovery.
 - **`protocol` and the manifest's `contracts.playerStatus.version` must
   bump together.** Both are checked independently
   (`statusProtocolVersion` in Go, `PlayerStatusContractVersion` — currently
@@ -521,6 +557,17 @@ never destructively:
 
 ## 10. Accepted residual risks
 
+- **Source 3 goes dark on a NEW player specifically while it is overheating
+  (or on any other exception inside `getStatus`).** `CanvasService.getStatus`
+  has two branches — the overheating check and its top-level `catch` — that
+  return before ever reaching the `stamp` field (§2.1). controld cannot
+  distinguish that reply shape from a genuinely old player; both decode as
+  `present == false`, "source unavailable, never bump." A feral-watchdog
+  navigation or foreign document replacement occurring during an overheating
+  episode is therefore invisible to the generation model until the episode
+  ends and `getStatus` reaches its normal-path return again. Not yet fixed;
+  the fix (adding `stamp` to the two early-return shapes) belongs to
+  ff-player.
 - **feral-watchdog is a second, ungated navigation authority** (§4). The
   session's gates are best-effort against it; source 3 detects its
   navigation within one status-poll interval (~5s) on new players only —
@@ -540,11 +587,19 @@ never destructively:
   back-to-back foreign navigations. Not a correctness issue, since the
   eventual detection still lands within one additional poll interval — a
   latency characteristic, not a lost-forever one.
-- **Conservative mode on old players limits boot recovery to logging**
-  (§5.3, §9) — by design, not a gap to close.
-- **`NavigateHomeInline`'s 20s verification wait** costs one relayer
-  handler slot out of the pool for its duration and fits under hub's 30s
-  HTTP timeout with headroom.
+- **Conservative mode on old players narrows one classification row to
+  logging** (§5.3, §9 — not "all boot recovery," see §9 for the precise
+  scope) — by design, not a gap to close.
+- **`NavigateHomeInline`'s 20s verification wait** normally costs one
+  relayer handler slot out of the pool for its duration and fits under
+  hub's 30s HTTP timeout with headroom. The commandrouter refreshArtwork
+  escalation path (§4) can extend this: a `sendCDPRequest` that hangs on a
+  wedged (but not yet torn-down) socket can burn cdp's own 15s
+  `sendRequestTimeout` BEFORE Inline's 20s cap even starts, for a ~35s
+  worst-case handler — over hub's 30s timeout. In practice this is rare:
+  a send timeout that severe normally also tears the underlying CDP
+  connection down, so the Inline call that follows fails fast (CDP no
+  longer initialized) rather than running out its own full 20s.
 
 ---
 

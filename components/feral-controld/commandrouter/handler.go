@@ -36,15 +36,15 @@ type handler struct {
 
 	// sessionGeneration, when set (SetSessionGeneration), is
 	// playersession.Session.Generation narrowed to a func() uint64 seam
-	// (design doc §2.4). nil reads as generation 0 always, which never
+	// (design doc §4). nil reads as generation 0 always, which never
 	// appears to move.
 	sessionGeneration func() uint64
 
 	// recoverySession, when set (SetRecoverySession), is the
-	// playersession.Session the refreshArtwork recovery escalation (§5)
+	// playersession.Session the refreshArtwork recovery escalation (§3)
 	// drives via NavigateHomeInline — the caller here holds no external lock
 	// while calling it (:267 is outside every WithPlayerPush closure and gate.go
-	// has no mutex [N-B(a)]), which is exactly Inline's synchronous-reply
+	// has no mutex), which is exactly Inline's synchronous-reply
 	// contract. nil (tests, a build wired before Phase 2b) makes the
 	// escalation a no-op, degrading to the pre-existing error return.
 	recoverySession RecoverySession
@@ -58,8 +58,8 @@ type RecoverySession interface {
 	NavigateHomeInline(opts playersession.NavOptions) error
 }
 
-// ErrGenerationRace marks sendCDPRequest's generation re-check failure
-// [M5]: the send itself succeeded, but the page generation moved while the
+// ErrGenerationRace marks sendCDPRequest's generation re-check failure:
+// the send itself succeeded, but the page generation moved while the
 // reply was in flight, so the reply cannot be trusted as describing the
 // current document. errors.Is-able so the refreshArtwork recovery
 // escalation below can EXCLUDE it: a healthy page racing an unrelated
@@ -337,7 +337,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// when the page is broken — e.g. Chromium serving stale cached
 			// chunks after a player bundle swap (#234), where the app never
 			// boots. The cache was already cleared above; the recovery
-			// primitive is navigate-to-entry (design doc §5), never
+			// primitive is navigate-to-entry (design doc §3), never
 			// reload-in-place — the static export is flat files only, so a
 			// client-route reload 404s. NavigateHomeInline runs its own gates
 			// (sleep/error-page/overlay) synchronously and reports a
@@ -349,7 +349,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if commandType != commands.CMD_REFRESH_ARTWORK {
 				return nil, err
 			}
-			// [M5] A generation-race failure means the send itself worked but
+			// A generation-race failure means the send itself worked but
 			// raced an unrelated page change — not evidence of a broken page.
 			// Escalating it into a destructive navigate would visibly restart
 			// a healthy page for no reason; the caller retries instead.
@@ -420,7 +420,7 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 		return nil, err
 	}
 
-	// Generation re-check (design doc §2.4): unlike devicectl's sleep apply,
+	// Generation re-check (design doc §4): unlike devicectl's sleep apply,
 	// a command reply answered by a document that is no longer current is not
 	// something the relayer/hub caller can safely trust as "delivered" — a
 	// cast or control command silently landing on (or being silently
