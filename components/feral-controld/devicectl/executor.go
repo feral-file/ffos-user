@@ -846,11 +846,14 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 		return
 	}
 	defer e.startupOTAGateInFlight.Store(false)
-	// Re-check under the guard: the cheap pre-check above can go stale while a
-	// concurrent run settles the latch and releases the in-flight flag —
-	// without this a second runner could spawn an update ladder against a
-	// device already rebooting into the new build.
-	if e.startupOTAGateDone.Load() {
+	// Re-check BOTH pre-checked predicates under the guard: the cheap
+	// pre-check above can go stale while a concurrent run settles the latch
+	// and releases the in-flight flag — without this a second runner could
+	// spawn an update ladder against a device already rebooting into the new
+	// build — and a factory reset can flip the device unclaimed in the same
+	// gap (the mid-retry re-check below covers the loop's sleeps; this covers
+	// the entry).
+	if e.startupOTAGateDone.Load() || !e.claimSettled() {
 		return
 	}
 
@@ -880,6 +883,19 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 		e.logger.Warn("Startup OTA gate: version check failed; retrying",
 			zap.Error(err), zap.Duration("backoff", backoff))
 		if err := e.clock.SleepContext(ctx, backoff); err != nil {
+			return
+		}
+		// Re-check the guard predicate after every backoff sleep, mirroring
+		// the auto-claim loop's mid-backoff re-check: a factory reset can
+		// clear the claim state while this loop sleeps (its staged reboot can
+		// be delayed or fail), and the next attempt would then start a
+		// Required-mode update — and its reboot — over the freshly unclaimed
+		// setup flow, on the wrong side of the claimSettled partition. Stop
+		// WITHOUT latching done: this run no longer owns the gate; if the
+		// device is ever re-claimed this process life, a later online
+		// transition may legitimately re-enter.
+		if !e.claimSettled() {
+			e.logger.Info("Startup OTA gate: device no longer settled mid-retry (factory reset); stopping without latching")
 			return
 		}
 		backoff *= 2

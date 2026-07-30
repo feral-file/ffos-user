@@ -239,3 +239,33 @@ func TestStartupOTAGate_EntryGatedOnBootWindow(t *testing.T) {
 	assert.Equal(t, 1, gate.calls())
 	assert.True(t, e.startupOTAGateDone.Load())
 }
+
+// TestStartupOTAGate_ResetMidRetryStopsWithoutLatching: a factory reset can
+// clear the claim state while the VersionCheckFailed retry loop sleeps (the
+// reset's staged reboot can be delayed or fail). The next attempt must NOT
+// run — a Required-mode update, and its reboot, over the freshly unclaimed
+// setup flow is on the wrong side of the claimSettled partition — and the
+// done latch must stay clear so a re-claimed device's later online
+// transition may legitimately re-enter.
+func TestStartupOTAGate_ResetMidRetryStopsWithoutLatching(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	// Mutable shared state: claimed at entry, reset mid-sleep.
+	st := &state.State{ConnectedDevice: &state.Device{ID: "phone-1"}}
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting) // don't leave a finished mock as the global manager
+	sm.EXPECT().GetState().Return(st).AnyTimes()
+
+	gate := &fakeStartupGate{results: []otagate.Result{otagate.ResultVersionCheckFailed}}
+	clk := &autoClaimClock{}
+	clk.onSleep = func() {
+		st.ConnectedDevice = nil // factory reset lands during the backoff sleep
+	}
+	e := &executor{logger: zap.NewNop(), clock: clk, startupOTAGate: gate.call}
+
+	e.MaybeRunStartupOTAGateOnOnline(context.Background())
+
+	assert.Equal(t, 1, gate.calls(), "no further attempt may run after the reset")
+	assert.False(t, e.startupOTAGateDone.Load(), "a stopped run must not latch the boot check")
+}
