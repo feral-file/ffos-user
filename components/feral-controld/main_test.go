@@ -209,6 +209,10 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				// CDP now connects in the background and never gates startup: run() calls
 				// Start (fire-and-forget) and Close on shutdown.
@@ -272,6 +276,10 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: "test-topic-123"},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "test-topic-123", TopicReady: true}).
+					AnyTimes()
 
 				// Mock logger manager set global topic ID
 				ts.mockLoggerManager.EXPECT().SetGlobalTopicID("test-topic-123")
@@ -343,6 +351,10 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				// Initial Start fails; the background retry parks in SleepContext
 				// until the test context ends, so no second Start is attempted.
@@ -404,6 +416,10 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				// Initial Start fails; the first backoff returns immediately so
 				// the retry fires inside the test window and succeeds; any later
@@ -481,6 +497,10 @@ func TestApp_Run_Success(t *testing.T) {
 						ConnectedDevice: &state.Device{},
 					}).
 					AnyTimes()
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
@@ -520,6 +540,10 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
 				ts.mockCDP.EXPECT().Close()
@@ -557,6 +581,10 @@ func TestApp_Run_Success(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				// CDP now connects in the background and never gates startup: run() calls
 				// Start (fire-and-forget) and Close on shutdown.
@@ -647,6 +675,10 @@ func TestApp_Run_Errors(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: "test-topic"},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "test-topic", TopicReady: true}).
+					AnyTimes()
 
 				// Mock Watchdog start and stop
 				ts.mockWatchdog.EXPECT().Start(gomock.Any())
@@ -722,6 +754,10 @@ func TestApp_Run_Errors(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				// CDP connects in the background; run() reaches Start + Close here.
 				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
@@ -782,6 +818,10 @@ func TestApp_Run_Errors(t *testing.T) {
 					Return(&state.State{
 						Relayer: &state.RelayerState{TopicID: ""},
 					}, nil)
+				ts.mockStateManager.EXPECT().
+					ClaimSnapshot().
+					Return(state.ClaimInfo{TopicID: "", TopicReady: false}).
+					AnyTimes()
 
 				// CDP connects in the background; run() reaches Start + Close here.
 				ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any())
@@ -1111,6 +1151,7 @@ func TestApp_Run_StartupOrdering(t *testing.T) {
 	ts.mockStateManager.EXPECT().Load(ts.logger).Return(&state.State{
 		Relayer: &state.RelayerState{TopicID: "test-topic"},
 	}, nil)
+	ts.mockStateManager.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{TopicID: "test-topic", TopicReady: true}).AnyTimes()
 
 	ts.mockWatchdog.EXPECT().Start(gomock.Any())
 	ts.mockWatchdog.EXPECT().Stop()

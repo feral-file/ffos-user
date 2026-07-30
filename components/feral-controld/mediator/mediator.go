@@ -11,6 +11,7 @@ import (
 
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/commandrouter"
@@ -20,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -43,9 +45,36 @@ type Mediator interface {
 	// auto-claim flow, whose topic wait may already have expired by the time
 	// the assignment arrives.
 	SetTopicObserver(observer func())
+	// SetSession injects the playersession.Session that owns page-generation
+	// readiness. The mediator registers itself as a connectivity reconciler
+	// (run on every generation-ready) and routes every connectivity push —
+	// both the edge-triggered ones and the reconciler ones — through it
+	// (§4): pushes wait AwaitStage(StageHandler) with the fail-fast, so a
+	// push never races a page that has not installed its handler yet. Call
+	// once at wiring time, before Start.
+	//
+	// Takes the concrete *playersession.Session (not a narrower
+	// consumer-owned interface): mediator's Mediator interface is mocked
+	// (mocks.MockMediator), and playersession is a leaf package with no
+	// dependency on devicectl — unlike a mediator-package-defined interface
+	// type, referencing it from mocks cannot reintroduce the
+	// mocks->mediator->devicectl->mocks import cycle devicectl's own tests
+	// would otherwise hit.
+	SetSession(session *playersession.Session)
+	// SetConnectivityPushHook registers a callback invoked after every
+	// connectivity push ATTEMPT completes (success, failure, or skipped —
+	// e.g. AwaitStage's fail-fast). It exists purely as a test synchronization
+	// seam for the otherwise-async connectivity worker; production wiring
+	// never calls it, and a nil hook (the default) is a no-op.
+	SetConnectivityPushHook(fn func())
 }
 
 type mediator struct {
+	// daemonCtx is the app-lifetime context: used for the
+	// singleflighted connectivity cold probe (coldProbeConnectivity) so it
+	// is never tied to whichever single caller's ctx happened to win the
+	// singleflight race.
+	daemonCtx  context.Context
 	relayer    relayer.Relayer
 	dbus       dbus.DBus
 	cdp        cdp.CDP
@@ -76,6 +105,42 @@ type mediator struct {
 	// periodic self-heal (see reconcileMDNSLocked) can tell "needs starting" from
 	// "already up" without relying on Advertiser.Start's already-started error.
 	mdnsStarted bool
+
+	// session, when set (SetSession), is the playersession.Session the
+	// connectivity owner routes every push through (§4). Nil until wired;
+	// pushConnectivity no-ops when nil (headless test/wiring paths).
+	session *playersession.Session
+
+	// connMu guards the mediator-owned connectivity cache — the single
+	// authority for what level the player was last told, closing M5/M6
+	// (a late reseed overwriting a fresher edge; a seed lost across a page
+	// reload). known distinguishes "never learned" (nothing to push, and the
+	// reconciler must cold-probe) from "known false" (push false).
+	connMu    sync.Mutex
+	connLevel bool
+	connKnown bool
+	// connSeq increments on every edge update. The single-flight cold probe's
+	// result is merged back into the cache only if connSeq has not moved
+	// since the probe started — a fresher edge arriving mid-probe must win,
+	// never be clobbered by a stale in-flight read.
+	connSeq uint64
+
+	// connProbeFlight single-flights the cold (!known) connectivity probe so
+	// concurrent reconciler runs (one per generation) never issue more than
+	// one refresh=true D-Bus round-trip at a time.
+	connProbeFlight singleflight.Group
+
+	// connPushMu / connPushBusy / connPushMore implement the "consecutive
+	// queued pushes coalesce" requirement: a push already in flight absorbs
+	// every edge that arrives while it runs into a single trailing re-push,
+	// which re-reads the cache AT EXECUTION TIME rather than snapshotting it
+	// at enqueue time.
+	connPushMu   sync.Mutex
+	connPushBusy bool
+	connPushMore bool
+
+	// connPushHook is the test-only completion seam (SetConnectivityPushHook).
+	connPushHook atomic.Pointer[func()]
 }
 
 // startMDNSLocked registers the advertiser with the current device info and
@@ -124,7 +189,15 @@ func (m *mediator) reconcileMDNSLocked(ctx context.Context) {
 	}
 }
 
+// New builds a Mediator. ctx is the daemon-lifetime context: the
+// singleflighted connectivity cold probe (coldProbeConnectivity) runs on
+// THIS context, never on a caller-supplied one — a probe shared by every
+// waiter must not be cancelable by whichever single caller happened to win
+// the singleflight race, e.g. a superseded reconciler's own scoped ctx. nil
+// defaults to context.Background() (test convenience; production always
+// passes the app's daemon ctx).
 func New(
+	ctx context.Context,
 	relayer relayer.Relayer,
 	dbus dbus.DBus,
 	cdp cdp.CDP,
@@ -134,7 +207,11 @@ func New(
 	json wrapper.JSON,
 	l *zap.Logger,
 ) Mediator {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return &mediator{
+		daemonCtx:  ctx,
 		relayer:    relayer,
 		dbus:       dbus,
 		cdp:        cdp,
@@ -177,6 +254,204 @@ func (m *mediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceIn
 // interface doc.
 func (m *mediator) SetTopicObserver(observer func()) {
 	m.topicObserver = observer
+}
+
+// SetSession injects the session and registers the connectivity reconciler.
+// See the Mediator interface doc.
+//
+// The reconciler enqueues through enqueueConnectivityPush — the SAME
+// single worker the edge-triggered connectivity_change handler uses — rather
+// than calling pushConnectivity directly. Registering pushConnectivity itself
+// as the reconciler would let it run CONCURRENTLY with the edge worker's own
+// pushConnectivity call: both do an independent cache-read-then-CDP-send, so
+// two overlapping runs are not truly serialized against each other (only
+// each's own field-level locking is), narrowing M5's stale-overwrite window
+// rather than closing it. Routing both through the one worker makes
+// cache-read+send happen in exactly one place at a time, and the worker's
+// existing coalescing (a push already in flight absorbs a trailing re-push
+// reading the cache at ITS execution time) is what actually closes it.
+func (m *mediator) SetSession(session *playersession.Session) {
+	m.session = session
+	if session != nil {
+		session.RegisterReconciler("connectivity", func(context.Context) {
+			m.enqueueConnectivityPush()
+		})
+	}
+}
+
+// SetConnectivityPushHook registers the test-only completion seam. See the
+// Mediator interface doc.
+func (m *mediator) SetConnectivityPushHook(fn func()) {
+	if fn == nil {
+		m.connPushHook.Store(nil)
+		return
+	}
+	m.connPushHook.Store(&fn)
+}
+
+func (m *mediator) fireConnectivityPushHook() {
+	if hook := m.connPushHook.Load(); hook != nil && *hook != nil {
+		(*hook)()
+	}
+}
+
+// enqueueConnectivityPush arms an async connectivity push. Concurrent calls
+// while one is already running coalesce into a single trailing re-push (the
+// "consecutive queued pushes coalesce" requirement): the busy flag means "a
+// push is in flight or about to read the cache", so a caller that loses the
+// race simply asks the in-flight push to run one more time after it finishes,
+// which re-reads the cache at THAT execution time rather than snapshotting it
+// now.
+func (m *mediator) enqueueConnectivityPush() {
+	m.connPushMu.Lock()
+	if m.connPushBusy {
+		m.connPushMore = true
+		m.connPushMu.Unlock()
+		return
+	}
+	m.connPushBusy = true
+	m.connPushMu.Unlock()
+	go m.runConnectivityPushWorker()
+}
+
+func (m *mediator) runConnectivityPushWorker() {
+	for {
+		m.pushConnectivity(context.Background())
+		m.connPushMu.Lock()
+		if !m.connPushMore {
+			m.connPushBusy = false
+			m.connPushMu.Unlock()
+			return
+		}
+		m.connPushMore = false
+		m.connPushMu.Unlock()
+	}
+}
+
+// pushConnectivity is the connectivity edge-triggered push worker's body
+// (§4), run ONLY on the single worker enqueueConnectivityPush/
+// runConnectivityPushWorker serialize — the connectivity reconciler
+// (registered on the session, run on every generation-ready) enqueues
+// through that same worker rather than calling this directly, so
+// cache-read+send only ever happens in one place at a time. It reads the
+// cache AT EXECUTION TIME (never a snapshot taken when the edge or
+// generation-ready fired), which is what keeps a late reconcile from
+// overwriting a fresher edge and what lets a reload-lost seed recover on the
+// next generation-ready.
+func (m *mediator) pushConnectivity(ctx context.Context) {
+	if m.session == nil {
+		m.fireConnectivityPushHook()
+		return
+	}
+	// Handler-readiness discipline: fail fast (no wait) when CDP is not
+	// connected; otherwise wait for the player's command handler so the push
+	// never races a page that has not installed it yet.
+	if err := m.session.AwaitStage(ctx, playersession.StageHandler); err != nil {
+		m.logger.Debug("Connectivity push skipped: player not ready", zap.Error(err))
+		m.fireConnectivityPushHook()
+		return
+	}
+
+	level, known, seq := m.connectivitySnapshot()
+	if !known {
+		level, known = m.coldProbeConnectivity(seq)
+		if !known {
+			m.logger.Debug("Connectivity push skipped: level unknown and the cold probe failed")
+			m.fireConnectivityPushHook()
+			return
+		}
+	}
+	m.sendConnectivityToPlayer(level)
+	m.fireConnectivityPushHook()
+}
+
+// coldProbeConnectivity issues ONE single-flighted refresh=true D-Bus query
+// when the cache has never learned a level (a fresh boot, or a process that
+// started before the first connectivity_change edge ever fired). The result
+// merges into the cache by seq: if a fresher edge raced in and updated
+// the cache while the probe was in flight, that edge's value wins and the
+// stale cold-probe result is discarded.
+//
+// The shared probe runs on m.daemonCtx, NOT a caller-supplied
+// ctx: singleflight.Do fans one in-flight call out to every concurrent
+// caller, so tying it to whichever caller happened to win the race would let
+// that one caller's own cancellation (e.g. a superseded reconciler's scoped
+// ctx) abort the probe for every other waiter too.
+func (m *mediator) coldProbeConnectivity(seqAtStart uint64) (level bool, known bool) {
+	v, err, _ := m.connProbeFlight.Do("connectivity", func() (interface{}, error) {
+		return m.queryConnectivityRefresh(m.daemonCtx)
+	})
+	if err != nil {
+		m.logger.Debug("Connectivity cold probe failed", zap.Error(err))
+		return false, false
+	}
+	connected, _ := v.(bool)
+
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	if !m.connKnown && m.connSeq == seqAtStart {
+		m.connLevel = connected
+		m.connKnown = true
+	}
+	return m.connLevel, m.connKnown
+}
+
+func (m *mediator) connectivitySnapshot() (level bool, known bool, seq uint64) {
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	return m.connLevel, m.connKnown, m.connSeq
+}
+
+// queryConnectivityRefresh reads sys-monitord's connectivity with a forced
+// live probe (refresh=true), unlike queryConnectivity's cached read. Used
+// only by the cold-probe path above, which by definition has no cached level
+// to fall back on. Mirrors main.go's getConnectivityStatus timeout.
+func (m *mediator) queryConnectivityRefresh(ctx context.Context) (bool, error) {
+	deadlineCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+	defer cancel()
+
+	resp, err := m.dbus.Call(
+		deadlineCtx,
+		dbus.MONITORD_NAME,
+		dbus.MONITORD_PATH,
+		dbus.MONITORD_INTERFACE,
+		dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
+		true,
+	)
+	if err != nil {
+		return false, err
+	}
+	if len(resp) != 1 {
+		return false, fmt.Errorf("expected 1 response, got %d", len(resp))
+	}
+	connected, ok := resp[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("expected bool, got %T", resp[0])
+	}
+	return connected, nil
+}
+
+// sendConnectivityToPlayer issues the actual CDP push. Kept a thin,
+// well-named leaf so pushConnectivity's flow reads as gate-then-send.
+func (m *mediator) sendConnectivityToPlayer(level bool) {
+	_, err := m.cdp.Send(
+		cdp.METHOD_EVALUATE,
+		map[string]interface{}{
+			"expression": fmt.Sprintf("window.handleConnectivityChange(%t)", level),
+		})
+	if err != nil {
+		// handleConnectivityChange is a notify-only hook; player builds that
+		// return nothing surface as "type mismatch: undefined" from the CDP
+		// client — the call was delivered, there is just no return value.
+		// Only real delivery failures deserve a visible log.
+		if strings.Contains(err.Error(), "type mismatch: undefined") {
+			m.logger.Debug("Connectivity pushed; player handler returned no value")
+		} else {
+			m.logger.Warn("Failed to push connectivity to player", zap.Error(err))
+		}
+		return
+	}
+	m.logger.Debug("Connectivity pushed to player", zap.Bool("connected", level))
 }
 
 // SetClaimed updates the advertised claim state. Because zeroconf only publishes
@@ -342,24 +617,19 @@ func (m *mediator) handleDBusSignal(
 			zap.Bool("mdns_active", m.mdnsAdvertiser != nil),
 		)
 
-		// Send the connectivity change to web app
-		m.logger.Debug("Forwarding connectivity change to web app", zap.Bool("connected", connected))
-		_, err := m.cdp.Send(
-			cdp.METHOD_EVALUATE,
-			map[string]interface{}{
-				"expression": fmt.Sprintf("window.handleConnectivityChange(%t)", connected),
-			})
-		if err != nil {
-			// handleConnectivityChange is a notify-only hook; player builds that
-			// return nothing surface as "type mismatch: undefined" from the CDP
-			// client — the call was delivered, there is just no return value.
-			// Only real delivery failures deserve a visible log.
-			if strings.Contains(err.Error(), "type mismatch: undefined") {
-				m.logger.Debug("Connectivity change delivered; player handler returned no value")
-			} else {
-				m.logger.Warn("Failed to forward connectivity change to web app", zap.Error(err))
-			}
-		}
+		// Update the mediator-owned connectivity cache and arm an async push
+		// through the session worker (§4). The edge handler no longer sends
+		// to CDP directly: pushConnectivity reads this cache AT EXECUTION
+		// TIME (never a value snapshotted here) and waits for the player's
+		// command handler first, so an edge that fires before DevTools
+		// attaches is not lost — the generation-ready reconciler picks it up
+		// the moment a page connects instead.
+		m.connMu.Lock()
+		m.connLevel = connected
+		m.connKnown = true
+		m.connSeq++
+		m.connMu.Unlock()
+		m.enqueueConnectivityPush()
 
 		// Reconnect the relayer if it's not already connected
 		if connected && !m.relayer.IsConnected() {
@@ -431,11 +701,10 @@ func (m *mediator) handleRelayerMessage(ctx context.Context, payload relayer.Pay
 			return err
 		}
 
-		// Save state
-		s := state.GetState()
-		hadTopic := strings.TrimSpace(s.Relayer.TopicID) != ""
-		s.Relayer.TopicID = *topicID
-		err := s.Save()
+		// Save state atomically: SetRelayerTopicID reports the pre-write
+		// hadTopic edge under the same lock as the write itself, so it can't
+		// straddle a concurrent clearPersistedClaim/connect.
+		hadTopic, err := state.SetRelayerTopicID(*topicID)
 		if err != nil {
 			m.logger.Error("Failed to persist state", zap.Error(err))
 			return err

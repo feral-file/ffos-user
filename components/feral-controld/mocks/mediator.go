@@ -8,6 +8,7 @@ import (
 	reflect "reflect"
 
 	mdns "github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	playersession "github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	status "github.com/feral-file/ffos-user/components/feral-controld/status"
 	gomock "github.com/golang/mock/gomock"
 )
@@ -57,6 +58,30 @@ func (m *MockMediator) SetClaimed(claimed bool) {
 func (mr *MockMediatorMockRecorder) SetClaimed(claimed interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimed", reflect.TypeOf((*MockMediator)(nil).SetClaimed), claimed)
+}
+
+// SetConnectivityPushHook mocks base method.
+func (m *MockMediator) SetConnectivityPushHook(fn func()) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetConnectivityPushHook", fn)
+}
+
+// SetConnectivityPushHook indicates an expected call of SetConnectivityPushHook.
+func (mr *MockMediatorMockRecorder) SetConnectivityPushHook(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetConnectivityPushHook", reflect.TypeOf((*MockMediator)(nil).SetConnectivityPushHook), fn)
+}
+
+// SetSession mocks base method.
+func (m *MockMediator) SetSession(session *playersession.Session) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSession", session)
+}
+
+// SetSession indicates an expected call of SetSession.
+func (mr *MockMediatorMockRecorder) SetSession(session interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSession", reflect.TypeOf((*MockMediator)(nil).SetSession), session)
 }
 
 // SetTopicObserver mocks base method.

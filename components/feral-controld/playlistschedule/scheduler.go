@@ -514,6 +514,19 @@ func (s *scheduler) restoreLocked(snapshot Snapshot) {
 	s.generation++
 	if s.full != nil && !s.restoredPending {
 		s.armTimerLocked()
+		// snapshot.lastActive is the last push CONFIRMED accepted by the player,
+		// not necessarily what is due right now: a losing cast/refresh can
+		// restore a schedule whose own cutover push had failed and was mid-retry
+		// at snapshot time (that retry was just canceled above by
+		// cancelPushRetryLocked). armTimerLocked alone cannot recover that
+		// cutover once the schedule's last boundary has already passed relative
+		// to the current clock — it only arms for a *future* boundary. Re-arm the
+		// push retry whenever the restored cache's active set, computed as of
+		// now, has not actually reached the player, so the outstanding cutover
+		// keeps resending instead of silently sticking on stale playback.
+		if active := s.activeLocked(); len(active.Items) > 0 && !reflect.DeepEqual(active.Items, s.lastActive) {
+			s.armPushRetryLocked()
+		}
 	}
 	if s.restoredPending && s.full == nil && !s.source.IsZero() {
 		s.persistSourceLocked()

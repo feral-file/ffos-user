@@ -212,7 +212,7 @@ func (r *relayer) RetryableConnect(ctx context.Context) error {
 	var attempts int
 	for {
 		attempts++
-		topicID := state.GetState().Relayer.TopicID
+		topicID := state.ClaimSnapshot().TopicID
 		r.logger.Info("Connecting to Relayer",
 			zap.String("endpoint", r.endpoint),
 			zap.Int("attempts", attempts),
@@ -290,11 +290,15 @@ func (r *relayer) Connect(ctx context.Context) error {
 		connectURL += fmt.Sprintf("/api/connection?apiKey=%s", r.apiKey)
 	}
 
-	topicID := state.GetState().Relayer.TopicID
+	// Single snapshot: topicID and isReady must come from the SAME write, not
+	// two separate GetState() reads that could straddle a concurrent
+	// clearPersistedClaim()/topic assignment.
+	claim := state.ClaimSnapshot()
+	topicID := claim.TopicID
 	r.logger.Info("Retrieved topic ID from state",
 		zap.String("topicID", topicID),
 		zap.Bool("isEmpty", topicID == ""),
-		zap.Bool("isReady", state.GetState().Relayer.IsReady()))
+		zap.Bool("isReady", claim.TopicReady))
 
 	if topicID != "" {
 		connectURL += fmt.Sprintf("&topicID=%s", topicID)

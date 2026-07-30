@@ -19,6 +19,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -51,7 +52,54 @@ func (s *narratorSpy) ShowUpdating(progress int) {
 }
 func (s *narratorSpy) Hide() { s.calls = append(s.calls, "hide") }
 
+// SweepStaleOverlay mirrors setupui.Service: the hide runs only when THIS
+// process has no narration intent yet — an overlay this process painted (or
+// already hid) is by definition not stale.
+func (s *narratorSpy) SweepStaleOverlay() {
+	if len(s.calls) == 0 {
+		s.calls = append(s.calls, "hide")
+	}
+}
+
+// HideIfShowing mirrors setupui.Service: hide only when the current intent
+// (the last recorded call) is one of states. Caveat for future callers: most
+// spy labels match the wire state names ("finalizing", "updating",
+// "factory_reset"), but ShowClaimQR records "claim" while the wire state is
+// "claim_qr" — a HideIfShowing(claim_qr) test through this spy would no-op.
+func (s *narratorSpy) HideIfShowing(states ...string) {
+	if len(s.calls) == 0 {
+		return
+	}
+	current := s.calls[len(s.calls)-1]
+	for _, st := range states {
+		if current == st {
+			s.calls = append(s.calls, "hide")
+			return
+		}
+	}
+}
+
 func strPtr(s string) *string { return &s }
+
+// claimSnapshotFromState derives the state.ClaimInfo view of a *state.State
+// the same way state.ClaimSnapshot() does in production. Tests that mock
+// GetState() with a MUTABLE *state.State (mid-test claim/reset) mock
+// ClaimSnapshot() with a DoAndReturn closure over this helper so the two
+// mocked reads stay consistent with each other as the backing struct changes,
+// mirroring how the real state manager derives both from the same memory.
+func claimSnapshotFromState(s *state.State) state.ClaimInfo {
+	var info state.ClaimInfo
+	if s != nil && s.ConnectedDevice != nil {
+		info.DeviceID = s.ConnectedDevice.ID
+		info.DeviceName = s.ConnectedDevice.Name
+		info.Claimed = strings.TrimSpace(s.ConnectedDevice.ID) != ""
+	}
+	if s != nil && s.Relayer != nil {
+		info.TopicID = s.Relayer.TopicID
+		info.TopicReady = s.Relayer.IsReady()
+	}
+	return info
+}
 
 func TestFormatDeviceConnectURL_ByteCompatible(t *testing.T) {
 	// The exact bytes launcher-ui/index.html renders as the claim QR for a fixture
@@ -128,6 +176,96 @@ func TestNarrateUpdateProgress_ForwardsPercentSkipsUnparsed(t *testing.T) {
 	assert.Equal(t, 42, spy.lastProgress)
 }
 
+// --- OTA gate narrator policy (design doc §3.3) -----------------------------
+
+// TestOTAPermanentFailureNarration_NotSettledShowsJoinFailed pins today's
+// behavior for a pre-claim device: a latched permanent OTA failure narrates
+// through the pairing flow's join_failed state.
+func TestOTAPermanentFailureNarration_NotSettledShowsJoinFailed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes() // unclaimed
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
+
+	e.otaPermanentFailureNarration(otagate.FailureState{Failed: true, Err: errors.New("ladder exhausted")})
+
+	assert.Equal(t, []string{"join_failed"}, spy.calls)
+	assert.Equal(t, "ladder exhausted", spy.lastURL)
+}
+
+// TestOTAPermanentFailureNarration_SettledClearsUpdatingNeverJoinFailed pins
+// the settled-device policy: a claimed device has nothing to "join" — the
+// permanent failure clears the stuck updating overlay (only if it owns it)
+// and is logged, never repainted as join_failed.
+func TestOTAPermanentFailureNarration_SettledClearsUpdatingNeverJoinFailed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{DeviceID: "phone-1", Claimed: true}).AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
+
+	spy.ShowUpdating(40) // the ladder's own progress narration, still up
+	e.otaPermanentFailureNarration(otagate.FailureState{Failed: true, Err: errors.New("ladder exhausted")})
+
+	assert.Equal(t, []string{"updating", "hide"}, spy.calls)
+	assert.NotContains(t, spy.calls, "join_failed", "a settled device must never see join_failed narration")
+}
+
+// TestOTAPermanentFailureNarration_ClaimPrecedenceOverJoinedFlight is the
+// claim-precedence test design doc §3.3 asks for: the policy is decided at
+// EMIT time by reading live claim state, not captured when a flight (or a
+// caller) started — so a device that settles WHILE an update ladder it
+// joined pre-claim is still running gets the settled policy when that ladder
+// ultimately fails, even though the flight began pre-claim.
+func TestOTAPermanentFailureNarration_ClaimPrecedenceOverJoinedFlight(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	claimed := false
+	sm.EXPECT().ClaimSnapshot().DoAndReturn(func() state.ClaimInfo {
+		if claimed {
+			return state.ClaimInfo{DeviceID: "phone-1", Claimed: true}
+		}
+		return state.ClaimInfo{}
+	}).AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
+
+	// The flight started pre-claim (no narration yet from this callback's
+	// perspective — the ladder's own ShowUpdating already ran). The device
+	// claims WHILE the ladder is still in flight (updateToLatest joined it
+	// after settling).
+	claimed = true
+
+	e.otaPermanentFailureNarration(otagate.FailureState{Failed: true, Err: errors.New("ladder exhausted")})
+
+	assert.NotContains(t, spy.calls, "join_failed",
+		"live claim state at emit time must win over the flight's pre-claim origin")
+}
+
+// TestClearStuckUpdatingOverlay_HidesRegardlessOfClaimState pins [W10]: the
+// post-ladder watchdog's callback is unconditional — whichever entry point's
+// updating narration is still up, a successful ladder with no reboot means
+// it no longer reflects real progress.
+func TestClearStuckUpdatingOverlay_HidesRegardlessOfClaimState(t *testing.T) {
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy}
+
+	spy.ShowUpdating(80)
+	e.clearStuckUpdatingOverlay()
+
+	assert.Equal(t, []string{"updating", "hide"}, spy.calls)
+}
+
 // --- online-triggered auto claim (launcher-ui replacement) -------------------
 
 // autoClaimClock is a fake clock whose SleepContext advances fake time, so the
@@ -169,6 +307,9 @@ func TestMaybeShowClaimQROnOnline_ClaimedSweepsStaleOverlayOnce(t *testing.T) {
 	sm.EXPECT().GetState().
 		Return(&state.State{ConnectedDevice: &state.Device{ID: "phone-1"}}).
 		AnyTimes()
+	sm.EXPECT().ClaimSnapshot().
+		Return(state.ClaimInfo{DeviceID: "phone-1", Claimed: true}).
+		AnyTimes()
 
 	spy := &narratorSpy{}
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
@@ -189,6 +330,7 @@ func TestPairingConfirmationSettlesAutoClaim(t *testing.T) {
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes() // never claimed
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
 
 	spy := &narratorSpy{}
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
@@ -199,12 +341,87 @@ func TestPairingConfirmationSettlesAutoClaim(t *testing.T) {
 	assert.Equal(t, CmdOK, res)
 	require.Equal(t, []string{"ready", "hide"}, spy.calls)
 
-	// A later online transition must treat the device as settled: only the
-	// one-time boot sweep runs, no finalizing, no gate, no claim QR.
+	// A later online transition must treat the device as settled: the boot
+	// sweep no-ops (this process already narrated ready→hide, so the on-screen
+	// state is not stale), no finalizing, no gate, no claim QR.
 	e.MaybeShowClaimQROnOnline(context.Background())
-	assert.Equal(t, []string{"ready", "hide", "hide"}, spy.calls)
+	assert.Equal(t, []string{"ready", "hide"}, spy.calls)
 	assert.NotContains(t, spy.calls, "claim")
 	assert.NotContains(t, spy.calls, "finalizing")
+}
+
+// TestMaybeShowClaimQROnOnline_SweepYieldsToLiveOTANarration is the
+// cross-flow regression: on a settled device's online transition the claim
+// flow's stale-overlay sweep and the startup OTA gate run as UNORDERED
+// goroutines, and a sweep landing after the gate's ShowUpdating must not
+// erase the live update narration (an unconditional Hide also blinded the
+// reload safeguard, which keys on the same narration intent). Modeled here
+// with the sweep maximally delayed: the gate has already narrated when the
+// sweep runs.
+func TestMaybeShowClaimQROnOnline_SweepYieldsToLiveOTANarration(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().
+		Return(&state.State{ConnectedDevice: &state.Device{ID: "phone-1"}}).
+		AnyTimes()
+	sm.EXPECT().ClaimSnapshot().
+		Return(state.ClaimInfo{DeviceID: "phone-1", Claimed: true}).
+		AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
+
+	spy.ShowUpdating(40) // the concurrent OTA gate narrated first
+	e.MaybeShowClaimQROnOnline(context.Background())
+	assert.Equal(t, []string{"updating"}, spy.calls,
+		"the delayed sweep must not erase live OTA narration")
+}
+
+// TestMaybeShowClaimQROnOnline_MidBackoffSettleYieldsToLiveNarration pins the
+// HideIfShowing call site at the mid-backoff settled re-check — the branch
+// reachable minutes after the flow started, which is exactly when another
+// narrator can own the screen. The device is claimed DURING the backoff sleep
+// while a concurrent update ladder narrates; the flow's clear must yield (its
+// finalizing overlay is already superseded), never blanket-Hide. Reverting
+// the call site to Hide() fails this test with a trailing "hide".
+func TestMaybeShowClaimQROnOnline_MidBackoffSettleYieldsToLiveNarration(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	// Mutable shared state: unclaimed with a topic, so the flow passes the
+	// topic wait and enters the pre-claim gate loop.
+	st := &state.State{Relayer: &state.RelayerState{TopicID: "topic-abc"}}
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(st).AnyTimes()
+	// DoAndReturn (not a static Return): st.ConnectedDevice mutates mid-test
+	// (the backoff sleep hook below), and the gate's mid-backoff re-check must
+	// observe that mutation exactly as ClaimSnapshot() would in production.
+	sm.EXPECT().ClaimSnapshot().
+		DoAndReturn(func() state.ClaimInfo { return claimSnapshotFromState(st) }).
+		AnyTimes()
+	// No local build config: the gate's version check fails, which is the
+	// retryable shape that reaches the backoff sleep.
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).
+		Return(nil, errors.New("no local config")).
+		AnyTimes()
+
+	spy := &narratorSpy{}
+	clk := &autoClaimClock{}
+	clk.onSleep = func() {
+		// During the backoff sleep: the phone claims the device, and a
+		// concurrent updateToLatestVersion ladder takes the screen.
+		st.ConnectedDevice = &state.Device{ID: "phone-1"}
+		spy.ShowUpdating(30)
+	}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: clk, os: mockOS}
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Equal(t, []string{"finalizing", "updating"}, spy.calls,
+		"the settled-mid-backoff clear must not erase live update narration")
 }
 
 // TestConnectClaimTransitionHidesOverlay: the claim landing is the moment the
@@ -220,7 +437,19 @@ func TestConnectClaimTransitionHidesOverlay(t *testing.T) {
 	state.InjectStateManagerForTesting(sm)
 	st := &state.State{}
 	sm.EXPECT().GetState().Return(st).AnyTimes()
-	sm.EXPECT().Save(gomock.Any()).Return(nil).Times(2)
+	// ClaimSnapshot must reflect the SAME st the SetConnectedDevice mock below
+	// mutates, so the second connect()'s wasClaimed check sees the first
+	// connect's write (mirrors production: both accessors read/write the same
+	// underlying state).
+	sm.EXPECT().ClaimSnapshot().
+		DoAndReturn(func() state.ClaimInfo { return claimSnapshotFromState(st) }).
+		AnyTimes()
+	sm.EXPECT().SetConnectedDevice(gomock.Any()).
+		DoAndReturn(func(d state.Device) error {
+			st.ConnectedDevice = &d
+			return nil
+		}).
+		Times(2)
 
 	// Exactly ONE displayDefaultPlaylist reaches the player: sent on the claim
 	// transition, not on the re-connect.
@@ -264,7 +493,8 @@ func TestConnectClaimTransitionPlayerDownDoesNotFailClaim(t *testing.T) {
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
-	sm.EXPECT().Save(gomock.Any()).Return(nil)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+	sm.EXPECT().SetConnectedDevice(gomock.Any()).Return(nil)
 
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockCDP.EXPECT().
@@ -287,7 +517,8 @@ func TestConnectClaimTransitionDefaultPlaybackDoesNotClearDisplayAtCache(t *test
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
-	sm.EXPECT().Save(gomock.Any()).Return(nil)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+	sm.EXPECT().SetConnectedDevice(gomock.Any()).Return(nil)
 
 	mockClock := mocks.NewMockClock(ctrl)
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
@@ -398,6 +629,7 @@ func TestMaybeShowClaimQROnOnline_NoTopicWithholds(t *testing.T) {
 	sm := mocks.NewMockStateManager(ctrl)
 	state.InjectStateManagerForTesting(sm)
 	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
 
 	spy := &narratorSpy{}
 	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
@@ -420,6 +652,9 @@ func TestMaybeShowClaimQROnOnline_UnclaimedRunsPreClaimGate(t *testing.T) {
 	state.InjectStateManagerForTesting(sm)
 	sm.EXPECT().GetState().
 		Return(&state.State{Relayer: &state.RelayerState{TopicID: "topic-abc"}}).
+		AnyTimes()
+	sm.EXPECT().ClaimSnapshot().
+		Return(state.ClaimInfo{TopicID: "topic-abc", TopicReady: true}).
 		AnyTimes()
 	mockOS := mocks.NewMockOS(ctrl)
 	mockOS.EXPECT().ReadFile(gomock.Any()).

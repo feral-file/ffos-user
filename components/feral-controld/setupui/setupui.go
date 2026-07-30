@@ -17,10 +17,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
 
 // DefaultContractPath is the on-device location of the player capability
@@ -45,8 +47,11 @@ const (
 	// stateScanning is an extension state narrating the pre-AP Wi-Fi scan (the
 	// device is looking for nearby networks before advertising its setup
 	// hotspot). Like stateFactoryReset below it is deliberately NOT in the
-	// required validation set: fielded players that predate it accept it as a
-	// no-op ({ok:true}, renders nothing) and keep full narration support.
+	// required validation set that validateSetupDisplayContract checks: the
+	// shipping player manifest lists it today, but the requirement is kept
+	// loose so an older manifest that predates it — which accepts it as a
+	// no-op ({ok:true}, renders nothing) — still passes the gate and keeps
+	// full narration support.
 	stateScanning = "scanning"
 
 	// stateFinalizing is an extension state covering the gap between a
@@ -57,14 +62,43 @@ const (
 
 	// stateFactoryReset is an extension state used by the in-process factory-reset
 	// flow. It is deliberately NOT in the required set that
-	// validateSetupDisplayContract checks: the currently-shipping player manifest
-	// does not list it, and requiring it would fail the gate and disable ALL setup
-	// narration on fielded players. Players that predate the corresponding
-	// ff-player renderer accept it as a no-op ({ok:true}, renders nothing); once
-	// ff-player adds the state it renders. This is the contract-level extensibility
-	// path in action.
+	// validateSetupDisplayContract checks: the shipping player manifest lists
+	// it today (ff-player added the renderer), but requiring it in the gate
+	// would fail validation and disable ALL setup narration against any
+	// fielded player whose manifest predates it — those older manifests
+	// accept it as a no-op ({ok:true}, renders nothing). This is the
+	// contract-level extensibility path in action: the required set names
+	// only the states every fielded manifest is guaranteed to list; states
+	// that shipped later, or states still to come, stay optional forever.
 	stateFactoryReset = "factory_reset"
 )
+
+// defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
+// worker's park while a playersession.Session recovery navigation is pending
+// (see parkForNavigation). The timeout mirrors defaultReadyPollTimeout's
+// precedent: bounded so a page that never installs its handler cannot park
+// narration for the process — see the NavigationPending doc for why an
+// unconditional park would reintroduce the SoftAP-QR-goes-dark failure.
+const (
+	defaultNavigationParkPollInterval = 100 * time.Millisecond
+	defaultNavigationParkTimeout      = 15 * time.Second
+)
+
+// NavigationSession is the narrow slice of playersession.Session the
+// narration worker consults to avoid racing a recovery navigation —
+// consumer-owned, mirroring the CDPSender idiom. *playersession.Session
+// satisfies it. NavigationTargetGeneration is needed alongside
+// StageReady/NavigationPending/Generation — see parkForNavigation's doc for
+// why.
+type NavigationSession interface {
+	NavigationPending() bool
+	StageReady(st playersession.Stage) bool
+	Generation() uint64
+	// NavigationTargetGeneration reports the generation ID the in-flight
+	// navigation bumped to, or 0 when no navigation is in flight past its
+	// own bump. See playersession.Session.NavigationTargetGeneration's doc.
+	NavigationTargetGeneration() uint64
+}
 
 // support tracks the one-shot manifest capability decision for the process
 // lifetime. Once resolved it never flips: an older player that predates the
@@ -95,6 +129,18 @@ type Service struct {
 	// narrationSupported).
 	warnedUnreadable bool
 	logger           *zap.Logger
+
+	// session, when set, is the playersession.Session the worker parks
+	// narration sends against (see parkForNavigation). Nil in every existing
+	// test and in any wiring that predates the session — the worker then
+	// never parks, so existing behavior is exactly preserved. Immutable after
+	// construction, same read-lock-free contract as the poll bounds above.
+	session NavigationSession
+	// navigationParkPollInterval / navigationParkTimeout override the park
+	// bounds (zero means the defaults); same test-only, pre-worker-spawn
+	// contract as the poll bounds above.
+	navigationParkPollInterval time.Duration
+	navigationParkTimeout      time.Duration
 
 	mu      sync.Mutex
 	support support
@@ -136,6 +182,15 @@ func New(sender CDPSender, contractPath string, logger *zap.Logger) *Service {
 		contractPath: contractPath,
 		logger:       logger,
 	}
+}
+
+// SetSession wires the playersession.Session the worker consults to avoid
+// racing a recovery navigation (see NavigationSession and parkForNavigation).
+// Call once at wiring time, before the first push spawns a worker — the field
+// is read lock-free on that goroutine. Passing nil (or never calling this) is
+// safe and preserves pre-session behavior exactly: the worker never parks.
+func (s *Service) SetSession(session NavigationSession) {
+	s.session = session
 }
 
 // ShowSoftAPQR narrates the soft-AP onboarding step: the phone should join the
@@ -228,6 +283,70 @@ func (s *Service) Hide() {
 	s.push(map[string]any{"state": stateHidden})
 }
 
+// SweepStaleOverlay hides the on-screen overlay ONLY if this process has not
+// narrated anything yet. It exists for boot reconciliation: narration intent
+// is in-memory, so after a daemon restart the player may still render the
+// PREVIOUS life's overlay (e.g. a claim QR painted before a crash on a device
+// that has since been claimed) — but an overlay THIS process painted is, by
+// definition, not stale. last == nil is exactly the complement of what
+// Resync can repair: any non-nil intent gets re-pushed on the next CDP
+// (re)connect — even one whose original send failed, since a send failure
+// triggers the reconnect that fires Resync — so the sweep covers precisely
+// the one state Resync cannot, no more. The no-intent check and the hide are
+// one critical section under the same mutex every push takes (pushIf), so a
+// concurrent narrator (the startup OTA gate's ShowUpdating, a factory reset)
+// can never have its live narration erased by the sweep: if its push wins
+// the lock, the sweep no-ops; if the sweep wins, the push is enqueued after
+// the hide and the screen still ends on the narration. A caller-side
+// Narrating() probe followed by Hide() would reintroduce exactly that
+// check-then-act race.
+func (s *Service) SweepStaleOverlay() {
+	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool { return last == nil })
+}
+
+// HideIfShowing hides only when the current narration intent is one of
+// states, so a flow can clear the narration IT painted without erasing a
+// concurrent narrator's. Same atomicity argument as SweepStaleOverlay: the
+// state comparison and the hide share every push's critical section, so a
+// racing ShowUpdating/ShowFactoryReset either lands first (the hide then
+// no-ops) or is queued behind the hide (and the screen still ends on it).
+// The canonical caller is the auto-claim flow clearing its own finalizing
+// overlay after discovering mid-flow that the device settled — the exact
+// moment another narrator may have taken the screen.
+func (s *Service) HideIfShowing(states ...string) {
+	s.pushIf(map[string]any{"state": stateHidden}, func(last map[string]any) bool {
+		current := stringField(last, "state")
+		for _, st := range states {
+			if current == st {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// StateFinalizing is exported for HideIfShowing callers that need to name the
+// narration they own (the auto-claim flow's post-join gap overlay).
+const StateFinalizing = stateFinalizing
+
+// StateUpdating is exported for HideIfShowing callers that need to name the
+// OTA update narration (the narrator-policy dispatch's settled-device
+// permanent-failure path and the post-ladder reboot watchdog — design doc
+// §6 — both clear "updating" without erasing a concurrent narrator's
+// overlay).
+const StateUpdating = stateUpdating
+
+// Narrating reports whether the last intended narration state is a visible
+// overlay — something has been shown and it was not subsequently hidden. It
+// reflects INTENT (the last push), not delivery: a push whose CDP send failed
+// still counts, which is the conservative reading for callers deciding whether
+// a destructive page operation would erase someone's narration.
+func (s *Service) Narrating() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last != nil && stringField(s.last, "state") != stateHidden
+}
+
 // Resync re-pushes the last intended narration state. It is the "CDP became
 // available" trigger: wire it to the CDP client's on-connect callback so a
 // reconnecting or freshly-loaded player catches up to the current setup state.
@@ -238,16 +357,30 @@ func (s *Service) Resync() {
 		s.mu.Unlock()
 		return
 	}
-	// A reconnect only needs the CURRENT intent; anything still queued is
-	// superseded by re-painting the latest state.
-	s.pending = []map[string]any{s.last}
-	if s.running {
+	// Resync now also runs as a generation-ready reconciler (on
+	// EVERY document replacement, not just the original CDP on-connect
+	// wiring), so it can fire while a genuine multi-state sequence is still
+	// queued (e.g. the claim flow's ShowReady()+Hide(), two DISTINCT states
+	// that must both reach the player — see the pending field's doc). The
+	// old unconditional overwrite collapsed that queue down to s.last,
+	// silently dropping the Ready. A non-empty queue is left alone here:
+	// those states will still deliver in order once the worker's park
+	// (parkForNavigation) releases post-generation-ready, so there is
+	// nothing for Resync to add. Only an EMPTY queue means there is
+	// genuinely nothing in flight for the new document to catch up on, and
+	// re-enqueuing the current intent is what a reconnect/new-generation
+	// resync is for.
+	if len(s.pending) > 0 {
 		s.mu.Unlock()
 		return
 	}
+	s.pending = []map[string]any{s.last}
+	starting := !s.running
 	s.running = true
 	s.mu.Unlock()
-	go s.worker()
+	if starting {
+		go s.worker()
+	}
 }
 
 // push enqueues req (see the pending field for the coalescing rule) and ensures
@@ -256,17 +389,37 @@ func (s *Service) Resync() {
 // next change", not a hot loop: a failed send is not re-attempted on its own.
 // The last state is retained for Resync so a later CDP reconnect can recover it.
 func (s *Service) push(req map[string]any) {
+	s.pushIf(req, nil)
+}
+
+// pushIf is the single enqueue-and-start path every narration intent takes:
+// when ok is non-nil it is evaluated UNDER the queue mutex and a false answer
+// drops the push entirely. Keeping the conditional ops (SweepStaleOverlay,
+// HideIfShowing) on this exact path — rather than duplicating the tail — is
+// what makes their "atomic with every push" claim structural: a future change
+// to queue policy or worker-spawn discipline cannot apply to plain pushes
+// alone and leave the conditional ops silently divergent.
+//
+// ok receives the current intent (s.last) as its argument BECAUSE it runs
+// while s.mu is held: handing the guarded state in leaves the predicate no
+// reason to reach back into the Service, whose exported methods take the same
+// non-reentrant mutex — a predicate calling one (e.g. Narrating) would
+// deadlock holding s.mu and wedge every push from every goroutine, breaking
+// the package's pushes-never-block contract.
+func (s *Service) pushIf(req map[string]any, ok func(last map[string]any) bool) {
 	s.mu.Lock()
-	s.last = req
-	s.enqueueLocked(req)
-	if s.running {
-		// The in-flight worker will drain this entry too.
+	if ok != nil && !ok(s.last) {
 		s.mu.Unlock()
 		return
 	}
+	s.last = req
+	s.enqueueLocked(req)
+	starting := !s.running
 	s.running = true
 	s.mu.Unlock()
-	go s.worker()
+	if starting {
+		go s.worker()
+	}
 }
 
 // enqueueLocked applies the coalescing rule: a push matching the TRAILING
@@ -278,6 +431,9 @@ func (s *Service) push(req map[string]any) {
 // always END on the newest state, so a repeat after intervening states
 // re-appends. Bursts that matter for coalescing (OTA progress) are contiguous,
 // so they still collapse to one trailing entry. Caller holds mu.
+//
+// Overflow (maxPendingStates) silently drops the oldest queued entry — the
+// correct staleness policy for a courtesy overlay.
 func (s *Service) enqueueLocked(req map[string]any) {
 	state := stringField(req, "state")
 	if n := len(s.pending); n > 0 && stringField(s.pending[n-1], "state") == state {
@@ -306,7 +462,61 @@ func (s *Service) worker() {
 		s.pending = s.pending[1:]
 		s.mu.Unlock()
 
+		s.parkForNavigation()
 		s.trySend(req)
+	}
+}
+
+// parkForNavigation blocks the worker while a playersession.Session recovery
+// navigation is pending, so a narration send cannot race the page
+// underneath it. It is a no-op when no session is wired (SetSession never
+// called), which is every existing test and any pre-session build. The park
+// exits on whichever comes FIRST: the navigation's TARGET generation reaching
+// StageHandler; NavigationPending clearing; or the bounded park timeout —
+// on either of the latter two the item is still delivered best-effort right
+// after this returns, exactly as today. Without a bounded exit a page that
+// never installs its handler would park narration indefinitely, reintroducing
+// the SoftAP-QR-goes-dark failure the positive-only barrier cache (NV1)
+// removed.
+//
+// Uses NavigationTargetGeneration, NOT a
+// Generation()-snapshot-at-entry comparison: that older
+// approach broke when the park was entered AFTER the bump already happened
+// (a real, common timing — parkForNavigation runs once per queued item, and
+// NavigationPending stays true for the navigation's entire ~20s verifyCap
+// window while awaitRouteSettled keeps polling an idle "/" wall) — the
+// snapshot IS already the new generation in that case, so
+// "Generation() != entrySnapshot" can never become true and the park stalled
+// for its full timeout on every send entered post-bump. NavigationTargetGeneration
+// instead identifies the SPECIFIC generation the in-flight navigation
+// produced, independent of when this call happened to start: pre-bump it
+// reads 0 (never exits via this path, preserving the original M2 intent of
+// never trusting a stale pre-bump StageReady positive), and once the bump
+// happens it holds that generation's ID until the navigation finishes,
+// letting a post-bump-entered park exit the moment that SPECIFIC generation
+// is handler-ready rather than waiting out the whole navigation.
+func (s *Service) parkForNavigation() {
+	if s.session == nil || !s.session.NavigationPending() {
+		return
+	}
+	interval := s.navigationParkPollInterval
+	if interval <= 0 {
+		interval = defaultNavigationParkPollInterval
+	}
+	timeout := s.navigationParkTimeout
+	if timeout <= 0 {
+		timeout = defaultNavigationParkTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	for s.session.NavigationPending() {
+		if target := s.session.NavigationTargetGeneration(); target != 0 && target == s.session.Generation() && s.session.StageReady(playersession.StageHandler) {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.logger.Info("Narration park timed out waiting on a pending navigation; delivering best-effort")
+			return
+		}
+		time.Sleep(interval)
 	}
 }
 
@@ -480,29 +690,82 @@ type playerContractAcceptedResponse struct {
 	OK bool `json:"ok"`
 }
 
-// errContractUnreadable marks a validation failure caused by failing to READ
-// the manifest, as opposed to a successfully-read manifest that lacks
-// setupDisplay support. The two must not be conflated: unreadable may be
-// transient (boot ordering, OTA mid-replace) and is retried, while a read
-// manifest without the contract latches narration off for the process.
-var errContractUnreadable = errors.New("player contract unreadable")
+// ErrPlayerContractUnreadable marks a validation failure caused by failing to
+// READ the player contract manifest, as opposed to a successfully-read
+// manifest that lacks the contract being checked. The two must not be
+// conflated: unreadable may be transient (boot ordering, an OTA mid-replace
+// of the player bundle) and must be re-checked on the next attempt, never
+// latched; a manifest that WAS read but lacks the contract means the
+// connected player's build genuinely does not support it. Exported so
+// other packages' capability fuses can apply the identical distinction —
+// devicectl's boot-recovery classification (design doc §5) checks
+// errors.Is(err, setupui.ErrPlayerContractUnreadable) against
+// ValidatePlayerStatusContract exactly as this package's own
+// narrationSupported does against validateSetupDisplayContract.
+var ErrPlayerContractUnreadable = errors.New("player contract unreadable")
+
+// errContractUnreadable is retained as a private alias so every existing
+// reference below (and every existing test) keeps working unchanged; new
+// code, in this package or elsewhere, should prefer the exported name.
+var errContractUnreadable = ErrPlayerContractUnreadable
+
+// readPlayerContractManifest reads and decodes the player contract manifest
+// at path, wrapping a read failure in ErrPlayerContractUnreadable. Shared by
+// every contract-specific validator in this file (validateSetupDisplayContract,
+// ValidatePlayerStatusContract) so the unreadable-vs-absent distinction is
+// defined exactly once.
+func readPlayerContractManifest(path string) (playerContractManifest, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return playerContractManifest{}, fmt.Errorf("player contract path is empty")
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
+	if err != nil {
+		return playerContractManifest{}, fmt.Errorf("%w: %w", ErrPlayerContractUnreadable, err)
+	}
+	var manifest playerContractManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return playerContractManifest{}, fmt.Errorf("decode player contract: %w", err)
+	}
+	return manifest, nil
+}
+
+// PlayerStatusContractVersion is the version ValidatePlayerStatusContract
+// requires for contracts.playerStatus (design doc §5.3).
+const PlayerStatusContractVersion = 1
+
+// ValidatePlayerStatusContract reports whether the player manifest at path
+// advertises contracts.playerStatus {version:1} — the structured status probe
+// (window.__ffosPlayerStatus) devicectl's boot-recovery classification and
+// the NavigateHome error-page/route gates depend on. Sibling of
+// validateSetupDisplayContract, sharing its exact unreadable-vs-absent
+// distinction via ErrPlayerContractUnreadable. Exported here — rather than in
+// a new shared package — because devicectl already imports this package for
+// narration, so it can call this directly with no new import-cycle risk:
+// setupui imports nothing back from devicectl.
+func ValidatePlayerStatusContract(path string) error {
+	manifest, err := readPlayerContractManifest(path)
+	if err != nil {
+		return err
+	}
+	contract, ok := manifest.Contracts["playerStatus"]
+	if !ok {
+		return fmt.Errorf("missing contracts.playerStatus")
+	}
+	if contract.Version != PlayerStatusContractVersion {
+		return fmt.Errorf("contracts.playerStatus.version must be %d", PlayerStatusContractVersion)
+	}
+	return nil
+}
 
 // validateSetupDisplayContract reports whether the player manifest at path
 // advertises the setupDisplay contract this Service speaks. It mirrors
 // mintpairing's contract validation mechanism (read the manifest from the
 // filesystem, not over HTTP).
 func validateSetupDisplayContract(path string) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fmt.Errorf("player contract path is empty")
-	}
-	raw, err := os.ReadFile(path) //nolint:gosec // Production uses the fixed player contract path; tests inject temp files.
+	manifest, err := readPlayerContractManifest(path)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errContractUnreadable, err)
-	}
-	var manifest playerContractManifest
-	if err := json.Unmarshal(raw, &manifest); err != nil {
-		return fmt.Errorf("decode player contract: %w", err)
+		return err
 	}
 	contract, ok := manifest.Contracts["setupDisplay"]
 	if !ok {

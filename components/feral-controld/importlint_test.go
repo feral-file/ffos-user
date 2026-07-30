@@ -23,6 +23,11 @@ var importDenylist = map[string][]string{
 	"provisioning": {"/relayer", "/cdp"},
 	"setupui":      {"/relayer"},
 	"otagate":      {"/relayer"},
+	// playersession is the cross-cutting page-generation/readiness/navigation
+	// authority (design doc §2); it must stay reachable from provisioning-path
+	// packages (setupui already imports it) and so must not itself depend on
+	// the relayer transport.
+	"playersession": {"/relayer"},
 }
 
 func TestProvisioningDomainImportIsolation(t *testing.T) {

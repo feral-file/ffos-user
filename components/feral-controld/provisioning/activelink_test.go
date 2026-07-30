@@ -677,3 +677,38 @@ func TestActiveLinkGuardNilDefaultsToNoSuppression(t *testing.T) {
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
+
+// TestWiredOfflineBootNotifiesWhenWANArrives pins the notification edge every
+// online-triggered hook (claim QR, startup OTA gate, boot player recovery)
+// depends on: a wired device that boots offline parks on StateUnprovisioned's
+// link-present leg, and when the WAN probe later succeeds, onConnectivity
+// re-targets the SAME state with ReasonUnprovisioned. A state-change-only
+// notify swallows that edge and no hook ever learns the device came online
+// this boot. The reason change must notify; a repeated same-reason reading
+// must stay suppressed.
+func TestWiredOfflineBootNotifiesWhenWANArrives(t *testing.T) {
+	fl := &fakeLink{up: true}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(false) // no Wi-Fi profile: wired device
+	ctx := context.Background()
+
+	// Boot assessment: offline with a live wired link parks without the AP.
+	h.m.onConnectivity(ctx, false)
+	require.Equal(t, StateUnprovisioned, h.m.State())
+	require.NotEmpty(t, h.notifier.calls)
+	require.Equal(t, "link-present", h.notifier.calls[len(h.notifier.calls)-1].Detail.Reason)
+
+	// WAN becomes reachable: same state, online leg — MUST notify.
+	h.m.onConnectivity(ctx, true)
+	last := h.notifier.calls[len(h.notifier.calls)-1]
+	require.Equal(t, StateUnprovisioned, last.State)
+	require.Equal(t, ReasonUnprovisioned, last.Detail.Reason,
+		"WAN arrival on a wired-offline boot must notify the online leg")
+	notified := len(h.notifier.calls)
+
+	// A re-emitted online reading (sys-monitord restart, periodic re-query) is
+	// the same state AND reason: suppressed.
+	h.m.onConnectivity(ctx, true)
+	require.Equal(t, notified, len(h.notifier.calls),
+		"same-state same-reason re-emission must not re-notify")
+}

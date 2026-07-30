@@ -148,6 +148,126 @@ type executor struct {
 	// painted before a crash on a device that has since been claimed).
 	staleOverlaySwept atomic.Bool
 
+	// startupOTAGateDone latches the once-per-process boot OTA gate for claimed
+	// devices (MaybeRunStartupOTAGateOnOnline): later connectivity flaps must
+	// not re-run a check the boot already settled. Deliberately left clear
+	// only when the retry loop is aborted by ctx (shutdown, or the backoff
+	// sleep interrupted) so a later online transition retries; an exhausted
+	// VersionCheckFailed budget DOES latch — see startupOTAGateMaxCheckAttempts.
+	startupOTAGateDone atomic.Bool
+
+	// startupOTAGateInFlight single-flights the boot OTA gate the same way
+	// autoClaimInFlight guards the claim flow: online flaps must not stack
+	// concurrent gate runs (each holds a retry-backoff loop).
+	startupOTAGateInFlight atomic.Bool
+
+	// startupOTAGateDeferLogged bounds the post-window deferral log to once
+	// per process: deferral deliberately does NOT latch the done flag, and
+	// the notifier re-fires the hook on every WAN-confirmed transition, so a
+	// flapping WAN would otherwise emit the Info line unboundedly.
+	startupOTAGateDeferLogged atomic.Bool
+
+	// startupOTAGate is the gate call MaybeRunStartupOTAGateOnOnline drives.
+	// Overridable in tests (same pattern as logUploaderFactory); nil in
+	// production, where it resolves to otaGateInstance().EnsureLatestAtStartup.
+	startupOTAGate func(ctx context.Context) (otagate.Result, error)
+
+	// bootRecoveryMu serializes EVERY boot player recovery state-machine
+	// transition (design doc §5): state, executed-attempt count, the
+	// backoff-ladder index, the conservative-mode capability-fuse latch, the
+	// preview_update_failed one-shot-tolerance flag, and the pending backoff
+	// timer's cancel func. See boot_recovery.go.
+	bootRecoveryMu sync.Mutex
+	// bootRecoveryState is the machine's resting state (Idle/Armed/Attempting/
+	// Deferred/Succeeded/Expired/Exhausted). Idle is the zero value, so a bare
+	// executor starts un-armed exactly like the old bootPlayerRecoveryDone==false.
+	bootRecoveryState bootRecoveryState
+	// bootRecoveryAttempts counts EXECUTED attempts only (a refreshArtwork
+	// evaluate, or a NavigateHome call that reached NavExecuted) — no-connection
+	// deferrals and NavSuperseded/NavEvicted/NavSkipped* outcomes don't count.
+	// Exhausted(bootRecoveryMaxExecuted) fires once this would otherwise defer
+	// again.
+	bootRecoveryAttempts int
+	// bootRecoveryAttemptRecordedThisRound latches once
+	// recordBootRecoveryAttemptExecuted has counted an attempt for the
+	// CURRENT round, so a round that reaches both an
+	// evaluateRefreshArtwork refusal AND an escalated navigateForRecovery
+	// call only ever consumes one budget slot. Cleared at the start of every
+	// new round (enterBootRecoveryRound).
+	bootRecoveryAttemptRecordedThisRound bool
+	// bootRecoveryDeferCount indexes bootRecoveryBackoffLadder for the NEXT
+	// scheduled backoff; separate from bootRecoveryAttempts because a deferral
+	// still backs off even when it doesn't count as an attempt.
+	bootRecoveryDeferCount int
+	// bootRecoveryConservative latches once the player contract manifest is
+	// READ but lacks contracts.playerStatus (§5.3 capability fuse): from
+	// then on an unclassifiable refusal is logged and deferred, never escalated
+	// to NavigateHome. A read FAILURE (unreadable manifest) never latches this —
+	// see checkPlayerStatusCapability.
+	bootRecoveryConservative bool
+	// bootRecoveryPreviewUpdateFailedSeen tracks the "once" in code=
+	// preview_update_failed → Deferred once, then attempt: NavigateHome (§5.2
+	// row). Scoped to one Arm→terminal cycle (the machine only Arms once per
+	// boot), so it never needs resetting.
+	bootRecoveryPreviewUpdateFailedSeen bool
+	// bootRecoveryBackoffCancel cancels the currently-scheduled backoff timer,
+	// if any. Canceled and cleared whenever a round is entered (Armed/Deferred
+	// -> Attempting) so a superseding trigger (CDP connect, generation bump,
+	// onAwake) cannot leave a stale timer that later double-fires a round.
+	bootRecoveryBackoffCancel context.CancelFunc
+	// bootRecoverySession, when set (devicectl.SetBootRecoverySession), is the
+	// playersession.Session the state machine escalates dead-page classification
+	// to via NavigateHome (§5). nil (tests, builds that predate the session)
+	// makes every escalation degrade to a counted, deferred attempt instead of
+	// navigating — never panics.
+	bootRecoverySession BootRecoverySession
+	// bootRecoveryContractPath overrides the player contract manifest path the
+	// capability fuse reads (zero means setupui.DefaultContractPath). Test seam
+	// only; production never sets it.
+	bootRecoveryContractPath string
+	// bootRecoveryDaemonCtx, when set (SetBootRecoveryDaemonContext), roots the
+	// backoff timer's sleep so process shutdown cancels a pending
+	// sleep instead of leaking the goroutine until it naturally elapses (up to
+	// 240s). nil (tests, builds that predate the wiring) falls back to
+	// context.Background() — the timer is then only ever canceled by a newer
+	// trigger superseding it, exactly as before this seam existed.
+	bootRecoveryDaemonCtx context.Context
+
+	// bootLifecycleProbe reports whether the kernel is still within the boot
+	// window (main wires it to re-read /proc/uptime). It scopes the two
+	// boot-hook paths whose late execution would be a mid-exhibition
+	// disturbance, and deliberately NOT the one whose late execution is the
+	// repair itself:
+	//   - the startup OTA gate's ENTRY: a device that booted offline and
+	//     gains WAN hours later must not launch a Required-mode update (and
+	//     reboot) mid-exhibition — that update belongs to the nightly timer;
+	//   - the parked player recovery's DEFERRED completion: a CDP connection
+	//     arriving hours after boot means Chromium just started (display
+	//     plugged in) and its page loaded with the network already up;
+	//   - but NOT the player recovery's INLINE path: however late WAN
+	//     arrives, the page it repairs loaded broken at boot and stays
+	//     broken until repaired.
+	// nil (tests, doubles) means no expiry.
+	bootLifecycleProbe func() bool
+
+	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
+	// (main wires it to re-read /proc/uptime against the wider
+	// startupOTAGateEntryWindow). Split from bootLifecycleProbe because the
+	// two consumers tolerate very different lateness: the parked player
+	// recovery expiry guards a page that loaded with the network already up
+	// (minutes matter), while the gate's entry only needs to exclude a WAN
+	// arriving mid-exhibition, hours later — and WAN routinely trails boot
+	// past the 2-minute window on a site-wide power restore, which must still
+	// force the boot OTA. nil falls back to bootLifecycleProbe (older wiring,
+	// test doubles), preserving the tighter gating rather than none.
+	otaGateEntryProbe func() bool
+
+	// playerReadyPoll{Interval,Timeout} pace awaitPlayerCommandHandlerReady;
+	// zero means the package defaults. Overridable in tests so the
+	// handler-never-appears path needn't wait out the real timeout.
+	playerReadyPollInterval time.Duration
+	playerReadyPollTimeout  time.Duration
+
 	// logUploaderFactory builds the in-process log uploader. Overridable in tests
 	// to avoid a real network transfer; nil in production, where newLogUploader
 	// builds the HTTP-backed uploader.
@@ -190,11 +310,35 @@ type executor struct {
 	// the other. It also guards every tracker field, so the last completed apply
 	// deterministically owns both the player command and the recorded state.
 	sleepApplyMu sync.Mutex
-	// Player (CDP) leg: sleepAppliedState/sleepApplyOK is the last state the
-	// synchronous player leg reached. ok=false (or a state mismatch) forces the
-	// next applySleepTransitionIfChanged to re-drive the player.
-	sleepAppliedState *sleepschedule.State
-	sleepApplyOK      bool
+	// Player (CDP) leg: the four-value tracker (design doc §7). sleepPlayerState
+	// is the resting record; sleepAttempted/sleepLastGood/sleepDesiredAtInvalidate
+	// are context fields each meaningful only for one specific state value (see
+	// playerSleepState's doc). The zero value (playerAwake, with every context
+	// field at sleepschedule.State's zero "") preserves today's pre-tracker nil
+	// semantics: a bare executor reports aligned-if-target-is-awake, nothing to
+	// redrive.
+	sleepPlayerState playerSleepState
+	// sleepAttempted is valid only when sleepPlayerState==playerUnknownFailed:
+	// the state the failed (or generation-raced) apply attempted.
+	sleepAttempted sleepschedule.State
+	// sleepLastGood is the last state a player apply actually SUCCEEDED at.
+	// Updated only on success; untouched by a failed apply so a subsequent
+	// failed-WAKE retry can still see the player was last confirmed sleeping
+	// (onAwake's M1 disjunct).
+	sleepLastGood sleepschedule.State
+	// sleepDesiredAtInvalidate is valid only when
+	// sleepPlayerState==playerFreshDocument: the schedule's desired state at
+	// invalidation time, read from sleepScheduleDesiredCache — never a
+	// fresh schedule read (see invalidatePlayerSleepState).
+	sleepDesiredAtInvalidate sleepschedule.State
+	// sleepScheduleDesiredCache is the schedule loop's per-tick desired state
+	// (status.CurrentState, sleep_schedule.go's runSleepScheduleLoop), cached
+	// under sleepApplyMu on every tick so invalidatePlayerSleepState — called
+	// from the CDP-connect reconciler, a different goroutine — can read it
+	// without a fresh sleepschedule.Load(): that would nil-panic a bare
+	// executor, violate the sleepScheduleFileMu discipline, and put file I/O on
+	// the CDP connect loop. Zero value "" is neither awake nor sleeping.
+	sleepScheduleDesiredCache sleepschedule.State
 	// Panel (FFP DDC) leg: sleepPanelState/sleepPanelOK is the last state the async
 	// panel-power worker reached. It lets the loop re-enqueue a best-effort DDC
 	// alignment when a transient ddcutil failure left the panel behind, without
@@ -226,6 +370,13 @@ type executor struct {
 	// player-owned and must not clear scheduler authority because
 	// onlyIfNoPlaylist:true can succeed as a no-op.
 	withPlayerPush func(func())
+
+	// sessionGeneration, when set (SetSessionGeneration), is
+	// playersession.Session.Generation narrowed to a func() uint64 seam so
+	// this package needs no import of playersession and tests need no real
+	// session (design doc §4 generation re-check contract). nil reads as
+	// generation 0 always, which never appears to move.
+	sessionGeneration func() uint64
 }
 
 func New(
@@ -396,13 +547,11 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 
 	wasClaimed := e.deviceClaimed()
 
-	s := state.GetState()
-	s.ConnectedDevice = &state.Device{
+	err = state.SetConnectedDevice(state.Device{
 		ID:       cmdArgs.Device.ID,
 		Name:     cmdArgs.Device.Name,
 		Platform: cmdArgs.Device.Platform,
-	}
-	err = s.Save()
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to save state: %w", err)
 	}
@@ -548,17 +697,21 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		// convergence) and failed update ladders (the ladder clears its own
 		// latch on the next explicit run).
 		e.logger.Warn("Pre-claim OTA gate did not pass; withholding claim QR",
-			zap.Error(err), zap.Int("gateResult", int(result)))
+			zap.Error(err), zap.Stringer("gateResult", result))
 		return false, false
 	}
 	if result != otagate.ResultNoUpdateNeeded {
 		e.logger.Info("Pre-claim OTA gate did not settle on no-update; withholding claim QR",
-			zap.Int("gateResult", int(result)))
+			zap.Stringer("gateResult", result))
 		// UpdateStarted: the updating narration owns the screen via OnProgress
 		// and the device reboots. TooOldToUpgrade: nothing further happens this
-		// boot, so don't leave a stale finalizing overlay implying progress.
+		// boot, so don't leave a stale finalizing overlay implying progress —
+		// but clear ONLY that overlay: the gate's live version check is a
+		// window in which another narrator can take the screen (a link drop
+		// re-raises the setup AP and paints softap_qr), and an unconditional
+		// Hide would erase it. See the settled branch below for the same rule.
 		if result == otagate.ResultTooOldToUpgrade {
-			e.setupUI().Hide()
+			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		}
 		return false, true
 	}
@@ -566,8 +719,13 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 	// device may have been claimed or pairing-confirmed while it ran. The
 	// auto loop must never repaint the QR over a settled device; the relayer
 	// command path opts out (an explicit cloud show=true is a re-pair).
+	// Settling mid-flow is exactly when ANOTHER narrator may own the screen
+	// (an updateToLatestVersion ladder's ShowUpdating, a factory reset), so
+	// clear only the finalizing overlay this flow painted — an unconditional
+	// Hide would erase live narration and blind the reload safeguard keyed on
+	// the same intent.
 	if skipIfSettled && e.claimSettled() {
-		e.setupUI().Hide()
+		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return false, true
 	}
 	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
@@ -597,6 +755,8 @@ type setupNarrator interface {
 	ShowJoinFailed(reason string)
 	ShowUpdating(progress int)
 	Hide()
+	SweepStaleOverlay()
+	HideIfShowing(states ...string)
 }
 
 // setupUI lazily builds the setup-narration surface from the executor's CDP
@@ -650,11 +810,15 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 		// Boot reconciliation: narration is in-memory, so after a daemon
 		// restart the player may still render the PREVIOUS life's overlay
 		// (e.g. claim_qr painted before a crash on a device that has since
-		// been claimed). Sweep it once — and only once: later online flaps on
-		// a settled device must not wipe a live updating/factory-reset
-		// narration.
+		// been claimed). Sweep it once — and only once. The sweep itself is
+		// conditional-and-atomic on the narration lane (SweepStaleOverlay
+		// hides only when THIS process has no narration intent yet): this
+		// goroutine races the startup OTA gate's on the same transition, and
+		// an unconditional Hide landing after the gate's ShowUpdating would
+		// erase live update narration — and blind the reload safeguard, which
+		// keys on that same intent.
 		if e.staleOverlaySwept.CompareAndSwap(false, true) {
-			e.setupUI().Hide()
+			e.setupUI().SweepStaleOverlay()
 		}
 		return
 	}
@@ -665,12 +829,20 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 
 	if !e.waitForRelayerTopic(ctx) {
 		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
-		e.setupUI().Hide() // clear our finalizing narration; nothing is coming
+		// Clear only our own finalizing narration; nothing is coming. The
+		// topic wait is 60s — the longest window in this flow for another
+		// narrator to take the screen (a link drop re-raises the setup AP
+		// and paints softap_qr), so an unconditional Hide here would blank
+		// an active setup surface. See runPreClaimGateAndPaint's settled
+		// branch for the shared rationale.
+		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return
 	}
 	// Re-check: the device may have settled while waiting (LAN connect).
+	// Clear only our own finalizing overlay — see runPreClaimGateAndPaint's
+	// settled branch for why an unconditional Hide races other narrators.
 	if e.claimSettled() {
-		e.setupUI().Hide()
+		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return
 	}
 
@@ -686,12 +858,234 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 			return
 		}
 		if e.claimSettled() {
-			e.setupUI().Hide() // clear finalizing; the device settled mid-backoff
+			// The device settled mid-backoff: clear only our finalizing
+			// overlay (see runPreClaimGateAndPaint's settled branch).
+			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 			return
 		}
 		backoff *= 2
 		if backoff > autoClaimRetryMax {
 			backoff = autoClaimRetryMax
+		}
+	}
+}
+
+// startupOTAGateMaxCheckAttempts bounds the VersionCheckFailed retry loop in
+// MaybeRunStartupOTAGateOnOnline: with the auto-claim backoff (30s doubling,
+// 5m cap) 8 attempts sleep seven times for ~22m of backoff (~27m wall clock
+// once each attempt's internal version-check ladder is counted) — generous
+// for boot-time DNS/route convergence, after which the failure is structural
+// (corrupt local build config, distributor outage) and the nightly updater
+// timer is the correct owner. This bound is the deliberate asymmetry with the auto-claim loop,
+// which retries forever because it has no fallback: an unclaimed device
+// without the claim QR is unusable, while a claimed device that misses the
+// boot check merely updates later.
+const startupOTAGateMaxCheckAttempts = 8
+
+// MaybeRunStartupOTAGateOnOnline is the boot-time mandatory update check for a
+// settled device, restoring the Ready-phase leg of feral-setupd's
+// on_startup_with_internet (v1.0.21 startup.rs), which ran a Required-mode
+// check on every boot with internet for all phases.
+//
+// The guard predicate is deliberately claimSettled() — the exact predicate
+// MaybeShowClaimQROnOnline returns early on — so for any device state exactly
+// one of the two online-triggered flows owns the gate (that flow runs
+// EnsureLatestBeforeClaim, and the shared otagate single-flight key coalesces
+// any overlap). Changing either predicate without the other opens a hole
+// where no boot-time gate runs at all.
+//
+// Triggered on every provisioning →Online/Unprovisioned transition, but wired
+// (wireBootLifecycleHooks) only when the daemon started within the kernel boot
+// window: feral-controld.service is Restart=always, so without that gate a
+// mid-exhibition crash-restart would re-run this check and could spring a
+// required update — and its reboot — on a healthy playing device; mid-life
+// updates belong to the nightly updater timer. Wiring-time scoping alone is
+// not enough, though: the wired hook lives for the whole process, so entry is
+// ALSO gated on the boot window still being open (bootLifecycleProbe) — a
+// device that booted offline and gains WAN hours later gets the same
+// nightly-timer deferral, not a mid-exhibition reboot. The gate runs once per
+// process lifetime. Outcome handling:
+//   - NoUpdateNeeded / TooOldToUpgrade: settled for this boot.
+//   - UpdateStarted: on success the device reboots into the new build. On
+//     error the ladder latched OnPermanentFailure (already narrated); still
+//     settled — the nightly updater timer is the fallback, and re-running a
+//     failing update ladder on every connectivity flap would hammer the
+//     distributor for a failure that needs intervention anyway.
+//   - VersionCheckFailed: usually transient (the boot online transition
+//     routinely races fresh-network DNS convergence — the same race the
+//     auto-claim loop documents), so retry with the auto-claim backoff; but
+//     bounded by startupOTAGateMaxCheckAttempts because the same result also
+//     covers deterministic failures (unreadable/unparseable local build
+//     config) that would otherwise spin the loop for the daemon's lifetime.
+//     Only a ctx-aborted loop leaves the done latch clear (shutdown, or the
+//     backoff sleep interrupted) so the next online transition retries.
+func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
+	if e.startupOTAGateDone.Load() || !e.claimSettled() {
+		return
+	}
+	// Boot-window entry gate: the hook stays wired for the process lifetime,
+	// so a device that BOOTED offline and only gains WAN hours later would
+	// otherwise run a Required-mode update — and its reboot — mid-exhibition.
+	// That late update belongs to the nightly updater timer. The window is
+	// the gate's OWN (startupOTAGateEntryWindow, wider than the player
+	// recovery's bootLifecycleWindow): WAN routinely trails boot by several
+	// minutes on a site-wide power restore — the boot this gate most needs to
+	// cover — and the 2-minute window silently deferred exactly those boots.
+	// Checked at ENTRY only: a gate that started inside the window may keep
+	// retrying a failing version check past it (boot-time DNS convergence is
+	// the common cause). The resulting worst case is bounded at ~22.5 minutes
+	// of backoff across startupOTAGateMaxCheckAttempts; per-retry probing
+	// would cap the ladder and defeat the DNS-convergence rationale.
+	probe := e.otaGateEntryProbe
+	if probe == nil {
+		probe = e.bootLifecycleProbe
+	}
+	if probe != nil && !probe() {
+		if e.startupOTAGateDeferLogged.CompareAndSwap(false, true) {
+			e.logger.Info("Startup OTA gate: boot window elapsed before WAN; deferring to the nightly updater timer")
+		}
+		return
+	}
+	if !e.startupOTAGateInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	defer e.startupOTAGateInFlight.Store(false)
+	// Re-check BOTH pre-checked predicates under the guard: the cheap
+	// pre-check above can go stale while a concurrent run settles the latch
+	// and releases the in-flight flag — without this a second runner could
+	// spawn an update ladder against a device already rebooting into the new
+	// build — and a factory reset can flip the device unclaimed in the same
+	// gap (the mid-retry re-check below covers the loop's sleeps; this covers
+	// the entry).
+	if e.startupOTAGateDone.Load() || !e.claimSettled() {
+		return
+	}
+
+	gate := e.startupOTAGate
+	if gate == nil {
+		gate = e.otaGateInstance().EnsureLatestAtStartup
+	}
+	backoff := autoClaimRetryMin
+	for attempt := 1; ; attempt++ {
+		result, err := gate(ctx)
+		if result != otagate.ResultVersionCheckFailed {
+			e.startupOTAGateDone.Store(true)
+			if err != nil {
+				e.logger.Warn("Startup OTA gate: update failed; nightly updater timer is the fallback",
+					zap.Error(err), zap.Stringer("gateResult", result))
+			} else {
+				e.logger.Info("Startup OTA gate settled", zap.Stringer("gateResult", result))
+			}
+			return
+		}
+		if attempt >= startupOTAGateMaxCheckAttempts {
+			e.startupOTAGateDone.Store(true)
+			e.logger.Warn("Startup OTA gate: version check kept failing; giving up until the nightly updater timer",
+				zap.Error(err), zap.Int("attempts", attempt))
+			return
+		}
+		e.logger.Warn("Startup OTA gate: version check failed; retrying",
+			zap.Error(err), zap.Duration("backoff", backoff))
+		if err := e.clock.SleepContext(ctx, backoff); err != nil {
+			return
+		}
+		// Re-check the guard predicate after every backoff sleep, mirroring
+		// the auto-claim loop's mid-backoff re-check: a factory reset can
+		// clear the claim state while this loop sleeps (its staged reboot can
+		// be delayed or fail), and the next attempt would then start a
+		// Required-mode update — and its reboot — over the freshly unclaimed
+		// setup flow, on the wrong side of the claimSettled partition. Stop
+		// WITHOUT latching done: this run no longer owns the gate; if the
+		// device is ever re-claimed this process life, a later online
+		// transition may legitimately re-enter.
+		if !e.claimSettled() {
+			e.logger.Info("Startup OTA gate: device no longer settled mid-retry (factory reset); stopping without latching")
+			return
+		}
+		backoff *= 2
+		if backoff > autoClaimRetryMax {
+			backoff = autoClaimRetryMax
+		}
+	}
+}
+
+// MaybeRecoverPlayerOnBootOnline, CompletePendingBootPlayerRecovery, and the
+// boot player recovery state machine itself (design doc §5) live in
+// boot_recovery.go. This split keeps the boot-lifecycle probe setters here,
+// beside bootLifecycleProbe/otaGateEntryProbe, since both are shared wiring
+// seams (SetStartupOTAGateEntryProbe is not boot-recovery-specific).
+
+// SetBootLifecycleProbe injects the still-within-boot-window check used to
+// expire a parked recovery at the deferred completion (see bootLifecycleProbe).
+// Wired by wireBootLifecycleHooks alongside the hook itself. The field is a
+// plain (non-atomic) func on purpose, which makes call ORDER the safety
+// invariant: this must run during initializeApp wiring, before run() calls
+// CDP.Start and spawns the connect loop that reads it — never afterwards.
+func (e *executor) SetBootLifecycleProbe(probe func() bool) {
+	e.bootLifecycleProbe = probe
+}
+
+// SetStartupOTAGateEntryProbe injects the startup OTA gate's own entry-window
+// check (see otaGateEntryProbe for why it is wider than the boot-lifecycle
+// probe). Same wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetStartupOTAGateEntryProbe(probe func() bool) {
+	e.otaGateEntryProbe = probe
+}
+
+// Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
+// connectivity re-seed's: on timeout this path still proceeds (and escalates
+// to the reload), so it only delays the dead-page repair, never skips it.
+const (
+	defaultPlayerReadyPollInterval = 500 * time.Millisecond
+	defaultPlayerReadyPollTimeout  = 20 * time.Second
+)
+
+// awaitPlayerCommandHandlerReady polls the page until the player app has
+// installed window.handleCDPRequest, bounding the wait with the executor's
+// poll seams (package defaults when zero). Returns whether the handler was
+// observed; callers treat a timeout as the dead page it indicates. The probe
+// evaluates to a JSON STRING because the cdp client decodes only string and
+// object evaluate results (the constraint setupui.awaitPageReady pins), and
+// typeof never throws, so polling a still-hydrating page is error-free.
+// Blocking is safe: both callers run on dedicated goroutines (the notifier's
+// hook spawn and main's on-connect spawn), never on the CDP connect loop.
+//
+// Uses e.clock — the same seam every other retry loop in this package uses
+// (scheduleBootRecoveryBackoffLocked, the sleep power-align worker) —
+// instead of the raw time package, and observes ctx (the one
+// attemptBootRecovery already threads through runBootRecoveryRound): a ctx
+// cancellation (process shutdown) must interrupt this wait instead of
+// running out its own up-to-20s timeout regardless.
+func (e *executor) awaitPlayerCommandHandlerReady(ctx context.Context) bool {
+	interval := e.playerReadyPollInterval
+	if interval <= 0 {
+		interval = defaultPlayerReadyPollInterval
+	}
+	timeout := e.playerReadyPollTimeout
+	if timeout <= 0 {
+		timeout = defaultPlayerReadyPollTimeout
+	}
+	const probe = `JSON.stringify({ready: typeof window.handleCDPRequest === 'function'})`
+	deadline := e.clock.Now().Add(timeout)
+	for {
+		result, err := e.cdp.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
+			"expression":    probe,
+			"returnByValue": true,
+		})
+		if err == nil {
+			if m, ok := result.(map[string]interface{}); ok {
+				if ready, _ := m["ready"].(bool); ready {
+					return true
+				}
+			}
+		}
+		if e.clock.Now().After(deadline) {
+			return false
+		}
+		if err := e.clock.SleepContext(ctx, interval); err != nil {
+			// ctx done (shutdown, or a caller-scoped cancellation): treat as
+			// not-ready, the same outcome as a plain timeout.
+			return false
 		}
 	}
 }
@@ -705,10 +1099,13 @@ func (e *executor) claimSettled() bool {
 }
 
 // deviceClaimed mirrors the claim derivation every other surface uses (mDNS
-// init, hub status): a ConnectedDevice with a non-empty ID.
+// init, hub status): a ConnectedDevice with a non-empty ID. Reads through
+// state.ClaimSnapshot() — this is the linearization point: the claim/unclaim
+// gate loops calling this repeatedly (e.g. mid-backoff re-checks) must see the
+// SAME connect()/clearPersistedClaim() write every other consumer sees, never
+// a partially-applied one.
 func (e *executor) deviceClaimed() bool {
-	s := state.GetState()
-	return s != nil && s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != ""
+	return state.ClaimSnapshot().Claimed
 }
 
 // waitForRelayerTopic polls persisted state until the relayer topic is
@@ -716,7 +1113,7 @@ func (e *executor) deviceClaimed() bool {
 func (e *executor) waitForRelayerTopic(ctx context.Context) bool {
 	deadline := e.clock.Now().Add(autoClaimTopicWait)
 	for {
-		if s := state.GetState(); s != nil && s.Relayer != nil && strings.TrimSpace(s.Relayer.TopicID) != "" {
+		if state.ClaimSnapshot().TopicReady {
 			return true
 		}
 		if e.clock.Now().Add(autoClaimTopicPoll).After(deadline) {
@@ -729,10 +1126,7 @@ func (e *executor) waitForRelayerTopic(ctx context.Context) bool {
 }
 
 func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
-	topicID := ""
-	if s := state.GetState(); s != nil && s.Relayer != nil {
-		topicID = s.Relayer.TopicID
-	}
+	topicID := state.ClaimSnapshot().TopicID
 	branch, version := "", ""
 	if b, v, _, err := otagate.NewFileConfigProvider(e.os, e.json).LocalBuild(ctx); err == nil {
 		branch, version = b, v
@@ -1949,21 +2343,54 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 			// Narrate update progress on-screen: the gate hands each parsed percent
 			// to setupui's updating overlay via this callback.
 			OnProgress: e.narrateUpdateProgress,
+			// Post-ladder watchdog (design doc §6): a successful ladder
+			// that somehow never reboots must not leave "updating" on screen
+			// forever.
+			OnUpdateSucceededNoReboot: e.clearStuckUpdatingOverlay,
 		})
-		// Surface a latched permanent OTA failure on-screen. There is no dedicated
-		// update-failed CDP state in the shipping player contract, so we reuse the
-		// existing join_failed narration (the least-surprising "setup could not
-		// complete" surface) rather than inventing a new state. Best-effort: a dead
-		// or absent player must never gate the OTA latch.
-		e.otaGate.OnPermanentFailure(func(fs otagate.FailureState) {
-			reason := "update-failed"
-			if fs.Err != nil {
-				reason = fs.Err.Error()
-			}
-			e.setupUI().ShowJoinFailed(reason)
-		})
+		// Narrator policy on a latched permanent OTA failure — decided at emit
+		// time (otaPermanentFailureNarration), claim-PRIMARY (design doc §6):
+		// all three entry points
+		// (RequestUpdate/EnsureLatestBeforeClaim/EnsureLatestAtStartup) share
+		// this ONE gate and this ONE callback, so a settled-device
+		// updateToLatest that happens to join a flight another (pre-claim)
+		// caller started still gets the settled policy — the claim snapshot is
+		// read live, not captured at flight start.
+		e.otaGate.OnPermanentFailure(e.otaPermanentFailureNarration)
 	})
 	return e.otaGate
+}
+
+// otaPermanentFailureNarration is the OTA gate's OnPermanentFailure callback
+// (design doc §6): claim NOT settled gets today's behavior (the pairing
+// flow's own ShowJoinFailed); claim settled clears the stuck "updating"
+// overlay and logs instead — a settled/claimed device has no "join failed"
+// to report, that narration belongs to the pre-claim pairing flow only.
+// Extracted as a named method (rather than an inline closure) so the policy
+// is directly unit-testable without driving the gate's real HTTP/runner
+// plumbing.
+func (e *executor) otaPermanentFailureNarration(fs otagate.FailureState) {
+	reason := "update-failed"
+	if fs.Err != nil {
+		reason = fs.Err.Error()
+	}
+	if e.claimSettled() {
+		e.setupUI().HideIfShowing(setupui.StateUpdating)
+		e.logger.Warn("OTA update permanently failed on a settled device", zap.Error(fs.Err))
+		return
+	}
+	e.setupUI().ShowJoinFailed(reason)
+}
+
+// clearStuckUpdatingOverlay is the post-ladder watchdog's fired callback
+// (Deps.OnUpdateSucceededNoReboot, design doc §6): a successful
+// update ladder normally ends in a reboot within seconds, so still being
+// alive PostLadderWatchdogTimeout later means that reboot did not happen.
+// Unconditional (not claim-gated): whichever entry point's "updating"
+// narration is still up, it no longer reflects real progress either way.
+func (e *executor) clearStuckUpdatingOverlay() {
+	e.logger.Warn("OTA update succeeded but no reboot followed within the watchdog timeout; clearing the updating overlay")
+	e.setupUI().HideIfShowing(setupui.StateUpdating)
 }
 
 // narrateUpdateProgress paints the OTA update percent on-screen via the shared
@@ -2031,23 +2458,11 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 // reboot into the factory snapshot still discards both). A no-op when nothing
 // is persisted.
 func (e *executor) clearPersistedClaim() {
-	s := state.GetState()
-	if s == nil {
-		return
-	}
-	changed := false
-	if s.Relayer != nil && s.Relayer.TopicID != "" {
-		s.Relayer.TopicID = ""
-		changed = true
-	}
-	if s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != "" {
-		s.ConnectedDevice = &state.Device{}
-		changed = true
-	}
+	changed, err := state.ClearClaim()
 	if !changed {
 		return
 	}
-	if err := s.Save(); err != nil {
+	if err != nil {
 		e.logger.Error("Factory reset: failed to clear persisted claim state", zap.Error(err))
 	}
 }

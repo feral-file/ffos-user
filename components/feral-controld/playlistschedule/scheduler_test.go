@@ -455,6 +455,94 @@ func TestRestore_RestoredPendingSourceOnlyKeepsDurableSource(t *testing.T) {
 	assert.False(t, store.cleared)
 }
 
+// TestRestore_ReArmsPushRetryWhenRestoredActiveSetWasNeverPushed pins the fix
+// for a cutover lost across a losing cast race. Restore alone re-arms the
+// transition timer (armTimerLocked), but that only arms for a *future*
+// displayAt boundary. If the restored schedule's boundary has already passed
+// relative to the current clock — because a superseding cast raced the
+// cutover, itself failed, and rolled the schedule back to its pre-cutover
+// snapshot — nothing would otherwise ever drive the real "now" active set to
+// the player: no timer (boundary already past) and no retry (snapshot.
+// lastActive still reflects whatever was pushed before the race, not what is
+// due now).
+func TestRestore_ReArmsPushRetryWhenRestoredActiveSetWasNeverPushed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	clock := mocks.NewMockClock(ctrl)
+	cdpMock := mocks.NewMockCDP(ctrl)
+	loc := time.UTC
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, loc)
+	t1 := time.Date(2026, 7, 23, 1, 0, 0, 0, loc)
+
+	var mu sync.Mutex
+	now := t0
+	clock.EXPECT().Now().DoAndReturn(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}).AnyTimes()
+
+	timerArmed := make(chan struct{}, 1)
+	first := clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case timerArmed <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	).Times(1)
+	second := clock.EXPECT().SleepContext(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+	gomock.InOrder(first, second)
+
+	pushed := make(chan struct{}, 1)
+	cdpMock.EXPECT().Initialized().Return(true).AnyTimes()
+	cdpMock.EXPECT().Send(cdp.METHOD_EVALUATE, gomock.Any()).DoAndReturn(
+		func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			assert.Contains(t, expr, "tomorrow")
+			assert.NotContains(t, expr, "today")
+			pushed <- struct{}{}
+			return map[string]interface{}{"ok": true}, nil
+		},
+	).Times(1)
+
+	sched := playlistschedule.New(context.Background(), cdpMock, clock, func() *time.Location {
+		return loc
+	}, zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+
+	// S1: the schedule about to lose a cutover race. At t0 "today" is active
+	// and "tomorrow" is a future boundary, so Prepare arms a timer for it.
+	_ = sched.Prepare(displayAtPlaylist(
+		item("today", "2026-07-22T00:00:00Z"),
+		item("tomorrow", "2026-07-23T00:00:00Z"),
+	))
+	<-timerArmed
+	snapshot := sched.Snapshot()
+
+	// The "tomorrow" boundary crosses before a competing cast's CDP send
+	// returns.
+	mu.Lock()
+	now = t1
+	mu.Unlock()
+
+	// S2: a competing cast supersedes S1, canceling S1's timer.
+	_ = sched.Prepare(displayAtPlaylist(item("other", "2026-07-22T00:00:00Z")))
+
+	// S2's own CDP send fails; the caller (handler/refresher) rolls back to
+	// S1's pre-race snapshot, whose lastActive is still "today" even though
+	// "tomorrow" is now the correct active set.
+	sched.Restore(snapshot)
+
+	select {
+	case <-pushed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Restore to re-arm a push retry that resends the missed cutover")
+	}
+}
+
 func TestPrepare_TimezoneLessDisplayAtUsesDeviceLocal(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

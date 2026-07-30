@@ -7,10 +7,9 @@ package mocks
 import (
 	reflect "reflect"
 
+	state "github.com/feral-file/ffos-user/components/feral-controld/state"
 	gomock "github.com/golang/mock/gomock"
 	zap "go.uber.org/zap"
-
-	state "github.com/feral-file/ffos-user/components/feral-controld/state"
 )
 
 // MockStateManager is a mock of StateManager interface.
@@ -34,6 +33,35 @@ func NewMockStateManager(ctrl *gomock.Controller) *MockStateManager {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockStateManager) EXPECT() *MockStateManagerMockRecorder {
 	return m.recorder
+}
+
+// ClaimSnapshot mocks base method.
+func (m *MockStateManager) ClaimSnapshot() state.ClaimInfo {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClaimSnapshot")
+	ret0, _ := ret[0].(state.ClaimInfo)
+	return ret0
+}
+
+// ClaimSnapshot indicates an expected call of ClaimSnapshot.
+func (mr *MockStateManagerMockRecorder) ClaimSnapshot() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClaimSnapshot", reflect.TypeOf((*MockStateManager)(nil).ClaimSnapshot))
+}
+
+// ClearClaim mocks base method.
+func (m *MockStateManager) ClearClaim() (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearClaim")
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ClearClaim indicates an expected call of ClearClaim.
+func (mr *MockStateManagerMockRecorder) ClearClaim() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearClaim", reflect.TypeOf((*MockStateManager)(nil).ClearClaim))
 }
 
 // GetState mocks base method.
@@ -77,4 +105,33 @@ func (m *MockStateManager) Save(arg0 *state.State) error {
 func (mr *MockStateManagerMockRecorder) Save(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Save", reflect.TypeOf((*MockStateManager)(nil).Save), arg0)
+}
+
+// SetConnectedDevice mocks base method.
+func (m *MockStateManager) SetConnectedDevice(d state.Device) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetConnectedDevice", d)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetConnectedDevice indicates an expected call of SetConnectedDevice.
+func (mr *MockStateManagerMockRecorder) SetConnectedDevice(d interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetConnectedDevice", reflect.TypeOf((*MockStateManager)(nil).SetConnectedDevice), d)
+}
+
+// SetRelayerTopicID mocks base method.
+func (m *MockStateManager) SetRelayerTopicID(topicID string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetRelayerTopicID", topicID)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SetRelayerTopicID indicates an expected call of SetRelayerTopicID.
+func (mr *MockStateManagerMockRecorder) SetRelayerTopicID(topicID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRelayerTopicID", reflect.TypeOf((*MockStateManager)(nil).SetRelayerTopicID), topicID)
 }
