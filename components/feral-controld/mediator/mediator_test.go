@@ -3,11 +3,15 @@ package mediator_test
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/feral-file/godbus"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
@@ -18,9 +22,71 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mdns"
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 )
+
+// stubSessionCDP is a minimal playersession.CDPSender double that always
+// reports the player command handler installed, so a playersession.Session
+// built on it reaches StageHandler readiness on the first probe — the
+// connectivity tests below exercise the mediator's OWN cache/coalescing/push
+// logic, not playersession's barrier polling.
+type stubSessionCDP struct{}
+
+func (stubSessionCDP) Initialized() bool { return true }
+func (stubSessionCDP) NoLogSend(method string, params map[string]interface{}) (interface{}, error) {
+	if method == cdp.METHOD_EVALUATE {
+		return map[string]any{"ready": true}, nil
+	}
+	return map[string]any{}, nil
+}
+
+// wireConnectivitySession wires a playersession.Session into ts.mediator,
+// exactly mirroring production wiring order (SetSession, THEN the session's
+// first generation bump — main.go calls SetSession once at composition time,
+// before CDP.Start ever bumps a generation). Because SetSession registers the
+// "connectivity" reconciler, that first bump's generation-ready worker runs
+// it immediately — with nothing known yet, that is ONE single-flight cold
+// probe (§3.1), which this helper expects and drains before returning so
+// subtests' OWN mockCDP/mockDbus expectations start from a clean slate.
+func wireConnectivitySession(t *testing.T, ts *testSetup) *playersession.Session {
+	t.Helper()
+	ts.mockDbus.EXPECT().
+		Call(gomock.Any(), dbus.MONITORD_NAME, dbus.MONITORD_PATH, dbus.MONITORD_INTERFACE, dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS, true).
+		Return([]interface{}{false}, nil).
+		Times(1)
+	// The cold probe resolves a level, and the reconciler push then SENDS it
+	// to the player unconditionally — absorb that push too so subtests' own
+	// mockCDP.Send expectations start clean.
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, map[string]interface{}{
+			"expression": "window.handleConnectivityChange(false)",
+		}).
+		Return(map[string]interface{}{"result": "ok"}, nil).
+		Times(1)
+
+	session := playersession.New(context.Background(), stubSessionCDP{}, nil, nil, zap.NewNop())
+	ts.mediator.SetSession(session)
+	session.OnConnect()
+	ts.waitForConnectivityPush(t)
+	return session
+}
+
+// drainConnectivityPushes drains every completed connectivity push attempt
+// until connPushDone stays quiet for quietFor, for tests that race multiple
+// triggers (the edge handler, the reconciler) and need to observe the FULL
+// coalesced sequence settle before asserting on the last delivered value.
+func drainConnectivityPushes(t *testing.T, ts *testSetup, quietFor time.Duration) {
+	t.Helper()
+	for {
+		select {
+		case <-ts.connPushDone:
+		case <-time.After(quietFor):
+			return
+		}
+	}
+}
 
 type testSetup struct {
 	ctrl               *gomock.Controller
@@ -34,6 +100,24 @@ type testSetup struct {
 	mockJSON           *mocks.MockJSON
 	mediator           mediator.Mediator
 	logger             *zap.Logger
+
+	// connPushDone fires once per completed connectivity push attempt (see
+	// mediator.SetConnectivityPushHook) — the async completion seam the
+	// connectivity tests wait on instead of asserting the CDP send
+	// synchronously inline with the DBus signal handler call.
+	connPushDone chan struct{}
+}
+
+// waitForConnectivityPush blocks until at least one connectivity push attempt
+// has completed (see connPushDone), or fails the test. Call it after invoking
+// the connectivity_change handler and before asserting on mockCDP.
+func (ts *testSetup) waitForConnectivityPush(t *testing.T) {
+	t.Helper()
+	select {
+	case <-ts.connPushDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the async connectivity push to complete")
+	}
 }
 
 func setup(t *testing.T) *testSetup {
@@ -50,6 +134,7 @@ func setup(t *testing.T) *testSetup {
 	mockJSON := mocks.NewMockJSON(ctrl)
 
 	med := mediator.New(
+		ctx,
 		mockRelayer,
 		mockDbus,
 		mockCDP,
@@ -59,6 +144,18 @@ func setup(t *testing.T) *testSetup {
 		mockJSON,
 		logger,
 	)
+
+	// No session is wired by default: m.session stays nil, so pushConnectivity
+	// no-ops and every test that does not care about connectivity keeps its
+	// original, unmodified behavior. The two connectivity-focused test
+	// functions below opt in via wireConnectivitySession.
+	connPushDone := make(chan struct{}, 8)
+	med.SetConnectivityPushHook(func() {
+		select {
+		case connPushDone <- struct{}{}:
+		default:
+		}
+	})
 
 	return &testSetup{
 		ctrl:               ctrl,
@@ -72,6 +169,7 @@ func setup(t *testing.T) *testSetup {
 		mockJSON:           mockJSON,
 		mediator:           med,
 		logger:             logger,
+		connPushDone:       connPushDone,
 	}
 }
 
@@ -321,6 +419,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
+			wireConnectivitySession(t, ts)
 
 			payload, expectedError := tt.setupFunc(ts)
 
@@ -349,9 +448,77 @@ func TestMediator_HandleDBusSignal_ConnectivityChange(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.Nil(t, result)
+				// The CDP push now runs on the async connectivity worker
+				// (design doc section 3.1); wait for it before ctrl.Finish()
+				// checks the mockCDP.Send expectation.
+				ts.waitForConnectivityPush(t)
 			}
 		})
 	}
+}
+
+// TestMediator_ConnectivityEdgeRacesReconciler_LastDeliveredValueIsCacheNewest
+// pins M6: the connectivity reconciler (run by the session on every
+// generation-ready) and the edge-triggered connectivity_change handler both
+// enqueue through the SAME single worker rather than one of them calling
+// pushConnectivity directly — so racing them concurrently must never produce
+// a stale overwrite; the last value actually delivered to the player must be
+// the cache's newest, however the two triggers interleave.
+func TestMediator_ConnectivityEdgeRacesReconciler_LastDeliveredValueIsCacheNewest(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	session := wireConnectivitySession(t, ts) // cache: known=true, level=false
+
+	var mu sync.Mutex
+	var sentLevels []bool
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr, _ := params["expression"].(string)
+			mu.Lock()
+			sentLevels = append(sentLevels, strings.Contains(expr, "true"))
+			mu.Unlock()
+			return map[string]interface{}{"result": "ok"}, nil
+		}).
+		AnyTimes()
+	ts.mockRelayer.EXPECT().IsConnected().Return(false).AnyTimes()
+	ts.mockRelayer.EXPECT().RetryableConnect(gomock.Any()).Return(nil).AnyTimes()
+
+	var capturedHandler func(context.Context, godbus.DBusPayload) ([]interface{}, error)
+	ts.mockDbus.EXPECT().
+		OnBusSignal(gomock.Any()).
+		DoAndReturn(func(handler func(context.Context, godbus.DBusPayload) ([]interface{}, error)) {
+			capturedHandler = handler
+		}).Times(1)
+	ts.mockRelayer.EXPECT().OnRelayerMessage(gomock.Any()).Times(1)
+	ts.mediator.Start()
+
+	// Race the edge (connectivity_change: connected=true, the NEWEST value)
+	// against the reconciler (session.OnConnect() bumps the generation,
+	// re-running the registered "connectivity" reconciler) firing at
+	// approximately the same time.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = capturedHandler(ts.ctx, godbus.DBusPayload{
+			Member: dbus.MONITORD_EVENT_CONNECTIVITY_CHANGE,
+			Body:   []interface{}{true},
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		session.OnConnect()
+	}()
+	wg.Wait()
+
+	drainConnectivityPushes(t, ts, 300*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, sentLevels, "expected at least one connectivity push from the race")
+	assert.True(t, sentLevels[len(sentLevels)-1],
+		"the last delivered value must be the cache's newest (connected=true), got %v", sentLevels)
 }
 
 // stubLinkState is a controllable status.LinkState for tests. It is mutable so a
@@ -447,6 +614,7 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := setup(t)
 			defer ts.teardown()
+			wireConnectivitySession(t, ts)
 
 			mockAdvertiser := mocks.NewMockAdvertiser(ts.ctrl)
 			payload := tt.setupFunc(ts, mockAdvertiser)
@@ -471,6 +639,10 @@ func TestMediator_HandleDBusSignal_ConnectivityChange_WithMDNS(t *testing.T) {
 
 			assert.NoError(t, err)
 			assert.Nil(t, result)
+			// The CDP push now runs on the async connectivity worker (design
+			// doc section 3.1); wait for it before ctrl.Finish() checks the
+			// mockCDP.Send expectation.
+			ts.waitForConnectivityPush(t)
 		})
 	}
 }
@@ -793,8 +965,14 @@ func TestMediator_TopicAssignmentFiresObserver(t *testing.T) {
 			ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte("{}"), nil).AnyTimes()
 			s := &state.State{Relayer: &state.RelayerState{TopicID: tc.prevTopic}}
 			mockStateManager := mocks.NewMockStateManager(ts.ctrl)
-			mockStateManager.EXPECT().GetState().Return(s).Times(1)
-			mockStateManager.EXPECT().Save(s).Return(nil).Times(1)
+			mockStateManager.EXPECT().
+				SetRelayerTopicID("assigned-topic").
+				DoAndReturn(func(newTopicID string) (bool, error) {
+					hadTopicBefore := s.Relayer.TopicID != ""
+					s.Relayer.TopicID = newTopicID
+					return hadTopicBefore, nil
+				}).
+				Times(1)
 			state.InjectStateManagerForTesting(mockStateManager)
 
 			var capturedHandler relayer.Handler
@@ -828,11 +1006,6 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 			name: "valid system message",
 			setupFunc: func(ts *testSetup) (relayer.Payload, error) {
 				topicID := "test-topic-id"
-				s := &state.State{
-					Relayer: &state.RelayerState{
-						TopicID: topicID,
-					},
-				}
 
 				// Expect JSON marshal for logging
 				ts.mockJSON.EXPECT().
@@ -840,17 +1013,11 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 					Return([]byte("{}"), nil).
 					AnyTimes()
 
-				// Mock state manager to return empty state
+				// Mock state manager write
 				mockStateManager := mocks.NewMockStateManager(ts.ctrl)
 				mockStateManager.EXPECT().
-					GetState().
-					Return(s).
-					Times(1)
-
-				// Expect Save to be called
-				mockStateManager.EXPECT().
-					Save(s).
-					Return(nil).
+					SetRelayerTopicID(topicID).
+					Return(true, nil).
 					Times(1)
 
 				// Inject mock state manager
@@ -897,21 +1064,11 @@ func TestMediator_HandleRelayerMessage_System(t *testing.T) {
 					Return([]byte("{}"), nil).
 					AnyTimes()
 
-				// Mock state manager
+				// Mock state manager write, failing
 				mockStateManager := mocks.NewMockStateManager(ts.ctrl)
-
-				// Expect GetState to be called
 				mockStateManager.EXPECT().
-					GetState().
-					Return(&state.State{
-						Relayer: &state.RelayerState{},
-					}).
-					Times(1)
-
-				// Expect Save to be called and return error
-				mockStateManager.EXPECT().
-					Save(gomock.Any()).
-					Return(saveError).
+					SetRelayerTopicID(topicID).
+					Return(false, saveError).
 					Times(1)
 
 				// Inject mock state manager

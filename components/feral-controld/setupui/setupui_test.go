@@ -1,6 +1,7 @@
 package setupui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 )
 
 // validContract is the player manifest the on-device player ships. Tests write
@@ -53,20 +56,22 @@ type fakeCDP struct {
 	// gate, when non-nil, is received from at the START of every NoLogSend so
 	// tests can hold the worker inside a send and control interleaving.
 	gate chan struct{}
-	// navigating models the document-replacement window a Page.reload opens:
-	// while set, narration evaluates execute in the DYING context — they are
-	// counted in lostEvaluates and fail, never reaching requests. It is set by
-	// a Page.reload send and cleared once readyAfterProbes readiness probes
+	// navigating models the document-replacement window a playersession
+	// recovery navigation (Page.navigate) opens: while set, narration
+	// evaluates execute in the DYING context — they are counted in
+	// lostEvaluates and fail, never reaching requests. It is set by a
+	// Page.navigate send and cleared once readyAfterProbes readiness probes
 	// have been answered (the probe that crosses the threshold observes the
 	// replacement document).
 	navigating       bool
 	readyAfterProbes int
 	probeCount       int
 	lostEvaluates    int
-	// stampedNonce is the reload nonce the stamp evaluate wrote into the "old
-	// document"; while navigating, a probe reads false only when it carries
-	// THIS value (a probe with a different or absent nonce is fooled by the
-	// old document — the HIGH-severity hazard the nonce exists to prevent).
+	// stampedNonce is the navigation nonce the stamp evaluate wrote into the
+	// "old document"; while navigating, a probe reads false only when it
+	// carries THIS value (a probe with a different or absent nonce is fooled
+	// by the old document — the HIGH-severity hazard the nonce exists to
+	// prevent).
 	stampedNonce string
 }
 
@@ -87,7 +92,7 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 	f.mu.Lock()
 	f.calls++
 	f.methods = append(f.methods, method)
-	if method == "Page.reload" {
+	if method == "Page.navigate" {
 		f.navigating = true
 	}
 	var result interface{} = map[string]any{"ok": true}
@@ -153,6 +158,10 @@ func (f *fakeCDP) NoLogSend(method string, params map[string]interface{}) (inter
 	}
 	return result, nil
 }
+
+// Initialized satisfies playersession.CDPSender for the setupui↔playersession
+// integration test; this fake is always "connected".
+func (f *fakeCDP) Initialized() bool { return true }
 
 func (f *fakeCDP) callCount() int {
 	f.mu.Lock()
@@ -412,6 +421,49 @@ func TestResyncBeforeAnyStateIsNoop(t *testing.T) {
 	assert.Equal(t, 0, sender.callCount())
 }
 
+// TestResync_NoOpWhenPendingNonEmpty pins minor #14: Resync now also runs as
+// a generation-ready reconciler (on every document replacement, not just the
+// original CDP on-connect wiring), so it can fire while a genuine
+// multi-state sequence (e.g. the claim flow's ShowReady()+Hide() — two
+// DISTINCT states that must both reach the player) is still queued. It must
+// leave a non-empty queue alone rather than collapsing it down to just the
+// last intent, which would silently drop the Ready.
+func TestResync_NoOpWhenPendingNonEmpty(t *testing.T) {
+	svc := newTestService(t, newFakeCDP(), validContract)
+
+	svc.mu.Lock()
+	svc.last = map[string]any{"state": stateHidden}
+	svc.pending = []map[string]any{
+		{"state": stateReady},
+		{"state": stateHidden},
+	}
+	svc.running = true // pretend a worker is already draining this queue
+	svc.mu.Unlock()
+
+	svc.Resync()
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	require.Len(t, svc.pending, 2, "a non-empty queue must be left alone")
+	assert.Equal(t, stateReady, svc.pending[0]["state"])
+	assert.Equal(t, stateHidden, svc.pending[1]["state"])
+}
+
+// TestResync_ReEnqueuesLastWhenPendingEmpty pins the other half: an EMPTY
+// queue means there is genuinely nothing in flight, so Resync's original job
+// (catch a reconnected/new document up to the current intent) still applies.
+func TestResync_ReEnqueuesLastWhenPendingEmpty(t *testing.T) {
+	fake := newFakeCDP()
+	svc := newTestService(t, fake, validContract)
+
+	svc.ShowReady()
+	fake.waitForCalls(t, 1) // queue drains empty
+
+	svc.Resync()
+	fake.waitForCalls(t, 2)
+	assert.Equal(t, stateReady, fake.lastRequest()["state"])
+}
+
 // TestManifestWithoutSetupDisplayDisablesNarration verifies the permanent
 // no-narration fallback: an older player yields zero CDP sends, and the typed
 // methods still return immediately (narration-disabled is indistinguishable
@@ -462,6 +514,33 @@ func TestFactoryResetIsSafeAgainstCurrentManifest(t *testing.T) {
 	svc.ShowReady()
 	sender.waitForCalls(t, before+1)
 	assert.Equal(t, stateReady, sender.lastRequest()["state"])
+}
+
+// TestValidatePlayerStatusContract pins the sibling exported validator (design
+// doc §4.3 / §8 housekeeping): same unreadable-vs-absent distinction as
+// validateSetupDisplayContract, exposed for devicectl's capability fuse.
+func TestValidatePlayerStatusContract(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		body := `{"contracts":{"playerStatus":{"version":1}}}`
+		require.NoError(t, ValidatePlayerStatusContract(writeContract(t, body)))
+	})
+	t.Run("missing playerStatus", func(t *testing.T) {
+		err := ValidatePlayerStatusContract(writeContract(t, contractWithoutSetupDisplay))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing contracts.playerStatus")
+		assert.NotErrorIs(t, err, ErrPlayerContractUnreadable, "a READ manifest lacking the contract is absent, not unreadable")
+	})
+	t.Run("wrong version", func(t *testing.T) {
+		body := `{"contracts":{"playerStatus":{"version":2}}}`
+		err := ValidatePlayerStatusContract(writeContract(t, body))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "version must be 1")
+	})
+	t.Run("unreadable manifest", func(t *testing.T) {
+		err := ValidatePlayerStatusContract(filepath.Join(t.TempDir(), "does-not-exist.json"))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
+	})
 }
 
 func TestValidateSetupDisplayContract(t *testing.T) {
@@ -611,135 +690,93 @@ func TestUnreadableContractDefersWithoutLatching(t *testing.T) {
 	sender.waitForCalls(t, 1)
 }
 
-// reloadOutcome collects a RequestPageReload done callback for test
-// synchronization with the narration-lane worker.
-type reloadOutcome struct {
-	executed bool
-	err      error
-}
-
-func awaitReload(t *testing.T, ch <-chan reloadOutcome) reloadOutcome {
-	t.Helper()
-	select {
-	case out := <-ch:
-		return out
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for RequestPageReload outcome")
-		return reloadOutcome{}
-	}
-}
-
-// TestRequestPageReloadExecutesWhenIdle: with no visible narration intended,
-// the reload executes. Uses the no-setupDisplay contract on purpose: the
-// reload is a page operation, not narration, and must work against players
-// that predate the narration contract (narrationSupported must not gate it).
-func TestRequestPageReloadExecutesWhenIdle(t *testing.T) {
+// TestNavigationSetupUIIntegration_SkipsWhenOverlayOwnsScreen is half of the
+// setupui↔playersession integration coverage the deleted RequestPageReload
+// atomicity tests provided (design doc §5): with setupui registered as a
+// REAL playersession.Session overlay owner, a navigation attempted while
+// narration is up must be pre-nav-skipped — the narration racing the
+// navigation's own gate check is exactly the case a caller-side
+// probe-then-navigate pattern could lose.
+func TestNavigationSetupUIIntegration_SkipsWhenOverlayOwnsScreen(t *testing.T) {
 	sender := newFakeCDP()
-	svc := newTestService(t, sender, contractWithoutSetupDisplay)
-
-	ch := make(chan reloadOutcome, 1)
-	svc.RequestPageReload(func(executed bool, err error) {
-		ch <- reloadOutcome{executed, err}
-	})
-
-	out := awaitReload(t, ch)
-	assert.True(t, out.executed)
-	assert.NoError(t, out.err)
-	assert.Contains(t, sender.sentMethods(), "Page.reload")
-}
-
-// TestRequestPageReloadSkipsWhenNarrationIntended: narration intent present
-// before the request means the reload is refused — the overlay owns the
-// screen. Intent, not delivery: the no-setupDisplay contract means the
-// updating push never actually painted, and the skip must still hold (the
-// conservative bias Narrating documents).
-func TestRequestPageReloadSkipsWhenNarrationIntended(t *testing.T) {
-	sender := newFakeCDP()
-	svc := newTestService(t, sender, contractWithoutSetupDisplay)
-
-	svc.ShowUpdating(40)
-	ch := make(chan reloadOutcome, 1)
-	svc.RequestPageReload(func(executed bool, err error) {
-		ch <- reloadOutcome{executed, err}
-	})
-
-	out := awaitReload(t, ch)
-	assert.False(t, out.executed)
-	assert.NoError(t, out.err)
-	assert.NotContains(t, sender.sentMethods(), "Page.reload")
-}
-
-// TestRequestPageReloadInterleavingPreservesRacingNarration is the TOCTOU
-// regression test: narration painted AFTER a reload was requested but BEFORE
-// it executed must survive. The worker is held inside an earlier narration
-// send while the reload is queued and an updating overlay is pushed behind
-// it; when the lane drains, the reload must observe the newer intent and
-// skip, and the overlay must still be delivered. This is exactly the
-// interleaving a caller-side Narrating() probe followed by a raw Page.reload
-// lost the race on.
-func TestRequestPageReloadInterleavingPreservesRacingNarration(t *testing.T) {
-	sender := newFakeCDP()
-	sender.gate = make(chan struct{})
 	svc := newTestService(t, sender, validContract)
+	session := playersession.New(context.Background(), sender, nil, nil, zap.NewNop())
+	svc.SetSession(session)
+	session.RegisterOverlayOwner("setupui", svc.Narrating)
 
-	// Hold the worker inside a benign narration send (hidden: not narrating,
-	// so it cannot itself cause the skip).
-	svc.Hide()
+	svc.ShowUpdating(10)
+	sender.waitForCalls(t, 1)
 
-	// While the worker is blocked: the recovery requests its reload, then the
-	// OTA gate paints its update overlay — the reviewer's race, made
-	// deterministic.
-	ch := make(chan reloadOutcome, 1)
-	svc.RequestPageReload(func(executed bool, err error) {
-		ch <- reloadOutcome{executed, err}
+	err := session.NavigateHomeInline(playersession.NavOptions{})
+	assert.ErrorIs(t, err, playersession.ErrNavSkippedOverlay)
+	assert.NotContains(t, sender.sentMethods(), "Page.navigate",
+		"the overlay gate must stop the navigation before it ever sends")
+}
+
+// TestNavigationSetupUIIntegration_RacingNarrationDeliveredPostNavigation is
+// the other half: with no overlay up, a navigation is allowed to run, and a
+// narration push that races in WHILE it is executing (NavigationPending)
+// must park (setupui.SetSession) and be delivered only once the navigation's
+// own generation-ready worker confirms the replacement document's handler is
+// installed — never lost by evaluating into the dying pre-navigation
+// document. This is exactly the atomicity the old single-worker
+// RequestPageReload lane provided, now reproduced across the two real
+// components instead of asserted against one.
+func TestNavigationSetupUIIntegration_RacingNarrationDeliveredPostNavigation(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+	svc.navigationParkPollInterval = 5 * time.Millisecond
+	svc.navigationParkTimeout = 2 * time.Second
+
+	session := playersession.New(context.Background(), sender, nil, nil, zap.NewNop())
+	svc.SetSession(session)
+	session.RegisterOverlayOwner("setupui", svc.Narrating)
+
+	// [M2] Establish a REAL, already-ready OLD generation before triggering
+	// the navigation below, so the pre-bump window is genuine: without this,
+	// session.Generation() starts at 0 (no generation ever established), and
+	// the pre-fix parkForNavigation (StageReady alone, no generation check)
+	// would accidentally behave correctly for the wrong reason — there is no
+	// stale-ready generation for a false positive to come from, so this test
+	// would pass whether or not the M2 bug was present.
+	session.OnConnect()
+	require.Eventually(t, func() bool { return session.StageReady(playersession.StageHandler) }, time.Second, time.Millisecond)
+
+	sender.readyAfterProbes = 3 // the replacement document answers on the 4th probe
+
+	navDone := make(chan playersession.NavResult, 1)
+	session.NavigateHome(playersession.NavOptions{}, func(res playersession.NavResult) {
+		navDone <- res
 	})
+
+	// Race a narration push in while the navigation is executing. Wait for
+	// Page.navigate to have actually been SENT (not just NavigationPending —
+	// which flips true at the very top of navigateAndVerify, before its own
+	// overlay gate check) so ShowUpdating's synchronous s.last write cannot
+	// race that gate check itself: this test targets the park mechanism
+	// during the post-navigate transition window, not the overlay gate
+	// (TestNavigationSetupUIIntegration_SkipsWhenOverlayOwnsScreen covers
+	// that separately).
+	require.Eventually(t, func() bool {
+		for _, m := range sender.sentMethods() {
+			if m == "Page.navigate" {
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond)
 	svc.ShowUpdating(10)
 
-	// Release the lane: hidden send completes, then the reload entry runs.
-	sender.gate <- struct{}{} // hidden
-	out := awaitReload(t, ch)
-	assert.False(t, out.executed, "reload must yield to narration that raced in behind it")
-	sender.gate <- struct{}{} // updating
-	sender.waitForCalls(t, 2)
-
-	assert.NotContains(t, sender.sentMethods(), "Page.reload")
-	last := sender.lastRequest()
-	require.NotNil(t, last)
-	assert.Equal(t, "updating", last["state"], "the racing overlay must still be delivered")
-}
-
-// TestReloadHoldsNarrationUntilReplacementDocumentReady models the
-// navigation/context-replacement window a real Page.reload opens: the reload
-// only ACCEPTS the navigation, and an evaluate sent immediately afterward
-// executes in the dying document and is lost (a same-target reload never
-// drops the DevTools socket, so no reconnect Resync repairs it). Narration
-// queued behind an executed reload must therefore be held until the
-// replacement document reports ready, then delivered — losing zero pushes.
-func TestReloadHoldsNarrationUntilReplacementDocumentReady(t *testing.T) {
-	sender := newFakeCDP()
-	sender.readyAfterProbes = 3 // page becomes ready on the 4th probe
-	svc := newTestService(t, sender, validContract)
-	svc.readyPollInterval = 5 * time.Millisecond
-	svc.readyPollTimeout = 2 * time.Second
-
-	// Nothing narrating: the reload executes and opens the navigation window.
-	executed := make(chan struct{})
-	svc.RequestPageReload(func(ok bool, err error) {
-		assert.True(t, ok)
-		assert.NoError(t, err)
-		close(executed)
-	})
 	select {
-	case <-executed:
+	case res := <-navDone:
+		assert.Equal(t, playersession.NavExecuted, res.Outcome)
+		assert.NoError(t, res.Err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for reload execution")
+		t.Fatal("navigation never completed")
 	}
 
-	// Narration arrives while the replacement document is still loading.
-	svc.ShowUpdating(10)
-
-	// The lane must deliver it exactly once, AFTER readiness — never into the
-	// dying document.
+	// The racing push must still reach the screen — delivered into the
+	// REPLACEMENT document, never lost into the dying one.
 	deadline := time.After(2 * time.Second)
 	for {
 		if last := sender.lastRequest(); last != nil && last["state"] == "updating" {
@@ -752,10 +789,9 @@ func TestReloadHoldsNarrationUntilReplacementDocumentReady(t *testing.T) {
 		}
 	}
 	sender.mu.Lock()
-	lost, probes := sender.lostEvaluates, sender.probeCount
+	lost := sender.lostEvaluates
 	sender.mu.Unlock()
 	assert.Equal(t, 0, lost, "no narration may evaluate into the dying document")
-	assert.GreaterOrEqual(t, probes, 4, "readiness must be polled until the replacement document answers")
 }
 
 // TestSweepStaleOverlay pins the boot-reconciliation sweep's atomicity with
@@ -835,4 +871,196 @@ func TestHideIfShowing(t *testing.T) {
 		assert.Equal(t, 0, sender.callCount())
 		assert.False(t, svc.Narrating())
 	})
+}
+
+// fakeNavigationSession is a minimal, directly-controllable NavigationSession
+// double: tests flip pending/ready/generation to drive the worker's park loop
+// without a real playersession.Session.
+type fakeNavigationSession struct {
+	mu      sync.Mutex
+	pending bool
+	ready   bool
+	gen     uint64
+	target  uint64
+}
+
+func (f *fakeNavigationSession) NavigationPending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pending
+}
+
+func (f *fakeNavigationSession) StageReady(playersession.Stage) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ready
+}
+
+func (f *fakeNavigationSession) Generation() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gen
+}
+
+func (f *fakeNavigationSession) NavigationTargetGeneration() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.target
+}
+
+func (f *fakeNavigationSession) setPending(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pending = v
+}
+
+func (f *fakeNavigationSession) setReady(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ready = v
+}
+
+func (f *fakeNavigationSession) setGeneration(v uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gen = v
+}
+
+func (f *fakeNavigationSession) setTarget(v uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.target = v
+}
+
+// TestParkForNavigation_NoSessionWired guards that every pre-session build
+// (and every OTHER test in this file, none of which call SetSession) sees the
+// worker never park: nil session must be indistinguishable from "no pending
+// navigation" behavior-wise.
+func TestParkForNavigation_NoSessionWired(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+
+	start := time.Now()
+	svc.ShowReady()
+	sender.waitForCalls(t, 1)
+	assert.Less(t, time.Since(start), time.Second)
+}
+
+// TestParkForNavigation_DeliversAfterNavigationPendingClears pins the primary
+// exit: a push queued while a navigation is pending waits, then delivers the
+// instant NavigationPending flips false — well before the park timeout.
+func TestParkForNavigation_DeliversAfterNavigationPendingClears(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+	nav := &fakeNavigationSession{pending: true}
+	svc.SetSession(nav)
+	svc.navigationParkPollInterval = 5 * time.Millisecond
+	svc.navigationParkTimeout = 2 * time.Second
+
+	svc.ShowReady()
+	// Give the worker a chance to observe the pending flag and start parking.
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, 0, sender.callCount(), "must park while NavigationPending is true")
+
+	nav.setPending(false)
+	sender.waitForCalls(t, 1)
+	assert.Equal(t, stateReady, sender.lastRequest()["state"])
+}
+
+// TestParkForNavigation_ExitsWhenStageReady pins the second exit: the
+// navigation's TARGET generation reaching StageHandler ends the park even
+// while NavigationPending is still (momentarily) true. target must be
+// non-zero AND match Generation() for StageReady to count [Park predicate
+// fix] — setting ready alone, with target still 0 (pre-bump), must NOT exit
+// (see the sibling pre-bump test below).
+func TestParkForNavigation_ExitsWhenStageReady(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+	nav := &fakeNavigationSession{pending: true}
+	svc.SetSession(nav)
+	svc.navigationParkPollInterval = 5 * time.Millisecond
+	svc.navigationParkTimeout = 2 * time.Second
+
+	svc.ShowReady()
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, 0, sender.callCount())
+
+	// pending stays true; the target generation reaching StageReady must
+	// still end the park.
+	nav.setGeneration(1)
+	nav.setTarget(1)
+	nav.setReady(true)
+	sender.waitForCalls(t, 1)
+	assert.Equal(t, stateReady, sender.lastRequest()["state"])
+}
+
+// TestParkForNavigation_PreBumpStageReady_DoesNotExit pins the pre-bump half
+// of the park predicate fix directly: StageReady answering against a stale,
+// already-ready OLD generation while the navigation hasn't bumped one yet
+// (target == 0) must never end the park. Before the ORIGINAL M2 fix, a bare
+// StageReady(StageHandler) check made this a production no-op: the park
+// exited immediately against the stale positive, delivering narration into a
+// document about to be torn down.
+func TestParkForNavigation_PreBumpStageReady_DoesNotExit(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+	nav := &fakeNavigationSession{pending: true, ready: true} // gen 0, target 0 (pre-bump), already "ready"
+	svc.SetSession(nav)
+	svc.navigationParkPollInterval = 5 * time.Millisecond
+	svc.navigationParkTimeout = 60 * time.Millisecond
+
+	start := time.Now()
+	svc.ShowReady()
+	sender.waitForCalls(t, 1)
+	elapsed := time.Since(start)
+
+	// It must have taken (roughly) the full park timeout, not exited early
+	// against the stale, pre-bump StageReady.
+	assert.GreaterOrEqual(t, elapsed, 55*time.Millisecond,
+		"a pre-bump (target==0) StageReady must not exit the park early")
+	assert.Equal(t, stateReady, sender.lastRequest()["state"])
+}
+
+// TestParkForNavigation_ExitsPromptlyWhenEnteredPostBump pins finding 1
+// directly: a park entered AFTER the navigation's bump already happened
+// (Generation() and the navigation's target generation are already the
+// SAME value when this park starts — a real, common timing since
+// NavigationPending stays true for the navigation's entire verifyCap window
+// while awaitRouteSettled keeps polling) must exit PROMPTLY once that
+// target generation is handler-ready, not stall for the full park timeout.
+// A Generation()-snapshot-at-entry comparison (the pre-fix approach) cannot
+// tell this case apart from "no bump happened yet" — the snapshot IS
+// already the new generation — so it stalled here for the full timeout.
+func TestParkForNavigation_ExitsPromptlyWhenEnteredPostBump(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+	nav := &fakeNavigationSession{pending: true, gen: 1, target: 1, ready: true}
+	svc.SetSession(nav)
+	svc.navigationParkPollInterval = 5 * time.Millisecond
+	svc.navigationParkTimeout = 2 * time.Second
+
+	start := time.Now()
+	svc.ShowReady()
+	sender.waitForCalls(t, 1)
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"a park entered post-bump must exit promptly, not stall for the full timeout")
+	assert.Equal(t, stateReady, sender.lastRequest()["state"])
+}
+
+// TestParkForNavigation_TimesOutAndDeliversBestEffort pins the third exit: a
+// navigation that never resolves (page never installs its handler) must not
+// park narration for the process.
+func TestParkForNavigation_TimesOutAndDeliversBestEffort(t *testing.T) {
+	sender := newFakeCDP()
+	svc := newTestService(t, sender, validContract)
+	nav := &fakeNavigationSession{pending: true}
+	svc.SetSession(nav)
+	svc.navigationParkPollInterval = 5 * time.Millisecond
+	svc.navigationParkTimeout = 30 * time.Millisecond
+
+	svc.ShowReady()
+	sender.waitForCalls(t, 1)
+	assert.Equal(t, stateReady, sender.lastRequest()["state"])
 }

@@ -21,7 +21,6 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
-	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -173,23 +172,66 @@ type executor struct {
 	// production, where it resolves to otaGateInstance().EnsureLatestAtStartup.
 	startupOTAGate func(ctx context.Context) (otagate.Result, error)
 
-	// bootPlayerRecoveryDone latches the once-per-boot player recovery
-	// (MaybeRecoverPlayerOnBootOnline). Once-per-process is the exhibition
-	// safety invariant: a later connectivity flap must never re-mount — and so
-	// visibly restart — playing artwork. The boot-lifecycle scoping (main only
-	// wires the trigger when the daemon started within the boot window) covers
-	// the mid-life daemon-restart case the process latch cannot.
-	bootPlayerRecoveryDone atomic.Bool
-
-	// bootPlayerRecoveryPending parks a WAN-confirmed boot player recovery that
-	// arrived before the CDP supervisor's first successful connection. The
-	// provisioning domain starts before CDP.Start (main.go's P2.5 ordering), so
-	// the boot online transition routinely fires while Chromium has already
-	// painted its page (offline) but DevTools is not attached yet — the exact
-	// boot this recovery exists to repair. The CDP on-connect callback drains
-	// this flag (CompletePendingBootPlayerRecovery); together with
-	// bootPlayerRecoveryDone it still guarantees at most one recovery per boot.
-	bootPlayerRecoveryPending atomic.Bool
+	// bootRecoveryMu serializes EVERY boot player recovery state-machine
+	// transition (design doc §3.2): state, executed-attempt count, the
+	// backoff-ladder index, the conservative-mode capability-fuse latch, the
+	// preview_update_failed one-shot-tolerance flag, and the pending backoff
+	// timer's cancel func. See boot_recovery.go.
+	bootRecoveryMu sync.Mutex
+	// bootRecoveryState is the machine's resting state (Idle/Armed/Attempting/
+	// Deferred/Succeeded/Expired/Exhausted). Idle is the zero value, so a bare
+	// executor starts un-armed exactly like the old bootPlayerRecoveryDone==false.
+	bootRecoveryState bootRecoveryState
+	// bootRecoveryAttempts counts EXECUTED attempts only (a refreshArtwork
+	// evaluate, or a NavigateHome call that reached NavExecuted) — no-connection
+	// deferrals and NavSuperseded/NavEvicted/NavSkipped* outcomes don't count.
+	// Exhausted(bootRecoveryMaxExecuted) fires once this would otherwise defer
+	// again.
+	bootRecoveryAttempts int
+	// bootRecoveryAttemptRecordedThisRound latches once
+	// recordBootRecoveryAttemptExecuted has counted an attempt for the
+	// CURRENT round [minor #9], so a round that reaches both an
+	// evaluateRefreshArtwork refusal AND an escalated navigateForRecovery
+	// call only ever consumes one budget slot. Cleared at the start of every
+	// new round (enterBootRecoveryRound).
+	bootRecoveryAttemptRecordedThisRound bool
+	// bootRecoveryDeferCount indexes bootRecoveryBackoffLadder for the NEXT
+	// scheduled backoff; separate from bootRecoveryAttempts because a deferral
+	// still backs off even when it doesn't count as an attempt.
+	bootRecoveryDeferCount int
+	// bootRecoveryConservative latches once the player contract manifest is
+	// READ but lacks contracts.playerStatus (§3.2/§4.3 capability fuse): from
+	// then on an unclassifiable refusal is logged and deferred, never escalated
+	// to NavigateHome. A read FAILURE (unreadable manifest) never latches this —
+	// see checkPlayerStatusCapability.
+	bootRecoveryConservative bool
+	// bootRecoveryPreviewUpdateFailedSeen tracks the "once" in code=
+	// preview_update_failed → Deferred once, then attempt: NavigateHome (§3.2
+	// row). Scoped to one Arm→terminal cycle (the machine only Arms once per
+	// boot), so it never needs resetting.
+	bootRecoveryPreviewUpdateFailedSeen bool
+	// bootRecoveryBackoffCancel cancels the currently-scheduled backoff timer,
+	// if any. Canceled and cleared whenever a round is entered (Armed/Deferred
+	// -> Attempting) so a superseding trigger (CDP connect, generation bump,
+	// onAwake) cannot leave a stale timer that later double-fires a round.
+	bootRecoveryBackoffCancel context.CancelFunc
+	// bootRecoverySession, when set (devicectl.SetBootRecoverySession), is the
+	// playersession.Session the state machine escalates dead-page classification
+	// to via NavigateHome (§3.2). nil (tests, builds that predate the session)
+	// makes every escalation degrade to a counted, deferred attempt instead of
+	// navigating — never panics.
+	bootRecoverySession BootRecoverySession
+	// bootRecoveryContractPath overrides the player contract manifest path the
+	// capability fuse reads (zero means setupui.DefaultContractPath). Test seam
+	// only; production never sets it.
+	bootRecoveryContractPath string
+	// bootRecoveryDaemonCtx, when set (SetBootRecoveryDaemonContext), roots the
+	// backoff timer's sleep [minor #4] so process shutdown cancels a pending
+	// sleep instead of leaking the goroutine until it naturally elapses (up to
+	// 240s). nil (tests, builds that predate the wiring) falls back to
+	// context.Background() — the timer is then only ever canceled by a newer
+	// trigger superseding it, exactly as before this seam existed.
+	bootRecoveryDaemonCtx context.Context
 
 	// bootLifecycleProbe reports whether the kernel is still within the boot
 	// window (main wires it to re-read /proc/uptime). It scopes the two
@@ -268,11 +310,35 @@ type executor struct {
 	// the other. It also guards every tracker field, so the last completed apply
 	// deterministically owns both the player command and the recorded state.
 	sleepApplyMu sync.Mutex
-	// Player (CDP) leg: sleepAppliedState/sleepApplyOK is the last state the
-	// synchronous player leg reached. ok=false (or a state mismatch) forces the
-	// next applySleepTransitionIfChanged to re-drive the player.
-	sleepAppliedState *sleepschedule.State
-	sleepApplyOK      bool
+	// Player (CDP) leg: the four-value tracker (design doc §3.4). sleepPlayerState
+	// is the resting record; sleepAttempted/sleepLastGood/sleepDesiredAtInvalidate
+	// are context fields each meaningful only for one specific state value (see
+	// playerSleepState's doc). The zero value (playerAwake, with every context
+	// field at sleepschedule.State's zero "") preserves today's pre-tracker nil
+	// semantics: a bare executor reports aligned-if-target-is-awake, nothing to
+	// redrive.
+	sleepPlayerState playerSleepState
+	// sleepAttempted is valid only when sleepPlayerState==playerUnknownFailed:
+	// the state the failed (or generation-raced) apply attempted.
+	sleepAttempted sleepschedule.State
+	// sleepLastGood is the last state a player apply actually SUCCEEDED at.
+	// Updated only on success; untouched by a failed apply so a subsequent
+	// failed-WAKE retry can still see the player was last confirmed sleeping
+	// (onAwake's M1 disjunct).
+	sleepLastGood sleepschedule.State
+	// sleepDesiredAtInvalidate is valid only when
+	// sleepPlayerState==playerFreshDocument: the schedule's desired state at
+	// invalidation time ([NV8]), read from sleepScheduleDesiredCache — never a
+	// fresh schedule read (see invalidatePlayerSleepState).
+	sleepDesiredAtInvalidate sleepschedule.State
+	// sleepScheduleDesiredCache is the schedule loop's per-tick desired state
+	// (status.CurrentState, sleep_schedule.go's runSleepScheduleLoop), cached
+	// under sleepApplyMu on every tick so invalidatePlayerSleepState — called
+	// from the CDP-connect reconciler, a different goroutine — can read it
+	// without a fresh sleepschedule.Load(): that would nil-panic a bare
+	// executor, violate the sleepScheduleFileMu discipline, and put file I/O on
+	// the CDP connect loop. Zero value "" is neither awake nor sleeping.
+	sleepScheduleDesiredCache sleepschedule.State
 	// Panel (FFP DDC) leg: sleepPanelState/sleepPanelOK is the last state the async
 	// panel-power worker reached. It lets the loop re-enqueue a best-effort DDC
 	// alignment when a transient ddcutil failure left the panel behind, without
@@ -304,6 +370,13 @@ type executor struct {
 	// player-owned and must not clear scheduler authority because
 	// onlyIfNoPlaylist:true can succeed as a no-op.
 	withPlayerPush func(func())
+
+	// sessionGeneration, when set (SetSessionGeneration), is
+	// playersession.Session.Generation narrowed to a func() uint64 seam so
+	// this package needs no import of playersession and tests need no real
+	// session (design doc §2.4 generation re-check contract). nil reads as
+	// generation 0 always, which never appears to move.
+	sessionGeneration func() uint64
 }
 
 func New(
@@ -474,13 +547,11 @@ func (e *executor) connect(args []byte) (interface{}, error) {
 
 	wasClaimed := e.deviceClaimed()
 
-	s := state.GetState()
-	s.ConnectedDevice = &state.Device{
+	err = state.SetConnectedDevice(state.Device{
 		ID:       cmdArgs.Device.ID,
 		Name:     cmdArgs.Device.Name,
 		Platform: cmdArgs.Device.Platform,
-	}
-	err = s.Save()
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to save state: %w", err)
 	}
@@ -686,7 +757,6 @@ type setupNarrator interface {
 	Hide()
 	SweepStaleOverlay()
 	HideIfShowing(states ...string)
-	RequestPageReload(done func(executed bool, err error))
 }
 
 // setupUI lazily builds the setup-narration surface from the executor's CDP
@@ -939,91 +1009,11 @@ func (e *executor) MaybeRunStartupOTAGateOnOnline(ctx context.Context) {
 	}
 }
 
-// MaybeRecoverPlayerOnBootOnline recovers the bundled player page exactly
-// once, on the first provisioning →Online/→Unprovisioned transition of a BOOT
-// lifecycle. main.go wires this trigger only when the daemon itself started
-// within the boot window (uptimeWithin), so a mid-life controld
-// restart can never disturb a healthy, possibly-playing page.
-//
-// Why: chromium-kiosk deliberately does not gate on the network (a blocked
-// kiosk is a black screen), so on Wi-Fi boots the player routinely paints
-// before association finishes. Per the ff-player source: the remote-config
-// fetch falls back to bundled defaults (rendering is not gated on it), but
-// each artwork's asset fetches are single-attempt — offline they die into
-// black slots or in-iframe error pages, with no network-regain retry. Only a
-// manual kiosk restart recovered this in the field (chromium.log:
-// "[API] Failed to load config: Network Error" seconds before NetworkManager
-// reports the connection).
-//
-// Recovery escalation mirrors refreshArtwork's command path
-// (commandrouter/handler.go): first an in-app refreshArtwork evaluate, which
-// re-mounts the current artwork slot — re-running exactly the fetches that
-// died pre-network, with the player's own crossfade and no page navigation
-// (later playlist items re-fetch naturally when their turn comes). Only when
-// that evaluate fails or the player does not ACK (page never booted) does the
-// browser-level Page.reload run, which needs no page JS. Cache stays enabled
-// on the reload: this is a network race, not the cache poisoning
-// refreshArtwork's own recovery targets with ignoreCache.
-//
-// The online transition is driven by sys-monitord's real WAN probe, and the
-// notifier positively matches the WAN-confirmed shapes only (StateOnline, or
-// StateUnprovisioned's ReasonUnprovisioned leg — its link-* legs are offline
-// parking states), so this fires only when the fetches can actually succeed,
-// never on a LAN without internet.
-//
-// Settled devices only: on an unclaimed device the auto-claim flow owns the
-// screen (finalizing narration, then the claim QR), there is no playlist to
-// repair, and a dead-page escalation would run a Page.reload that can erase
-// the concurrently painted claim overlay with nothing guaranteed to restore
-// it (narration re-syncs only on a CDP reconnect, which a same-target reload
-// does not force). The latch is still consumed: anything cast after a claim
-// loads with the network already up, so an unclaimed boot has nothing this
-// hook could ever need to repair.
-//
-// CDP ordering: the provisioning domain starts before the CDP supervisor
-// (main.go's P2.5 ordering), so this transition routinely precedes the first
-// DevTools connection even though Chromium painted its page long before —
-// DevTools attach lag says nothing about page-load timing. When CDP is not
-// connected yet the recovery is therefore PARKED (bootPlayerRecoveryPending),
-// and the CDP on-connect callback completes it
-// (CompletePendingBootPlayerRecovery). The arm-then-probe order below is what
-// makes that race-free: connectLoop marks the client Initialized before firing
-// onConnect, so observing Initialized()==false here guarantees the connect
-// callback has not run yet and will see the pending flag.
-//
-// ctx is unused: the body is a bounded handler-readiness poll (~20s worst
-// case, on its own goroutine) plus at most two CDP Sends; nothing WaitGroups
-// this goroutine, so shutdown simply orphans it rather than waiting (contrast
-// the gate and claim hooks, whose retry/backoff waits must observe daemon
-// shutdown).
-//
-// The player build now drives its own reconnect recovery from the
-// connectivity pushes (window.handleConnectivityChange) — but that recovery
-// is gated on the player having DETECTED the failure, and two artwork shapes
-// cannot signal one (a cross-origin iframe fires load even on Chromium's
-// network-error page; HLS network errors are deliberately non-fatal). This
-// hook therefore stays: it is the only repair for an undetected broken load,
-// and for the page that painted before DevTools attached. When both fire on
-// the same boot edge the cost is one duplicate crossfade, not a conflict —
-// the player's refresh and this one converge on the same re-mount path.
-func (e *executor) MaybeRecoverPlayerOnBootOnline(_ context.Context) {
-	if !e.bootPlayerRecoveryDone.CompareAndSwap(false, true) {
-		return
-	}
-	if !e.claimSettled() {
-		e.logger.Info("Boot player recovery: device unclaimed; claim flow owns the screen, nothing to recover")
-		return
-	}
-	e.bootPlayerRecoveryPending.Store(true)
-	if e.cdp == nil || !e.cdp.Initialized() {
-		e.logger.Info("Boot player recovery: WAN confirmed before DevTools attached; recovery pending until CDP connects")
-		return
-	}
-	// Inline completion: no boot-window expiry (see bootLifecycleProbe) — WAN
-	// just arrived, so the page on screen predates it and is the broken load
-	// this hook repairs, however late that is.
-	e.finishPendingBootPlayerRecovery()
-}
+// MaybeRecoverPlayerOnBootOnline, CompletePendingBootPlayerRecovery, and the
+// boot player recovery state machine itself (design doc §3.2) live in
+// boot_recovery.go. This split keeps the boot-lifecycle probe setters here,
+// beside bootLifecycleProbe/otaGateEntryProbe, since both are shared wiring
+// seams (SetStartupOTAGateEntryProbe is not boot-recovery-specific).
 
 // SetBootLifecycleProbe injects the still-within-boot-window check used to
 // expire a parked recovery at the deferred completion (see bootLifecycleProbe).
@@ -1040,168 +1030,6 @@ func (e *executor) SetBootLifecycleProbe(probe func() bool) {
 // probe). Same wiring-before-run ordering contract as SetBootLifecycleProbe.
 func (e *executor) SetStartupOTAGateEntryProbe(probe func() bool) {
 	e.otaGateEntryProbe = probe
-}
-
-// CompletePendingBootPlayerRecovery is the CDP on-connect entry point for a
-// parked boot player recovery. A callback firing with nothing parked — every
-// reconnect for the rest of the process — is a no-op. A callback firing AFTER
-// the boot window elapsed drops the parked recovery instead of running it:
-// that late a first connection means Chromium just started (display plugged
-// into a headless device, mid-exhibition kiosk restart) and its page loaded
-// with the network already up — a healthy load the boot scoping promises
-// never to disturb.
-func (e *executor) CompletePendingBootPlayerRecovery() {
-	if !e.bootPlayerRecoveryPending.Load() {
-		return
-	}
-	if probe := e.bootLifecycleProbe; probe != nil && !probe() {
-		if e.bootPlayerRecoveryPending.CompareAndSwap(true, false) {
-			e.logger.Info("Boot player recovery: boot window elapsed before CDP connected; dropping parked recovery")
-		}
-		return
-	}
-	e.finishPendingBootPlayerRecovery()
-}
-
-// finishPendingBootPlayerRecovery executes a parked boot player recovery
-// exactly once. Two callers: MaybeRecoverPlayerOnBootOnline inline (CDP was
-// already connected at the online transition; no expiry) and
-// CompletePendingBootPlayerRecovery (the CDP on-connect path; expiry-checked
-// above). The CAS makes the two race-safe.
-func (e *executor) finishPendingBootPlayerRecovery() {
-	if !e.bootPlayerRecoveryPending.CompareAndSwap(true, false) {
-		return
-	}
-	// Re-check between park and completion: a factory reset in the gap flips
-	// the device back to unclaimed, where a reload could wipe the claim
-	// overlay (see the settled-devices-only rationale above).
-	if !e.claimSettled() {
-		e.logger.Info("Boot player recovery: device no longer settled; dropping pending recovery")
-		return
-	}
-
-	// The refresh evaluate needs window.handleCDPRequest, which the player app
-	// installs only once React has hydrated — and the first CDP connect
-	// routinely precedes that (the connect loop needs only a page TARGET,
-	// which exists from navigation start). Without this wait, a healthy
-	// still-hydrating page fails the evaluate at transport level and gets the
-	// destructive reload on nearly every in-window boot. A page that never
-	// installs the handler is the dead page the reload exists for, so a
-	// timeout simply falls through to the escalation below.
-	if !e.awaitPlayerCommandHandlerReady() {
-		e.logger.Info("Boot player recovery: player command handler never appeared; treating the page as dead")
-	}
-	refreshErr := e.evaluateRefreshArtwork()
-	if refreshErr == nil {
-		e.logger.Info("Boot player recovery: in-app artwork refresh re-ran the pre-network fetches")
-		return
-	}
-	if errors.Is(refreshErr, errPlayerAliveRefusal) {
-		// The player app answered and either queued the refresh for its own
-		// replay or has no artwork a reload could repair — reloading here
-		// would kill a healthy page mid-boot and discard the queued replay.
-		// The one-shot latch stays consumed: the player owns it from here.
-		e.logger.Info("Boot player recovery: player is alive and owns the refresh; skipping reload",
-			zap.Error(refreshErr))
-		return
-	}
-	// The reload fallback is the destructive step: a Page.reload erases
-	// whatever setup narration is on screen (a required-update ladder's
-	// "updating" progress started by the concurrent startup OTA gate, or a
-	// factory reset that raced past the claimSettled check above), and a
-	// same-target reload does NOT drop the DevTools websocket, so the
-	// on-connect Resync that normally restores narration never fires. A probe-
-	// then-Send here would be check-then-act against narrators running on other
-	// goroutines, so the reload is routed THROUGH the narration surface
-	// instead: setupui executes it on the same serialized lane as narration
-	// pushes and skips it if visible narration is intended by execution time —
-	// any racing overlay either wins (reload skipped) or repaints after the
-	// reload (queued behind it). The in-app refresh above needs no such care:
-	// it re-mounts artwork BEHIND the overlay without touching page state.
-	e.setupUI().RequestPageReload(func(executed bool, err error) {
-		switch {
-		case !executed:
-			e.logger.Info("Boot player recovery: setup narration on screen; skipped page reload to preserve it",
-				zap.NamedError("refreshError", refreshErr))
-		case err != nil:
-			// A transport-level failure means the recovery never ran (the
-			// send died, e.g. the connection tore down between the connect
-			// callback and this worker executing). Re-arm the park so the
-			// NEXT CDP connect retries — still bounded by the boot-window
-			// probe in CompletePendingBootPlayerRecovery and by
-			// bootPlayerRecoveryDone, so this cannot outlive the boot or
-			// stack runs. Without the re-arm a single mid-recovery
-			// disconnect leaves the broken pre-network page for the whole
-			// exhibition.
-			e.bootPlayerRecoveryPending.Store(true)
-			e.logger.Warn("Boot player recovery failed; re-armed to retry on the next CDP connect",
-				zap.NamedError("refreshError", refreshErr), zap.NamedError("reloadError", err))
-		default:
-			e.logger.Info("Boot player recovery: page reloaded (in-app refresh unavailable)",
-				zap.NamedError("refreshError", refreshErr))
-		}
-	})
-}
-
-// Player refusal reasons that mean the app is ALIVE and the reload must not
-// run. Wire contract with ff-player CanvasService.refreshArtwork — these
-// strings must match its `error` reply fields byte-for-byte:
-//   - "No playlist handler registered yet": the playlist route has not
-//     mounted its handler; CanvasService parked pendingRefreshArtwork and
-//     replays the refresh itself the moment the handler lands.
-//   - "No active artwork to refresh": no castInfo (still hydrating from
-//     storage, or genuinely nothing cast) — a reload would boot the very
-//     same empty page while killing an in-flight hydration.
-const (
-	playerRefusalHandlerPending = "No playlist handler registered yet"
-	playerRefusalNoArtwork      = "No active artwork to refresh"
-)
-
-// errPlayerAliveRefusal marks a refreshArtwork refusal whose reason proves the
-// player app is running and owns the recovery from here; the caller must not
-// escalate it to the destructive Page.reload.
-var errPlayerAliveRefusal = errors.New("player alive; reload not warranted")
-
-// evaluateRefreshArtwork asks the live player app to re-mount the current
-// artwork via the same window.handleCDPRequest envelope every player command
-// uses. A transport error or a bare non-ACK response both mean the app cannot
-// be assumed to have refreshed (e.g. the page never booted), which the caller
-// escalates to a browser-level reload — EXCEPT the refusal reasons above,
-// which prove the app is alive and wrap errPlayerAliveRefusal instead.
-func (e *executor) evaluateRefreshArtwork() error {
-	if e.cdp == nil {
-		return fmt.Errorf("cdp client is not configured")
-	}
-	command := commands.Command{Type: commands.CMD_REFRESH_ARTWORK}
-	payload, err := command.JSON()
-	if err != nil {
-		return fmt.Errorf("marshal refreshArtwork payload: %w", err)
-	}
-	result, err := e.cdp.Send(cdp.METHOD_EVALUATE, map[string]any{
-		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(payload)),
-	})
-	if err != nil {
-		return fmt.Errorf("send refreshArtwork to player: %w", err)
-	}
-	if !playerresponse.OK(result) {
-		// Surface the player's own refusal reason when it sent one — and
-		// classify it: the two known-alive reasons must not trigger the
-		// reload escalation (see errPlayerAliveRefusal), while an unknown
-		// reason or a bare non-ACK still reads as "cannot assume the app
-		// refreshed".
-		if m, ok := result.(map[string]interface{}); ok {
-			if msg, ok := m["message"].(map[string]interface{}); ok {
-				if s, _ := msg["error"].(string); s != "" {
-					if s == playerRefusalHandlerPending || s == playerRefusalNoArtwork {
-						return fmt.Errorf("player refused refreshArtwork: %s: %w", s, errPlayerAliveRefusal)
-					}
-					return fmt.Errorf("player refused refreshArtwork: %s", s)
-				}
-			}
-		}
-		return fmt.Errorf("player did not acknowledge refreshArtwork")
-	}
-	return nil
 }
 
 // Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
@@ -1260,10 +1088,13 @@ func (e *executor) claimSettled() bool {
 }
 
 // deviceClaimed mirrors the claim derivation every other surface uses (mDNS
-// init, hub status): a ConnectedDevice with a non-empty ID.
+// init, hub status): a ConnectedDevice with a non-empty ID. Reads through
+// state.ClaimSnapshot() — this is the linearization point: the claim/unclaim
+// gate loops calling this repeatedly (e.g. mid-backoff re-checks) must see the
+// SAME connect()/clearPersistedClaim() write every other consumer sees, never
+// a partially-applied one.
 func (e *executor) deviceClaimed() bool {
-	s := state.GetState()
-	return s != nil && s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != ""
+	return state.ClaimSnapshot().Claimed
 }
 
 // waitForRelayerTopic polls persisted state until the relayer topic is
@@ -1271,7 +1102,7 @@ func (e *executor) deviceClaimed() bool {
 func (e *executor) waitForRelayerTopic(ctx context.Context) bool {
 	deadline := e.clock.Now().Add(autoClaimTopicWait)
 	for {
-		if s := state.GetState(); s != nil && s.Relayer != nil && strings.TrimSpace(s.Relayer.TopicID) != "" {
+		if state.ClaimSnapshot().TopicReady {
 			return true
 		}
 		if e.clock.Now().Add(autoClaimTopicPoll).After(deadline) {
@@ -1284,10 +1115,7 @@ func (e *executor) waitForRelayerTopic(ctx context.Context) bool {
 }
 
 func (e *executor) buildDeviceConnectURL(ctx context.Context) string {
-	topicID := ""
-	if s := state.GetState(); s != nil && s.Relayer != nil {
-		topicID = s.Relayer.TopicID
-	}
+	topicID := state.ClaimSnapshot().TopicID
 	branch, version := "", ""
 	if b, v, _, err := otagate.NewFileConfigProvider(e.os, e.json).LocalBuild(ctx); err == nil {
 		branch, version = b, v
@@ -2504,21 +2332,54 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 			// Narrate update progress on-screen: the gate hands each parsed percent
 			// to setupui's updating overlay via this callback.
 			OnProgress: e.narrateUpdateProgress,
+			// Post-ladder watchdog (design doc §3.3 [W10]): a successful ladder
+			// that somehow never reboots must not leave "updating" on screen
+			// forever.
+			OnUpdateSucceededNoReboot: e.clearStuckUpdatingOverlay,
 		})
-		// Surface a latched permanent OTA failure on-screen. There is no dedicated
-		// update-failed CDP state in the shipping player contract, so we reuse the
-		// existing join_failed narration (the least-surprising "setup could not
-		// complete" surface) rather than inventing a new state. Best-effort: a dead
-		// or absent player must never gate the OTA latch.
-		e.otaGate.OnPermanentFailure(func(fs otagate.FailureState) {
-			reason := "update-failed"
-			if fs.Err != nil {
-				reason = fs.Err.Error()
-			}
-			e.setupUI().ShowJoinFailed(reason)
-		})
+		// Narrator policy on a latched permanent OTA failure — decided at emit
+		// time (otaPermanentFailureNarration), claim-PRIMARY (design doc §3.3
+		// [N-I]): all three entry points
+		// (RequestUpdate/EnsureLatestBeforeClaim/EnsureLatestAtStartup) share
+		// this ONE gate and this ONE callback, so a settled-device
+		// updateToLatest that happens to join a flight another (pre-claim)
+		// caller started still gets the settled policy — the claim snapshot is
+		// read live, not captured at flight start.
+		e.otaGate.OnPermanentFailure(e.otaPermanentFailureNarration)
 	})
 	return e.otaGate
+}
+
+// otaPermanentFailureNarration is the OTA gate's OnPermanentFailure callback
+// (design doc §3.3): claim NOT settled gets today's behavior (the pairing
+// flow's own ShowJoinFailed); claim settled clears the stuck "updating"
+// overlay and logs instead — a settled/claimed device has no "join failed"
+// to report, that narration belongs to the pre-claim pairing flow only.
+// Extracted as a named method (rather than an inline closure) so the policy
+// is directly unit-testable without driving the gate's real HTTP/runner
+// plumbing.
+func (e *executor) otaPermanentFailureNarration(fs otagate.FailureState) {
+	reason := "update-failed"
+	if fs.Err != nil {
+		reason = fs.Err.Error()
+	}
+	if e.claimSettled() {
+		e.setupUI().HideIfShowing(setupui.StateUpdating)
+		e.logger.Warn("OTA update permanently failed on a settled device", zap.Error(fs.Err))
+		return
+	}
+	e.setupUI().ShowJoinFailed(reason)
+}
+
+// clearStuckUpdatingOverlay is the post-ladder watchdog's fired callback
+// (Deps.OnUpdateSucceededNoReboot, design doc §3.3 [W10]): a successful
+// update ladder normally ends in a reboot within seconds, so still being
+// alive PostLadderWatchdogTimeout later means that reboot did not happen.
+// Unconditional (not claim-gated): whichever entry point's "updating"
+// narration is still up, it no longer reflects real progress either way.
+func (e *executor) clearStuckUpdatingOverlay() {
+	e.logger.Warn("OTA update succeeded but no reboot followed within the watchdog timeout; clearing the updating overlay")
+	e.setupUI().HideIfShowing(setupui.StateUpdating)
 }
 
 // narrateUpdateProgress paints the OTA update percent on-screen via the shared
@@ -2586,23 +2447,11 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 // reboot into the factory snapshot still discards both). A no-op when nothing
 // is persisted.
 func (e *executor) clearPersistedClaim() {
-	s := state.GetState()
-	if s == nil {
-		return
-	}
-	changed := false
-	if s.Relayer != nil && s.Relayer.TopicID != "" {
-		s.Relayer.TopicID = ""
-		changed = true
-	}
-	if s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != "" {
-		s.ConnectedDevice = &state.Device{}
-		changed = true
-	}
+	changed, err := state.ClearClaim()
 	if !changed {
 		return
 	}
-	if err := s.Save(); err != nil {
+	if err != nil {
 		e.logger.Error("Factory reset: failed to clear persisted claim state", zap.Error(err))
 	}
 }

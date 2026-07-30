@@ -344,6 +344,63 @@ func TestCanceledContextDoesNotLatch(t *testing.T) {
 	}
 }
 
+// TestPostLadderWatchdogFiresWhenNoReboot pins [W10]: a successful ladder
+// arms the watchdog, and if the process is still running once the timeout
+// elapses (a real reboot would have killed it), OnUpdateSucceededNoReboot
+// fires exactly once — using the fake clock's deterministic SleepContext so
+// the test needs no wall-clock wait.
+func TestPostLadderWatchdogFiresWhenNoReboot(t *testing.T) {
+	clock := newFakeClock()
+	runner := &fakeRunner{results: []error{nil}}
+	deps := localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock)
+	fired := make(chan struct{}, 1)
+	deps.OnUpdateSucceededNoReboot = func() { fired <- struct{}{} }
+	deps.PostLadderWatchdogTimeout = time.Minute
+	gate := New(deps)
+
+	res, err := gate.RequestUpdate(context.Background())
+	if err != nil || res != ResultUpdateStarted {
+		t.Fatalf("RequestUpdate() = %v, %v; want ResultUpdateStarted, nil", res, err)
+	}
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnUpdateSucceededNoReboot never fired")
+	}
+
+	sleeps := clock.recordedSleeps()
+	if len(sleeps) == 0 || sleeps[len(sleeps)-1] != time.Minute {
+		t.Errorf("watchdog sleeps = %v, want last entry = 1m", sleeps)
+	}
+}
+
+// TestPostLadderWatchdogUsesDefaultTimeout: a zero PostLadderWatchdogTimeout
+// falls back to the package default rather than firing immediately.
+func TestPostLadderWatchdogUsesDefaultTimeout(t *testing.T) {
+	clock := newFakeClock()
+	runner := &fakeRunner{results: []error{nil}}
+	deps := localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock)
+	fired := make(chan struct{}, 1)
+	deps.OnUpdateSucceededNoReboot = func() { fired <- struct{}{} }
+	gate := New(deps)
+
+	if _, err := gate.RequestUpdate(context.Background()); err != nil {
+		t.Fatalf("RequestUpdate error: %v", err)
+	}
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnUpdateSucceededNoReboot never fired")
+	}
+
+	sleeps := clock.recordedSleeps()
+	if len(sleeps) == 0 || sleeps[len(sleeps)-1] != postLadderWatchdogDefault {
+		t.Errorf("watchdog sleeps = %v, want last entry = %v", sleeps, postLadderWatchdogDefault)
+	}
+}
+
 // TestNoUpdateNeededClearsStaleLatch: a latched permanent failure clears once a
 // later check shows the device satisfies the gate (e.g. the distributor lowered
 // min_runtime_version, or the device was updated out of band). Otherwise the

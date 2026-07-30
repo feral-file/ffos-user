@@ -20,6 +20,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -488,6 +489,50 @@ func TestHandleClosePairingSession_CancelsActivePairingAndClosesChannel(t *testi
 	s.mu.Lock()
 	assert.Nil(t, s.active)
 	s.mu.Unlock()
+}
+
+// TestDisplayActive_TracksLiveOverlayOwnership pins the overlay-owner probe
+// wired to playersession.Session.RegisterOverlayOwner: false before any
+// pairing starts, true once the pairing code is showing, and false again
+// once the session closes and releases the display.
+func TestDisplayActive_TracksLiveOverlayOwnership(t *testing.T) {
+	defer state.ResetForTesting()
+	state.GetState().Relayer.TopicID = "topic-1"
+
+	ch := &fakeBrokerChannel{
+		pairingCode: "PAIR-123",
+		expiresAt:   time.Now().Add(time.Minute),
+		closed:      make(chan struct{}, 1),
+	}
+	cdpClient := &fakeCDP{}
+	s := newService(
+		Options{
+			Enabled:       true,
+			BrokerBaseURL: "https://broker.example",
+			PollInterval:  time.Millisecond,
+		},
+		&fakeBrokerStarter{channel: ch},
+		nil,
+		nil,
+		cdpClient,
+		wrapper.NewJSON(),
+		zap.NewNop(),
+	).(*service)
+	s.Start(context.Background())
+	defer s.Stop()
+
+	assert.False(t, s.DisplayActive(), "no pairing has started yet")
+
+	result, err := s.HandleStartPairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assert.True(t, result.(startPairingResponse).OK)
+	assertEventuallyDisplayObserved(t, cdpClient, "pairing_code", "PAIR-123", "")
+	assert.True(t, s.DisplayActive(), "the pairing code overlay is live")
+
+	_, err = s.HandleClosePairingSession(context.Background(), nil)
+	require.NoError(t, err)
+	assertEventuallyDisplayObserved(t, cdpClient, "hidden", "", "")
+	assert.False(t, s.DisplayActive(), "the overlay was released on close")
 }
 
 func TestHandleClosePairingSession_ReturnsNotStartedWithoutActivePairing(t *testing.T) {
@@ -1049,6 +1094,154 @@ func TestShowPairingCode_FailedReplacementDoesNotSuppressReleasedCleanup(t *test
 	s.restoreDefaultDisplay(oldActive.channelID, displayGeneration)
 
 	assertLastDisplay(t, cdpClient, "hidden", "", "")
+}
+
+// fakeMintNavigationSession is a minimal, directly-controllable
+// NavigationSession double, mirroring setupui's fakeNavigationSession: tests
+// flip pending/ready/generation to drive parkForNavigation without a real
+// playersession.Session.
+type fakeMintNavigationSession struct {
+	mu      sync.Mutex
+	pending bool
+	ready   bool
+	gen     uint64
+	target  uint64
+}
+
+func (f *fakeMintNavigationSession) NavigationPending() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pending
+}
+
+func (f *fakeMintNavigationSession) StageReady(playersession.Stage) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ready
+}
+
+func (f *fakeMintNavigationSession) Generation() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gen
+}
+
+func (f *fakeMintNavigationSession) NavigationTargetGeneration() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.target
+}
+
+func (f *fakeMintNavigationSession) setPending(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pending = v
+}
+
+func (f *fakeMintNavigationSession) setReadyAndGeneration(ready bool, gen uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ready = ready
+	f.gen = gen
+}
+
+func (f *fakeMintNavigationSession) setTarget(v uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.target = v
+}
+
+// TestShowPairingCode_ParksWhileNavigationPending pins M13: a display send
+// parks while a recovery navigation is pending, delivering only once
+// NavigationPending clears — mirroring setupui's park tests.
+func TestShowPairingCode_ParksWhileNavigationPending(t *testing.T) {
+	active := &activePairing{channelID: "ch", pairingCode: "PAIR-1"}
+	cdpClient := &fakeCDP{}
+	s := newTestService()
+	s.cdp = cdpClient
+	nav := &fakeMintNavigationSession{pending: true}
+	s.SetSession(nav)
+	s.navigationParkPollInterval = 5 * time.Millisecond
+	s.navigationParkTimeout = 2 * time.Second
+
+	done := make(chan error, 1)
+	go func() { done <- s.showPairingCode(context.Background(), active) }()
+
+	// Give the call a chance to observe the pending flag and start parking.
+	time.Sleep(30 * time.Millisecond)
+	cdpClient.mu.Lock()
+	sentSoFar := len(cdpClient.displayRequests)
+	cdpClient.mu.Unlock()
+	assert.Zero(t, sentSoFar, "must park while NavigationPending is true")
+
+	nav.setPending(false)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the parked send to deliver")
+	}
+	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-1", "")
+}
+
+// TestShowPairingCode_ExitsParkWhenTargetGenerationReady pins the same
+// target-generation park predicate setupui's park gets [Park predicate fix]:
+// a bare StageReady with the navigation target still 0 (pre-bump) must NOT
+// exit the park; once the target is set and matches Generation(), it does.
+func TestShowPairingCode_ExitsParkWhenTargetGenerationReady(t *testing.T) {
+	active := &activePairing{channelID: "ch", pairingCode: "PAIR-1"}
+	cdpClient := &fakeCDP{}
+	s := newTestService()
+	s.cdp = cdpClient
+	nav := &fakeMintNavigationSession{pending: true, ready: true} // gen 0, target 0 (pre-bump), already "ready"
+	s.SetSession(nav)
+	s.navigationParkPollInterval = 5 * time.Millisecond
+	s.navigationParkTimeout = 2 * time.Second
+
+	done := make(chan error, 1)
+	go func() { done <- s.showPairingCode(context.Background(), active) }()
+
+	time.Sleep(30 * time.Millisecond)
+	cdpClient.mu.Lock()
+	sentSoFar := len(cdpClient.displayRequests)
+	cdpClient.mu.Unlock()
+	assert.Zero(t, sentSoFar, "pre-bump (target==0) StageReady must not exit the park")
+
+	nav.setReadyAndGeneration(true, 1)
+	nav.setTarget(1)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the parked send to deliver")
+	}
+	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-1", "")
+}
+
+// TestShowPairingCode_ExitsParkPromptlyWhenEnteredPostBump pins finding 1
+// directly for mintpairing's park twin: a park entered AFTER the
+// navigation's bump already happened (Generation() and the navigation's
+// target are already the SAME value when this park starts) must exit
+// PROMPTLY once that target generation is handler-ready, not stall for the
+// full park timeout — see setupui's identical test for the full rationale.
+func TestShowPairingCode_ExitsParkPromptlyWhenEnteredPostBump(t *testing.T) {
+	active := &activePairing{channelID: "ch", pairingCode: "PAIR-1"}
+	cdpClient := &fakeCDP{}
+	s := newTestService()
+	s.cdp = cdpClient
+	nav := &fakeMintNavigationSession{pending: true, gen: 1, target: 1, ready: true}
+	s.SetSession(nav)
+	s.navigationParkPollInterval = 5 * time.Millisecond
+	s.navigationParkTimeout = 2 * time.Second
+
+	start := time.Now()
+	err := s.showPairingCode(context.Background(), active)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"a park entered post-bump must exit promptly, not stall for the full timeout")
+	assertLastDisplay(t, cdpClient, "pairing_code", "PAIR-1", "")
 }
 
 func TestStop_SendsApprovalCancelledForPendingRequest(t *testing.T) {

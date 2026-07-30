@@ -193,8 +193,21 @@ func TestExecutor_Connect_Success(t *testing.T) {
 			return nil
 		})
 
-	// Mock state manager get. AnyTimes: connect() also reads state for the
-	// wasClaimed check before saving.
+	// Mock the claim snapshot connect() reads for the wasClaimed check before
+	// writing (already claimed here, matching the device below, so the claim
+	// TRANSITION guard on the setup-narration hide is exercised).
+	ts.mockStateManager.EXPECT().
+		ClaimSnapshot().
+		Return(state.ClaimInfo{DeviceID: device.ID, Claimed: true}).
+		AnyTimes()
+
+	// Mock state manager write
+	ts.mockStateManager.EXPECT().
+		SetConnectedDevice(gomock.Any()).
+		Return(nil)
+
+	// GetState is exercised only by this test's own post-assertion read
+	// below, not by connect() itself anymore.
 	ts.mockStateManager.EXPECT().
 		GetState().
 		Return(&state.State{
@@ -204,11 +217,6 @@ func TestExecutor_Connect_Success(t *testing.T) {
 				Platform: device.Platform,
 			},
 		}).AnyTimes()
-
-	// Mock state manager save
-	ts.mockStateManager.EXPECT().
-		Save(gomock.Any()).
-		Return(nil)
 
 	// Execute command
 	result, err := ts.executor.Execute(ts.ctx, cmd)
@@ -279,21 +287,16 @@ func TestExecutor_Connect_Errors(t *testing.T) {
 						return nil
 					})
 
-				// Mock state manager get. AnyTimes: connect() also reads state
-				// for the wasClaimed check before saving.
+				// Mock the claim snapshot connect() reads for the wasClaimed
+				// check before writing.
 				ts.mockStateManager.EXPECT().
-					GetState().
-					Return(&state.State{
-						ConnectedDevice: &state.Device{
-							ID:       "test-device-id",
-							Name:     "Test Device",
-							Platform: 1,
-						},
-					}).AnyTimes()
+					ClaimSnapshot().
+					Return(state.ClaimInfo{DeviceID: "test-device-id", Claimed: true}).
+					AnyTimes()
 
-				// Mock state manager save to fail
+				// Mock state manager write to fail
 				ts.mockStateManager.EXPECT().
-					Save(gomock.Any()).
+					SetConnectedDevice(gomock.Any()).
 					Return(errors.New("permission denied"))
 			},
 			wantErr: "failed to save state",
@@ -4580,21 +4583,13 @@ func TestExecutor_FactoryReset_StartsServiceAndRotatesTopic(t *testing.T) {
 		Marshal(cmd.Arguments).
 		Return([]byte(`{}`), nil)
 
-	// Topic is cleared before the reset proceeds (security property).
+	// Topic is cleared before the reset proceeds (security property). The
+	// clearing semantics themselves (TopicID AND ConnectedDevice both zeroed)
+	// are pinned by state_test.go's TestStateManager_ClearClaim_* — this test
+	// only needs to verify factoryReset calls through to ClearClaim.
 	ts.mockStateManager.EXPECT().
-		GetState().
-		Return(&state.State{
-			Relayer:         &state.RelayerState{TopicID: "old-topic"},
-			ConnectedDevice: &state.Device{ID: "phone-1"},
-		})
-	ts.mockStateManager.EXPECT().
-		Save(gomock.Any()).
-		DoAndReturn(func(s *state.State) error {
-			assert.Equal(t, "", s.Relayer.TopicID)
-			assert.Equal(t, "", s.ConnectedDevice.ID,
-				"the ConnectedDevice claim record must fall with the topic")
-			return nil
-		})
+		ClearClaim().
+		Return(true, nil)
 
 	// The in-process reset starts the system reset unit directly.
 	ts.mockExec.EXPECT().
@@ -4637,19 +4632,8 @@ func TestExecutor_FactoryReset_UnitFailureStillRevokesSession(t *testing.T) {
 		Return([]byte(`{}`), nil)
 
 	ts.mockStateManager.EXPECT().
-		GetState().
-		Return(&state.State{
-			Relayer:         &state.RelayerState{TopicID: "old-topic"},
-			ConnectedDevice: &state.Device{ID: "phone-1"},
-		})
-	ts.mockStateManager.EXPECT().
-		Save(gomock.Any()).
-		DoAndReturn(func(s *state.State) error {
-			assert.Equal(t, "", s.Relayer.TopicID)
-			assert.Equal(t, "", s.ConnectedDevice.ID,
-				"the ConnectedDevice claim record must fall with the topic")
-			return nil
-		})
+		ClearClaim().
+		Return(true, nil)
 
 	ts.mockExec.EXPECT().
 		CommandContext(ts.ctx, "systemctl", "start", "set-factory-boot.service").

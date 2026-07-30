@@ -32,6 +32,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mediator"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	oomrecovery "github.com/feral-file/ffos-user/components/feral-controld/oom-recovery"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	playlist_refresher "github.com/feral-file/ffos-user/components/feral-controld/playlist-refresher"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -101,6 +102,14 @@ type app struct {
 	// domain. run() re-pushes its last state (Resync) when CDP (re)connects so a
 	// late-loading player catches up. Nil in the test app.
 	SetupUI *setupui.Service
+	// Session is the cross-cutting page-generation/readiness/navigation
+	// authority (design doc §2). run() bumps its generation on every CDP
+	// (re)connect (Session.OnConnect); every off-lane producer that used to
+	// run its own ad-hoc CDP-reconnect resync (sleep invalidation, playlist
+	// recompute, status force-refresh, setup narration resync, connectivity
+	// re-seed) is registered as a reconciler on it instead, at composition
+	// time in initializeApp. Nil in the test app.
+	Session *playersession.Session
 }
 
 func main() {
@@ -194,18 +203,23 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// preserving the bytes for diagnosis instead of overwriting them) and
 	// continue on a fresh empty state: the worst case is the device presents
 	// as unclaimed and re-pairs, which the claim flow handles.
-	s, err := state.Load(app.Logger)
-	if err != nil {
+	// The returned *State is intentionally unused below: every downstream
+	// read of ConnectedDevice/Relayer.TopicID goes through
+	// state.ClaimSnapshot() instead, which reads the SAME in-memory state
+	// Load() just installed but under the state package's lock. Load()
+	// itself still must run — it is what populates the global manager's
+	// in-memory state from disk before that first ClaimSnapshot() call.
+	if _, err := state.Load(app.Logger); err != nil {
 		app.Logger.Error("Failed to load persisted state; quarantining it and continuing with empty state", zap.Error(err))
 		if rerr := app.OS.Rename(constants.STATE_FILE, constants.STATE_FILE+".corrupt"); rerr != nil {
 			app.Logger.Warn("Failed to quarantine state file", zap.Error(rerr))
 		}
-		s = state.GetState() // installs and returns a fresh empty state
+		state.GetState() // installs a fresh empty state
 	}
 
-	// Set global topic ID in Sentry if available
-	if conf.SentryConfig.IsEnabled() && s.Relayer.TopicID != "" {
-		logger.SetGlobalTopicID(s.Relayer.TopicID)
+	// Set global topic ID in Sentry if available.
+	if claim := state.ClaimSnapshot(); conf.SentryConfig.IsEnabled() && claim.TopicID != "" {
+		logger.SetGlobalTopicID(claim.TopicID)
 	}
 
 	// Start watchdog
@@ -277,8 +291,9 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			}
 		}()
 
-		deviceInfo := resolveMDNSDeviceInfo(app.OS, s, app.Logger)
-		deviceInfo.Claimed = s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != ""
+		claim := state.ClaimSnapshot()
+		deviceInfo := resolveMDNSDeviceInfo(app.OS, claim, app.Logger)
+		deviceInfo.Claimed = claim.Claimed
 		advertiser := mdns.New(app.Logger)
 		defer advertiser.Stop()
 
@@ -310,10 +325,14 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	} else {
 		app.Logger.Info("Connectivity status", zap.Bool("connected", connected))
 	}
+	// Single snapshot: relayer_ready and topic_id must come from the SAME
+	// write, not two separate GetState() field reads racing a concurrent
+	// claim or topic assignment.
+	startupClaim := state.ClaimSnapshot()
 	app.Logger.Info("Initial relayer connection gate evaluated",
 		zap.Bool("internet_connected", connected),
-		zap.Bool("relayer_ready", s.Relayer.IsReady()),
-		zap.String("topic_id", s.Relayer.TopicID),
+		zap.Bool("relayer_ready", startupClaim.TopicReady),
+		zap.String("topic_id", startupClaim.TopicID),
 	)
 	// Gate on reachability ONLY, never on IsReady(): connecting with an empty
 	// topic is the designed topic-ASSIGNMENT path (relayer.Connect omits the
@@ -348,7 +367,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	} else {
 		app.Logger.Info("Skipping initial relayer connection",
 			zap.Bool("internet_connected", connected),
-			zap.Bool("relayer_ready", s.Relayer.IsReady()),
+			zap.Bool("relayer_ready", state.ClaimSnapshot().TopicReady),
 		)
 	}
 	// Close unconditionally: a connection can exist at shutdown regardless of
@@ -384,46 +403,31 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	// precede CDP-connected — that is intended.
 	//
 	// On every (re)connect the player web app has just (re)loaded with default (awake)
-	// state, so any player-side state controld drove before the restart no longer holds:
-	// invalidate the sleep tracker's player leg so the schedule loop re-drives it (the old
-	// PartOf=chromium-ready.target design got this for free by restarting controld), then
-	// force a status re-poll so upstream re-syncs to what a fresh boot would produce.
-	// Recompute displayAt from the in-memory cache as well: after a kiosk restart the
-	// player no longer holds the last filtered list, and a threshold may have crossed
-	// while CDP was down.
+	// state, so any player-side state controld drove before the restart no longer holds.
+	// Session.OnConnect bumps the page generation (design doc §2.1 source 1); every
+	// off-lane producer that used to run its own ad-hoc resync here (sleep invalidation,
+	// playlist recompute, status force-refresh, setup-narration resync, connectivity
+	// re-seed) is registered as a reconciler on the session instead (see initializeApp),
+	// so it runs once the new document's command handler is actually installed rather than
+	// racing a page that has not hydrated yet.
 	app.CDP.Start(ctx, func() {
-		devicectl.InvalidatePlayerSleepState(app.Executor, app.Logger)
-		if app.PlaylistScheduler != nil {
-			app.PlaylistScheduler.RecomputeNow(ctx)
+		if app.Session != nil {
+			app.Session.OnConnect()
 		}
-		app.StatusPoller.ForceRefresh()
-		// Re-push the last setup-narration state so a freshly-(re)loaded player
-		// catches up to where provisioning currently is. No-op if nothing has been
-		// narrated yet or (test app) no narrator is wired.
-		if app.SetupUI != nil {
-			app.SetupUI.Resync()
-		}
-		// A WAN-confirmed boot player recovery may be parked waiting for this
-		// first DevTools connection (provisioning starts before this supervisor,
-		// so its online transition can precede it). Complete it now; a no-op on
-		// every connect with nothing parked. Own goroutine for the same reason
-		// the provisioning notifier hooks get one: its CDP sends must not stall
-		// the connect loop's other resync work.
+		// The boot player recovery state machine (design doc §3.2,
+		// devicectl/boot_recovery.go) has two connect-edge entry points:
+		// MaybeRecoverPlayerOnBootOnline arms it on the first WAN-confirmed
+		// online transition (wired into the provisioning notifier, may run
+		// before DevTools ever attaches) and attempts inline; this call,
+		// CompletePendingBootPlayerRecovery, completes an Armed/Deferred
+		// machine still parked waiting for THIS first DevTools connection —
+		// a no-op on every connect with nothing parked. Own goroutine, AFTER
+		// the generation bump above, for the same reason the provisioning
+		// notifier hooks get one: its CDP sends must not stall the connect
+		// loop's other resync work.
 		if pr, ok := app.Executor.(bootPlayerRecoveryFlow); ok {
 			go pr.CompletePendingBootPlayerRecovery()
 		}
-		// Re-seed the player's connectivity view (level, not edge). The
-		// mediator forwards connectivity_change edges fire-and-forget, so an
-		// edge that fired before DevTools attached — routine on Wi-Fi boots,
-		// where association finishes while Chromium is still starting — is
-		// simply dropped, and sys-monitord emits nothing further while the
-		// state holds steady. A freshly (re)loaded page also resets to its
-		// optimistic isOnline=true seed. The player's online-keyed recovery
-		// (display.json refetch, degraded artwork refresh, offline backdrop)
-		// keys on this notification, so without the re-push those paths wait
-		// for a transition that may never come. Own goroutine: the D-Bus
-		// round-trip must not stall the connect loop's resync work.
-		go reseedPlayerConnectivity(ctx, app)
 	})
 	defer app.CDP.Close()
 
@@ -450,7 +454,7 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 	return nil
 }
 
-func resolveMDNSDeviceInfo(os wrapper.OS, s *state.State, logger *zap.Logger) mdns.DeviceInfo {
+func resolveMDNSDeviceInfo(os wrapper.OS, claim state.ClaimInfo, logger *zap.Logger) mdns.DeviceInfo {
 	deviceID := ""
 	deviceName := ""
 	hostnameBytes, err := os.ReadFile(constants.HOSTNAME_FILE)
@@ -464,13 +468,13 @@ func resolveMDNSDeviceInfo(os wrapper.OS, s *state.State, logger *zap.Logger) md
 		}
 	}
 
-	if (deviceID == "" || deviceName == "") && s != nil && s.ConnectedDevice != nil {
+	if (deviceID == "" || deviceName == "") && claim.DeviceID != "" {
 		logger.Warn("mDNS using connected device state for identity")
 		if deviceID == "" {
-			deviceID = strings.TrimSpace(s.ConnectedDevice.ID)
+			deviceID = strings.TrimSpace(claim.DeviceID)
 		}
 		if deviceName == "" {
-			deviceName = strings.TrimSpace(s.ConnectedDevice.Name)
+			deviceName = strings.TrimSpace(claim.DeviceName)
 		}
 	}
 
@@ -516,92 +520,52 @@ func getConnectivityStatus(ctx context.Context, dc dbus.DBus, logger *zap.Logger
 	return connected, nil
 }
 
-// connectivityReseedPoll{Interval,Timeout} pace awaitConnectivityHandlerReady.
-// The timeout is generous: it only delays the re-seed on a page that never
-// installs the handler (a broken load, already Warn-logged), while a healthy
-// hydration clears the poll in a few ticks.
-const (
-	connectivityReseedPollInterval = 500 * time.Millisecond
-	connectivityReseedPollTimeout  = 45 * time.Second
-)
-
-// reseedPlayerConnectivity pushes the CURRENT connectivity state to a freshly
-// connected player page. The mediator owns the edge-triggered forwarding of
-// connectivity_change; this is the level-triggered reconciliation leg of the
-// same contract — the house discipline SYSMETRICS applies to mDNS and the
-// relayer (see mediator.reconcileRelayer) — covering the page that missed its
-// edge because DevTools was not attached when it fired. An unknown state
-// (D-Bus down) pushes nothing: the player's optimistic online default plus
-// the next real edge beat guessing offline, which would pause streaming
-// playback on a healthy wall.
-//
-// The push waits for the page to install the handler first: the first CDP
-// connect routinely lands before the player app has hydrated (the connect
-// loop only needs a page TARGET to exist, which is true from navigation
-// start), and window.handleConnectivityChange is installed by a React effect.
-// An unguarded evaluate there raises a TypeError — a RemoteError, not the
-// tolerated "type mismatch: undefined" — and with sys-monitord silent while
-// the state holds steady, the page would then never learn its connectivity
-// for its whole lifetime. Same discipline as setupui.awaitPageReady.
-func reseedPlayerConnectivity(ctx context.Context, app *app) {
-	if !awaitConnectivityHandlerReady(ctx, app.CDP,
-		connectivityReseedPollInterval, connectivityReseedPollTimeout) {
-		if ctx.Err() == nil {
-			app.Logger.Warn("Player connectivity re-seed skipped: page never installed handleConnectivityChange")
-		}
-		return
-	}
-	connected, err := getConnectivityStatus(ctx, app.DBus, app.Logger)
-	if err != nil {
-		app.Logger.Warn("Player connectivity re-seed skipped: status unavailable", zap.Error(err))
-		return
-	}
-	_, err = app.CDP.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
-		"expression": fmt.Sprintf("window.handleConnectivityChange(%t)", connected),
-	})
-	if err != nil {
-		// Notify-only hook: player builds that return nothing surface as
-		// "type mismatch: undefined" — delivered, just no return value (same
-		// tolerance as the mediator's edge forwarding).
-		if strings.Contains(err.Error(), "type mismatch: undefined") {
-			app.Logger.Debug("Player connectivity re-seed delivered; handler returned no value")
-		} else {
-			app.Logger.Warn("Failed to re-seed player connectivity", zap.Error(err))
-		}
+// sleepInvalidateReconciler / playlistRecomputeReconciler /
+// statusForceRefreshReconciler / setupUIResyncReconciler build the
+// session.RegisterReconciler closures initializeApp wires (design doc §2.4).
+// Defined at FILE scope, not as inline closures inside initializeApp, for the
+// same reason externalLinkProbe lives in provisioning_wiring.go:
+// initializeApp's own local `context` variable (the daemon-lifetime ctx)
+// shadows the context PACKAGE for the rest of that function, so a func
+// literal written inline there cannot spell out the context.Context
+// parameter type it needs.
+func sleepInvalidateReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
+	return func(context.Context) {
+		devicectl.InvalidatePlayerSleepState(executor, logger)
 	}
 }
 
-// awaitConnectivityHandlerReady polls the connected page until the player app
-// has installed window.handleConnectivityChange, bounding the wait with
-// `timeout` and observing ctx (daemon shutdown); intervals are parameters so
-// tests needn't wait out production pacing. The probe evaluates to a JSON
-// STRING because the cdp client decodes only string and object evaluate
-// results (see setupui.awaitPageReady, which pins the same constraint);
-// typeof never throws, so polling a still-hydrating page is error-free rather
-// than a RemoteError per tick.
-func awaitConnectivityHandlerReady(ctx context.Context, client cdp.CDP, interval, timeout time.Duration) bool {
-	const probe = `JSON.stringify({ready: typeof window.handleConnectivityChange === 'function'})`
-	deadline := time.Now().Add(timeout)
-	for {
-		result, err := client.NoLogSend(cdp.METHOD_EVALUATE, map[string]interface{}{
-			"expression":    probe,
-			"returnByValue": true,
-		})
-		if err == nil {
-			if m, ok := result.(map[string]interface{}); ok {
-				if ready, _ := m["ready"].(bool); ready {
-					return true
-				}
-			}
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(interval):
-		}
+func playlistRecomputeReconciler(scheduler playlistschedule.Scheduler) func(context.Context) {
+	return func(ctx context.Context) {
+		scheduler.RecomputeNow(ctx)
+	}
+}
+
+func statusForceRefreshReconciler(poller status.Poller) func(context.Context) {
+	return func(context.Context) {
+		poller.ForceRefresh()
+	}
+}
+
+func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
+	return func(context.Context) {
+		ui.Resync()
+	}
+}
+
+func bootRecoveryRetryReconciler(executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
+	return func(context.Context) {
+		devicectl.RetryBootRecovery(executor, logger)
+	}
+}
+
+// onAwakeHook composes the displayAt recompute with the boot recovery
+// early-re-entry accelerator — see its call site's doc for why this must be
+// a named file-scope function.
+func onAwakeHook(scheduler playlistschedule.Scheduler, executor devicectl.Executor, logger *zap.Logger) func(context.Context) {
+	return func(ctx context.Context) {
+		scheduler.RecomputeNow(ctx)
+		devicectl.RetryBootRecovery(executor, logger)
 	}
 }
 
@@ -702,7 +666,33 @@ func initializeApp(
 	playlistScheduler := playlistschedule.NewWithStore(context, cdp, clock, nil,
 		playlistschedule.NewFileStore(os, json), logger)
 	devicectl.SetWithPlayerPush(executor, playlistScheduler.WithPlayerPush, logger)
-	devicectl.SetOnAwake(executor, playlistScheduler.RecomputeNow, logger)
+	// onAwake composes the displayAt recompute with the boot recovery
+	// early-re-entry accelerator (design doc §3.2: the sleep tracker's
+	// onAwake is one of the two accelerators, alongside a generation bump,
+	// that let a Deferred round re-enter before its backoff timer — which
+	// stays the PRIMARY trigger — fires). A named file-scope function, not an
+	// inline closure: initializeApp's own local `context` variable shadows
+	// the context PACKAGE for the rest of this function (see
+	// sleepInvalidateReconciler's doc), so a func literal written here
+	// cannot spell out the context.Context parameter type it needs.
+	devicectl.SetOnAwake(executor, onAwakeHook(playlistScheduler, executor, logger), logger)
+
+	// Session is the cross-cutting page-generation/readiness/navigation
+	// authority (design doc §2): page generation (three sources — CDP
+	// connect, a session-executed navigation, a status-poller stamp
+	// mismatch), the per-generation readiness barrier, screen-overlay
+	// coordination, and the navigate-to-entry recovery primitive. Off-lane
+	// producers (setupui, mediator connectivity, mintpairing, commandrouter)
+	// are wired to it below, once their own components exist. The asleep
+	// gate is devicectl's four-value sleep tracker (design doc §3.4): built
+	// AFTER executor so PlayerSleepGate can read its live tracker state.
+	session := playersession.New(context, cdp, clock, devicectl.PlayerSleepGate(executor), logger)
+	// Boot recovery's escalation primitive (design doc §3.2: "Escalations
+	// call session.NavigateHome").
+	devicectl.SetBootRecoverySession(executor, session, logger)
+	// Roots the backoff timer's sleep on the daemon-lifetime ctx [minor #4]
+	// so shutdown cancels a pending sleep instead of leaking the goroutine.
+	devicectl.SetBootRecoveryDaemonContext(executor, context, logger)
 
 	// Mint Pairing
 	mintPairingOpts := mintpairing.OptionsFromConfig(mintPairingConfig, relayerEndpoint)
@@ -732,7 +722,7 @@ func initializeApp(
 	oomRecoverer := oomrecovery.New(poller, rawCmdHandler, logger)
 
 	// Mediator
-	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
+	mediator := mediator.New(context, relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
 
 	// LinkChecker is the shared link-state seam keying mDNS/hub discoverability
 	// on the presence of any LAN link rather than internet reachability.
@@ -762,6 +752,56 @@ func initializeApp(
 	// CDP.Start re-pushes every narration state (not just provisioning's) when
 	// Chromium reconnects mid-setup.
 	executor.SetSetupUI(setupNarrator)
+
+	// Wire every off-lane producer to the session (design doc §2.4), now that
+	// they all exist. Registration ORDER is the reconciler execution order on
+	// every generation-ready: sleep invalidate+poke, playlist recompute,
+	// status force-refresh, setup-narration resync, boot-recovery retry,
+	// connectivity — replacing the five ad-hoc CDP-reconnect spawns run()
+	// used to do inline.
+	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
+	if playlistScheduler != nil {
+		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
+	}
+	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
+	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
+	// Boot recovery's generation-bump accelerator (design doc §3.2): a new
+	// generation (CDP reconnect, a recovery navigation, a stamp-mismatch
+	// bump) is a signal the page or player state likely changed, so a
+	// Deferred round re-enters early instead of waiting out its backoff
+	// timer (which stays the PRIMARY trigger either way).
+	session.RegisterReconciler("boot-recovery-retry", bootRecoveryRetryReconciler(executor, logger))
+	// setupui integration (§2.4 disposition table): the narration worker
+	// parks sends while a recovery navigation is pending, and setupui
+	// registers its own Narrating() as an overlay owner so NavigateHome never
+	// erases live narration.
+	setupNarrator.SetSession(session)
+	session.RegisterOverlayOwner("setupui", setupNarrator.Narrating)
+	// mintpairing/qrdisplay: a live mint-pairing display (pairing code or
+	// request-received) is an overlay owner too, for the same reason. It also
+	// parks its own display sends while a recovery navigation is pending
+	// [M13], mirroring setupui's park discipline above.
+	session.RegisterOverlayOwner("mintpairing", mintPairing.DisplayActive)
+	mintPairing.SetSession(session)
+	// mediator connectivity ownership (§3.1): SetSession registers the
+	// "connectivity" reconciler internally, so it runs last among the five
+	// above, and routes the edge-triggered pushes from connectivity_change
+	// through the session's handler-readiness discipline too.
+	mediator.SetSession(session)
+	// Generation re-check seams (§2.4): a moved generation across an
+	// in-flight setSleepMode send or CDP command reply means the ack may not
+	// describe the current document.
+	devicectl.SetSessionGeneration(executor, session.Generation, logger)
+	commandrouter.SetSessionGeneration(rawCmdHandler, session.Generation, logger)
+	// commandrouter's refreshArtwork dead-page recovery escalates to
+	// NavigateHomeInline instead of Page.reload (design doc §5).
+	commandrouter.SetRecoverySession(rawCmdHandler, session, logger)
+	// Status-poller stamp carrier (§2.1 source 3): every checkStatus
+	// round-trip reports its observed document stamp so the session can
+	// detect a document replaced without going through NavigateHome
+	// (feral-watchdog's recovery navigate, a player-initiated reload).
+	poller.SetStampObserver(session.ObserveStatusStamp)
+
 	softAP := softap.NewNetworkManager(exec, logger, "", nil)
 	wifiCtl := wifictl.New(exec, clock, logger, "")
 	// The claim QR auto-paints when an unclaimed device comes online — the
@@ -840,6 +880,7 @@ func initializeApp(
 		LinkChecker:       linkChecker,
 		Provisioning:      provMachine,
 		SetupUI:           setupNarrator,
+		Session:           session,
 	}
 }
 

@@ -32,6 +32,45 @@ const (
 // See the loop in background() for the scenario this guards against.
 const startupForceCastEscalationThreshold = 3
 
+// startupEscalation tracks the startup loop's consecutive-rejection streak
+// and the forced-cast escalation it justifies. forceCast is a symmetric
+// latch: it sets when the streak reaches the threshold and clears the
+// instant the streak's justification goes away — a success, or a
+// NON-rejection response breaking the streak (record is the single place
+// both happen, so the two can never drift apart). Without the symmetric
+// clear, an unrelated later error (e.g. errCDPNotReady while Chromium
+// restarts) would reset the streak counter but leave forceCast latched, and
+// the next attempt would force a visible now_display restart long after the
+// rejection streak that justified it ended.
+type startupEscalation struct {
+	consecutiveRejects int
+	forceCast          bool
+}
+
+// record updates escalation state after one processPlayingPlaylist attempt.
+// err is that attempt's result (nil on success).
+func (e *startupEscalation) record(err error) {
+	switch {
+	case err == nil:
+		// Success: nothing left to escalate out of.
+		e.consecutiveRejects = 0
+		e.forceCast = false
+	case errors.Is(err, errPlayerRejectedRefresh):
+		e.consecutiveRejects++
+		if e.consecutiveRejects >= startupForceCastEscalationThreshold {
+			e.forceCast = true
+		}
+	default:
+		// Any other response — including errCDPNotReady — is not a
+		// rejection and breaks the streak. The escalation's sole
+		// justification (a live rejection streak) is gone, so forceCast
+		// clears with it: the next attempt gets the normal soft-refresh
+		// path, and a fresh streak must re-earn the escalation from zero.
+		e.consecutiveRejects = 0
+		e.forceCast = false
+	}
+}
+
 // errCDPNotReady marks a refresh pass skipped because CDP is not connected. On a
 // headless boot (no monitor) Chromium never starts, so CDP can stay absent for
 // hours; that is an expected state, not a failure, and must not surface as
@@ -130,25 +169,18 @@ func (r *refresher) background(done <-chan struct{}) {
 	// now_display cast instead, which hydrates an empty player regardless of
 	// prior cache state. Transport/fetch errors are a different error value
 	// and do not count toward this escalation.
-	consecutiveRejects := 0
-	forceCast := false
+	esc := startupEscalation{}
 	for {
-		if err := r.processPlayingPlaylist(forceCast); err != nil {
+		if err := r.processPlayingPlaylist(esc.forceCast); err != nil {
 			r.logProcessFailure(err)
-			if errors.Is(err, errPlayerRejectedRefresh) {
-				consecutiveRejects++
-				if consecutiveRejects >= startupForceCastEscalationThreshold {
-					forceCast = true
-				}
-			} else {
-				consecutiveRejects = 0
-			}
+			esc.record(err)
 			if err := r.clock.SleepContext(runCtx, PLAYER_STATUS_POLLING_INTERVAL); err != nil {
 				r.logger.Info("Refresher background goroutine stopped before initial success")
 				return
 			}
 			continue
 		}
+		esc.record(nil)
 		break
 	}
 

@@ -21,6 +21,7 @@ import (
 
 	"github.com/feral-file/ffos-user/components/feral-controld/cdp"
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/qrdisplay"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -87,6 +88,33 @@ type Service interface {
 	HandleStartPairingSession(ctx context.Context, args map[string]any) (any, error)
 	HandleClosePairingSession(ctx context.Context, args map[string]any) (any, error)
 	HandleApprovalDecision(ctx context.Context, args map[string]any) (any, error)
+	// DisplayActive reports whether THIS process currently owns the player
+	// overlay with a live mint-pairing display (pairing code or
+	// request-received, painted by showPairingCode/showRequestReceived and
+	// cleared by releaseDisplayOwnership) — the overlay-owner probe for
+	// playersession.Session.RegisterOverlayOwner, so a recovery navigation
+	// never erases a QR mid-pairing.
+	DisplayActive() bool
+	// SetSession wires the playersession.Session the display sends park
+	// against while a recovery navigation is pending [M13], mirroring
+	// setupui.Service.SetSession's discipline. Call once at wiring time,
+	// before Start; nil (never called) preserves pre-session behavior
+	// exactly — the sends never park.
+	SetSession(session NavigationSession)
+}
+
+// NavigationSession is the narrow slice of playersession.Session the display
+// sends consult to avoid racing a recovery navigation — consumer-owned,
+// mirroring setupui.NavigationSession (and CDPSender's) idiom.
+// *playersession.Session satisfies it.
+type NavigationSession interface {
+	NavigationPending() bool
+	StageReady(st playersession.Stage) bool
+	Generation() uint64
+	// NavigationTargetGeneration reports the generation ID the in-flight
+	// navigation bumped to, or 0 when no navigation is in flight past its
+	// own bump. See playersession.Session.NavigationTargetGeneration's doc.
+	NavigationTargetGeneration() uint64
 }
 
 type service struct {
@@ -111,6 +139,19 @@ type service struct {
 	displayGeneration uint64
 	pending           map[string]*pendingApproval
 	doneMap           map[string]completedApproval
+
+	// session, when set (SetSession), is the playersession.Session the
+	// display sends park against while a recovery navigation is pending
+	// [M13] — same generation-snapshot park discipline setupui.Service gets
+	// (see parkForNavigation). Nil in every existing test and any wiring
+	// that predates the session — the sends then never park, preserving
+	// pre-session behavior exactly. Immutable after construction.
+	session NavigationSession
+	// navigationParkPollInterval / navigationParkTimeout override the park
+	// bounds (zero means the defaults); test-only, same pre-first-use
+	// contract as session above.
+	navigationParkPollInterval time.Duration
+	navigationParkTimeout      time.Duration
 }
 
 type brokerStarter interface {
@@ -290,6 +331,67 @@ func newService(
 	}
 }
 
+// defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
+// display-send park while a playersession.Session recovery navigation is
+// pending [M13] — same values and rationale as setupui's identical constants.
+const (
+	defaultNavigationParkPollInterval = 100 * time.Millisecond
+	defaultNavigationParkTimeout      = 15 * time.Second
+)
+
+// SetSession wires the session the display sends park against. See the
+// Service interface doc.
+func (s *service) SetSession(session NavigationSession) {
+	s.session = session
+}
+
+// parkForNavigation blocks the caller while a playersession.Session recovery
+// navigation is pending [NV4][M13], so a display send cannot race the page
+// underneath it — the same discipline setupui.Service.parkForNavigation
+// applies to narration sends. No-op when no session is wired (SetSession
+// never called), which is every existing test and any pre-session build.
+//
+// Unlike setupui, this is NOT run on a dedicated queue-draining worker: the
+// three call sites (showPairingCode, showRequestReceived,
+// restoreDefaultDisplay) already run on their own goroutines (the broker
+// session goroutine, or restoreDefaultDisplay's own `go`), so parking here
+// blocks only that goroutine, not a shared queue. It is called BEFORE
+// displayMu is taken (never while holding it): parking can take up to the
+// full timeout, and holding displayMu across that would serialize every
+// OTHER display mutation behind an unrelated navigation.
+//
+// The park exits on whichever comes FIRST: the navigation's TARGET
+// generation reaching StageHandler (see NavigationTargetGeneration and
+// setupui's parkForNavigation for the full rationale — a
+// Generation()-snapshot-at-entry comparison stalls for the full timeout when
+// the park is entered AFTER the bump already happened, which is common
+// here); NavigationPending clearing; or the bounded park timeout — on the
+// latter two the send still proceeds best-effort right after this returns.
+func (s *service) parkForNavigation() {
+	if s.session == nil || !s.session.NavigationPending() {
+		return
+	}
+	interval := s.navigationParkPollInterval
+	if interval <= 0 {
+		interval = defaultNavigationParkPollInterval
+	}
+	timeout := s.navigationParkTimeout
+	if timeout <= 0 {
+		timeout = defaultNavigationParkTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	for s.session.NavigationPending() {
+		if target := s.session.NavigationTargetGeneration(); target != 0 && target == s.session.Generation() && s.session.StageReady(playersession.StageHandler) {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.logger.Info("Mint pairing display park timed out waiting on a pending navigation; delivering best-effort")
+			return
+		}
+		time.Sleep(interval)
+	}
+}
+
 func (s *service) Start(ctx context.Context) {
 	if s == nil {
 		return
@@ -348,7 +450,7 @@ func (s *service) HandleStartPairingSession(ctx context.Context, _ map[string]an
 		s.logger.Warn("Mint pairing player contract validation failed", zap.Error(err), zap.String("path", s.opts.PlayerContractPath))
 		return commandError("invalid_config", "mint pairing player contract is not valid", false), nil
 	}
-	topicID := strings.TrimSpace(state.GetState().Relayer.TopicID)
+	topicID := strings.TrimSpace(state.ClaimSnapshot().TopicID)
 	if topicID == "" {
 		return commandError("topic_not_ready", "relayer topic is not ready", true), nil
 	}
@@ -505,7 +607,7 @@ func (s *service) HandleApprovalDecision(ctx context.Context, args map[string]an
 		s.mu.Unlock()
 		return approvalError(decision.ApprovalRequestID, "expired", "approval request expired", false), nil
 	}
-	if decision.TopicID != pending.topicID || decision.TopicID != state.GetState().Relayer.TopicID {
+	if decision.TopicID != pending.topicID || decision.TopicID != state.ClaimSnapshot().TopicID {
 		s.mu.Unlock()
 		return approvalError(decision.ApprovalRequestID, "topic_mismatch", "approval decision does not match this device topic", false), nil
 	}
@@ -791,7 +893,7 @@ func (s *service) sendTerminalRejectionAndOutcome(channel brokerChannel, request
 }
 
 func currentRelayerTopicID() string {
-	return strings.TrimSpace(state.GetState().Relayer.TopicID)
+	return strings.TrimSpace(state.ClaimSnapshot().TopicID)
 }
 
 func currentRelayerTopicMatches(topicID string) bool {
@@ -854,6 +956,14 @@ func (s *service) sendMintPairingNotification(ctx context.Context, notificationT
 		PersistRecordCount: persistRecordCount,
 		Message:            message,
 	})
+}
+
+// DisplayActive reports whether this process currently owns the player
+// overlay with a live mint-pairing display. See the Service interface doc.
+func (s *service) DisplayActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.displayOwner != nil
 }
 
 func (s *service) registerPending(p *pendingApproval) {
@@ -923,6 +1033,10 @@ func (s *service) setActivePendingApproval(active *activePairing, browserName st
 }
 
 func (s *service) showPairingCode(ctx context.Context, active *activePairing) error {
+	// [M13] Park BEFORE taking displayMu — parking can take up to the full
+	// timeout, and holding displayMu across it would serialize every OTHER
+	// display mutation behind an unrelated navigation.
+	s.parkForNavigation()
 	s.displayMu.Lock()
 	defer s.displayMu.Unlock()
 
@@ -939,6 +1053,8 @@ func (s *service) showPairingCode(ctx context.Context, active *activePairing) er
 }
 
 func (s *service) showRequestReceived(ctx context.Context, active *activePairing, browserName string) error {
+	// [M13] See showPairingCode's comment: park before taking displayMu.
+	s.parkForNavigation()
 	s.displayMu.Lock()
 	defer s.displayMu.Unlock()
 
@@ -976,6 +1092,8 @@ func (s *service) closeChannel(channel brokerChannel) {
 }
 
 func (s *service) restoreDefaultDisplay(channelID string, displayGeneration uint64) {
+	// [M13] See showPairingCode's comment: park before taking displayMu.
+	s.parkForNavigation()
 	s.displayMu.Lock()
 	defer s.displayMu.Unlock()
 

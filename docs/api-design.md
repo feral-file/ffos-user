@@ -402,6 +402,8 @@ Two retry ladders:
 
 The setupd one-attempt BLE refresh variant (`RefreshRetries::Single`) is intentionally absent — there is no BLE response deadline to protect.
 
+**Narrator policy on `OnPermanentFailure`** (all three entry points share one gate and one callback): decided at emit time by reading the LIVE claim state, not the state at flight start — a settled-device `updateToLatestVersion` call that joins an in-flight update another (pre-claim) caller started still gets the settled policy. Claim not settled: today's behavior, the pairing flow's `join_failed` narration. Claim settled: there is no "join" to fail, so the callback instead hides a stuck `updating` overlay (`HideIfShowing`) and logs — it never repaints `join_failed` over a claimed device. A separate post-ladder watchdog (`Deps.OnUpdateSucceededNoReboot`, default 5 minutes) hides a stuck `updating` overlay if a successful ladder's expected reboot never happens.
+
 ---
 
 ## Protocol Invariants Agents Must Not Break

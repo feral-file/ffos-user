@@ -112,6 +112,22 @@ type Deps struct {
 	// field). nil keeps the debug-log-only behavior. devicectl wires this to the
 	// setupui updating narration so the on-screen overlay tracks the update.
 	OnProgress func(pct int)
+
+	// OnUpdateSucceededNoReboot, when non-nil, fires once
+	// PostLadderWatchdogTimeout elapses after a successful update ladder with
+	// this process STILL RUNNING — meaning the reboot the ladder triggered has
+	// not happened (design doc §3.3 [W10]). A real reboot kills the process
+	// before the timer ever fires, so no separate "did it reboot" detection is
+	// needed: still being alive to fire the callback IS the signal. devicectl
+	// wires this to hide a stuck "updating" overlay so a failed/delayed reboot
+	// does not leave the on-screen narration implying forward progress forever.
+	OnUpdateSucceededNoReboot func()
+
+	// PostLadderWatchdogTimeout overrides how long the watchdog above waits.
+	// Zero uses postLadderWatchdogDefault (5 minutes — generous for a normal
+	// reboot, short enough that a genuinely stuck update is caught well before
+	// an operator would otherwise notice).
+	PostLadderWatchdogTimeout time.Duration
 }
 
 // Gate is the OTA update gate. Construct it once (long-lived) so the single-flight
@@ -245,7 +261,33 @@ func (g *Gate) runLocal(ctx context.Context, mode Mode) (Result, error) {
 		return ResultUpdateStarted, err
 	}
 	g.clearLatch()
+	g.scheduleLadderRebootWatchdog()
 	return ResultUpdateStarted, nil
+}
+
+// postLadderWatchdogDefault is documented on Deps.PostLadderWatchdogTimeout.
+const postLadderWatchdogDefault = 5 * time.Minute
+
+// scheduleLadderRebootWatchdog arms the post-ladder watchdog (design doc
+// §3.3 [W10]) after a successful update ladder. Detached from the caller's
+// ctx deliberately: both entry points typically pass a request-scoped ctx
+// (e.g. the relayer command that triggered RequestUpdate), which is canceled
+// the moment the handler returns — long before a real reboot would land —
+// and using it here would fire the watchdog immediately on every success.
+func (g *Gate) scheduleLadderRebootWatchdog() {
+	if g.deps.OnUpdateSucceededNoReboot == nil {
+		return
+	}
+	timeout := g.deps.PostLadderWatchdogTimeout
+	if timeout <= 0 {
+		timeout = postLadderWatchdogDefault
+	}
+	go func() {
+		if err := g.deps.Clock.SleepContext(context.Background(), timeout); err != nil {
+			return
+		}
+		g.deps.OnUpdateSucceededNoReboot()
+	}()
 }
 
 // runUpdateLadder spawns the updater and retries on transient failures with

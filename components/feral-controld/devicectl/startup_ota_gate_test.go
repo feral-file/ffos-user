@@ -68,6 +68,13 @@ func startupGateExecutor(t *testing.T, claimed bool, gate *fakeStartupGate) *exe
 		st.ConnectedDevice = &state.Device{ID: "phone-1"}
 	}
 	sm.EXPECT().GetState().Return(st).AnyTimes()
+	// DoAndReturn over st (not a static Return): some tests mutate st after
+	// construction (e.g. a simulated mid-retry factory reset), and the gate's
+	// re-checks must observe that mutation the same way ClaimSnapshot() would
+	// in production.
+	sm.EXPECT().ClaimSnapshot().
+		DoAndReturn(func() state.ClaimInfo { return claimSnapshotFromState(st) }).
+		AnyTimes()
 
 	return &executor{
 		logger:         zap.NewNop(),
@@ -288,6 +295,9 @@ func TestStartupOTAGate_ResetMidRetryStopsWithoutLatching(t *testing.T) {
 	state.InjectStateManagerForTesting(sm)
 	t.Cleanup(state.ResetForTesting) // don't leave a finished mock as the global manager
 	sm.EXPECT().GetState().Return(st).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().
+		DoAndReturn(func() state.ClaimInfo { return claimSnapshotFromState(st) }).
+		AnyTimes()
 
 	gate := &fakeStartupGate{results: []otagate.Result{otagate.ResultVersionCheckFailed}}
 	clk := &autoClaimClock{}
