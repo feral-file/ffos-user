@@ -5,11 +5,11 @@
 // navigation primitive (navigate-to-entry, never reload-in-place — the
 // static export is flat files only, so a client-route reload 404s).
 //
-// Design reference: .omc/plans/cross-repo-recovery-redesign.md §2. Off-lane
+// Design reference: docs/player-session-recovery.md §2-§4. Off-lane
 // producers (setupui narration, mediator connectivity, qrdisplay/mintpairing,
 // sleep_schedule, commandrouter) keep their own queues/locks and consult this
 // package's generation counter, readiness barrier, and overlay/navigation
-// primitives rather than driving the page directly — see §2.4.
+// primitives rather than driving the page directly — see §4 there.
 package playersession
 
 import (
