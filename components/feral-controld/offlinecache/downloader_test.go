@@ -25,6 +25,9 @@ import (
 // within a fast test, and against mocked Exec/HTTPClient since spawning a
 // real Chromium binary is neither available nor desirable in unit tests.
 type downloaderTestSetup struct {
+	// t is set by tests that need it inside mock callbacks (the scope
+	// tests); the original suite predates it and leaves it nil.
+	t          *testing.T
 	ctrl       *gomock.Controller
 	mockExec   *mocks.MockExec
 	mockOS     *mocks.MockOS
@@ -46,9 +49,11 @@ func setupDownloader(t *testing.T, idleTeardown time.Duration) *downloaderTestSe
 
 	mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
+	// Limits are disabled here so the existing suite exercises the plain
+	// spawn path unchanged; scope behavior has its own tests below.
 	d := offlinecache.NewDownloader(
 		"/usr/bin/chromium", "/tmp/offline-cache-headless", 9223,
-		idleTeardown, mockExec, mockOS, wrapper.NewClock(), mockHTTP, logger,
+		idleTeardown, offlinecache.HeadlessLimits{}, mockExec, mockOS, wrapper.NewClock(), mockHTTP, logger,
 	)
 
 	return &downloaderTestSetup{ctrl: ctrl, mockExec: mockExec, mockOS: mockOS, mockHTTP: mockHTTP, downloader: d}

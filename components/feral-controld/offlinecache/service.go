@@ -561,6 +561,20 @@ func (q *jobQueue) pop() (captureJob, bool) {
 	return j, true
 }
 
+// peek returns the head job without popping it — dequeueAdmitted's
+// look-before-pop, so an admission denial leaves the job in the queue
+// (still StateQueued, still clearable). Only meaningful while the caller
+// holds s.mu: without it a reserveForClear could remove the peeked job
+// before any decision about it lands.
+func (q *jobQueue) peek() (captureJob, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return captureJob{}, false
+	}
+	return q.items[0], true
+}
+
 // len reports how many jobs are currently queued (not yet popped) —
 // used by enqueue's capacity check (see ErrQueueFull's doc).
 func (q *jobQueue) len() int {
@@ -604,6 +618,29 @@ type service struct {
 	maxDiskBytes    int64 // <=0 means unlimited
 	maxQueueLen     int   // see ErrQueueFull's doc
 	observer        ProgressObserver
+
+	// admission gates head-of-queue pops while the device is under
+	// resource pressure (nil = always admit). See AdmissionController's
+	// doc for the lock-ordering contract its Admit must honor and
+	// dequeueAdmitted for the pop semantics.
+	admission     AdmissionController
+	clock         wrapper.Clock
+	maxDefer      time.Duration
+	retryInterval time.Duration
+	// deferredItemID/deferredSince track how long the CURRENT head of the
+	// queue has been denied admission, for the maxDefer bound and the
+	// admitted-after-deferral log. Head-only tracking is sufficient: the
+	// single worker only ever defers on the head. The tracking MUST be
+	// reset on every path that retires the tracked job — admitted pop,
+	// expiry pop, empty queue, and reserveForClear removing the tracked
+	// id — because a stale deferredSince would otherwise be inherited by
+	// a LATER job for the same item (clear-then-re-download, exactly the
+	// retry the expiry failure reason tells the client to perform) and
+	// could expire that fresh job on its first denial. Always written
+	// under s.mu; both the worker (dequeueAdmitted) and clear callers
+	// (reserveForClear) write it.
+	deferredItemID string
+	deferredSince  time.Time
 
 	queue *jobQueue
 
@@ -718,6 +755,7 @@ type service struct {
 
 // NewService constructs a Service. observer may be nil (no-op notifications
 // — useful in tests and until the notifications todo wires a real one).
+// admission's zero value means "no gate" — see AdmissionOptions.
 func NewService(
 	store Store,
 	classifier Classifier,
@@ -727,8 +765,21 @@ func NewService(
 	captureWindowMs int,
 	maxDiskBytes int64,
 	observer ProgressObserver,
+	admission AdmissionOptions,
 	logger *zap.Logger,
 ) Service {
+	clock := admission.Clock
+	if clock == nil {
+		clock = wrapper.NewClock()
+	}
+	maxDefer := admission.MaxDefer
+	if maxDefer <= 0 {
+		maxDefer = DefaultAdmissionMaxDefer
+	}
+	retryInterval := admission.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = defaultAdmissionRetryInterval
+	}
 	return &service{
 		store:              store,
 		classifier:         classifier,
@@ -740,6 +791,10 @@ func NewService(
 		maxDiskBytes:       maxDiskBytes,
 		maxQueueLen:        defaultMaxQueueLen,
 		observer:           observer,
+		admission:          admission.Controller,
+		clock:              clock,
+		maxDefer:           maxDefer,
+		retryInterval:      retryInterval,
 		queue:              newJobQueue(),
 		state:              make(map[string]ItemState),
 		downloadEpoch:      make(map[string]uint64),
@@ -810,11 +865,31 @@ func (s *service) Stop() {
 
 func (s *service) run(ctx context.Context) {
 	defer close(s.doneCh)
+	// The ticker only matters while the head of the queue is deferred by
+	// the admission gate: pressure clearing produces no queue.wake, so
+	// without a periodic re-check a deferred head would wait for the next
+	// enqueue that may never come. It ticks while idle too — a harmless
+	// spurious loop iteration every retryInterval, accepted as cheaper and
+	// simpler than arming/disarming the ticker around deferral episodes.
+	// With no gate at all there is nothing to re-evaluate, so no ticker is
+	// created (a nil channel in the select below simply never fires).
+	var retryTick <-chan time.Time
+	if s.admission != nil {
+		ticker := s.clock.NewTicker(s.retryInterval)
+		defer ticker.Stop()
+		retryTick = ticker.C()
+	}
 	for {
-		j, ok := s.dequeueForProcessing()
+		j, ok, expired, expiredReason := s.dequeueAdmitted()
+		if expired {
+			s.failDeferred(ctx, j, expiredReason)
+			continue
+		}
 		if !ok {
 			select {
 			case <-s.queue.wake:
+				continue
+			case <-retryTick:
 				continue
 			case <-ctx.Done():
 				// enqueue() pushes while still holding s.mu, the same
@@ -831,6 +906,12 @@ func (s *service) run(ctx context.Context) {
 				// fast (ctx is already canceled, so Capture below
 				// will error quickly) instead of sitting stranded in
 				// StateQueued forever with no worker left to drain it.
+				//
+				// The drain deliberately uses the UNGATED
+				// dequeueForProcessing, bypassing the admission gate: a
+				// hot device must never be able to stall Stop() behind
+				// a deferred head, and every drained job fails fast and
+				// quietly via process's ctx.Err() early return anyway.
 				for {
 					j, ok := s.dequeueForProcessing()
 					if !ok {
@@ -870,6 +951,100 @@ func (s *service) dequeueForProcessing() (captureJob, bool) {
 	}
 	s.state[j.itemID] = StateDownloading
 	return j, true
+}
+
+// dequeueAdmitted is dequeueForProcessing's admission-gated twin, used by
+// run()'s steady state (the shutdown drain keeps using the ungated
+// original — see run's drain comment). The admission check and the pop are
+// ONE s.mu critical section for the same reason dequeueForProcessing fuses
+// its pop with the state write: a denied head stays in the queue in
+// StateQueued, so a racing reserveForClear can still remove it without
+// ErrItemBusy, and an admitted pop can never race a clear or pop a job of
+// a different class than the one just admitted (the clear would have had
+// to run inside this critical section to swap the head).
+//
+// Return shape: ok means j was popped (marked StateDownloading) and must
+// be processed. expired means the head outlived maxDefer: it was popped
+// and marked StateFailed atomically here — mirroring the pop+state-write
+// invariant — and the caller owns the observer notification via
+// failDeferred (state writes happen under s.mu, observer callouts never do
+// — see notifyObserver's doc); expiredReason carries the gate's last
+// denial cause for that notification. Neither flag set means the queue is
+// empty or its head is deferred; the caller waits and retries either way.
+func (s *service) dequeueAdmitted() (j captureJob, ok bool, expired bool, expiredReason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	head, exists := s.queue.peek()
+	if !exists {
+		// An emptied queue retires whatever was being tracked (the head
+		// was popped, cleared, or drained) — see the field doc on why
+		// stale tracking must never outlive its job.
+		s.deferredItemID = ""
+		return captureJob{}, false, false, ""
+	}
+
+	if s.admission != nil {
+		if decision := s.admission.Admit(head.class); !decision.Allowed {
+			now := s.clock.Now()
+			if s.deferredItemID != head.itemID {
+				// A new head started deferring (first denial, or the
+				// previous head was cleared/expired out from under the
+				// tracking): restart the clock.
+				s.deferredItemID = head.itemID
+				s.deferredSince = now
+				s.logger.Info("offline cache: deferring download under system pressure",
+					zap.String("item_id", head.itemID),
+					zap.String("class", string(head.class)),
+					zap.String("reason", decision.Reason))
+			}
+			if now.Sub(s.deferredSince) <= s.maxDefer {
+				return captureJob{}, false, false, ""
+			}
+			// Deferred past the bound: fail it so the FIFO cannot be
+			// wedged forever behind one item on a persistently hot
+			// device. Pop + terminal state in this same critical
+			// section, exactly like the ok path below.
+			popped, _ := s.queue.pop()
+			s.state[popped.itemID] = StateFailed
+			s.deferredItemID = ""
+			s.logger.Warn("offline cache: failing download deferred past the admission bound",
+				zap.String("item_id", popped.itemID),
+				zap.String("class", string(popped.class)),
+				zap.Duration("deferred_for", now.Sub(s.deferredSince)),
+				zap.String("reason", decision.Reason))
+			return popped, false, true, decision.Reason
+		}
+	}
+
+	popped, _ := s.queue.pop()
+	s.state[popped.itemID] = StateDownloading
+	if s.deferredItemID == popped.itemID {
+		s.logger.Info("offline cache: admitting download after deferral",
+			zap.String("item_id", popped.itemID),
+			zap.Duration("deferred_for", s.clock.Now().Sub(s.deferredSince)))
+	}
+	s.deferredItemID = ""
+	return popped, true, false, ""
+}
+
+// failDeferred emits the observer notification for a job dequeueAdmitted
+// expired (its StateFailed was already written there, under s.mu). The
+// queuedNotified barrier is honored with the same ctx escape process uses,
+// so failed can never reach a client before its own queued did — and a
+// canceled ctx means shutdown is tearing everything down and ordering no
+// longer matters. gateReason is the gate's last denial cause, embedded so
+// the client sees WHAT was over threshold, not just that something was.
+func (s *service) failDeferred(ctx context.Context, j captureJob, gateReason string) {
+	if j.queuedNotified != nil {
+		select {
+		case <-j.queuedNotified:
+		case <-ctx.Done():
+		}
+	}
+	s.notifyObserver(j.itemID, StateFailed, Coverage{
+		Reason: "download deferred too long under sustained system pressure (" + gateReason + "); re-issue the download once the device recovers",
+	})
 }
 
 // reserveForClear is dequeueForProcessing's counterpart on the
@@ -918,6 +1093,15 @@ func (s *service) reserveForClear(itemIDs map[string]bool) (res clearReservation
 		if j.queuedNotified != nil {
 			res.queuedNotified = append(res.queuedNotified, j.queuedNotified)
 		}
+	}
+	// Retire the admission-deferral tracking if this clear just removed
+	// the tracked head: a later re-download of the same item is a NEW job
+	// and must start with a fresh deferral clock, not inherit this one's
+	// (see the deferredItemID field doc for the instant-expiry failure
+	// this prevents). Same s.mu section as the removal, so the worker can
+	// never observe the removed job with tracking still attached.
+	if itemIDs[s.deferredItemID] {
+		s.deferredItemID = ""
 	}
 	return res, "", nil
 }

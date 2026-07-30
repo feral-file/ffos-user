@@ -43,6 +43,13 @@ type Mediator interface {
 	// auto-claim flow, whose topic wait may already have expired by the time
 	// the assignment arrives.
 	SetTopicObserver(observer func())
+	// SetSysMetricsObserver registers a sink for monitord's raw sysmetrics
+	// payloads (forwarded verbatim, undecoded — decode and policy live in
+	// the consumer, keeping this mediator pure forwarding glue). Wired once
+	// at composition time, before Start; main uses it to feed the offline
+	// cache's admission gate. The sink runs inline on the D-Bus per-signal
+	// goroutine and must not block.
+	SetSysMetricsObserver(observer func(raw []byte))
 }
 
 type mediator struct {
@@ -60,6 +67,11 @@ type mediator struct {
 	// on the relayer-message goroutine; no lock by the same single-writer
 	// argument as the executor's claimObserver.
 	topicObserver func()
+
+	// sysMetricsObserver, when set, receives every raw sysmetrics payload
+	// (see Mediator.SetSysMetricsObserver). Same set-once-before-Start,
+	// single-writer discipline as topicObserver.
+	sysMetricsObserver func(raw []byte)
 
 	// relayerReconciling collapses overlapping heartbeat-driven relayer
 	// reconciles to one in flight: signal handlers run on per-signal
@@ -179,6 +191,12 @@ func (m *mediator) SetTopicObserver(observer func()) {
 	m.topicObserver = observer
 }
 
+// SetSysMetricsObserver registers the raw-sysmetrics sink. See the Mediator
+// interface doc.
+func (m *mediator) SetSysMetricsObserver(observer func(raw []byte)) {
+	m.sysMetricsObserver = observer
+}
+
 // SetClaimed updates the advertised claim state. Because zeroconf only publishes
 // its TXT record once at Register time, reflecting a claim-state change requires
 // a Stop+Start re-registration with the updated TXT. This is a no-op when the
@@ -295,6 +313,11 @@ func (m *mediator) handleDBusSignal(
 
 		m.logger.Debug("Received sysmetrics", zap.String("metrics", string(body)))
 		m.executor.SaveLastSysMetrics(body)
+		if m.sysMetricsObserver != nil {
+			// Raw forward only — decode and policy live in the consumer
+			// (the offline cache's admission gate today).
+			m.sysMetricsObserver(body)
+		}
 
 		// Self-heal mDNS discoverability off this periodic signal. connectivity_change
 		// only fires on INTERNET transitions, so a link that comes up while the

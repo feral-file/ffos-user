@@ -26,7 +26,23 @@
     "maxConcurrent": 0
   },
   "offlineCache": {
-    "enabled": false
+    "enabled": false,
+    "resourceGate": {
+      "disabled": false,
+      "softwareMaxMemoryPercent": 80,
+      "softwareMaxCpuTempC": 75,
+      "mediaMaxMemoryPercent": 90,
+      "mediaMaxCpuTempC": 85,
+      "memorySafetyCeilingPercent": 90,
+      "metricsStaleAfterSeconds": 15,
+      "maxDeferSeconds": 3600
+    },
+    "headlessLimits": {
+      "disabled": false,
+      "cpuQuotaPercent": 300,
+      "allowedCpus": "0-3",
+      "memoryMaxBytes": 2147483648
+    }
   },
   "enableHub": true
 }

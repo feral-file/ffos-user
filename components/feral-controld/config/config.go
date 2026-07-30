@@ -82,6 +82,72 @@ type OfflineCacheConfig struct {
 	// MissPolicy is "fail_closed" (default) or "pass_through"; see
 	// offlinecache.MissPolicy's doc.
 	MissPolicy string `json:"missPolicy,omitempty"`
+	// ResourceGate tunes the resource-aware admission gate in front of the
+	// capture worker (offlinecache/admission.go). An absent section keeps
+	// the gate ON with built-in defaults — it exists to protect the kiosk
+	// Chromium from capture-induced memory/thermal pressure, so like the
+	// storm gate it must not require configuration to be effective.
+	ResourceGate *OfflineCacheResourceGateConfig `json:"resourceGate,omitempty"`
+	// HeadlessLimits caps the headless capture Chromium's CPU and memory
+	// via a transient systemd scope (offlinecache/downloader.go's
+	// HeadlessLimits). An absent section keeps the cap ON with built-in
+	// defaults, for the same protect-by-default reason as ResourceGate.
+	HeadlessLimits *OfflineCacheHeadlessLimitsConfig `json:"headlessLimits,omitempty"`
+}
+
+// OfflineCacheHeadlessLimitsConfig tunes the resource cap applied to the
+// headless capture Chromium. Non-positive/absent values fall back to the
+// offlinecache.DefaultHeadless* constants; Disabled removes the cap
+// entirely (plain spawn). The cap degrades to a plain spawn on its own
+// when transient systemd scopes are unavailable, so misconfiguration can
+// slow captures but never block them.
+type OfflineCacheHeadlessLimitsConfig struct {
+	Disabled bool `json:"disabled"`
+	// CPUQuotaPercent caps total CPU cycles (systemd CPUQuota; 100 = one
+	// full CPU).
+	CPUQuotaPercent int `json:"cpuQuotaPercent,omitempty"`
+	// AllowedCPUs pins the capture Chromium to a CPU subset (systemd
+	// AllowedCPUs syntax, e.g. "0-3"), bounding worst-case package power
+	// draw. Default: the first quarter of the machine's logical CPUs.
+	AllowedCPUs string `json:"allowedCpus,omitempty"`
+	// MemoryMaxBytes is the cgroup memory ceiling; exceeding it OOM-kills
+	// the capture Chromium (the job fails cleanly), not the kiosk.
+	MemoryMaxBytes int64 `json:"memoryMaxBytes,omitempty"`
+}
+
+// OfflineCacheResourceGateConfig tunes when the offline cache defers
+// starting downloads because the device is under resource pressure. All
+// thresholds are optional; non-positive/absent values fall back to the
+// offlinecache.Default* admission constants (which are anchored below the
+// watchdog's and firmware's own protection thresholds — see
+// offlinecache/admission.go). Follows CommandStormConfig's optional-
+// pointer-section + Disabled opt-out convention.
+type OfflineCacheResourceGateConfig struct {
+	// Disabled turns the admission gate off entirely (downloads start
+	// unconditionally, the pre-gate behavior). Default (false) keeps it on.
+	Disabled bool `json:"disabled"`
+	// Software* gate items captured via the headless Chromium; Media*
+	// gate browser-free direct downloads. Values are used-memory percent
+	// and CPU °C above which new downloads of that class defer.
+	SoftwareMaxMemoryPercent float64 `json:"softwareMaxMemoryPercent,omitempty"`
+	SoftwareMaxCPUTempC      float64 `json:"softwareMaxCpuTempC,omitempty"`
+	MediaMaxMemoryPercent    float64 `json:"mediaMaxMemoryPercent,omitempty"`
+	MediaMaxCPUTempC         float64 `json:"mediaMaxCpuTempC,omitempty"`
+	// MemorySafetyCeilingPercent is the projected-usage line a software
+	// capture's worst case must stay under. The effective software memory
+	// threshold is the stricter of SoftwareMaxMemoryPercent and
+	// (this ceiling - headlessLimits.memoryMaxBytes as a percentage of
+	// this device's RAM), which is what keeps the gate and the headless
+	// cap aligned on any RAM size — see offlinecache's
+	// AdmissionPolicy.SoftwareReserveBytes.
+	MemorySafetyCeilingPercent float64 `json:"memorySafetyCeilingPercent,omitempty"`
+	// MetricsStaleAfterSeconds bounds how old the last sysmetrics sample
+	// may be before the gate fails open (admits unconditionally).
+	MetricsStaleAfterSeconds int `json:"metricsStaleAfterSeconds,omitempty"`
+	// MaxDeferSeconds bounds how long one queued download may sit deferred
+	// before it is failed with a visible reason instead of blocking the
+	// download queue indefinitely.
+	MaxDeferSeconds int `json:"maxDeferSeconds,omitempty"`
 }
 
 // Configuration for all components

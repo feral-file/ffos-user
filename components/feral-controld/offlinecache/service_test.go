@@ -54,7 +54,7 @@ func setupService(t *testing.T, maxDiskBytes int64, observer offlinecache.Progre
 	// there is nothing to stub for it here.
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, observer, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, observer, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 
 	return &serviceTestSetup{
 		t: t, ctrl: ctrl, store: store, mockClassifier: mockClassifier, mockCapturer: mockCapturer,
@@ -77,7 +77,7 @@ func setupServiceDeferredBudget(t *testing.T) *serviceTestSetup {
 // Must be called before Start.
 func (ts *serviceTestSetup) setMaxDiskBytes(maxDiskBytes int64) {
 	ts.service = offlinecache.NewService(ts.store, ts.mockClassifier, ts.mockCapturer,
-		ts.mockMediaCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, nil, zaptest.NewLogger(ts.t))
+		ts.mockMediaCapturer, wrapper.NewJSON(), 5000, maxDiskBytes, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(ts.t))
 }
 
 func seedItemWithCapturedAt(t *testing.T, store offlinecache.Store, itemID, blobContent string, capturedAt time.Time) offlinecache.Resource {
@@ -274,7 +274,7 @@ func TestService_DownloadItem_AfterStartFailureReturnsNotStarted(t *testing.T) {
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("permission denied")).Times(1)
 
-	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 
 	err := svc.Start(context.Background())
 	require.Error(t, err)
@@ -619,7 +619,7 @@ func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) 
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, nil).Times(1)
 
-	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -1634,7 +1634,7 @@ func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
 	obs := &recordingObserver{}
 	svc := offlinecache.NewService(store, mocks.NewMockOfflineCacheClassifier(ctrl), mockCapturer,
-		mocks.NewMockOfflineCacheMediaCapturer(ctrl), wrapper.NewJSON(), 5000, 0, obs, logger)
+		mocks.NewMockOfflineCacheMediaCapturer(ctrl), wrapper.NewJSON(), 5000, 0, obs, offlinecache.AdmissionOptions{}, logger)
 
 	seedItemWithCapturedAt(t, store, "item-1", "payload-1", time.Now())
 	seedItemWithCapturedAt(t, store, "item-2", "payload-2", time.Now())
@@ -1891,7 +1891,7 @@ func TestService_Start_PropagatesListItemIDsError(t *testing.T) {
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("disk error")).Times(1)
 
-	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	err := svc.Start(context.Background())
 	assert.Error(t, err)
 }
@@ -1940,7 +1940,7 @@ func TestService_Stop_ClosesCapturer(t *testing.T) {
 	mockCapturer.EXPECT().Close().Return(nil).Times(1)
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	svc.Stop()
 }
@@ -2239,7 +2239,7 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 			return rec, nil
 		}).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -2298,7 +2298,7 @@ func TestService_Notify_TruncatesReason(t *testing.T) {
 			return rec, nil
 		}).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -2352,7 +2352,7 @@ func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskSta
 	mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
 	mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).Return(nil, assertError("recapture failed")).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -2425,7 +2425,7 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 			return nil, ctx.Err()
 		}).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 
 	require.NoError(t, svc.DownloadItem(context.Background(), item))
@@ -2512,7 +2512,7 @@ func TestService_DownloadItem_ClearWinningTheRaceNotifiesNothingAndReportsIt(t *
 		}).Times(1)
 	// No Capture expectation: reaching the worker at all is the bug.
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -2599,7 +2599,7 @@ func TestService_Enqueue_NotifiesQueuedOnlyAfterTheJobIsCommitted(t *testing.T) 
 			return rec, nil
 		}).Times(1)
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 	defer svc.Stop()
 
@@ -2670,7 +2670,7 @@ func TestService_Notify_QueuedPrecedesDownloadingEvenWithAnIdleWorker(t *testing
 					return rec, nil
 				}).Times(1)
 
-			svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+			svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 			require.NoError(t, svc.Start(context.Background()))
 			defer svc.Stop()
 
@@ -2744,7 +2744,7 @@ func TestService_Stop_WithQueuedBacklogDoesNotNotifyPerJob(t *testing.T) {
 		mockClassifier.EXPECT().Classify(gomock.Any(), items[i].Source).Return(offlinecache.ClassSoftware, nil).Times(1)
 	}
 
-	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, zaptest.NewLogger(t))
+	svc := offlinecache.NewService(store, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, mockObserver, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
 
 	require.NoError(t, svc.DownloadItem(context.Background(), items[0]))

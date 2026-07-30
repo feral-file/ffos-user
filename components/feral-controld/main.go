@@ -721,6 +721,7 @@ func initializeApp(
 	var offlineCacheScopeLost offlinecache.ScopeLostRegistrar
 	var offlineCacheStaticServer offlinecache.StaticServer
 	var offlineCacheNotifier *offlinecache.Notifier
+	var offlineCacheSysMetricsSink func(raw []byte)
 	if offlineCacheConfig != nil && offlineCacheConfig.Enabled {
 		ocOpts := offlinecache.OptionsFromConfig(offlineCacheConfig, cdpEndpoint)
 		ocRuntime := offlinecache.Bootstrap(
@@ -732,6 +733,7 @@ func initializeApp(
 		offlineCacheScopeLost = ocRuntime.ScopeLost
 		offlineCacheStaticServer = ocRuntime.StaticServer
 		offlineCacheNotifier = ocRuntime.Notifier
+		offlineCacheSysMetricsSink = ocRuntime.SysMetricsSink
 	}
 
 	// Command handler. The raw handler serves internal daemon lifecycle flows
@@ -776,6 +778,14 @@ func initializeApp(
 
 	// Mediator
 	mediator := mediator.New(relayer, dbusClient, cdp, cmdHandler, executor, playlistRefresher, json, logger)
+
+	// Feed monitord's sysmetrics into the offline cache's admission gate
+	// (see offlinecache.Runtime.SysMetricsSink). Wired here for the same
+	// no-cross-import reason as the claim observer below: the mediator
+	// forwards raw bytes without knowing who consumes them.
+	if offlineCacheSysMetricsSink != nil {
+		mediator.SetSysMetricsObserver(offlineCacheSysMetricsSink)
+	}
 
 	// LinkChecker is the shared link-state seam keying mDNS/hub discoverability
 	// on the presence of any LAN link rather than internet reachability.

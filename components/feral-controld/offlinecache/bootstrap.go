@@ -1,8 +1,11 @@
 package offlinecache
 
 import (
+	"fmt"
 	go_url "net/url"
+	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -64,6 +67,29 @@ type Options struct {
 	// physical kiosk cdp.CDP already connects to, never a second
 	// configurable value that could drift out of sync with it.
 	KioskCDPEndpoint string
+	// ResourceGate configures the admission gate in front of the capture
+	// worker (see admission.go). Enabled defaults ON via OptionsFromConfig:
+	// the gate protects the kiosk Chromium from capture-induced pressure,
+	// so it must be effective with zero configuration.
+	ResourceGate ResourceGateOptions
+	// HeadlessLimits caps the capture Chromium's CPU/memory via a
+	// transient systemd scope (see HeadlessLimits in downloader.go). Also
+	// defaults ON: it bounds the in-flight-capture window the admission
+	// gate cannot cover.
+	HeadlessLimits HeadlessLimits
+	// HeadlessLimitsWarning is non-empty when OptionsFromConfig had to
+	// correct an internally inconsistent HeadlessLimits (see
+	// alignHeadlessLimits). Bootstrap logs it; carried as data so the
+	// mapping stays a pure, testable function.
+	HeadlessLimitsWarning string
+}
+
+// ResourceGateOptions is the fully-defaulted admission-gate slice of
+// Options, mirroring the parent struct's convention.
+type ResourceGateOptions struct {
+	Enabled  bool
+	Policy   AdmissionPolicy
+	MaxDefer time.Duration
 }
 
 // OptionsFromConfig fills Options from cfg (nil is treated as "feature
@@ -80,9 +106,24 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 		StaticServerAddr:     DefaultStaticServerAddr,
 		MissPolicy:           MissPolicyFailClosed,
 		KioskCDPEndpoint:     kioskCDPEndpoint,
+		ResourceGate: ResourceGateOptions{
+			Enabled: true,
+			Policy: AdmissionPolicy{
+				SoftwareBlockMemoryPercent: DefaultSoftwareBlockMemoryPercent,
+				SoftwareBlockCPUTempC:      DefaultSoftwareBlockCPUTempC,
+				MediaBlockMemoryPercent:    DefaultMediaBlockMemoryPercent,
+				MediaBlockCPUTempC:         DefaultMediaBlockCPUTempC,
+				MetricsStaleAfter:          DefaultMetricsStaleAfter,
+				MemorySafetyCeilingPercent: DefaultMemorySafetyCeilingPercent,
+			},
+			MaxDefer: DefaultAdmissionMaxDefer,
+		},
+		HeadlessLimits: defaultHeadlessLimits(),
 	}
 	if cfg == nil {
-		return opts
+		// Still finalize: the cross-setting couplings must hold on every
+		// path out of this function, not only the configured one.
+		return finalizeOptions(opts)
 	}
 
 	opts.Enabled = cfg.Enabled
@@ -113,7 +154,146 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 	if cfg.MissPolicy != "" {
 		opts.MissPolicy = MissPolicy(cfg.MissPolicy)
 	}
+	if rg := cfg.ResourceGate; rg != nil {
+		opts.ResourceGate.Enabled = !rg.Disabled
+		if rg.SoftwareMaxMemoryPercent > 0 {
+			opts.ResourceGate.Policy.SoftwareBlockMemoryPercent = rg.SoftwareMaxMemoryPercent
+		}
+		if rg.SoftwareMaxCPUTempC > 0 {
+			opts.ResourceGate.Policy.SoftwareBlockCPUTempC = rg.SoftwareMaxCPUTempC
+		}
+		if rg.MediaMaxMemoryPercent > 0 {
+			opts.ResourceGate.Policy.MediaBlockMemoryPercent = rg.MediaMaxMemoryPercent
+		}
+		if rg.MediaMaxCPUTempC > 0 {
+			opts.ResourceGate.Policy.MediaBlockCPUTempC = rg.MediaMaxCPUTempC
+		}
+		if rg.MemorySafetyCeilingPercent > 0 {
+			opts.ResourceGate.Policy.MemorySafetyCeilingPercent = rg.MemorySafetyCeilingPercent
+		}
+		if rg.MetricsStaleAfterSeconds > 0 {
+			opts.ResourceGate.Policy.MetricsStaleAfter = time.Duration(rg.MetricsStaleAfterSeconds) * time.Second
+		}
+		if rg.MaxDeferSeconds > 0 {
+			opts.ResourceGate.MaxDefer = time.Duration(rg.MaxDeferSeconds) * time.Second
+		}
+	}
+	if hl := cfg.HeadlessLimits; hl != nil {
+		opts.HeadlessLimits.Enabled = !hl.Disabled
+		if hl.CPUQuotaPercent > 0 {
+			opts.HeadlessLimits.CPUQuotaPercent = hl.CPUQuotaPercent
+		}
+		if hl.AllowedCPUs != "" {
+			opts.HeadlessLimits.AllowedCPUs = hl.AllowedCPUs
+		}
+		if hl.MemoryMaxBytes > 0 {
+			opts.HeadlessLimits.MemoryMaxBytes = hl.MemoryMaxBytes
+		}
+	}
+	return finalizeOptions(opts)
+}
+
+// finalizeOptions applies the couplings BETWEEN sections, after each has
+// been resolved from config. Kept as the single exit point of
+// OptionsFromConfig so a future early return cannot silently skip them
+// and leave the resource gate and the headless cap independently tuned.
+func finalizeOptions(opts Options) Options {
+	opts.HeadlessLimits, opts.HeadlessLimitsWarning = alignHeadlessLimits(opts.HeadlessLimits)
+	// Couple the admission gate to the cap the capture actually runs
+	// under, so the two are never independently-tuned numbers that only
+	// happen to agree — see AdmissionPolicy.SoftwareReserveBytes. A
+	// disabled cap leaves the reserve at 0, which drops the derived term
+	// and leaves the static threshold in charge.
+	if opts.HeadlessLimits.Enabled {
+		opts.ResourceGate.Policy.SoftwareReserveBytes = opts.HeadlessLimits.MemoryMaxBytes
+	}
 	return opts
+}
+
+// alignHeadlessLimits enforces the one internal consistency rule the two
+// CPU properties have: CPUQuota can never exceed what AllowedCPUs is able
+// to deliver. `AllowedCPUs=0-1` with `CPUQuota=300%` is not a 3-CPU
+// budget — the cpuset physically caps it at 200%, so the quota silently
+// stops being a limit at all and the operator's intent ("cap CPU at
+// 300%") is not what runs. Clamping makes the effective value match what
+// the kernel will actually enforce, and returns a warning string the
+// caller logs (this function stays pure so OptionsFromConfig's tests can
+// assert the mapping).
+func alignHeadlessLimits(l HeadlessLimits) (HeadlessLimits, string) {
+	if !l.Enabled || l.CPUQuotaPercent <= 0 {
+		return l, ""
+	}
+	allowed := countAllowedCPUs(l.AllowedCPUs)
+	if allowed <= 0 {
+		return l, "" // no cpuset pin: the quota alone governs
+	}
+	if maxQuota := allowed * 100; l.CPUQuotaPercent > maxQuota {
+		warning := fmt.Sprintf(
+			"offlineCache.headlessLimits.cpuQuotaPercent (%d%%) exceeds what allowedCpus %q can deliver (%d CPUs = %d%%); clamped to %d%%",
+			l.CPUQuotaPercent, l.AllowedCPUs, allowed, maxQuota, maxQuota)
+		l.CPUQuotaPercent = maxQuota
+		return l, warning
+	}
+	return l, ""
+}
+
+// countAllowedCPUs counts the CPUs in a systemd AllowedCPUs list
+// ("0-3", "0,2,4", "0-3,8-11"). Returns 0 for an empty or unparseable
+// spec, which callers treat as "no pin" rather than guessing.
+func countAllowedCPUs(spec string) int {
+	if strings.TrimSpace(spec) == "" {
+		return 0
+	}
+	total := 0
+	for part := range strings.SplitSeq(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		lo, hi, isRange := strings.Cut(part, "-")
+		start, err := strconv.Atoi(strings.TrimSpace(lo))
+		if err != nil {
+			return 0
+		}
+		if !isRange {
+			total++
+			continue
+		}
+		end, err := strconv.Atoi(strings.TrimSpace(hi))
+		if err != nil || end < start {
+			return 0
+		}
+		total += end - start + 1
+	}
+	return total
+}
+
+// defaultHeadlessLimits derives the CPU pin and the CPU quota TOGETHER so
+// they are aligned by construction on whatever machine this runs on (see
+// DefaultHeadlessCPUShareOfPinned for why a fixed quota cannot be).
+//
+// The pin is the first quarter of the machine's logical CPUs, at least
+// two — SwiftShader on a single CPU would starve page load inside the
+// capture windows and turn the cap into a fidelity regression. Pinning is
+// what bounds worst-case package power draw no matter what the captured
+// artwork's code does; a CPUQuota alone still lets short bursts light up
+// every core's boost clocks, which is the spike that can brown out the
+// whole device. On the 16-thread target this yields "0-3" @ 300%.
+func defaultHeadlessLimits() HeadlessLimits {
+	total := runtime.NumCPU()
+	pinned := max(2, total/4)
+	if total > 0 && pinned > total {
+		pinned = total
+	}
+	// Floor at one full CPU: below that the quota, not the artwork, would
+	// be what fails captures.
+	quota := max(100, int(float64(pinned)*100*DefaultHeadlessCPUShareOfPinned))
+	return HeadlessLimits{
+		Enabled:         true,
+		CPUQuotaPercent: quota,
+		AllowedCPUs:     fmt.Sprintf("0-%d", pinned-1),
+		MemoryMaxBytes:  DefaultHeadlessMemoryMaxBytes,
+	}
 }
 
 // Runtime bundles Bootstrap's constructed components. Service and
@@ -141,6 +321,14 @@ type Runtime struct {
 	// interface (OnItemStateChanged only), which has no Close method, so
 	// Service cannot own this shutdown step itself.
 	Notifier *Notifier
+	// SysMetricsSink, when non-nil (the admission gate is enabled), is
+	// main.go's hook for feeding monitord's raw sysmetrics payloads into
+	// the gate — wired to mediator.SetSysMetricsObserver so the mediator
+	// stays policy-free forwarding glue and never imports an offlinecache
+	// type for it. The sink runs inline on the mediator's D-Bus
+	// signal-dispatch goroutine: it must not block, and the gate's Observe
+	// honors that by only decoding and storing.
+	SysMetricsSink func(raw []byte)
 }
 
 // Bootstrap wires every offlinecache component together from Options. It
@@ -163,12 +351,15 @@ func Bootstrap(
 	clockWrapper wrapper.Clock,
 	logger *zap.Logger,
 ) Runtime {
+	if opts.HeadlessLimitsWarning != "" {
+		logger.Warn("offline cache: " + opts.HeadlessLimitsWarning)
+	}
 	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
 	classifier := NewClassifier(httpClient)
 	headlessDebugPort := safeHeadlessDebugPort(opts.HeadlessDebugPort, opts.KioskCDPEndpoint, logger)
 	downloader := NewDownloader(
 		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, headlessDebugPort,
-		opts.HeadlessIdleTeardown, execWrapper, osWrapper, clockWrapper, httpClient, logger,
+		opts.HeadlessIdleTeardown, opts.HeadlessLimits, execWrapper, osWrapper, clockWrapper, httpClient, logger,
 	)
 
 	// bodyClient is deliberately NOT the daemon-wide httpClient above.
@@ -208,12 +399,19 @@ func Bootstrap(
 	// treats as "no prompt recovery wired", not as a startup failure.
 	scopeLost, _ := replayer.(ScopeLostRegistrar)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
-	service := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, logger)
+	admissionOpts := AdmissionOptions{Clock: clockWrapper, MaxDefer: opts.ResourceGate.MaxDefer}
+	var sysMetricsSink func(raw []byte)
+	if opts.ResourceGate.Enabled {
+		gate := NewAdmissionGate(opts.ResourceGate.Policy, clockWrapper, jsonWrapper, logger)
+		admissionOpts.Controller = gate
+		sysMetricsSink = gate.Observe
+	}
+	service := NewService(store, classifier, capturer, mediaCapturer, jsonWrapper, opts.CaptureWindowMs, opts.MaxDiskBytes, notifier, admissionOpts, logger)
 	kioskReplay := NewKioskReplay(replayer, store, opts.KioskCDPEndpoint, httpClient, dialer, jsonWrapper, ioWrapper, clockWrapper, logger)
 
 	return Runtime{
 		Service: service, KioskReplay: kioskReplay, ScopeLost: scopeLost,
-		StaticServer: staticServer, Notifier: notifier,
+		StaticServer: staticServer, Notifier: notifier, SysMetricsSink: sysMetricsSink,
 	}
 }
 

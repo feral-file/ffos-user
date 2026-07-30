@@ -93,7 +93,9 @@ Discover  →  Capture  →  Store  →  Replay
 
 Both browsers stay independent: the headless downloader (`:9223`) never
 shares state with the kiosk (`:9222`), so downloading does not disturb
-whatever is currently playing on the player surface. This separation is
+whatever is currently playing on the player surface. (State isolation is
+only half of that promise — resource contention is the other half, handled
+by the admission gate in §2.1.) This separation is
 enforced only by the two processes listening on different ports, so
 `bootstrap.go`'s `safeHeadlessDebugPort` defends against
 `offlineCache.headlessDebugPort` being misconfigured to collide with the
@@ -108,6 +110,116 @@ the kiosk's own (unusually configured) port happens to equal that default
 too, so the fallback itself can never reintroduce the same collision
 (logged at `Error`, mirroring `staticserver.go`'s `safeLoopbackAddr` guard
 for the same class of "config typo breaks an isolation invariant" hazard).
+
+### 2.1 Resource-aware admission (`admission.go`)
+
+Process separation keeps capture from *touching* the kiosk's state, but not
+from competing with it for the machine: the device runs the kiosk Chromium
+resident at all times, chronically near its memory limit, and the second
+headless Chromium a `ClassSoftware` capture spawns has field precedent for
+destabilizing playback (the real-GPU capture flags had to be replaced with
+software WebGL after device-wide freezes — see §3's flag notes). An
+admission gate therefore sits in front of the capture worker and defers
+STARTING queued jobs while the device is under pressure:
+
+- **Signals**: memory used% and CPU temperature, decoded from the
+  `sysmetrics` D-Bus signal monitord already publishes (~2s cadence). The
+  mediator forwards the raw payload to the gate via
+  `Runtime.SysMetricsSink` → `mediator.SetSysMetricsObserver`; decode and
+  policy live entirely in `offlinecache`. GPU busy% is deliberately NOT
+  gated on (kiosk WebGL art keeps it chronically high; the iGPU shares the
+  package thermal domain, so CPU temperature proxies GPU heat; the capture
+  Chromium renders with software WebGL anyway).
+- **Class-aware thresholds**: `ClassSoftware` (headless Chromium, hundreds
+  of MB to >1 GiB) blocks at 80% memory / 75°C; everything else (a plain
+  streamed GET) only at 90% / 85°C. Temperature is deliberately the
+  strict axis and memory the generous one: the capture Chromium renders
+  WebGL on the CPU (SwiftShader), so its dominant hazard is sustained CPU
+  load heating the package and degrading live playback. Every threshold
+  is written as a **derived berth beneath the layer it protects against**
+  rather than as an independent number — 75°C is `WatchdogCriticalCPUTempC
+  (93) − softwareThermalHeadroomC (18)`, and that 18°C is sized to cover
+  the heat a capture bounded by `headlessLimits` can add. Latching
+  hysteresis (resume = block − 5 units) prevents flapping at the metrics
+  cadence, and `maxDeferSeconds` defaults to an hour so a queued download
+  can wait out a single hot-running artwork's display slot rather than
+  fail midway through it.
+- **Deferral is not an error**: the gate only delays the head-of-queue pop
+  (`dequeueAdmitted`), strictly FIFO — no skip-ahead. A deferred item
+  stays `queued` on the wire (no new state in the app contract), remains
+  clearable without `busy`, and in-flight captures are never aborted. A
+  head deferred past `maxDeferSeconds` (default 60 min) fails with a
+  visible reason; re-issuing the download is the established retry path.
+- **Fail-open**: no sysmetrics for `metricsStaleAfterSeconds` (default
+  15s), or nonsensical readings (zero capacity/temperature), admit
+  unconditionally — absence of metrics is not evidence of pressure,
+  downloads are user-initiated, and the watchdog/firmware backstops hold
+  either way. Shutdown likewise bypasses the gate: `Stop()` drains via the
+  ungated path so a hot device can never stall daemon shutdown.
+- **Config**: `offlineCache.resourceGate` — on by default whenever the
+  offline cache is enabled; `"disabled": true` is the kill switch, and
+  every threshold is overridable (see `config.example.json`).
+
+The admission gate covers *starting* work; the **headless resource cap**
+(`offlineCache.headlessLimits`, also on by default) covers the window the
+gate cannot: a capture already in flight is never aborted and can run for
+up to the 30-minute transfer ceiling. `downloader.go` therefore wraps the
+capture Chromium spawn in a transient systemd scope (`systemd-run --user
+--scope`, a runtime invocation — deliberately NOT unit-file properties,
+which would drag this onto the full-image rail):
+
+- `CPUQuota` (default 300%) caps total cycles — bounding the heat and
+  scheduling pressure an in-flight capture can generate; `AllowedCPUs`
+  (default: first quarter of the machine's logical CPUs, "0-3" on the
+  16-thread target) additionally pins it so short bursts cannot light up
+  every core's boost clocks (a quota alone still allows that); `MemoryMax`
+  (default 2 GiB) turns a runaway capture into a clean cgroup OOM kill of
+  the *capture* process — a failed, retryable job — instead of a global
+  OOM-killer roll of the dice against the live kiosk.
+- Teardown of a scoped generation goes through `systemctl --user stop`
+  (cgroup kill: Chromium first, then `systemd-run` exits and the normal
+  reaper observes it) — never a raw kill of `systemd-run`, which would
+  orphan Chromium inside the scope still holding the debug port and
+  profile lock. A scope also survives a crashed daemon by design, so the
+  first spawn of each daemon run sweeps stale `feral-offline-capture-*`
+  scopes before probing.
+- Scope support is probed once (`systemd-run ... /bin/true`); on failure
+  (no session bus, missing binary) the downloader logs one warning and
+  degrades to the plain uncapped spawn — a broken environment slows
+  nothing and blocks nothing, it just loses the cap.
+
+**The gate and the cap are one system, not two knobs.** Three couplings
+keep them from drifting into a combination that only works on one device:
+
+1. **Memory** — the software memory threshold is *derived* from the cap:
+   `effective = min(softwareMaxMemoryPercent, memorySafetyCeilingPercent −
+   memoryMaxBytes as a percentage of this device's RAM)`. Taking the
+   minimum means the derived term can only tighten an operator's setting,
+   never loosen it. This is not cosmetic: with a 2 GiB cap, admitting at a
+   static 80% peaks near 92% on a 16 GB device (safe, under the watchdog's
+   95%) but at **105% on an 8 GB device** — the OOM the gate exists to
+   prevent. Deriving it yields 77.5% and 65% respectively, correct on both.
+   With the cap disabled the reserve is 0, the derived term drops out, and
+   the static threshold governs.
+2. **CPU quota vs. CPU set** — `cpuQuotaPercent` can never exceed
+   `100 × len(allowedCpus)`; above that the cpuset is the real limit and
+   the quota silently stops being one. A configured pair that violates
+   this is clamped to the reachable value and the correction is logged.
+   The defaults are derived together (`DefaultHeadlessCPUShareOfPinned`),
+   so they stay aligned on any core count instead of only on the
+   16-thread target.
+3. **Temperature** — the gate's 18°C berth below the watchdog's 93°C is
+   the budget for the heat a capture may add, and `headlessLimits` is what
+   bounds that addition. Raising the quota or widening the cpuset without
+   revisiting the berth is the amendment hazard to watch.
+
+**Not** attempted: telling Chromium how many CPUs to assume. There is no
+reliable flag for it, and whether Chromium's thread-pool sizing observes a
+cpuset at all is glibc-version dependent. `AllowedCPUs` is enforced by the
+kernel regardless of how many threads Chromium spawns, so the worst case
+is some extra mostly-idle threads — cheap, and not a heat or correctness
+problem. Speculative flags (`--renderer-process-limit`, `--single-process`)
+were rejected as capture-fidelity risks for no bounded gain.
 
 ---
 
