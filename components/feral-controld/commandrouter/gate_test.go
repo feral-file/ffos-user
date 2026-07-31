@@ -323,3 +323,37 @@ func TestDefaultGateConfig_ClassifiesCommands(t *testing.T) {
 	assert.GreaterOrEqual(t, rotation.Burst, 3)
 	assert.False(t, rotation.Dedupe)
 }
+
+// TestDefaultGateConfig_ClassifiesOfflineCacheCommands is the regression
+// test pinning that the five offline-cache commands (see commands/types.go's
+// "Offline artwork caching commands" block) are classified in Policies
+// rather than silently inheriting the generous Default policy — undersized
+// for downloadPlaylist/downloadPlaylistItem, which do DP1 resolution plus
+// enqueue into offlinecache.Service's jobQueue (bounded at
+// defaultMaxQueueLen, but not a limit a realistic burst is meant to hit).
+func TestDefaultGateConfig_ClassifiesOfflineCacheCommands(t *testing.T) {
+	cfg := DefaultGateConfig()
+	query := cfg.Policies[commands.CMD_DEVICE_STATUS]
+
+	// Downloads are explicitly classified, not left at Default, and carry
+	// the same heavier weight as the externally reachable cast path.
+	cast := cfg.Policies[commands.CMD_DISPLAY_PLAYLIST]
+	for _, cmd := range []commands.Type{commands.CMD_DOWNLOAD_PLAYLIST_ITEM, commands.CMD_DOWNLOAD_PLAYLIST} {
+		p := cfg.Policies[cmd]
+		assert.NotEqual(t, cfg.Default.Rate, p.Rate, "%s must not silently fall through to Default", cmd)
+		assert.Equal(t, cast.Weight, p.Weight, "%s should be classified as heavy as displayPlaylist", cmd)
+	}
+
+	// Clears are explicitly classified, not left at Default, and carry a
+	// heavier weight than a cheap query (disk I/O + a store-wide GC sweep).
+	for _, cmd := range []commands.Type{commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE, commands.CMD_CLEAR_PLAYLIST_CACHE} {
+		p := cfg.Policies[cmd]
+		assert.NotEqual(t, cfg.Default.Rate, p.Rate, "%s must not silently fall through to Default", cmd)
+		assert.Greater(t, p.Weight, query.Weight, "%s should be heavier than a cheap query", cmd)
+	}
+
+	// Status is a cheap, dedupable query, same class as getDeviceStatus.
+	status := cfg.Policies[commands.CMD_GET_OFFLINE_CACHE_STATUS]
+	assert.NotEqual(t, cfg.Default.Rate, status.Rate, "getOfflineCacheStatus must not silently fall through to Default")
+	assert.Equal(t, query.Weight, status.Weight)
+}

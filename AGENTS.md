@@ -47,7 +47,10 @@ Canonical sequence:
 - Do not commit or open a PR until the reviewer loop reaches `Verdict: accept`.
 
 ## Agent assets
+- Claude Code contract: `CLAUDE.md` (consolidates this file, `.cursor/rules/`, the sub-agent roles, and `prompts/code-review.md` into one entry point)
 - Cursor rules: `.cursor/rules/`
 - Cursor sub-agents: `.cursor/agents/`
 - Codex sub-agents: `.codex/agents/`
 - OpenCode sub-agents: `.opencode/agents/`
+
+A repository-wide rule change must land in `CLAUDE.md` AND here (and in `.cursor/rules/` when it is glob-scoped) in the same change. A rule that exists in only one of them will be missed by whichever tool reads the other.

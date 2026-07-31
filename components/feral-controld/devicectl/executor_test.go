@@ -4516,7 +4516,16 @@ func TestExecutor_SysMetrics_ConcurrentAccess(t *testing.T) {
 		testMetrics := []byte(`{"cpu": 85.5, "memory": 60.2, "disk": 45.0}`)
 		ts.executor.SaveLastSysMetrics(testMetrics)
 
-		saveComplete <- true
+		// Closed, not sent: saveComplete has TWO receivers — the first
+		// goroutine's tail wait and the third goroutine's head wait — so
+		// a single token is claimed by whichever gets there first and the
+		// other blocks forever. When the first goroutine won that race
+		// the third never ran, nothing ever sent readSecond, and the test
+		// hung until the 10-minute panic (seen on CI, ~10% of runs in a
+		// standalone reproduction of this channel topology). Closing
+		// releases both, which is what "save is done" was always meant
+		// to mean.
+		close(saveComplete)
 	}()
 
 	// Third goroutine: Read (should get saved data)

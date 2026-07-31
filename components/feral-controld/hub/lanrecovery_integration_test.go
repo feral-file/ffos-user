@@ -113,9 +113,10 @@ func newLANRig(t *testing.T, gateCfg commandrouter.GateConfig, statusInfo Status
 		jsonw, mockOS, mockExec, mockMath, mockClock, logger,
 	)
 
-	// Real command router + real storm gate. dp1 and mintPairing are unused by
-	// the device-control recovery commands and are left nil.
-	inner := commandrouter.New(executor, mockCDP, nil, mockPoller, nil, nil, jsonw, logger)
+	// Real command router + real storm gate. dp1, mintPairing, offlineCache,
+	// kioskReplay and the playlist scheduler are unused by the device-control
+	// recovery commands and are left nil.
+	inner := commandrouter.New(executor, mockCDP, nil, mockPoller, nil, nil, nil, nil, jsonw, logger)
 	gated := commandrouter.NewGate(inner, gateCfg, logger)
 
 	// Grab the mux the hub registers its routed+middlewared handlers onto, then

@@ -7,6 +7,7 @@ package mocks
 import (
 	context "context"
 	io "io"
+	net "net"
 	http "net/http"
 	reflect "reflect"
 
@@ -145,6 +146,20 @@ func (m *MockHTTPServer) ListenAndServe() error {
 func (mr *MockHTTPServerMockRecorder) ListenAndServe() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListenAndServe", reflect.TypeOf((*MockHTTPServer)(nil).ListenAndServe))
+}
+
+// Serve mocks base method.
+func (m *MockHTTPServer) Serve(l net.Listener) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Serve", l)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Serve indicates an expected call of Serve.
+func (mr *MockHTTPServerMockRecorder) Serve(l interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Serve", reflect.TypeOf((*MockHTTPServer)(nil).Serve), l)
 }
 
 // Shutdown mocks base method.

@@ -1,0 +1,20 @@
+---
+description: API and protocol design rules for ffos-user service work
+globs:
+  - "components/**"
+alwaysApply: false
+---
+
+# API Design Rule
+
+`docs/api-design.md` is the canonical API and protocol contract for this repository, and it is filled in. Read it before adding or changing an interface.
+
+(This file previously said the contract "has not been finalized". That predated
+the doc being written and contradicted `AGENTS.md`/`CLAUDE.md`, which both state
+it is filled — see CLAUDE.md's "Which file wins".)
+
+Alongside it:
+- keep interfaces explicit and narrow
+- prefer additive changes over ambiguous field reuse
+- comment on compatibility assumptions near protocol code
+- update `docs/api-design.md` when you establish a rule it does not yet state

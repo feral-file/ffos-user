@@ -70,6 +70,11 @@ for relayer topic assignment:
   otherwise forwarded unchanged.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
+- `downloadPlaylistItem`, `downloadPlaylist`, `clearPlaylistItemCache`,
+  `clearPlaylistCache`, and `getOfflineCacheStatus` are likewise handled by
+  `feral-controld` as commandrouter pre-CDP special cases, owned by the
+  `offlinecache` package (see "Offline Artwork Caching Inbound Messages"
+  below).
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
   CDP.
 - Any other non-device command is forwarded to Chromium through CDP.
@@ -376,12 +381,32 @@ Current success response: Chromium/player response from
 }
 ```
 
+If offline caching is enabled and `playlistUrl` was previously used with
+`downloadPlaylist` for this exact URL, a live DP1 fetch/processing
+failure (e.g. no network) falls back to that downloaded copy instead of
+failing the command — see `offline-artwork-capture.md` §6. This is a
+"last known good" copy: it will not reflect anything republished at that
+URL since it was downloaded.
+
+If offline caching is enabled, this command also switches the kiosk's
+live offline-replay `Fetch`-interception scope to the newly-requested
+playlist's cached items *before* the CDP send below (so replay is ready
+before the player starts requesting the new playlist's resources — see
+`offline-artwork-capture.md` §6). If the CDP send then fails, or the
+player rejects the command (`ok:false`), that scope switch is reverted:
+the command re-queries whatever the player actually reports as currently
+displayed and re-syncs replay scope to that, since the kiosk never
+actually switched away from it. This revert is itself best-effort and
+does not change the error/response shape below in any way.
+
 Current error cases:
 
 - Missing both `playlistUrl` and `dp1_call`: command failure with
   `unknown payload type`.
 - `playlistUrl` is not a non-empty string.
-- DP1 URL fetch or processing fails.
+- DP1 URL fetch or processing fails, and no cached fallback exists for
+  that URL (never downloaded, offline caching disabled, or since
+  cleared).
 - `dp1_call` is not an object.
 - Inline DP1 cannot be marshaled/unmarshaled.
 - Dynamic query resolution fails.
@@ -1394,6 +1419,594 @@ Allowed `status` values:
 - `cancelled`
 
 The outcome must not include the browser session token.
+
+## Offline Artwork Caching Inbound Messages
+
+`feral-controld` can download a DP-1 playlist item into a local cache so
+`ff-player` can play it back without internet access — a software
+(HTML/JS) item via a headless-Chromium capture, or any other single-file
+mime type (image/video/audio/SVG/`model/gltf`/PDF/unrecognized) via a
+browser-free direct HTTP download; see `docs/offline-artwork-capture.md`
+§1/§3.3. This is a `commandrouter`-owned, pre-CDP command family (same
+precedent as mint-pairing): these commands never reach
+Manifest-based streaming sources — HLS (`.m3u8`) and DASH (`.mpd` /
+`application/dash+xml`) alike — are the one class rejected outright; see
+`classify.go`'s `ClassStreaming`. Both families must be excluded, not
+just HLS: a manifest points at segments fetched progressively during
+playback rather than a single fixed byte sequence, so a manifest that
+fell through to the single-file download path would cache only the
+manifest itself with `coverageComplete: true`, then fail every segment
+request offline under the default fail-closed miss policy while status
+still reported the item as fully cached.
+
+The subsystem is opt-in through `offlineCache.enabled` in `feral-controld`
+config. When disabled (or the config is absent), every command below returns:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "disabled",
+    "message": "offline caching is not enabled",
+    "retryable": false
+  }
+}
+```
+
+`downloadPlaylistItem`/`downloadPlaylist` also return this same `disabled`
+shape (message: `"offline cache: service is not started"`) if the offline
+cache's background worker never started successfully — `feral-controld`
+treats a `Service.Start` failure (e.g. an unreadable cache root) as
+best-effort and keeps running rather than crashing, so this guards against
+silently queuing a download nothing will ever process. As with the
+feature-disabled case, this is not retryable by the client; it clears only
+on a daemon restart (or after the underlying startup failure is fixed).
+
+All five commands use the explicit RPC ok/error shape from
+["Response Shape Recommendation for New Inbound Commands"](#response-shape-recommendation-for-new-inbound-commands)
+below. Downloads are asynchronous: the command ACKs `queued` immediately and
+per-item progress arrives later over the `offline_cache_status` notification.
+
+Common error codes across this command family:
+
+- `disabled`: offline caching is not enabled.
+- `invalid_request`: a required field (`itemId`, `playlistId`) is missing,
+  neither `playlistUrl` nor `dp1_call` was supplied, or — for
+  `getOfflineCacheStatus` only — an argument is the wrong type or out of
+  range (see that command's own section).
+- `resolve_failed`: DP1 playlist resolution failed (bad URL, fetch failure,
+  malformed `dp1_call`); `retryable: true`.
+- `not_found`: the requested `itemId` was not found in the resolved
+  playlist (`downloadPlaylistItem`), the item being *cleared* is entirely
+  unknown to the device — neither cached nor queued nor otherwise tracked
+  (`clearPlaylistItemCache`; see that command for why a clear that cancels
+  a still-queued download is a success instead) — or the playlist being
+  cleared is not cached (`clearPlaylistCache`, which is unaffected by that
+  distinction: `downloadPlaylist` writes the playlist record before queuing
+  any item, so a cached playlist always has a record).
+  `getOfflineCacheStatus` never returns `not_found` for an unrecognized
+  `itemId` — it always answers `ok: true` with that item reported as
+  `state: "not_cached"` (see below), since querying an item that simply
+  has no cache yet is not itself an error condition.
+- `unsupported_media`: the item's source classifies as HLS/DASH manifest streaming
+  (see `classify.go`'s `ClassStreaming`); this item can never be cached
+  offline, so `retryable: false`. Every other class (software, media,
+  unknown) is queueable.
+- `offline_cache_error`: a store/disk/network failure inside the offline
+  cache service; `retryable: true`.
+
+### downloadPlaylistItem
+
+Purpose: resolve a playlist, verify one item is not a live/streaming
+source, and queue it for offline capture.
+
+Example:
+
+```json
+{
+  "messageID": "msg-dl-item-1",
+  "message": {
+    "command": "downloadPlaylistItem",
+    "request": {
+      "playlistUrl": "https://gallery.example/dp1/feed.json",
+      "itemId": "work-1"
+    }
+  }
+}
+```
+
+`dp1_call` (inline/dynamic DP1) is also accepted in place of `playlistUrl`,
+using the same shapes as `displayPlaylist`.
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "status": "queued",
+  "itemId": "work-1"
+}
+```
+
+Error cases: `invalid_request` (missing `itemId`), `resolve_failed`,
+`not_found` (itemId not in the resolved playlist), `unsupported_media`,
+`busy`, `offline_cache_error`.
+
+`busy` here (retryable) covers a `clearPlaylistItemCache`/
+`clearPlaylistCache` for the same item that landed while this download was
+still resolving and queuing. The clear wins by design — the alternative
+would resurrect a record the device already told a client was deleted — so
+nothing was queued, and this command reports that rather than answering
+`status: "queued"` for work no worker will run. Re-issue the download once
+the clear has settled and it queues normally. No `offline_cache_status`
+notification is emitted for an item in this case, so a client must not
+wait on one.
+
+When the request was resolved via `playlistUrl` (not `dp1_call`) and the
+item is queued successfully, `feral-controld` also best-effort indexes the
+resolved playlist body under that same `playlistUrl` so a later offline
+`displayPlaylist` by that URL can fall back to it (see
+`docs/offline-artwork-capture.md`'s on-disk-format section). This indexing
+is best-effort and never changes this command's own response: a failure
+to index is logged, not surfaced as an error here, since the requested
+item is genuinely queued either way.
+
+### downloadPlaylist
+
+Purpose: resolve a playlist and queue every cacheable item it contains (up
+to `dp1.MAX_PLAYLIST_ITEMS_LIMIT` items) — every class except HLS/DASH manifest
+streaming; streaming items are silently skipped rather than failing the
+whole request.
+
+Example:
+
+```json
+{
+  "messageID": "msg-dl-playlist-1",
+  "message": {
+    "command": "downloadPlaylist",
+    "request": {
+      "playlistUrl": "https://gallery.example/dp1/feed.json"
+    }
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "status": "queued",
+  "total": 12,
+  "queuedCount": 5
+}
+```
+
+`total` is every item in the resolved playlist; `queuedCount` is how many
+were actually queued for offline capture — every class except HLS/DASH manifest
+streaming (software via headless Chromium, media/unknown via direct HTTP
+download; see `docs/offline-artwork-capture.md` §3.3). An item classified as
+HLS/DASH manifest streaming (or missing an `id`/`source`) is simply excluded from
+`queuedCount` with `ok: true` — that is the normal, successful shape for
+a playlist with few or no cacheable items. If classification itself fails
+(e.g. a transient network error reaching the classify target) for every
+eligible item so nothing could be queued at all, this command instead
+fails with `offline_cache_error` rather than returning that same
+`ok: true`/`queuedCount: 0` shape: a broken classifier must not look
+identical to "this playlist genuinely has no cacheable items" to the
+controller. A classify failure for only *some* items still returns
+`ok: true` with `queuedCount` reflecting whatever did queue
+successfully; the skipped item(s) are logged server-side but not
+individually reported here.
+
+Classification of the playlist's items is **time-bounded** (10s total,
+run concurrently) so this command acknowledges promptly regardless of
+item count. Each item needs a network probe to classify, so an
+unbounded serial pass over a large playlist of unreachable sources could
+otherwise hold the command far past the LAN hub's own 30s response
+deadline. An item not classified before that bound is treated exactly
+like a classification failure: logged, skipped, and absent from
+`queuedCount`. Re-issuing the command retries those items.
+
+An item excluded because a concurrent clear won the race (see
+`downloadPlaylistItem`'s `busy` case) is likewise absent from
+`queuedCount` without failing the whole command: a playlist download is an
+aggregate whose other items may well have queued fine, and `queuedCount`
+already reports exactly how many did.
+
+The resolved playlist (as `dp1.DP1` returns it —
+`dynamicQuery` items already materialized, all field values including
+`source` intact) is stored as-is (`playlists/<playlistId>.json`, no further
+mutation) so a later `clearPlaylistCache` can operate on it. When the
+request carried `playlistUrl` (as opposed to `dp1_call`), that URL is
+additionally indexed so `displayPlaylist` with the same `playlistUrl` can
+still find and display this exact cached playlist offline if live DP1
+resolution later fails — see `displayPlaylist`'s section above and
+`offline-artwork-capture.md` §6. Both the playlist body and its `playlistUrl`
+index are written only after classification/queuing finishes, never
+before — a request that ends up returning `offline_cache_error` above
+(every eligible item failed classification) persists neither, so a
+failed download can never leave a "last known good" offline fallback
+that looks like a successful one. This is not
+guaranteed to be byte-identical to whatever a publisher
+originally served (`dp1` resolution re-serializes the Go struct, so key
+order/whitespace can differ), but DP-1 signatures verify against a
+JCS-canonicalized form rather than raw bytes, so this does not affect
+signature validity — see `docs/offline-artwork-capture.md`.
+
+Error cases: `resolve_failed`, `offline_cache_error`.
+
+### clearPlaylistItemCache
+
+Purpose: delete one cached item's record and garbage-collect any blobs it
+was the last referent of.
+
+Example:
+
+```json
+{
+  "messageID": "msg-clear-item-1",
+  "message": {
+    "command": "clearPlaylistItemCache",
+    "request": {
+      "itemId": "work-1"
+    }
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "itemId": "work-1"
+}
+```
+
+A clear that finds no cached record but *does* cancel a still-queued
+download for `itemId` — including a first-time download that has not
+captured anything yet — is also a success, not a `not_found`: work really
+was canceled, and the item ends up `not_cached` either way.
+
+Every item this command settles at `not_cached` (a deleted record, or a
+canceled queued download) is pushed as an `offline_cache_status`
+notification, so a connected controller does not have to poll
+`getOfflineCacheStatus` to learn the item is gone. An item that was already
+`not_cached` produces no notification — nothing transitioned.
+
+Error cases: `invalid_request` (missing `itemId`), `not_found` (the device
+has no cached record, queued download, or other tracked state for `itemId`
+— nothing to clear), `busy` (retryable — `itemId` is the one item currently
+mid-capture; retry once its in-flight download finishes, typically within a
+few seconds up to the configured capture window), `offline_cache_error`.
+
+### clearPlaylistCache
+
+Purpose: delete a cached playlist's record and every one of its cached
+items, garbage-collecting shared blobs.
+
+Example:
+
+```json
+{
+  "messageID": "msg-clear-playlist-1",
+  "message": {
+    "command": "clearPlaylistCache",
+    "request": {
+      "playlistId": "playlist-1"
+    }
+  }
+}
+```
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "playlistId": "playlist-1"
+}
+```
+
+As with `clearPlaylistItemCache`, each member item this command settles at
+`not_cached` is pushed as its own `offline_cache_status` notification.
+Member items that were already `not_cached`, and any whose deletion failed
+(the record — and therefore its `ready`/`partial` status — is still on
+disk), are deliberately not announced.
+
+Error cases: `invalid_request` (missing `playlistId`), `not_found` (playlist
+is not cached), `busy` (retryable — one of the playlist's items is
+currently mid-capture; the whole clear is rejected rather than clearing
+everything else and leaving that one item to reappear once its capture
+finishes — retry once it completes), `offline_cache_error` (also covers a
+genuine per-item deletion failure partway through the sweep — e.g. a
+permissions/I/O error deleting one item's on-disk record; every item that
+*did* delete successfully, plus the playlist record and GC, still ran
+before this is reported, so a retry only needs to contend with whatever
+actually failed).
+
+### getOfflineCacheStatus
+
+Purpose: return a cache-state snapshot for the mobile app to render.
+
+Example (specific items):
+
+```json
+{
+  "messageID": "msg-status-1",
+  "message": {
+    "command": "getOfflineCacheStatus",
+    "request": {
+      "itemIds": ["work-1", "work-2"]
+    }
+  }
+}
+```
+
+Omitting `itemIds` (or passing an empty array) reports on every item this
+process currently knows about, on disk and in flight.
+
+Request fields, all optional:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `itemIds` | string[] | Restrict the report to these items. Omitted or `[]` means every known item. At most **1024** ids per request. |
+| `limit` | integer | Cap on how many entries `items` carries. Omitted, `0`, or above the cap is clamped to **1000**, which is also the maximum. |
+| `cursor` | string | The `nextCursor` from the previous page. Omitted means the first page. |
+| `totalsOnly` | boolean | Return `totals`/`diskUsed` with an empty `items`, for a summary view. Cannot be combined with `cursor`. |
+
+Unlike the other commands in this family, these arguments are validated
+strictly: a wrong type (for example `"itemIds": "work-1"` instead of an
+array) is rejected with `invalid_request` rather than ignored, because
+every one of these fields decides how much work the device does and how
+large the response gets.
+
+Success response:
+
+```json
+{
+  "ok": true,
+  "items": [
+    {
+      "itemId": "work-1",
+      "state": "ready",
+      "percent": 100,
+      "bytes": 4213456,
+      "coverageComplete": true
+    },
+    {
+      "itemId": "work-2",
+      "state": "partial",
+      "percent": 100,
+      "bytes": 189234,
+      "coverageComplete": false,
+      "reason": "loading_failed(net::ERR_CONNECTION_RESET):https://cdn.example/track.mp3"
+    }
+  ],
+  "totals": {
+    "total": 2,
+    "ready": 1,
+    "downloading": 0,
+    "failed": 0
+  },
+  "diskUsed": 4402690
+}
+```
+
+`items` is always ordered by `itemId` — including when `itemIds` was
+given, so the response order does not follow the request order, and
+duplicate ids collapse to one entry.
+
+**Paging.** `items` never carries more than 1000 entries. When more
+remain, the response adds `"truncated": true` and `"nextCursor": "<last
+itemId in items>"`; pass that value back as `cursor` for the next page,
+and repeat until `nextCursor` is absent. Both fields are absent on the
+last page, so a client can treat "no `nextCursor`" as "that was
+everything". Because paging is by sort order rather than by position, a
+cursor stays valid even if the item it names is cleared or evicted
+between pages.
+
+`totals` and `diskUsed` describe the **whole requested set**, not the
+current page, and for that reason are returned **only on the first page**
+(a request with no `cursor`). Deriving them costs one on-disk read per
+item in the set, so recomputing them for every page would make walking a
+large cache cost far more than it needs to. A continuation page omits
+both fields; carry forward what the first page reported. Use
+`totalsOnly: true` when the summary is all you need — it skips the
+per-item disk measurements and the response body entirely.
+
+`state` is one of `not_cached`, `queued`, `downloading`, `ready`, `partial`,
+`failed`, `broken_online`. `percent` is coarse (`0` or `100`): capture is a
+single bounded-window operation, not chunked, so there is no meaningful
+mid-download progress beyond queued/downloading vs. done. `100` covers
+every state where the capture window already finished — `ready`,
+`partial`, and `broken_online` (a finished capture whose only failures
+were CSP blocks, so the artwork itself, not the download, is what is
+broken — see below) — since none of those three will ever progress
+further on their own; `0` covers `not_cached`, `queued`, `downloading`,
+and `failed` (no successful capture ever completed to report progress
+on). `reason` is only
+present when `coverageComplete` is `false` and is free text, not a fixed
+enum — it is a semicolon-joined list of per-resource capture outcomes,
+each one of:
+- `csp_blocked` embedded inside `loading_failed(csp_blocked):<url>` — the
+  resource's own request failed even with live network, because the
+  origin's Content-Security-Policy blocked it (see
+  `offline-artwork-capture.md` §4.5). Clients should treat this as
+  permanently degraded, not a transient capture failure.
+- `loading_failed(<errorText>):<url>` — the browser's own
+  `Network.loadingFailed` event for that URL, with `errorText` as CDP
+  reported it (e.g. `net::ERR_CONNECTION_RESET`).
+- `fetch_failed:<url>` — the resource loaded successfully in-browser but
+  controld's own out-of-band re-fetch of its bytes failed.
+- `unresolved_at_deadline:<url>` — the page requested this URL but it
+  never reached a terminal `Network.responseReceived`/`loadingFailed`
+  event before the capture window closed (e.g. a hanging/slow origin).
+- `over_disk_budget:<url>` — the resource was seen but deliberately not
+  stored because writing it would have pushed the cache past its
+  configured `maxDiskBytes` ceiling. Retrying after older items have
+  been evicted (or after the budget is raised) can succeed.
+- `gltf_external_dependency:<uri>` — the item is a JSON `.gltf` manifest
+  whose spec-defined `buffers[].uri`/`images[].uri` entries reference
+  separate external files the direct-download path does not capture
+  (see `offline-artwork-capture.md` §3.3). Like `csp_blocked`, treat
+  this as permanently degraded for this source, not a transient capture
+  failure — re-downloading the same manifest can never capture the
+  missing files.
+
+Clients should match on the fixed prefix before the first `:`/`(` rather
+than the whole string, and must not assume the reason list is exhaustive
+or stable in wording — only `coverageComplete` itself is a stable
+boolean contract.
+
+`reason` is **truncated to roughly 512 bytes** on the wire (both here and
+in the `offline_cache_status` notification). One entry is emitted per
+failed resource with that resource's full URL inline, and nothing bounds
+how many resources an artwork loads, so an item captured with no network
+can otherwise produce tens of KB of reason text on its own. Entries are
+kept whole — a truncated list ends with `…(+N more)`, where `N` is how
+many entries were dropped, so a partial list never reads as a complete
+one. The untruncated text stays in the device's on-disk record for
+support/debugging.
+
+Error cases: `invalid_request` (an argument of the wrong type, more than
+1024 `itemIds`, a negative or non-integral `limit`, an empty `cursor`, or
+`totalsOnly` combined with `cursor`), `offline_cache_error`.
+
+### offline_cache_status notification
+
+Purpose: push per-item state transitions (queued, downloading, terminal
+state) to the mobile app as they happen, so it does not need to poll
+`getOfflineCacheStatus` to keep a live view current. Delivery is
+best-effort, not guaranteed — see the delivery rules below, and prefer
+`getOfflineCacheStatus` whenever a definitive answer is needed.
+
+That includes transitions the app did not itself cause or cannot see the
+result of: an item evicted by the disk-budget sweep, and an item cleared by
+`clearPlaylistItemCache`/`clearPlaylistCache`, both push `not_cached`.
+Clears are pushed even though the clearing client already got an `ok: true`
+response, because *other* connected controllers (and local hub WebSocket
+clients) would otherwise keep rendering a stale `queued`/`ready` entry
+until they next poll.
+
+Direction: `feral-controld` -> `ff-relayer` -> `ff-controller`, and mirrored
+to local hub WebSocket clients.
+
+```json
+{
+  "type": "notification",
+  "notification_type": "offline_cache_status",
+  "persist_record_count": 1,
+  "message": {
+    "itemId": "work-1",
+    "state": "ready",
+    "percent": 100,
+    "bytes": 4213456,
+    "coverageComplete": true
+  }
+}
+```
+
+Delivery is best-effort on both transports, and **neither one runs on the
+goroutine that produced the notification**. Both are enqueued
+(non-blocking) onto one bounded background queue (`notifyQueueCapacity`,
+1024 entries in `notifier.go` — the DP-1 per-playlist item cap), drained
+one notification at a time by a dedicated worker that performs the relayer
+send and then the hub-WS send for each.
+
+**Successive states of the same item coalesce while queued.** The queue
+holds at most one pending notification per `itemId` — the latest state
+that item has reached — so an item may go straight from `queued` to
+`ready` on the wire with no `downloading` in between, and may appear only
+once for a whole burst of transitions. Clients must therefore treat each
+notification as *the item's current state*, never as a step in a sequence
+they can count on receiving in full. Delivered notifications are never
+reordered — one worker sends them in queue order, so `downloading` can
+never arrive after `ready` for the same item — intermediate states are
+simply skipped.
+
+This is what keeps the bound safe: the queue's capacity counts in-flight
+*items*, which a single command's playlist size bounds, rather than
+*transitions*, which nothing bounds. A max-size playlist emits 1024 `queued` notifications from
+command admission alone, before any `downloading`/terminal transitions —
+with one slot per transition, those overran the buffer and accepted items
+silently lost progress.
+
+The capacity is one max-size playlist, which is the largest burst a single
+command can produce — not a guarantee that drops cannot happen. Several
+back-to-back `downloadPlaylist` calls (the rate limiter admits a burst of
+3), or a disk-budget eviction sweep (bounded by the device's record count,
+not by any playlist size), can exceed it in aggregate. That is what the
+reconciliation advice below is for.
+
+That matters because notifications are produced from two places that
+must not pay for delivery: the single capture worker (which would
+otherwise stall the whole download queue behind a slow transport) and
+command admission itself — `enqueue` emits `queued` per item, and
+`downloadPlaylist` drives that in a loop, so an inline relayer send
+bounded at 5s each turned one playlist request into (item count) x 5s of
+blocking, minutes past the LAN hub's own response deadline.
+
+Per transport, at delivery time:
+
+- **Relayer**: skipped silently (no log) when the relayer is not
+  connected; otherwise write-deadline-bounded to 5s via
+  `notifySendTimeout`, and only a failed `Send` is logged.
+- **Hub WS**: `ws.WS.SendAll` is itself a no-op (debug-logged, not a
+  drop/warning) when no hub clients are connected — that is `SendAll`'s
+  own behavior (`ws.go`), not a decision `Notifier` makes before
+  enqueueing. Its per-connection writes are each bounded
+  (`ws.go`'s `sendWriteWait`), but the loop across however many clients
+  are connected has no aggregate bound, which is the other reason
+  delivery cannot run inline.
+
+Two situations drop a notification outright, logged as a warning each
+time: the queue is full (more than 1024 *distinct items* are pending
+delivery at once — more than a whole max-size playlist; an update to an
+already-pending item is coalesced into its existing slot and so is never
+dropped for lack of room), or the notification was still queued when the
+daemon began shutting down
+(`Notifier.Close` does not drain the remainder — see its doc for why
+flushing to a client the process is about to stop serving has no value).
+Shutdown bounds how long it waits on the delivery already in flight:
+`main.go` uses `Notifier.CloseWithin` with a budget well inside the
+daemon's own shutdown timeout, because neither leg finishes fast enough
+for it — the relayer send waits on that connection's mutex (bounded, but
+several times over the whole shutdown timeout), and the hub fan-out
+bounds each per-connection write but not the loop across clients, so that
+leg grows with client count. Note this bounds that *step*, not shutdown
+as a whole: the abandoned delivery keeps the transport mutex it was
+using, and both transports take that same mutex for their own teardown
+later in the shutdown sequence, so a wedged delivery delays shutdown
+either way. A connection that hits its write deadline (either transport)
+is dropped as a failed write and closed, same as any other write error;
+the
+queued/downloading captures behind it are unaffected either way.
+
+The `message` body is one `items[]` entry of `getOfflineCacheStatus` and
+follows the same rules, including the ~512-byte `reason` truncation
+described there.
+
+Clients that need a definitive current state should still poll
+`getOfflineCacheStatus` rather than relying on every notification having
+been delivered.
+
+This notification is attempt-level, not cache-level: it reports the
+outcome of one specific capture attempt for `itemId`, which is not always
+the same thing as whether that item is currently playable offline. The
+one case where they diverge: re-downloading an item that already has a
+successful cached copy (`downloadPlaylistItem` on an already-`ready` item)
+and that re-download fails. This notification fires `state: "failed"` for
+the attempt, but the earlier successful capture's blobs and record on
+disk were never touched by the failed attempt, so a `getOfflineCacheStatus`
+call made right after (or the next `offline_cache_status` notification for
+an unrelated event) will still report `ready`/`partial` for that same
+`itemId` — the old cached copy remains valid and playable offline the
+entire time. Clients should treat this notification as "this attempt's
+result", and use `getOfflineCacheStatus` as the source of truth for
+"is this item currently cached" when the two might disagree.
 
 ## Response Shape Recommendation for New Inbound Commands
 

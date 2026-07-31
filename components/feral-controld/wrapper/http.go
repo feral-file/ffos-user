@@ -4,6 +4,7 @@ package wrapper
 import (
 	"context"
 	go_io "io"
+	"net"
 	go_http "net/http"
 	"time"
 )
@@ -64,6 +65,14 @@ func (h httpClient) Post(url string, contentType string, body go_io.Reader) (*go
 type HTTPServer interface {
 	Handler() go_http.Handler
 	ListenAndServe() error
+	// Serve runs the server on an already-bound listener (net.Listener),
+	// unlike ListenAndServe, which combines binding and serving into one
+	// blocking call. Callers that need to know DEFINITIVELY whether a
+	// bind succeeded before treating the server as available (see
+	// offlinecache.StaticServer's Listen/Serve split and its doc for
+	// why net/http's combined ListenAndServe cannot provide that)
+	// should net.Listen themselves and call Serve with the result.
+	Serve(l net.Listener) error
 	Shutdown(ctx context.Context) error
 }
 
@@ -81,6 +90,10 @@ func (h httpServer) Handler() go_http.Handler {
 
 func (h httpServer) ListenAndServe() error {
 	return h.server.ListenAndServe()
+}
+
+func (h httpServer) Serve(l net.Listener) error {
+	return h.server.Serve(l)
 }
 
 func (h httpServer) Shutdown(ctx context.Context) error {

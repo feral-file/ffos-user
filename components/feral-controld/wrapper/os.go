@@ -13,10 +13,27 @@ type OS interface {
 	ReadFile(path string) ([]byte, error)
 	WriteFile(path string, data []byte, perm go_os.FileMode) error
 	ReadDir(path string) ([]go_os.DirEntry, error)
+	// Stat also backs blob/disk size accounting in the offline-cache store.
 	Stat(path string) (go_os.FileInfo, error)
 	IsNotExist(err error) bool
 	MkdirAll(path string, perm go_os.FileMode) error
 	Rename(oldpath, newpath string) error
+	// Remove and RemoveAll back the offline-cache store's item/blob deletion and
+	// GC sweep (see components/feral-controld/offlinecache). Added alongside that
+	// feature; every other OS caller is unaffected since these are additive.
+	Remove(path string) error
+	RemoveAll(path string) error
+	// Open backs the offline-cache static server's streamed serving of
+	// large blobs (io.ReadSeeker, so http.ServeContent can honor Range
+	// requests for video seeking) without loading the whole file into
+	// memory the way ReadFile would.
+	Open(path string) (*go_os.File, error)
+	// CreateTemp backs the offline-cache store's streaming blob write
+	// path (see offlinecache/store.go's WriteBlob): a blob's
+	// content-addressed name is only known after its full content has
+	// been hashed, so the write has to land in a uniquely-named temp
+	// file first and get renamed into place once the hash is known.
+	CreateTemp(dir, pattern string) (*go_os.File, error)
 	Exit(code int)
 }
 
@@ -52,6 +69,22 @@ func (o os) MkdirAll(path string, perm go_os.FileMode) error {
 
 func (o os) Rename(oldpath, newpath string) error {
 	return go_os.Rename(oldpath, newpath)
+}
+
+func (o os) Remove(path string) error {
+	return go_os.Remove(path)
+}
+
+func (o os) RemoveAll(path string) error {
+	return go_os.RemoveAll(path)
+}
+
+func (o os) Open(path string) (*go_os.File, error) {
+	return go_os.Open(path)
+}
+
+func (o os) CreateTemp(dir, pattern string) (*go_os.File, error) {
+	return go_os.CreateTemp(dir, pattern)
 }
 
 func (o os) Exit(code int) {

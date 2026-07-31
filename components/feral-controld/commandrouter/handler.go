@@ -12,6 +12,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
 	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
@@ -31,8 +32,16 @@ type handler struct {
 	json         wrapper.JSON
 	statusPoller status.Poller
 	mintPairing  mintpairing.Service
-	scheduler    playlistschedule.Scheduler
-	logger       *zap.Logger
+	// offlineCache may be nil (feature disabled / not yet wired), mirroring
+	// the mintPairing nil-guard pattern above.
+	offlineCache offlinecache.Service
+	// kioskReplay may be nil for the same reason as offlineCache above.
+	// Kept as a separate nilable dependency (rather than folded into
+	// offlineCache) because it is specifically about the kiosk's live CDP
+	// Fetch-interception scope, not the download/store side of caching.
+	kioskReplay offlinecache.KioskReplay
+	scheduler   playlistschedule.Scheduler
+	logger      *zap.Logger
 
 	// sessionGeneration, when set (SetSessionGeneration), is
 	// playersession.Session.Generation narrowed to a func() uint64 seam
@@ -43,10 +52,18 @@ type handler struct {
 	// recoverySession, when set (SetRecoverySession), is the
 	// playersession.Session the refreshArtwork recovery escalation (§3)
 	// drives via NavigateHomeInline — the caller here holds no external lock
-	// while calling it (:267 is outside every WithPlayerPush closure and gate.go
-	// has no mutex), which is exactly Inline's synchronous-reply
+	// while calling it (the escalation is outside every WithPlayerPush closure
+	// and gate.go has no mutex), which is exactly Inline's synchronous-reply
 	// contract. nil (tests, a build wired before Phase 2b) makes the
 	// escalation a no-op, degrading to the pre-existing error return.
+	//
+	// The "no external lock" premise now has ONE thing holding it up that is
+	// not obvious from the escalation site: Process does take the
+	// kioskReplay playback lock, but only on the CMD_DISPLAY_PLAYLIST branch
+	// (heldPlaybackLock), while this escalation is CMD_REFRESH_ARTWORK-only,
+	// so the two never overlap. Extending the escalation to displayPlaylist
+	// would deadlock on that non-reentrant lock — re-check this before doing
+	// so, rather than trusting the sentence above.
 	recoverySession RecoverySession
 }
 
@@ -117,6 +134,8 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	mintPairing mintpairing.Service,
+	offlineCache offlinecache.Service,
+	kioskReplay offlinecache.KioskReplay,
 	scheduler playlistschedule.Scheduler,
 	json wrapper.JSON,
 	logger *zap.Logger,
@@ -127,6 +146,8 @@ func New(
 		dp1:          dp1,
 		statusPoller: statusPoller,
 		mintPairing:  mintPairing,
+		offlineCache: offlineCache,
+		kioskReplay:  kioskReplay,
 		scheduler:    scheduler,
 		json:         json,
 		logger:       logger,
@@ -186,6 +207,10 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return h.mintPairing.HandleApprovalDecision(ctx, command.Arguments)
 	}
 
+	if isOfflineCacheCommand(commandType) {
+		return h.handleOfflineCacheCommand(ctx, commandType, command.Arguments)
+	}
+
 	if commandType.DeviceCtlCommand() {
 		// Handle device control command
 		result, err = h.executor.Execute(ctx,
@@ -208,12 +233,45 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			defer func() {
 				if err != nil {
 					status.RecordPlaybackFailure()
+					// SyncPlaylist below already switched replay's live
+					// Fetch-interception scope to the NEW playlist before
+					// this CDP send ran (see that call site's doc for why
+					// that ordering is required). Since the send itself
+					// failed, the kiosk never actually switched — it is
+					// still showing whatever it displayed before — so
+					// leaving scope pointed at the new playlist would
+					// misclassify the still-on-screen old playlist's own
+					// requests as misses. Re-syncing to the player's
+					// actual current status reverts that.
+					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
 					return
 				}
 				h.logger.Info("result from CDP", zap.Any("result", result))
 				if !playerresponse.OK(result) {
 					h.logger.Warn("Playback verification failed: player did not respond with ok")
 					status.RecordPlaybackFailure()
+					// Same rationale as the err != nil branch above: the
+					// send succeeded at the transport level but the
+					// player itself rejected the command, so it is still
+					// displaying whatever it had before.
+					h.resyncKioskReplayScopeToCurrentDisplay(ctx)
+				}
+			}()
+			// heldPlaybackLock records whether this path acquired the
+			// playback coordinator (only when it actually syncs replay
+			// scope below). Releasing it is deferred so the lock spans
+			// BOTH the scope sync and the CDP send at the end of this
+			// branch, making that pair atomic against concurrent
+			// displayPlaylist commands and playlist-refresher passes (see
+			// KioskReplay.LockPlayback's doc). Registered AFTER the
+			// failure/rejection resync defer above so it runs BEFORE it
+			// (defers are LIFO): that resync re-acquires this same
+			// non-reentrant lock, so this path must have released it
+			// first.
+			var heldPlaybackLock bool
+			defer func() {
+				if heldPlaybackLock {
+					h.kioskReplay.UnlockPlayback()
 				}
 			}()
 			switch {
@@ -225,7 +283,27 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 
 				playlist, err = h.dp1.ProcessPlaylistURLForCast(ctx, url)
 				if err != nil {
-					return nil, err
+					// Live DP-1 resolution failed — most commonly, the
+					// device has no network right now. Fall back to the
+					// exact playlist body last saved by downloadPlaylist
+					// for this same URL, if any, rather than hard-failing
+					// a playlist that is actually fully cached and
+					// replayable offline (see docs/offline-artwork-
+					// capture.md §6 and Service.CachedPlaylistForURL's
+					// doc). This is a "last known good" copy, not a live
+					// re-resolution: it will not reflect anything
+					// published at url after it was downloaded, and (by
+					// construction, since it can only exist if it was
+					// downloaded successfully before) was already
+					// signature-verified once at that time.
+					cachedPlaylist, cacheErr := h.loadCachedPlaylistForURL(url)
+					if cacheErr != nil {
+						return nil, err
+					}
+					h.logger.Warn("offline cache: displayPlaylist falling back to cached copy after live DP-1 resolution failure",
+						zap.String("playlist_url", url), zap.Error(err))
+					playlist = cachedPlaylist
+					err = nil
 				}
 				schedulerSource = playlistschedule.Source{PlaylistURL: url}
 
@@ -264,6 +342,57 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// playlistschedule push (now_display, never soft refresh).
 			ensureDisplayPlaylistIntent(command.Arguments)
 
+			// Acquire the playback coordinator here and hold it (via the
+			// deferred unlock above) across both the replay scope sync
+			// (syncReplayScope below) and the CDP send, so scope-sync +
+			// navigation cannot interleave with another display/refresh's
+			// own sync+send. Deliberately acquired AFTER the (possibly
+			// slow, network-bound) DP-1 resolution above, which does not
+			// touch scope.
+			if h.kioskReplay != nil && playlist != nil {
+				h.kioskReplay.LockPlayback()
+				heldPlaybackLock = true
+			}
+		}
+
+		// syncReplayScope points replay's Fetch-interception scope at p's
+		// currently-cached items. feral-player advances through a
+		// multi-item playlist client-side without telling controld which
+		// item is on screen at any instant, so scope covers every cached
+		// item in the playlist rather than a single "current" one (see
+		// Replayer.EnableForPlaylist's doc). Best-effort: a sync failure
+		// must never block the actual display command, since offline
+		// replay is a strict enhancement over the live path.
+		//
+		// Callers invoke this ONLY once a CDP send for p is actually
+		// going to happen, immediately before it — never for a cast the
+		// scheduler defers or rejects. Scope must keep tracking what is
+		// genuinely on screen: a deferred (future-only) cast leaves the
+		// previous playlist displaying, and switching interception to the
+		// new playlist anyway would — under a fail_closed scope — start
+		// blocking the on-screen playlist's own requests even with live
+		// network, until a later corrective pass noticed
+		// (feral-file/ffos-user#229 review finding).
+		syncReplayScope := func(p *dp1.Playlist) {
+			if h.kioskReplay == nil || p == nil {
+				return
+			}
+			itemIDs := make([]string, 0, len(p.Items))
+			for _, item := range p.Items {
+				itemIDs = append(itemIDs, item.ID)
+			}
+			if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
+				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
+			}
+			// Announce this authoritative scope change (under the
+			// lock) so a concurrent corrective resync that sampled
+			// the generation earlier will defer to it instead of
+			// clobbering it with a stale playlist's scope — see
+			// KioskReplay.PlaybackGeneration's doc. Bumped even if the
+			// sync above logged an error: this path is authoritative
+			// for what SHOULD be on screen, and the resync must not
+			// override that intent with an older snapshot.
+			h.kioskReplay.MarkPlaybackChanged()
 		}
 
 		if commandType == commands.CMD_REFRESH_ARTWORK {
@@ -285,6 +414,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				schedulerSnapshot = h.scheduler.Snapshot()
 				// Filter displayAt playlists to the active set before the player
 				// sees them. The scheduler keeps the full list for timer/wake updates.
+				fullPlaylist := playlist
 				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
 				if playlist == nil {
 					err = fmt.Errorf("playlist has invalid displayAt")
@@ -294,7 +424,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				if len(playlist.Items) == 0 {
 					// The scheduler retained and armed the future schedule; the
 					// player rejects an empty displayPlaylist, so leave its current
-					// artwork in place until a cohort becomes eligible.
+					// artwork in place until a cohort becomes eligible. Replay
+					// scope is deliberately NOT synced on this path (see
+					// syncReplayScope's caller contract): nothing new reaches
+					// the screen, so interception must stay pointed at the
+					// playlist that keeps displaying.
 					h.scheduler.Commit()
 					// A relayer RPC and hub request both need an explicit acceptance
 					// response even though no CDP write was valid. This also prevents
@@ -304,6 +438,18 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					}
 					return
 				}
+				// Scope the FULL playlist's items, not just the filtered
+				// active cohort: the scheduler's own timer/wake/retry
+				// cutovers push later cohorts of this same playlist
+				// directly (playlistschedule's push), with no replay-scope
+				// hook of their own, so the scope installed here must
+				// already cover every cohort a cutover can display. The
+				// cost is only precision, in the safe direction: uncached
+				// future items keep the scope "mixed", whose miss policy
+				// is pass-through rather than fail_closed (see
+				// Replayer.EnableForPlaylist), and the playlist-refresher's
+				// periodic pass re-syncs as downloads complete.
+				syncReplayScope(fullPlaylist)
 				command.Arguments["dp1_call"] = playlist
 				result, err = h.sendCDPRequest(command)
 				if err != nil || !playerresponse.OK(result) {
@@ -318,6 +464,9 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			})
 		default:
 			if commandType == commands.CMD_DISPLAY_PLAYLIST {
+				// No scheduler configured: every cast reaches the player
+				// unfiltered, so scope-sync immediately precedes the send.
+				syncReplayScope(playlist)
 				command.Arguments["dp1_call"] = playlist
 			}
 			result, err = h.sendCDPRequest(command)
@@ -342,9 +491,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// client-route reload 404s. NavigateHomeInline runs its own gates
 			// (sleep/error-page/overlay) synchronously and reports a
 			// SYNCHRONOUS error, which is exactly what this caller needs: it
-			// holds no external lock (:267 is outside every WithPlayerPush
-			// closure and gate.go has no mutex), so Inline's bounded wait
-			// cannot deadlock it. Only when the escalation itself fails (or no
+			// holds no external lock (this escalation is outside every
+			// WithPlayerPush closure, gate.go has no mutex, and the kioskReplay
+			// playback lock is taken only on the displayPlaylist branch — see
+			// recoverySession's field doc), so Inline's bounded wait cannot
+			// deadlock it. Only when the escalation itself fails (or no
 			// session is wired) is the command truly dead.
 			if commandType != commands.CMD_REFRESH_ARTWORK {
 				return nil, err
