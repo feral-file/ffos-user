@@ -26,6 +26,13 @@ var (
 	// ErrBlobTooLarge is returned by WriteBlob when the source reader
 	// produces more than the maxBytes cap passed to it.
 	ErrBlobTooLarge = errors.New("offline cache: blob exceeds size limit")
+	// ErrItemRecordCorrupt marks a LoadItem failure as DETERMINISTIC —
+	// the record's bytes were read fine but do not parse, so retrying can
+	// never succeed. GC branches on this to quarantine the record and
+	// keep sweeping, versus aborting on a possibly-transient read error;
+	// see GC's mark phase for why conflating the two either wedges GC
+	// forever or deletes live blobs.
+	ErrItemRecordCorrupt = errors.New("offline cache: item record does not parse")
 )
 
 // blobFilePerm/recordFilePerm are intentionally not group/world-writable:
@@ -320,12 +327,19 @@ func (s *fsStore) WriteBlob(r io.Reader, maxBytes int64) (string, error) {
 
 	hexSum := hex.EncodeToString(hasher.Sum(nil))
 	finalPath := s.blobPath(hexSum)
-	if _, statErr := s.os.Stat(finalPath); statErr == nil {
-		return hexSum, nil // already stored: dedup across items/playlists, discard the redundant temp file via defer
-	} else if !s.os.IsNotExist(statErr) {
-		return "", fmt.Errorf("offline cache: stat blob %s: %w", hexSum, statErr)
-	}
-
+	// Rename unconditionally, even when finalPath already exists. An
+	// earlier version short-circuited on a bare existence check as a dedup
+	// optimization, which made a corrupt on-disk blob PERMANENT: after a
+	// power-loss torn write (the rename survives, the data doesn't — no
+	// fsync here, and ext4 delayed allocation makes that window real), the
+	// existence check kept discarding every freshly-downloaded good copy
+	// while ReadBlob's hash verification kept rejecting the stored one, so
+	// the item reported ready and never played. The content-addressed name
+	// means an existing healthy blob is overwritten with identical bytes
+	// (harmless — rename is atomic, and any concurrent reader keeps its
+	// open inode), while a torn one is repaired by the next capture that
+	// references it. The dedup saving was only ever the rename itself: the
+	// bytes have already been streamed to the temp file either way.
 	if err := s.os.Rename(tmpPath, finalPath); err != nil {
 		return "", fmt.Errorf("offline cache: finalize blob %s: %w", hexSum, err)
 	}
@@ -396,7 +410,7 @@ func (s *fsStore) LoadItem(itemID string) (*ItemRecord, error) {
 	}
 	var rec ItemRecord
 	if err := s.json.Unmarshal(data, &rec); err != nil {
-		return nil, fmt.Errorf("offline cache: parse item %s: %w", itemID, err)
+		return nil, fmt.Errorf("%w: item %s: %w", ErrItemRecordCorrupt, itemID, err)
 	}
 	return &rec, nil
 }
@@ -530,6 +544,30 @@ func (s *fsStore) listJSONIDs(dir, opDescription string) ([]string, error) {
 	return ids, nil
 }
 
+// quarantineItemRecordSuffix is appended to an unparsable item record's
+// filename by GC's quarantine path. The resulting name no longer ends in
+// ".json", so ListItemIDs — the single listing seam every reader
+// (itemStatus, Start's rebuild, eviction's victim scan, GC itself) goes
+// through — stops seeing the record entirely, while the bytes stay on
+// disk for post-incident inspection. Quarantined files are counted by
+// DiskUsage (they live in the items dir) but are a few KB of JSON, not
+// blob-scale data.
+const quarantineItemRecordSuffix = ".corrupt"
+
+// quarantineItemRecord renames an unparsable item record out of
+// ListItemIDs' view — see GC's mark phase for why corrupt records are
+// quarantined rather than aborting the sweep or being deleted outright.
+func (s *fsStore) quarantineItemRecord(id string) error {
+	path, err := s.itemPath(id)
+	if err != nil {
+		return err
+	}
+	if err := s.os.Rename(path, path+quarantineItemRecordSuffix); err != nil {
+		return fmt.Errorf("offline cache: quarantine item record %s: %w", id, err)
+	}
+	return nil
+}
+
 func (s *fsStore) GC() (int, int64, error) {
 	itemIDs, err := s.ListItemIDs()
 	if err != nil {
@@ -539,10 +577,41 @@ func (s *fsStore) GC() (int, int64, error) {
 	keep := make(map[string]bool)
 	for _, id := range itemIDs {
 		rec, err := s.LoadItem(id)
-		if err != nil {
-			s.logger.Warn("offline cache GC: skipping unreadable item record",
+		switch {
+		case errors.Is(err, ErrItemRecordCorrupt):
+			// Deterministic: the bytes read fine but will never parse, so
+			// aborting here would wedge GC on every future pass — and GC
+			// is the ONLY thing that frees blob bytes (DeleteItem removes
+			// just the record JSON), so a permanent abort silently
+			// disables the disk budget while eviction keeps deleting
+			// healthy records for zero reclaimed bytes. Nothing else can
+			// remove the record either: eviction's victim scan skips
+			// records it cannot read. Quarantining it (rename to a suffix
+			// ListItemIDs ignores, preserving the bytes for forensics)
+			// and continuing is safe because no reader can use the record
+			// anyway — itemStatus reports it not_cached and Start's
+			// rebuild skips it — so blobs only it referenced are already
+			// unreachable, and blobs it shared stay in the keep-set via
+			// the readable records that also reference them.
+			if qErr := s.quarantineItemRecord(id); qErr != nil {
+				return 0, 0, fmt.Errorf("offline cache: GC aborted, could not quarantine corrupt item record %s: %w", id, qErr)
+			}
+			s.logger.Warn("offline cache GC: quarantined unparsable item record",
 				zap.String("item_id", id), zap.Error(err))
 			continue
+		case err != nil:
+			// Possibly transient (EIO/EMFILE): abort the whole sweep
+			// rather than skipping the record. It still references blobs,
+			// and skipping would silently narrow the keep-set — the sweep
+			// below would then delete those blobs as "orphans" while the
+			// record recovers on a later read, an unrecoverable loss of
+			// good data from a recoverable error. Deleting bytes based on
+			// an error must fail safe in the direction that preserves
+			// data; an aborted pass costs only disk until a retry
+			// succeeds (or, if the error proves permanent for this
+			// record's file specifically, until the device's real problem
+			// — a failing disk — is addressed).
+			return 0, 0, fmt.Errorf("offline cache: GC aborted, item record %s unreadable (would orphan its blobs): %w", id, err)
 		}
 		for _, res := range rec.Resources {
 			if res.SHA256 != "" {

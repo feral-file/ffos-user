@@ -975,6 +975,28 @@ There is deliberately **no** top-level manifest, no separate
   deletes any blob not in it. There is no separate reference count kept in
   sync with saves/deletes — the saved item records are already the source
   of truth for what is live.
+- A record the mark phase cannot load splits two ways, because the two
+  failure shapes demand opposite responses. A **transient read error**
+  (EIO/EMFILE) aborts the whole sweep with an error: the record still
+  references blobs, and sweeping over a silently narrowed keep-set would
+  delete them as "orphans" while the record recovers on a later read —
+  an unrecoverable loss from a recoverable error. Callers treat the abort
+  as a non-fatal warning; the eviction loop stops for that pass (having
+  already deleted its current victim's record — those bytes wait for the
+  next successful sweep). A **deterministically unparsable record**
+  (`ErrItemRecordCorrupt` — bytes read fine, JSON never will parse) is
+  instead **quarantined** (renamed to `<id>.json.corrupt`, out of
+  `ListItemIDs`' view but preserved for forensics) and the sweep
+  continues. Aborting on it too would wedge GC on every future pass —
+  and since GC is the only path that frees blob bytes (`DeleteItem`
+  removes just the record JSON), that would permanently disable the disk
+  budget while eviction kept deleting healthy records for zero reclaimed
+  bytes, with nothing able to remove the corrupt record (eviction's
+  victim scan skips records it cannot read). The quarantine is safe
+  because no reader can use an unparsable record anyway: status reports
+  it `not_cached` and `Start`'s rebuild skips it, so blobs only it
+  referenced are already unreachable, and shared blobs stay in the
+  keep-set via the readable records that also reference them.
 - That sweep is dangerous to run concurrently with an in-flight capture:
   `capturer.Capture` writes each resource's blob as it observes it and only
   calls `SaveItem` once, at the end, so for the whole capture window there
@@ -1396,6 +1418,25 @@ items (`mixed`); `replay.go` uses that to relax `fail_closed` to
 pass-through for exactly that scope, so an uncached sibling item can still
 reach the live network instead of having every one of its requests failed
 just because it happens to share a CDP target with a cached item.
+
+Two loopback origins are exempt from interception outright, on every
+scope and under every miss policy (`processRequestPaused` and the
+admission-overflow path both check them before anything else): the
+cache's own static server (its large-asset `302` follow-up would
+otherwise loop back into the interceptor) and the ff-player shell's
+origin (`constant.WEBAPP_URL`). The shell exemption is what keeps
+daemon-driven recovery navigations working while a fail-closed non-mixed
+scope is armed — `playersession.navigateAndVerify`'s `Page.navigate`
+back to the shell (boot recovery, `refreshArtwork` escalation, watchdog
+navigate) is by construction never in the captured resource map (capture
+navigates to `item.Source`, never the shell), so without it the
+navigation's own document request would be `Fetch.failRequest`-ed,
+leaving Chromium on its error page with no command handler until a
+browser restart. Both exemptions match by parsed scheme+host equality,
+never a string prefix (see `isStaticServerFollowUp`'s userinfo-lookalike
+hazard), and both origins are served locally, so passing them through is
+offline-safe and never reaches an attacker-controlled host.
+
 `KioskReplay.AttachOnReconnect` re-attaches the replay CDP session in
 `main.go`'s CDP `onConnect` hook, so a kiosk Chromium restart (including OOM
 recovery) does not leave replay silently detached.

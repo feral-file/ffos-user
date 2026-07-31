@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/config"
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 	"github.com/feral-file/ffos-user/components/feral-controld/ws"
@@ -391,7 +392,7 @@ func Bootstrap(
 	// mediacapture.go's package doc).
 	mediaCapturer := NewMediaCapturer(bodyClient, store, jsonWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	staticServer := NewStaticServer(opts.StaticServerAddr, store, osWrapper, logger)
-	replayer := NewReplayer(store, staticServer, opts.MissPolicy, jsonWrapper, logger)
+	replayer := NewReplayer(store, staticServer, opts.MissPolicy, constants.WEBAPP_URL, jsonWrapper, logger)
 	// The concrete replayer implements the scope-lost setter, but Replayer
 	// deliberately does not declare it (see ScopeLostRegistrar). Asserted
 	// once here rather than exposing a wider interface from Bootstrap; a
