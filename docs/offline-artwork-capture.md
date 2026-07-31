@@ -1005,12 +1005,27 @@ There is deliberately **no** top-level manifest, no separate
   caller could have enqueued a job — the one point in this package's
   lifecycle where "no capture can possibly be in flight" is true by
   construction, so unconditionally deleting every `*.tmp` file there is
-  safe in a way it would not be from `GC()`.
+  safe in a way it would not be from `GC()`. `Start` also runs one full
+  `GC()` pass in that same window: GC is otherwise only reached through
+  clears and eviction, and eviction can only free bytes by deleting
+  records `ListItemKeys` can see — so records GC must quarantine (a
+  legacy id-keyed cache from before source keying, or any
+  invalid/mismatched filename) would otherwise pin their blobs against
+  `maxDiskBytes` where no eviction pass could ever reclaim them,
+  starving every new capture's budget on a full store.
 - Blobs are freed by a **sweep, not a refcount**: `store.go`'s `GC()` walks
   every saved item record's `Resources` to build the "keep" set, then
   deletes any blob not in it. There is no separate reference count kept in
   sync with saves/deletes — the saved item records are already the source
   of truth for what is live.
+- GC's mark phase also quarantines two unreachable-by-construction
+  shapes alongside genuinely unparsable records: a `.json` file whose
+  name is not a valid source key at all, and a parseable record whose
+  own `item.source` does not hash to its filename (`LoadItem` rejects
+  that identity mismatch as corrupt too, mirroring `ReadBlob`'s
+  hash-vs-name verification). No reader can ever load either one, so
+  keeping them "live" would pin their blobs forever for content nothing
+  can serve.
 - A record the mark phase cannot load splits two ways, because the two
   failure shapes demand opposite responses. A **transient read error**
   (EIO/EMFILE) aborts the whole sweep with an error: the record still

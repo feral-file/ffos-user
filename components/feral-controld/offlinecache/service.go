@@ -845,6 +845,31 @@ func (s *service) Start(ctx context.Context) error {
 			zap.Int("removed_files", removed), zap.Int64("freed_bytes", freed))
 	}
 
+	// One GC pass in this same no-capture-in-flight window, and for the
+	// same reason the sweep above cannot wait for a later trigger: GC is
+	// otherwise only reached through clears and eviction, and eviction
+	// can only free bytes by deleting records ListItemKeys can see. A
+	// store carrying records GC must quarantine (a legacy id-keyed cache
+	// from before source keying, or any invalid/mismatched filename)
+	// counts their blobs in DiskUsage while eviction can never select
+	// them as victims — so near maxDiskBytes every new capture would be
+	// starved of budget up front, and the post-capture eviction that
+	// might have helped is unreachable because captures keep failing or
+	// degrading. Running GC here quarantines those records and reclaims
+	// their blobs before the first capture ever samples its budget.
+	// Best-effort like the sweep: a transiently unreadable record aborts
+	// the pass (see GC's doc), and the next clear/eviction retries. Goes
+	// through s.gc() like every other GC call in this file — captureMu is
+	// uncontended here (the worker does not exist yet), so this keeps
+	// gc()'s "never call the store directly" invariant absolute at zero
+	// cost.
+	if removed, freed, err := s.gc(); err != nil {
+		s.logger.Warn("offline cache: startup GC pass failed", zap.Error(err))
+	} else if removed > 0 {
+		s.logger.Info("offline cache: startup GC reclaimed unreferenced blobs",
+			zap.Int("removed_blobs", removed), zap.Int64("freed_bytes", freed))
+	}
+
 	keys, err := s.store.ListItemKeys()
 	if err != nil {
 		return fmt.Errorf("offline cache: rebuild index: %w", err)

@@ -466,6 +466,18 @@ func (s *fsStore) LoadItem(sourceKey string) (*ItemRecord, error) {
 	if err := s.json.Unmarshal(data, &rec); err != nil {
 		return nil, fmt.Errorf("%w: item %s: %w", ErrItemRecordCorrupt, sourceKey, err)
 	}
+	// Filename and content must agree on identity, the same way ReadBlob
+	// re-verifies a blob against its content-addressed name. SaveItem
+	// derives the filename from rec.Item.Source, so a mismatch means the
+	// bytes on disk are not the record this key's readers (replay scope,
+	// status, eviction) believe they are — tampering, a torn/misplaced
+	// write, or a future bug — and serving them would key replay's
+	// resource set or status off the WRONG source. Deterministic, so it
+	// takes the corrupt (quarantine) path, not the transient one.
+	if got := SourceKey(rec.Item.Source); got != sourceKey {
+		return nil, fmt.Errorf("%w: item %s: record's own source hashes to %s (filename/content identity mismatch)",
+			ErrItemRecordCorrupt, sourceKey, got)
+	}
 	return &rec, nil
 }
 
@@ -674,16 +686,25 @@ func (s *fsStore) GC() (int, int64, error) {
 	keep := make(map[string]bool)
 	for _, id := range itemNames {
 		rec, err := s.loadItemByName(id)
-		// A record whose filename is not a valid source key is unreachable
-		// by construction — LoadItem validates keys, so no reader (status,
-		// replay scope, eviction) can ever load it, no matter how well its
-		// bytes parse. Treating it as live would keep its blobs pinned
-		// forever for content nothing can serve; treating it as a
-		// transient error would wedge GC on every pass (the name never
-		// becomes valid). It gets exactly the corrupt-record treatment:
-		// quarantined for forensics, its exclusive blobs reclaimed.
+		// A record whose filename is not a valid source key — or is a
+		// valid key that does NOT match the record's own source (LoadItem
+		// rejects that mismatch as corrupt, see its identity check) — is
+		// unreachable by construction: no reader (status, replay scope,
+		// eviction) can ever load it, no matter how well its bytes parse.
+		// Treating it as live would keep its blobs pinned forever for
+		// content nothing can serve; treating it as a transient error
+		// would wedge GC on every pass (the name never becomes valid).
+		// Both get exactly the corrupt-record treatment: quarantined for
+		// forensics, their exclusive blobs reclaimed. This is also what
+		// retires a legacy id-keyed cache from before source keying —
+		// Service.Start's GC pass reaches here on first boot after the
+		// upgrade.
 		if err == nil && !validSourceKey(id) {
 			err = fmt.Errorf("%w: item %s: filename is not a source key", ErrItemRecordCorrupt, id)
+		}
+		if err == nil && SourceKey(rec.Item.Source) != id {
+			err = fmt.Errorf("%w: item %s: record's own source hashes to %s (filename/content identity mismatch)",
+				ErrItemRecordCorrupt, id, SourceKey(rec.Item.Source))
 		}
 		switch {
 		case errors.Is(err, ErrItemRecordCorrupt):

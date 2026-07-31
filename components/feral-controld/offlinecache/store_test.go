@@ -229,6 +229,60 @@ func TestStore_SourceKey_HostileSourcesArePathSafe(t *testing.T) {
 	}
 }
 
+// TestStore_LoadItem_RejectsFilenameContentIdentityMismatch pins
+// LoadItem's identity check: a parseable record sitting at a valid key
+// that is NOT SourceKey of its own source must be rejected as corrupt
+// (deterministic), never returned — its content is not what this key's
+// readers believe it is, and replay/status keyed off it would describe
+// the wrong source.
+func TestStore_LoadItem_RejectsFilenameContentIdentityMismatch(t *testing.T) {
+	store, root := newTestStore(t)
+
+	rec := &offlinecache.ItemRecord{
+		Item:     dp1playlist.PlaylistItem{Source: "https://example.com/real-source"},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}
+	data, err := json.Marshal(rec)
+	require.NoError(t, err)
+	wrongKey := offlinecache.SourceKey("https://example.com/some-other-source")
+	require.NoError(t, wrapper.NewOS().MkdirAll(filepath.Join(root, "items"), 0o755))
+	require.NoError(t, wrapper.NewOS().WriteFile(
+		filepath.Join(root, "items", wrongKey+".json"), data, 0o644))
+
+	_, err = store.LoadItem(wrongKey)
+	assert.ErrorIs(t, err, offlinecache.ErrItemRecordCorrupt)
+}
+
+// TestStore_GC_QuarantinesIdentityMismatchedRecord pins GC's half of the
+// same check: a parseable record under a valid-but-wrong key is
+// unreachable by every reader (LoadItem rejects it), so GC must
+// quarantine it and reclaim its exclusive blobs rather than keep them
+// pinned for content nothing can serve.
+func TestStore_GC_QuarantinesIdentityMismatchedRecord(t *testing.T) {
+	store, root := newTestStore(t)
+
+	pinnedHash := writeBlobString(t, store, "referenced only by the mismatched record")
+	rec := &offlinecache.ItemRecord{
+		Item:      dp1playlist.PlaylistItem{Source: "https://example.com/real-source"},
+		Resources: []offlinecache.Resource{{URL: "https://example.com/a.js", Status: 200, SHA256: pinnedHash}},
+	}
+	data, err := json.Marshal(rec)
+	require.NoError(t, err)
+	wrongKey := offlinecache.SourceKey("https://example.com/some-other-source")
+	wrongPath := filepath.Join(root, "items", wrongKey+".json")
+	require.NoError(t, wrapper.NewOS().MkdirAll(filepath.Join(root, "items"), 0o755))
+	require.NoError(t, wrapper.NewOS().WriteFile(wrongPath, data, 0o644))
+
+	removed, _, err := store.GC()
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed, "the mismatched record's exclusive blob is reclaimed")
+
+	_, statErr := wrapper.NewOS().Stat(wrongPath)
+	assert.True(t, wrapper.NewOS().IsNotExist(statErr))
+	_, statErr = wrapper.NewOS().Stat(wrongPath + ".corrupt")
+	assert.NoError(t, statErr, "the mismatched record's bytes must be preserved for forensics")
+}
+
 // TestStore_LoadItem_RejectsRawSource pins the boundary contract: item ops
 // take a SourceKey, never a raw source URL — passing one is a programming
 // bug and must fail loudly (not resolve, not traverse).

@@ -398,6 +398,7 @@ func TestService_DownloadItem_AfterStartFailureReturnsNotStarted(t *testing.T) {
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
+	mockStore.EXPECT().GC().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemKeys().Return(nil, assertError("permission denied")).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
@@ -743,6 +744,7 @@ func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) 
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
+	mockStore.EXPECT().GC().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemKeys().Return(nil, nil).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
@@ -2054,6 +2056,50 @@ func TestService_Status_InFlightItemsSortWithOnDiskOnes(t *testing.T) {
 		[]string{snap.Items[0].Source, snap.Items[1].Source, snap.Items[2].Source})
 }
 
+// TestService_Start_ReclaimsBlobsPinnedByLegacyIdKeyedRecords is the
+// upgrade-path regression test for the startup GC pass: a cache written
+// by the pre-source-keying format keeps its records under DP-1 id
+// filenames, which ListItemKeys hides from every reader — so their blobs
+// counted toward DiskUsage while eviction could never select them as
+// victims, and a store near maxDiskBytes starved every new capture of
+// budget before the first post-capture eviction could ever run. Start's
+// GC pass must quarantine those records and reclaim their blobs before
+// the worker starts.
+func TestService_Start_ReclaimsBlobsPinnedByLegacyIdKeyedRecords(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	legacyHash := writeBlobString(t, ts.store, "legacy payload from the id-keyed format")
+	legacyRec := &offlinecache.ItemRecord{
+		Item:      dp1playlist.PlaylistItem{ID: "legacy-uuid", Source: "https://example.com/legacy"},
+		Resources: []offlinecache.Resource{{URL: "https://example.com/legacy", Status: 200, SHA256: legacyHash}},
+		Coverage:  offlinecache.Coverage{Complete: true},
+	}
+	data, err := json.Marshal(legacyRec)
+	require.NoError(t, err)
+	// The old format's filename: the DP-1 item id, not a source key.
+	legacyPath := filepath.Join(ts.store.RootDir(), "items", "legacy-uuid.json")
+	require.NoError(t, os.MkdirAll(filepath.Join(ts.store.RootDir(), "items"), 0o750))
+	require.NoError(t, os.WriteFile(legacyPath, data, 0o600))
+
+	// A current-format sibling must survive the same pass untouched.
+	seedItemWithCapturedAt(t, ts.store, "item-1", "current payload", time.Now())
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	_, statErr := os.Stat(legacyPath)
+	assert.True(t, os.IsNotExist(statErr), "the legacy record must leave ListItemKeys' blind spot")
+	_, statErr = os.Stat(legacyPath + ".corrupt")
+	assert.NoError(t, statErr, "quarantined, not silently deleted — bytes preserved for forensics")
+	_, err = ts.store.ReadBlob(legacyHash)
+	assert.ErrorIs(t, err, offlinecache.ErrBlobNotFound,
+		"the legacy record's blob must be reclaimed at startup, not pinned against maxDiskBytes until a clear that may never come")
+
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
+	assert.NoError(t, err, "the current-format record must survive the startup pass")
+}
+
 func TestService_Start_RebuildsIndexFromExistingDiskState(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
@@ -2076,6 +2122,7 @@ func TestService_Start_PropagatesListItemKeysError(t *testing.T) {
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
+	mockStore.EXPECT().GC().Return(0, int64(0), nil).Times(1)
 	mockStore.EXPECT().ListItemKeys().Return(nil, assertError("disk error")).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
