@@ -1041,6 +1041,99 @@ func TestCommandHandler_GetOfflineCacheStatus_RejectsInvalidArguments(t *testing
 	}
 }
 
+// TestCommandHandler_OfflineCache_LegacyItemIDShapeIsRejectedLoudly is the
+// controller-boundary contract test for the source-keying cutover: a
+// client still speaking the pre-cutover `itemId`/`itemIds` shape must be
+// rejected with a NON-retryable `invalid_request` on every command, never
+// silently misinterpreted.
+//
+// "Silently misinterpreted" is the failure this pins, and it is the one
+// that would actually be dangerous: an id accepted where a source belongs
+// would hash to a key nothing can ever match, so the device would report
+// work queued/cleared for an artwork it never touched. Failing closed
+// means a stale client sees an immediate, non-retryable error naming the
+// missing field instead — the honest signal that it needs the coordinated
+// release.
+//
+// Deliberately no legacy-compat branch is being pinned here: the
+// itemId-keyed contract never shipped in any release tag (the offline
+// cache command family merged after v1.0.21 and is opt-in via
+// offlineCache.enabled), so there is no fielded caller to preserve — see
+// docs/api-design.md's current-v1 posture, whose rule 2 allows a rename
+// through a coordinated release that updates all callers. This test is
+// what stops a future package release from quietly loosening that
+// rejection into a silent misread.
+func TestCommandHandler_OfflineCache_LegacyItemIDShapeIsRejectedLoudly(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  commands.Type
+		args map[string]any
+	}{
+		{
+			name: "downloadPlaylistItem with legacy itemId",
+			cmd:  commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+			args: map[string]any{"playlistUrl": "https://example.com/playlist.json", "itemId": "work-1"},
+		},
+		{
+			name: "clearPlaylistItemCache with legacy itemId",
+			cmd:  commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+			args: map[string]any{"itemId": "work-1"},
+		},
+		{
+			name: "getOfflineCacheStatus with legacy itemIds",
+			cmd:  commands.CMD_GET_OFFLINE_CACHE_STATUS,
+			args: map[string]any{"itemIds": []interface{}{"work-1", "work-2"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts, mockOfflineCache := setupOfflineCache(t)
+			defer ts.teardown()
+
+			// The service must never be reached: a legacy-shape request
+			// is rejected at the argument boundary, so no download is
+			// queued, no cache is cleared, and no status work is done.
+			mockOfflineCache.EXPECT().DownloadItem(gomock.Any(), gomock.Any()).Times(0)
+			mockOfflineCache.EXPECT().ClearItem(gomock.Any()).Times(0)
+			mockOfflineCache.EXPECT().Status(gomock.Any()).Times(0)
+
+			result, err := ts.handler.Process(ts.ctx, commands.Command{Type: tt.cmd, Arguments: tt.args})
+			require.NoError(t, err)
+
+			body := assertErrorResponse(t, result, "invalid_request")
+			errBody, ok := body["error"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, false, errBody["retryable"],
+				"a stale client cannot fix this by retrying — it needs the coordinated release, so the error must be non-retryable")
+		})
+	}
+}
+
+// TestCommandHandler_GetOfflineCacheStatus_LegacyItemIDsDoNotWidenTheReport
+// pins the one legacy shape that could fail OPEN rather than closed:
+// `getOfflineCacheStatus` treats an absent `sources` as "report on every
+// known item", so an unrecognized `itemIds` key being ignored (rather
+// than rejected) would silently turn a stale client's narrow query into a
+// full-store scan — the exact "a client-side typo becomes a full-store
+// scan" hazard parseStatusRequest's strict validation exists to prevent.
+func TestCommandHandler_GetOfflineCacheStatus_LegacyItemIDsDoNotWidenTheReport(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	// No Status expectation at all: a whole-store snapshot must never be
+	// computed for a request that only named two items in the old shape.
+	mockOfflineCache.EXPECT().Status(gomock.Any()).Times(0)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
+		Arguments: map[string]any{"itemIds": []interface{}{"work-1", "work-2"}},
+	})
+
+	require.NoError(t, err)
+	assertErrorResponse(t, result, "invalid_request")
+}
+
 func tooManySources() []interface{} {
 	sources := make([]interface{}, offlinecache.MaxStatusSources+1)
 	for i := range sources {

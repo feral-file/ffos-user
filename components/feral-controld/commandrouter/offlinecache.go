@@ -378,6 +378,24 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[string]any) {
 	var req offlinecache.StatusRequest
 
+	// The pre-source-keying filter key, rejected explicitly rather than
+	// ignored. This command treats an absent filter as "report on every
+	// known item", so silently dropping an unrecognized itemIds would
+	// widen a stale client's two-item query into a whole-store scan —
+	// precisely the "a client-side typo becomes a full-store scan on a
+	// device that also has a kiosk browser to keep alive" hazard this
+	// function's strict validation exists to prevent (see its doc). The
+	// rename made itemIds exactly such a typo, so it needs a name-level
+	// guard, not just a type-level one.
+	//
+	// Deliberately narrow: only this one known-legacy key is rejected,
+	// never "any unrecognized key", so genuinely additive future fields
+	// stay safe to introduce (docs/api-design.md's rule 1).
+	if _, present := args["itemIds"]; present {
+		return req, errorResponse("invalid_request",
+			"itemIds is no longer supported; use sources (item source URLs) — see docs/controld-inbound-controller-messages.md", false)
+	}
+
 	if raw, present := args["sources"]; present && raw != nil {
 		sources, ok := stringSliceArg(raw)
 		if !ok {

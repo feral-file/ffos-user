@@ -1787,6 +1787,13 @@ an array) is rejected with `invalid_request` rather than ignored, because
 every one of these fields decides how much work the device does and how
 large the response gets.
 
+The pre-source-keying `itemIds` key is rejected **by name** for the same
+reason, rather than ignored as an unrecognized field: an absent filter
+means "report on every known item", so silently dropping `itemIds` would
+widen a stale client's two-item query into a whole-store scan. The
+rejection is deliberately narrow — only this one known-legacy key —
+so genuinely additive future fields stay safe to introduce.
+
 Success response:
 
 ```json
