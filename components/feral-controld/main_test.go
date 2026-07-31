@@ -766,14 +766,19 @@ func TestApp_Run_SkipsServeAndShutdownWhenStaticServerBindFails(t *testing.T) {
 	assert.NoError(t, err, "a static-server bind failure must degrade gracefully, never fail the whole daemon run")
 }
 
-// TestApp_Run_OnConnectResyncsOfflineCacheReplayScope is the regression
-// test pinning that AttachOnReconnect alone must not leave offline-cache
-// replay scope stale (Fetch.enable is not even reissued)
-// until the next displayPlaylist command or PlaylistRefresher's next
-// periodic pass — up to PLAYLIST_REFRESH_INTERVAL later. It captures the
-// onConnect callback CDP.Start is given and invokes it directly, asserting
-// both AttachOnReconnect and PlaylistRefresher.ForceRefresh run.
-func TestApp_Run_OnConnectResyncsOfflineCacheReplayScope(t *testing.T) {
+// TestApp_Run_OnConnectAttachesOfflineCacheReplay pins the INLINE half of
+// the reconnect resync: AttachOnReconnect must run straight off the CDP
+// connect callback, because it arms Fetch interception on offlinecache's own
+// socket and needs no page JS.
+//
+// Its companion half — re-applying the item scope, which does need a hydrated
+// page — is deliberately NOT here: it is the "replay-scope-resync"
+// reconciler, covered by TestReplayScopeResyncReconciler. Asserting
+// PlaylistRefresher.ForceRefresh on this callback is what the old version of
+// this test did, and it pinned a resync that could not actually work at this
+// point in the lifecycle (the status fetch it depends on evaluates
+// window.handleCDPRequest against a document that has not hydrated yet).
+func TestApp_Run_OnConnectAttachesOfflineCacheReplay(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
 
@@ -810,7 +815,10 @@ func TestApp_Run_OnConnectResyncsOfflineCacheReplayScope(t *testing.T) {
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	mockKioskReplay.EXPECT().AttachOnReconnect(gomock.Any()).Return(nil).Times(1)
 	ts.app.KioskReplay = mockKioskReplay
-	ts.mockRefresher.EXPECT().ForceRefresh().Times(1)
+	// Deliberately no ForceRefresh expectation: the scope resync moved to the
+	// replay-scope-resync reconciler. ts.mockRefresher is a strict gomock mock,
+	// so an unexpected ForceRefresh here fails the test — which is what pins
+	// the split rather than merely not asserting it.
 
 	var onConnect func()
 	ts.mockCDP.EXPECT().Start(gomock.Any(), gomock.Any()).Do(func(_ context.Context, fn func()) {
@@ -826,6 +834,42 @@ func TestApp_Run_OnConnectResyncsOfflineCacheReplayScope(t *testing.T) {
 
 	require.NotNil(t, onConnect, "CDP.Start must be given an onConnect callback")
 	onConnect()
+}
+
+// TestReplayScopeResyncReconciler pins the half of the reconnect resync that
+// moved off the CDP connect callback. Before this split the assertion lived in
+// TestApp_Run_OnConnectAttachesOfflineCacheReplay; without a test here the
+// resync would be entirely uncovered, and a future edit dropping the
+// registration in initializeApp would silently reinstate the up-to-
+// PLAYLIST_REFRESH_INTERVAL replay outage the reconciler exists to prevent.
+func TestReplayScopeResyncReconciler(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockRefresher := mocks.NewMockRefresher(ctrl)
+	mockRefresher.EXPECT().ForceRefresh().Times(1)
+
+	replayScopeResyncReconciler(mockRefresher)(context.Background())
+}
+
+// TestStatusForceRefreshReconciler covers the status poller half of what this
+// branch's merge moved OFF the connect callback (it is develop's reconciler
+// now). Deleting the inline call removed the repo's only assertion that a CDP
+// connect force-refreshes status, so without this the regression would be
+// uncovered on both sides of the move.
+//
+// There is deliberately no sibling TestSetupUIResyncReconciler: the other
+// moved producer, setupUIResyncReconciler, takes a concrete *setupui.Service
+// rather than a consumer-owned interface, so there is no seam to assert
+// against without narrowing that parameter first.
+func TestStatusForceRefreshReconciler(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockPoller := mocks.NewMockStatusPoller(ctrl)
+	mockPoller.EXPECT().ForceRefresh().Times(1)
+
+	statusForceRefreshReconciler(mockPoller)(context.Background())
 }
 
 func TestApp_Run_Errors(t *testing.T) {

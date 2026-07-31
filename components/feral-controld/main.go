@@ -504,37 +504,6 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		if app.Session != nil {
 			app.Session.OnConnect()
 		}
-		// Re-attach offline-cache replay interception on every (re)connect —
-		// this covers plain kiosk restarts AND OOM-recovery restarts alike,
-		// since both funnel through this same reconnect loop (see
-		// offlinecache.KioskReplay.AttachOnReconnect's doc). Nil whenever
-		// the offline cache is switched off (offlineCache.enabled unset or
-		// false), which is the default — see the Bootstrap call below.
-		//
-		// Deliberately still INLINE here rather than a session reconciler like
-		// the resyncs named above: this attaches CDP Fetch interception at the
-		// SESSION level, and it has to be armed before the reloaded document
-		// starts requesting assets. A reconciler runs only once the new page
-		// has installed its command handler, which is strictly later — every
-		// asset the page fetched before that point would miss interception and
-		// silently fall through to the live network, which is exactly what
-		// offline replay exists to prevent.
-		if app.KioskReplay != nil {
-			if err := app.KioskReplay.AttachOnReconnect(ctx); err != nil {
-				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
-			}
-			// AttachOnReconnect deliberately does not re-apply the
-			// previously-enabled item scope (Fetch.enable is not even
-			// reissued until something calls SyncPlaylist). Without this,
-			// a playlist that was already scoped for offline replay
-			// before the restart would silently fall back to live
-			// network for up to PLAYLIST_REFRESH_INTERVAL — exactly the
-			// window OOM-recovery restarts happen in — until
-			// PlaylistRefresher's next periodic pass. ForceRefresh runs
-			// that same resync immediately instead of waiting.
-			app.PlaylistRefresher.ForceRefresh()
-		}
-
 		// The boot player recovery state machine (design doc §5,
 		// devicectl/boot_recovery.go) has two connect-edge entry points:
 		// MaybeRecoverPlayerOnBootOnline arms it on the first WAN-confirmed
@@ -548,6 +517,33 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 		// loop's other resync work.
 		if pr, ok := app.Executor.(bootPlayerRecoveryFlow); ok {
 			go pr.CompletePendingBootPlayerRecovery()
+		}
+
+		// Re-attach offline-cache replay interception on every (re)connect —
+		// this covers plain kiosk restarts AND OOM-recovery restarts alike,
+		// since both funnel through this same reconnect loop (see
+		// offlinecache.KioskReplay.AttachOnReconnect's doc). Nil whenever
+		// the offline cache is switched off (offlineCache.enabled unset or
+		// false), which is the default — see the Bootstrap call below.
+		//
+		// This ONE producer stays inline rather than becoming a reconciler
+		// like the resyncs named above, because it is the only one that needs
+		// no page JS: it arms Fetch interception on offlinecache's own CDP
+		// socket, and it must be armed as early as possible so the reloaded
+		// document's asset requests are intercepted rather than escaping to
+		// the live network. Its COMPANION half — re-applying the previously
+		// enabled item scope, which does need a hydrated page to resolve what
+		// is playing — is the "replay-scope-resync" reconciler instead; see
+		// replayScopeResyncReconciler for why splitting them is load-bearing.
+		//
+		// Runs AFTER the boot-recovery spawn above, not before: AttachOnReconnect
+		// dials a page session synchronously (bounded, but seconds under a sick
+		// kiosk) on this connect-loop goroutine, and ordering it first would
+		// gate that deliberately-async recovery behind this dial.
+		if app.KioskReplay != nil {
+			if err := app.KioskReplay.AttachOnReconnect(ctx); err != nil {
+				app.Logger.Warn("Failed to attach offline cache replay to kiosk CDP session", zap.Error(err))
+			}
 		}
 	})
 	defer app.CDP.Close()
@@ -671,6 +667,43 @@ func statusForceRefreshReconciler(poller status.Poller) func(context.Context) {
 func setupUIResyncReconciler(ui *setupui.Service) func(context.Context) {
 	return func(context.Context) {
 		ui.Resync()
+	}
+}
+
+// replayScopeResyncReconciler re-applies offline-cache replay's
+// Fetch-interception SCOPE after a page generation change.
+//
+// This is the half of the reconnect resync that cannot run inline on the CDP
+// connect callback next to AttachOnReconnect. AttachOnReconnect resets scope
+// (a new top-level socket starts with Fetch disabled — see replayer.attachRoot)
+// and deliberately does not re-apply it; something must call SyncPlaylist.
+// ForceRefresh is that something, but the pass it triggers resolves what is
+// playing via statusPoller.FetchPlayerStatus, which evaluates
+// window.handleCDPRequest in the page. Fired inline at connect time that
+// evaluate hits a document that has not hydrated yet, so the pass returns the
+// status error BEFORE reaching syncReplayScopeLocked and the scope is never
+// restored — leaving replay off until the next periodic pass up to
+// PLAYLIST_REFRESH_INTERVAL later, which is exactly the OOM-restart window
+// the resync exists to close. As a reconciler it runs once the new document
+// has installed its command handler, so the status fetch can actually answer.
+//
+// Nothing is lost by deferring it: scope is disabled between attach and
+// handler-ready either way, so assets fetched in that window miss
+// interception regardless of when this runs.
+//
+// Known residual, deliberately accepted: the generation-ready worker gates on
+// StageHandler, which proves window.handleCDPRequest is INSTALLED, not that
+// the player has restored playback. If hydration installs the handler before
+// the player restores its last playlist, FetchPlayerStatus answers with
+// Command != displayPlaylist and the pass returns nil without syncing scope
+// (refresher.go's "Player command is not display any playlist" branch),
+// leaving the resync to the periodic ticker. There is no "playback restored"
+// stage to wait on, so this is as tight as the current primitives allow — and
+// still strictly better than firing inline at connect, where the status fetch
+// could not answer at all.
+func replayScopeResyncReconciler(refresher playlist_refresher.Refresher) func(context.Context) {
+	return func(context.Context) {
+		refresher.ForceRefresh()
 	}
 }
 
@@ -928,15 +961,28 @@ func initializeApp(
 	// Wire every off-lane producer to the session (design doc §4), now that
 	// they all exist. Registration ORDER is the reconciler execution order on
 	// every generation-ready: sleep invalidate+poke, playlist recompute,
-	// status force-refresh, setup-narration resync, boot-recovery retry,
-	// connectivity — replacing the five ad-hoc CDP-reconnect spawns run()
-	// used to do inline.
+	// status force-refresh, setup-narration resync, offline-cache replay-scope
+	// resync, boot-recovery retry, connectivity — replacing the five ad-hoc
+	// CDP-reconnect spawns run() used to do inline.
 	session.RegisterReconciler("sleep-invalidate", sleepInvalidateReconciler(executor, logger))
 	if playlistScheduler != nil {
 		session.RegisterReconciler("playlist-recompute", playlistRecomputeReconciler(playlistScheduler))
 	}
 	session.RegisterReconciler("status-force-refresh", statusForceRefreshReconciler(poller))
 	session.RegisterReconciler("setupui-resync", setupUIResyncReconciler(setupNarrator))
+	// Guarded on kioskReplay, not on the refresher. This is not an
+	// optimization: ForceRefresh signals a full processPlayingPlaylist pass,
+	// which re-resolves the playlist over the network and re-sends
+	// displayPlaylist with refresh:true. Registering it unguarded would add a
+	// soft artwork refresh on EVERY generation bump (CDP connect, every
+	// recovery navigation, every stamp mismatch) to devices running the
+	// default config with the offline cache off — breaking the
+	// "feature off behaves exactly as before" contract the Bootstrap call
+	// above depends on. With the cache off, the periodic ticker stays the
+	// only resync, which is byte-identical to develop's behavior.
+	if kioskReplay != nil {
+		session.RegisterReconciler("replay-scope-resync", replayScopeResyncReconciler(playlistRefresher))
+	}
 	// Boot recovery's generation-bump accelerator (design doc §5.1): a new
 	// generation (CDP reconnect, a recovery navigation, a stamp-mismatch
 	// bump) is a signal the page or player state likely changed, so a

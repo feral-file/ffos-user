@@ -52,10 +52,18 @@ type handler struct {
 	// recoverySession, when set (SetRecoverySession), is the
 	// playersession.Session the refreshArtwork recovery escalation (§3)
 	// drives via NavigateHomeInline — the caller here holds no external lock
-	// while calling it (:267 is outside every WithPlayerPush closure and gate.go
-	// has no mutex), which is exactly Inline's synchronous-reply
+	// while calling it (the escalation is outside every WithPlayerPush closure
+	// and gate.go has no mutex), which is exactly Inline's synchronous-reply
 	// contract. nil (tests, a build wired before Phase 2b) makes the
 	// escalation a no-op, degrading to the pre-existing error return.
+	//
+	// The "no external lock" premise now has ONE thing holding it up that is
+	// not obvious from the escalation site: Process does take the
+	// kioskReplay playback lock, but only on the CMD_DISPLAY_PLAYLIST branch
+	// (heldPlaybackLock), while this escalation is CMD_REFRESH_ARTWORK-only,
+	// so the two never overlap. Extending the escalation to displayPlaylist
+	// would deadlock on that non-reentrant lock — re-check this before doing
+	// so, rather than trusting the sentence above.
 	recoverySession RecoverySession
 }
 
@@ -483,9 +491,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			// client-route reload 404s. NavigateHomeInline runs its own gates
 			// (sleep/error-page/overlay) synchronously and reports a
 			// SYNCHRONOUS error, which is exactly what this caller needs: it
-			// holds no external lock (:267 is outside every WithPlayerPush
-			// closure and gate.go has no mutex), so Inline's bounded wait
-			// cannot deadlock it. Only when the escalation itself fails (or no
+			// holds no external lock (this escalation is outside every
+			// WithPlayerPush closure, gate.go has no mutex, and the kioskReplay
+			// playback lock is taken only on the displayPlaylist branch — see
+			// recoverySession's field doc), so Inline's bounded wait cannot
+			// deadlock it. Only when the escalation itself fails (or no
 			// session is wired) is the command truly dead.
 			if commandType != commands.CMD_REFRESH_ARTWORK {
 				return nil, err
