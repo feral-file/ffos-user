@@ -811,7 +811,32 @@ externally-controlled URL strings out of filenames — the same convention
 
 **The record is per-source, not per-playlist-item.** Items sharing a
 `source` — within one playlist or across playlists — converge on one
-record: one classify probe, one capture, one status entry. The flip side
+record and therefore one status entry, with their blobs shared.
+
+How far up the pipeline that dedup reaches depends on the scope, and the
+distinction is worth stating precisely rather than claiming more than
+holds:
+
+- **Within one `downloadPlaylist` call**, a repeated source costs one
+  classify probe and one capture: `classifyPlaylistItems` dedups by
+  source key before probing (first occurrence wins, playlist order
+  preserved).
+- **Across separate requests**, each call classifies independently — two
+  concurrent `downloadPlaylist`/`downloadPlaylistItem` requests naming
+  the same source do issue two probes, since classification happens
+  before either can observe the other's queued state. They still
+  converge to a SINGLE capture: `enqueue` re-checks the source's tracked
+  state under the same lock it commits the job with, so the second one
+  returns `enqueueAlreadyQueued` and schedules nothing. The duplicate
+  probe is a bounded, accepted cost (one `HEAD`, or a small ranged `GET`
+  fallback); coalescing it would need an in-flight-classify registry
+  with its own synchronization on a path whose real dedup — the capture
+  itself — is already correct.
+- **A later request for an already-captured source is a deliberate
+  recapture**, not a missed dedup: it re-probes, re-captures, and
+  refreshes the existing record in place under the same key.
+
+The flip side
 is deliberate and refcount-free: clearing a source via one playlist
 (`clearPlaylistCache`) makes it `not_cached` for every other cached
 playlist that contains it. The record's verbatim `item` field holds

@@ -252,6 +252,87 @@ func TestService_DownloadPlaylist_DuplicateSourcesCollapseToOneJob(t *testing.T)
 // two cached playlists has ONE record, so clearing playlist A settles it
 // at not_cached for playlist B too (no refcount, by design — see
 // Store.DeleteItem's doc).
+// TestService_DownloadPlaylist_ConcurrentRequestsForOneSourceCaptureOnce
+// pins the cross-REQUEST half of the per-source dedup contract, which the
+// within-one-playlist test above cannot reach: two concurrent playlist
+// downloads naming the same source must converge on a single capture and
+// a single record, even though each request classifies independently.
+//
+// The two levels are deliberately different, and this test pins both
+// honestly (see docs/offline-artwork-capture.md §5): classification runs
+// before either caller can observe the other's queued state, so BOTH may
+// probe — an accepted, bounded cost. What must never double is the
+// capture: enqueue re-checks the source's tracked state under the same
+// lock it commits the job with, so the loser returns
+// enqueueAlreadyQueued and schedules nothing. Capture.Times(1) is the
+// assertion that matters; a regression that moved dedup out of that
+// locked commit would show up here as a second, unexpected Capture call.
+func TestService_DownloadPlaylist_ConcurrentRequestsForOneSourceCaptureOnce(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	sharedSource := "https://example.com/shared-across-requests.html"
+	rawFor := func(playlistID string) json.RawMessage {
+		raw, err := json.Marshal(map[string]interface{}{
+			"dpVersion": "1.0.0", "id": playlistID, "title": playlistID,
+			// Different resolution-minted ids, one shared source.
+			"items": []map[string]interface{}{{"id": playlistID + "-item", "source": sharedSource}},
+		})
+		require.NoError(t, err)
+		return raw
+	}
+
+	// Both requests may classify (AnyTimes): the probe is not coalesced
+	// across requests, and pinning a specific count here would make this
+	// test assert a scheduling race rather than the dedup contract.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), sharedSource).Return(offlinecache.ClassSoftware, nil).AnyTimes()
+	// Held open so both enqueues are guaranteed to have raced before the
+	// single capture completes and leaves the queued/downloading state.
+	releaseCapture := make(chan struct{})
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			<-releaseCapture
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	type result struct {
+		queued, total int
+		err           error
+	}
+	results := make(chan result, 2)
+	var start sync.WaitGroup
+	start.Add(1)
+	for _, playlistID := range []string{"playlist-a", "playlist-b"} {
+		go func(raw json.RawMessage) {
+			start.Wait() // release both goroutines together
+			q, tot, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+			results <- result{q, tot, err}
+		}(rawFor(playlistID))
+	}
+	start.Done()
+
+	first, second := <-results, <-results
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+	assert.Equal(t, 1, first.total+second.total-1, "each request reports its own single-item playlist")
+	assert.Equal(t, 1, first.queued+second.queued,
+		"exactly one of the two concurrent requests may report the shared source as newly queued; the other collapses onto it")
+
+	close(releaseCapture)
+	waitForState(t, ts.service, sharedSource, offlinecache.StateReady)
+
+	// One record for the shared source, and one status entry — whichever
+	// request won the enqueue race.
+	keys, err := ts.store.ListItemKeys()
+	require.NoError(t, err)
+	assert.Equal(t, []string{offlinecache.SourceKey(sharedSource)}, keys)
+}
+
 func TestService_ClearPlaylist_SharedSourceClearsForEveryPlaylist(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
