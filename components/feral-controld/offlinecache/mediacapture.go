@@ -62,8 +62,11 @@ func NewMediaCapturer(
 }
 
 func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem) (*ItemRecord, error) {
-	if item.ID == "" || item.Source == "" {
-		return nil, fmt.Errorf("offline cache: item must have an id and a source")
+	// Source is the item's cache identity (see SourceKey) and the one URL
+	// this path downloads; the DP-1 item id is optional per spec and
+	// deliberately not required here.
+	if item.Source == "" {
+		return nil, fmt.Errorf("offline cache: item must have a source")
 	}
 
 	// A single-resource capture only ever needs one reservation (unlike
@@ -114,7 +117,6 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 	}
 
 	rec := &ItemRecord{
-		ItemID:     item.ID,
 		Item:       item,
 		Entry:      item.Source,
 		Resources:  []Resource{resource},
@@ -122,7 +124,7 @@ func (c *mediaCapturer) Capture(ctx context.Context, item dp1playlist.PlaylistIt
 		CapturedAt: c.clock.Now().UTC(),
 	}
 	if err := c.store.SaveItem(rec); err != nil {
-		return nil, fmt.Errorf("offline cache: save item %s: %w", item.ID, err)
+		return nil, fmt.Errorf("offline cache: save item %s: %w", item.Source, err)
 	}
 	return rec, nil
 }

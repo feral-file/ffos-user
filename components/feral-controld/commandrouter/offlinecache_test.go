@@ -102,13 +102,13 @@ func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
 	assert.Equal(t, "queued", resp["status"])
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, item.Source, resp["source"])
 }
 
 // TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing
@@ -136,7 +136,7 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *test
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"dp1_call": playlistMap, "itemId": "item-1"},
+		Arguments: map[string]any{"dp1_call": playlistMap, "source": item.Source},
 	})
 
 	require.NoError(t, err)
@@ -166,7 +166,7 @@ func TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess(
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
@@ -174,7 +174,7 @@ func TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess(
 	assert.Equal(t, "queued", resp["status"])
 }
 
-func TestCommandHandler_DownloadPlaylistItem_MissingItemID(t *testing.T) {
+func TestCommandHandler_DownloadPlaylistItem_MissingSource(t *testing.T) {
 	ts, _ := setupOfflineCache(t)
 	defer ts.teardown()
 
@@ -197,7 +197,7 @@ func TestCommandHandler_DownloadPlaylistItem_ItemNotInPlaylist(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "missing-item"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": "https://example.com/never-in-playlist.html"},
 	})
 
 	require.NoError(t, err)
@@ -210,7 +210,7 @@ func TestCommandHandler_DownloadPlaylistItem_ResolveFailure(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"itemId": "item-1"}, // neither playlistUrl nor dp1_call
+		Arguments: map[string]any{"source": "https://example.com/index.html"}, // neither playlistUrl nor dp1_call
 	})
 
 	require.NoError(t, err)
@@ -233,7 +233,7 @@ func TestCommandHandler_DownloadPlaylistItem_ServiceNotStarted(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
@@ -259,7 +259,7 @@ func TestCommandHandler_DownloadPlaylistItem_UnsupportedMediaClass(t *testing.T)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
@@ -367,19 +367,19 @@ func TestCommandHandler_ClearPlaylistItemCache_Success(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, "https://example.com/item-1", resp["source"])
 }
 
-func TestCommandHandler_ClearPlaylistItemCache_MissingItemID(t *testing.T) {
+func TestCommandHandler_ClearPlaylistItemCache_MissingSource(t *testing.T) {
 	ts, _ := setupOfflineCache(t)
 	defer ts.teardown()
 
@@ -418,11 +418,11 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
-		{ID: "item-1"}, {ID: "item-2"},
+		{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"},
 	}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
@@ -435,17 +435,17 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, "https://example.com/item-1", resp["source"])
 }
 
 // TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlaylist
@@ -456,7 +456,7 @@ func TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlayl
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command: "someOtherCommand",
 	}, nil).Times(1)
@@ -471,7 +471,7 @@ func TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlayl
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -485,7 +485,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFailureDoesNotBlockResponse
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(nil, assertError("cdp not ready")).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
@@ -497,12 +497,12 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFailureDoesNotBlockResponse
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, "https://example.com/item-1", resp["source"])
 }
 
 // TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope mirrors
@@ -514,7 +514,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 
 	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(nil).Times(1)
 
-	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a"}}}}
+	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a", Source: "https://example.com/item-a"}}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
 		Playlist: inlinePlaylist,
@@ -525,7 +525,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-a"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-a"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -556,7 +556,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncSkipsWhenPlaybackGenerationAdva
 
 	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(nil).Times(1)
 
-	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a"}}}}
+	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a", Source: "https://example.com/item-a"}}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
 		Playlist: inlinePlaylist,
@@ -655,11 +655,11 @@ func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
-		{ID: "item-1"}, {ID: "item-2"},
+		{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"},
 	}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
@@ -685,7 +685,7 @@ func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -694,7 +694,7 @@ func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
 
 	select {
 	case ids := <-fake.syncCalls:
-		assert.Equal(t, []string{"item-1", "item-2"}, ids,
+		assert.Equal(t, []string{"https://example.com/item-1", "https://example.com/item-2"}, ids,
 			"the resync must recompute scope from post-clear state, not defer to the pre-clear install")
 	default:
 		t.Fatal("resync deferred to a scope installed from pre-clear store reads: SyncPlaylist was never called, replay stays pointed at just-deleted blobs")
@@ -711,11 +711,11 @@ func TestCommandHandler_ClearPlaylistItemCache_ActiveCaptureReturnsBusy(t *testi
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(offlinecache.ErrItemBusy).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(offlinecache.ErrItemBusy).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -749,7 +749,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
@@ -759,10 +759,10 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).
 		Return(nil, assertError("no network")).Times(1)
 
-	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1"},{"id":"item-2"}]}`)
+	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/item-1"},{"id":"item-2","source":"https://example.com/item-2"}]}`)
 	cachedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID:    "playlist-1",
-		Items: []dp1playlist.PlaylistItem{{ID: "item-1"}, {ID: "item-2"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"}},
 	}}
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
 	ts.mockJSON.EXPECT().
@@ -779,12 +779,12 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -800,7 +800,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEi
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
@@ -822,7 +822,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEi
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -839,11 +839,11 @@ func TestCommandHandler_ClearPlaylistItemCache_NotFound(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("missing").Return(offlinecache.ErrItemNotFound).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/missing").Return(offlinecache.ErrItemNotFound).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "missing"},
+		Arguments: map[string]any{"source": "https://example.com/missing"},
 	})
 
 	require.NoError(t, err)
@@ -866,23 +866,23 @@ func TestCommandHandler_ClearPlaylistCache_NotFound(t *testing.T) {
 	assertErrorResponse(t, result, "not_found")
 }
 
-func TestCommandHandler_GetOfflineCacheStatus_WithItemIDs(t *testing.T) {
+func TestCommandHandler_GetOfflineCacheStatus_WithSources(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
 	totals := offlinecache.StatusTotals{Total: 1, Ready: 1}
 	diskUsed := int64(1024)
 	snapshot := offlinecache.StatusSnapshot{
-		Items:         []offlinecache.ItemStatus{{ItemID: "item-1", State: offlinecache.StateReady}},
+		Items:         []offlinecache.ItemStatus{{Source: "https://example.com/item-1", State: offlinecache.StateReady}},
 		Totals:        &totals,
 		DiskUsedBytes: &diskUsed,
 	}
-	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1", "item-2"}}).
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{Sources: []string{"https://example.com/item-1", "https://example.com/item-2"}}).
 		Return(snapshot, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
-		Arguments: map[string]any{"itemIds": []interface{}{"item-1", "item-2"}},
+		Arguments: map[string]any{"sources": []interface{}{"https://example.com/item-1", "https://example.com/item-2"}},
 	})
 
 	require.NoError(t, err)
@@ -921,7 +921,7 @@ func TestCommandHandler_GetOfflineCacheStatus_PagingArguments(t *testing.T) {
 	defer ts.teardown()
 
 	snapshot := offlinecache.StatusSnapshot{
-		Items:      []offlinecache.ItemStatus{{ItemID: "item-9", State: offlinecache.StateReady}},
+		Items:      []offlinecache.ItemStatus{{Source: "https://example.com/item-9", State: offlinecache.StateReady}},
 		NextCursor: "item-9",
 		Truncated:  true,
 	}
@@ -976,20 +976,20 @@ func TestCommandHandler_GetOfflineCacheStatus_RejectsInvalidArguments(t *testing
 		{
 			// The regression this closes: a bare string used to fall
 			// through to "report on every item" instead of erroring.
-			name: "itemIds not an array",
-			args: map[string]any{"itemIds": "item-1"},
+			name: "sources not an array",
+			args: map[string]any{"sources": "https://example.com/item-1"},
 		},
 		{
-			name: "itemIds holds a non-string",
-			args: map[string]any{"itemIds": []interface{}{"item-1", 7}},
+			name: "sources holds a non-string",
+			args: map[string]any{"sources": []interface{}{"https://example.com/item-1", 7}},
 		},
 		{
-			name: "itemIds holds an empty string",
-			args: map[string]any{"itemIds": []interface{}{""}},
+			name: "sources holds an empty string",
+			args: map[string]any{"sources": []interface{}{""}},
 		},
 		{
-			name: "itemIds over the per-request cap",
-			args: map[string]any{"itemIds": tooManyItemIDs()},
+			name: "sources over the per-request cap",
+			args: map[string]any{"sources": tooManySources()},
 		},
 		{
 			name: "limit is not a number",
@@ -1041,12 +1041,12 @@ func TestCommandHandler_GetOfflineCacheStatus_RejectsInvalidArguments(t *testing
 	}
 }
 
-func tooManyItemIDs() []interface{} {
-	ids := make([]interface{}, offlinecache.MaxStatusItemIDs+1)
-	for i := range ids {
-		ids[i] = fmt.Sprintf("item-%d", i)
+func tooManySources() []interface{} {
+	sources := make([]interface{}, offlinecache.MaxStatusSources+1)
+	for i := range sources {
+		sources[i] = fmt.Sprintf("https://example.com/item-%d", i)
 	}
-	return ids
+	return sources
 }
 
 func TestCommandHandler_GetOfflineCacheStatus_ServiceError(t *testing.T) {
@@ -1093,7 +1093,7 @@ func TestCommandHandler_DownloadPlaylistItem_ClearWonIsReportedNotAcked(t *testi
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"itemId": "item-1", "playlistUrl": playlistURL},
+		Arguments: map[string]any{"source": item.Source, "playlistUrl": playlistURL},
 	})
 
 	require.NoError(t, err)

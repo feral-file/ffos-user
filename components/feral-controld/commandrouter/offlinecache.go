@@ -60,9 +60,13 @@ func (h *handler) handleOfflineCacheCommand(ctx context.Context, commandType com
 }
 
 func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[string]any) (interface{}, error) {
-	itemID, ok := stringArg(args["itemId"])
+	// The item is selected by its source URL — the cache identity (see
+	// offlinecache.SourceKey) — never by the DP-1 item id, which is
+	// optional per spec and regenerated on every resolution for
+	// dynamic-query playlists.
+	source, ok := stringArg(args["source"])
 	if !ok {
-		return errorResponse("invalid_request", "itemId is required", false), nil
+		return errorResponse("invalid_request", "source is required", false), nil
 	}
 
 	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
@@ -70,9 +74,9 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		return errorResponse("resolve_failed", err.Error(), true), nil
 	}
 
-	item, found := findPlaylistItem(playlist, itemID)
+	item, found := findPlaylistItemBySource(playlist, source)
 	if !found {
-		return errorResponse("not_found", "itemId not found in playlist", false), nil
+		return errorResponse("not_found", "source not found in playlist", false), nil
 	}
 
 	// Only a playlistUrl-resolved download has a URL to index for the
@@ -108,7 +112,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen)
 	}
 
-	return map[string]any{"ok": true, "status": "queued", "itemId": itemID}, nil
+	return map[string]any{"ok": true, "status": "queued", "source": source}, nil
 }
 
 func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) {
@@ -154,15 +158,15 @@ func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]an
 }
 
 func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[string]any) (interface{}, error) {
-	itemID, ok := stringArg(args["itemId"])
+	source, ok := stringArg(args["source"])
 	if !ok {
-		return errorResponse("invalid_request", "itemId is required", false), nil
+		return errorResponse("invalid_request", "source is required", false), nil
 	}
-	if err := h.offlineCache.ClearItem(itemID); err != nil {
+	if err := h.offlineCache.ClearItem(source); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
 	h.resyncKioskReplayScopeToCurrentDisplay(ctx)
-	return map[string]any{"ok": true, "itemId": itemID}, nil
+	return map[string]any{"ok": true, "source": source}, nil
 }
 
 func (h *handler) handleClearPlaylistCache(ctx context.Context, args map[string]any) (interface{}, error) {
@@ -264,9 +268,9 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 		return
 	}
 
-	itemIDs := make([]string, 0, len(playlist.Items))
+	sources := make([]string, 0, len(playlist.Items))
 	for _, item := range playlist.Items {
-		itemIDs = append(itemIDs, item.ID)
+		sources = append(sources, item.Source)
 	}
 	// Serialize this scope resync against any concurrent displayPlaylist
 	// sync+send (see KioskReplay.LockPlayback's doc). Acquired only around
@@ -285,7 +289,7 @@ func (h *handler) resyncKioskReplayScopeToCurrentDisplay(ctx context.Context) {
 	if h.kioskReplay.PlaybackGeneration() != genBeforeResolve {
 		return
 	}
-	if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
+	if syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
 		h.logger.Warn("offline cache: failed to sync kiosk replay scope after clear", zap.Error(syncErr))
 	}
 }
@@ -366,7 +370,7 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 // This one command is validated strictly, unlike the lenient arg helpers
 // the older commands share, because every one of its inputs decides how
 // much work the daemon does and how large the response gets: a
-// misspelled itemIds (say a bare string instead of an array) used to
+// misspelled sources (say a bare string instead of an array) used to
 // fall through to "report on EVERY item", turning a client-side typo
 // into a full-store scan on a device that also has a kiosk browser to
 // keep alive. Failing closed with a non-retryable error is the cheaper
@@ -374,16 +378,16 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[string]any) {
 	var req offlinecache.StatusRequest
 
-	if raw, present := args["itemIds"]; present && raw != nil {
-		ids, ok := stringSliceArg(raw)
+	if raw, present := args["sources"]; present && raw != nil {
+		sources, ok := stringSliceArg(raw)
 		if !ok {
-			return req, errorResponse("invalid_request", "itemIds must be an array of non-empty strings", false)
+			return req, errorResponse("invalid_request", "sources must be an array of non-empty strings", false)
 		}
-		if len(ids) > offlinecache.MaxStatusItemIDs {
+		if len(sources) > offlinecache.MaxStatusSources {
 			return req, errorResponse("invalid_request",
-				fmt.Sprintf("itemIds accepts at most %d ids per request", offlinecache.MaxStatusItemIDs), false)
+				fmt.Sprintf("sources accepts at most %d sources per request", offlinecache.MaxStatusSources), false)
 		}
-		req.ItemIDs = ids
+		req.Sources = sources
 	}
 
 	if raw, present := args["limit"]; present && raw != nil {
@@ -491,12 +495,16 @@ func (h *handler) loadCachedPlaylistForURL(url string) (*dp1.Playlist, error) {
 	return playlist, nil
 }
 
-func findPlaylistItem(playlist *dp1.Playlist, itemID string) (dp1playlist.PlaylistItem, bool) {
+// findPlaylistItemBySource matches by exact (byte-for-byte) source string
+// — the same no-normalization rule the cache key itself uses (see
+// offlinecache.SourceKey). Duplicate sources in one playlist are the same
+// cache entry, so returning the first match is correct.
+func findPlaylistItemBySource(playlist *dp1.Playlist, source string) (dp1playlist.PlaylistItem, bool) {
 	if playlist == nil {
 		return dp1playlist.PlaylistItem{}, false
 	}
 	for _, item := range playlist.Items {
-		if item.ID == itemID {
+		if item.Source == source {
 			return item, true
 		}
 	}
@@ -532,7 +540,7 @@ func stringSliceArg(v any) ([]string, bool) {
 }
 
 // maxIntArgValue is an overflow guard, not a policy limit: the callers'
-// own bounds (MaxStatusItems, MaxStatusItemIDs) are far below it, and
+// own bounds (MaxStatusItems, MaxStatusSources) are far below it, and
 // anything above it could not be converted to int meaningfully anyway.
 const maxIntArgValue = 1 << 20
 

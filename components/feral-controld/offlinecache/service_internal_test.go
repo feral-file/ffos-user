@@ -111,7 +111,6 @@ func TestService_EvictDownTo_StopsAfterOneVictimWhenGCFails(t *testing.T) {
 		blobHash, err := store.WriteBlob(strings.NewReader(content), 0)
 		require.NoError(t, err)
 		require.NoError(t, store.SaveItem(&ItemRecord{
-			ItemID:     id,
 			Item:       dp1playlist.PlaylistItem{ID: id, Source: "https://example.com/" + id},
 			Entry:      "https://example.com/" + id,
 			Resources:  []Resource{{URL: "https://example.com/" + id, Status: 200, SHA256: blobHash}},
@@ -129,15 +128,15 @@ func TestService_EvictDownTo_StopsAfterOneVictimWhenGCFails(t *testing.T) {
 	// The flaky record reads fine during the victim scan setup above;
 	// from here on it fails, so oldestEvictableItem skips it (its own
 	// LoadItem errors) and gc()'s mark phase aborts on it.
-	failOS.failPath = filepath.Join(root, "items", "item-flaky.json")
+	failOS.failPath = filepath.Join(root, "items", SourceKey("https://example.com/item-flaky")+".json")
 
 	// Target 0 with three items on disk: without the gc-failure stop this
 	// loop would evict every readable record trying to get under target.
-	svc.evictDownTo(0, "", false)
+	svc.evictDownTo(0, "", "", false)
 
-	_, err := store.LoadItem("item-victim")
+	_, err := store.LoadItem(SourceKey("https://example.com/item-victim"))
 	assert.ErrorIs(t, err, ErrItemNotFound, "the oldest readable record is deleted before the GC failure is discovered")
-	_, err = store.LoadItem("item-survivor")
+	_, err = store.LoadItem(SourceKey("https://example.com/item-survivor"))
 	assert.NoError(t, err, "the loop must stop after the failed GC instead of burning further healthy records")
 	for _, content := range []string{"victim payload", "survivor payload", "flaky payload"} {
 		sum := sha256.Sum256([]byte(content))

@@ -284,8 +284,11 @@ func NewCapturer(
 }
 
 func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, captureWindowMs int) (*ItemRecord, error) {
-	if item.ID == "" || item.Source == "" {
-		return nil, fmt.Errorf("offline cache: item must have an id and a source")
+	// Source is the item's cache identity (see SourceKey) and the URL this
+	// capture navigates to; the DP-1 item id is optional per spec and
+	// deliberately not required here.
+	if item.Source == "" {
+		return nil, fmt.Errorf("offline cache: item must have a source")
 	}
 	window := captureWindowDefault
 	if captureWindowMs > 0 {
@@ -362,7 +365,6 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	c.clearObservedOriginsStorage(ctx, session, resources)
 
 	rec := &ItemRecord{
-		ItemID:     item.ID,
 		Item:       item,
 		Entry:      item.Source,
 		Resources:  resources,
@@ -370,7 +372,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 		CapturedAt: c.clock.Now().UTC(),
 	}
 	if err := c.store.SaveItem(rec); err != nil {
-		return nil, fmt.Errorf("offline cache: save item %s: %w", item.ID, err)
+		return nil, fmt.Errorf("offline cache: save item %s: %w", item.Source, err)
 	}
 	return rec, nil
 }

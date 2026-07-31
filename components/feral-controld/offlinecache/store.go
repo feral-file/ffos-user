@@ -47,7 +47,7 @@ const (
 // Store implements the canonical on-disk format from the plan: a shared
 // content-addressed blob store plus one JSON record per cached item or
 // playlist. There is deliberately no persisted top-level manifest —
-// ListItemIDs/ListPlaylistIDs/DiskUsage/GC all derive state by walking the
+// ListItemKeys/ListPlaylistIDs/DiskUsage/GC all derive state by walking the
 // directories, so there is nothing that can drift out of sync with the
 // files themselves after a crash mid-write (writes below go through a
 // temp-file-then-rename so a killed capture process cannot leave a
@@ -97,9 +97,18 @@ type Store interface {
 	// treat it as read-only.
 	BlobPath(sha256Hex string) string
 
+	// SaveItem persists rec under items/<SourceKey(rec.Item.Source)>.json.
+	// The key is derived here, from the record's own source, in the one
+	// place a record is ever written — so the filename and the record
+	// content can never disagree about identity. rec.Item.Source is the
+	// only required field (the DP-1 item id is optional per spec and
+	// informational here — see ItemRecord's doc).
 	SaveItem(rec *ItemRecord) error
-	LoadItem(itemID string) (*ItemRecord, error)
-	// DeleteItem removes itemID's record if it exists, reporting whether
+	// LoadItem reads the record for sourceKey (a SourceKey value, NOT a
+	// raw source URL — callers at the package boundary hash exactly once
+	// and pass the key everywhere inward).
+	LoadItem(sourceKey string) (*ItemRecord, error)
+	// DeleteItem removes sourceKey's record if it exists, reporting whether
 	// there was one to remove. It stays a Remove-if-exists primitive —
 	// "already absent" is success, never an error — so removed is the ONLY
 	// signal a caller has that this particular call is what made the item
@@ -107,8 +116,17 @@ type Store interface {
 	// clear that really settled an item at not_cached (announce it, see
 	// ClearItem) from one that found nothing to do, without paying for a
 	// LoadItem read+unmarshal of a record it is about to delete anyway.
-	DeleteItem(itemID string) (removed bool, err error)
-	ListItemIDs() ([]string, error)
+	//
+	// The record is per-SOURCE (see ItemRecord's doc): deleting it removes
+	// the cached artifact for EVERY playlist item — in any playlist — whose
+	// source hashes to sourceKey. There is deliberately no refcount; a
+	// clear issued via one playlist makes the shared source not_cached for
+	// all of them.
+	DeleteItem(sourceKey string) (removed bool, err error)
+	// ListItemKeys lists the sourceKey of every saved item record — a
+	// cheap directory-name listing, no record reads. Callers that need a
+	// record's original source URL load it (Item.Source).
+	ListItemKeys() ([]string, error)
 
 	SavePlaylist(playlistID string, raw json.RawMessage) error
 	LoadPlaylist(playlistID string) (json.RawMessage, error)
@@ -199,9 +217,11 @@ func (s *fsStore) blobsDir() string     { return filepath.Join(s.root, "blobs") 
 func (s *fsStore) itemsDir() string     { return filepath.Join(s.root, "items") }
 func (s *fsStore) playlistsDir() string { return filepath.Join(s.root, "playlists") }
 
-// safeID defends against a malformed DP-1 id escaping the store root via
-// path separators or "..". DP-1 ids are normally opaque UUID/slug strings,
-// so this should never trigger outside of a hostile or corrupted playlist.
+// safeID defends against a malformed DP-1 playlist id escaping the store
+// root via path separators or "..". Playlist ids are normally opaque
+// UUID/slug strings, so this should never trigger outside of a hostile or
+// corrupted playlist. Item records no longer need it: their filenames are
+// SourceKey hashes, validated by validSourceKey below.
 func safeID(id string) (string, error) {
 	if id == "" {
 		return "", errors.New("offline cache: empty id")
@@ -387,31 +407,51 @@ func (s *fsStore) BlobSize(hexSum string) (int64, error) {
 	return info.Size(), nil
 }
 
-func (s *fsStore) itemPath(id string) (string, error) {
-	clean, err := safeID(id)
-	if err != nil {
-		return "", err
+// validSourceKey reports whether key has the exact shape SourceKey
+// produces: 64 lowercase hex characters. Every legitimate caller derives
+// keys via SourceKey (or reads them back from ListItemKeys, i.e. from
+// filenames SourceKey named), so a mismatch is a programming bug — but
+// the check also guarantees, independently of caller discipline, that an
+// item path can never contain a separator or "..": the item-record
+// counterpart of safeID's defense for playlist paths.
+func validSourceKey(key string) bool {
+	if len(key) != sha256.Size*2 {
+		return false
 	}
-	return filepath.Join(s.itemsDir(), clean+".json"), nil
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *fsStore) itemPath(sourceKey string) (string, error) {
+	if !validSourceKey(sourceKey) {
+		return "", fmt.Errorf("offline cache: invalid source key %q (want 64 lowercase hex chars — pass SourceKey(source), never a raw source URL)", sourceKey)
+	}
+	return filepath.Join(s.itemsDir(), sourceKey+".json"), nil
 }
 
 func (s *fsStore) SaveItem(rec *ItemRecord) error {
-	if rec == nil || rec.ItemID == "" {
-		return errors.New("offline cache: item record must have an itemId")
+	if rec == nil || rec.Item.Source == "" {
+		return errors.New("offline cache: item record must have an item source")
 	}
-	path, err := s.itemPath(rec.ItemID)
+	key := SourceKey(rec.Item.Source)
+	path, err := s.itemPath(key)
 	if err != nil {
 		return err
 	}
 	data, err := s.json.Marshal(rec)
 	if err != nil {
-		return fmt.Errorf("offline cache: marshal item %s: %w", rec.ItemID, err)
+		return fmt.Errorf("offline cache: marshal item %s: %w", key, err)
 	}
 	return s.writeFileAtomic(s.itemsDir(), path, data, recordFilePerm)
 }
 
-func (s *fsStore) LoadItem(itemID string) (*ItemRecord, error) {
-	path, err := s.itemPath(itemID)
+func (s *fsStore) LoadItem(sourceKey string) (*ItemRecord, error) {
+	path, err := s.itemPath(sourceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -420,17 +460,17 @@ func (s *fsStore) LoadItem(itemID string) (*ItemRecord, error) {
 		return nil, ErrItemNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("offline cache: read item %s: %w", itemID, err)
+		return nil, fmt.Errorf("offline cache: read item %s: %w", sourceKey, err)
 	}
 	var rec ItemRecord
 	if err := s.json.Unmarshal(data, &rec); err != nil {
-		return nil, fmt.Errorf("%w: item %s: %w", ErrItemRecordCorrupt, itemID, err)
+		return nil, fmt.Errorf("%w: item %s: %w", ErrItemRecordCorrupt, sourceKey, err)
 	}
 	return &rec, nil
 }
 
-func (s *fsStore) DeleteItem(itemID string) (bool, error) {
-	path, err := s.itemPath(itemID)
+func (s *fsStore) DeleteItem(sourceKey string) (bool, error) {
+	path, err := s.itemPath(sourceKey)
 	if err != nil {
 		return false, err
 	}
@@ -438,13 +478,28 @@ func (s *fsStore) DeleteItem(itemID string) (bool, error) {
 		if s.os.IsNotExist(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("offline cache: delete item %s: %w", itemID, err)
+		return false, fmt.Errorf("offline cache: delete item %s: %w", sourceKey, err)
 	}
 	return true, nil
 }
 
-func (s *fsStore) ListItemIDs() ([]string, error) {
-	return s.listJSONIDs(s.itemsDir(), "list items")
+func (s *fsStore) ListItemKeys() ([]string, error) {
+	names, err := s.listJSONIDs(s.itemsDir(), "list items")
+	if err != nil {
+		return nil, err
+	}
+	// Filter to valid source keys: a .json file under any other name is
+	// unreachable through LoadItem's key validation, so surfacing it here
+	// would only feed every reader (status, Start's rebuild, eviction) a
+	// name it can never load. GC — the one caller that must see such
+	// strays to quarantine them — walks the raw directory entries itself.
+	keys := names[:0]
+	for _, name := range names {
+		if validSourceKey(name) {
+			keys = append(keys, name)
+		}
+	}
+	return keys, nil
 }
 
 func (s *fsStore) playlistPath(id string) (string, error) {
@@ -560,7 +615,7 @@ func (s *fsStore) listJSONIDs(dir, opDescription string) ([]string, error) {
 
 // quarantineItemRecordSuffix is appended to an unparsable item record's
 // filename by GC's quarantine path. The resulting name no longer ends in
-// ".json", so ListItemIDs — the single listing seam every reader
+// ".json", so ListItemKeys — the single listing seam every reader
 // (itemStatus, Start's rebuild, eviction's victim scan, GC itself) goes
 // through — stops seeing the record entirely, while the bytes stay on
 // disk for post-incident inspection. Quarantined files are counted by
@@ -568,29 +623,68 @@ func (s *fsStore) listJSONIDs(dir, opDescription string) ([]string, error) {
 // blob-scale data.
 const quarantineItemRecordSuffix = ".corrupt"
 
-// quarantineItemRecord renames an unparsable item record out of
-// ListItemIDs' view — see GC's mark phase for why corrupt records are
+// quarantineItemRecord renames an unparsable (or unreachable — see GC)
+// item record out of ListItemKeys' view. name is the raw directory-entry
+// name minus ".json", NOT necessarily a valid source key: GC must be able
+// to quarantine a record whose very problem is a filename LoadItem's key
+// validation would reject, so this deliberately joins the name directly
+// (safe — ReadDir entry names never contain path separators) instead of
+// going through itemPath. See GC's mark phase for why such records are
 // quarantined rather than aborting the sweep or being deleted outright.
-func (s *fsStore) quarantineItemRecord(id string) error {
-	path, err := s.itemPath(id)
-	if err != nil {
-		return err
-	}
+func (s *fsStore) quarantineItemRecord(name string) error {
+	path := filepath.Join(s.itemsDir(), name+".json")
 	if err := s.os.Rename(path, path+quarantineItemRecordSuffix); err != nil {
-		return fmt.Errorf("offline cache: quarantine item record %s: %w", id, err)
+		return fmt.Errorf("offline cache: quarantine item record %s: %w", name, err)
 	}
 	return nil
 }
 
+// loadItemByName reads an item record by its raw directory-entry name
+// (minus ".json"), bypassing LoadItem's source-key validation. GC-only:
+// the mark phase iterates real directory entries and must distinguish
+// "reads fine but unusable" from "transiently unreadable" even for files
+// whose names are not valid source keys — LoadItem's validation error
+// would conflate those into one undifferentiated failure.
+func (s *fsStore) loadItemByName(name string) (*ItemRecord, error) {
+	path := filepath.Join(s.itemsDir(), name+".json")
+	data, err := s.os.ReadFile(path)
+	if s.os.IsNotExist(err) {
+		return nil, ErrItemNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("offline cache: read item %s: %w", name, err)
+	}
+	var rec ItemRecord
+	if err := s.json.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("%w: item %s: %w", ErrItemRecordCorrupt, name, err)
+	}
+	return &rec, nil
+}
+
 func (s *fsStore) GC() (int, int64, error) {
-	itemIDs, err := s.ListItemIDs()
+	// Raw directory names, NOT ListItemKeys: that seam filters out
+	// invalid-key strays so ordinary readers never see them, but GC is
+	// exactly the one caller that must see them to quarantine them (see
+	// the invalid-name branch below).
+	itemNames, err := s.listJSONIDs(s.itemsDir(), "list items")
 	if err != nil {
 		return 0, 0, err
 	}
 
 	keep := make(map[string]bool)
-	for _, id := range itemIDs {
-		rec, err := s.LoadItem(id)
+	for _, id := range itemNames {
+		rec, err := s.loadItemByName(id)
+		// A record whose filename is not a valid source key is unreachable
+		// by construction — LoadItem validates keys, so no reader (status,
+		// replay scope, eviction) can ever load it, no matter how well its
+		// bytes parse. Treating it as live would keep its blobs pinned
+		// forever for content nothing can serve; treating it as a
+		// transient error would wedge GC on every pass (the name never
+		// becomes valid). It gets exactly the corrupt-record treatment:
+		// quarantined for forensics, its exclusive blobs reclaimed.
+		if err == nil && !validSourceKey(id) {
+			err = fmt.Errorf("%w: item %s: filename is not a source key", ErrItemRecordCorrupt, id)
+		}
 		switch {
 		case errors.Is(err, ErrItemRecordCorrupt):
 			// Deterministic: the bytes read fine but will never parse, so
@@ -601,7 +695,7 @@ func (s *fsStore) GC() (int, int64, error) {
 			// healthy records for zero reclaimed bytes. Nothing else can
 			// remove the record either: eviction's victim scan skips
 			// records it cannot read. Quarantining it (rename to a suffix
-			// ListItemIDs ignores, preserving the bytes for forensics)
+			// ListItemKeys ignores, preserving the bytes for forensics)
 			// and continuing is safe because no reader can use the record
 			// anyway — itemStatus reports it not_cached and Start's
 			// rebuild skips it — so blobs only it referenced are already
@@ -611,7 +705,7 @@ func (s *fsStore) GC() (int, int64, error) {
 				return 0, 0, fmt.Errorf("offline cache: GC aborted, could not quarantine corrupt item record %s: %w", id, qErr)
 			}
 			s.logger.Warn("offline cache GC: quarantined unparsable item record",
-				zap.String("item_id", id), zap.Error(err))
+				zap.String("source_key", id), zap.Error(err))
 			continue
 		case err != nil:
 			// Possibly transient (EIO/EMFILE): abort the whole sweep

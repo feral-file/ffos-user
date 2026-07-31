@@ -139,14 +139,14 @@ func TestReplayer_EnableForItem_LoadsItemAndEnablesFetch(t *testing.T) {
 	seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
 
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 }
 
 func TestReplayer_EnableForItem_ItemNotFound(t *testing.T) {
 	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
 	defer ts.ctrl.Finish()
 
-	err := ts.replayer.EnableForItem(context.Background(), "missing-item")
+	err := ts.replayer.EnableForItem(context.Background(), sourceFor("missing-item"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 }
 
@@ -184,7 +184,7 @@ func TestReplayer_ProcessRequestPaused_DelayedEventFromSupersededSessionIsDroppe
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	// oldHandler is bound (via Attach's closure) to ts.mockSession — the
 	// OLD session, about to be superseded below.
@@ -233,7 +233,7 @@ func TestReplayer_EnableForPlaylist_SerializesAgainstConcurrentAttach(t *testing
 
 	enableDone := make(chan error, 1)
 	go func() {
-		enableDone <- ts.replayer.EnableForItem(context.Background(), "item-1")
+		enableDone <- ts.replayer.EnableForItem(context.Background(), sourceFor("item-1"))
 	}()
 
 	select {
@@ -291,7 +291,7 @@ func TestReplayer_EnableForItem_NoSessionAttached(t *testing.T) {
 	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
 
 	rp := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
-	err := rp.EnableForItem(context.Background(), "item-1")
+	err := rp.EnableForItem(context.Background(), sourceFor("item-1"))
 	assert.Error(t, err)
 }
 
@@ -302,7 +302,7 @@ func TestReplayer_EnableForPlaylist_UnionsMultipleItemsResources(t *testing.T) {
 	res2 := seedItem(t, ts.store, "item-2", "software payload two")
 	ts.stubFetchEnable()
 
-	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1", "item-2"}, false))
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{sourceFor("item-1"), sourceFor("item-2")}, false))
 
 	done1 := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEvent(t, "req-1", res1.URL))
@@ -318,7 +318,7 @@ func TestReplayer_EnableForPlaylist_UnknownItemErrorsAndLeavesScopeUnchanged(t *
 	defer ts.ctrl.Finish()
 	seedItem(t, ts.store, "item-1", "software payload")
 
-	err := ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1", "missing-item"}, false)
+	err := ts.replayer.EnableForPlaylist(context.Background(), []string{sourceFor("item-1"), sourceFor("missing-item")}, false)
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 }
 
@@ -347,7 +347,7 @@ func TestReplayer_EnableForPlaylist_MixedScopeMissPassesThroughEvenUnderFailClos
 	// (the sibling's own request) must pass through to the live network
 	// even though the configured policy is fail_closed, or the sibling
 	// item could never play. A cached hit must still be served normally.
-	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1"}, true))
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{sourceFor("item-1")}, true))
 
 	missDone := ts.expectSend("Fetch.continueRequest")
 	ts.handler(requestPausedEvent(t, "req-miss", "https://example.com/uncached-sibling.js"))
@@ -367,7 +367,7 @@ func TestReplayer_EnableForPlaylist_NonMixedScopeMissStillFailsClosed(t *testing
 	// mixed=false (every item in the displayed playlist is cached) must
 	// keep the strict fail_closed guarantee: nothing here should ever
 	// legitimately need the live network.
-	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1"}, false))
+	require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{sourceFor("item-1")}, false))
 
 	done := ts.expectSend("Fetch.failRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/unrelated.js"))
@@ -419,7 +419,7 @@ func TestReplayer_KioskShellRequestsPassThroughUnderFailClosed(t *testing.T) {
 
 			// mixed=false: the strictest scope, where every non-exempt
 			// miss fails closed.
-			require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1"}, false))
+			require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{sourceFor("item-1")}, false))
 
 			done := ts.expectSend(tt.want)
 			ts.handler(requestPausedEvent(t, "req-1", tt.url))
@@ -438,7 +438,7 @@ func TestReplayer_ProcessRequestPaused_MethodMismatchIsTreatedAsMiss(t *testing.
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "software payload") // seeded with an implicit GET Resource
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	// A GET to the exact same URL still hits, proving the cached entry is
 	// reachable at all.
@@ -466,9 +466,8 @@ func TestReplayer_ProcessRequestPaused_DistinctMethodsToSameURLServeIndependentl
 	getHash := writeBlobString(t, ts.store, "GET body")
 	optionsHash := writeBlobString(t, ts.store, "")
 	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
-		ItemID: "item-multi-method",
-		Item:   dp1playlist.PlaylistItem{ID: "item-multi-method", Source: url},
-		Entry:  url,
+		Item:  dp1playlist.PlaylistItem{ID: "item-multi-method", Source: url},
+		Entry: url,
 		Resources: []offlinecache.Resource{
 			{URL: url, Status: 200, SHA256: getHash, ContentType: "application/json"},
 			{URL: url, Status: 204, SHA256: optionsHash, Method: "OPTIONS"},
@@ -476,7 +475,7 @@ func TestReplayer_ProcessRequestPaused_DistinctMethodsToSameURLServeIndependentl
 		Coverage: offlinecache.Coverage{Complete: true},
 	}))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-multi-method"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), url))
 
 	getDone := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEventWithMethod(t, "req-get", url, "GET"))
@@ -506,7 +505,7 @@ func TestReplayer_ProcessRequestPaused_StripsPlayerAppendedDisplayModeParam(t *t
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "software payload") // res.URL has no query string
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	liveURL := res.URL + "?display_mode=fit"
 	done := ts.expectSend("Fetch.fulfillRequest")
@@ -529,14 +528,13 @@ func TestReplayer_ProcessRequestPaused_StripsDisplayModeWithoutReorderingOtherPa
 	capturedURL := "https://cdn.example.com/previews/abc/?edition_number=0&blockchain=bitmark"
 	hash := writeBlobString(t, ts.store, "software payload")
 	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
-		ItemID:    "item-1",
 		Item:      dp1playlist.PlaylistItem{ID: "item-1", Source: capturedURL},
 		Entry:     capturedURL,
 		Resources: []offlinecache.Resource{{URL: capturedURL, Status: 200, SHA256: hash, ContentType: "text/html"}},
 		Coverage:  offlinecache.Coverage{Complete: true},
 	}))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), capturedURL))
 
 	// Exactly what ArtworkPlayer.tsx produces: the ORIGINAL query order
 	// preserved, with "&display_mode=crop" appended at the end.
@@ -560,7 +558,7 @@ func TestReplayer_ProcessRequestPaused_UnknownExtraParamStillMisses(t *testing.T
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	liveURL := res.URL + "?some_other_param=1"
 	done := ts.expectSend("Fetch.failRequest")
@@ -578,7 +576,6 @@ func seedMediaItem(t *testing.T, store offlinecache.Store, itemID, sourceURL, co
 	hash := writeBlobString(t, store, blobContent)
 	res := offlinecache.Resource{URL: sourceURL, Status: 200, SHA256: hash, ContentType: contentType, Headers: headers}
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
-		ItemID:    itemID,
 		Item:      dp1playlist.PlaylistItem{ID: itemID, Source: sourceURL},
 		Entry:     sourceURL,
 		Resources: []offlinecache.Resource{res},
@@ -603,7 +600,7 @@ func TestReplayer_ProcessRequestPaused_AnswersHEADContentTypeProbeFromGETResourc
 	res := seedMediaItem(t, ts.store, "item-media", "https://example.com/video.mp4", "video/mp4",
 		"fake video bytes", map[string]string{"Access-Control-Allow-Origin": "*"})
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-media"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://example.com/video.mp4"))
 
 	probeURL := res.URL + "?v=1234567890&x-request=xhr"
 	done := ts.expectSend("Fetch.fulfillRequest")
@@ -633,7 +630,7 @@ func TestReplayer_ProcessRequestPaused_HEADProbeStripDoesNotReorderOtherParams(t
 	capturedURL := "https://cdn.example.com/art/video.mp4?edition_number=0&blockchain=bitmark"
 	seedMediaItem(t, ts.store, "item-media", capturedURL, "video/mp4", "fake video bytes", nil)
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-media"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), capturedURL))
 
 	// Exactly what ff-player's getContentTypeFromURL produces: the
 	// ORIGINAL query preserved, with "&v=...&x-request=xhr" appended.
@@ -654,7 +651,7 @@ func TestReplayer_ProcessRequestPaused_HEADMissesWhenNoGETResourceCaptured(t *te
 	defer ts.ctrl.Finish()
 	seedMediaItem(t, ts.store, "item-media", "https://example.com/video.mp4", "video/mp4", "fake video bytes", nil)
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-media"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://example.com/video.mp4"))
 
 	done := ts.expectSend("Fetch.failRequest")
 	probeURL := "https://example.com/never-captured.mp4?v=123&x-request=xhr"
@@ -670,16 +667,15 @@ func TestReplayer_ProcessRequestPaused_HEADFollowsGETResourceRedirect(t *testing
 	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
 	defer ts.ctrl.Finish()
 	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
-		ItemID: "item-redirect",
-		Item:   dp1playlist.PlaylistItem{ID: "item-redirect", Source: "https://example.com/video.mp4"},
-		Entry:  "https://example.com/video.mp4",
+		Item:  dp1playlist.PlaylistItem{ID: "item-redirect", Source: "https://example.com/video.mp4"},
+		Entry: "https://example.com/video.mp4",
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/video.mp4", Status: 302, RedirectTo: "https://cdn.example.com/video-v2.mp4"},
 		},
 		Coverage: offlinecache.Coverage{Complete: true},
 	}))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-redirect"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://example.com/video.mp4"))
 
 	done := ts.expectSend("Fetch.fulfillRequest")
 	probeURL := "https://example.com/video.mp4?v=123&x-request=xhr"
@@ -701,16 +697,15 @@ func TestReplayer_ProcessRequestPaused_HEADMissesWhenGETResourceHasNoBody(t *tes
 	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
 	defer ts.ctrl.Finish()
 	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
-		ItemID: "item-broken",
-		Item:   dp1playlist.PlaylistItem{ID: "item-broken", Source: "https://example.com/video.mp4"},
-		Entry:  "https://example.com/video.mp4",
+		Item:  dp1playlist.PlaylistItem{ID: "item-broken", Source: "https://example.com/video.mp4"},
+		Entry: "https://example.com/video.mp4",
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/video.mp4", Status: 0}, // no SHA256: fetch failed at capture time
 		},
 		Coverage: offlinecache.Coverage{Complete: false, Reason: "fetch_failed:https://example.com/video.mp4"},
 	}))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-broken"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://example.com/video.mp4"))
 
 	done := ts.expectSend("Fetch.failRequest")
 	probeURL := "https://example.com/video.mp4?v=123&x-request=xhr"
@@ -723,7 +718,7 @@ func TestReplayer_Disable_DisablesFetchAndClearsScope(t *testing.T) {
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
 	require.NoError(t, ts.replayer.Disable(context.Background()))
@@ -747,7 +742,7 @@ func TestReplayer_Disable_FetchDisableFailureForcesPassThroughInsteadOfFailClose
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).
 		Return(nil, assert.AnError).Times(1)
@@ -783,7 +778,7 @@ func TestReplayer_ProcessRequestPaused_FulfillsSmallBlob(t *testing.T) {
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "<html>art</html>")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	done := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEvent(t, "req-1", res.URL))
@@ -823,7 +818,7 @@ func TestReplayer_OnRequestPaused_AdmissionBoundResolvesOverflowViaMissPolicy(t 
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-hot", "hot payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-hot")))
 
 	release := make(chan struct{})
 	var admitted sync.WaitGroup
@@ -871,7 +866,7 @@ func TestReplayer_OnRequestPaused_OverflowStillPassesThroughKioskShell(t *testin
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-hot", "hot payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-hot")))
 
 	release := make(chan struct{})
 	var admitted sync.WaitGroup
@@ -912,7 +907,7 @@ func TestReplayer_ProcessRequestPaused_HeaderlessResourceFulfillsWithNonNullHead
 
 	hash := writeBlobString(t, ts.store, "void main(){}")
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-shader",
+		Item: dp1playlist.PlaylistItem{Source: "https://cdn.example.com/shaders/post.frag"},
 		Resources: []offlinecache.Resource{
 			// No ContentType, no Headers — the exact shape that produced a
 			// nil headers slice before the fix.
@@ -922,7 +917,7 @@ func TestReplayer_ProcessRequestPaused_HeaderlessResourceFulfillsWithNonNullHead
 	}
 	require.NoError(t, ts.store.SaveItem(rec))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-shader"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://cdn.example.com/shaders/post.frag"))
 
 	done := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://cdn.example.com/shaders/post.frag"))
@@ -954,7 +949,7 @@ func TestReplayer_ProcessRequestPaused_PartialContentBlobNormalizedTo200(t *test
 	// it takes the inline-fulfill path, not the static-server redirect.
 	hash := writeBlobString(t, ts.store, "audio-bytes")
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-206",
+		Item: dp1playlist.PlaylistItem{Source: "https://example.com/track.mp3"},
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/track.mp3", Status: 206, SHA256: hash, ContentType: "audio/mpeg"},
 		},
@@ -962,7 +957,7 @@ func TestReplayer_ProcessRequestPaused_PartialContentBlobNormalizedTo200(t *test
 	}
 	require.NoError(t, ts.store.SaveItem(rec))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-206"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://example.com/track.mp3"))
 
 	done := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/track.mp3"))
@@ -990,7 +985,7 @@ func TestReplayer_ProcessRequestPaused_InlineFulfillReplaysCORSHeaders(t *testin
 
 	hash := writeBlobString(t, ts.store, "export default 1;")
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-cors",
+		Item: dp1playlist.PlaylistItem{Source: "https://cdn.example.com/module.js"},
 		Resources: []offlinecache.Resource{
 			{
 				URL: "https://cdn.example.com/module.js", Status: 200, SHA256: hash, ContentType: "application/javascript",
@@ -1004,7 +999,7 @@ func TestReplayer_ProcessRequestPaused_InlineFulfillReplaysCORSHeaders(t *testin
 	}
 	require.NoError(t, ts.store.SaveItem(rec))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-cors"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://cdn.example.com/module.js"))
 
 	done := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://cdn.example.com/module.js"))
@@ -1040,14 +1035,13 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectPassesCORSHeadersToStat
 
 	corsHeaders := map[string]string{"Access-Control-Allow-Origin": "https://example.com"}
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-large-cors",
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/movie.mp4", Status: 200, SHA256: "deadbeef", ContentType: "video/mp4", Headers: corsHeaders},
 		},
 	}
-	mockStore.EXPECT().LoadItem("item-large-cors").Return(rec, nil).Times(1)
+	mockStore.EXPECT().LoadItem(offlinecache.SourceKey("https://example.com/movie.mp4")).Return(rec, nil).Times(1)
 	mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
-	require.NoError(t, rp.EnableForItem(context.Background(), "item-large-cors"))
+	require.NoError(t, rp.EnableForItem(context.Background(), "https://example.com/movie.mp4"))
 
 	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
 	mockStatic.EXPECT().IsListening().Return(true).Times(1)
@@ -1074,9 +1068,8 @@ func TestReplayer_ProcessRequestPaused_RedirectResource(t *testing.T) {
 
 	finalHash := writeBlobString(t, ts.store, "console.log(1)")
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-redirect",
-		Item:   dp1playlist.PlaylistItem{ID: "item-redirect", Source: "https://example.com/lib.min.js"},
-		Entry:  "https://example.com/lib.min.js",
+		Item:  dp1playlist.PlaylistItem{ID: "item-redirect", Source: "https://example.com/lib.min.js"},
+		Entry: "https://example.com/lib.min.js",
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/lib.min.js", Status: 302, RedirectTo: "https://example.com/lib@2/lib.min.js"},
 			{URL: "https://example.com/lib@2/lib.min.js", Status: 200, SHA256: finalHash, ContentType: "application/javascript"},
@@ -1086,7 +1079,7 @@ func TestReplayer_ProcessRequestPaused_RedirectResource(t *testing.T) {
 	require.NoError(t, ts.store.SaveItem(rec))
 
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-redirect"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://example.com/lib.min.js"))
 
 	done := ts.expectSend("Fetch.fulfillRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/lib.min.js"))
@@ -1115,14 +1108,13 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectsToStatic(t *testing.T)
 	rp.Attach("", mockSession)
 
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-large",
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/movie.mp4", Status: 200, SHA256: "deadbeef", ContentType: "video/mp4"},
 		},
 	}
-	mockStore.EXPECT().LoadItem("item-large").Return(rec, nil).Times(1)
+	mockStore.EXPECT().LoadItem(offlinecache.SourceKey("https://example.com/movie.mp4")).Return(rec, nil).Times(1)
 	mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
-	require.NoError(t, rp.EnableForItem(context.Background(), "item-large"))
+	require.NoError(t, rp.EnableForItem(context.Background(), "https://example.com/movie.mp4"))
 
 	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
 	mockStatic.EXPECT().IsListening().Return(true).Times(1)
@@ -1170,14 +1162,13 @@ func TestReplayer_ProcessRequestPaused_LargeAssetMissesWhenStaticServerNotListen
 	rp.Attach("", mockSession)
 
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-large",
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/movie.mp4", Status: 200, SHA256: "deadbeef", ContentType: "video/mp4"},
 		},
 	}
-	mockStore.EXPECT().LoadItem("item-large").Return(rec, nil).Times(1)
+	mockStore.EXPECT().LoadItem(offlinecache.SourceKey("https://example.com/movie.mp4")).Return(rec, nil).Times(1)
 	mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
-	require.NoError(t, rp.EnableForItem(context.Background(), "item-large"))
+	require.NoError(t, rp.EnableForItem(context.Background(), "https://example.com/movie.mp4"))
 
 	mockStore.EXPECT().BlobSize("deadbeef").Return(int64(300*1024*1024), nil).Times(1)
 	mockStatic.EXPECT().IsListening().Return(false).Times(1)
@@ -1201,14 +1192,14 @@ func TestReplayer_ProcessRequestPaused_BlobMissingTreatedAsMiss(t *testing.T) {
 	defer ts.ctrl.Finish()
 
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-1",
+		Item: dp1playlist.PlaylistItem{Source: "https://example.com/gone.js"},
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/gone.js", Status: 200, SHA256: "not-a-real-hash", ContentType: "application/javascript"},
 		},
 	}
 	require.NoError(t, ts.store.SaveItem(rec))
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "https://example.com/gone.js"))
 
 	done := ts.expectSend("Fetch.failRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/gone.js"))
@@ -1221,7 +1212,7 @@ func TestReplayer_ProcessRequestPaused_MissFailClosed(t *testing.T) {
 	defer ts.ctrl.Finish()
 	seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	done := ts.expectSend("Fetch.failRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/unrelated.js"))
@@ -1234,7 +1225,7 @@ func TestReplayer_ProcessRequestPaused_MissPassThrough(t *testing.T) {
 	defer ts.ctrl.Finish()
 	seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	done := ts.expectSend("Fetch.continueRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/unrelated.js"))
@@ -1332,7 +1323,7 @@ func TestReplayer_AttachChild_WhileEnabledArmsFetchImmediately(t *testing.T) {
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-1", "software payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	// Attaching the child while enabled must arm Fetch on it (expected).
 	child, childHandler := attachChildTarget(t, ts, "child-1", true)
@@ -1365,7 +1356,7 @@ func TestReplayer_EnableForPlaylist_FansOutToAllTargets(t *testing.T) {
 	// Enabling now must send Fetch.enable to BOTH the page and the child.
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
 	child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 }
 
 // TestReplayer_Disable_FansOutToAllTargets pins that Disable turns Fetch
@@ -1379,7 +1370,7 @@ func TestReplayer_Disable_FansOutToAllTargets(t *testing.T) {
 
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
 	child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
 	child.EXPECT().Send(gomock.Any(), "Fetch.disable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
@@ -1399,7 +1390,7 @@ func TestReplayer_Disable_PartialTargetFailureForcesPassThrough(t *testing.T) {
 	child, _ := attachChildTarget(t, ts, "child-1", false)
 	ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
 	child.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).Return(json.RawMessage(`{}`), nil).Times(1)
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 	// The page disables fine, but the child's Fetch.disable fails. Both
 	// are still attempted.
@@ -1583,7 +1574,7 @@ func TestReplayer_TransportFailureRetiresAndClosesTheSession(t *testing.T) {
 		// Closing is what makes Chromium let go of the paused requests.
 		ts.mockSession.EXPECT().Close().Return(nil).Times(1)
 
-		err := ts.replayer.EnableForItem(context.Background(), "item-1")
+		err := ts.replayer.EnableForItem(context.Background(), sourceFor("item-1"))
 		require.ErrorIs(t, err, offlinecache.ErrCDPTransport)
 		assert.False(t, ts.replayer.RootAttached(),
 			"a retired root must be reported as gone so KioskReplay.SyncPlaylist knows to re-dial")
@@ -1601,7 +1592,7 @@ func TestReplayer_TransportFailureRetiresAndClosesTheSession(t *testing.T) {
 		ts.mockSession.EXPECT().Send(gomock.Any(), "Fetch.enable", gomock.Any()).
 			Return(nil, assert.AnError).Times(1)
 
-		require.Error(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+		require.Error(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 		assert.True(t, ts.replayer.RootAttached(),
 			"a rejected command must not be mistaken for a dead connection")
 	})
@@ -1627,7 +1618,7 @@ func TestReplayer_AttachChild_UnarmedChildIsNotResumable(t *testing.T) {
 		defer ts.ctrl.Finish()
 		seedItem(t, ts.store, "item-1", "software payload")
 		ts.stubFetchEnable()
-		require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+		require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 		// A transport failure also retires the session, so it is closed.
 		child := newChild(t, ts, fmt.Errorf("write failed: %w", offlinecache.ErrCDPTransport))
@@ -1642,7 +1633,7 @@ func TestReplayer_AttachChild_UnarmedChildIsNotResumable(t *testing.T) {
 		defer ts.ctrl.Finish()
 		seedItem(t, ts.store, "item-1", "software payload")
 		ts.stubFetchEnable()
-		require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+		require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 		child := newChild(t, ts, fmt.Errorf("write failed: %w", offlinecache.ErrCDPTransport))
 		child.EXPECT().Close().Return(nil).Times(1)
@@ -1656,7 +1647,7 @@ func TestReplayer_AttachChild_UnarmedChildIsNotResumable(t *testing.T) {
 		defer ts.ctrl.Finish()
 		seedItem(t, ts.store, "item-1", "software payload")
 		ts.stubFetchEnable()
-		require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-1"))
+		require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
 
 		child := newChild(t, ts, nil)
 		assert.True(t, ts.replayer.AttachChild(ts.mockSession, "child-1", child))
@@ -1681,7 +1672,7 @@ func TestReplayer_OnRequestPaused_OverflowGoroutinesAreBounded(t *testing.T) {
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-hot", "hot payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-hot")))
 
 	release := make(chan struct{})
 	var sends atomic.Int64
@@ -1762,7 +1753,7 @@ func TestReplayer_OnRequestPaused_SaturationNotifiesScopeLost(t *testing.T) {
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-hot", "hot payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-hot")))
 
 	release := make(chan struct{})
 	stuck := func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
@@ -1808,7 +1799,7 @@ func TestReplayer_SetOnScopeLost_NilHandlerIsSafe(t *testing.T) {
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-hot", "hot payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-hot")))
 
 	ts.replayer.(offlinecache.ScopeLostRegistrar).SetOnScopeLost(func() {})
 	ts.replayer.(offlinecache.ScopeLostRegistrar).SetOnScopeLost(nil) // cleared again
@@ -1866,7 +1857,7 @@ func TestReplayer_OnRequestPaused_ChildSaturationRetiresTheRootSession(t *testin
 	defer ts.ctrl.Finish()
 	res := seedItem(t, ts.store, "item-hot", "hot payload")
 	ts.stubFetchEnable()
-	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-hot")))
 
 	// Attach a child and capture ITS Fetch.requestPaused handler, so the
 	// flood below is delivered on the child session exactly as Chromium

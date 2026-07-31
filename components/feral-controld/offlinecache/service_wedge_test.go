@@ -31,39 +31,40 @@ import (
 // on chance interleaving to reproduce the bug.
 func TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive(t *testing.T) {
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	key := SourceKey(item.Source)
 
 	t.Run("dequeue wins: reserveForClear must see busy and must not touch the queue or state", func(t *testing.T) {
-		s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64)}
-		s.state["item-1"] = StateQueued
-		s.queue.push(captureJob{itemID: "item-1", item: item})
+		s := &service{queue: newJobQueue(), state: make(map[string]ItemState), sourceByKey: make(map[string]string), downloadEpoch: make(map[string]uint64)}
+		s.state[key] = StateQueued
+		s.queue.push(captureJob{sourceKey: key, item: item})
 
 		j, ok := s.dequeueForProcessing()
 		require.True(t, ok, "the worker must be able to dequeue the job that was sitting in the queue")
-		assert.Equal(t, "item-1", j.itemID)
-		assert.Equal(t, StateDownloading, s.state["item-1"],
+		assert.Equal(t, key, j.sourceKey)
+		assert.Equal(t, StateDownloading, s.state[key],
 			"dequeueForProcessing must mark the item downloading in the SAME step as the pop")
 
-		res, busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
-		assert.Equal(t, "item-1", busyID)
+		res, busyID, err := s.reserveForClear(map[string]bool{key: true})
+		assert.Equal(t, key, busyID)
 		assert.ErrorIs(t, err, ErrItemBusy,
 			"a clear landing after the worker already dequeued this exact job must be rejected, never silently succeed")
 		assert.Empty(t, res.settled,
 			"a rejected clear settled nothing: reporting the item as settled would make ClearItem announce a not_cached that never happened")
-		assert.Equal(t, StateDownloading, s.state["item-1"],
+		assert.Equal(t, StateDownloading, s.state[key],
 			"a rejected clear must leave the now-active item's tracked state untouched")
 	})
 
 	t.Run("clear wins: dequeueForProcessing must find nothing once reserveForClear already canceled the job", func(t *testing.T) {
-		s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64)}
-		s.state["item-1"] = StateQueued
-		s.queue.push(captureJob{itemID: "item-1", item: item})
+		s := &service{queue: newJobQueue(), state: make(map[string]ItemState), sourceByKey: make(map[string]string), downloadEpoch: make(map[string]uint64)}
+		s.state[key] = StateQueued
+		s.queue.push(captureJob{sourceKey: key, item: item})
 
-		res, busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
+		res, busyID, err := s.reserveForClear(map[string]bool{key: true})
 		require.NoError(t, err)
 		assert.Empty(t, busyID)
-		assert.True(t, res.settled["item-1"],
+		assert.True(t, res.settled[key],
 			"a winning clear must report the queued item as settled: it is what tells ClearItem this was a real cancellation and not a not_found no-op")
-		_, tracked := s.state["item-1"]
+		_, tracked := s.state[key]
 		assert.False(t, tracked, "a winning clear must clear the item's tracked state")
 
 		_, ok := s.dequeueForProcessing()
@@ -122,10 +123,12 @@ func TestService_ClearReservation_WaitsForARacingEnqueuesQueuedNotification(t *t
 	obs := &blockingObserver{release: make(chan struct{})}
 	s := &service{
 		queue: newJobQueue(), state: make(map[string]ItemState),
+		sourceByKey:   make(map[string]string),
 		downloadEpoch: make(map[string]uint64), maxQueueLen: 4, observer: obs,
 	}
 	s.started.Store(true)
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
+	key := SourceKey(item.Source)
 
 	enqueueDone := make(chan struct{})
 	go func() {
@@ -139,7 +142,7 @@ func TestService_ClearReservation_WaitsForARacingEnqueuesQueuedNotification(t *t
 	require.Eventually(t, func() bool { return s.queue.len() == 1 }, time.Second, time.Millisecond,
 		"the enqueue goroutine must commit its job before this test can race it")
 
-	res, _, err := s.reserveForClear(map[string]bool{"item-1": true})
+	res, _, err := s.reserveForClear(map[string]bool{key: true})
 	require.NoError(t, err)
 	require.Len(t, res.queuedNotified, 1, "the clear must have dropped the queued job, barrier included")
 
@@ -173,10 +176,11 @@ func TestService_ClearReservation_WaitsForARacingEnqueuesQueuedNotification(t *t
 // state tracked) transitioned to nothing, so a clear for it must stay a
 // not_found no-op rather than re-announcing a state the client already has.
 func TestService_ReserveForClear_DoesNotSettleAnAlreadyNotCachedItem(t *testing.T) {
-	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64)}
-	s.state["item-1"] = StateNotCached
+	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), sourceByKey: make(map[string]string), downloadEpoch: make(map[string]uint64)}
+	key := SourceKey("https://example.com/item-1")
+	s.state[key] = StateNotCached
 
-	res, busyID, err := s.reserveForClear(map[string]bool{"item-1": true})
+	res, busyID, err := s.reserveForClear(map[string]bool{key: true})
 	require.NoError(t, err)
 	assert.Empty(t, busyID)
 	assert.Empty(t, res.settled)
@@ -191,7 +195,7 @@ func TestService_ReserveForClear_DoesNotSettleAnAlreadyNotCachedItem(t *testing.
 // defaultMaxQueueLen's doc), so this is necessarily a whitebox test
 // constructing *service directly to set a small cap.
 func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *testing.T) {
-	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64), maxQueueLen: 2}
+	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), sourceByKey: make(map[string]string), downloadEpoch: make(map[string]uint64), maxQueueLen: 2}
 	s.started.Store(true)
 
 	item1 := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
@@ -212,7 +216,7 @@ func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *tes
 	assert.ErrorIs(t, err, ErrQueueFull, "a third distinct item must be rejected once the queue is already at its 2-item cap")
 	assert.NotEqual(t, enqueueQueued, queued3, "a rejected enqueue must not report itself as newly queued")
 	assert.Equal(t, 2, s.queue.len(), "a rejected enqueue must not have touched the queue")
-	_, tracked := s.state[item3.ID]
+	_, tracked := s.state[SourceKey(item3.Source)]
 	assert.False(t, tracked, "a rejected item must not be left behind in a spurious StateQueued")
 
 	_, ok := s.dequeueForProcessing() // drains item1, freeing one slot
@@ -229,7 +233,7 @@ func TestService_Enqueue_ReturnsErrQueueFullAtCapacityAndAdmitsAfterDrain(t *tes
 // ErrQueueFull just because capacity happens to be exhausted by OTHER
 // items, since it was never going to consume a new queue slot anyway.
 func TestService_Enqueue_IdempotentReenqueueDoesNotCountAgainstCapacity(t *testing.T) {
-	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), downloadEpoch: make(map[string]uint64), maxQueueLen: 1}
+	s := &service{queue: newJobQueue(), state: make(map[string]ItemState), sourceByKey: make(map[string]string), downloadEpoch: make(map[string]uint64), maxQueueLen: 1}
 	s.started.Store(true)
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
 

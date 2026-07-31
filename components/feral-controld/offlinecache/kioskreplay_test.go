@@ -402,12 +402,12 @@ func TestKioskReplay_SyncPlaylist_EnablesOnlyCachedItemsAsMixedScope(t *testing.
 	// capture on disk: SyncPlaylist must flag this scope as mixed so
 	// Replayer relaxes fail_closed to pass-through for it, or its
 	// requests would be wrongly failed while cached-1 is also in scope.
-	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{"cached-1"}, true).Return(nil).Times(1)
+	mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{sourceFor("cached-1")}, true).Return(nil).Times(1)
 
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{"cached-1", "uncached-1", ""}))
+	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("cached-1"), sourceFor("uncached-1"), ""}))
 }
 
 func TestKioskReplay_SyncPlaylist_AllItemsCachedIsNotMixedScope(t *testing.T) {
@@ -423,13 +423,13 @@ func TestKioskReplay_SyncPlaylist_AllItemsCachedIsNotMixedScope(t *testing.T) {
 	// real item and must not count against that), so the fail_closed
 	// guarantee should still hold: mixed must be false.
 	mockReplayer.EXPECT().
-		EnableForPlaylist(gomock.Any(), []string{"cached-1", "cached-2"}, false).
+		EnableForPlaylist(gomock.Any(), []string{sourceFor("cached-1"), sourceFor("cached-2")}, false).
 		Return(nil).Times(1)
 
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{"cached-1", "cached-2", ""}))
+	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("cached-1"), sourceFor("cached-2"), ""}))
 }
 
 func TestKioskReplay_SyncPlaylist_NoCachedItemsDisables(t *testing.T) {
@@ -444,7 +444,7 @@ func TestKioskReplay_SyncPlaylist_NoCachedItemsDisables(t *testing.T) {
 	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
 		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
 
-	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{"uncached-1", "uncached-2"}))
+	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("uncached-1"), sourceFor("uncached-2")}))
 }
 
 func TestKioskReplay_SyncPlaylist_EmptyItemIDsDisables(t *testing.T) {
@@ -534,18 +534,18 @@ func TestKioskReplay_SyncPlaylist_RedialsWhenTheRootDiedWithPrimaryCDPHealthy(t 
 	// First sync: the scope call fails because the socket is dead, and
 	// the replayer reports no root left (it retired the dead one).
 	gomock.InOrder(
-		h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{"item-1"}, false).
+		h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{sourceFor("item-1")}, false).
 			Return(offlinecache.ErrCDPTransport).Times(1),
 		h.mockReplayer.EXPECT().RootAttached().Return(false).Times(1),
 		// Re-dial installs a fresh root...
 		h.mockReplayer.EXPECT().Attach("", gomock.Any()).Times(1),
 		// ...and the scope is re-applied to it, restoring exactly what
 		// the store says should be replayable right now.
-		h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{"item-1"}, false).
+		h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{sourceFor("item-1")}, false).
 			Return(nil).Times(1),
 	)
 
-	require.NoError(t, h.kr.SyncPlaylist(context.Background(), []string{"item-1"}),
+	require.NoError(t, h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")}),
 		"the sync must recover within itself, not leave replay dead until the next kiosk restart")
 	assert.Equal(t, 1, *h.dials, "exactly one re-dial")
 }
@@ -561,13 +561,13 @@ func TestKioskReplay_SyncPlaylist_DoesNotRedialWhenTheRootIsStillAttached(t *tes
 	h := setupRedial(t, store)
 
 	h.clock.EXPECT().Now().Return(time.Now()).AnyTimes()
-	h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{"item-1"}, false).
+	h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{sourceFor("item-1")}, false).
 		Return(assert.AnError).Times(1)
 	h.mockReplayer.EXPECT().RootAttached().Return(true).Times(1)
 	// No Attach expectation: gomock's strict controller fails the test if
 	// a re-dial happens anyway.
 
-	err := h.kr.SyncPlaylist(context.Background(), []string{"item-1"})
+	err := h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})
 	require.ErrorIs(t, err, assert.AnError, "the original failure must be reported, not masked by a recovery attempt")
 	assert.Equal(t, 0, *h.dials)
 }
@@ -589,19 +589,19 @@ func TestKioskReplay_SyncPlaylist_RedialIsRateLimited(t *testing.T) {
 		h.clock.EXPECT().Now().Return(base.Add(time.Second)).Times(1),
 	)
 
-	h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{"item-1"}, false).
+	h.mockReplayer.EXPECT().EnableForPlaylist(gomock.Any(), []string{sourceFor("item-1")}, false).
 		Return(offlinecache.ErrCDPTransport).AnyTimes()
 	h.mockReplayer.EXPECT().RootAttached().Return(false).AnyTimes()
 	h.mockReplayer.EXPECT().Attach("", gomock.Any()).Times(1)
 
 	// First sync re-dials; the fresh session's own enable fails too (the
 	// kiosk is genuinely unwell), so the error is reported.
-	require.Error(t, h.kr.SyncPlaylist(context.Background(), []string{"item-1"}))
+	require.Error(t, h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")}))
 	assert.Equal(t, 1, *h.dials)
 
 	// Second sync, one second later: no second dial, and the caller still
 	// learns the real failure rather than a misleading dial error.
-	err := h.kr.SyncPlaylist(context.Background(), []string{"item-1"})
+	err := h.kr.SyncPlaylist(context.Background(), []string{sourceFor("item-1")})
 	require.ErrorIs(t, err, offlinecache.ErrCDPTransport)
 	assert.Equal(t, 1, *h.dials, "a re-dial inside the cooldown must not be attempted")
 }

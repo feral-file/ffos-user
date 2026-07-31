@@ -9,6 +9,8 @@
 package offlinecache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	go_http "net/http"
 	go_url "net/url"
@@ -211,17 +213,52 @@ type Coverage struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// ItemRecord is the single on-disk source of truth for one cached DP-1 item
-// (items/<itemId>.json in the Store). It merges the verbatim item, the
-// entry URL Chromium actually loaded, and the capture index replay/export
-// need, so there is exactly one file to read/write per item.
+// SourceKey derives the cache identity for a DP-1 item source URL:
+// hex(sha256(source)) over the EXACT byte string as it appears in the
+// resolved playlist, with deliberately NO normalization (no lowercasing,
+// no query-param sorting, no trailing-slash trimming). Replay interception
+// also matches the exact URL, so a "normalized" key would claim a cache
+// hit for bytes captured under a different URL — the one direction that
+// can serve wrong content. Under-normalizing merely costs a duplicate
+// capture for trivially-different spellings of the same URL, which is
+// rare and bounded.
+//
+// This is the identity EVERYWHERE inside the package: on-disk record
+// filenames (items/<sourceKey>.json), every service-side state map, the
+// capture queue, and replay scope resolution. The DP-1 item id is NOT an
+// identity anywhere — it is optional in the DP-1 core schema and specified
+// as a random UUID v4, and dynamic-query playlists regenerate it on every
+// resolution, which is exactly the instability that orphaned cached
+// records before this keying existed. The raw source string appears only
+// at package boundaries (the wire contract, resolved-playlist call sites)
+// and as reporting data carried alongside the key. Fixed-length keys also
+// keep map keys and filenames free of arbitrary-length,
+// externally-controlled URL strings — the same convention the store's
+// playlists/by-url/ index already uses.
+func SourceKey(source string) string {
+	sum := sha256.Sum256([]byte(source))
+	return hex.EncodeToString(sum[:])
+}
+
+// ItemRecord is the single on-disk source of truth for one cached artwork
+// source (items/<SourceKey(Item.Source)>.json in the Store). It merges the
+// verbatim item, the entry URL Chromium actually loaded, and the capture
+// index replay/export need, so there is exactly one file to read/write per
+// source.
+//
+// The record is per-SOURCE, not per-playlist-item: multiple playlist items
+// — within one playlist or across playlists — that share a source converge
+// on this one record. Saving refreshes the cached artifact for all of
+// them, and deleting it removes the cached artifact for all of them (no
+// refcount, by design — see Store.DeleteItem's doc).
 type ItemRecord struct {
-	// ItemID is the DP-1 item id and this record's identity/filename.
-	ItemID string `json:"itemId"`
-	// Item is the DP-1 playlist item as resolved by dp1.DP1. Source is
-	// never rewritten — replay interception keys on the original URL —
-	// which preserves the signed-playlist invariant from capture through
-	// to replay.
+	// Item is the DP-1 playlist item as resolved by dp1.DP1. Item.Source
+	// is this record's identity (see SourceKey) and is never rewritten —
+	// replay interception keys on the original URL — which preserves the
+	// signed-playlist invariant from capture through to replay. The item's
+	// optional DP-1 id is carried verbatim but is informational only:
+	// when items sharing this source appear in several resolutions, the
+	// record holds whichever item was captured last.
 	Item dp1playlist.PlaylistItem `json:"item"`
 	// Entry is the URL Chromium actually navigated to. Equal to
 	// Item.Source unless Source itself redirected.

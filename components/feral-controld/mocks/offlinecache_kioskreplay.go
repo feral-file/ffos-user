@@ -48,20 +48,6 @@ func (mr *MockOfflineCacheKioskReplayMockRecorder) AttachOnReconnect(ctx interfa
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AttachOnReconnect", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).AttachOnReconnect), ctx)
 }
 
-// SyncPlaylist mocks base method.
-func (m *MockOfflineCacheKioskReplay) SyncPlaylist(ctx context.Context, itemIDs []string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SyncPlaylist", ctx, itemIDs)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// SyncPlaylist indicates an expected call of SyncPlaylist.
-func (mr *MockOfflineCacheKioskReplayMockRecorder) SyncPlaylist(ctx, itemIDs interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SyncPlaylist", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).SyncPlaylist), ctx, itemIDs)
-}
-
 // LockPlayback mocks base method.
 func (m *MockOfflineCacheKioskReplay) LockPlayback() {
 	m.ctrl.T.Helper()
@@ -74,16 +60,16 @@ func (mr *MockOfflineCacheKioskReplayMockRecorder) LockPlayback() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LockPlayback", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).LockPlayback))
 }
 
-// UnlockPlayback mocks base method.
-func (m *MockOfflineCacheKioskReplay) UnlockPlayback() {
+// MarkPlaybackChanged mocks base method.
+func (m *MockOfflineCacheKioskReplay) MarkPlaybackChanged() {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "UnlockPlayback")
+	m.ctrl.Call(m, "MarkPlaybackChanged")
 }
 
-// UnlockPlayback indicates an expected call of UnlockPlayback.
-func (mr *MockOfflineCacheKioskReplayMockRecorder) UnlockPlayback() *gomock.Call {
+// MarkPlaybackChanged indicates an expected call of MarkPlaybackChanged.
+func (mr *MockOfflineCacheKioskReplayMockRecorder) MarkPlaybackChanged() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UnlockPlayback", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).UnlockPlayback))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkPlaybackChanged", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).MarkPlaybackChanged))
 }
 
 // PlaybackGeneration mocks base method.
@@ -100,14 +86,28 @@ func (mr *MockOfflineCacheKioskReplayMockRecorder) PlaybackGeneration() *gomock.
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PlaybackGeneration", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).PlaybackGeneration))
 }
 
-// MarkPlaybackChanged mocks base method.
-func (m *MockOfflineCacheKioskReplay) MarkPlaybackChanged() {
+// SyncPlaylist mocks base method.
+func (m *MockOfflineCacheKioskReplay) SyncPlaylist(ctx context.Context, sources []string) error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "MarkPlaybackChanged")
+	ret := m.ctrl.Call(m, "SyncPlaylist", ctx, sources)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
-// MarkPlaybackChanged indicates an expected call of MarkPlaybackChanged.
-func (mr *MockOfflineCacheKioskReplayMockRecorder) MarkPlaybackChanged() *gomock.Call {
+// SyncPlaylist indicates an expected call of SyncPlaylist.
+func (mr *MockOfflineCacheKioskReplayMockRecorder) SyncPlaylist(ctx, sources interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MarkPlaybackChanged", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).MarkPlaybackChanged))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SyncPlaylist", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).SyncPlaylist), ctx, sources)
+}
+
+// UnlockPlayback mocks base method.
+func (m *MockOfflineCacheKioskReplay) UnlockPlayback() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "UnlockPlayback")
+}
+
+// UnlockPlayback indicates an expected call of UnlockPlayback.
+func (mr *MockOfflineCacheKioskReplayMockRecorder) UnlockPlayback() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UnlockPlayback", reflect.TypeOf((*MockOfflineCacheKioskReplay)(nil).UnlockPlayback))
 }

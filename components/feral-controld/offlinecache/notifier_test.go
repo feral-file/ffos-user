@@ -38,7 +38,7 @@ func TestNotifier_OnItemStateChanged_SendsViaRelayerAndWS(t *testing.T) {
 
 	mockRelayer := mocks.NewMockRelayer(ctrl)
 	mockWS := mocks.NewMockWS(ctrl)
-	status := offlinecache.ItemStatus{ItemID: "item-1", State: offlinecache.StateReady, CoverageComplete: true}
+	status := offlinecache.ItemStatus{Source: "item-1", State: offlinecache.StateReady, CoverageComplete: true}
 
 	mockRelayer.EXPECT().IsConnected().Return(true).Times(1)
 	mockRelayer.EXPECT().Send(gomock.Any(), gomock.Any()).DoAndReturn(
@@ -81,7 +81,7 @@ func TestNotifier_OnItemStateChanged_SkipsRelayerWhenDisconnected(t *testing.T) 
 
 	notifier := offlinecache.NewNotifier(mockRelayer, mockWS, zaptest.NewLogger(t))
 	defer notifier.Close()
-	notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-1", State: offlinecache.StateQueued})
+	notifier.OnItemStateChanged(offlinecache.ItemStatus{Source: "item-1", State: offlinecache.StateQueued})
 
 	waitForWSSend(t, done)
 }
@@ -90,7 +90,7 @@ func TestNotifier_OnItemStateChanged_NilRelayerAndWSAreNoop(t *testing.T) {
 	notifier := offlinecache.NewNotifier(nil, nil, zaptest.NewLogger(t))
 	defer notifier.Close()
 	assert.NotPanics(t, func() {
-		notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-1", State: offlinecache.StateFailed})
+		notifier.OnItemStateChanged(offlinecache.ItemStatus{Source: "item-1", State: offlinecache.StateFailed})
 	})
 }
 
@@ -112,7 +112,7 @@ func TestNotifier_OnItemStateChanged_LogsSendErrorsButDoesNotPanic(t *testing.T)
 	notifier := offlinecache.NewNotifier(mockRelayer, mockWS, zaptest.NewLogger(t))
 	defer notifier.Close()
 	assert.NotPanics(t, func() {
-		notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-1", State: offlinecache.StateFailed, Reason: "boom"})
+		notifier.OnItemStateChanged(offlinecache.ItemStatus{Source: "item-1", State: offlinecache.StateFailed, Reason: "boom"})
 	})
 
 	waitForWSSend(t, done)
@@ -157,7 +157,7 @@ func TestNotifier_OnItemStateChanged_DoesNotBlockOnSlowWSDelivery(t *testing.T) 
 
 	// This first enqueue is what the background worker picks up and
 	// blocks on inside the (deliberately stuck) SendAll above.
-	notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-1", State: offlinecache.StateDownloading})
+	notifier.OnItemStateChanged(offlinecache.ItemStatus{Source: "item-1", State: offlinecache.StateDownloading})
 	select {
 	case <-sendStarted:
 	case <-time.After(2 * time.Second):
@@ -170,7 +170,7 @@ func TestNotifier_OnItemStateChanged_DoesNotBlockOnSlowWSDelivery(t *testing.T) 
 	start := time.Now()
 	for i := 0; i < 50; i++ {
 		notifier.OnItemStateChanged(offlinecache.ItemStatus{
-			ItemID: fmt.Sprintf("item-%d", i+2), State: offlinecache.StateReady,
+			Source: fmt.Sprintf("item-%d", i+2), State: offlinecache.StateReady,
 		})
 	}
 	elapsed := time.Since(start)
@@ -239,7 +239,7 @@ func TestNotifier_OnItemStateChanged_DoesNotBlockOnSlowRelayerDelivery(t *testin
 
 	// Wait until a send is genuinely stuck, so the timing below is
 	// measuring "queued behind a wedged transport" and not a race.
-	notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-0", State: offlinecache.StateQueued})
+	notifier.OnItemStateChanged(offlinecache.ItemStatus{Source: "item-0", State: offlinecache.StateQueued})
 	select {
 	case <-blocked:
 	case <-time.After(2 * time.Second):
@@ -252,7 +252,7 @@ func TestNotifier_OnItemStateChanged_DoesNotBlockOnSlowRelayerDelivery(t *testin
 	start := time.Now()
 	for i := 0; i < items; i++ {
 		notifier.OnItemStateChanged(offlinecache.ItemStatus{
-			ItemID: fmt.Sprintf("item-%d", i+1), State: offlinecache.StateQueued,
+			Source: fmt.Sprintf("item-%d", i+1), State: offlinecache.StateQueued,
 		})
 	}
 	elapsed := time.Since(start)
@@ -311,7 +311,7 @@ func TestNotifier_OnItemStateChanged_MaxSizePlaylistWithWedgedTransportLosesNoIt
 			return nil
 		}
 		mu.Lock()
-		lastSeen[status.ItemID] = status.State
+		lastSeen[status.Source] = status.State
 		sendCalls++
 		mu.Unlock()
 		return nil
@@ -331,7 +331,7 @@ func TestNotifier_OnItemStateChanged_MaxSizePlaylistWithWedgedTransportLosesNoIt
 
 	// Wedge the worker inside a delivery first, so the whole burst below
 	// provably piles up behind a stuck transport rather than racing it.
-	notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-0", State: offlinecache.StateQueued})
+	notifier.OnItemStateChanged(offlinecache.ItemStatus{Source: "item-0", State: offlinecache.StateQueued})
 	select {
 	case <-sendStarted:
 	case <-time.After(2 * time.Second):
@@ -344,7 +344,7 @@ func TestNotifier_OnItemStateChanged_MaxSizePlaylistWithWedgedTransportLosesNoIt
 	} {
 		for i := 0; i < items; i++ {
 			notifier.OnItemStateChanged(offlinecache.ItemStatus{
-				ItemID: fmt.Sprintf("item-%d", i), State: state,
+				Source: fmt.Sprintf("item-%d", i), State: state,
 			})
 		}
 	}
@@ -410,7 +410,7 @@ func TestNotifier_OnItemStateChanged_ConcurrentProducersLoseNoItem(t *testing.T)
 			return nil
 		}
 		mu.Lock()
-		lastSeen[status.ItemID] = status.State
+		lastSeen[status.Source] = status.State
 		mu.Unlock()
 		return nil
 	}).AnyTimes()
@@ -428,7 +428,7 @@ func TestNotifier_OnItemStateChanged_ConcurrentProducersLoseNoItem(t *testing.T)
 			for _, state := range []offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateReady} {
 				for i := 0; i < itemsPer; i++ {
 					notifier.OnItemStateChanged(offlinecache.ItemStatus{
-						ItemID: fmt.Sprintf("p%d-item-%d", p, i), State: state,
+						Source: fmt.Sprintf("p%d-item-%d", p, i), State: state,
 					})
 				}
 			}
@@ -504,7 +504,7 @@ func TestNotifier_CloseWithin_ReturnsOnBudgetWhenDeliveryIsWedged(t *testing.T) 
 		notifier.Close()
 	}()
 
-	notifier.OnItemStateChanged(offlinecache.ItemStatus{ItemID: "item-1", State: offlinecache.StateQueued})
+	notifier.OnItemStateChanged(offlinecache.ItemStatus{Source: "item-1", State: offlinecache.StateQueued})
 	select {
 	case <-sendStarted:
 	case <-time.After(2 * time.Second):
@@ -514,7 +514,7 @@ func TestNotifier_CloseWithin_ReturnsOnBudgetWhenDeliveryIsWedged(t *testing.T) 
 	// CloseWithin signals, budget expiry notwithstanding.
 	for i := 0; i < 10; i++ {
 		notifier.OnItemStateChanged(offlinecache.ItemStatus{
-			ItemID: fmt.Sprintf("item-%d", i+2), State: offlinecache.StateReady,
+			Source: fmt.Sprintf("item-%d", i+2), State: offlinecache.StateReady,
 		})
 	}
 

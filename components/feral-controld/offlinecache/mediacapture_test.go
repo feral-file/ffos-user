@@ -119,8 +119,7 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 
-	assert.Equal(t, "item-1", rec.ItemID)
-	assert.Equal(t, item, rec.Item)
+	assert.Equal(t, item, rec.Item, "the record carries the item verbatim; its Source is the record's identity")
 	assert.Equal(t, item.Source, rec.Entry)
 	assert.True(t, rec.Coverage.Complete)
 	require.Len(t, rec.Resources, 1)
@@ -137,7 +136,7 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, body, string(blob))
 
-	saved, err := h.store.LoadItem("item-1")
+	saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources, "Capture must have persisted the record via SaveItem, not just returned it")
 }
@@ -269,7 +268,7 @@ func TestMediaCapturer_Capture_GLTFManifest(t *testing.T) {
 			assert.Equal(t, tc.wantComplete, rec.Coverage.Complete)
 			assert.Equal(t, tc.wantReason, rec.Coverage.Reason)
 
-			saved, err := h.store.LoadItem("item-1")
+			saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 			require.NoError(t, err)
 			assert.Equal(t, rec.Coverage, saved.Coverage, "the persisted record must carry the same coverage verdict")
 		})
@@ -306,7 +305,7 @@ func TestMediaCapturer_Capture_NonSuccessStatusReturnsError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, rec)
 
-	_, loadErr := h.store.LoadItem("item-1")
+	_, loadErr := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a failed fetch must never leave a saved record behind")
 }
 
@@ -374,7 +373,7 @@ func TestMediaCapturer_Capture_RejectsBodyLargerThanRemainingBudget(t *testing.T
 	assert.Error(t, err)
 	assert.Nil(t, rec)
 
-	_, loadErr := h.store.LoadItem("item-1")
+	_, loadErr := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a rejected oversized fetch must never leave a saved record behind")
 }
 
@@ -458,7 +457,7 @@ func TestMediaCapturer_Capture_SlowBodyOutlivesAWholeRequestTimeout(t *testing.T
 		rec, err := capturer.Capture(context.Background(), item(srv))
 		require.Error(t, err, "this is the pre-fix behavior being pinned, not a desired outcome")
 		assert.Nil(t, rec)
-		_, loadErr := store.LoadItem("item-1")
+		_, loadErr := store.LoadItem(offlinecache.SourceKey(item(srv).Source))
 		assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
 	})
 
@@ -503,7 +502,7 @@ func TestMediaCapturer_Capture_TimeoutFreeClientStillHonorsCancellation(t *testi
 	require.Error(t, err)
 	assert.Nil(t, rec)
 	assert.Less(t, elapsed, 5*time.Second, "cancellation must abort the transfer promptly, not wait out the download ceiling")
-	_, loadErr := store.LoadItem("item-1")
+	_, loadErr := store.LoadItem(offlinecache.SourceKey(srv.URL + "/video.mp4"))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "a canceled download must leave no record behind")
 }
 
@@ -522,6 +521,6 @@ func TestMediaCapturer_Capture_TimeoutFreeClientStillEnforcesDiskLimit(t *testin
 	assert.Nil(t, rec)
 	assert.Greater(t, len(payload), 128)
 
-	_, loadErr := store.LoadItem("item-1")
+	_, loadErr := store.LoadItem(offlinecache.SourceKey(srv.URL + "/video.mp4"))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
 }

@@ -84,7 +84,7 @@ Discover  →  Capture  →  Store  →  Replay
   straight into the blob store — no browser process at all. See §3.3.
 - **Store**: `store.go` content-addresses the bytes (sha256) into a shared
   blob store, deduplicated across items/playlists, plus one
-  `items/<itemId>.json` record per edition — shared unchanged by both
+  `items/<sha256(item.source)>.json` record per source — shared unchanged by both
   capture paths above.
 - **Replay**: `replay.go` intercepts `Fetch.requestPaused` on the kiosk
   Chromium (`:9222`) and fulfills from the local blob store or a loopback
@@ -782,22 +782,47 @@ Root: `offlineCache.rootDir` (default
 `/home/feralfile/.cache/offline-artworks/`).
 
 Design rule: **keep only what replay and status reporting need; derive
-everything else.** Three directories, one essential record per item:
+everything else.** Three directories, one essential record per SOURCE:
 
 ```
 offline-artworks/
-  blobs/<sha256>                      # shared content-addressed bytes (the ONLY place binary payloads live)
-  items/<itemId>.json                 # the ONE per-item record (ItemRecord in types.go)
-  playlists/<playlistId>.json         # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
-  playlists/by-url/<sha256(url)>.json  # {"playlistId": "..."} pointer, only when DownloadPlaylist was given a sourceURL
+  blobs/<sha256>                          # shared content-addressed bytes (the ONLY place binary payloads live)
+  items/<sha256(item.source)>.json        # the ONE per-source record (ItemRecord in types.go)
+  playlists/<playlistId>.json             # resolved DP-1 playlist (see note below), stored only for whole-playlist downloads
+  playlists/by-url/<sha256(url)>.json     # {"playlistId": "..."} pointer, only when DownloadPlaylist was given a sourceURL
 ```
 
-`items/<itemId>.json` (`ItemRecord`, see `types.go`):
+**An item's cache identity is its `source` URL, never its DP-1 `id`**
+(`SourceKey` in `types.go`: `hex(sha256(source))` over the exact byte
+string, no normalization). The DP-1 core schema makes `id` optional and
+specifies it as UUID v4 — a random identifier — and dynamic-query
+playlists regenerate ids on every resolution, which orphaned id-keyed
+records (replay scope missed, status lied `not_cached`, re-downloads
+stormed). `source` is the one field that is simultaneously mandatory in
+DP-1, what capture actually navigates to/downloads, and what replay
+matches paused requests against — so the storage identity and the lookup
+identity are the same thing. Hashing is deliberately byte-exact: replay
+also matches exact URLs, so a "normalized" key could claim a cache hit
+for bytes captured under a different URL, the one direction that serves
+wrong content; under-normalization merely costs a duplicate capture for
+trivially different spellings. The hex name also keeps arbitrary-length,
+externally-controlled URL strings out of filenames — the same convention
+`playlists/by-url/` already uses.
+
+**The record is per-source, not per-playlist-item.** Items sharing a
+`source` — within one playlist or across playlists — converge on one
+record: one classify probe, one capture, one status entry. The flip side
+is deliberate and refcount-free: clearing a source via one playlist
+(`clearPlaylistCache`) makes it `not_cached` for every other cached
+playlist that contains it. The record's verbatim `item` field holds
+whichever resolution captured last — informational drift only, since
+replay reads `resources` and the DP-1 id inside is not an identity.
+
+`items/<sha256(item.source)>.json` (`ItemRecord`, see `types.go`):
 
 ```json
 {
-  "itemId":  "work-1",
-  "item":    { "id": "work-1", "source": "...", "...": "verbatim DP-1 item, source NEVER rewritten" },
+  "item":    { "id": "work-1", "source": "...", "...": "verbatim DP-1 item, source NEVER rewritten; item.source is the record's identity" },
   "entry":   "https://host/index.html",
   "resources": [
     { "url": "https://host/app.js",  "status": 200, "sha256": "ab12…", "contentType": "application/javascript" },
@@ -809,6 +834,17 @@ offline-artworks/
   "capturedAt": "2026-07-17T04:55:00Z"
 }
 ```
+
+**This layout is already sufficient for a future `.dp1c` capsule export**
+(DP-1's offline transport: a tar+zstd archive of `playlist.json` +
+`assets/`, integrity-checked via sha256 — see dp1-validator's
+`validator/capsule.go`), with no migration: a cached playlist's body and
+its item records are produced from the same resolved playlist struct, so
+their `source` strings are byte-identical, and an exporter derives
+everything by walking `playlists/<id>.json` → `items[].source` →
+`sha256(source)` → `items/<key>.json` → `resources[].sha256` →
+`blobs/<sha256>`. Changes to this on-disk format must keep that
+derivation chain intact.
 
 `playlists/<playlistId>.json` is the playlist as `commandrouter` resolved it
 through `dp1.DP1` before calling `Service.DownloadPlaylist` — `dynamicQuery`
@@ -986,7 +1022,7 @@ There is deliberately **no** top-level manifest, no separate
   next successful sweep). A **deterministically unparsable record**
   (`ErrItemRecordCorrupt` — bytes read fine, JSON never will parse) is
   instead **quarantined** (renamed to `<id>.json.corrupt`, out of
-  `ListItemIDs`' view but preserved for forensics) and the sweep
+  `ListItemKeys`' view but preserved for forensics) and the sweep
   continues. Aborting on it too would wedge GC on every future pass —
   and since GC is the only path that frees blob bytes (`DeleteItem`
   removes just the record JSON), that would permanently disable the disk
@@ -1059,7 +1095,7 @@ There is deliberately **no** top-level manifest, no separate
   next status query). The call is `notifyObserver`, *not* `notify`:
   `notify` would write the state back into `s.state`, re-adding the entry
   the clear just removed — and since `s.state` is also the in-memory half
-  of the known-item set (`allKnownItemIDs`), every cleared item would then
+  of the known-item set (`allKnownItemKeys`), every cleared item would then
   linger in whole-store status pages, and grow that map without bound,
   purely as a side effect of having been cleared.
 - That push is **ordered against a racing `enqueue`'s own `queued`
@@ -1361,8 +1397,8 @@ no new per-target machinery was needed for this.
 Replay is only enabled while a cached item is on screen:
 `commandrouter`'s `displayPlaylist` path and `playlist-refresher` call
 `KioskReplay.SyncPlaylist` (`kioskreplay.go`) with the current playlist's
-item IDs before/after the CDP display call, which enables `Fetch`
-interception scoped to whichever of those IDs are actually cached
+item source URLs before/after the CDP display call, which enables `Fetch`
+interception scoped to whichever of those sources are actually cached
 (`EnableForPlaylist` in `replay.go`) and disables it entirely when none are.
 `commandrouter`'s `displayPlaylist` handler calls `SyncPlaylist` for the
 *new* playlist **before** asking CDP to actually display it — deliberately,
@@ -1377,7 +1413,7 @@ leaves scope untouched, because the previous playlist keeps displaying
 and switching interception to the deferred playlist would — under a
 fail_closed scope — block the on-screen playlist's own requests even
 with live network. When a filtered cast IS pushed, the scope is synced
-with the FULL playlist's item IDs rather than the active cohort: the
+with the FULL playlist's item sources rather than the active cohort: the
 scheduler's timer/wake/retry cutovers push later cohorts of the same
 playlist directly with no replay-scope hook of their own, so the
 cast-time scope must already cover every cohort a cutover can display

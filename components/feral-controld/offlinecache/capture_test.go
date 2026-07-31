@@ -159,7 +159,7 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 	rec, err := h.capturer.Capture(context.Background(), item, 300)
 	require.NoError(t, err)
 
-	assert.Equal(t, "item-1", rec.ItemID)
+	assert.Equal(t, item, rec.Item, "the record carries the item verbatim; its Source is the record's identity")
 	assert.Equal(t, "https://example.com/index.html", rec.Entry)
 	assert.True(t, rec.Coverage.Complete)
 	require.Len(t, rec.Resources, 1)
@@ -173,7 +173,7 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "<html>art</html>", string(blob))
 
-	saved, err := h.store.LoadItem("item-1")
+	saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources)
 }
@@ -420,7 +420,7 @@ func TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort(t *te
 	assert.Equal(t, "https://example.com/index.html", rec.Resources[0].URL)
 	assert.True(t, rec.Coverage.Complete)
 
-	saved, err := h.store.LoadItem("item-1")
+	saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	require.NoError(t, err, "the record must still be persisted despite the best-effort cleanup failure")
 	assert.Equal(t, rec.Resources, saved.Resources)
 }
@@ -1134,7 +1134,7 @@ func TestCapturer_Capture_ParentCancellationAfterNavigateAbortsWithoutSaving(t *
 		assert.Nil(t, rec, "iteration %d: a canceled capture must not return a record", i)
 		assert.ErrorIs(t, err, context.Canceled, "iteration %d", i)
 
-		_, loadErr := h.store.LoadItem("item-cancel")
+		_, loadErr := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 		assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound,
 			"iteration %d: a canceled capture must not save a partial/incomplete ItemRecord", i)
 

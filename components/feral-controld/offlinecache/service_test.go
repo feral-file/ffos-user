@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,7 +86,6 @@ func seedItemWithCapturedAt(t *testing.T, store offlinecache.Store, itemID, blob
 	hash := writeBlobString(t, store, blobContent)
 	res := offlinecache.Resource{URL: "https://example.com/" + itemID, Status: 200, SHA256: hash, ContentType: "text/html"}
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
-		ItemID:     itemID,
 		Item:       dp1playlist.PlaylistItem{ID: itemID, Source: res.URL},
 		Entry:      res.URL,
 		Resources:  []offlinecache.Resource{res},
@@ -119,19 +119,19 @@ func (o *recordingObserver) statesFor(itemID string) []offlinecache.ItemState {
 	defer o.mu.Unlock()
 	var states []offlinecache.ItemState
 	for _, status := range o.statuses {
-		if status.ItemID == itemID {
+		if status.Source == itemID {
 			states = append(states, status.State)
 		}
 	}
 	return states
 }
 
-func waitForState(t *testing.T, svc offlinecache.Service, itemID string, want offlinecache.ItemState) {
+func waitForState(t *testing.T, svc offlinecache.Service, source string, want offlinecache.ItemState) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		snap, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{itemID}})
+		snap, err := svc.Status(offlinecache.StatusRequest{Sources: []string{source}})
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == want
-	}, 2*time.Second, 10*time.Millisecond, "item %s never reached state %s", itemID, want)
+	}, 2*time.Second, 10*time.Millisecond, "item %s never reached state %s", source, want)
 }
 
 func TestService_DownloadItem_QueuesAndCapturesSoftwareItem(t *testing.T) {
@@ -140,7 +140,7 @@ func TestService_DownloadItem_QueuesAndCapturesSoftwareItem(t *testing.T) {
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-1", Item: item, Entry: item.Source,
+		Item: item, Entry: item.Source,
 		Coverage: offlinecache.Coverage{Complete: true},
 	}
 
@@ -155,7 +155,133 @@ func TestService_DownloadItem_QueuesAndCapturesSoftwareItem(t *testing.T) {
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
+}
+
+// TestService_DownloadItem_ItemWithoutIDIsCacheable pins requirement 6 of
+// the source-keying change: the DP-1 core schema makes item.id OPTIONAL
+// (only source is required), so an id-less item must download, persist
+// under items/<SourceKey(source)>.json, and report status by source —
+// end to end, with no id anywhere.
+func TestService_DownloadItem_ItemWithoutIDIsCacheable(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	item := dp1playlist.PlaylistItem{Source: "https://example.com/no-id.html"} // no ID, per spec
+	rec := &offlinecache.ItemRecord{
+		Item: item, Entry: item.Source,
+		Coverage: offlinecache.Coverage{Complete: true},
+	}
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
+		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
+
+	loaded, err := ts.store.LoadItem(offlinecache.SourceKey(item.Source))
+	require.NoError(t, err)
+	assert.Empty(t, loaded.Item.ID)
+	assert.Equal(t, item.Source, loaded.Item.Source)
+}
+
+// TestService_DownloadItem_RejectsEmptySource pins the flip side: source
+// is the identity, so an item without one is not cacheable at all.
+func TestService_DownloadItem_RejectsEmptySource(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	err := ts.service.DownloadItem(context.Background(), dp1playlist.PlaylistItem{ID: "item-1"})
+	require.Error(t, err)
+}
+
+// TestService_DownloadPlaylist_DuplicateSourcesCollapseToOneJob pins the
+// per-source record contract at the playlist level: two items sharing a
+// source ARE the same cache entry, so the duplicate must cost neither a
+// second classify probe nor a second queued job, and queuedCount must
+// reflect the number of distinct sources actually scheduled.
+func TestService_DownloadPlaylist_DuplicateSourcesCollapseToOneJob(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	sharedSource := "https://example.com/shared.html"
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0",
+		"id":        "playlist-1",
+		"title":     "t",
+		"items": []map[string]interface{}{
+			// Different resolution-minted ids, same source: one cache entry.
+			{"id": "resolution-a-uuid", "source": sharedSource},
+			{"id": "resolution-b-uuid", "source": sharedSource},
+		},
+	})
+	require.NoError(t, err)
+
+	// Times(1) on both: the duplicate source must not probe or capture twice.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), sharedSource).Return(offlinecache.ClassSoftware, nil).Times(1)
+	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, queued, "a duplicated source must be queued exactly once")
+	assert.Equal(t, 2, total, "total still reports the playlist's raw item count")
+
+	waitForState(t, ts.service, sharedSource, offlinecache.StateReady)
+}
+
+// TestService_ClearPlaylist_SharedSourceClearsForEveryPlaylist pins the
+// documented consequence of per-source records: a source shared between
+// two cached playlists has ONE record, so clearing playlist A settles it
+// at not_cached for playlist B too (no refcount, by design — see
+// Store.DeleteItem's doc).
+func TestService_ClearPlaylist_SharedSourceClearsForEveryPlaylist(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	sharedSource := "https://example.com/shared.html"
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	// Seed the shared record directly (both playlists reference it) and
+	// persist both playlist bodies the way DownloadPlaylist would.
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		Item:     dp1playlist.PlaylistItem{ID: "id-from-a", Source: sharedSource},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+	rawA := []byte(`{"dpVersion":"1.0.0","id":"playlist-a","title":"a","items":[{"id":"id-from-a","source":"` + sharedSource + `"}]}`)
+	rawB := []byte(`{"dpVersion":"1.0.0","id":"playlist-b","title":"b","items":[{"id":"id-from-b","source":"` + sharedSource + `"}]}`)
+	require.NoError(t, ts.store.SavePlaylist("playlist-a", rawA))
+	require.NoError(t, ts.store.SavePlaylist("playlist-b", rawB))
+
+	require.NoError(t, ts.service.ClearPlaylist("playlist-a"))
+
+	// One record, so B's member is gone too — replay scope and status for
+	// B must now see it uncached.
+	_, err := ts.store.LoadItem(offlinecache.SourceKey(sharedSource))
+	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{sharedSource}})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State)
+	assert.Equal(t, sharedSource, snap.Items[0].Source)
 }
 
 func TestService_DownloadItem_RejectsStreaming(t *testing.T) {
@@ -186,7 +312,7 @@ func TestService_DownloadItem_QueuesAndCapturesMediaItem(t *testing.T) {
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/video.mp4"}
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-1", Item: item, Entry: item.Source,
+		Item: item, Entry: item.Source,
 		Coverage: offlinecache.Coverage{Complete: true},
 	}
 
@@ -201,7 +327,7 @@ func TestService_DownloadItem_QueuesAndCapturesMediaItem(t *testing.T) {
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 }
 
 func TestService_DownloadItem_RequiresIDAndSource(t *testing.T) {
@@ -272,7 +398,7 @@ func TestService_DownloadItem_AfterStartFailureReturnsNotStarted(t *testing.T) {
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
-	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("permission denied")).Times(1)
+	mockStore.EXPECT().ListItemKeys().Return(nil, assertError("permission denied")).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 
@@ -329,7 +455,7 @@ func TestService_DownloadItem_IdempotentWhileInFlight(t *testing.T) {
 	defer ts.ctrl.Finish()
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
-	rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+	rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 	gate := make(chan struct{})
 
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(2)
@@ -347,13 +473,13 @@ func TestService_DownloadItem_IdempotentWhileInFlight(t *testing.T) {
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 	require.Eventually(t, func() bool {
-		snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+		snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == offlinecache.StateDownloading
 	}, 2*time.Second, 10*time.Millisecond, "worker should have dequeued into downloading before the gate is released")
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 	close(gate)
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 }
 
 func TestService_DownloadItem_FailureIsReported(t *testing.T) {
@@ -368,7 +494,7 @@ func TestService_DownloadItem_FailureIsReported(t *testing.T) {
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-	waitForState(t, ts.service, "item-1", offlinecache.StateFailed)
+	waitForState(t, ts.service, item.Source, offlinecache.StateFailed)
 }
 
 func TestService_DownloadItem_CoverageClassification(t *testing.T) {
@@ -410,7 +536,7 @@ func TestService_DownloadItem_CoverageClassification(t *testing.T) {
 
 			item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 			rec := &offlinecache.ItemRecord{
-				ItemID: "item-1", Item: item, Entry: item.Source,
+				Item: item, Entry: item.Source,
 				Coverage: offlinecache.Coverage{Complete: false, Reason: tt.reason},
 			}
 
@@ -425,9 +551,9 @@ func TestService_DownloadItem_CoverageClassification(t *testing.T) {
 			defer ts.service.Stop()
 
 			require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-			waitForState(t, ts.service, "item-1", tt.wantState)
+			waitForState(t, ts.service, item.Source, tt.wantState)
 
-			snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+			snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 			require.NoError(t, err)
 			require.Len(t, snap.Items, 1)
 			assert.Equal(t, wantPercent, snap.Items[0].Percent)
@@ -461,13 +587,13 @@ func TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim(
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/live.m3u8").Return(offlinecache.ClassStreaming, nil).Times(1)
 	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
 		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
-			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 			require.NoError(t, ts.store.SaveItem(rec))
 			return rec, nil
 		}).Times(1)
 	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, item dp1playlist.PlaylistItem) (*offlinecache.ItemRecord, error) {
-			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 			require.NoError(t, ts.store.SaveItem(rec))
 			return rec, nil
 		}).Times(1)
@@ -480,8 +606,8 @@ func TestService_DownloadPlaylist_QueuesEveryClassButStreamingAndStoresVerbatim(
 	assert.Equal(t, 2, queued, "software and media items must both be queued; only the streaming item is excluded")
 	assert.Equal(t, 3, total)
 
-	waitForState(t, ts.service, "item-software", offlinecache.StateReady)
-	waitForState(t, ts.service, "item-media", offlinecache.StateReady)
+	waitForState(t, ts.service, "https://example.com/index.html", offlinecache.StateReady)
+	waitForState(t, ts.service, "https://example.com/video.mp4", offlinecache.StateReady)
 
 	stored, err := ts.store.LoadPlaylist("playlist-1")
 	require.NoError(t, err)
@@ -518,7 +644,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 			<-gate
-			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 			require.NoError(t, ts.store.SaveItem(rec))
 			return rec, nil
 		}).Times(1)
@@ -532,7 +658,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 	assert.Equal(t, 1, total1)
 
 	require.Eventually(t, func() bool {
-		snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+		snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 		return err == nil && len(snap.Items) == 1 && snap.Items[0].State == offlinecache.StateDownloading
 	}, 2*time.Second, 10*time.Millisecond, "worker should have dequeued into downloading before the retry lands")
 
@@ -542,7 +668,7 @@ func TestService_DownloadPlaylist_DoesNotDoubleCountAlreadyInFlightItems(t *test
 	assert.Equal(t, 1, total2)
 
 	close(gate)
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 }
 
 // TestService_DownloadPlaylist_AllItemsFailClassificationReturnsError is
@@ -617,7 +743,7 @@ func TestService_DownloadPlaylist_SavePlaylistFailureStartsNoWork(t *testing.T) 
 	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
-	mockStore.EXPECT().ListItemIDs().Return(nil, nil).Times(1)
+	mockStore.EXPECT().ListItemKeys().Return(nil, nil).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	require.NoError(t, svc.Start(context.Background()))
@@ -670,7 +796,7 @@ func TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccess
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), "https://example.com/broken.html").Return(offlinecache.ClassUnknown, assertError("classifier unreachable")).Times(1)
 	ts.mockCapturer.EXPECT().Capture(gomock.Any(), gomock.Any(), 5000).DoAndReturn(
 		func(_ context.Context, item dp1playlist.PlaylistItem, _ int) (*offlinecache.ItemRecord, error) {
-			rec := &offlinecache.ItemRecord{ItemID: item.ID, Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 			require.NoError(t, ts.store.SaveItem(rec))
 			return rec, nil
 		}).Times(1)
@@ -688,7 +814,7 @@ func TestService_DownloadPlaylist_PartialClassificationFailureStillQueuesSuccess
 	// ever satisfied by the shutdown drain happening to run it, which
 	// stopped being true once a drained job began skipping capture
 	// entirely (see process's ctx.Err() branch).
-	waitForState(t, ts.service, "item-ok", offlinecache.StateReady)
+	waitForState(t, ts.service, "https://example.com/ok.html", offlinecache.StateReady)
 }
 
 // TestService_DownloadPlaylist_IndexesBySourceURLForOfflineDisplayFallback
@@ -781,7 +907,7 @@ func TestService_IndexPlaylistForOfflineDisplay_MakesPlaylistRecoverableByURL(t 
 
 	// Never queued: the ONE item in this playlist must not have been
 	// classified or captured just because the playlist was indexed.
-	_, loadErr := ts.store.LoadItem("item-1")
+	_, loadErr := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound)
 }
 
@@ -908,9 +1034,9 @@ func TestService_ClearItem_RemovesRecordAndBlob(t *testing.T) {
 	defer ts.ctrl.Finish()
 	res := seedItemWithCapturedAt(t, ts.store, "item-1", "payload", time.Now())
 
-	require.NoError(t, ts.service.ClearItem("item-1"))
+	require.NoError(t, ts.service.ClearItem("https://example.com/item-1"))
 
-	_, err := ts.store.LoadItem("item-1")
+	_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 	_, err = ts.store.ReadBlob(res.SHA256)
 	assert.ErrorIs(t, err, offlinecache.ErrBlobNotFound, "GC should reclaim the now-orphaned blob")
@@ -951,9 +1077,9 @@ func TestService_ClearItem_NotifiesNotCachedAfterClearingCachedItem(t *testing.T
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	require.NoError(t, ts.service.ClearItem("item-1"))
+	require.NoError(t, ts.service.ClearItem("https://example.com/item-1"))
 
-	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"))
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("https://example.com/item-1"))
 }
 
 // TestService_ClearItem_ClearsARecordTooCorruptToParse pins the behavior
@@ -973,16 +1099,16 @@ func TestService_ClearItem_ClearsARecordTooCorruptToParse(t *testing.T) {
 	// Truncated mid-object: on disk, non-empty, and unparseable — what a
 	// power cut or a corrupted filesystem block leaves behind.
 	require.NoError(t, os.WriteFile(
-		filepath.Join(ts.store.RootDir(), "items", "item-1.json"), []byte(`{"itemId":"item-1"`), 0o600))
-	_, err := ts.store.LoadItem("item-1")
+		filepath.Join(ts.store.RootDir(), "items", offlinecache.SourceKey("https://example.com/item-1")+".json"), []byte(`{"item":{"source"`), 0o600))
+	_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	require.Error(t, err, "precondition: the record must be unreadable")
 
-	require.NoError(t, ts.service.ClearItem("item-1"),
+	require.NoError(t, ts.service.ClearItem("https://example.com/item-1"),
 		"a record too corrupt to parse must still be clearable")
 
-	_, err = ts.store.LoadItem("item-1")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
-	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"))
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("https://example.com/item-1"))
 }
 
 // TestService_ClearItem_CancelsAFailedItemsTrackedStateAndReportsSuccess
@@ -1005,15 +1131,15 @@ func TestService_ClearItem_CancelsAFailedItemsTrackedStateAndReportsSuccess(t *t
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-	waitForState(t, ts.service, "item-1", offlinecache.StateFailed)
+	waitForState(t, ts.service, item.Source, offlinecache.StateFailed)
 
-	require.NoError(t, ts.service.ClearItem("item-1"),
+	require.NoError(t, ts.service.ClearItem("https://example.com/item-1"),
 		"retiring a failed item's tracked entry is real work, not a not_found no-op")
 
 	assert.Equal(t,
 		[]offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateDownloading, offlinecache.StateFailed, offlinecache.StateNotCached},
-		obs.statesFor("item-1"))
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+		obs.statesFor("https://example.com/item-1"))
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State)
@@ -1046,7 +1172,7 @@ func TestService_ClearItem_CancelsQueuedFirstTimeDownloadAndReportsSuccess(t *te
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 			close(busyStarted)
 			<-proceedBusy
-			return &offlinecache.ItemRecord{ItemID: busyItem.ID, Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
+			return &offlinecache.ItemRecord{Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
 		}).Times(1)
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
 	// No Capture expectation for item-1: the worker reaching it at all
@@ -1060,18 +1186,18 @@ func TestService_ClearItem_CancelsQueuedFirstTimeDownloadAndReportsSuccess(t *te
 	<-busyStarted // worker is now blocked; item-1's job below is guaranteed to stay queued
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-	require.Equal(t, []offlinecache.ItemState{offlinecache.StateQueued}, obs.statesFor("item-1"),
+	require.Equal(t, []offlinecache.ItemState{offlinecache.StateQueued}, obs.statesFor("https://example.com/item-1"),
 		"precondition: the client has been told item-1 is queued, and nothing has been captured for it yet")
 
 	// Synchronous, unlike the sibling tests that must background their
 	// clear: with no record on disk there is nothing to delete or GC, so
 	// this path never blocks on captureMu behind busyItem's capture.
-	require.NoError(t, ts.service.ClearItem("item-1"),
+	require.NoError(t, ts.service.ClearItem("https://example.com/item-1"),
 		"canceling a queued first-time download is real work, not a not_found no-op")
 
-	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateNotCached}, obs.statesFor("item-1"),
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateNotCached}, obs.statesFor("https://example.com/item-1"),
 		"the canceled item must settle at not_cached for the client, not sit on a queued entry forever")
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State,
@@ -1079,7 +1205,7 @@ func TestService_ClearItem_CancelsQueuedFirstTimeDownloadAndReportsSuccess(t *te
 
 	close(proceedBusy) // let the worker drain and reach item-1's (removed) queue slot
 	require.Never(t, func() bool {
-		_, loadErr := ts.store.LoadItem("item-1")
+		_, loadErr := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 		return loadErr == nil
 	}, 200*time.Millisecond, 10*time.Millisecond,
 		"the canceled download must not run and save a record after the clear reported success")
@@ -1109,7 +1235,7 @@ func TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC(t *testing.T) 
 			close(blobWritten)
 			<-proceedToSave
 			rec := &offlinecache.ItemRecord{
-				ItemID: "item-b", Item: itemB, Entry: itemB.Source,
+				Item: itemB, Entry: itemB.Source,
 				Resources: []offlinecache.Resource{{URL: itemB.Source, Status: 200, SHA256: hash, ContentType: "text/html"}},
 				Coverage:  offlinecache.Coverage{Complete: true},
 			}
@@ -1124,7 +1250,7 @@ func TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC(t *testing.T) 
 	<-blobWritten // item-b's blob now exists on disk, but its record does not yet.
 
 	clearDone := make(chan error, 1)
-	go func() { clearDone <- ts.service.ClearItem("item-a") }()
+	go func() { clearDone <- ts.service.ClearItem("https://example.com/item-a") }()
 
 	select {
 	case <-clearDone:
@@ -1135,10 +1261,10 @@ func TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC(t *testing.T) 
 	close(proceedToSave)
 	require.NoError(t, <-clearDone)
 
-	_, err := ts.store.LoadItem("item-a")
+	_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-a"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "item-a should still be cleared once the fence releases")
 
-	rec, err := ts.store.LoadItem("item-b")
+	rec, err := ts.store.LoadItem(offlinecache.SourceKey(itemB.Source))
 	require.NoError(t, err, "item-b's capture must have completed normally")
 	_, err = ts.store.ReadBlob(rec.Resources[0].SHA256)
 	assert.NoError(t, err, "item-b's blob must not have been GC'd out from under its own in-flight capture")
@@ -1170,7 +1296,7 @@ func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 			close(busyStarted)
 			<-proceedBusy
-			return &offlinecache.ItemRecord{ItemID: busyItem.ID, Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
+			return &offlinecache.ItemRecord{Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
 		}).Times(1)
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
 	// Capture is deliberately given no expectation for item-1: if the
@@ -1191,7 +1317,7 @@ func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
 	// TestService_ClearItem_WaitsForUnrelatedActiveCaptureBeforeGC
 	// covers directly. Run it in the background instead.
 	clearDone := make(chan error, 1)
-	go func() { clearDone <- ts.service.ClearItem("item-1") }()
+	go func() { clearDone <- ts.service.ClearItem("https://example.com/item-1") }()
 
 	// ClearItem's queue removal (jobQueue.removeItems) happens before
 	// its blocking GC call, and item-1's on-disk delete happens
@@ -1200,7 +1326,7 @@ func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
 	// job has already been removed" before releasing busyItem, which
 	// is what would let the worker's run loop reach queue.pop() next.
 	require.Eventually(t, func() bool {
-		_, err := ts.store.LoadItem("item-1")
+		_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 		return errors.Is(err, offlinecache.ErrItemNotFound)
 	}, time.Second, 5*time.Millisecond, "ClearItem must delete item-1's record before this test releases busyItem")
 
@@ -1208,7 +1334,7 @@ func TestService_ClearItem_RemovesQueuedRecaptureJobBeforeItRuns(t *testing.T) {
 	require.NoError(t, <-clearDone)
 
 	require.Never(t, func() bool {
-		_, err := ts.store.LoadItem("item-1")
+		_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 		return err == nil
 	}, 200*time.Millisecond, 10*time.Millisecond, "the cleared item's queued recapture must not resurrect its record")
 }
@@ -1237,7 +1363,7 @@ func TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting(t *
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 			close(captureStarted)
 			<-proceed
-			rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 			require.NoError(t, ts.store.SaveItem(rec))
 			return rec, nil
 		}).Times(1)
@@ -1247,17 +1373,17 @@ func TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting(t *
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 	<-captureStarted // item-1's recapture is now active, past the queue.
 
-	err := ts.service.ClearItem("item-1")
+	err := ts.service.ClearItem("https://example.com/item-1")
 	assert.ErrorIs(t, err, offlinecache.ErrItemBusy)
 
-	rec, loadErr := ts.store.LoadItem("item-1")
+	rec, loadErr := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	require.NoError(t, loadErr, "the rejected clear must leave the old record untouched")
 	blob, err := ts.store.ReadBlob(rec.Resources[0].SHA256)
 	require.NoError(t, err, "the old blob must survive a rejected clear too")
 	assert.Equal(t, "old payload", string(blob))
 
 	close(proceed)
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 	// waitForState only proves the *disk* record is ready (SaveItem runs
 	// inside the mocked Capture above, before process() calls notify());
 	// s.state's StateDownloading->StateReady transition happens slightly
@@ -1266,7 +1392,7 @@ func TestService_ClearItem_ActiveCaptureOfSameItemReturnsBusyWithoutDeleting(t *
 	// after the disk write lands — retry until that transition catches
 	// up, rather than asserting a fixed one-shot call here.
 	require.Eventually(t, func() bool {
-		err := ts.service.ClearItem("item-1")
+		err := ts.service.ClearItem("https://example.com/item-1")
 		return err == nil
 	}, time.Second, 5*time.Millisecond, "clear must succeed once the capture that made it busy has finished")
 }
@@ -1299,14 +1425,14 @@ func TestService_ClearItem_ForcedRaceAgainstWorkerDequeueNeverResurrectsAfterSuc
 			func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 				close(busyStarted)
 				<-proceedBusy
-				return &offlinecache.ItemRecord{ItemID: busyItem.ID, Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
+				return &offlinecache.ItemRecord{Item: busyItem, Coverage: offlinecache.Coverage{Complete: true}}, nil
 			}).Times(1)
 		ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
 		// MaxTimes(1), not Times(1): whether the worker ever gets to
 		// call this at all depends on which side wins the race below.
 		ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).MaxTimes(1).DoAndReturn(
 			func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
-				rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+				rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 				require.NoError(t, ts.store.SaveItem(rec))
 				return rec, nil
 			})
@@ -1317,18 +1443,18 @@ func TestService_ClearItem_ForcedRaceAgainstWorkerDequeueNeverResurrectsAfterSuc
 		require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 
 		clearDone := make(chan error, 1)
-		go func() { clearDone <- ts.service.ClearItem("item-1") }()
+		go func() { clearDone <- ts.service.ClearItem("https://example.com/item-1") }()
 		close(proceedBusy) // frees the worker to race ClearItem for item-1's queued job
 
 		if err := <-clearDone; err == nil {
 			require.Never(t, func() bool {
-				_, loadErr := ts.store.LoadItem("item-1")
+				_, loadErr := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 				return loadErr == nil
 			}, 150*time.Millisecond, 5*time.Millisecond,
 				"iteration %d: a clear that reported success must never be followed by a resurrected record", i)
 		} else {
 			require.ErrorIs(t, err, offlinecache.ErrItemBusy, "iteration %d: the only way ClearItem may fail here is busy", i)
-			waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+			waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 		}
 
 		ts.service.Stop()
@@ -1374,7 +1500,7 @@ func TestService_ClearItem_DuringBlockedClassificationDoesNotResurrect(t *testin
 	go func() { dlDone <- ts.service.DownloadItem(context.Background(), item) }()
 
 	<-classifyEntered
-	require.NoError(t, ts.service.ClearItem("item-1"),
+	require.NoError(t, ts.service.ClearItem("https://example.com/item-1"),
 		"the clear must succeed: during classification item-1 is untracked, so nothing is busy")
 	close(releaseClassify)
 
@@ -1385,10 +1511,10 @@ func TestService_ClearItem_DuringBlockedClassificationDoesNotResurrect(t *testin
 	require.ErrorIs(t, <-dlDone, offlinecache.ErrClearedDuringDownload,
 		"a download aborted by a winning clear must say so, not report success for work it never queued")
 
-	_, err := ts.store.LoadItem("item-1")
+	_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	require.Error(t, err, "the cleared record must stay deleted")
 	require.Never(t, func() bool {
-		_, loadErr := ts.store.LoadItem("item-1")
+		_, loadErr := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 		return loadErr == nil
 	}, 150*time.Millisecond, 5*time.Millisecond,
 		"a clear that reported success must never be followed by a resurrected record")
@@ -1445,12 +1571,12 @@ func TestService_ClearPlaylist_DuringBlockedClassificationDoesNotResurrect(t *te
 
 	require.NoError(t, <-dlDone, "the download must return cleanly, not error")
 
-	_, err = ts.store.LoadItem("item-1")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	require.Error(t, err, "the cleared member item record must stay deleted")
 	_, err = ts.store.LoadPlaylist("playlist-1")
 	require.Error(t, err, "the cleared playlist record must not be resurrected as an empty offline fallback")
 	require.Never(t, func() bool {
-		_, itemErr := ts.store.LoadItem("item-1")
+		_, itemErr := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 		_, plErr := ts.store.LoadPlaylist("playlist-1")
 		return itemErr == nil || plErr == nil
 	}, 150*time.Millisecond, 5*time.Millisecond,
@@ -1470,12 +1596,15 @@ func TestService_ClearPlaylist_ActiveCaptureOfMemberItemReturnsBusyWithoutPartia
 
 	raw, err := json.Marshal(map[string]interface{}{
 		"dpVersion": "1.0.0", "id": "playlist-1",
-		"items": []map[string]interface{}{{"id": "item-1", "source": "x"}, {"id": "item-2", "source": "y"}},
+		"items": []map[string]interface{}{{"id": "item-1", "source": "https://example.com/item-1"}, {"id": "item-2", "source": "https://example.com/item-2"}},
 	})
 	require.NoError(t, err)
 	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
 
-	item2 := dp1playlist.PlaylistItem{ID: "item-2", Source: "y"}
+	// Same SOURCE as the playlist's item-2 member: membership is
+	// per-source now, so the busy check must trip on the source, not the
+	// resolution-minted id.
+	item2 := dp1playlist.PlaylistItem{ID: "item-2", Source: "https://example.com/item-2"}
 	captureStarted := make(chan struct{})
 	proceed := make(chan struct{})
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item2.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
@@ -1483,7 +1612,7 @@ func TestService_ClearPlaylist_ActiveCaptureOfMemberItemReturnsBusyWithoutPartia
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 			close(captureStarted)
 			<-proceed
-			rec := &offlinecache.ItemRecord{ItemID: "item-2", Item: item2, Coverage: offlinecache.Coverage{Complete: true}}
+			rec := &offlinecache.ItemRecord{Item: item2, Coverage: offlinecache.Coverage{Complete: true}}
 			require.NoError(t, ts.store.SaveItem(rec))
 			return rec, nil
 		}).Times(1)
@@ -1496,13 +1625,13 @@ func TestService_ClearPlaylist_ActiveCaptureOfMemberItemReturnsBusyWithoutPartia
 	err = ts.service.ClearPlaylist("playlist-1")
 	assert.ErrorIs(t, err, offlinecache.ErrItemBusy)
 
-	_, loadErr := ts.store.LoadItem("item-1")
+	_, loadErr := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	assert.NoError(t, loadErr, "a rejected playlist clear must not partially delete an unrelated, idle sibling item")
 	_, loadErr = ts.store.LoadPlaylist("playlist-1")
 	assert.NoError(t, loadErr, "a rejected playlist clear must leave the playlist record itself untouched too")
 
 	close(proceed)
-	waitForState(t, ts.service, "item-2", offlinecache.StateReady)
+	waitForState(t, ts.service, item2.Source, offlinecache.StateReady)
 }
 
 func TestService_ClearPlaylist_RemovesPlaylistAndItsItems(t *testing.T) {
@@ -1513,16 +1642,16 @@ func TestService_ClearPlaylist_RemovesPlaylistAndItsItems(t *testing.T) {
 
 	raw, err := json.Marshal(map[string]interface{}{
 		"dpVersion": "1.0.0", "id": "playlist-1",
-		"items": []map[string]interface{}{{"id": "item-1", "source": "x"}, {"id": "item-2", "source": "y"}},
+		"items": []map[string]interface{}{{"id": "item-1", "source": "https://example.com/item-1"}, {"id": "item-2", "source": "https://example.com/item-2"}},
 	})
 	require.NoError(t, err)
 	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
 
 	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
 
-	_, err = ts.store.LoadItem("item-1")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
-	_, err = ts.store.LoadItem("item-2")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-2"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 	_, err = ts.store.LoadPlaylist("playlist-1")
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
@@ -1545,8 +1674,8 @@ func TestService_ClearPlaylist_NotifiesNotCachedForClearedItemsOnly(t *testing.T
 	raw, err := json.Marshal(map[string]interface{}{
 		"dpVersion": "1.0.0", "id": "playlist-1",
 		"items": []map[string]interface{}{
-			{"id": "item-cached", "source": "x"},
-			{"id": "item-never-cached", "source": "y"},
+			{"id": "item-cached", "source": "https://example.com/item-cached"},
+			{"id": "item-never-cached", "source": "https://example.com/item-never-cached"},
 		},
 	})
 	require.NoError(t, err)
@@ -1559,8 +1688,8 @@ func TestService_ClearPlaylist_NotifiesNotCachedForClearedItemsOnly(t *testing.T
 
 	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
 
-	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-cached"))
-	assert.Empty(t, obs.statesFor("item-never-cached"),
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("https://example.com/item-cached"))
+	assert.Empty(t, obs.statesFor("https://example.com/item-never-cached"),
 		"an item that was already not_cached transitioned to nothing; announcing it is pure noise on the relayer/hub transports")
 }
 
@@ -1580,14 +1709,14 @@ func TestService_ClearPlaylist_NotifiesForAnUntrackedRecordOnDisk(t *testing.T) 
 
 	raw, err := json.Marshal(map[string]interface{}{
 		"dpVersion": "1.0.0", "id": "playlist-1",
-		"items": []map[string]interface{}{{"id": "item-1", "source": "x"}},
+		"items": []map[string]interface{}{{"id": "item-1", "source": "https://example.com/item-1"}},
 	})
 	require.NoError(t, err)
 	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
 
 	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
 
-	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"),
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("https://example.com/item-1"),
 		"a record that really was removed must be announced even when nothing was tracked for it in memory")
 }
 
@@ -1625,7 +1754,7 @@ func (o removeFailingOS) Remove(path string) error {
 func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	root := t.TempDir()
 	logger := zaptest.NewLogger(t)
-	failingOS := removeFailingOS{OS: wrapper.NewOS(), failPathSubstr: "item-2.json"}
+	failingOS := removeFailingOS{OS: wrapper.NewOS(), failPathSubstr: offlinecache.SourceKey("https://example.com/item-2") + ".json"}
 	store := offlinecache.NewStore(root, failingOS, wrapper.NewJSON(), logger)
 
 	ctrl := gomock.NewController(t)
@@ -1641,7 +1770,7 @@ func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 
 	raw, err := json.Marshal(map[string]interface{}{
 		"dpVersion": "1.0.0", "id": "playlist-1",
-		"items": []map[string]interface{}{{"id": "item-1", "source": "x"}, {"id": "item-2", "source": "y"}},
+		"items": []map[string]interface{}{{"id": "item-1", "source": "https://example.com/item-1"}, {"id": "item-2", "source": "https://example.com/item-2"}},
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.SavePlaylist("playlist-1", raw))
@@ -1654,14 +1783,14 @@ func TestService_ClearPlaylist_ReturnsErrorWhenAnItemDeleteFails(t *testing.T) {
 	err = svc.ClearPlaylist("playlist-1")
 	assert.Error(t, err, "a genuine per-item delete failure must not be swallowed into a successful clear")
 
-	_, loadErr := store.LoadItem("item-1")
+	_, loadErr := store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	assert.ErrorIs(t, loadErr, offlinecache.ErrItemNotFound, "item-1's delete succeeded and must still take effect")
-	_, loadErr = store.LoadItem("item-2")
+	_, loadErr = store.LoadItem(offlinecache.SourceKey("https://example.com/item-2"))
 	assert.NoError(t, loadErr, "item-2's record must remain since its delete genuinely failed")
 
-	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("item-1"),
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor("https://example.com/item-1"),
 		"the items that really were cleared must still be pushed, even though the call as a whole failed")
-	assert.Empty(t, obs.statesFor("item-2"),
+	assert.Empty(t, obs.statesFor("https://example.com/item-2"),
 		"an item whose record survived a failed delete must never be announced as not_cached")
 }
 
@@ -1677,7 +1806,7 @@ func TestService_Status_UnknownItemIsNotCached(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"missing"}})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{"missing"}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State)
@@ -1711,7 +1840,6 @@ func TestService_Status_AggregatesTotalsAndDiskUsage(t *testing.T) {
 func seedItemWithReason(t *testing.T, store offlinecache.Store, itemID, reason string) {
 	t.Helper()
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
-		ItemID:     itemID,
 		Item:       dp1playlist.PlaylistItem{ID: itemID, Source: "https://example.com/" + itemID},
 		Entry:      "https://example.com/" + itemID,
 		Coverage:   offlinecache.Coverage{Complete: false, Reason: reason},
@@ -1733,7 +1861,7 @@ func TestService_Status_TruncatesLongReason(t *testing.T) {
 	require.Greater(t, len(reason), 10_000, "fixture should be far over the wire budget")
 	seedItemWithReason(t, ts.store, "item-1", reason)
 
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{"https://example.com/item-1"}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 
@@ -1743,7 +1871,7 @@ func TestService_Status_TruncatesLongReason(t *testing.T) {
 	assert.Regexp(t, `…\(\+\d+ more\)$`, got, "a truncated list must say how much it dropped")
 
 	// The record on disk keeps the complete reason for debugging.
-	rec, err := ts.store.LoadItem("item-1")
+	rec, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	require.NoError(t, err)
 	assert.Equal(t, reason, rec.Coverage.Reason)
 }
@@ -1751,17 +1879,26 @@ func TestService_Status_TruncatesLongReason(t *testing.T) {
 func TestService_Status_PagesWithCursor(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
+	sources := make([]string, 0, 5)
 	for _, id := range []string{"item-1", "item-2", "item-3", "item-4", "item-5"} {
 		seedItemWithCapturedAt(t, ts.store, id, id+"-blob", time.Now())
+		sources = append(sources, "https://example.com/"+id)
 	}
+	// Pages follow source-KEY order (the paging domain — see
+	// StatusRequest.Cursor's doc), so derive the expected sequence the
+	// same way rather than assuming URL-lexicographic order.
+	sort.Slice(sources, func(i, j int) bool {
+		return offlinecache.SourceKey(sources[i]) < offlinecache.SourceKey(sources[j])
+	})
 
 	first, err := ts.service.Status(offlinecache.StatusRequest{Limit: 2})
 	require.NoError(t, err)
 	require.Len(t, first.Items, 2)
-	assert.Equal(t, "item-1", first.Items[0].ItemID)
-	assert.Equal(t, "item-2", first.Items[1].ItemID)
+	assert.Equal(t, sources[0], first.Items[0].Source)
+	assert.Equal(t, sources[1], first.Items[1].Source)
 	assert.True(t, first.Truncated)
-	assert.Equal(t, "item-2", first.NextCursor)
+	assert.Equal(t, offlinecache.SourceKey(sources[1]), first.NextCursor,
+		"the cursor is the last entry's source KEY — an opaque token, not a URL")
 	// Totals cover the whole set, not just this page.
 	require.NotNil(t, first.Totals)
 	assert.Equal(t, 5, first.Totals.Total)
@@ -1771,8 +1908,8 @@ func TestService_Status_PagesWithCursor(t *testing.T) {
 	second, err := ts.service.Status(offlinecache.StatusRequest{Limit: 2, Cursor: first.NextCursor})
 	require.NoError(t, err)
 	require.Len(t, second.Items, 2)
-	assert.Equal(t, "item-3", second.Items[0].ItemID)
-	assert.Equal(t, "item-4", second.Items[1].ItemID)
+	assert.Equal(t, sources[2], second.Items[0].Source)
+	assert.Equal(t, sources[3], second.Items[1].Source)
 	assert.True(t, second.Truncated)
 	// Continuation pages skip the whole-set pass, so they carry no
 	// totals — see StatusSnapshot's doc.
@@ -1782,7 +1919,7 @@ func TestService_Status_PagesWithCursor(t *testing.T) {
 	last, err := ts.service.Status(offlinecache.StatusRequest{Limit: 2, Cursor: second.NextCursor})
 	require.NoError(t, err)
 	require.Len(t, last.Items, 1)
-	assert.Equal(t, "item-5", last.Items[0].ItemID)
+	assert.Equal(t, sources[4], last.Items[0].Source)
 	assert.False(t, last.Truncated)
 	assert.Empty(t, last.NextCursor)
 }
@@ -1792,14 +1929,51 @@ func TestService_Status_CursorSurvivesEvictedItem(t *testing.T) {
 	defer ts.ctrl.Finish()
 	seedItemWithCapturedAt(t, ts.store, "item-1", "one", time.Now())
 	seedItemWithCapturedAt(t, ts.store, "item-2", "two", time.Now())
+	sources := []string{"https://example.com/item-1", "https://example.com/item-2"}
+	sort.Slice(sources, func(i, j int) bool {
+		return offlinecache.SourceKey(sources[i]) < offlinecache.SourceKey(sources[j])
+	})
 
-	// The cursor names an item that no longer exists (cleared or evicted
-	// between pages); paging is by sort order, so the next page still
-	// resolves rather than erroring or restarting.
-	snap, err := ts.service.Status(offlinecache.StatusRequest{Cursor: "item-1-gone-since"})
+	// The cursor is the first item's key, as if that item was delivered on
+	// a previous page and has since been cleared/evicted; paging is by
+	// sort order, so the next page still resolves rather than erroring or
+	// restarting.
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Cursor: offlinecache.SourceKey(sources[0])})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
-	assert.Equal(t, "item-2", snap.Items[0].ItemID)
+	assert.Equal(t, sources[1], snap.Items[0].Source)
+}
+
+// TestService_Status_DropsEntryWhoseSourceIsUnrecoverable pins the
+// whole-store walk's drop path: a record too corrupt to read, untracked
+// in memory and not named in the request, has no recoverable source —
+// the one field clients match entries on — so it is dropped from the
+// page rather than reported with an empty identity. (GC's quarantine
+// pass owns that record's ultimate fate; this covers the window before
+// it runs.) Healthy siblings must be unaffected.
+func TestService_Status_DropsEntryWhoseSourceIsUnrecoverable(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "payload", time.Now())
+
+	// A corrupt record at a VALID key filename: ListItemKeys surfaces it,
+	// LoadItem fails on it, nothing tracks it, nobody asked about it.
+	corruptKey := offlinecache.SourceKey("https://example.com/corrupt")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(ts.store.RootDir(), "items", corruptKey+".json"), []byte(`{"item":{`), 0o600))
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1, "the unreadable, unmatchable record must be dropped, not emitted without a source")
+	assert.Equal(t, "https://example.com/item-1", snap.Items[0].Source)
+
+	// Asked about explicitly, the same key answers not_cached under the
+	// caller's own source string — the hint fallback, not a drop.
+	snap, err = ts.service.Status(offlinecache.StatusRequest{Sources: []string{"https://example.com/corrupt"}})
+	require.NoError(t, err)
+	require.Len(t, snap.Items, 1)
+	assert.Equal(t, "https://example.com/corrupt", snap.Items[0].Source)
+	assert.Equal(t, offlinecache.StateNotCached, snap.Items[0].State)
 }
 
 func TestService_Status_TotalsOnlyOmitsItems(t *testing.T) {
@@ -1819,27 +1993,36 @@ func TestService_Status_TotalsOnlyOmitsItems(t *testing.T) {
 	assert.Equal(t, allCacheBytesOnDisk(t, ts.store.RootDir()), *snap.DiskUsedBytes)
 }
 
-func TestService_Status_SortsAndDedupesRequestedIDs(t *testing.T) {
+func TestService_Status_SortsAndDedupesRequestedSources(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 	seedItemWithCapturedAt(t, ts.store, "item-1", "one", time.Now())
 	seedItemWithCapturedAt(t, ts.store, "item-2", "two", time.Now())
+	source1 := "https://example.com/item-1"
+	source2 := "https://example.com/item-2"
 
 	snap, err := ts.service.Status(offlinecache.StatusRequest{
-		ItemIDs: []string{"item-2", "item-1", "item-2", ""},
+		Sources: []string{source2, source1, source2, ""},
 	})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 2)
-	assert.Equal(t, "item-1", snap.Items[0].ItemID)
-	assert.Equal(t, "item-2", snap.Items[1].ItemID)
+	// Ordering is by source KEY (the paging domain — see
+	// StatusRequest.Sources' doc), not lexicographically by URL, so the
+	// expected order is derived the same way.
+	want := []string{source1, source2}
+	if offlinecache.SourceKey(source2) < offlinecache.SourceKey(source1) {
+		want = []string{source2, source1}
+	}
+	assert.Equal(t, want, []string{snap.Items[0].Source, snap.Items[1].Source})
 }
 
 func TestService_Status_InFlightItemsSortWithOnDiskOnes(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
 	// "item-b" only exists in memory (queued, no record written yet), so
-	// it must still land in id order rather than after every on-disk id —
-	// paging by "id greater than cursor" would otherwise skip it.
+	// it must still land in global source-KEY order rather than after
+	// every on-disk entry — paging by "key greater than cursor" would
+	// otherwise skip it.
 	seedItemWithCapturedAt(t, ts.store, "item-a", "a", time.Now())
 	seedItemWithCapturedAt(t, ts.store, "item-c", "c", time.Now())
 
@@ -1863,8 +2046,12 @@ func TestService_Status_InFlightItemsSortWithOnDiskOnes(t *testing.T) {
 	snap, err := ts.service.Status(offlinecache.StatusRequest{})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 3)
-	assert.Equal(t, []string{"item-a", "item-b", "item-c"},
-		[]string{snap.Items[0].ItemID, snap.Items[1].ItemID, snap.Items[2].ItemID})
+	want := []string{"https://example.com/item-a", item.Source, "https://example.com/item-c"}
+	sort.Slice(want, func(i, j int) bool {
+		return offlinecache.SourceKey(want[i]) < offlinecache.SourceKey(want[j])
+	})
+	assert.Equal(t, want,
+		[]string{snap.Items[0].Source, snap.Items[1].Source, snap.Items[2].Source})
 }
 
 func TestService_Start_RebuildsIndexFromExistingDiskState(t *testing.T) {
@@ -1875,13 +2062,13 @@ func TestService_Start_RebuildsIndexFromExistingDiskState(t *testing.T) {
 	require.NoError(t, ts.service.Start(context.Background()))
 	defer ts.service.Stop()
 
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{"https://example.com/item-1"}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateReady, snap.Items[0].State)
 }
 
-func TestService_Start_PropagatesListItemIDsError(t *testing.T) {
+func TestService_Start_PropagatesListItemKeysError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
@@ -1889,7 +2076,7 @@ func TestService_Start_PropagatesListItemIDsError(t *testing.T) {
 	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
-	mockStore.EXPECT().ListItemIDs().Return(nil, assertError("disk error")).Times(1)
+	mockStore.EXPECT().ListItemKeys().Return(nil, assertError("disk error")).Times(1)
 
 	svc := offlinecache.NewService(mockStore, mockClassifier, mockCapturer, mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil, offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
 	err := svc.Start(context.Background())
@@ -1987,7 +2174,7 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
 			newHash := writeBlobString(t, ts.store, strings.Repeat("z", blobSize))
 			newRec := &offlinecache.ItemRecord{
-				ItemID: "new-item", Item: newItem, Entry: newItem.Source,
+				Item: newItem, Entry: newItem.Source,
 				Resources:  []offlinecache.Resource{{URL: newItem.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
 				Coverage:   offlinecache.Coverage{Complete: true},
 				CapturedAt: time.Now(),
@@ -2000,25 +2187,25 @@ func TestService_EnforceDiskLimit_EvictsOldestItemsFirst(t *testing.T) {
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), newItem))
-	waitForState(t, ts.service, "new-item", offlinecache.StateReady)
+	waitForState(t, ts.service, newItem.Source, offlinecache.StateReady)
 
 	require.Eventually(t, func() bool {
 		usage, err := ts.store.DiskUsage()
 		return err == nil && usage <= budget
 	}, 2*time.Second, 10*time.Millisecond, "disk usage should settle back under budget")
 
-	_, err := ts.store.LoadItem("old-1")
+	_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/old-1"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "oldest item should be evicted first")
-	_, err = ts.store.LoadItem("old-2")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/old-2"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound, "second-oldest item should also be evicted to get under budget")
-	_, err = ts.store.LoadItem("new-item")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/new"))
 	assert.NoError(t, err, "the item that was just captured must never be evicted by its own capture when evicting OTHER items already brings usage back under budget")
 
 	// An evicted item was already announced as not_cached (eviction's own
 	// notify), so a later clear for it settles nothing and must stay the
 	// not_found no-op it always was — the queued/failed cancellation cases
 	// are successes precisely because they DO retire a live entry.
-	assert.ErrorIs(t, ts.service.ClearItem("old-1"), offlinecache.ErrItemNotFound,
+	assert.ErrorIs(t, ts.service.ClearItem("https://example.com/old-1"), offlinecache.ErrItemNotFound,
 		"clearing an already-evicted item must not report a transition that already happened")
 }
 
@@ -2038,7 +2225,7 @@ func TestService_EnforceDiskLimit_EvictsJustCapturedItemWhenNoOtherVictimRemains
 	newHash := writeBlobString(t, ts.store, "0123456789")
 	newItem := dp1playlist.PlaylistItem{ID: "new-item", Source: "https://example.com/new"}
 	newRec := &offlinecache.ItemRecord{
-		ItemID: "new-item", Item: newItem, Entry: newItem.Source,
+		Item: newItem, Entry: newItem.Source,
 		Resources:  []offlinecache.Resource{{URL: newItem.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
 		Coverage:   offlinecache.Coverage{Complete: true},
 		CapturedAt: time.Now(),
@@ -2055,13 +2242,13 @@ func TestService_EnforceDiskLimit_EvictsJustCapturedItemWhenNoOtherVictimRemains
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), newItem))
-	waitForState(t, ts.service, "new-item", offlinecache.StateNotCached)
+	waitForState(t, ts.service, newItem.Source, offlinecache.StateNotCached)
 
 	usage, err := ts.store.DiskUsage()
 	require.NoError(t, err)
 	assert.LessOrEqual(t, usage, int64(5), "the cache must never be left permanently over budget just because the only oversized item was also the most recent capture")
 
-	_, err = ts.store.LoadItem("new-item")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/new"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound,
 		"an item that alone exceeds maxDiskBytes with no older item to evict instead must be rejected, not silently kept over budget forever")
 }
@@ -2112,7 +2299,7 @@ func TestService_ReclaimBeforeCapture_ReplacesOldestWhenCacheFull(t *testing.T) 
 
 			newHash := writeBlobString(t, ts.store, strings.Repeat("z", blobSize))
 			rec := &offlinecache.ItemRecord{
-				ItemID: "new-item", Item: newItem, Entry: newItem.Source,
+				Item: newItem, Entry: newItem.Source,
 				Resources:  []offlinecache.Resource{{URL: newItem.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
 				Coverage:   offlinecache.Coverage{Complete: true},
 				CapturedAt: time.Now(),
@@ -2125,20 +2312,20 @@ func TestService_ReclaimBeforeCapture_ReplacesOldestWhenCacheFull(t *testing.T) 
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), newItem))
-	waitForState(t, ts.service, "new-item", offlinecache.StateReady)
+	waitForState(t, ts.service, newItem.Source, offlinecache.StateReady)
 
 	require.Eventually(t, func() bool {
 		usage, err := ts.store.DiskUsage()
 		return err == nil && usage <= budget
 	}, 2*time.Second, 10*time.Millisecond, "disk usage should settle at or under budget")
 
-	_, err := ts.store.LoadItem("old-1")
+	_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/old-1"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound,
 		"the oldest item must be evicted pre-capture to make room for the new one")
-	_, err = ts.store.LoadItem("old-2")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/old-2"))
 	assert.NoError(t, err,
 		"rollover must evict only what the headroom floor needs, not wipe the whole cache")
-	_, err = ts.store.LoadItem("new-item")
+	_, err = ts.store.LoadItem(offlinecache.SourceKey("https://example.com/new"))
 	assert.NoError(t, err, "the new item must be cached on a previously-full store")
 }
 
@@ -2172,15 +2359,17 @@ func TestService_ReclaimBeforeCapture_NeverEvictsTheItemBeingRecaptured(t *testi
 	ts.setMaxDiskBytes(budget)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: seeded.URL}
+	recaptured := make(chan struct{})
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
 	ts.mockCapturer.EXPECT().Capture(gomock.Any(), item, 5000).DoAndReturn(
 		func(context.Context, dp1playlist.PlaylistItem, int) (*offlinecache.ItemRecord, error) {
+			defer close(recaptured)
 			// The reclaim ran (the store is over its headroom target) but
 			// must have given up quietly rather than evicting the very
 			// item this capture is refreshing: the existing ready record
 			// — blob included — is still fully on disk when the capture
 			// starts.
-			existing, err := ts.store.LoadItem("item-1")
+			existing, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 			require.NoError(t, err,
 				"the pre-capture reclaim must never evict the item it is making room FOR")
 			require.Equal(t, seeded.SHA256, existing.Resources[0].SHA256)
@@ -2188,7 +2377,7 @@ func TestService_ReclaimBeforeCapture_NeverEvictsTheItemBeingRecaptured(t *testi
 			newHash := writeBlobString(t, ts.store, strings.Repeat("a", blobSize))
 			require.Equal(t, seeded.SHA256, newHash, "same content must dedup onto the existing blob")
 			rec := &offlinecache.ItemRecord{
-				ItemID: "item-1", Item: item, Entry: item.Source,
+				Item: item, Entry: item.Source,
 				Resources:  []offlinecache.Resource{{URL: item.Source, Status: 200, SHA256: newHash, ContentType: "text/html"}},
 				Coverage:   offlinecache.Coverage{Complete: true},
 				CapturedAt: time.Now(),
@@ -2201,9 +2390,17 @@ func TestService_ReclaimBeforeCapture_NeverEvictsTheItemBeingRecaptured(t *testi
 	defer ts.service.Stop()
 
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	// waitForState alone cannot synchronize here: the seeded record
+	// already reports ready on disk, so Status answers ready before the
+	// recapture has even started — wait for the capture itself instead.
+	select {
+	case <-recaptured:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the recapture never ran")
+	}
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 
-	_, err := ts.store.LoadItem("item-1")
+	_, err := ts.store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	assert.NoError(t, err, "the recaptured item must survive both the reclaim and the post-capture limit pass")
 	usage, err := ts.store.DiskUsage()
 	require.NoError(t, err)
@@ -2221,7 +2418,7 @@ func TestService_Notify_ReportsQueuedDownloadingThenReadyInOrder(t *testing.T) {
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
-	rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+	rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 
 	var seen []offlinecache.ItemState
 	done := make(chan struct{})
@@ -2278,7 +2475,7 @@ func TestService_Notify_TruncatesReason(t *testing.T) {
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-1", Item: item,
+		Item:     item,
 		Coverage: offlinecache.Coverage{Complete: false, Reason: reason},
 	}
 
@@ -2337,7 +2534,9 @@ func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskSta
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
-	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	// Same SOURCE as the seeded record below: a recapture targets the same
+	// per-source cache entry, whatever id this resolution happened to mint.
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
 	seedItemWithCapturedAt(t, store, "item-1", "already cached payload", time.Now())
 
 	var seenFailed atomic.Bool
@@ -2367,7 +2566,7 @@ func TestService_Notify_FailedRecaptureNotificationDivergesFromStillReadyDiskSta
 
 	// The notification said "failed", but the disk-backed status must
 	// still say "ready": the old record/blob were never touched.
-	snap, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	snap, err := svc.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateReady, snap.Items[0].State,
@@ -2399,7 +2598,9 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 	mockMediaCapturer := mocks.NewMockOfflineCacheMediaCapturer(ctrl)
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
-	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	// Same SOURCE as the seeded record below: a recapture targets the same
+	// per-source cache entry, whatever id this resolution happened to mint.
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/item-1"}
 	seedItemWithCapturedAt(t, store, "item-1", "already cached payload", time.Now())
 
 	captureStarted := make(chan struct{})
@@ -2448,7 +2649,7 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 		t.Fatal("timed out waiting for the observer to see the canceled recapture attempt")
 	}
 
-	snap, err := store.LoadItem("item-1")
+	snap, err := store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	require.NoError(t, err, "the pre-existing ready record must still be on disk, untouched by the canceled recapture")
 	assert.Equal(t, "already cached payload", func() string {
 		blob, blobErr := store.ReadBlob(snap.Resources[0].SHA256)
@@ -2456,7 +2657,7 @@ func TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched(t *testi
 		return string(blob)
 	}())
 
-	status, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	status, err := svc.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 	require.NoError(t, err)
 	require.Len(t, status.Items, 1)
 	assert.Equal(t, offlinecache.StateReady, status.Items[0].State,
@@ -2520,7 +2721,7 @@ func TestService_DownloadItem_ClearWinningTheRaceNotifiesNothingAndReportsIt(t *
 	go func() { dlDone <- svc.DownloadItem(context.Background(), item) }()
 
 	<-classifyEntered
-	require.NoError(t, svc.ClearItem("item-1"))
+	require.NoError(t, svc.ClearItem(item.Source))
 	close(releaseClassify)
 
 	require.ErrorIs(t, <-dlDone, offlinecache.ErrClearedDuringDownload,
@@ -2543,7 +2744,7 @@ func TestService_DownloadItem_ClearWinningTheRaceNotifiesNothingAndReportsIt(t *
 	}, 200*time.Millisecond, 10*time.Millisecond,
 		"a clear that won the race must produce no state notification for the aborted download, least of all state:\"queued\"")
 
-	_, err := store.LoadItem("item-1")
+	_, err := store.LoadItem(offlinecache.SourceKey("https://example.com/item-1"))
 	require.Error(t, err, "the cleared record must stay deleted")
 }
 
@@ -2563,7 +2764,7 @@ func TestService_Enqueue_NotifiesQueuedOnlyAfterTheJobIsCommitted(t *testing.T) 
 	mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
-	rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+	rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 
 	queuedSeen := make(chan struct{})
 	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
@@ -2620,7 +2821,7 @@ func TestService_Enqueue_NotifiesQueuedOnlyAfterTheJobIsCommitted(t *testing.T) 
 	// And the state the notification claims is real: Status agrees the
 	// item is scheduled. Deterministically downloading, since the capture
 	// above has provably started and is held open.
-	snap, err := svc.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	snap, err := svc.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateDownloading, snap.Items[0].State)
@@ -2649,7 +2850,7 @@ func TestService_Notify_QueuedPrecedesDownloadingEvenWithAnIdleWorker(t *testing
 			mockObserver := mocks.NewMockOfflineCacheProgressObserver(ctrl)
 
 			item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
-			rec := &offlinecache.ItemRecord{ItemID: "item-1", Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
 
 			var mu sync.Mutex
 			var seen []offlinecache.ItemState
@@ -2735,7 +2936,7 @@ func TestService_Stop_WithQueuedBacklogDoesNotNotifyPerJob(t *testing.T) {
 	mockObserver.EXPECT().OnItemStateChanged(gomock.Any()).Do(func(status offlinecache.ItemStatus) {
 		mu.Lock()
 		defer mu.Unlock()
-		notifiedFor[status.ItemID]++
+		notifiedFor[status.Source]++
 	}).AnyTimes()
 
 	items := make([]dp1playlist.PlaylistItem, backlog)
@@ -2766,14 +2967,14 @@ func TestService_Stop_WithQueuedBacklogDoesNotNotifyPerJob(t *testing.T) {
 	// What must NOT happen is the drain adding downloading/failed on top
 	// of it for jobs that never ran.
 	for _, item := range items[1:] {
-		assert.Equal(t, 1, notifiedFor[item.ID],
+		assert.Equal(t, 1, notifiedFor[item.Source],
 			"drained job %s must carry only its original queued notification, not a downloading/failed pair emitted during shutdown", item.ID)
 	}
 
 	// The item that genuinely was capturing keeps its full attempt-level
 	// story (queued, downloading, failed) — see
 	// TestService_Stop_DuringInFlightRecaptureLeavesReadyStatusUntouched.
-	assert.Equal(t, 3, notifiedFor[blocking.ID],
+	assert.Equal(t, 3, notifiedFor[blocking.Source],
 		"the in-flight capture is a real attempt and must still report its outcome")
 }
 

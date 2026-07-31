@@ -68,7 +68,7 @@ func TestService_Admission_DeniedHeadStaysQueuedThenProceeds(t *testing.T) {
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-1", Item: item, Entry: item.Source,
+		Item: item, Entry: item.Source,
 		Coverage: offlinecache.Coverage{Complete: true},
 	}
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
@@ -87,7 +87,7 @@ func TestService_Admission_DeniedHeadStaysQueuedThenProceeds(t *testing.T) {
 	// While denied, the job must sit in StateQueued — visibly queued, not
 	// downloading, not failed — across several retry intervals.
 	time.Sleep(100 * time.Millisecond)
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateQueued, snap.Items[0].State,
@@ -100,13 +100,13 @@ func TestService_Admission_DeniedHeadStaysQueuedThenProceeds(t *testing.T) {
 
 	// Pressure clears: the retry tick alone (no new enqueue) must admit it.
 	gate.setDenied(offlinecache.ClassSoftware, false)
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 
 	// Client-visible progression ran forward, exactly once each — deferral
 	// added no extra notifications.
 	assert.Equal(t, []offlinecache.ItemState{
 		offlinecache.StateQueued, offlinecache.StateDownloading, offlinecache.StateReady,
-	}, obs.statesFor("item-1"))
+	}, obs.statesFor(item.Source))
 }
 
 // TestService_Admission_MediaBehindDeniedSoftwareHeadWaits pins the
@@ -122,11 +122,11 @@ func TestService_Admission_MediaBehindDeniedSoftwareHeadWaits(t *testing.T) {
 	software := dp1playlist.PlaylistItem{ID: "item-software", Source: "https://example.com/index.html"}
 	media := dp1playlist.PlaylistItem{ID: "item-media", Source: "https://example.com/video.mp4"}
 	softwareRec := &offlinecache.ItemRecord{
-		ItemID: software.ID, Item: software, Entry: software.Source,
+		Item: software, Entry: software.Source,
 		Coverage: offlinecache.Coverage{Complete: true},
 	}
 	mediaRec := &offlinecache.ItemRecord{
-		ItemID: media.ID, Item: media, Entry: media.Source,
+		Item: media, Entry: media.Source,
 		Coverage: offlinecache.Coverage{Complete: true},
 	}
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), software.Source).Return(offlinecache.ClassSoftware, nil).Times(1)
@@ -150,15 +150,15 @@ func TestService_Admission_MediaBehindDeniedSoftwareHeadWaits(t *testing.T) {
 	// The media job is admissible on its own terms but must not overtake
 	// the deferred software head.
 	time.Sleep(100 * time.Millisecond)
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{media.ID}})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{media.Source}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateQueued, snap.Items[0].State,
 		"FIFO must hold: media queued behind a deferred software head does not start")
 
 	gate.setDenied(offlinecache.ClassSoftware, false)
-	waitForState(t, ts.service, software.ID, offlinecache.StateReady)
-	waitForState(t, ts.service, media.ID, offlinecache.StateReady)
+	waitForState(t, ts.service, software.Source, offlinecache.StateReady)
+	waitForState(t, ts.service, media.Source, offlinecache.StateReady)
 }
 
 func TestService_Admission_DeferredHeadIsClearableWithoutBusy(t *testing.T) {
@@ -182,12 +182,12 @@ func TestService_Admission_DeferredHeadIsClearableWithoutBusy(t *testing.T) {
 	// A deferred head is still StateQueued, so clearing it must succeed —
 	// deferral must never surface as ErrItemBusy (that error is reserved
 	// for an item actively mid-capture).
-	require.NoError(t, ts.service.ClearItem("item-1"))
+	require.NoError(t, ts.service.ClearItem(item.Source))
 
 	// Even once admission opens up, the cleared job must not resurrect.
 	gate.setDenied(offlinecache.ClassSoftware, false)
 	time.Sleep(100 * time.Millisecond)
-	waitForState(t, ts.service, "item-1", offlinecache.StateNotCached)
+	waitForState(t, ts.service, item.Source, offlinecache.StateNotCached)
 }
 
 func TestService_Admission_StopReturnsPromptlyWhileDeferred(t *testing.T) {
@@ -231,7 +231,7 @@ func TestService_Admission_ReDownloadAfterClearGetsFreshDeferClock(t *testing.T)
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-1", Item: item, Entry: item.Source,
+		Item: item, Entry: item.Source,
 		Coverage: offlinecache.Coverage{Complete: true},
 	}
 	ts.mockClassifier.EXPECT().Classify(gomock.Any(), item.Source).Return(offlinecache.ClassSoftware, nil).Times(2)
@@ -247,14 +247,14 @@ func TestService_Admission_ReDownloadAfterClearGetsFreshDeferClock(t *testing.T)
 	// First download defers for most of the budget, then is cleared.
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 	time.Sleep(400 * time.Millisecond)
-	require.NoError(t, ts.service.ClearItem("item-1"))
+	require.NoError(t, ts.service.ClearItem(item.Source))
 
 	// Re-download immediately: with stale tracking this job would "expire"
 	// ~200ms in (400ms inherited + 200ms fresh > 600ms); with a fresh
 	// clock it is still within budget and must remain queued.
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 	time.Sleep(400 * time.Millisecond)
-	snap, err := ts.service.Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1"}})
+	snap, err := ts.service.Status(offlinecache.StatusRequest{Sources: []string{item.Source}})
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	require.Equal(t, offlinecache.StateQueued, snap.Items[0].State,
@@ -262,7 +262,7 @@ func TestService_Admission_ReDownloadAfterClearGetsFreshDeferClock(t *testing.T)
 
 	// And it still completes once pressure clears.
 	gate.setDenied(offlinecache.ClassSoftware, false)
-	waitForState(t, ts.service, "item-1", offlinecache.StateReady)
+	waitForState(t, ts.service, item.Source, offlinecache.StateReady)
 }
 
 func TestService_Admission_MaxDeferExpiryFailsWithReason(t *testing.T) {
@@ -280,17 +280,17 @@ func TestService_Admission_MaxDeferExpiryFailsWithReason(t *testing.T) {
 	defer ts.service.Stop()
 	require.NoError(t, ts.service.DownloadItem(context.Background(), item))
 
-	waitForState(t, ts.service, "item-1", offlinecache.StateFailed)
+	waitForState(t, ts.service, item.Source, offlinecache.StateFailed)
 
 	// The client sees queued then failed-with-reason; downloading is never
 	// announced for a job that never started.
-	states := obs.statesFor("item-1")
+	states := obs.statesFor(item.Source)
 	require.Equal(t, []offlinecache.ItemState{offlinecache.StateQueued, offlinecache.StateFailed}, states)
 	obs.mu.Lock()
 	defer obs.mu.Unlock()
 	var failedReason string
 	for _, st := range obs.statuses {
-		if st.ItemID == "item-1" && st.State == offlinecache.StateFailed {
+		if st.Source == item.Source && st.State == offlinecache.StateFailed {
 			failedReason = st.Reason
 		}
 	}

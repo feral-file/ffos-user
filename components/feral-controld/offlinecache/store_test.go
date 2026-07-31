@@ -50,23 +50,32 @@ func writeBlobString(t *testing.T, store offlinecache.Store, content string) str
 	return hash
 }
 
+// sourceFor derives the deterministic source URL seedItem stores a record
+// under for a short test-local name, so tests can reference a seeded item
+// by name while still exercising the real source-keyed lookups
+// (offlinecache.SourceKey(sourceFor(name)) is the record's key).
+func sourceFor(name string) string {
+	return "https://example.com/" + name + "/index.html"
+}
+
 // seedItem writes a minimal ready ItemRecord (one HTML resource) directly to
 // store, for tests elsewhere in this package (replay_test.go,
 // kioskreplay_test.go) that need a pre-cached item without going through the
-// full capture pipeline.
-func seedItem(t *testing.T, store offlinecache.Store, itemID, blobContent string) offlinecache.Resource {
+// full capture pipeline. name is a short test-local handle; the record's
+// real identity is sourceFor(name) — the DP-1 id is set to name only to
+// mirror production records, which carry the id informationally.
+func seedItem(t *testing.T, store offlinecache.Store, name, blobContent string) offlinecache.Resource {
 	t.Helper()
 	hash := writeBlobString(t, store, blobContent)
 
 	res := offlinecache.Resource{
-		URL:         "https://example.com/" + itemID + "/index.html",
+		URL:         sourceFor(name),
 		Status:      200,
 		SHA256:      hash,
 		ContentType: "text/html",
 	}
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
-		ItemID:    itemID,
-		Item:      dp1playlist.PlaylistItem{ID: itemID, Source: res.URL},
+		Item:      dp1playlist.PlaylistItem{ID: name, Source: res.URL},
 		Entry:     res.URL,
 		Resources: []offlinecache.Resource{res},
 		Coverage:  offlinecache.Coverage{Complete: true},
@@ -128,44 +137,44 @@ func TestStore_ReadBlob_HashMismatch(t *testing.T) {
 func TestStore_Item_SaveLoadDelete(t *testing.T) {
 	store, _ := newTestStore(t)
 
+	source := "https://example.com/index.html"
+	key := offlinecache.SourceKey(source)
 	rec := &offlinecache.ItemRecord{
-		ItemID: "item-1",
-		Item:   dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"},
-		Entry:  "https://example.com/index.html",
+		Item:  dp1playlist.PlaylistItem{ID: "item-1", Source: source},
+		Entry: source,
 		Resources: []offlinecache.Resource{
-			{URL: "https://example.com/index.html", Status: 200, SHA256: "abc123", ContentType: "text/html"},
+			{URL: source, Status: 200, SHA256: "abc123", ContentType: "text/html"},
 		},
 		Coverage: offlinecache.Coverage{Complete: true},
 	}
 
 	require.NoError(t, store.SaveItem(rec))
 
-	loaded, err := store.LoadItem("item-1")
+	loaded, err := store.LoadItem(key)
 	require.NoError(t, err)
-	assert.Equal(t, rec.ItemID, loaded.ItemID)
 	assert.Equal(t, rec.Item.Source, loaded.Item.Source)
 	assert.Equal(t, rec.Resources, loaded.Resources)
 	assert.True(t, loaded.Coverage.Complete)
 
-	ids, err := store.ListItemIDs()
+	keys, err := store.ListItemKeys()
 	require.NoError(t, err)
-	assert.Equal(t, []string{"item-1"}, ids)
+	assert.Equal(t, []string{key}, keys)
 
-	removed, err := store.DeleteItem("item-1")
+	removed, err := store.DeleteItem(key)
 	require.NoError(t, err)
 	assert.True(t, removed, "deleting an existing record must report that it removed one")
 
-	_, err = store.LoadItem("item-1")
+	_, err = store.LoadItem(key)
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 
-	ids, err = store.ListItemIDs()
+	keys, err = store.ListItemKeys()
 	require.NoError(t, err)
-	assert.Empty(t, ids)
+	assert.Empty(t, keys)
 
 	// Remove-if-exists: a second delete is still success, but must NOT
 	// claim it removed anything — Service reads that flag to decide whether
 	// a clear settled the item at not_cached (see ClearItem).
-	removed, err = store.DeleteItem("item-1")
+	removed, err = store.DeleteItem(key)
 	require.NoError(t, err)
 	assert.False(t, removed, "deleting an already-absent record must report that it removed nothing")
 }
@@ -173,26 +182,67 @@ func TestStore_Item_SaveLoadDelete(t *testing.T) {
 func TestStore_LoadItem_NotFound(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	_, err := store.LoadItem("missing")
+	_, err := store.LoadItem(offlinecache.SourceKey("https://example.com/never-cached"))
 	assert.ErrorIs(t, err, offlinecache.ErrItemNotFound)
 }
 
-func TestStore_SaveItem_RequiresItemID(t *testing.T) {
+func TestStore_SaveItem_RequiresSource(t *testing.T) {
 	store, _ := newTestStore(t)
 
 	err := store.SaveItem(&offlinecache.ItemRecord{})
 	assert.Error(t, err)
 }
 
-func TestStore_UnsafeID_Rejected(t *testing.T) {
+// TestStore_SourceKey_HostileSourcesArePathSafe pins that identity keying
+// makes item filenames immune to path-hostile source strings: the record
+// lands under a hex hash regardless of what the source contains, and
+// round-trips through Save/Load/Delete.
+func TestStore_SourceKey_HostileSourcesArePathSafe(t *testing.T) {
+	store, root := newTestStore(t)
+
+	sources := []string{
+		"../../etc/passwd",
+		"https://host/a/b?c=d&e=f#frag",
+		"file:///dev/null",
+		strings.Repeat("https://very-long-url.example.com/segment/", 50),
+	}
+	for _, source := range sources {
+		t.Run(source[:min(len(source), 40)], func(t *testing.T) {
+			key := offlinecache.SourceKey(source)
+			require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
+				Item: dp1playlist.PlaylistItem{Source: source},
+			}))
+
+			// The record must live at items/<key>.json inside the root —
+			// never anywhere a hostile source could steer it.
+			_, statErr := go_os.Stat(filepath.Join(root, "items", key+".json"))
+			require.NoError(t, statErr)
+
+			loaded, err := store.LoadItem(key)
+			require.NoError(t, err)
+			assert.Equal(t, source, loaded.Item.Source)
+
+			removed, err := store.DeleteItem(key)
+			require.NoError(t, err)
+			assert.True(t, removed)
+		})
+	}
+}
+
+// TestStore_LoadItem_RejectsRawSource pins the boundary contract: item ops
+// take a SourceKey, never a raw source URL — passing one is a programming
+// bug and must fail loudly (not resolve, not traverse).
+func TestStore_LoadItem_RejectsRawSource(t *testing.T) {
 	store, _ := newTestStore(t)
 
-	tests := []string{"../escape", "a/b", "."}
-	for _, id := range tests {
-		t.Run(id, func(t *testing.T) {
-			err := store.SaveItem(&offlinecache.ItemRecord{ItemID: id})
-			assert.Error(t, err)
-		})
+	for _, bad := range []string{"https://example.com/art", "../escape", "", "ABCDEF" + strings.Repeat("0", 58)} {
+		_, err := store.LoadItem(bad)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, offlinecache.ErrItemNotFound,
+			"a malformed key must fail as invalid input, not report a clean miss")
+
+		_, err = store.DeleteItem(bad)
+		assert.Error(t, err)
 	}
 }
 
@@ -360,7 +410,7 @@ func TestStore_GC_RemovesOnlyOrphanBlobs(t *testing.T) {
 	orphanHash := writeBlobString(t, store, "orphan")
 
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
-		ItemID: "item-1",
+		Item: dp1playlist.PlaylistItem{Source: "https://example.com/item-1"},
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/a.js", Status: 200, SHA256: keepHash},
 		},
@@ -383,7 +433,7 @@ func TestStore_GC_RemovesOnlyOrphanBlobs(t *testing.T) {
 // bytes read fine but do not parse can never be fixed by retrying, and
 // aborting on it forever would wedge GC — the only path that frees blob
 // bytes — permanently disabling the disk budget. It must instead be
-// quarantined (renamed out of ListItemIDs' view, bytes preserved) and
+// quarantined (renamed out of ListItemKeys' view, bytes preserved) and
 // the sweep must proceed: blobs shared with readable records survive via
 // those records' keep-set entries, while blobs only the corrupt record
 // referenced are unreachable by every reader and are reclaimed.
@@ -395,14 +445,14 @@ func TestStore_GC_QuarantinesCorruptRecordAndKeepsSweeping(t *testing.T) {
 	orphanHash := writeBlobString(t, store, "genuine orphan")
 
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
-		ItemID: "item-healthy",
+		Item: dp1playlist.PlaylistItem{Source: "https://example.com/item-healthy"},
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/a.js", Status: 200, SHA256: sharedHash},
 		},
 	}))
 
 	itemsDir := filepath.Join(root, "items")
-	corruptPath := filepath.Join(itemsDir, "item-corrupt.json")
+	corruptPath := filepath.Join(itemsDir, offlinecache.SourceKey("https://example.com/item-corrupt")+".json")
 	require.NoError(t, wrapper.NewOS().WriteFile(corruptPath, []byte("{not json"), 0o644))
 
 	removed, _, err := store.GC()
@@ -410,7 +460,7 @@ func TestStore_GC_QuarantinesCorruptRecordAndKeepsSweeping(t *testing.T) {
 	assert.Equal(t, 2, removed, "the orphan and the corrupt record's exclusive blob are both reclaimed")
 
 	_, statErr := wrapper.NewOS().Stat(corruptPath)
-	assert.True(t, wrapper.NewOS().IsNotExist(statErr), "the corrupt record must leave ListItemIDs' view")
+	assert.True(t, wrapper.NewOS().IsNotExist(statErr), "the corrupt record must leave ListItemKeys' view")
 	_, statErr = wrapper.NewOS().Stat(corruptPath + ".corrupt")
 	assert.NoError(t, statErr, "the corrupt record's bytes must be preserved for forensics")
 
@@ -426,6 +476,45 @@ func TestStore_GC_QuarantinesCorruptRecordAndKeepsSweeping(t *testing.T) {
 	removed, _, err = store.GC()
 	require.NoError(t, err)
 	assert.Zero(t, removed)
+}
+
+// TestStore_GC_QuarantinesRecordAtInvalidKeyFilename pins the invalid-name
+// branch: a .json record whose filename is not a valid source key —
+// however well its bytes parse — is unreachable by every reader (LoadItem
+// validates keys, ListItemKeys filters names), so GC must quarantine it
+// and reclaim its exclusive blobs rather than pin them forever or, worse,
+// treat the permanently-invalid name as a transient error and wedge every
+// future sweep.
+func TestStore_GC_QuarantinesRecordAtInvalidKeyFilename(t *testing.T) {
+	store, root := newTestStore(t)
+
+	strayHash := writeBlobString(t, store, "referenced only by the stray record")
+
+	// A perfectly parsable record, but at a legacy-style id filename.
+	strayRec := &offlinecache.ItemRecord{
+		Item: dp1playlist.PlaylistItem{Source: "https://example.com/stray"},
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/stray.js", Status: 200, SHA256: strayHash},
+		},
+	}
+	data, err := json.Marshal(strayRec)
+	require.NoError(t, err)
+	strayPath := filepath.Join(root, "items", "legacy-item-id.json")
+	require.NoError(t, wrapper.NewOS().MkdirAll(filepath.Join(root, "items"), 0o755))
+	require.NoError(t, wrapper.NewOS().WriteFile(strayPath, data, 0o644))
+
+	keys, err := store.ListItemKeys()
+	require.NoError(t, err)
+	assert.Empty(t, keys, "an invalid-key filename must be invisible to ordinary readers")
+
+	removed, _, err := store.GC()
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed, "the stray record's exclusive blob is reclaimed")
+
+	_, statErr := wrapper.NewOS().Stat(strayPath)
+	assert.True(t, wrapper.NewOS().IsNotExist(statErr))
+	_, statErr = wrapper.NewOS().Stat(strayPath + ".corrupt")
+	assert.NoError(t, statErr, "the stray record's bytes must be preserved for forensics")
 }
 
 // failReadOS delegates to a real OS wrapper but fails ReadFile for one
@@ -452,14 +541,15 @@ func (f *failReadOS) ReadFile(path string) ([]byte, error) {
 // until a retry succeeds.
 func TestStore_GC_AbortsOnTransientlyUnreadableRecord(t *testing.T) {
 	root := t.TempDir()
-	failOS := &failReadOS{OS: wrapper.NewOS(), failPath: filepath.Join(root, "items", "item-flaky.json")}
+	flakySource := "https://example.com/item-flaky"
+	failOS := &failReadOS{OS: wrapper.NewOS(), failPath: filepath.Join(root, "items", offlinecache.SourceKey(flakySource)+".json")}
 	store := offlinecache.NewStore(root, failOS, wrapper.NewJSON(), zaptest.NewLogger(t))
 
 	referencedHash := writeBlobString(t, store, "referenced by the unreadable record")
 	orphanHash := writeBlobString(t, store, "genuine orphan")
 
 	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
-		ItemID: "item-flaky",
+		Item: dp1playlist.PlaylistItem{Source: flakySource},
 		Resources: []offlinecache.Resource{
 			{URL: "https://example.com/a.js", Status: 200, SHA256: referencedHash},
 		},

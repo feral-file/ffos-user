@@ -377,11 +377,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			if h.kioskReplay == nil || p == nil {
 				return
 			}
-			itemIDs := make([]string, 0, len(p.Items))
+			sources := make([]string, 0, len(p.Items))
 			for _, item := range p.Items {
-				itemIDs = append(itemIDs, item.ID)
+				sources = append(sources, item.Source)
 			}
-			if syncErr := h.kioskReplay.SyncPlaylist(ctx, itemIDs); syncErr != nil {
+			if syncErr := h.kioskReplay.SyncPlaylist(ctx, sources); syncErr != nil {
 				h.logger.Warn("offline cache: failed to sync kiosk replay scope for playlist", zap.Error(syncErr))
 			}
 			// Announce this authoritative scope change (under the

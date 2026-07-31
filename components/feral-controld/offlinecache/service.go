@@ -38,7 +38,7 @@ var ErrUnsupportedMediaClass = errors.New("offline cache: item is a live/streami
 // app.
 var ErrServiceNotStarted = errors.New("offline cache: service is not started")
 
-// ErrItemBusy is returned by ClearItem/ClearPlaylist when itemID is the
+// ErrItemBusy is returned by ClearItem/ClearPlaylist when the item is the
 // one job currently inside capturer.Capture (state == StateDownloading —
 // see notify's doc). Earlier revisions let a clear proceed unconditionally
 // in this case: it would delete the on-disk record and dequeue nothing
@@ -75,7 +75,7 @@ var ErrQueueFull = errors.New("offline cache: download queue is full, try again 
 //
 // Three separate bounds in this package are derived from it rather than
 // each spelling out 1024: defaultMaxQueueLen at 4x (a backlog safety
-// valve, deliberately sized for several bursts), MaxStatusItemIDs and
+// valve, deliberately sized for several bursts), MaxStatusSources and
 // notifyQueueCapacity at 1x (each absorbing exactly one burst). All three
 // exist because of a per-playlist burst, so a future spec change must move
 // them together; naming the shared origin is what makes that lockstep
@@ -152,7 +152,12 @@ const (
 // ItemStatus is one entry of a Status snapshot, shaped for the
 // getOfflineCacheStatus command and offline_cache_status notification.
 type ItemStatus struct {
-	ItemID string    `json:"itemId"`
+	// Source is the item's source URL — the cache identity (see
+	// SourceKey) and the field clients match entries against their own
+	// playlist items by. The DP-1 item id is deliberately absent from the
+	// wire: it is optional per spec and regenerated per resolution for
+	// dynamic playlists, so nothing durable can key on it.
+	Source string    `json:"source"`
 	State  ItemState `json:"state"`
 	// Percent is coarse (0 or 100): capture is a single bounded-window
 	// operation, not chunked, so there is no meaningful mid-download
@@ -207,29 +212,32 @@ const maxReasonBytes = 512
 // (nextCursor) rather than into a multi-hundred-MB response.
 const MaxStatusItems = 1000
 
-// MaxStatusItemIDs bounds StatusRequest.ItemIDs. No legitimate caller
+// MaxStatusSources bounds StatusRequest.Sources. No legitimate caller
 // needs to ask about more identifiers than a single playlist can hold,
 // while an unbounded list would let a single 4 MiB hub body
 // (hub.MAX_REQUEST_BODY_BYTES) drive ~100k store reads.
-const MaxStatusItemIDs = dp1MaxPlaylistItems
+const MaxStatusSources = dp1MaxPlaylistItems
 
 // StatusRequest is the input to Service.Status.
 //
 // The zero value means "first page of every item this process knows
 // about", which is the shape every caller used before paging existed.
 type StatusRequest struct {
-	// ItemIDs restricts the report to these items. Empty means every
-	// item on disk plus everything in flight. Duplicates and empty
-	// strings are dropped; the result is always ordered by itemId, not
-	// by the order given here.
-	ItemIDs []string
+	// Sources restricts the report to the items with these source URLs.
+	// Empty means every item on disk plus everything in flight.
+	// Duplicates and empty strings are dropped; the result is always
+	// ordered by source KEY (SourceKey — fixed-length, stable), not by
+	// the order given here and not lexicographically by the URLs
+	// themselves.
+	Sources []string
 	// Limit caps how many items come back. <=0 or >MaxStatusItems is
 	// clamped to MaxStatusItems.
 	Limit int
-	// Cursor is the last itemId of the previous page; this page starts
-	// at the first id strictly greater than it. Empty means the first
-	// page. Because ids are sorted, a cursor stays valid even if the
-	// item it names is evicted between pages.
+	// Cursor is an opaque paging token: the source KEY of the previous
+	// page's last entry (StatusSnapshot.NextCursor), NOT a source URL.
+	// This page starts at the first key strictly greater than it. Empty
+	// means the first page. Because keys are sorted, a cursor stays
+	// valid even if the item it names is evicted between pages.
 	Cursor string
 	// TotalsOnly returns totals and disk usage with an empty items list,
 	// for a caller that only renders a summary. It skips the per-item
@@ -251,8 +259,9 @@ type StatusTotals struct {
 
 // StatusSnapshot is the response shape for getOfflineCacheStatus.
 type StatusSnapshot struct {
-	// Items is at most StatusRequest.Limit entries, ordered by itemId.
-	// Never nil, so the wire always carries [] rather than null.
+	// Items is at most StatusRequest.Limit entries, ordered by source
+	// KEY (see StatusRequest.Sources). Never nil, so the wire always
+	// carries [] rather than null.
 	Items []ItemStatus `json:"items"`
 	// Totals and DiskUsedBytes describe the WHOLE requested set, not
 	// this page, and are computed on the first page only (empty
@@ -265,8 +274,9 @@ type StatusSnapshot struct {
 	// DiskUsedBytes is named diskUsed on the wire to match the plan's
 	// documented command response shape (section 5).
 	DiskUsedBytes *int64 `json:"diskUsed,omitempty"`
-	// NextCursor is the itemId to pass back as StatusRequest.Cursor to
-	// fetch the next page. Empty means this was the last page.
+	// NextCursor is the source KEY (an opaque token on the wire) to pass
+	// back as StatusRequest.Cursor to fetch the next page. Empty means
+	// this was the last page.
 	NextCursor string `json:"nextCursor,omitempty"`
 	// Truncated mirrors "NextCursor is set" as an explicit flag, so a
 	// client that ignores paging can still tell it is not looking at the
@@ -423,22 +433,25 @@ type Service interface {
 	// bytes, so this does not affect signature validity — see
 	// docs/offline-artwork-capture.md.
 	DownloadPlaylist(ctx context.Context, playlistRaw json.RawMessage, sourceURL string) (queued, total int, err error)
-	// ClearItem removes itemID from the cache: its record, any blob it was
-	// the last referent of, and any not-yet-started download queued for it.
-	// ErrItemNotFound means the device had NOTHING for itemID — not cached,
-	// not queued, not otherwise tracked; commandrouter maps it to a
-	// non-retryable not_found, so canceling a queued download must not (and
-	// does not) report it. ErrItemBusy means itemID is the one item
-	// currently mid-capture and the caller should retry. See the
-	// implementation's doc for the full contract.
-	ClearItem(itemID string) error
+	// ClearItem removes the item with this source URL from the cache: its
+	// record, any blob it was the last referent of, and any
+	// not-yet-started download queued for it. Because cached records are
+	// per-source, this clears the artifact for EVERY playlist item (in
+	// any playlist) sharing the source. ErrItemNotFound means the device
+	// had NOTHING for the source — not cached, not queued, not otherwise
+	// tracked; commandrouter maps it to a non-retryable not_found, so
+	// canceling a queued download must not (and does not) report it.
+	// ErrItemBusy means this source is the one item currently mid-capture
+	// and the caller should retry. See the implementation's doc for the
+	// full contract.
+	ClearItem(source string) error
 	// ClearPlaylist removes a cached playlist's record and every one of its
 	// member items, all-or-nothing: if any member is mid-capture the whole
 	// call is rejected with ErrItemBusy before anything is deleted.
 	// ErrPlaylistNotFound means the playlist itself is not cached.
 	ClearPlaylist(playlistID string) error
-	// Status reports on req.ItemIDs, or on every item this process knows
-	// about (on-disk + in-flight) when req.ItemIDs is empty. The result
+	// Status reports on req.Sources, or on every item this process knows
+	// about (on-disk + in-flight) when req.Sources is empty. The result
 	// is one bounded page (see MaxStatusItems and StatusSnapshot's doc);
 	// the zero StatusRequest asks for the first page of everything.
 	Status(req StatusRequest) (StatusSnapshot, error)
@@ -495,8 +508,11 @@ type Service interface {
 }
 
 type captureJob struct {
-	itemID string
-	item   dp1playlist.PlaylistItem
+	// sourceKey is SourceKey(item.Source) — the queue/state identity,
+	// computed once at enqueue. item carries the raw source alongside for
+	// notifications and logs.
+	sourceKey string
+	item      dp1playlist.PlaylistItem
 	// class is the MediaClass sampled at classify time (DownloadItem/
 	// DownloadPlaylist) and carried through the queue so process() can
 	// route to the right capture pipeline without re-classifying (a
@@ -583,20 +599,20 @@ func (q *jobQueue) len() int {
 	return len(q.items)
 }
 
-// removeItems drops any not-yet-started job for one of ids and returns the
-// jobs it dropped. Used by ClearItem/ClearPlaylist so a clear that races an
-// item still sitting in the queue (as opposed to actively capturing — see
-// service.captureMu) does not get silently undone once that queued job
-// eventually runs and calls SaveItem again. The returned jobs carry the
-// queuedNotified barriers the clear must wait on before announcing
-// not_cached — see clearReservation.awaitQueuedNotifications.
-func (q *jobQueue) removeItems(ids map[string]bool) []captureJob {
+// removeItems drops any not-yet-started job whose sourceKey is in keys and
+// returns the jobs it dropped. Used by ClearItem/ClearPlaylist so a clear
+// that races an item still sitting in the queue (as opposed to actively
+// capturing — see service.captureMu) does not get silently undone once
+// that queued job eventually runs and calls SaveItem again. The returned
+// jobs carry the queuedNotified barriers the clear must wait on before
+// announcing not_cached — see clearReservation.awaitQueuedNotifications.
+func (q *jobQueue) removeItems(keys map[string]bool) []captureJob {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var removed []captureJob
 	kept := q.items[:0]
 	for _, j := range q.items {
-		if ids[j.itemID] {
+		if keys[j.sourceKey] {
 			removed = append(removed, j)
 			continue
 		}
@@ -627,20 +643,20 @@ type service struct {
 	clock         wrapper.Clock
 	maxDefer      time.Duration
 	retryInterval time.Duration
-	// deferredItemID/deferredSince track how long the CURRENT head of the
-	// queue has been denied admission, for the maxDefer bound and the
+	// deferredSourceKey/deferredSince track how long the CURRENT head of
+	// the queue has been denied admission, for the maxDefer bound and the
 	// admitted-after-deferral log. Head-only tracking is sufficient: the
 	// single worker only ever defers on the head. The tracking MUST be
 	// reset on every path that retires the tracked job — admitted pop,
 	// expiry pop, empty queue, and reserveForClear removing the tracked
-	// id — because a stale deferredSince would otherwise be inherited by
-	// a LATER job for the same item (clear-then-re-download, exactly the
+	// key — because a stale deferredSince would otherwise be inherited by
+	// a LATER job for the same source (clear-then-re-download, exactly the
 	// retry the expiry failure reason tells the client to perform) and
 	// could expire that fresh job on its first denial. Always written
 	// under s.mu; both the worker (dequeueAdmitted) and clear callers
 	// (reserveForClear) write it.
-	deferredItemID string
-	deferredSince  time.Time
+	deferredSourceKey string
+	deferredSince     time.Time
 
 	queue *jobQueue
 
@@ -687,9 +703,20 @@ type service struct {
 	playlistRecordMu sync.Mutex
 
 	mu    sync.RWMutex
-	state map[string]ItemState // itemID -> last-known state, seeded from disk on Start
+	state map[string]ItemState // sourceKey -> last-known state, seeded from disk on Start
 
-	// downloadEpoch[itemID] increments every time that item is cleared
+	// sourceByKey maps a tracked sourceKey back to the raw source URL, so
+	// status reporting and notifications can always carry the original
+	// URL (the wire identity clients match on — see ItemStatus.Source)
+	// even for items that exist only in memory: a queued/failed item with
+	// no record on disk yet has nowhere else to recover its source from,
+	// since the key is a one-way hash. Kept strictly in lockstep with
+	// state: every write that adds a state entry records the source here,
+	// and reserveForClear deletes both together. Records on disk don't
+	// need it — their source is in the record itself (Item.Source).
+	sourceByKey map[string]string
+
+	// downloadEpoch[sourceKey] increments every time that item is cleared
 	// (ClearItem/ClearPlaylist, via reserveForClear). It exists solely to
 	// close the one download window the state map cannot: a download
 	// classifies its source (network I/O, up to the shared HTTP client
@@ -707,7 +734,7 @@ type service struct {
 	// already covered by reserveForClear/dequeueForProcessing sharing mu,
 	// so this only guards the pre-enqueue classify window.
 	//
-	// Grows by one uint64 per distinct item ID ever cleared and is never
+	// Grows by one uint64 per distinct source ever cleared and is never
 	// pruned: an entry must outlive any in-flight download that sampled
 	// it, and pruning would reopen the very race it closes. The footprint
 	// is negligible for realistic device item counts, and this is the
@@ -797,6 +824,7 @@ func NewService(
 		retryInterval:      retryInterval,
 		queue:              newJobQueue(),
 		state:              make(map[string]ItemState),
+		sourceByKey:        make(map[string]string),
 		downloadEpoch:      make(map[string]uint64),
 		playlistClearEpoch: make(map[string]uint64),
 	}
@@ -817,20 +845,21 @@ func (s *service) Start(ctx context.Context) error {
 			zap.Int("removed_files", removed), zap.Int64("freed_bytes", freed))
 	}
 
-	ids, err := s.store.ListItemIDs()
+	keys, err := s.store.ListItemKeys()
 	if err != nil {
 		return fmt.Errorf("offline cache: rebuild index: %w", err)
 	}
 
 	s.mu.Lock()
-	for _, id := range ids {
-		rec, err := s.store.LoadItem(id)
+	for _, key := range keys {
+		rec, err := s.store.LoadItem(key)
 		if err != nil {
 			s.logger.Warn("offline cache: skipping unreadable item record on startup",
-				zap.String("item_id", id), zap.Error(err))
+				zap.String("source_key", key), zap.Error(err))
 			continue
 		}
-		s.state[id] = stateFromCoverage(rec.Coverage)
+		s.state[key] = stateFromCoverage(rec.Coverage)
+		s.sourceByKey[key] = rec.Item.Source
 	}
 	s.mu.Unlock()
 
@@ -949,7 +978,7 @@ func (s *service) dequeueForProcessing() (captureJob, bool) {
 	if !ok {
 		return captureJob{}, false
 	}
-	s.state[j.itemID] = StateDownloading
+	s.state[j.sourceKey] = StateDownloading
 	return j, true
 }
 
@@ -980,21 +1009,21 @@ func (s *service) dequeueAdmitted() (j captureJob, ok bool, expired bool, expire
 		// An emptied queue retires whatever was being tracked (the head
 		// was popped, cleared, or drained) — see the field doc on why
 		// stale tracking must never outlive its job.
-		s.deferredItemID = ""
+		s.deferredSourceKey = ""
 		return captureJob{}, false, false, ""
 	}
 
 	if s.admission != nil {
 		if decision := s.admission.Admit(head.class); !decision.Allowed {
 			now := s.clock.Now()
-			if s.deferredItemID != head.itemID {
+			if s.deferredSourceKey != head.sourceKey {
 				// A new head started deferring (first denial, or the
 				// previous head was cleared/expired out from under the
 				// tracking): restart the clock.
-				s.deferredItemID = head.itemID
+				s.deferredSourceKey = head.sourceKey
 				s.deferredSince = now
 				s.logger.Info("offline cache: deferring download under system pressure",
-					zap.String("item_id", head.itemID),
+					zap.String("source", head.item.Source),
 					zap.String("class", string(head.class)),
 					zap.String("reason", decision.Reason))
 			}
@@ -1006,10 +1035,10 @@ func (s *service) dequeueAdmitted() (j captureJob, ok bool, expired bool, expire
 			// device. Pop + terminal state in this same critical
 			// section, exactly like the ok path below.
 			popped, _ := s.queue.pop()
-			s.state[popped.itemID] = StateFailed
-			s.deferredItemID = ""
+			s.state[popped.sourceKey] = StateFailed
+			s.deferredSourceKey = ""
 			s.logger.Warn("offline cache: failing download deferred past the admission bound",
-				zap.String("item_id", popped.itemID),
+				zap.String("source", popped.item.Source),
 				zap.String("class", string(popped.class)),
 				zap.Duration("deferred_for", now.Sub(s.deferredSince)),
 				zap.String("reason", decision.Reason))
@@ -1018,13 +1047,13 @@ func (s *service) dequeueAdmitted() (j captureJob, ok bool, expired bool, expire
 	}
 
 	popped, _ := s.queue.pop()
-	s.state[popped.itemID] = StateDownloading
-	if s.deferredItemID == popped.itemID {
+	s.state[popped.sourceKey] = StateDownloading
+	if s.deferredSourceKey == popped.sourceKey {
 		s.logger.Info("offline cache: admitting download after deferral",
-			zap.String("item_id", popped.itemID),
+			zap.String("source", popped.item.Source),
 			zap.Duration("deferred_for", s.clock.Now().Sub(s.deferredSince)))
 	}
-	s.deferredItemID = ""
+	s.deferredSourceKey = ""
 	return popped, true, false, ""
 }
 
@@ -1042,7 +1071,7 @@ func (s *service) failDeferred(ctx context.Context, j captureJob, gateReason str
 		case <-ctx.Done():
 		}
 	}
-	s.notifyObserver(j.itemID, StateFailed, Coverage{
+	s.notifyObserver(j.item.Source, StateFailed, Coverage{
 		Reason: "download deferred too long under sustained system pressure (" + gateReason + "); re-issue the download once the device recovers",
 	})
 }
@@ -1050,35 +1079,36 @@ func (s *service) failDeferred(ctx context.Context, j captureJob, gateReason str
 // reserveForClear is dequeueForProcessing's counterpart on the
 // clear side — see that function's doc for why both must share this
 // exact lock and why the check-then-mutate sequence below must be one
-// critical section, not two. If ANY id in itemIDs is already
-// StateDownloading, nothing is mutated and that id is returned
+// critical section, not two. keys are sourceKeys. If ANY key in keys is
+// already StateDownloading, nothing is mutated and that key is returned
 // alongside ErrItemBusy (map iteration order is unspecified, so which
 // one is named when several are busy simultaneously is not guaranteed
 // — every caller's contract only promises all-or-nothing, never a
 // specific culprit). err is returned as exactly ErrItemBusy, not
-// wrapped with busyItemID baked in, so each caller can format its own
-// itemID/playlistID-scoped message the same way it already did before
-// this shared helper existed. Otherwise every id's queued job (if any)
+// wrapped with the busy key baked in, so each caller can format its own
+// source/playlistID-scoped message the same way it already did before
+// this shared helper existed. Otherwise every key's queued job (if any)
 // is dropped and its tracked state cleared, atomically with the check
 // that just passed.
 //
 // The returned clearReservation describes what the reservation actually
 // took away from clients — see its own doc.
-func (s *service) reserveForClear(itemIDs map[string]bool) (res clearReservation, busyItemID string, err error) {
+func (s *service) reserveForClear(keys map[string]bool) (res clearReservation, busyKey string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id := range itemIDs {
-		if s.state[id] == StateDownloading {
-			return clearReservation{}, id, ErrItemBusy
+	for key := range keys {
+		if s.state[key] == StateDownloading {
+			return clearReservation{}, key, ErrItemBusy
 		}
 	}
-	res.settled = make(map[string]bool, len(itemIDs))
-	for id := range itemIDs {
-		if st, tracked := s.state[id]; tracked && st != StateNotCached {
-			res.settled[id] = true
+	res.settled = make(map[string]bool, len(keys))
+	for key := range keys {
+		if st, tracked := s.state[key]; tracked && st != StateNotCached {
+			res.settled[key] = true
 		}
-		delete(s.state, id)
-		// Invalidate any download of this id that is still in its
+		delete(s.state, key)
+		delete(s.sourceByKey, key)
+		// Invalidate any download of this source that is still in its
 		// pre-enqueue classify window: bumping the epoch here (under the
 		// same mu enqueue commits under) is what a racing
 		// DownloadItem/DownloadPlaylist observes as "a clear landed after
@@ -1087,21 +1117,22 @@ func (s *service) reserveForClear(itemIDs map[string]bool) (res clearReservation
 		// only after the busy check above passed, so a rejected
 		// (ErrItemBusy) clear never perturbs an in-flight download's
 		// epoch.
-		s.downloadEpoch[id]++
+		s.downloadEpoch[key]++
 	}
-	for _, j := range s.queue.removeItems(itemIDs) {
+	for _, j := range s.queue.removeItems(keys) {
 		if j.queuedNotified != nil {
 			res.queuedNotified = append(res.queuedNotified, j.queuedNotified)
 		}
 	}
 	// Retire the admission-deferral tracking if this clear just removed
-	// the tracked head: a later re-download of the same item is a NEW job
-	// and must start with a fresh deferral clock, not inherit this one's
-	// (see the deferredItemID field doc for the instant-expiry failure
-	// this prevents). Same s.mu section as the removal, so the worker can
-	// never observe the removed job with tracking still attached.
-	if itemIDs[s.deferredItemID] {
-		s.deferredItemID = ""
+	// the tracked head: a later re-download of the same source is a NEW
+	// job and must start with a fresh deferral clock, not inherit this
+	// one's (see the deferredSourceKey field doc for the instant-expiry
+	// failure this prevents). Same s.mu section as the removal, so the
+	// worker can never observe the removed job with tracking still
+	// attached.
+	if keys[s.deferredSourceKey] {
+		s.deferredSourceKey = ""
 	}
 	return res, "", nil
 }
@@ -1188,14 +1219,14 @@ func (r clearReservation) awaitQueuedNotifications() {
 	}
 }
 
-// currentEpoch reads an item's clear-epoch under mu. Callers sample it
+// currentEpoch reads a source's clear-epoch under mu. Callers sample it
 // before the network-bound Classify step and hand the sample to enqueue,
 // which re-reads and compares under the commit lock — see downloadEpoch's
 // doc for the resurrection race this closes.
-func (s *service) currentEpoch(itemID string) uint64 {
+func (s *service) currentEpoch(sourceKey string) uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.downloadEpoch[itemID]
+	return s.downloadEpoch[sourceKey]
 }
 
 // currentPlaylistEpoch is currentEpoch's playlist-scoped twin — see
@@ -1264,16 +1295,20 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
-	if item.ID == "" || item.Source == "" {
-		return errors.New("offline cache: item must have an id and a source")
+	// Source is the cache identity (see SourceKey); the DP-1 item id is
+	// optional per spec — a dynamic-query playlist regenerates it per
+	// resolution, and some publishers omit it entirely — so it is
+	// deliberately NOT required here.
+	if item.Source == "" {
+		return errors.New("offline cache: item must have a source")
 	}
 
 	// Sample the clear-epoch BEFORE the (network-bound) classify below,
-	// then hand it to enqueue: a ClearItem/ClearPlaylist for this id that
-	// lands anywhere in the classify window bumps the epoch, so enqueue
-	// aborts instead of resurrecting a record the clear just deleted and
-	// reported success for — see downloadEpoch's doc.
-	epoch := s.currentEpoch(item.ID)
+	// then hand it to enqueue: a ClearItem/ClearPlaylist for this source
+	// that lands anywhere in the classify window bumps the epoch, so
+	// enqueue aborts instead of resurrecting a record the clear just
+	// deleted and reported success for — see downloadEpoch's doc.
+	epoch := s.currentEpoch(SourceKey(item.Source))
 
 	class, err := s.classifier.Classify(ctx, item.Source)
 	if err != nil {
@@ -1355,9 +1390,20 @@ func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist
 
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, classifyConcurrency)
+	// Dedup repeated sources up front: two playlist items sharing a
+	// source ARE the same cache entry (see ItemRecord's per-source doc),
+	// so probing the duplicate would be a wasted network round trip and
+	// its job would only be rejected by enqueue's already-queued check
+	// anyway. First occurrence wins, preserving playlist order.
+	seen := make(map[string]bool, len(items))
 	for i, item := range items {
-		if item.ID == "" || item.Source == "" {
+		if item.Source == "" {
 			continue
+		}
+		if key := SourceKey(item.Source); seen[key] {
+			continue
+		} else {
+			seen[key] = true
 		}
 		wg.Add(1)
 		go func(i int, item dp1playlist.PlaylistItem) {
@@ -1370,12 +1416,12 @@ func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist
 			// still caught at enqueue — see downloadEpoch's doc. The
 			// concurrency does not change that contract: each item's
 			// epoch still brackets only its own classify.
-			epoch := s.currentEpoch(item.ID)
+			epoch := s.currentEpoch(SourceKey(item.Source))
 			class, err := s.classifier.Classify(ctx, item.Source)
 			if err != nil {
 				failed[i] = true
 				s.logger.Warn("offline cache: classify failed while queuing playlist, skipping item",
-					zap.String("item_id", item.ID), zap.Error(err))
+					zap.String("source", item.Source), zap.Error(err))
 				return
 			}
 			// ClassStreaming is the only excluded class — see
@@ -1640,10 +1686,11 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	if !s.started.Load() {
 		return enqueueClearWon, ErrServiceNotStarted
 	}
+	key := SourceKey(item.Source)
 	s.mu.RLock()
-	st, tracked := s.state[item.ID]
+	st, tracked := s.state[key]
 	queueFull := s.queue.len() >= s.maxQueueLen
-	cleared := s.downloadEpoch[item.ID] != epoch
+	cleared := s.downloadEpoch[key] != epoch
 	s.mu.RUnlock()
 	if tracked && (st == StateQueued || st == StateDownloading) {
 		return enqueueAlreadyQueued, nil
@@ -1677,7 +1724,7 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 		s.mu.Unlock()
 		return enqueueClearWon, ErrServiceNotStarted
 	}
-	if st, ok := s.state[item.ID]; ok && (st == StateQueued || st == StateDownloading) {
+	if st, ok := s.state[key]; ok && (st == StateQueued || st == StateDownloading) {
 		s.mu.Unlock()
 		return enqueueAlreadyQueued, nil
 	}
@@ -1688,7 +1735,7 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	// is now StateQueued → reserveForClear removes the queued job). There
 	// is no interleaving that both passes this check and leaves a job the
 	// clear failed to remove — see downloadEpoch's doc.
-	if s.downloadEpoch[item.ID] != epoch {
+	if s.downloadEpoch[key] != epoch {
 		s.mu.Unlock()
 		return enqueueClearWon, nil
 	}
@@ -1696,9 +1743,10 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 		s.mu.Unlock()
 		return enqueueClearWon, ErrQueueFull
 	}
-	s.state[item.ID] = StateQueued
+	s.state[key] = StateQueued
+	s.sourceByKey[key] = item.Source
 	queuedNotified := make(chan struct{})
-	s.queue.push(captureJob{itemID: item.ID, item: item, class: class, queuedNotified: queuedNotified})
+	s.queue.push(captureJob{sourceKey: key, item: item, class: class, queuedNotified: queuedNotified})
 	s.mu.Unlock()
 
 	// Notified only AFTER the commit above, never before it. An earlier
@@ -1711,7 +1759,7 @@ func (s *service) enqueue(item dp1playlist.PlaylistItem, epoch uint64, class Med
 	// ever describe work that really is scheduled. Deliberately outside
 	// s.mu: the observer sends over the relayer/hub WS, and notify's doc
 	// explains why that must never run under this lock.
-	s.notifyObserver(item.ID, StateQueued, Coverage{})
+	s.notifyObserver(item.Source, StateQueued, Coverage{})
 	// Releases process()'s barrier — see captureJob.queuedNotified.
 	// Deliberately after the notify above, and unconditional, so the
 	// worker is never left waiting on a job whose enqueuer has already
@@ -1751,7 +1799,7 @@ func (s *service) process(ctx context.Context, j captureJob) {
 		// behind, so Status keeps answering identically for a Stop()ed
 		// service that outlives the process (tests, chiefly).
 		s.mu.Lock()
-		s.state[j.itemID] = StateFailed
+		s.state[j.sourceKey] = StateFailed
 		s.mu.Unlock()
 		return
 	}
@@ -1768,12 +1816,13 @@ func (s *service) process(ctx context.Context, j captureJob) {
 		}
 	}
 
-	// s.state[j.itemID] is already StateDownloading — dequeueForProcessing
-	// set it atomically with the pop that produced j (see that
-	// function's doc). Only the observer notification remains to do
-	// here, and it deliberately runs without s.mu held (see notify's
-	// doc on why the observer call is never made under that lock).
-	s.notifyObserver(j.itemID, StateDownloading, Coverage{})
+	// s.state[j.sourceKey] is already StateDownloading —
+	// dequeueForProcessing set it atomically with the pop that produced j
+	// (see that function's doc). Only the observer notification remains
+	// to do here, and it deliberately runs without s.mu held (see
+	// notify's doc on why the observer call is never made under that
+	// lock).
+	s.notifyObserver(j.item.Source, StateDownloading, Coverage{})
 
 	// Make room BEFORE the capture starts, not only after it succeeds:
 	// both capture pipelines seed their disk budget with the store's
@@ -1786,7 +1835,7 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	// the eviction loop's GC goes through s.gc(), which locks captureMu
 	// itself. That ordering is safe against a concurrent capture because
 	// this single worker goroutine is the only place captures run.
-	s.reclaimDiskForCapture(j.itemID)
+	s.reclaimDiskForCapture(j.sourceKey)
 
 	// Held for the full Capture call, not just its final SaveItem — see
 	// captureMu's doc on why the whole blob-writing window must be
@@ -1795,13 +1844,13 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	rec, err := s.captureForClass(ctx, j)
 	s.captureMu.Unlock()
 	if err != nil {
-		s.logger.Warn("offline cache: capture failed", zap.String("item_id", j.itemID), zap.Error(err))
-		s.notify(j.itemID, StateFailed, Coverage{Reason: err.Error()})
+		s.logger.Warn("offline cache: capture failed", zap.String("source", j.item.Source), zap.Error(err))
+		s.notify(j.item.Source, StateFailed, Coverage{Reason: err.Error()})
 		return
 	}
 
-	s.notify(j.itemID, stateFromCoverage(rec.Coverage), rec.Coverage)
-	s.enforceDiskLimit(j.itemID)
+	s.notify(j.item.Source, stateFromCoverage(rec.Coverage), rec.Coverage)
+	s.enforceDiskLimit(j.sourceKey, j.item.Source)
 }
 
 // captureForClass routes a queued job to the capture pipeline matching
@@ -1821,10 +1870,12 @@ func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecor
 }
 
 // enforceDiskLimit evicts oldest-first (via evictDownTo, preferring
-// anything OTHER than justCapturedID) until usage is back under
-// maxDiskBytes or nothing more can be evicted.
+// anything OTHER than the just-captured item) until usage is back under
+// maxDiskBytes or nothing more can be evicted. justCapturedKey/Source
+// identify that item (key for store ops, source for the eviction
+// notification).
 //
-// justCapturedID is only PREFERRED to survive, never permanently
+// The just-captured item is only PREFERRED to survive, never permanently
 // exempted: capture enforces a per-resource size cap
 // (maxResourceBytes), never a per-item total, so a single multi-resource
 // artwork can still exceed the WHOLE cache's maxDiskBytes budget on its
@@ -1834,12 +1885,12 @@ func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecor
 // fill the disk" failure mode this budget exists to prevent (see
 // OptionsFromConfig's DefaultMaxDiskBytes doc). So once
 // oldestEvictableItem has nothing else left to offer, evictDownTo's
-// last-resort mode deliberately evicts justCapturedID too.
-func (s *service) enforceDiskLimit(justCapturedID string) {
+// last-resort mode deliberately evicts the just-captured item too.
+func (s *service) enforceDiskLimit(justCapturedKey, justCapturedSource string) {
 	if s.maxDiskBytes <= 0 {
 		return
 	}
-	s.evictDownTo(s.maxDiskBytes, justCapturedID, true)
+	s.evictDownTo(s.maxDiskBytes, justCapturedKey, justCapturedSource, true)
 }
 
 // captureReclaimHeadroomDivisor sizes the free-space floor
@@ -1866,7 +1917,7 @@ const captureReclaimHeadroomDivisor = 8
 // oldest contents instead of rolling over to newer ones
 // (feral-file/ffos-user#229 review finding).
 //
-// itemID (the item about to be captured) is never evicted here, with
+// sourceKey (the item about to be captured) is never evicted here, with
 // no last-resort fallback: for a RECAPTURE of an already-ready item,
 // evicting its existing record now would flip it to not_cached while
 // the replacement download is still in flight, and "this item alone
@@ -1874,15 +1925,18 @@ const captureReclaimHeadroomDivisor = 8
 // started — enforceDiskLimit still owns that verdict afterwards.
 // Running out of victims before reaching the target is likewise a
 // normal, quiet outcome here (a store whose remaining contents are
-// itemID itself plus playlist metadata no item eviction can reclaim),
+// this item itself plus playlist metadata no item eviction can reclaim),
 // not an over-budget alarm: the capture then simply runs with whatever
 // room is actually left, exactly as it would have before this reclaim
 // existed.
-func (s *service) reclaimDiskForCapture(itemID string) {
+func (s *service) reclaimDiskForCapture(sourceKey string) {
 	if s.maxDiskBytes <= 0 {
 		return
 	}
-	s.evictDownTo(s.maxDiskBytes-s.maxDiskBytes/captureReclaimHeadroomDivisor, itemID, false)
+	// The protected item's source is irrelevant here: with the
+	// last-resort mode off, evictDownTo can never evict (and so never
+	// needs to announce) the protected item itself.
+	s.evictDownTo(s.maxDiskBytes-s.maxDiskBytes/captureReclaimHeadroomDivisor, sourceKey, "", false)
 }
 
 // evictDownTo is the shared eviction loop behind enforceDiskLimit
@@ -1890,25 +1944,31 @@ func (s *service) reclaimDiskForCapture(itemID string) {
 // reclaimDiskForCapture (pre-capture, target = ceiling minus a
 // headroom floor). It evicts the oldest-captured item (by CapturedAt,
 // via oldestEvictableItem), preferring anything OTHER than
-// protectedID, and re-runs GC until usage is back under targetBytes or
+// protectedKey, and re-runs GC until usage is back under targetBytes or
 // nothing more can be evicted. Blobs are deduped, so an item's disk
 // contribution is only knowable after GC reclaims blobs no other item
 // still references — hence the delete-then-GC-then-recheck loop rather
 // than trying to precompute how much one eviction will free.
 //
+// protectedSource is protectedKey's raw source URL, needed only for the
+// last-resort eviction notification below (the key is a one-way hash,
+// and the record it could have been read back from is what is being
+// deleted); ordinary victims carry their own source out of
+// oldestEvictableItem.
+//
 // evictProtectedAsLastResort selects what "nothing else left" means:
-//   - true (enforceDiskLimit): protectedID is only PREFERRED to
+//   - true (enforceDiskLimit): protectedKey is only PREFERRED to
 //     survive, never permanently exempted — see enforceDiskLimit's doc
 //     for why the just-captured item must ultimately be evictable too.
-//     The fallback fires at most once per call (protectedID is cleared
+//     The fallback fires at most once per call (protectedKey is cleared
 //     right after), so a store that is over budget with truly nothing
 //     left on disk still terminates instead of looping forever trying
 //     to re-evict an item that is already gone.
 //   - false (reclaimDiskForCapture): missing the target is a normal
 //     outcome, so the loop returns quietly without touching
-//     protectedID and without the over-budget warning — the hard
+//     protectedKey and without the over-budget warning — the hard
 //     ceiling is enforceDiskLimit's job, not this reclaim's.
-func (s *service) evictDownTo(targetBytes int64, protectedID string, evictProtectedAsLastResort bool) {
+func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource string, evictProtectedAsLastResort bool) {
 	for {
 		usage, err := s.store.DiskUsage()
 		if err != nil {
@@ -1919,13 +1979,13 @@ func (s *service) evictDownTo(targetBytes int64, protectedID string, evictProtec
 			return
 		}
 
-		victim, ok := s.oldestEvictableItem(protectedID)
+		victimKey, victimSource, ok := s.oldestEvictableItem(protectedKey)
 		reason := ""
 		if !ok {
 			if !evictProtectedAsLastResort {
 				return
 			}
-			if protectedID == "" {
+			if protectedKey == "" {
 				// Already gave up the just-captured item's protection
 				// above and there is STILL nothing left to evict:
 				// nothing more this function can do.
@@ -1933,15 +1993,15 @@ func (s *service) evictDownTo(targetBytes int64, protectedID string, evictProtec
 					zap.Int64("usage_bytes", usage), zap.Int64("max_bytes", s.maxDiskBytes))
 				return
 			}
-			victim = protectedID
-			protectedID = ""
+			victimKey, victimSource = protectedKey, protectedSource
+			protectedKey = ""
 			reason = "offline cache: evicted the just-captured item itself; it alone exceeds the disk budget with no older item left to evict"
 		}
-		if _, err := s.store.DeleteItem(victim); err != nil {
-			s.logger.Warn("offline cache: evict item failed", zap.String("item_id", victim), zap.Error(err))
+		if _, err := s.store.DeleteItem(victimKey); err != nil {
+			s.logger.Warn("offline cache: evict item failed", zap.String("source", victimSource), zap.Error(err))
 			return
 		}
-		s.notify(victim, StateNotCached, Coverage{Reason: reason})
+		s.notify(victimSource, StateNotCached, Coverage{Reason: reason})
 
 		if _, _, err := s.gc(); err != nil {
 			s.logger.Warn("offline cache: GC during eviction failed", zap.Error(err))
@@ -1960,50 +2020,57 @@ func (s *service) gc() (int, int64, error) {
 	return s.store.GC()
 }
 
-func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
-	ids, err := s.store.ListItemIDs()
+// oldestEvictableItem picks the eviction victim: the oldest-captured
+// record other than excludeKey. It returns both the victim's key (for
+// the store delete) and its source (for the eviction notification —
+// already in hand here from the record read, where the caller could not
+// recover it after the delete).
+func (s *service) oldestEvictableItem(excludeKey string) (key, source string, ok bool) {
+	keys, err := s.store.ListItemKeys()
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 
-	var oldestID string
 	var oldestAt time.Time
-	found := false
-	for _, id := range ids {
-		if id == excludeID {
+	for _, candidate := range keys {
+		if candidate == excludeKey {
 			continue
 		}
-		rec, err := s.store.LoadItem(id)
+		rec, err := s.store.LoadItem(candidate)
 		if err != nil {
 			continue
 		}
-		if !found || rec.CapturedAt.Before(oldestAt) {
-			oldestID, oldestAt, found = id, rec.CapturedAt, true
+		if !ok || rec.CapturedAt.Before(oldestAt) {
+			key, source, oldestAt, ok = candidate, rec.Item.Source, rec.CapturedAt, true
 		}
 	}
-	return oldestID, found
+	return key, source, ok
 }
 
-// ClearItem deletes itemID's record and GCs any blob it was the last
-// referent of. It returns ErrItemNotFound (wrapped) only when itemID had
+// ClearItem deletes the record for source (the raw source URL, hashed to
+// its key here at the boundary) and GCs any blob it was the last
+// referent of. Because the record is per-SOURCE (see ItemRecord's doc),
+// this clears the cached artifact for EVERY playlist item — in any
+// playlist — that shares this source, not just the one the caller had in
+// hand. It returns ErrItemNotFound (wrapped) only when the source had
 // nothing to clear at all — no record on disk AND nothing tracked in
 // memory — matching the not_found contract documented in
 // docs/controld-inbound-controller-messages.md.
 //
-// Any job for itemID still sitting in the queue (not yet started) is
-// dropped, atomically with the busy check, so it cannot silently
+// Any job for this source still sitting in the queue (not yet started)
+// is dropped, atomically with the busy check, so it cannot silently
 // resurrect the record this call just deleted once it eventually runs
 // — see reserveForClear's doc for why the busy check and the queue
 // removal must be one critical section rather than two separate steps.
-// A capture for itemID that is already ACTIVE (past the queue, inside
-// capturer.Capture) is rejected outright with ErrItemBusy instead — see
-// that error's doc for why: this call's GC would otherwise still wait
-// for the active capture via captureMu (so it could never corrupt that
-// capture's blobs), but the capture itself is not canceled, so a
+// A capture for this source that is already ACTIVE (past the queue,
+// inside capturer.Capture) is rejected outright with ErrItemBusy instead
+// — see that error's doc for why: this call's GC would otherwise still
+// wait for the active capture via captureMu (so it could never corrupt
+// that capture's blobs), but the capture itself is not canceled, so a
 // delete-then-let-GC-run approach would let the item's record
 // legitimately reappear once the capture finishes.
 //
-// reserveForClear runs FIRST and unconditionally: for an itemID this
+// reserveForClear runs FIRST and unconditionally: for a source this
 // service has never heard of, that is a harmless no-op (nothing tracked,
 // nothing queued), and for one whose only trace is a not-yet-started
 // first-time download it cancels that queued job — closing a related gap
@@ -2036,17 +2103,18 @@ func (s *service) oldestEvictableItem(excludeID string) (string, bool) {
 // docs/controld-inbound-controller-messages.md); without it a connected
 // controller keeps displaying queued/ready until it happens to poll
 // getOfflineCacheStatus. It is notifyObserver, NOT notify: notify would
-// write s.state[itemID] = not_cached, re-adding the very entry
+// write s.state[key] = not_cached, re-adding the very entry
 // reserveForClear just deleted, and s.state doubles as the in-memory
-// half of the known-item set (see allKnownItemIDs), so every cleared item
+// half of the known-item set (see allKnownItemKeys), so every cleared item
 // would linger forever in whole-store Status pages — and grow s.state
 // without bound — purely as a side effect of having been cleared.
-func (s *service) ClearItem(itemID string) error {
-	res, _, err := s.reserveForClear(map[string]bool{itemID: true})
+func (s *service) ClearItem(source string) error {
+	key := SourceKey(source)
+	res, _, err := s.reserveForClear(map[string]bool{key: true})
 	if err != nil {
-		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
+		return fmt.Errorf("offline cache: clear item %s: %w", source, err)
 	}
-	removed, err := s.store.DeleteItem(itemID)
+	removed, err := s.store.DeleteItem(key)
 	if err != nil {
 		// Knowingly silent on the observer: the record survived, so the
 		// item is still whatever the record says (see itemStatus) and
@@ -2056,10 +2124,10 @@ func (s *service) ClearItem(itemID string) error {
 		// the record-derived status, which is more machinery than this
 		// already-failing I/O path warrants. The error itself is the
 		// caller's signal to retry.
-		return fmt.Errorf("offline cache: clear item %s: %w", itemID, err)
+		return fmt.Errorf("offline cache: clear item %s: %w", source, err)
 	}
-	if !removed && !res.settled[itemID] {
-		return fmt.Errorf("offline cache: clear item %s: %w", itemID, ErrItemNotFound)
+	if !removed && !res.settled[key] {
+		return fmt.Errorf("offline cache: clear item %s: %w", source, ErrItemNotFound)
 	}
 	// Ordered against a racing enqueue's own "queued" notification, then
 	// emitted as soon as the record is gone and ahead of GC: the record is
@@ -2067,7 +2135,7 @@ func (s *service) ClearItem(itemID string) error {
 	// the item is already not_cached here whether or not the blob sweep
 	// below succeeds.
 	res.awaitQueuedNotifications()
-	s.notifyObserver(itemID, StateNotCached, Coverage{})
+	s.notifyObserver(source, StateNotCached, Coverage{})
 
 	if !removed {
 		// Cancel-only clear: this call deleted no record, so it orphaned no
@@ -2078,7 +2146,7 @@ func (s *service) ClearItem(itemID string) error {
 		return nil
 	}
 	if _, _, err := s.gc(); err != nil {
-		return fmt.Errorf("offline cache: GC after clearing item %s: %w", itemID, err)
+		return fmt.Errorf("offline cache: GC after clearing item %s: %w", source, err)
 	}
 	return nil
 }
@@ -2108,13 +2176,27 @@ func (s *service) ClearPlaylist(playlistID string) error {
 		return fmt.Errorf("offline cache: parse playlist %s: %w", playlistID, err)
 	}
 
-	itemIDs := make(map[string]bool, len(playlist.Items))
+	// One clear target per distinct SOURCE, not per playlist item: items
+	// sharing a source share one record (see ItemRecord's doc), so
+	// deduping here is what keeps the delete/notify loop below from
+	// double-announcing a source the playlist happens to list twice. An
+	// item with no source has nothing cached to clear and is skipped.
+	// Note the flip side of per-source records: a source this playlist
+	// shares with ANOTHER cached playlist is cleared for that playlist
+	// too — records are shared with no refcount, by design.
+	keys := make(map[string]bool, len(playlist.Items))
+	sourceOf := make(map[string]string, len(playlist.Items))
 	for _, item := range playlist.Items {
-		itemIDs[item.ID] = true
+		if item.Source == "" {
+			continue
+		}
+		key := SourceKey(item.Source)
+		keys[key] = true
+		sourceOf[key] = item.Source
 	}
-	res, busyID, err := s.reserveForClear(itemIDs)
+	res, busyKey, err := s.reserveForClear(keys)
 	if err != nil {
-		return fmt.Errorf("offline cache: clear playlist %s: item %s: %w", playlistID, busyID, err)
+		return fmt.Errorf("offline cache: clear playlist %s: item %s: %w", playlistID, sourceOf[busyKey], err)
 	}
 	// Before any not_cached is emitted below — see
 	// awaitQueuedNotifications' doc for the inversion it prevents.
@@ -2146,14 +2228,26 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	// therefore a ready/partial status — is still on disk, so announcing
 	// not_cached would be a lie the next getOfflineCacheStatus contradicts.
 	var errs []error
+	// Iterate the playlist's own item order (deduped via done) rather
+	// than the keys map, so deletions and notifications keep a
+	// deterministic, playlist-shaped order.
+	done := make(map[string]bool, len(keys))
 	for _, item := range playlist.Items {
-		removed, err := s.store.DeleteItem(item.ID)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("delete item %s: %w", item.ID, err))
+		if item.Source == "" {
 			continue
 		}
-		if removed || res.settled[item.ID] {
-			s.notifyObserver(item.ID, StateNotCached, Coverage{})
+		key := SourceKey(item.Source)
+		if done[key] {
+			continue
+		}
+		done[key] = true
+		removed, err := s.store.DeleteItem(key)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("delete item %s: %w", item.Source, err))
+			continue
+		}
+		if removed || res.settled[key] {
+			s.notifyObserver(item.Source, StateNotCached, Coverage{})
 		}
 	}
 	// Bump the playlist clear-epoch and delete the record as ONE critical
@@ -2189,10 +2283,16 @@ func (s *service) CachedPlaylistForURL(sourceURL string) (json.RawMessage, error
 }
 
 func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
-	ids := sortedUniqueIDs(req.ItemIDs)
-	if len(ids) == 0 {
+	// keys drive the walk (sorted, fixed-length — the paging domain);
+	// requestedSource preserves the caller's own source strings so an
+	// entry can still report a source for a key the store has never seen
+	// (a not_cached answer for an explicitly asked-about source). For the
+	// whole-store case it stays nil: every known key recovers its source
+	// from the record on disk or from sourceByKey (in-flight items).
+	keys, requestedSource := sortedUniqueSourceKeys(req.Sources)
+	if len(keys) == 0 {
 		var err error
-		ids, err = s.allKnownItemIDs()
+		keys, err = s.allKnownItemKeys()
 		if err != nil {
 			return StatusSnapshot{}, fmt.Errorf("offline cache: list known items: %w", err)
 		}
@@ -2211,13 +2311,13 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 	if req.TotalsOnly {
 		cursor = ""
 	}
-	// Every id here sorts strictly above "", so an empty cursor selects
+	// Every key here sorts strictly above "", so an empty cursor selects
 	// the whole set without any special-casing below.
 	withTotals := cursor == ""
 
 	snapshot := StatusSnapshot{Items: []ItemStatus{}}
 	if !req.TotalsOnly {
-		snapshot.Items = make([]ItemStatus, 0, min(limit, len(ids)))
+		snapshot.Items = make([]ItemStatus, 0, min(limit, len(keys)))
 	}
 	var totals StatusTotals
 
@@ -2233,17 +2333,21 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 		}
 	}
 
-	for _, id := range ids {
-		// Only reachable on a continuation page (see withTotals): ids
+	// lastKey mirrors the key of the last entry appended to
+	// snapshot.Items, for NextCursor — the entry itself only carries the
+	// source, and paging runs on keys.
+	lastKey := ""
+	for _, key := range keys {
+		// Only reachable on a continuation page (see withTotals): keys
 		// already delivered cost nothing here, which is what keeps a
 		// paged walk from re-reading the whole store per page.
-		if id <= cursor {
+		if key <= cursor {
 			continue
 		}
 		pageFull := req.TotalsOnly || len(snapshot.Items) == limit
 		if pageFull {
 			if !withTotals {
-				// Nothing left to compute for this page, and ids is
+				// Nothing left to compute for this page, and keys is
 				// sorted, so everything after this point is out of
 				// scope too.
 				snapshot.Truncated = true
@@ -2252,21 +2356,31 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 			if !req.TotalsOnly {
 				snapshot.Truncated = true
 			}
-			// Cheap read: this id is only here to be counted, so skip
+			// Cheap read: this key is only here to be counted, so skip
 			// the per-blob stats recordBytes would do.
-			countTotals(s.itemStatus(id, false))
+			if item, ok := s.itemStatus(key, requestedSource[key], false); ok {
+				countTotals(item)
+			}
 			continue
 		}
 
-		item := s.itemStatus(id, true)
+		item, ok := s.itemStatus(key, requestedSource[key], true)
+		if !ok {
+			// No source recoverable for this key (see itemStatus): the
+			// entry would be unmatchable by any client, so it is
+			// dropped from the page rather than reported with an empty
+			// identity.
+			continue
+		}
 		snapshot.Items = append(snapshot.Items, item)
+		lastKey = key
 		if withTotals {
 			countTotals(item)
 		}
 	}
 
 	if snapshot.Truncated {
-		snapshot.NextCursor = snapshot.Items[len(snapshot.Items)-1].ItemID
+		snapshot.NextCursor = lastKey
 	}
 	if withTotals {
 		snapshot.Totals = &totals
@@ -2282,80 +2396,106 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 	return snapshot, nil
 }
 
-// sortedUniqueIDs normalizes a caller-supplied id list into the same
-// ordering allKnownItemIDs produces, which is what lets StatusRequest.
-// Cursor mean "the first id strictly greater than this" for both the
-// explicit-ids and whole-store cases. Empty ids are dropped rather than
-// reported as not_cached entries nobody asked for.
-func sortedUniqueIDs(ids []string) []string {
-	if len(ids) == 0 {
-		return nil
+// sortedUniqueSourceKeys normalizes a caller-supplied source list into
+// the same key ordering allKnownItemKeys produces, which is what lets
+// StatusRequest.Cursor mean "the first key strictly greater than this"
+// for both the explicit-sources and whole-store cases. The second return
+// maps each key back to the caller's own source string, so Status can
+// still report a source for a key the store has never seen. Empty
+// sources are dropped rather than reported as not_cached entries nobody
+// asked for; duplicate sources collapse onto one key.
+func sortedUniqueSourceKeys(sources []string) ([]string, map[string]string) {
+	if len(sources) == 0 {
+		return nil, nil
 	}
-	seen := make(map[string]struct{}, len(ids))
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" {
+	byKey := make(map[string]string, len(sources))
+	keys := make([]string, 0, len(sources))
+	for _, source := range sources {
+		if source == "" {
 			continue
 		}
-		if _, dup := seen[id]; dup {
+		key := SourceKey(source)
+		if _, dup := byKey[key]; dup {
 			continue
 		}
-		seen[id] = struct{}{}
-		out = append(out, id)
+		byKey[key] = source
+		keys = append(keys, key)
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(keys)
+	return keys, byKey
 }
 
-// allKnownItemIDs unions on-disk items with anything tracked in memory
-// (e.g. a just-queued item that has not written items/<id>.json yet).
+// allKnownItemKeys unions on-disk items with anything tracked in memory
+// (e.g. a just-queued item that has not written its record yet).
 // The union is sorted as a whole, not as an on-disk run followed by an
-// in-flight run: Status pages by "id strictly greater than the cursor",
+// in-flight run: Status pages by "key strictly greater than the cursor",
 // which silently skips entries unless the sequence is globally ordered.
-func (s *service) allKnownItemIDs() ([]string, error) {
-	diskIDs, err := s.store.ListItemIDs()
+func (s *service) allKnownItemKeys() ([]string, error) {
+	diskKeys, err := s.store.ListItemKeys()
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{}, len(diskIDs))
-	ids := make([]string, 0, len(diskIDs))
-	for _, id := range diskIDs {
-		seen[id] = struct{}{}
-		ids = append(ids, id)
+	seen := make(map[string]struct{}, len(diskKeys))
+	keys := make([]string, 0, len(diskKeys))
+	for _, key := range diskKeys {
+		seen[key] = struct{}{}
+		keys = append(keys, key)
 	}
 
 	s.mu.RLock()
-	for id := range s.state {
-		if _, ok := seen[id]; !ok {
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+	for key := range s.state {
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
 		}
 	}
 	s.mu.RUnlock()
 
-	sort.Strings(ids)
-	return ids, nil
+	sort.Strings(keys)
+	return keys, nil
 }
 
-// itemStatus builds one snapshot entry. withBytes controls whether the
-// Bytes field is populated, which costs one store stat per unique blob
-// this item references (recordBytes) — by far the most expensive part of
-// a large snapshot. Callers that only need the item's state for totals
-// pass false, and must not put the result on the wire: its Bytes would
-// read as 0 rather than as "not measured".
-func (s *service) itemStatus(itemID string, withBytes bool) ItemStatus {
+// itemStatus builds one snapshot entry for key. sourceHint is the
+// caller-supplied source for the key (from an explicit StatusRequest.
+// Sources entry), used only when neither the record on disk nor
+// sourceByKey can supply one; ok=false means no source could be
+// recovered at all — a record too corrupt to read for a key nobody
+// asked about explicitly — and the entry should be dropped rather than
+// reported without the one field clients match on (GC's quarantine pass
+// owns that record's fate).
+//
+// withBytes controls whether the Bytes field is populated, which costs
+// one store stat per unique blob this item references (recordBytes) —
+// by far the most expensive part of a large snapshot. Callers that only
+// need the item's state for totals pass false, and must not put the
+// result on the wire: its Bytes would read as 0 rather than as "not
+// measured".
+func (s *service) itemStatus(key, sourceHint string, withBytes bool) (ItemStatus, bool) {
 	s.mu.RLock()
-	trackedState, tracked := s.state[itemID]
+	trackedState, tracked := s.state[key]
+	if src, ok := s.sourceByKey[key]; ok {
+		// Tracked entries always know their source — sourceByKey is kept
+		// in lockstep with state (see its doc) — and it wins over the
+		// hint: both are the same string whenever both exist. The ok
+		// check (rather than an unconditional overwrite) only matters if
+		// a future edit ever breaks that lockstep: an explicit-source
+		// query should then still fall back to the caller's own hint
+		// instead of emitting an entry with no identity at all.
+		sourceHint = src
+	}
 	s.mu.RUnlock()
 
-	rec, err := s.store.LoadItem(itemID)
+	rec, err := s.store.LoadItem(key)
 	if err != nil {
 		if tracked {
 			// Queued/downloading (or failed with no prior successful
 			// capture) items have no record on disk yet.
-			return ItemStatus{ItemID: itemID, State: trackedState, Percent: percentForState(trackedState)}
+			return ItemStatus{Source: sourceHint, State: trackedState, Percent: percentForState(trackedState)}, true
 		}
-		return ItemStatus{ItemID: itemID, State: StateNotCached}
+		if sourceHint == "" {
+			return ItemStatus{}, false
+		}
+		return ItemStatus{Source: sourceHint, State: StateNotCached}, true
 	}
 
 	// A record on disk always wins over in-memory state: e.g. a failed
@@ -2363,7 +2503,7 @@ func (s *service) itemStatus(itemID string, withBytes bool) ItemStatus {
 	// still report that earlier successful capture, not "failed".
 	state := stateFromCoverage(rec.Coverage)
 	status := ItemStatus{
-		ItemID:           itemID,
+		Source:           rec.Item.Source,
 		State:            state,
 		Percent:          percentForState(state),
 		CoverageComplete: rec.Coverage.Complete,
@@ -2372,7 +2512,7 @@ func (s *service) itemStatus(itemID string, withBytes bool) ItemStatus {
 	if withBytes {
 		status.Bytes = s.recordBytes(rec)
 	}
-	return status
+	return status, true
 }
 
 // percentForState is coarse (0 or 100): capture is a single bounded-window
@@ -2411,11 +2551,13 @@ func (s *service) recordBytes(rec *ItemRecord) int64 {
 	return total
 }
 
-func (s *service) notify(itemID string, state ItemState, coverage Coverage) {
+func (s *service) notify(source string, state ItemState, coverage Coverage) {
+	key := SourceKey(source)
 	s.mu.Lock()
-	s.state[itemID] = state
+	s.state[key] = state
+	s.sourceByKey[key] = source
 	s.mu.Unlock()
-	s.notifyObserver(itemID, state, coverage)
+	s.notifyObserver(source, state, coverage)
 }
 
 // notifyObserver is notify's callout-only half, split out so
@@ -2427,12 +2569,16 @@ func (s *service) notify(itemID string, state ItemState, coverage Coverage) {
 // send with no bound on how long it takes, and holding s.mu across
 // that would block every other state read/write (reserveForClear,
 // dequeueForProcessing, ...) for as long as it runs.
-func (s *service) notifyObserver(itemID string, state ItemState, coverage Coverage) {
+//
+// Takes the raw source, not a key: every caller has it in hand (the
+// job's item, the clear request, the eviction victim's record), and it
+// is what the notification carries on the wire (ItemStatus.Source).
+func (s *service) notifyObserver(source string, state ItemState, coverage Coverage) {
 	if s.observer == nil {
 		return
 	}
 	s.observer.OnItemStateChanged(ItemStatus{
-		ItemID:           itemID,
+		Source:           source,
 		State:            state,
 		Percent:          percentForState(state),
 		CoverageComplete: coverage.Complete,
