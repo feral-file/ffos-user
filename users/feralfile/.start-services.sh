@@ -43,23 +43,20 @@ fi
 systemctl --user daemon-reload
 systemctl --user start system-ready.target
 
-# Start the recovery daemons FIRST, before any blocking service start. This
+# Start the recovery daemon FIRST, before any blocking service start. This
 # script runs under set -e, so a failed/timed-out blocking start (player,
-# display-restore, …) aborts everything after it — and setupd is the only path
-# back into BLE/WiFi provisioning on a device that boots broken, so it must
-# already be started by then. Start them directly rather than relying on
-# chromium-ready.target to pull them in: they are CDP-optional with
-# self-reconnect, so they must run whether or not a display/Chromium ever comes
-# up (e.g. a headless boot). setupd starts BLE before its bounded, non-fatal
-# controld wait (components/feral-setupd/src/main.rs), so neither daemon's
-# readiness gates the other.
+# display-restore, …) aborts everything after it — and controld is the only path
+# back into WiFi/SoftAP provisioning and LAN recovery on a device that boots
+# broken, so it must already be started by then. Start it directly rather than
+# relying on chromium-ready.target to pull it in: it is CDP-optional with
+# self-reconnect, so it must run whether or not a display/Chromium ever comes up
+# (e.g. a headless boot).
 # --no-block: controld is Type=notify and can exit before READY on a bad boot
 # (e.g. relayer handshake failure on a warm reboot). A blocking start would then
 # fail and, under set -e, abort this script before chromium-kiosk/feral-watchdog
-# ever start. Restart=always recovers the daemons on their own; the rest of boot
-# must never hinge on them reaching READY.
+# ever start. Restart=always recovers the daemon on its own; the rest of boot
+# must never hinge on it reaching READY.
 systemctl --user start --no-block "feral-controld.service"
-systemctl --user start --no-block "feral-setupd.service"
 
 systemctl --user start "feral-sys-monitord.service"
 systemctl --user start "feral-vmagent.service"

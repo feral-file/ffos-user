@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FF1 Setup — Searching for networks…</title>
+<style>
+  /* Shares the FF1 setup design language with index.html (dark-only,
+     monochrome, letterspaced micro-labels); keep the two in sync. */
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+      "Helvetica Neue", Arial, sans-serif;
+    background: #0a0a0b;
+    color: #f5f5f6;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 26rem; margin: 0 auto; padding: 2.25rem 1.5rem 3.5rem; }
+  .brand {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.35em;
+    text-transform: uppercase;
+    color: #8a8a90;
+  }
+  h1 {
+    margin: 1.75rem 0 0.75rem;
+    font-size: 1.55rem;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .note {
+    margin-top: 1.25rem;
+    padding: 0.9rem 1rem;
+    font-size: 0.92rem;
+    border: 1px solid #1e3a5f;
+    background: #131315;
+    color: #a8c7fa;
+  }
+  .note strong { color: #f5f5f6; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <p class="brand">Feral File · FF1</p>
+  <h1>Searching for networks…</h1>
+  <p class="note">
+    The frame is restarting its setup Wi-Fi to look for nearby networks. Your
+    phone will be disconnected from <strong>{{.APSSID}}</strong> in a moment.
+    When the frame shows its QR code again, scan it to reconnect and see the
+    updated list.
+  </p>
+</main>
+</body>
+</html>

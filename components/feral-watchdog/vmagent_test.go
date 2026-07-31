@@ -152,10 +152,6 @@ func TestVmagentClient_SendServiceFailedMetric(t *testing.T) {
 			name:    "feral-sys-monitord",
 			service: "feral-sys-monitord",
 		},
-		{
-			name:    "feral-setupd",
-			service: "feral-setupd",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

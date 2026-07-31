@@ -8,7 +8,7 @@
 # real devices, so the invariants are pinned at the file level:
 #
 #   1. Every user shell script parses (bash -n).
-#   2. feral-setupd/feral-controld run unconditionally: started --no-block by
+#   2. feral-controld runs unconditionally: started --no-block by
 #      .start-services.sh and never tied to chromium-ready.target.
 #   3. chromium-ready.target stays a pure signal owned by cdp-ready-check.sh.
 #   4. start-kiosk.sh keeps the rotation retry and its wait_for_display gate
@@ -52,50 +52,32 @@ done
 
 # --- 2. Unconditional daemon startup ------------------------------------------
 
-# setupd/controld must start whether or not a display/Chromium ever appears, and
-# a pre-READY exit (e.g. relayer handshake failure) must not abort the rest of
-# boot under set -e: hence --no-block, with Restart=always as the recovery rail.
+# controld must start whether or not a display/Chromium ever appears, and a
+# pre-READY exit (e.g. relayer handshake failure) must not abort the rest of boot
+# under set -e: hence --no-block, with Restart=always as the recovery rail.
 assert_contains "$start_services" 'systemctl --user start --no-block "feral-controld.service"'
-assert_contains "$start_services" 'systemctl --user start --no-block "feral-setupd.service"'
 assert_contains "$units_dir/feral-controld.service" "Restart=always"
-assert_contains "$units_dir/feral-setupd.service" "Restart=always"
 
-# The old design tore both daemons down with every Chromium restart via
-# PartOf=chromium-ready.target, killing live BLE sessions. They must never be
-# re-coupled to it in any dependency direction.
-assert_not_contains "$units_dir/feral-setupd.service" "chromium-ready.target"
+# The old design tore controld down with every Chromium restart via
+# PartOf=chromium-ready.target, killing live recovery/provisioning sessions. It
+# must never be re-coupled to it in any dependency direction.
 assert_not_contains "$units_dir/feral-controld.service" "chromium-ready.target"
 
-# setupd must start independently of player/controld in BOTH coupling
-# dimensions, or BLE recovery silently re-gates on the very services whose
-# failure it exists to recover from:
-#   - unit ordering: an After=feral-player/feral-controld delays setupd's start
-#     job even when the systemctl start itself is --no-block (a Type=notify
-#     controld or a hung player start job holds it back);
-#   - script ordering: .start-services.sh runs under set -e, so any BLOCKING
-#     service start placed before the --no-block daemon starts can fail and
-#     abort the script before setupd ever starts.
-# Only dependency directives count as coupling — comments may (and do) name the
-# services while documenting exactly this contract.
-if grep -E '^(After|Before|Requires|Wants|BindsTo|PartOf|Requisite)=' "$units_dir/feral-setupd.service" | \
-   grep -Eq 'feral-(controld|player)\.service'; then
-  fail "feral-setupd.service must not declare a dependency on feral-controld/feral-player"
-fi
-
+# controld owns WiFi/SoftAP provisioning and LAN recovery, so its --no-block
+# start must precede any BLOCKING service start: .start-services.sh runs under
+# set -e, so a failed blocking start placed before it aborts the script before
+# recovery ever starts.
 daemon_start_line() {
   grep -nF -- "systemctl --user start --no-block \"$1\"" "$start_services" | head -1 | cut -d: -f1
 }
-setupd_line="$(daemon_start_line feral-setupd.service)"
 controld_line="$(daemon_start_line feral-controld.service)"
-[ -n "$setupd_line" ] && [ -n "$controld_line" ] || fail "missing --no-block daemon starts in $start_services"
+[ -n "$controld_line" ] || fail "missing --no-block controld start in $start_services"
 # First blocking `systemctl --user start "..."` (quoted form; system-ready.target
 # is unquoted and the backward-compat block only stops/disables).
 first_blocking_line="$(grep -n 'systemctl --user start "' "$start_services" | grep -v -- --no-block | head -1 | cut -d: -f1)"
 if [ -n "$first_blocking_line" ]; then
-  [ "$setupd_line" -lt "$first_blocking_line" ] || \
-    fail "setupd --no-block start (line $setupd_line) must precede the first blocking service start (line $first_blocking_line): a failed blocking start aborts the script under set -e before BLE recovery starts"
   [ "$controld_line" -lt "$first_blocking_line" ] || \
-    fail "controld --no-block start (line $controld_line) must precede the first blocking service start (line $first_blocking_line)"
+    fail "controld --no-block start (line $controld_line) must precede the first blocking service start (line $first_blocking_line): a failed blocking start aborts the script under set -e before recovery starts"
 fi
 
 # --- 3. chromium-ready.target stays a pure signal -----------------------------
@@ -119,7 +101,10 @@ assert_contains "$kiosk_script" "for attempt in 1 2 3"
 # extracted verbatim with its DRM glob retargeted, so the assertions exercise
 # the exact shipped logic.
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+# u+rwX first: the cache-guard cases park fixtures at mode 000, and a fail()
+# exit between chmod and restore would otherwise leak the tmp dir (rm -rf
+# cannot descend a non-traversable directory).
+trap 'chmod -R u+rwX "$tmp_dir" 2>/dev/null || true; rm -rf "$tmp_dir"' EXIT
 
 drm_root="$tmp_dir/drm"
 mkdir -p "$drm_root/card0-HDMI-A-1" "$drm_root/card1-DP-1"
@@ -202,5 +187,250 @@ expect_waiting "unreadable alongside disconnected waits"
 rmdir "$drm_root/card0-HDMI-A-1/status"
 rm "$drm_root/card1-DP-1/status"
 expect_proceed "no readable status fails open" "fail open"
+
+# --- 5. player-bundle cache guard (#234) ---------------------------------------
+
+# Chromium's disk cache can keep serving a previous player app (or
+# negatively-cached 404s for its chunks) across kiosk restarts AND reboots
+# after a bundle swap. serve-feral-player.sh mitigates with a global
+# "Cache-Control: no-cache" when darkhttpd supports --header, but entries
+# cached headerless — before that header was active, or under the legacy
+# headerless fallback — are reused without revalidation, so the guard in
+# start-kiosk.sh purges the cache exactly when the bundle fingerprint
+# changes; these cases pin all three directions (purge on change, keep when
+# unchanged — the keep side is what protects remote-artwork cache warmth —
+# and purge defensively when the fingerprint cannot be computed at all).
+# The guard must actually be CALLED, and called before Chromium exists —
+# extracting and testing the function alone would stay green if the invocation
+# were deleted or moved after the launch, where a purge races a live browser.
+# `|| true` keeps a no-match from tripping pipefail inside the substitution,
+# so the legible fail() below is what reports the regression.
+guard_call_line="$(grep -n '^clear_chromium_cache_on_bundle_change$' "$kiosk_script" | head -1 | cut -d: -f1 || true)"
+[ -n "$guard_call_line" ] || fail "start-kiosk.sh never calls clear_chromium_cache_on_bundle_change"
+cage_line="$(grep -n '^exec cage' "$kiosk_script" | head -1 | cut -d: -f1 || true)"
+[ -n "$cage_line" ] || fail "could not locate exec cage in $kiosk_script"
+[ "$guard_call_line" -lt "$cage_line" ] || \
+  fail "cache guard (line $guard_call_line) must run before Chromium launches (line $cage_line)"
+
+# Pin the production constants: a typo in any of these makes the guard a
+# silent no-op while the functional cases below (which override them) stay
+# green. `.state` is the OTA-surviving location for the fingerprint, and
+# ~/.cache/chromium is Chromium's default cache root for this launch (no
+# --disk-cache-dir flag is passed).
+assert_contains "$kiosk_script" 'PLAYER_BUNDLE_ROOT="/opt/feral/feral-player"'
+assert_contains "$kiosk_script" 'CHROMIUM_CACHE_DIR="/home/feralfile/.cache/chromium"'
+assert_contains "$kiosk_script" 'PLAYER_FINGERPRINT_FILE="/home/feralfile/.state/player-bundle-fingerprint"'
+
+# The fingerprint is persistent state, so its write must follow the
+# temp-then-rename contract (docs/architecture.md "Persistence and State
+# Ownership") — a crash mid-write must not leave a truncated fingerprint.
+assert_contains "$kiosk_script" 'mv -f "$PLAYER_FINGERPRINT_FILE.tmp" "$PLAYER_FINGERPRINT_FILE"'
+
+fp_fn_file="$tmp_dir/cache_guard.sh"
+sed -n '/^clear_chromium_cache_on_bundle_change() {/,/^}/p' "$kiosk_script" > "$fp_fn_file"
+grep -q 'clear_chromium_cache_on_bundle_change() {' "$fp_fn_file" || \
+  fail "could not extract clear_chromium_cache_on_bundle_change"
+
+bundle_dir="$tmp_dir/bundle"
+cache_dir="$tmp_dir/chromium-cache"
+fp_file="$tmp_dir/state/player-bundle-fingerprint"
+
+# Captures guard stdout: the "[INFO] Player bundle changed" line is the only
+# field-diagnosable signal the purge fired, so its presence/absence is asserted
+# alongside the filesystem effects.
+guard_out="$tmp_dir/guard.out"
+run_cache_guard() {
+  bash -c "
+    PLAYER_BUNDLE_ROOT='$bundle_dir'
+    CHROMIUM_CACHE_DIR='$cache_dir'
+    PLAYER_FINGERPRINT_FILE='$fp_file'
+    source '$fp_fn_file'
+    clear_chromium_cache_on_bundle_change
+  " > "$guard_out" || fail "cache guard exited non-zero"
+}
+
+assert_purge_logged() {
+  grep -Fq "Player bundle changed" "$guard_out" || \
+    fail "$1: purge must log the bundle-changed line"
+}
+
+assert_no_purge_logged() {
+  if grep -Fq "Player bundle changed" "$guard_out"; then
+    fail "$1: keep path must not log the bundle-changed line"
+  fi
+}
+
+seed_cache() {
+  mkdir -p "$cache_dir/Default/Cache"
+  touch "$cache_dir/Default/Cache/marker"
+}
+
+mkdir -p "$bundle_dir/_next/static/chunks"
+echo "chunk-v1" > "$bundle_dir/_next/static/chunks/a.js"
+echo "index-v1" > "$bundle_dir/index.html"
+
+# First run (no recorded fingerprint) must purge: devices already poisoned by a
+# past swap are healed by the release that ships the guard.
+seed_cache
+run_cache_guard
+[ ! -e "$cache_dir/Default/Cache/marker" ] || fail "first run must clear the cache"
+[ -s "$fp_file" ] || fail "first run must record a fingerprint"
+assert_purge_logged "first run"
+
+# Unchanged bundle must keep the cache.
+seed_cache
+run_cache_guard
+[ -e "$cache_dir/Default/Cache/marker" ] || fail "unchanged bundle must keep the cache"
+assert_no_purge_logged "unchanged bundle"
+
+# In-place content change with an unchanged filename and size (index.html is
+# not content-hashed) must purge — this is why the fingerprint reads contents.
+echo "index-v2" > "$bundle_dir/index.html"
+run_cache_guard
+[ ! -e "$cache_dir/Default/Cache/marker" ] || fail "changed bundle must clear the cache"
+assert_purge_logged "changed bundle"
+
+# Deleting a file (with all remaining contents unchanged) must also purge:
+# filenames are embedded in the cksum lines, so removals change the digest.
+seed_cache
+rm "$bundle_dir/_next/static/chunks/a.js"
+run_cache_guard
+[ ! -e "$cache_dir/Default/Cache/marker" ] || fail "file removal must clear the cache"
+assert_purge_logged "file removal"
+
+# A missing bundle tree must not purge: serve-feral-player.service is about to
+# fail readiness anyway, and the cache may still be wanted when the tree returns.
+seed_cache
+fp_before="$(cat "$fp_file")"
+mv "$bundle_dir" "$bundle_dir.gone"
+run_cache_guard
+[ -e "$cache_dir/Default/Cache/marker" ] || fail "missing bundle must not clear the cache"
+[ "$(cat "$fp_file")" = "$fp_before" ] || fail "missing bundle must not rewrite the fingerprint"
+assert_no_purge_logged "missing bundle"
+mv "$bundle_dir.gone" "$bundle_dir"
+
+# A failed cache delete must NOT record the new fingerprint: recording it
+# would mark the purge as done and leave the stale cache in place on every
+# future start — silently reintroducing the bug the guard exists to fix. The
+# retained fingerprint makes the next start retry the purge. Write-bit removal
+# on the containing dir makes unlink fail; root ignores permission bits, so
+# the case only runs unprivileged (CI and dev machines are).
+if [ "$(id -u)" -ne 0 ]; then
+  echo "index-v3" > "$bundle_dir/index.html"
+  fp_before="$(cat "$fp_file")"
+  chmod a-w "$cache_dir/Default/Cache"
+  run_cache_guard
+  chmod u+w "$cache_dir/Default/Cache"
+  [ -e "$cache_dir/Default/Cache/marker" ] || fail "failed-delete fixture did not hold (marker gone)"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "failed delete must not record the new fingerprint"
+  grep -Fq "Could not delete Chromium cache" "$guard_out" || \
+    fail "failed delete must log the retry warning"
+  run_cache_guard
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "retry after failed delete must clear the cache"
+  [ "$(cat "$fp_file")" != "$fp_before" ] || fail "successful retry must record the new fingerprint"
+else
+  echo "test-headless-startup-contract: SKIPPED failed-delete case (running as root)" >&2
+fi
+
+# A fingerprint that cannot read the whole tree must fail toward purging
+# WITHOUT advancing the stored fingerprint. This scenario is the exact
+# collision the pipefail guard exists for: the ONLY change is a newly added
+# unreadable file, so a digest of just the readable subset equals the
+# recorded fingerprint and would mask the change — the purge must fire from
+# the failure path, not the comparison. chmod 000 blocks the owner's read
+# too, but root ignores permission bits, so unprivileged runs only.
+if [ "$(id -u)" -ne 0 ]; then
+  seed_cache
+  fp_before="$(cat "$fp_file")"
+  echo "chunk-v2" > "$bundle_dir/_next/static/chunks/unreadable.js"
+  chmod 000 "$bundle_dir/_next/static/chunks/unreadable.js"
+  run_cache_guard
+  chmod 644 "$bundle_dir/_next/static/chunks/unreadable.js"
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "unreadable bundle file must fail toward purging"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "failed fingerprint must not be recorded"
+  grep -Fq "bundle fingerprint failed" "$guard_out" || \
+    fail "failed fingerprint must log its warning"
+  # The purge must have come from the failure path, not the comparison path.
+  assert_no_purge_logged "unreadable bundle file"
+  # Once the tree reads cleanly the full digest differs from the recorded one
+  # (the new file is now visible), so the normal purge-and-record path runs.
+  run_cache_guard
+  [ "$(cat "$fp_file")" != "$fp_before" ] || fail "recovered fingerprint must be recorded"
+  assert_purge_logged "recovered fingerprint"
+else
+  echo "test-headless-startup-contract: SKIPPED unreadable-bundle case (running as root)" >&2
+fi
+
+# The failure path must also cover entries find cannot DESCEND — an unreadable
+# directory hides whole files from the digest input, not just one cksum line —
+# and must hold across starts: every launch purges again with the fingerprint
+# parked until the tree reads cleanly (retry-until-readable, not a one-shot).
+# Same root gate as above.
+if [ "$(id -u)" -ne 0 ]; then
+  fp_before="$(cat "$fp_file")"
+  mkdir -p "$bundle_dir/private"
+  echo "hidden-chunk" > "$bundle_dir/private/chunk.js"
+  chmod 000 "$bundle_dir/private"
+  seed_cache
+  run_cache_guard
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "unreadable directory must fail toward purging"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "unreadable directory must not advance the stored fingerprint"
+  # Second start with the tree still unreadable: purge again, still parked,
+  # warning still legible.
+  seed_cache
+  run_cache_guard
+  chmod 755 "$bundle_dir/private"
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "still-unreadable tree must purge on every start"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "retrying starts must keep the stored fingerprint parked"
+  grep -Fq "bundle fingerprint failed" "$guard_out" || fail "retrying starts must keep logging the warning"
+  rm -rf "$bundle_dir/private"
+
+  # A present-but-non-traversable bundle ROOT is unreadable content, not
+  # absence: [ -d ] passes (it needs only the parent traversable), the cd
+  # fails, and the guard must purge defensively — only a MISSING tree skips.
+  run_cache_guard # settle: tree is back to the recorded state (keep path)
+  fp_before="$(cat "$fp_file")"
+  seed_cache
+  chmod 000 "$bundle_dir"
+  run_cache_guard
+  chmod 755 "$bundle_dir"
+  [ ! -e "$cache_dir/Default/Cache/marker" ] || fail "non-traversable bundle root must purge defensively"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "non-traversable root must not advance the stored fingerprint"
+
+  # A FAILED defensive purge must be legible: the fingerprint-failure branch
+  # has already warned "clearing Chromium cache", so when the rm then fails
+  # it must add the same delete-retry warning the normal path emits —
+  # otherwise an operator cannot tell a successful defensive purge from
+  # stale cache left in place. Fixture combines both failures: an unreadable
+  # bundle entry (fingerprint fails) and a write-protected cache parent
+  # (delete fails).
+  fp_before="$(cat "$fp_file")"
+  echo "chunk-v9" > "$bundle_dir/_next/static/chunks/unreadable2.js"
+  chmod 000 "$bundle_dir/_next/static/chunks/unreadable2.js"
+  seed_cache
+  chmod a-w "$cache_dir/Default/Cache"
+  run_cache_guard
+  chmod u+w "$cache_dir/Default/Cache"
+  chmod 644 "$bundle_dir/_next/static/chunks/unreadable2.js"
+  [ -e "$cache_dir/Default/Cache/marker" ] || fail "failed-defensive-purge fixture did not hold (marker gone)"
+  [ "$(cat "$fp_file")" = "$fp_before" ] || fail "failed defensive purge must not record a fingerprint"
+  grep -Fq "bundle fingerprint failed" "$guard_out" || \
+    fail "failed defensive purge must log the fingerprint warning"
+  grep -Fq "Could not delete Chromium cache" "$guard_out" || \
+    fail "failed defensive purge must log the delete-retry warning"
+  rm -f "$bundle_dir/_next/static/chunks/unreadable2.js"
+  run_cache_guard # settle: tree back to the recorded state (keep path)
+  assert_no_purge_logged "settled tree"
+else
+  echo "test-headless-startup-contract: SKIPPED unreadable-directory cases (running as root)" >&2
+fi
+
+# --- 6. controld start-limit never latches -------------------------------------
+
+# controld is the device's only provisioning path (SoftAP portal + LAN hub —
+# no BLE fallback), so a systemd start-limit latch ("start-limit-hit") would
+# permanently strand an offline device instead of degrading into slow
+# Restart=always retries. See docs/architecture.md "Relaxed StartLimit".
+assert_contains "$units_dir/feral-controld.service" "StartLimitIntervalSec=0"
 
 echo "test-headless-startup-contract: OK"

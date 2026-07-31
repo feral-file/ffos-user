@@ -7,7 +7,6 @@
 | Component              | Build Status                                                                                                                                                                                                                           | Lint Status                                                                                                                                                                                                                          | Code Coverage                                                                                                                                                                       |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **feral-controld**     | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-controld.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-controld.yaml)         | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-controld.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-controld.yaml)         | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-controld&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user)     |
-| **feral-setupd**       | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-setupd.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-setupd.yaml)             | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-setupd.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-setupd.yaml)             | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-setupd&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user)       |
 | **feral-sys-monitord** | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-sys-monitord.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-sys-monitord.yaml) | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-sys-monitord.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-sys-monitord.yaml) | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-sys-monitord&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user) |
 | **feral-watchdog**     | [![Build](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/test-watchdog.yaml?branch=develop&label=build&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/test-watchdog.yaml)         | [![Lint](https://img.shields.io/github/actions/workflow/status/feral-file/ffos-user/lint-watchdog.yaml?branch=develop&label=lint&logo=github)](https://github.com/feral-file/ffos-user/actions/workflows/lint-watchdog.yaml)         | [![Coverage](https://img.shields.io/codecov/c/github/feral-file/ffos-user/develop?flag=feral-watchdog&label=coverage&logo=codecov)](https://codecov.io/gh/feral-file/ffos-user)     |
 
@@ -26,16 +25,12 @@ FFOS-USER provides components and user data to the FFOS build system. Build orch
 │  │                  │    │                 │              │
 │  │ ┌──────────────┐ │    │ ┌─────────────┐ │              │
 │  │ │feral-controld│ │    │ │  feralfile  │ │              │
-│  │ │feral-setupd  │ │    │ │  soaktest   │ │              │
-│  │ │feral-sys-    │ │    │ │             │ │              │
-│  │ │  monitord    │ │    │ │ Configs     │ │              │
-│  │ │feral-app-    │ │    │ │ Scripts     │ │              │
-│  │ │  monitord    │ │    │ │ Data        │ │              │
-│  │ │feral-watchdog│ │    │ └─────────────┘ │              │
-│  │ │launcher-ui   │ │    │                 │              │
-│  │ │player-wrapper│ │    │                 │              │
-│  │ │     -ui      │ │    │                 │              │
-│  │ └──────────────┘ │    │                 │              │
+│  │ │feral-sys-    │ │    │ │  soaktest   │ │              │
+│  │ │  monitord    │ │    │ │             │ │              │
+│  │ │feral-watchdog│ │    │ │ Configs     │ │              │
+│  │ │player-wrapper│ │    │ │ Scripts     │ │              │
+│  │ │     -ui      │ │    │ │ Data        │ │              │
+│  │ └──────────────┘ │    │ └─────────────┘ │              │
 │  └──────────────────┘    └─────────────────┘              │
 └───────────────────────────────────────────────────────────┘
                               │
@@ -51,17 +46,12 @@ FFOS-USER provides components and user data to the FFOS build system. Build orch
 ```
 ffos-user/
 ├── components/                    # Service components
-│   ├── feral-controld/           # Connection daemon
+│   ├── feral-controld/           # Connectivity, command routing, and device setup
 │   │   ├── main.go
 │   │   ├── go.mod
 │   │   └── ...
-│   ├── feral-setupd/             # Setup daemon (Rust)
-│   │   ├── src/
-│   │   ├── Cargo.toml
-│   │   └── ...
 │   ├── feral-sys-monitord/       # System monitoring
 │   ├── feral-watchdog/           # System watchdog
-│   ├── launcher-ui/              # Launcher UI components
 │   └── player-wrapper-ui/        # Player wrapper UI
 └── users/                        # User data and configurations
     ├── feralfile/                # feralfile user data
@@ -72,7 +62,7 @@ ffos-user/
     │   ├── .config/              # User configurations
     │   │   │   ├── systemd/user/
     │   │   │   │   ├── feral-sys-monitord.service
-    │   │   │   │   ├── feral-setupd.service
+    │   │   │   │   ├── feral-controld.service
     │   │   │   │   ├── chromium-kiosk.service
     │   │   │   │   └── ...
     │   │   ├── controld.json
@@ -90,29 +80,23 @@ ffos-user/
 
 ### Service Components Layer
 
-#### 1. Connection Layer (`feral-controld`)
+#### 1. Connectivity, Command, and Setup Layer (`feral-controld`)
 
-- **Purpose**: Manages device connectivity and communication
+- **Purpose**: Manages device connectivity and command routing, and owns the full device-setup domain merged from the former `feral-setupd` (SoftAP provisioning, captive portal, OTA gate, on-screen setup narration, claiming, factory reset, log upload, LAN hub)
 - **Language**: Go
-- **Dependencies**: WebSocket, HTTP, CDP
+- **Dependencies**: WebSocket, HTTP, CDP, NetworkManager (`nmcli`)
 - **Build Output**: `feral-controld-{version}-x86_64.pkg.tar.zst`
 
-#### 2. Setup Layer (`feral-setupd`)
-
-- **Purpose**: Handles device initialization and configuration
-- **Language**: Rust
-- **Dependencies**: Bluetooth, WiFi, System APIs
-- **Build Output**: `feral-setupd-{version}-x86_64.pkg.tar.zst`
-
-#### 3. Monitoring Layer
+#### 2. Monitoring Layer
 
 - **feral-sys-monitord**: System resource monitoring
 - **feral-watchdog**: System watchdog and recovery
 
-#### 4. UI Layer
+#### 3. UI Layer
 
-- **launcher-ui**: Main launcher interface
 - **player-wrapper-ui**: Media player wrapper interface
+
+The Chromium kiosk is launched by `users/feralfile/scripts/start-kiosk.sh` (unit `chromium-kiosk.service`) at `http://127.0.0.1:8080/`; there is no separate `launcher-ui` process.
 
 ### User Data Layer
 
@@ -128,7 +112,7 @@ users/feralfile/
 ├── .config/                      # Application configs
 │   ├── systemd/user/             # Systemd services
 │   │   ├── feral-sys-monitord.service
-│   │   ├── feral-setupd.service
+│   │   ├── feral-controld.service
 │   │   ├── chromium-kiosk.service
 │   │   └── ...
 │   ├── controld.json            # Connection daemon config
@@ -211,16 +195,14 @@ make verify
 `make verify` is non-mutating for repository files and runs the same component checks that CI calls:
 
 - Go components: `go mod download`, `go vet ./...`, `golangci-lint run ./...`, `gofmt -s -l .`, and `go test -v` for `feral-controld`, `feral-sys-monitord`, and `feral-watchdog`.
-- Rust component: `cargo fmt -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo check`, and `cargo test` for `feral-setupd`.
 - Startup contract smoke test: `scripts/test-serve-feral-player.sh` validates the `serve-feral-player.sh` static bundle failure path and systemd notify readiness contract with temporary fakes.
 
-Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, `golangci-lint` v2.4.0, Rust 1.88.0 with `rustfmt` and `clippy`, and the system libraries needed by `feral-setupd` (`libdbus-1-dev` and `pkg-config` on Ubuntu). `feral-controld` uses Go 1.26.0 because its mint-pairing handoff minter dependency declares Go 1.26.
+Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, and `golangci-lint` v2.4.0. `feral-controld` uses Go 1.26.0 because its mint-pairing handoff minter dependency declares Go 1.26.
 
 GitHub Actions are split by component and purpose:
 
 - `lint-controld.yaml`, `lint-sys-monitord.yaml`, and `lint-watchdog.yaml` run the matching Go lint targets.
-- `lint-setupd.yaml` runs the Rust lint target.
-- `test-controld.yaml`, `test-sys-monitord.yaml`, `test-watchdog.yaml`, and `test-setupd.yaml` run the matching test targets.
+- `test-controld.yaml`, `test-sys-monitord.yaml`, and `test-watchdog.yaml` run the matching test targets.
 - `testing.yaml` reuses the component test workflows on pushes to `main` and `develop` and enables Codecov upload.
 
 CI intentionally has one parity exception: push coverage jobs generate coverage artifacts for Codecov after the shared `make verify-*` test target passes. That coverage step is CI-only and is not part of the non-mutating local verification path.
@@ -231,7 +213,6 @@ Focused local targets are available when working on one component:
 make verify-feral-controld
 make verify-feral-sys-monitord
 make verify-feral-watchdog
-make verify-setupd
 ```
 
 Each target prints deterministic command output suitable for local review or agent evaluation; the smoke test also emits `test-serve-feral-player: OK` when the service-state contract passes.
@@ -248,7 +229,7 @@ make -C components sync-feral-controld
 REMOTE_HOST=ff1-03vdu3x1.local REMOTE_KEY=~/.ssh/id_ed25519 make -C components sync-feral-controld
 ```
 
-`sync-all` syncs the component source tree and the launcher UI. Mint-pairing
+`sync-all` syncs the whole component source tree. Mint-pairing
 handoff does not ship or sync a dedicated QR page from this repository:
 `feral-controld` keeps Chromium on the bundled player and drives the
 ff-player mint-pairing overlay through the `mintPairingDisplay` CDP command.

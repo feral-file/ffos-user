@@ -1,7 +1,7 @@
 # Release-rail evidence ledger
 
 Consumed by `scripts/check-release-rail.sh`, which runs in the
-release-guardrail workflow on every PR into `staging`/`main`. A release whose
+release-guardrail workflow on every PR into `staging`/`release`. A release whose
 diff touches BOTH shipping rails — component binaries (`components/**`, pacman
 package rail) AND user units/session scripts (`users/**`, full-image rsync
 rail built in the `ffos` repo) — must add an entry here declaring the
@@ -11,6 +11,25 @@ two shipping rails".
 An entry is the durable record that the release was cut on the full-image
 rail: it names the version and the exact `ffos` image-build dispatch that
 ships the units/scripts alongside the new binaries. Newest first.
+
+## 1.1.0 — full-image
+
+- Cross-rail changes: `components/feral-setupd` (the Rust BLE provisioning
+  daemon) and the launcher-ui setup surface are DELETED; `components/feral-controld`
+  absorbs device setup end to end (SoftAP + captive-portal provisioning, LAN
+  hub recovery on `:1111`, claim QR auto-trigger, on-screen setup narration
+  via ff-player's `setupDisplay` contract) — paired with `users/feralfile/**`
+  unit and script edits (`feral-setupd.service` removed, `.start-services.sh`
+  ordering, `serve-feral-player.sh` setupDisplay contract gate, kiosk/session
+  scripts).
+- Release action: dispatch `build-image-to-cf.yml` in the `ffos` repo with
+  `version=1.1.0` and `ffos_user_ref` pointing at the staging merge tag of
+  PR #232, on an `ffos` ref that includes feral-file/ffos#118 (build/image
+  manifests pruned of setupd/launcher-ui; captive-DNS + nftables portal
+  plumbing). The two PRs ship together or not at all.
+- A package-only rollout is NOT permitted: old units would still try to start
+  the deleted setupd service and never expose the SoftAP/claim path — a
+  fielded device that lost Wi-Fi would have NO provisioning surface at all.
 
 ## 1.0.21 — full-image
 

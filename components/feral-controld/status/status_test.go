@@ -14,6 +14,7 @@ import (
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/relayer"
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 type fakeRelayer struct {
@@ -228,6 +229,7 @@ func TestPollPlayerStatus_SkipsWhenNotOnPlayerPage(t *testing.T) {
 		cdp:                     mockCDP,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
 		logger:                  zap.NewNop(),
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
@@ -282,6 +284,7 @@ func TestPollPlayerStatus_ContinuesWhenPageURLReadFails(t *testing.T) {
 		cdp:                     mockCDP,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
 		logger:                  zap.NewNop(),
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
@@ -337,6 +340,7 @@ func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 		cdp:                     mockCDP,
 		relayer:                 mockRelayer,
 		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
 		logger:                  zap.NewNop(),
 		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
 		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
@@ -346,6 +350,204 @@ func TestPollPlayerStatus_PollsWhenOnPlayerPage(t *testing.T) {
 
 	if mockCDP.noLogSendCalls != 1 {
 		t.Fatalf("expected one checkStatus call on the player page, got %d", mockCDP.noLogSendCalls)
+	}
+}
+
+func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok":           true,
+				"castCommand":  "displayPlaylist",
+				"index":        1,
+				"renderStatus": 2,
+				"isPaused":     false,
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockWS.sendAllCalls != 1 {
+		t.Fatalf("expected one websocket send, got %d", mockWS.sendAllCalls)
+	}
+
+	payload, ok := mockWS.lastPayload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected websocket payload map, got %T", mockWS.lastPayload)
+	}
+	message, ok := payload["message"].(*PlayerStatus)
+	if !ok {
+		t.Fatalf("expected payload message to be *PlayerStatus, got %T", payload["message"])
+	}
+	if message.RenderStatus == nil || *message.RenderStatus != 2 {
+		t.Fatalf("expected renderStatus to survive polling, got %+v", message.RenderStatus)
+	}
+	if message.Index == nil || *message.Index != 1 {
+		t.Fatalf("expected index to survive polling, got %+v", message.Index)
+	}
+}
+
+// TestPollPlayerStatus_StripsStampFromNotificationPayload pins that the
+// playersession generation carrier (an internal implementation detail) never
+// leaks onto the relayer/websocket-facing player_status payload, even though
+// it is reported to the stamp observer.
+func TestPollPlayerStatus_StripsStampFromNotificationPayload(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok":    true,
+				"stamp": "42-abc123",
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockWS.sendAllCalls != 1 {
+		t.Fatalf("expected one websocket send, got %d", mockWS.sendAllCalls)
+	}
+	payload, ok := mockWS.lastPayload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected websocket payload map, got %T", mockWS.lastPayload)
+	}
+	message, ok := payload["message"].(*PlayerStatus)
+	if !ok {
+		t.Fatalf("expected payload message to be *PlayerStatus, got %T", payload["message"])
+	}
+	if message.Stamp != nil {
+		t.Fatalf("expected stamp to be stripped from the notification payload, got %+v", *message.Stamp)
+	}
+}
+
+// TestPollPlayerStatus_ReportsStampToObserver pins the design doc §2.1 source-3
+// carrier: an observed stamp rides the existing checkStatus round-trip and is
+// reported to the wired observer.
+func TestPollPlayerStatus_ReportsStampToObserver(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok":    true,
+				"stamp": "42-abc123",
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	var observed []string
+	var observedPresent []bool
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+		stampObserver: func(stamp string, present bool) {
+			observed = append(observed, stamp)
+			observedPresent = append(observedPresent, present)
+		},
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if len(observed) != 1 || observed[0] != "42-abc123" {
+		t.Fatalf("expected the observed stamp to be reported once, got %+v", observed)
+	}
+	if len(observedPresent) != 1 || !observedPresent[0] {
+		t.Fatalf("expected the stamp to be reported present, got %+v", observedPresent)
+	}
+}
+
+// TestPollPlayerStatus_ReportsAbsentStampWhenOmitted pins "absent stamp =
+// source unavailable": an old player's response (no stamp field) must still
+// notify the observer, with present=false and an empty string, not skip the
+// call — playersession relies on present (not the empty string alone) to
+// distinguish "old player, source unavailable" from "new player whose
+// document genuinely carries no stamp yet".
+func TestPollPlayerStatus_ReportsAbsentStampWhenOmitted(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok": true,
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	var observed []string
+	var observedPresent []bool
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+		stampObserver: func(stamp string, present bool) {
+			observed = append(observed, stamp)
+			observedPresent = append(observedPresent, present)
+		},
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if len(observed) != 1 || observed[0] != "" {
+		t.Fatalf("expected one empty-stamp report for an old player, got %+v", observed)
+	}
+	if len(observedPresent) != 1 || observedPresent[0] {
+		t.Fatalf("expected the stamp to be reported absent, got %+v", observedPresent)
+	}
+}
+
+func TestSetStampObserver_Wires(t *testing.T) {
+	p := NewPoller(&fakeCDP{}, &fakeRelayer{}, &fakeWS{}, nil, nil, wrapper.NewJSON(), zap.NewNop())
+	called := false
+	p.SetStampObserver(func(string, bool) { called = true })
+	// Reach into the concrete type only to confirm wiring; behavior is
+	// covered end-to-end by the two tests above.
+	pp, ok := p.(*poller)
+	if !ok {
+		t.Fatalf("expected *poller, got %T", p)
+	}
+	if pp.stampObserver == nil {
+		t.Fatal("expected stampObserver to be set")
+	}
+	pp.stampObserver("x", true)
+	if !called {
+		t.Fatal("expected the wired observer to be invoked")
 	}
 }
 
@@ -404,6 +606,11 @@ type fakePanelDDC struct {
 	// refreshes the display fingerprint as a side effect, so the poller must
 	// call it every round even when the no-display gate skips the poll.
 	shouldPollCalls int
+	// shouldPollSeq scripts individual ShouldPoll answers (consumed in order,
+	// then falling back to !noPoll) so a single pollDDCStatus call can see the
+	// gate open and the post-collect verdict still closed, the way a failed
+	// reprobe of an unsupported panel does.
+	shouldPollSeq []bool
 }
 
 func (f *fakePanelDDC) CollectStatus(ctx context.Context) (*ddc.DdcPanelStatus, error) {
@@ -419,6 +626,11 @@ func (f *fakePanelDDC) ApplyControl(context.Context, ddc.DdcPanelAction, json.Ra
 
 func (f *fakePanelDDC) ShouldPoll() bool {
 	f.shouldPollCalls++
+	if len(f.shouldPollSeq) > 0 {
+		v := f.shouldPollSeq[0]
+		f.shouldPollSeq = f.shouldPollSeq[1:]
+		return v
+	}
 	return !f.noPoll
 }
 func (f *fakePanelDDC) Generation() uint64 { return 0 }
@@ -621,6 +833,62 @@ func TestPollDDCStatus_PollsAgainOnceDisplayConnects(t *testing.T) {
 	}
 }
 
+// TestPollDDCStatus_FailedReprobeSendsSteadyUnsupportedPayload pins the wire
+// contract for the powered-off-monitor steady state: a reprobe round whose
+// collect still fails against an unchanged tracker verdict (ShouldPoll stays
+// false afterwards) must push the SAME "display does not support DDC/CI"
+// payload the skip rounds push. Pre-fix it pushed the raw per-field ddcutil
+// errors, so skip rounds and reprobe rounds alternated payloads under the
+// per-type dedup hash and the relayer received BOTH payloads every reprobe
+// lease, forever, while a monitor was merely powered off.
+func TestPollDDCStatus_FailedReprobeSendsSteadyUnsupportedPayload(t *testing.T) {
+	fakeDDC := &fakePanelDDC{
+		status: &ddc.DdcPanelStatus{
+			Errors: map[string]string{"power": "No displays implementing DDC/CI found: exit status 1"},
+		},
+		// Reprobe round: gate open, then still-unsupported after the failed
+		// collect. Every later round takes the noPoll skip path.
+		shouldPollSeq: []bool{true, false},
+		noPoll:        true,
+	}
+	fRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	fWS := &fakeWS{}
+	p := &poller{
+		relayer:                 fRelayer,
+		ws:                      fWS,
+		panelDDC:                fakeDDC,
+		displayConnected:        func() bool { return true },
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	// The failed reprobe round must send the steady unsupported payload, not
+	// the raw error fields.
+	p.pollDDCStatus(context.Background())
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected the failed reprobe to send one notification, got %d", fRelayer.sendCalls)
+	}
+	data, ok := fWS.lastPayload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected websocket payload type %T", fWS.lastPayload)
+	}
+	st, ok := data["message"].(*ddc.DdcPanelStatus)
+	if !ok {
+		t.Fatalf("unexpected notification message type %T", data["message"])
+	}
+	if st.Errors["panel"] != "display does not support DDC/CI" {
+		t.Fatalf("failed reprobe must push the steady unsupported payload, got %+v", st)
+	}
+
+	// A following skip round pushes the identical payload — the dedup hash
+	// must collapse it instead of alternating.
+	p.pollDDCStatus(context.Background())
+	if fRelayer.sendCalls != 1 {
+		t.Fatalf("expected dedup to collapse the skip-round repeat, got %d sends", fRelayer.sendCalls)
+	}
+}
+
 // TestPollDDCStatus_UnsupportedIsQuietSkipWithOneNotification pins the
 // poller's contract with the ddc availability tracker: ShouldPoll()==false
 // means "display has no DDC/CI" — no CollectStatus call, no Error-level log
@@ -656,5 +924,145 @@ func TestPollDDCStatus_UnsupportedIsQuietSkipWithOneNotification(t *testing.T) {
 	if n := observed.Len(); n != 0 {
 		t.Fatalf("expected no Error-level logs for an unsupported display, got %d: %v",
 			n, observed.All())
+	}
+}
+
+// TestPlayerStatus_DefaultDurationRoundTrip guards the checkStatus -> typed
+// unmarshal -> player_status re-marshal bridge for deviceSettings.defaultDuration.
+// PlayerStatus is a typed struct, so any field missing from it is silently
+// dropped between the player and controllers; this is the regression the
+// field addition exists to prevent.
+func TestPlayerStatus_DefaultDurationRoundTrip(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape", "defaultDuration": 600}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	if status.DeviceSettings == nil || status.DeviceSettings.DefaultDuration == nil {
+		t.Fatal("deviceSettings.defaultDuration was dropped on unmarshal")
+	}
+	if *status.DeviceSettings.DefaultDuration != 600 {
+		t.Fatalf("defaultDuration = %v, want 600", *status.DeviceSettings.DefaultDuration)
+	}
+
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if got := ds["defaultDuration"]; got != float64(600) {
+		t.Fatalf("re-marshaled defaultDuration = %v, want 600", got)
+	}
+}
+
+// TestPlayerStatus_DefaultDurationOmittedWhenAbsent ensures current-firmware
+// replies (no defaultDuration) re-marshal without inventing the field.
+func TestPlayerStatus_DefaultDurationOmittedWhenAbsent(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape"}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if _, present := ds["defaultDuration"]; present {
+		t.Fatal("defaultDuration should be omitted when the player did not report one")
+	}
+}
+
+// TestPlayerStatus_TombstoneRoundTrip guards deviceSettings.tombstone across
+// the same checkStatus -> typed unmarshal -> player_status re-marshal bridge.
+// ff-player #255 reports the field; without it here the label renders on the
+// wall but ff-app's On/Off/Timed control has no current value to show.
+func TestPlayerStatus_TombstoneRoundTrip(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape", "tombstone": "on"}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	if status.DeviceSettings == nil || status.DeviceSettings.Tombstone == nil {
+		t.Fatal("deviceSettings.tombstone was dropped on unmarshal")
+	}
+	if *status.DeviceSettings.Tombstone != "on" {
+		t.Fatalf("tombstone = %q, want \"on\"", *status.DeviceSettings.Tombstone)
+	}
+
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if got := ds["tombstone"]; got != "on" {
+		t.Fatalf("re-marshaled tombstone = %v, want \"on\"", got)
+	}
+}
+
+// TestPlayerStatus_TombstoneOmittedWhenAbsent ensures a player that never had
+// a tombstone mode set re-marshals without inventing one — absence is what
+// tells ff-app to show the "timed" fallback rather than a stored choice.
+func TestPlayerStatus_TombstoneOmittedWhenAbsent(t *testing.T) {
+	raw := []byte(`{
+		"ok": true,
+		"index": 0,
+		"deviceSettings": {"scaling": "fit", "orientation": "landscape"}
+	}`)
+
+	var status PlayerStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("unmarshal checkStatus reply: %v", err)
+	}
+	remarshaled, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("re-marshal player status: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(remarshaled, &wire); err != nil {
+		t.Fatalf("parse re-marshaled status: %v", err)
+	}
+	ds, ok := wire["deviceSettings"].(map[string]any)
+	if !ok {
+		t.Fatal("deviceSettings missing from re-marshaled status")
+	}
+	if _, present := ds["tombstone"]; present {
+		t.Fatal("tombstone should be omitted when the player did not report one")
 	}
 }

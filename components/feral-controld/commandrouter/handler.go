@@ -2,6 +2,7 @@ package commandrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
@@ -11,6 +12,9 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
 	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
+	"github.com/feral-file/ffos-user/components/feral-controld/playerresponse"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -27,7 +31,84 @@ type handler struct {
 	json         wrapper.JSON
 	statusPoller status.Poller
 	mintPairing  mintpairing.Service
+	scheduler    playlistschedule.Scheduler
 	logger       *zap.Logger
+
+	// sessionGeneration, when set (SetSessionGeneration), is
+	// playersession.Session.Generation narrowed to a func() uint64 seam
+	// (design doc §4). nil reads as generation 0 always, which never
+	// appears to move.
+	sessionGeneration func() uint64
+
+	// recoverySession, when set (SetRecoverySession), is the
+	// playersession.Session the refreshArtwork recovery escalation (§3)
+	// drives via NavigateHomeInline — the caller here holds no external lock
+	// while calling it (:267 is outside every WithPlayerPush closure and gate.go
+	// has no mutex), which is exactly Inline's synchronous-reply
+	// contract. nil (tests, a build wired before Phase 2b) makes the
+	// escalation a no-op, degrading to the pre-existing error return.
+	recoverySession RecoverySession
+}
+
+// RecoverySession is the narrow slice of playersession.Session the relayer's
+// refreshArtwork recovery path needs. Consumer-owned, mirroring
+// setupui.NavigationSession and devicectl.BootRecoverySession;
+// *playersession.Session satisfies it.
+type RecoverySession interface {
+	NavigateHomeInline(opts playersession.NavOptions) error
+}
+
+// ErrGenerationRace marks sendCDPRequest's generation re-check failure:
+// the send itself succeeded, but the page generation moved while the
+// reply was in flight, so the reply cannot be trusted as describing the
+// current document. errors.Is-able so the refreshArtwork recovery
+// escalation below can EXCLUDE it: a healthy page racing an unrelated
+// generation change (a connectivity reconciler bump, a stamp-mismatch
+// bump, ...) is not evidence the page is broken, and escalating it into
+// NavigateHomeInline({PurgeCache:true}) would be a visible, unwarranted
+// restart. The caller retries instead, per the re-check's stated purpose.
+var ErrGenerationRace = errors.New("commandrouter: command reply raced a page generation change")
+
+// SetRecoverySession injects the session the refreshArtwork recovery
+// escalation drives against, if h supports it (the concrete *handler built
+// by New — NOT the storm-protection gate wrapper, mirroring
+// SetSessionGeneration's contract).
+func SetRecoverySession(h Handler, sess RecoverySession, logger *zap.Logger) {
+	setter, ok := h.(interface{ setRecoverySession(RecoverySession) })
+	if !ok {
+		logger.Warn("Command handler does not support recovery session wiring")
+		return
+	}
+	setter.setRecoverySession(sess)
+}
+
+func (h *handler) setRecoverySession(sess RecoverySession) {
+	h.recoverySession = sess
+}
+
+// SetSessionGeneration injects the generation-getter seam onto h, if h
+// supports it (the concrete *handler built by New — NOT the storm-protection
+// gate wrapper, so callers must wire it against the raw handler before
+// NewGate wraps it). logger.Warn's on a handler that does not support it
+// rather than panicking, mirroring devicectl.SetSessionGeneration.
+func SetSessionGeneration(h Handler, fn func() uint64, logger *zap.Logger) {
+	setter, ok := h.(interface{ setSessionGeneration(func() uint64) })
+	if !ok {
+		logger.Warn("Command handler does not support session generation re-check")
+		return
+	}
+	setter.setSessionGeneration(fn)
+}
+
+func (h *handler) setSessionGeneration(fn func() uint64) {
+	h.sessionGeneration = fn
+}
+
+func (h *handler) currentGeneration() uint64 {
+	if h.sessionGeneration == nil {
+		return 0
+	}
+	return h.sessionGeneration()
 }
 
 func New(
@@ -36,6 +117,7 @@ func New(
 	dp1 dp1.DP1,
 	statusPoller status.Poller,
 	mintPairing mintpairing.Service,
+	scheduler playlistschedule.Scheduler,
 	json wrapper.JSON,
 	logger *zap.Logger,
 ) Handler {
@@ -45,6 +127,7 @@ func New(
 		dp1:          dp1,
 		statusPoller: statusPoller,
 		mintPairing:  mintPairing,
+		scheduler:    scheduler,
 		json:         json,
 		logger:       logger,
 	}
@@ -118,6 +201,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 		return result, nil
 	} else {
 		var playlist *dp1.Playlist
+		var schedulerSnapshot playlistschedule.Snapshot
+		var schedulerSource playlistschedule.Source
 		if commandType == commands.CMD_DISPLAY_PLAYLIST {
 			status.RecordPlaybackAttempt()
 			defer func() {
@@ -126,7 +211,7 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return
 				}
 				h.logger.Info("result from CDP", zap.Any("result", result))
-				if !isPlayerResponseOk(result) {
+				if !playerresponse.OK(result) {
 					h.logger.Warn("Playback verification failed: player did not respond with ok")
 					status.RecordPlaybackFailure()
 				}
@@ -138,10 +223,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 					return nil, fmt.Errorf("playlistUrl is not a string or empty")
 				}
 
-				playlist, err = h.dp1.ProcessPlaylistURL(ctx, url, true)
+				playlist, err = h.dp1.ProcessPlaylistURLForCast(ctx, url)
 				if err != nil {
 					return nil, err
 				}
+				schedulerSource = playlistschedule.Source{PlaylistURL: url}
 
 			case command.Arguments["dp1_call"] != nil:
 				playlistMap, ok := command.Arguments["dp1_call"].(map[string]interface{})
@@ -160,7 +246,8 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				}
 
 				if playlist.HasDynamicContent() {
-					playlist, err = h.dp1.ProcessDynamicPlaylist(ctx, *playlist, true)
+					schedulerSource = playlistschedule.Source{DynamicPlaylist: playlist}
+					playlist, err = h.dp1.ProcessDynamicPlaylistForCast(ctx, *playlist)
 					if err != nil {
 						h.logger.Error("Failed to process dynamic playlist", zap.Error(err))
 						return nil, err
@@ -171,7 +258,11 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 				return nil, fmt.Errorf("unknown payload type")
 			}
 
-			command.Arguments["dp1_call"] = playlist
+			// Player CanvasService rejects displayPlaylist without a known
+			// intent.action ("Unknown DP1 action: undefined" → ok:false).
+			// Controller casts are force-display, same contract as
+			// playlistschedule push (now_display, never soft refresh).
+			ensureDisplayPlaylistIntent(command.Arguments)
 
 		}
 
@@ -182,10 +273,104 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 			}
 		}
 
-		// Forward to CDP (final, full data)
-		result, err = h.sendCDPRequest(command)
+		// Forward to CDP. displayPlaylist and displayDefaultPlaylist share the
+		// scheduler push lock with RecomputeNow so a stale timed push cannot land
+		// after a newer cast or OOM-recovery fallback.
+		// displayDefaultPlaylist is player-owned fallback today; it may no-op
+		// successfully, so this path must not clear scheduler authority until
+		// controld can prove that default playback replaced the current playlist.
+		switch {
+		case commandType == commands.CMD_DISPLAY_PLAYLIST && h.scheduler != nil:
+			h.scheduler.WithPlayerPush(func() {
+				schedulerSnapshot = h.scheduler.Snapshot()
+				// Filter displayAt playlists to the active set before the player
+				// sees them. The scheduler keeps the full list for timer/wake updates.
+				playlist = h.scheduler.PrepareWithSource(playlist, schedulerSource)
+				if playlist == nil {
+					err = fmt.Errorf("playlist has invalid displayAt")
+					h.scheduler.Restore(schedulerSnapshot)
+					return
+				}
+				if len(playlist.Items) == 0 {
+					// The scheduler retained and armed the future schedule; the
+					// player rejects an empty displayPlaylist, so leave its current
+					// artwork in place until a cohort becomes eligible.
+					h.scheduler.Commit()
+					// A relayer RPC and hub request both need an explicit acceptance
+					// response even though no CDP write was valid. This also prevents
+					// playback metrics from treating the deferred schedule as a failure.
+					result = map[string]interface{}{
+						"message": map[string]interface{}{"ok": true, "deferred": true},
+					}
+					return
+				}
+				command.Arguments["dp1_call"] = playlist
+				result, err = h.sendCDPRequest(command)
+				if err != nil || !playerresponse.OK(result) {
+					h.scheduler.Restore(schedulerSnapshot)
+				} else {
+					h.scheduler.Commit()
+				}
+			})
+		case commandType == commands.CMD_DISPLAY_DEFAULT_PLAYLIST && h.scheduler != nil:
+			h.scheduler.WithPlayerPush(func() {
+				result, err = h.sendCDPRequest(command)
+			})
+		default:
+			if commandType == commands.CMD_DISPLAY_PLAYLIST {
+				command.Arguments["dp1_call"] = playlist
+			}
+			result, err = h.sendCDPRequest(command)
+		}
 		if err != nil {
-			return nil, err
+			// No restore-on-error here: every CMD_DISPLAY_PLAYLIST failure path
+			// above already calls scheduler.Restore before returning from the
+			// WithPlayerPush closure, so there is nothing left to undo by the
+			// time control reaches this point. That is also load-bearing, not
+			// just a redundancy removal — a restore here would run outside
+			// pushMu, violating the scheduler's documented pushMu-before-mu lock
+			// ordering (Restore must run under the same push lock as the failed
+			// send it is undoing).
+			//
+			// refreshArtwork's evaluate needs a live player page
+			// (window.handleCDPRequest), but a refresh is most needed exactly
+			// when the page is broken — e.g. Chromium serving stale cached
+			// chunks after a player bundle swap (#234), where the app never
+			// boots. The cache was already cleared above; the recovery
+			// primitive is navigate-to-entry (design doc §3), never
+			// reload-in-place — the static export is flat files only, so a
+			// client-route reload 404s. NavigateHomeInline runs its own gates
+			// (sleep/error-page/overlay) synchronously and reports a
+			// SYNCHRONOUS error, which is exactly what this caller needs: it
+			// holds no external lock (:267 is outside every WithPlayerPush
+			// closure and gate.go has no mutex), so Inline's bounded wait
+			// cannot deadlock it. Only when the escalation itself fails (or no
+			// session is wired) is the command truly dead.
+			if commandType != commands.CMD_REFRESH_ARTWORK {
+				return nil, err
+			}
+			// A generation-race failure means the send itself worked but
+			// raced an unrelated page change — not evidence of a broken page.
+			// Escalating it into a destructive navigate would visibly restart
+			// a healthy page for no reason; the caller retries instead.
+			if errors.Is(err, ErrGenerationRace) {
+				return nil, err
+			}
+			if h.recoverySession == nil {
+				return nil, err
+			}
+			if navErr := h.recoverySession.NavigateHomeInline(playersession.NavOptions{PurgeCache: true}); navErr != nil {
+				return nil, err
+			}
+			h.logger.Warn("refreshArtwork: player page unresponsive; recovered with cache clear + navigate", zap.Error(err))
+			err = nil
+			// "navigate" replaces the old "recovered":"reload" value — the
+			// relayer/app consumer only reads `ok` from this reply (verified:
+			// no in-repo consumer parses `recovered`), so this is a diagnostic
+			// label, not a wire contract change.
+			result = map[string]interface{}{
+				"message": map[string]interface{}{"ok": true, "recovered": "navigate"},
+			}
 		}
 
 		// Force refresh status poller
@@ -197,19 +382,25 @@ func (h *handler) Process(ctx context.Context, command commands.Command) (interf
 	}
 }
 
-// isPlayerResponseOk checks whether the CDP result from the player
-// contains { "message": { "ok": true } }.
-func isPlayerResponseOk(result interface{}) bool {
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		return false
+// ensureDisplayPlaylistIntent sets intent.action=now_display when the cast
+// request has no action yet. Controllers historically send only playlistUrl /
+// dp1_call; the player still requires a known DP1 action. Soft refresh keeps
+// its own path (playlist-refresher sets refresh:true and does not use this
+// helper). An explicit controller intent is preserved.
+func ensureDisplayPlaylistIntent(args map[string]interface{}) {
+	if args == nil {
+		return
 	}
-	msg, ok := m["message"].(map[string]interface{})
-	if !ok {
-		return false
+	if intent, ok := args["intent"].(map[string]interface{}); ok {
+		if action, _ := intent["action"].(string); action != "" {
+			return
+		}
+		intent["action"] = "now_display"
+		return
 	}
-	okVal, _ := msg["ok"].(bool)
-	return okVal
+	args["intent"] = map[string]interface{}{
+		"action": "now_display",
+	}
 }
 
 // sendCDPRequest marshals payload and sends to CDP
@@ -220,12 +411,25 @@ func (h *handler) sendCDPRequest(command commands.Command) (interface{}, error) 
 		return nil, err
 	}
 
+	genBefore := h.currentGeneration()
 	result, err := h.cdp.Send(cdp.METHOD_EVALUATE, map[string]interface{}{
 		"expression": fmt.Sprintf("window.handleCDPRequest(%s)", string(p)),
 	})
 	if err != nil {
 		h.logger.Error("Failed to send CDP request", zap.Error(err))
 		return nil, err
+	}
+
+	// Generation re-check (design doc §4): unlike devicectl's sleep apply,
+	// a command reply answered by a document that is no longer current is not
+	// something the relayer/hub caller can safely trust as "delivered" — a
+	// cast or control command silently landing on (or being silently
+	// swallowed by) a torn-down page must surface loudly rather than report
+	// success, so the caller retries instead of believing a phantom ACK.
+	if genAfter := h.currentGeneration(); genAfter != genBefore {
+		h.logger.Warn("CDP request reply raced a page generation change; reporting failure",
+			zap.Uint64("generation_before", genBefore), zap.Uint64("generation_after", genAfter))
+		return nil, fmt.Errorf("command reply raced a page navigation (generation changed from %d to %d); retry: %w", genBefore, genAfter, ErrGenerationRace)
 	}
 
 	return result, nil

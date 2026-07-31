@@ -7,9 +7,10 @@ package mocks
 import (
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
-
 	mdns "github.com/feral-file/ffos-user/components/feral-controld/mdns"
+	playersession "github.com/feral-file/ffos-user/components/feral-controld/playersession"
+	status "github.com/feral-file/ffos-user/components/feral-controld/status"
+	gomock "github.com/golang/mock/gomock"
 )
 
 // MockMediator is a mock of Mediator interface.
@@ -36,15 +37,63 @@ func (m *MockMediator) EXPECT() *MockMediatorMockRecorder {
 }
 
 // InitializeMDNS mocks base method.
-func (m *MockMediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, internetConnected bool) {
+func (m *MockMediator) InitializeMDNS(advertiser mdns.Advertiser, info mdns.DeviceInfo, link status.LinkState) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "InitializeMDNS", advertiser, info, internetConnected)
+	m.ctrl.Call(m, "InitializeMDNS", advertiser, info, link)
 }
 
 // InitializeMDNS indicates an expected call of InitializeMDNS.
-func (mr *MockMediatorMockRecorder) InitializeMDNS(advertiser, info, internetConnected interface{}) *gomock.Call {
+func (mr *MockMediatorMockRecorder) InitializeMDNS(advertiser, info, link interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InitializeMDNS", reflect.TypeOf((*MockMediator)(nil).InitializeMDNS), advertiser, info, internetConnected)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InitializeMDNS", reflect.TypeOf((*MockMediator)(nil).InitializeMDNS), advertiser, info, link)
+}
+
+// SetClaimed mocks base method.
+func (m *MockMediator) SetClaimed(claimed bool) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetClaimed", claimed)
+}
+
+// SetClaimed indicates an expected call of SetClaimed.
+func (mr *MockMediatorMockRecorder) SetClaimed(claimed interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimed", reflect.TypeOf((*MockMediator)(nil).SetClaimed), claimed)
+}
+
+// SetConnectivityPushHook mocks base method.
+func (m *MockMediator) SetConnectivityPushHook(fn func()) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetConnectivityPushHook", fn)
+}
+
+// SetConnectivityPushHook indicates an expected call of SetConnectivityPushHook.
+func (mr *MockMediatorMockRecorder) SetConnectivityPushHook(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetConnectivityPushHook", reflect.TypeOf((*MockMediator)(nil).SetConnectivityPushHook), fn)
+}
+
+// SetSession mocks base method.
+func (m *MockMediator) SetSession(session *playersession.Session) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSession", session)
+}
+
+// SetSession indicates an expected call of SetSession.
+func (mr *MockMediatorMockRecorder) SetSession(session interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSession", reflect.TypeOf((*MockMediator)(nil).SetSession), session)
+}
+
+// SetTopicObserver mocks base method.
+func (m *MockMediator) SetTopicObserver(observer func()) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetTopicObserver", observer)
+}
+
+// SetTopicObserver indicates an expected call of SetTopicObserver.
+func (mr *MockMediatorMockRecorder) SetTopicObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetTopicObserver", reflect.TypeOf((*MockMediator)(nil).SetTopicObserver), observer)
 }
 
 // Start mocks base method.

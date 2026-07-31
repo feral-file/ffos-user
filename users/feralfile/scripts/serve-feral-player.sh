@@ -8,10 +8,60 @@ readonly FF_PLAYER_READY_TIMEOUT_SECONDS="${FF_PLAYER_READY_TIMEOUT_SECONDS:-30}
 readonly FF_PLAYER_READY_POLL_SECONDS="${FF_PLAYER_READY_POLL_SECONDS:-1}"
 readonly FF_PLAYER_CONTRACT_FILE="${FF_PLAYER_ROOT}/ffos-player-contract.json"
 readonly FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT="${FF_PLAYER_REQUIRE_MINT_PAIRING_CONTRACT:-0}"
+readonly FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT="${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT:-1}"
 
 require_binary() {
 	if ! command -v "$1" >/dev/null 2>&1; then
 		echo "serve-feral-player: required binary not found: $1" >&2
+		exit 1
+	fi
+}
+
+# SoftAP onboarding narrates entirely through the player's setupDisplay CDP
+# contract (soft-AP QR, join feedback, claim QR). controld deliberately degrades
+# to narration-disabled when the bundle lacks it, so without this gate a bad
+# bundle reaches READY and a fresh offline device sits with no displayed setup
+# credentials. Default-required for exactly that reason (unlike the optional
+# mint-pairing gate below); FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT=0 is the
+# dev/legacy-bundle escape hatch. The checks mirror
+# setupui.validateSetupDisplayContract — keep the two in sync.
+validate_setup_display_contract() {
+	if [[ "${FF_PLAYER_REQUIRE_SETUP_DISPLAY_CONTRACT}" != "1" ]]; then
+		return 0
+	fi
+
+	if [[ ! -f "${FF_PLAYER_CONTRACT_FILE}" ]]; then
+		echo "serve-feral-player: missing player contract manifest at ${FF_PLAYER_CONTRACT_FILE}" >&2
+		exit 1
+	fi
+
+	require_binary python3
+	if ! python3 - "${FF_PLAYER_CONTRACT_FILE}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+required_states = {"softap_qr", "joining", "join_failed", "updating", "claim_qr", "ready", "hidden"}
+
+with open(path, encoding="utf-8") as fh:
+    manifest = json.load(fh)
+
+contract = manifest.get("contracts", {}).get("setupDisplay")
+if not isinstance(contract, dict):
+    raise SystemExit("missing contracts.setupDisplay")
+if contract.get("version") != 1:
+    raise SystemExit("contracts.setupDisplay.version must be 1")
+if contract.get("requestKey") != "request":
+    raise SystemExit('contracts.setupDisplay.requestKey must be "request"')
+states = contract.get("states")
+if not isinstance(states, list) or not required_states.issubset(set(states)):
+    raise SystemExit("contracts.setupDisplay.states missing required states")
+accepted = contract.get("acceptedResponse")
+if not isinstance(accepted, dict) or accepted.get("ok") is not True:
+    raise SystemExit("contracts.setupDisplay.acceptedResponse.ok must be true")
+PY
+	then
+		echo "serve-feral-player: invalid setupDisplay player contract at ${FF_PLAYER_CONTRACT_FILE}" >&2
 		exit 1
 	fi
 }
@@ -63,13 +113,63 @@ start_server() {
 		exit 1
 	fi
 
+	validate_setup_display_contract
 	validate_player_contract
 
 	require_binary darkhttpd
 	require_binary curl
 	require_binary systemd-notify
 
-	darkhttpd "${FF_PLAYER_ROOT}" --port "${FF_PLAYER_PORT}" --addr 127.0.0.1 &
+	# darkhttpd emits no Cache-Control headers on its own, so Chromium
+	# heuristically caches the route HTML and even negative (404) responses —
+	# stale entries that outlive bundle swaps and reboots (#234). A single
+	# global no-cache forces revalidation on every use (loopback 304s via
+	# If-Modified-Since, effectively free) and darkhttpd applies custom
+	# headers to error responses too, so a 404 captured mid-swap cannot
+	# poison later loads of a live Chromium session — the one window the
+	# kiosk-side bundle-fingerprint purge cannot close (it only runs between
+	# Chromium instances). Per-path policy (immutable _next/static, no-cache
+	# HTML) is not expressible with darkhttpd; global no-cache is the safe
+	# degradation. Probe for --header support instead of assuming it: an
+	# older binary must degrade to headerless serving (the fingerprint purge
+	# still covers bundle changes), not die in a flag-error restart loop.
+	# ${arr[@]+...} keeps the empty-array expansion safe under `set -u` on
+	# bash < 4.4 (macOS test harness).
+	# The no-arg usage dump MAY exit non-zero (1.17 measures 0; other
+	# builds differ — assume neither). Under `set -e` an unguarded
+	# `var=$(darkhttpd 2>&1)` aborts the script at this line — the
+	# unit would die before ever starting the server and Restart=on-failure
+	# would loop it. `|| true` is what keeps the probe non-fatal; do not
+	# remove it. The match is anchored so a hypothetical --no-header (or a
+	# mention in prose) cannot false-positive into passing an unknown flag,
+	# which would exit darkhttpd and restart-loop the unit.
+	# A misbehaving darkhttpd wrapper/shim on PATH (or a build that blocks
+	# instead of exiting on a bad invocation) could hang this probe
+	# indefinitely, keeping the unit from ever reaching systemd-notify --ready
+	# and tripping the service manager's start timeout instead of failing fast
+	# here. `timeout 5` bounds the wait; the real no-arg usage dump is
+	# near-instant, so 5s is generous, not tight. Only wrapped when `timeout`
+	# is on PATH — the production image (Debian, systemd) always ships GNU
+	# coreutils, but dev/macOS commonly does not, and an unguarded probe there
+	# only weakens the local test path, not the deployed one.
+	local darkhttpd_usage
+	if command -v timeout >/dev/null 2>&1; then
+		darkhttpd_usage=$(timeout 5 darkhttpd 2>&1 || true)
+	else
+		darkhttpd_usage=$(darkhttpd 2>&1 || true)
+	fi
+	local -a cache_header_args=()
+	if grep -Eq -- '(^|[^-[:alnum:]])--header([[:space:]]|$)' <<<"$darkhttpd_usage"; then
+		cache_header_args=(--header 'Cache-Control: no-cache')
+	else
+		# Degrading silently would make "is the #234 header mitigation
+		# active?" unanswerable from the journal; the fingerprint purge in
+		# start-kiosk.sh is then the only remaining defense.
+		echo "serve-feral-player: darkhttpd has no --header support; serving without Cache-Control (see #234)" >&2
+	fi
+
+	darkhttpd "${FF_PLAYER_ROOT}" --port "${FF_PLAYER_PORT}" --addr 127.0.0.1 \
+		${cache_header_args[@]+"${cache_header_args[@]}"} &
 	server_pid=$!
 }
 

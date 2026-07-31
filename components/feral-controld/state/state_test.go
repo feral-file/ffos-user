@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
@@ -169,6 +170,47 @@ func TestStateManager_Load_Success_EmptyFile(t *testing.T) {
 	assert.NotNil(t, result)
 	assert.Empty(t, result.ConnectedDevice.ID)
 	assert.Empty(t, result.Relayer.TopicID)
+}
+
+// TestStateManager_Load_FileNotExists_GetStateReturnsSameObject is the
+// fresh-boot identity regression: before this fix, only the successful
+// unmarshal branch assigned m.state, so a fresh-boot Load (file does not
+// exist — the overwhelmingly common case) left it nil, and a later GetState()
+// call built a SECOND, independent empty State. Callers like main
+// (state.Load at startup) and the mediator (state.GetState() on every
+// relayer system message) would then silently diverge onto two different
+// objects whose mutations were invisible to each other.
+func TestStateManager_Load_FileNotExists_GetStateReturnsSameObject(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	notFoundErr := &os.PathError{Op: "open", Path: constants.STATE_FILE, Err: os.ErrNotExist}
+	ts.mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+	ts.mockOS.EXPECT().ReadFile(gomock.Any()).Return(nil, notFoundErr).Times(1)
+	ts.mockOS.EXPECT().IsNotExist(notFoundErr).Return(true).Times(1)
+
+	loaded, err := ts.sm.Load(ts.logger)
+	assert.NoError(t, err)
+
+	got := ts.sm.GetState()
+	assert.Same(t, loaded, got, "GetState() must return the SAME object Load() handed its caller")
+}
+
+// TestStateManager_Load_EmptyFile_GetStateReturnsSameObject is the empty-file
+// counterpart of the identity regression above.
+func TestStateManager_Load_EmptyFile_GetStateReturnsSameObject(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+	ts.mockOS.EXPECT().ReadFile(gomock.Any()).Return([]byte{}, nil).Times(1)
+	ts.mockOS.EXPECT().IsNotExist(nil).Return(false).Times(1)
+
+	loaded, err := ts.sm.Load(ts.logger)
+	assert.NoError(t, err)
+
+	got := ts.sm.GetState()
+	assert.Same(t, loaded, got, "GetState() must return the SAME object Load() handed its caller")
 }
 
 func TestStateManager_Load_Errors(t *testing.T) {
@@ -1120,4 +1162,212 @@ func TestRelayerState_IsReady(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// --- claim accessors (ClaimSnapshot / SetConnectedDevice / ClearClaim /
+// SetRelayerTopicID) ---------------------------------------------------------
+
+// anyWriteExpectations wires the mocks for however many saveLocked calls a
+// test drives, without pinning an exact count — the accessor tests below care
+// about the observable claim state and error propagation, not the write
+// count.
+func anyWriteExpectations(ts *testSetup) {
+	ts.mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	ts.mockJSON.EXPECT().Marshal(gomock.Any()).Return([]byte(`{}`), nil).AnyTimes()
+	ts.mockOS.EXPECT().WriteFile(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	ts.mockOS.EXPECT().Rename(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+}
+
+func TestStateManager_SetConnectedDevice_PersistsAndReflectsInSnapshot(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	anyWriteExpectations(ts)
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+
+	err := sm.SetConnectedDevice(state.Device{ID: "phone-1", Name: "Phone", Platform: 1})
+	assert.NoError(t, err)
+
+	snap := sm.ClaimSnapshot()
+	assert.True(t, snap.Claimed)
+	assert.Equal(t, "phone-1", snap.DeviceID)
+	assert.Equal(t, "Phone", snap.DeviceName)
+
+	got := sm.GetState()
+	assert.Equal(t, "phone-1", got.ConnectedDevice.ID)
+}
+
+func TestStateManager_SetConnectedDevice_SaveErrorPropagates(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	ts.mockOS.EXPECT().MkdirAll(gomock.Any(), gomock.Any()).Return(fmt.Errorf("disk full")).Times(1)
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+	err := sm.SetConnectedDevice(state.Device{ID: "phone-1"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to create state directory")
+}
+
+func TestStateManager_ClearClaim_NoopWhenNothingPersisted(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	// No write-path expectations: a no-op must not touch the filesystem.
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+	changed, err := sm.ClearClaim()
+	assert.False(t, changed)
+	assert.NoError(t, err)
+}
+
+func TestStateManager_ClearClaim_ClearsTopicAndDevice(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	anyWriteExpectations(ts)
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+	assert.NoError(t, sm.SetConnectedDevice(state.Device{ID: "phone-1", Name: "Phone"}))
+	if _, err := sm.SetRelayerTopicID("topic-1"); err != nil {
+		t.Fatalf("SetRelayerTopicID: %v", err)
+	}
+
+	changed, err := sm.ClearClaim()
+	assert.True(t, changed)
+	assert.NoError(t, err)
+
+	snap := sm.ClaimSnapshot()
+	assert.False(t, snap.Claimed)
+	assert.Empty(t, snap.DeviceID)
+	assert.Empty(t, snap.TopicID)
+	assert.False(t, snap.TopicReady)
+}
+
+func TestStateManager_SetRelayerTopicID_ReportsFirstAssignmentEdge(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	anyWriteExpectations(ts)
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+
+	// Factory-fresh: no topic persisted yet, so this is the first-assignment
+	// edge the mediator's topicObserver fires on.
+	hadTopicBefore, err := sm.SetRelayerTopicID("topic-1")
+	assert.NoError(t, err)
+	assert.False(t, hadTopicBefore, "first assignment must report hadTopicBefore=false")
+
+	snap := sm.ClaimSnapshot()
+	assert.Equal(t, "topic-1", snap.TopicID)
+	assert.True(t, snap.TopicReady)
+
+	// A rotation on an already-claimed topic must NOT report the edge again.
+	hadTopicBefore, err = sm.SetRelayerTopicID("topic-2")
+	assert.NoError(t, err)
+	assert.True(t, hadTopicBefore, "topic rotation must report hadTopicBefore=true")
+	assert.Equal(t, "topic-2", sm.ClaimSnapshot().TopicID)
+}
+
+func TestStateManager_ClaimSnapshot_EmptyState(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+	snap := sm.ClaimSnapshot()
+	assert.False(t, snap.Claimed)
+	assert.Empty(t, snap.DeviceID)
+	assert.Empty(t, snap.TopicID)
+	assert.False(t, snap.TopicReady)
+}
+
+// TestStateManager_Race_ClearClaimVsClaimSnapshot mirrors the startup OTA
+// gate's mid-backoff re-check racing a factory reset's ClearClaim: -race must
+// stay clean, and every snapshot the reader observes must be internally
+// consistent (Claimed can never disagree with DeviceID being non-empty) —
+// exactly the guarantee ClaimSnapshot's single-lock-acquisition read exists
+// to provide over two separate GetState() field reads.
+func TestStateManager_Race_ClearClaimVsClaimSnapshot(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	anyWriteExpectations(ts)
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+	assert.NoError(t, sm.SetConnectedDevice(state.Device{ID: "phone-1", Name: "Phone"}))
+	if _, err := sm.SetRelayerTopicID("topic-1"); err != nil {
+		t.Fatalf("SetRelayerTopicID: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var readerWG sync.WaitGroup
+	readerWG.Add(1)
+	go func() {
+		defer readerWG.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			snap := sm.ClaimSnapshot()
+			if snap.Claimed != (snap.DeviceID != "") {
+				t.Errorf("inconsistent snapshot: Claimed=%v DeviceID=%q", snap.Claimed, snap.DeviceID)
+			}
+			if snap.TopicReady != (snap.TopicID != "") {
+				t.Errorf("inconsistent snapshot: TopicReady=%v TopicID=%q", snap.TopicReady, snap.TopicID)
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		if _, err := sm.ClearClaim(); err != nil {
+			t.Errorf("ClearClaim: %v", err)
+		}
+	}
+
+	close(stop)
+	readerWG.Wait()
+}
+
+// TestStateManager_Race_ClearClaimVsConcurrentStatusReads mirrors several
+// concurrent hub /api/status handlers reading the claim snapshot while a
+// factory reset clears it — the multi-reader counterpart of the race test
+// above. The writer keeps re-seeding a claim after each clear so the race
+// window stays "hot" (a claimed→cleared→claimed churn) for the whole run.
+func TestStateManager_Race_ClearClaimVsConcurrentStatusReads(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	anyWriteExpectations(ts)
+
+	sm := state.NewStateManagerWithDeps(ts.mockOS, ts.mockJSON)
+
+	const numReaders = 8
+	stop := make(chan struct{})
+	var readerWG sync.WaitGroup
+	for i := 0; i < numReaders; i++ {
+		readerWG.Add(1)
+		go func() {
+			defer readerWG.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				snap := sm.ClaimSnapshot()
+				if snap.Claimed != (snap.DeviceID != "") {
+					t.Errorf("inconsistent snapshot: Claimed=%v DeviceID=%q", snap.Claimed, snap.DeviceID)
+				}
+			}
+		}()
+	}
+
+	for i := 0; i < 200; i++ {
+		if err := sm.SetConnectedDevice(state.Device{ID: "phone-1"}); err != nil {
+			t.Errorf("SetConnectedDevice: %v", err)
+		}
+		if _, err := sm.ClearClaim(); err != nil {
+			t.Errorf("ClearClaim: %v", err)
+		}
+	}
+
+	close(stop)
+	readerWG.Wait()
 }

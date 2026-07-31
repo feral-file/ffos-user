@@ -55,7 +55,19 @@ for relayer topic assignment:
 
 - Device-control commands are handled by the `devicectl` executor.
 - `displayPlaylist` is resolved through DP1 first, then forwarded to Chromium
-  through CDP as `window.handleCDPRequest(...)`.
+  through CDP as `window.handleCDPRequest(...)`. Controld defaults missing CDP
+  `intent.action` to `now_display` so the player accepts the cast. When the
+  playlist contains item-level `displayAt` values, controld filters them to the
+  current active set before CDP, commits only the refreshable source identity to
+  durable cache after the player accepts that filtered cast, keeps the resolved
+  full playlist in memory, and advances the player on the next `displayAt`
+  (timer), sleep-schedule wake, or CDP reconnect with a force cast
+  (`intent.action=now_display`, not `refresh: true`) so cutover is not deferred
+  until the current artwork duration ends. URL / dynamic playlist refresh still
+  uses `refresh: true`, except the first scheduled reconstruction after a
+  controld restart force-casts because scheduler ownership may need to be
+  restored from persisted state. Playlists without item-level `displayAt` are
+  otherwise forwarded unchanged.
 - `startMintPairingSession` and `mintPairingApprovalDecision` are handled by
   `feral-controld` as commandrouter pre-CDP special cases.
 - `refreshArtwork` clears Chromium cache, then forwards to Chromium through
@@ -153,7 +165,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### showPairingQRCode
 
-Purpose: ask `feral-setupd` to show or hide the setup pairing QR code.
+Purpose: show or hide the setup pairing (claim) QR code. Handled in-process by `feral-controld`: `show=true` runs the mandatory pre-claim OTA gate and, on no-update-needed, paints the claim QR through the `setupDisplay` narration contract; `show=false` records the `ready` state before hiding the overlay.
 
 Example:
 
@@ -174,7 +186,6 @@ Current success response: `{"ok": true}`.
 Current error cases:
 
 - Invalid `request.show` shape causes command failure.
-- D-Bus send failure to `feral-setupd` causes command failure.
 
 Current relayer error response: none standardized; command failure is logged.
 
@@ -254,6 +265,39 @@ Current relayer error response: none standardized; command failure is logged.
 ### displayPlaylist
 
 Purpose: display a DP1 playlist on the FF1 player.
+
+When forwarding to Chromium, controld sets `intent.action=now_display` on the
+CDP payload if the controller request did not already include an intent action.
+The player rejects `displayPlaylist` without a known DP1 action
+(`Unknown DP1 action: undefined` → `ok: false`). Soft refresh remains on the
+5-minute URL/dynamic refresher path (`refresh: true`), which does not use this
+cast default.
+
+When the resolved playlist contains item-level `displayAt` values, controld
+computes an active set
+(`max(displayAt <= now)` items plus items without `displayAt`) and sends only
+that filtered playlist to Chromium. Timezone-less `displayAt` values use device
+local time; values with `Z`/offset are absolute. Date-only (`YYYY-MM-DD`) is
+rejected per DP-1 §3.5.2 (not evergreen). If no playlist item has `displayAt`,
+controld forwards the full playlist unchanged. Controld keeps the resolved full
+playlist in memory while casting, persists only its refreshable source identity
+after the player accepts the filtered cast, and uses the in-memory playlist to
+arm the next `displayAt` transition and to recompute after wake or CDP
+reconnect. After a controld-only restart, the refresher must fetch the source
+again before scheduler cutovers resume; if that fetch fails, controld leaves the
+current player artwork alone and retries later. Static inline player status
+contains only the filtered active set and no stable full-playlist identity, so
+controld does not restart-resume a persisted static inline schedule from player
+status alone.
+Initial casts and timed / wake / reconnect pushes are force casts
+(`intent.action=now_display`
+without `refresh`) so the player applies the playlist immediately even if the
+current artwork still has remaining duration; the 5-minute URL/dynamic
+playlist-refresher path continues to use `refresh: true`. The legacy
+`displayDefaultPlaylist` command is forwarded to the player as a player-owned
+fallback and does not clear controld's displayAt cache; with
+`onlyIfNoPlaylist`, a successful response may mean the player no-opped because
+content was already playing.
 
 Playlist URL example:
 
@@ -352,7 +396,9 @@ command failure is logged.
 ### displayDefaultPlaylist
 
 Purpose: tell the player to resume or display its default playlist. This is
-forwarded to Chromium through CDP.
+forwarded to Chromium through CDP as a legacy player-owned fallback. It does
+not clear controld's cached `displayAt` playlist because a successful player
+response does not prove that default playback replaced the current playlist.
 
 Example:
 
@@ -392,12 +438,26 @@ Example:
 }
 ```
 
-Current success response: Chromium/player response.
+Current success response: Chromium/player response — or, when the player page
+is unresponsive, a synthesized `{"message": {"ok": true, "recovered": "navigate"}}`
+(see below).
 
 Current error cases:
 
 - Cache clear failure is logged as a warning and does not stop the command.
-- CDP command forwarding failure causes command failure.
+- CDP page-evaluate failure does NOT fail the command: controld falls back to
+  the `playersession.Session` recovery primitive
+  (`NavigateHomeInline({PurgeCache: true})`) — navigate-to-entry, not
+  reload-in-place: the static export is flat files only, so a client-route
+  reload 404s. A refresh is most needed exactly when the page is broken (e.g.
+  Chromium serving stale cached chunks after a player bundle swap), so cache
+  clear + navigate is the complete recovery, and it runs through the same
+  sleep/error-page/overlay gates every recovery navigation does. The
+  synthesized success response carries `recovered: "navigate"` so controllers
+  can distinguish it from a normal player reply.
+- Only when the navigate escalation also fails (dead CDP connection, or no
+  session wired) does the command fail, surfacing the original evaluate
+  error.
 
 Current relayer error response: none standardized; command failure is logged.
 
@@ -719,7 +779,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### updateToLatestVersion
 
-Purpose: signal `feral-setupd` to show update UI and execute a system update.
+Purpose: run a system update. Handled in-process by `feral-controld`'s OTA gate (`otagate.RequestUpdate`, mode `Available`), which narrates progress and drives the local updater.
 
 Example:
 
@@ -737,13 +797,13 @@ Current success response: `{"ok": true}`.
 
 Current error cases:
 
-- D-Bus send failure to `feral-setupd`.
+- Starting or running the local updater fails.
 
 Current relayer error response: none standardized; command failure is logged.
 
 ### factoryReset
 
-Purpose: signal `feral-setupd` to show reset UI and execute factory reset.
+Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted relayer topic, narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume).
 
 Example:
 
@@ -761,14 +821,20 @@ Current success response: `{"ok": true}`.
 
 Current error cases:
 
-- D-Bus send failure to `feral-setupd`.
+- Starting `set-factory-boot.service` fails.
 
 Current relayer error response: none standardized; command failure is logged.
 
 ### uploadLogs
 
-Purpose: signal `feral-setupd` to upload logs. The optional support bundle id
-uses an additive D-Bus signal.
+Purpose: upload device logs. Handled in-process by `feral-controld` and
+**fire-and-forget** (see [`api-design.md`](api-design.md)): the command
+validates the request, schedules the upload, and ACKs immediately; a detached
+worker then zips the device logs and submits them (JSON pre-sign request to the
+FF1 log-submissions endpoint returning a pre-signed S3 URL, then a PUT of the
+zip), bounded by a 10-minute budget and single-flighted — a duplicate command
+while an upload is running is ACKed and ignored. The optional support bundle id
+is included in the submission request.
 
 Example:
 
@@ -789,12 +855,15 @@ Example:
 
 Current success response: `{"ok": true}`.
 
-Current error cases:
+Current error cases (returned to the caller — only pre-schedule validation can
+fail the command):
 
 - Invalid request shape.
 - Missing `userId`, `apiKey`, or `title`.
-- Bundled upload payload cannot be marshaled.
-- D-Bus send failure to `feral-setupd`.
+
+Failures after the ACK (zipping, obtaining the presigned URL, or uploading the
+zip) are logged on-device by the detached worker and are **not** surfaced to
+the caller.
 
 Current relayer error response: none standardized; command failure is logged.
 

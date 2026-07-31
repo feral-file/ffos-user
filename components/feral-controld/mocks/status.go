@@ -8,9 +8,8 @@ import (
 	context "context"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
-
 	status "github.com/feral-file/ffos-user/components/feral-controld/status"
+	gomock "github.com/golang/mock/gomock"
 )
 
 // MockStatusPoller is a mock of Poller interface.
@@ -63,6 +62,18 @@ func (mr *MockStatusPollerMockRecorder) ForceRefresh() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ForceRefresh", reflect.TypeOf((*MockStatusPoller)(nil).ForceRefresh))
 }
 
+// SetStampObserver mocks base method.
+func (m *MockStatusPoller) SetStampObserver(fn func(string, bool)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetStampObserver", fn)
+}
+
+// SetStampObserver indicates an expected call of SetStampObserver.
+func (mr *MockStatusPollerMockRecorder) SetStampObserver(fn interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetStampObserver", reflect.TypeOf((*MockStatusPoller)(nil).SetStampObserver), fn)
+}
+
 // Start mocks base method.
 func (m *MockStatusPoller) Start(ctx context.Context) {
 	m.ctrl.T.Helper()
@@ -75,18 +86,6 @@ func (mr *MockStatusPollerMockRecorder) Start(ctx interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockStatusPoller)(nil).Start), ctx)
 }
 
-// SuppressPlayerNotifications mocks base method.
-func (m *MockStatusPoller) SuppressPlayerNotifications(suppress bool) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SuppressPlayerNotifications", suppress)
-}
-
-// SuppressPlayerNotifications indicates an expected call of SuppressPlayerNotifications.
-func (mr *MockStatusPollerMockRecorder) SuppressPlayerNotifications(suppress interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SuppressPlayerNotifications", reflect.TypeOf((*MockStatusPoller)(nil).SuppressPlayerNotifications), suppress)
-}
-
 // Stop mocks base method.
 func (m *MockStatusPoller) Stop() {
 	m.ctrl.T.Helper()
@@ -97,4 +96,16 @@ func (m *MockStatusPoller) Stop() {
 func (mr *MockStatusPollerMockRecorder) Stop() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stop", reflect.TypeOf((*MockStatusPoller)(nil).Stop))
+}
+
+// SuppressPlayerNotifications mocks base method.
+func (m *MockStatusPoller) SuppressPlayerNotifications(suppress bool) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SuppressPlayerNotifications", suppress)
+}
+
+// SuppressPlayerNotifications indicates an expected call of SuppressPlayerNotifications.
+func (mr *MockStatusPollerMockRecorder) SuppressPlayerNotifications(suppress interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SuppressPlayerNotifications", reflect.TypeOf((*MockStatusPoller)(nil).SuppressPlayerNotifications), suppress)
 }
