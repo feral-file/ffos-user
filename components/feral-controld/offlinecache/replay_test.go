@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/offlinecache"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
@@ -44,7 +45,7 @@ func setupReplay(t *testing.T, missPolicy offlinecache.MissPolicy) *replayTestSe
 	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
 	mockSession := mocks.NewMockCDPSession(ctrl)
 
-	rp := offlinecache.NewReplayer(store, mockStatic, missPolicy, wrapper.NewJSON(), zaptest.NewLogger(t))
+	rp := offlinecache.NewReplayer(store, mockStatic, missPolicy, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
 
 	var handler func(json.RawMessage)
 	mockSession.EXPECT().
@@ -275,7 +276,7 @@ func TestReplayer_Attach_FirstCallDoesNotCloseAnything(t *testing.T) {
 	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
 	mockSession := mocks.NewMockCDPSession(ctrl)
 
-	rp := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+	rp := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
 	// mockSession.Close is deliberately not expected: the first Attach has
 	// no prior session to supersede.
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Times(1)
@@ -289,7 +290,7 @@ func TestReplayer_EnableForItem_NoSessionAttached(t *testing.T) {
 	seedItem(t, store, "item-1", "software payload")
 	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
 
-	rp := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+	rp := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
 	err := rp.EnableForItem(context.Background(), "item-1")
 	assert.Error(t, err)
 }
@@ -371,6 +372,60 @@ func TestReplayer_EnableForPlaylist_NonMixedScopeMissStillFailsClosed(t *testing
 	done := ts.expectSend("Fetch.failRequest")
 	ts.handler(requestPausedEvent(t, "req-1", "https://example.com/unrelated.js"))
 	awaitSend(t, done)
+}
+
+// TestReplayer_KioskShellRequestsPassThroughUnderFailClosed pins the
+// recovery-navigation exemption: the ff-player shell (constant.WEBAPP_URL)
+// is never in the captured resource map, so without an explicit
+// pass-through a fail-closed non-mixed scope would Fetch.failRequest the
+// daemon's own Page.navigate back to the shell (boot recovery,
+// refreshArtwork escalation, watchdog navigate), wedging the kiosk on
+// Chromium's error page until a browser restart. See
+// processRequestPaused's kiosk-shell comment.
+func TestReplayer_KioskShellRequestsPassThroughUnderFailClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "shell document navigation",
+			url:  constants.WEBAPP_URL,
+			want: "Fetch.continueRequest",
+		},
+		{
+			name: "shell bundle asset",
+			url:  constants.WEBAPP_URL + "assets/index-abc123.js",
+			want: "Fetch.continueRequest",
+		},
+		//nolint:gosec // G101 reads the userinfo below as a credential; it is
+		// the attack fixture this case exists to reject, not a secret.
+		{
+			// Origin equality must be on parsed components: a URL whose
+			// userinfo merely LOOKS like the shell host must not escape
+			// offline isolation (same hazard isStaticServerFollowUp
+			// documents).
+			name: "userinfo lookalike still fails closed",
+			url:  "http://127.0.0.1:8080@evil.example/",
+			want: "Fetch.failRequest",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+			defer ts.ctrl.Finish()
+			seedItem(t, ts.store, "item-1", "software payload")
+			ts.stubFetchEnable()
+
+			// mixed=false: the strictest scope, where every non-exempt
+			// miss fails closed.
+			require.NoError(t, ts.replayer.EnableForPlaylist(context.Background(), []string{"item-1"}, false))
+
+			done := ts.expectSend(tt.want)
+			ts.handler(requestPausedEvent(t, "req-1", tt.url))
+			awaitSend(t, done)
+		})
+	}
 }
 
 // TestReplayer_ProcessRequestPaused_MethodMismatchIsTreatedAsMiss pins
@@ -719,7 +774,7 @@ func TestReplayer_Disable_NoSessionAttached_Noop(t *testing.T) {
 	store, _ := newTestStore(t)
 	mockStatic := mocks.NewMockOfflineCacheStaticServer(ctrl)
 
-	rp := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+	rp := offlinecache.NewReplayer(store, mockStatic, offlinecache.MissPolicyFailClosed, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
 	assert.NoError(t, rp.Disable(context.Background()))
 }
 
@@ -797,6 +852,45 @@ func TestReplayer_OnRequestPaused_AdmissionBoundResolvesOverflowViaMissPolicy(t 
 	// Must resolve promptly even though every admission slot is still
 	// stuck on release below — a queued (rather than bound) overflow
 	// design would instead time out here.
+	awaitSend(t, overflowDone)
+
+	close(release)
+	admitted.Wait()
+}
+
+// TestReplayer_OnRequestPaused_OverflowStillPassesThroughKioskShell pins
+// that the kiosk-shell exemption holds on the admission-overflow path
+// too: resolveOverflow answers via the miss policy WITHOUT a cache
+// lookup, so without its own shell check a recovery navigation that
+// happened to land during backlog pressure would be nondeterministically
+// Fetch.failRequest-ed under fail_closed — the exact wedge the
+// processRequestPaused exemption exists to prevent. Same slot-filling
+// shape as the test above; only the overflow event's URL differs.
+func TestReplayer_OnRequestPaused_OverflowStillPassesThroughKioskShell(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-hot", "hot payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), "item-hot"))
+
+	release := make(chan struct{})
+	var admitted sync.WaitGroup
+	admitted.Add(offlinecache.RequestPausedAdmission)
+	ts.mockSession.EXPECT().
+		Send(gomock.Any(), "Fetch.fulfillRequest", gomock.Any()).
+		DoAndReturn(func(context.Context, string, map[string]interface{}) (json.RawMessage, error) {
+			defer admitted.Done()
+			<-release
+			return json.RawMessage(`{}`), nil
+		}).
+		Times(offlinecache.RequestPausedAdmission)
+	overflowDone := ts.expectSend("Fetch.continueRequest")
+
+	for i := 0; i < offlinecache.RequestPausedAdmission; i++ {
+		ts.handler(requestPausedEvent(t, fmt.Sprintf("req-hit-%d", i), res.URL))
+	}
+	ts.handler(requestPausedEvent(t, "req-shell-nav", constants.WEBAPP_URL))
+
 	awaitSend(t, overflowDone)
 
 	close(release)
@@ -938,7 +1032,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectPassesCORSHeadersToStat
 	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
 	mockSession := mocks.NewMockCDPSession(ctrl)
 
-	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
 
 	var handler func(json.RawMessage)
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)
@@ -1014,7 +1108,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetRedirectsToStatic(t *testing.T)
 	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
 	mockSession := mocks.NewMockCDPSession(ctrl)
 
-	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
 
 	var handler func(json.RawMessage)
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)
@@ -1069,7 +1163,7 @@ func TestReplayer_ProcessRequestPaused_LargeAssetMissesWhenStaticServerNotListen
 	mockStatic.EXPECT().BaseURL().Return(testStaticBaseURL).AnyTimes()
 	mockSession := mocks.NewMockCDPSession(ctrl)
 
-	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, wrapper.NewJSON(), zaptest.NewLogger(t))
+	rp := offlinecache.NewReplayer(mockStore, mockStatic, offlinecache.MissPolicyFailClosed, constants.WEBAPP_URL, wrapper.NewJSON(), zaptest.NewLogger(t))
 
 	var handler func(json.RawMessage)
 	mockSession.EXPECT().On("Fetch.requestPaused", gomock.Any()).Do(func(_ string, h func(json.RawMessage)) { handler = h }).Times(1)

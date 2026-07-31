@@ -223,6 +223,16 @@ type replayer struct {
 	json         wrapper.JSON
 	logger       *zap.Logger
 
+	// kioskShellOrigin is the parsed origin (scheme+host) of the bundled
+	// local player (constant.WEBAPP_URL, served on loopback by
+	// feral-player.service), injected via NewReplayer. Every request to
+	// this origin passes through untouched — see processRequestPaused for
+	// why this exemption is load-bearing for recovery navigations. nil
+	// when the injected URL was empty or unparsable, which simply means
+	// no exemption (safe: requests then fall through to normal
+	// interception, they never escape to the network by accident).
+	kioskShellOrigin *url.URL
+
 	// transitionMu serializes target-set mutations (Attach, which swaps
 	// and closes the top-level CDP session on kiosk reconnect and adds
 	// child targets, and Detach) against EnableForPlaylist/Disable's own
@@ -333,15 +343,31 @@ func (r *replayer) notifyScopeLost() {
 
 // NewReplayer constructs a Replayer. staticServer's BaseURL is used to let
 // the static-asset follow-up request (from a large-asset 302) pass
-// through untouched instead of being re-intercepted.
-func NewReplayer(store Store, staticServer StaticServer, missPolicy MissPolicy, jsonWrapper wrapper.JSON, logger *zap.Logger) Replayer {
+// through untouched instead of being re-intercepted. kioskShellURL is the
+// bundled local player's own URL (constant.WEBAPP_URL) — requests to its
+// origin are likewise never intercepted, so daemon-driven recovery
+// navigations (boot recovery, refreshArtwork escalation, watchdog
+// navigate) still work while a fail-closed scope is armed. An empty or
+// unparsable kioskShellURL disables that exemption rather than failing
+// construction.
+func NewReplayer(store Store, staticServer StaticServer, missPolicy MissPolicy, kioskShellURL string, jsonWrapper wrapper.JSON, logger *zap.Logger) Replayer {
 	if missPolicy == "" {
 		missPolicy = MissPolicyFailClosed
+	}
+	var shellOrigin *url.URL
+	if kioskShellURL != "" {
+		if parsed, err := url.Parse(kioskShellURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+			shellOrigin = parsed
+		} else if logger != nil {
+			logger.Warn("offline cache replay: kiosk shell URL unparsable, shell-origin pass-through disabled",
+				zap.String("url", kioskShellURL), zap.Error(err))
+		}
 	}
 	return &replayer{
 		store:             store,
 		staticServer:      staticServer,
 		missPolicy:        missPolicy,
+		kioskShellOrigin:  shellOrigin,
 		json:              jsonWrapper,
 		logger:            logger,
 		targets:           make(map[string]CDPSession),
@@ -1005,6 +1031,26 @@ func (r *replayer) processRequestPaused(sessionID string, session CDPSession, pa
 		return
 	}
 
+	// The kiosk shell (ff-player, constant.WEBAPP_URL) must likewise always
+	// pass through: it is served by feral-player.service on loopback, so it
+	// is reachable offline and is by construction never in the captured
+	// resource map (capture navigates to item.Source, never to the shell).
+	// Without this exemption, a fail-closed non-mixed scope — armed exactly
+	// when a displayed playlist is fully cached, online or not — would
+	// Fetch.failRequest every daemon-driven recovery navigation
+	// (playersession.navigateAndVerify's Page.navigate to WEBAPP_URL for
+	// boot recovery, refreshArtwork escalation, and watchdog-requested
+	// navigations): Chromium renders its error page, the command handler
+	// never installs, and only a Chromium restart recovers. Matched by
+	// origin equality (never a prefix test — see isStaticServerFollowUp's
+	// userinfo hazard) over the WHOLE origin, not just "/": the shell's
+	// own JS/CSS bundle requests after the navigation must escape
+	// interception too.
+	if r.isKioskShellRequest(evt.Request.URL) {
+		r.continueRequest(ctx, session, evt.RequestID)
+		return
+	}
+
 	// Looking up a key on a nil map is safe in Go (returns zero value,
 	// ok=false), so no explicit nil-check is needed here when disabled.
 	// Keyed by method+URL, not URL alone — see resources' doc for why a
@@ -1107,6 +1153,28 @@ func (r *replayer) isStaticServerFollowUp(rawURL string) bool {
 	return u.Scheme == base.Scheme &&
 		u.Host == base.Host &&
 		strings.HasPrefix(u.Path, blobsRoutePrefix)
+}
+
+// isKioskShellRequest reports whether rawURL targets the bundled local
+// player's own origin (constant.WEBAPP_URL, injected via NewReplayer) —
+// see processRequestPaused for why those requests must always pass
+// through. Origin equality on parsed components for the same reason
+// isStaticServerFollowUp documents: a match yields Fetch.continueRequest,
+// the one branch that lets a paused request escape offline isolation, so
+// a prefix test would let a userinfo lookalike
+// (http://127.0.0.1:8080@evil.example/) through under fail_closed. The
+// whole origin is exempt (no path restriction): everything on it is
+// served locally by feral-player.service, so it is both offline-reachable
+// and never attacker-controlled.
+func (r *replayer) isKioskShellRequest(rawURL string) bool {
+	if r.kioskShellOrigin == nil {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == r.kioskShellOrigin.Scheme && u.Host == r.kioskShellOrigin.Host
 }
 
 // playerAppendedQueryParams lists query parameters ff-player's
@@ -1451,6 +1519,17 @@ func (r *replayer) resolveOverflow(sessionID string, session CDPSession, params 
 	// under backlog pressure — see processRequestPaused's identical
 	// check for why this cannot be collapsed into an ordinary miss.
 	if r.staticServer != nil && r.isStaticServerFollowUp(evt.Request.URL) {
+		r.continueRequest(ctx, session, evt.RequestID)
+		return
+	}
+
+	// So must the kiosk shell's own requests: failing a recovery
+	// navigation because it happened to land during backlog pressure
+	// would reintroduce (nondeterministically) the exact wedge the
+	// processRequestPaused exemption exists to prevent. Both checks are
+	// pure in-memory URL parses — no store I/O — so they preserve this
+	// path's cheapness contract.
+	if r.isKioskShellRequest(evt.Request.URL) {
 		r.continueRequest(ctx, session, evt.RequestID)
 		return
 	}

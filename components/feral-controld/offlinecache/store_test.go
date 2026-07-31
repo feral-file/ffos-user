@@ -82,7 +82,11 @@ func TestStore_WriteBlob_DedupAndVerify(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, hash1)
 
-	// Writing identical content again must be a no-op that returns the same hash.
+	// Writing identical content again converges on the same hash — that
+	// convergence IS the dedup, not an early return: the blob is rewritten
+	// rather than skipped (see
+	// TestStore_WriteBlob_RepairsCorruptExistingBlob for why that
+	// difference is load-bearing).
 	hash2, err := store.WriteBlob(bytes.NewReader(data), 0)
 	require.NoError(t, err)
 	assert.Equal(t, hash1, hash2)
@@ -317,6 +321,38 @@ func TestStore_SavePlaylist_ConcurrentDifferentPayloadsNeverCorrupts(t *testing.
 		"loaded playlist record must exactly match exactly one writer's own payload, never a torn mixture of two: got %d bytes", len(loaded))
 }
 
+// TestStore_WriteBlob_RepairsCorruptExistingBlob pins that a re-download
+// of content whose blob already exists on disk REPLACES the stored file
+// rather than short-circuiting on existence. WriteBlob previously treated
+// "final path exists" as "already stored" — after a power-loss torn write
+// (rename survived, data didn't) that dedup made the corruption
+// permanent: every fresh good copy was discarded while ReadBlob's hash
+// verification kept rejecting the stored bytes, so the item reported
+// ready and never played.
+func TestStore_WriteBlob_RepairsCorruptExistingBlob(t *testing.T) {
+	store, _ := newTestStore(t)
+
+	data := []byte("artwork bytes")
+	hash, err := store.WriteBlob(bytes.NewReader(data), 0)
+	require.NoError(t, err)
+
+	// Simulate the torn write: the content-addressed file exists but its
+	// bytes are gone (zero-length is what ext4 delayed allocation
+	// typically leaves behind).
+	require.NoError(t, wrapper.NewOS().WriteFile(store.BlobPath(hash), nil, 0o644))
+	_, err = store.ReadBlob(hash)
+	require.ErrorIs(t, err, offlinecache.ErrBlobHashMismatch)
+
+	// The next capture referencing the same content must repair it.
+	rehash, err := store.WriteBlob(bytes.NewReader(data), 0)
+	require.NoError(t, err)
+	assert.Equal(t, hash, rehash)
+
+	got, err := store.ReadBlob(hash)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
+}
+
 func TestStore_GC_RemovesOnlyOrphanBlobs(t *testing.T) {
 	store, _ := newTestStore(t)
 
@@ -340,6 +376,108 @@ func TestStore_GC_RemovesOnlyOrphanBlobs(t *testing.T) {
 
 	_, err = store.ReadBlob(orphanHash)
 	assert.ErrorIs(t, err, offlinecache.ErrBlobNotFound)
+}
+
+// TestStore_GC_QuarantinesCorruptRecordAndKeepsSweeping pins the
+// deterministic half of GC's unreadable-record split: a record whose
+// bytes read fine but do not parse can never be fixed by retrying, and
+// aborting on it forever would wedge GC — the only path that frees blob
+// bytes — permanently disabling the disk budget. It must instead be
+// quarantined (renamed out of ListItemIDs' view, bytes preserved) and
+// the sweep must proceed: blobs shared with readable records survive via
+// those records' keep-set entries, while blobs only the corrupt record
+// referenced are unreachable by every reader and are reclaimed.
+func TestStore_GC_QuarantinesCorruptRecordAndKeepsSweeping(t *testing.T) {
+	store, root := newTestStore(t)
+
+	sharedHash := writeBlobString(t, store, "shared with a readable record")
+	exclusiveHash := writeBlobString(t, store, "referenced only by the corrupt record")
+	orphanHash := writeBlobString(t, store, "genuine orphan")
+
+	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
+		ItemID: "item-healthy",
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/a.js", Status: 200, SHA256: sharedHash},
+		},
+	}))
+
+	itemsDir := filepath.Join(root, "items")
+	corruptPath := filepath.Join(itemsDir, "item-corrupt.json")
+	require.NoError(t, wrapper.NewOS().WriteFile(corruptPath, []byte("{not json"), 0o644))
+
+	removed, _, err := store.GC()
+	require.NoError(t, err)
+	assert.Equal(t, 2, removed, "the orphan and the corrupt record's exclusive blob are both reclaimed")
+
+	_, statErr := wrapper.NewOS().Stat(corruptPath)
+	assert.True(t, wrapper.NewOS().IsNotExist(statErr), "the corrupt record must leave ListItemIDs' view")
+	_, statErr = wrapper.NewOS().Stat(corruptPath + ".corrupt")
+	assert.NoError(t, statErr, "the corrupt record's bytes must be preserved for forensics")
+
+	_, err = store.ReadBlob(sharedHash)
+	assert.NoError(t, err, "a blob shared with a readable record must survive")
+	_, err = store.ReadBlob(exclusiveHash)
+	assert.ErrorIs(t, err, offlinecache.ErrBlobNotFound)
+	_, err = store.ReadBlob(orphanHash)
+	assert.ErrorIs(t, err, offlinecache.ErrBlobNotFound)
+
+	// The quarantine is what makes the NEXT pass clean — a wedge would
+	// show up here as the same warn/quarantine cycle or an error.
+	removed, _, err = store.GC()
+	require.NoError(t, err)
+	assert.Zero(t, removed)
+}
+
+// failReadOS delegates to a real OS wrapper but fails ReadFile for one
+// specific path, simulating a transient per-file I/O error (EIO/EMFILE)
+// that a later retry could recover from.
+type failReadOS struct {
+	wrapper.OS
+	failPath string
+}
+
+func (f *failReadOS) ReadFile(path string) ([]byte, error) {
+	if path == f.failPath {
+		return nil, fmt.Errorf("simulated transient read error for %s", path)
+	}
+	return f.OS.ReadFile(path)
+}
+
+// TestStore_GC_AbortsOnTransientlyUnreadableRecord pins the other half
+// of the split: a record that cannot be READ (as opposed to parsed) may
+// recover on a later attempt, and it still references blobs — skipping
+// it would narrow the keep-set and delete those blobs as "orphans",
+// losing good data unrecoverably. The whole sweep must abort, removing
+// NOTHING (not even genuine orphans): an aborted pass costs only disk
+// until a retry succeeds.
+func TestStore_GC_AbortsOnTransientlyUnreadableRecord(t *testing.T) {
+	root := t.TempDir()
+	failOS := &failReadOS{OS: wrapper.NewOS(), failPath: filepath.Join(root, "items", "item-flaky.json")}
+	store := offlinecache.NewStore(root, failOS, wrapper.NewJSON(), zaptest.NewLogger(t))
+
+	referencedHash := writeBlobString(t, store, "referenced by the unreadable record")
+	orphanHash := writeBlobString(t, store, "genuine orphan")
+
+	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
+		ItemID: "item-flaky",
+		Resources: []offlinecache.Resource{
+			{URL: "https://example.com/a.js", Status: 200, SHA256: referencedHash},
+		},
+	}))
+
+	_, _, err := store.GC()
+	require.Error(t, err)
+
+	_, err = store.ReadBlob(referencedHash)
+	assert.NoError(t, err, "blobs referenced by the unreadable record must survive")
+	_, err = store.ReadBlob(orphanHash)
+	assert.NoError(t, err, "an aborted sweep must not remove anything, orphans included")
+
+	// Once the transient error clears, the same store recovers on its own.
+	failOS.failPath = ""
+	removed, _, err := store.GC()
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed, "only the genuine orphan is reclaimed after recovery")
 }
 
 func TestStore_DiskUsage(t *testing.T) {
