@@ -66,10 +66,24 @@ type Store interface {
 	// (<=0 means unlimited); this lets a caller reject one oversized
 	// resource mid-stream against a disk budget, rather than discovering
 	// the overrun only once the whole body has already landed on disk.
-	// Writing content that already exists under its hash (across
-	// items/playlists) is a cheap no-op after the redundant temp file is
-	// discarded — this is the entire dedup mechanism, there is no
-	// separate refcount to maintain.
+	// Content-addressing IS the entire dedup mechanism — identical bytes
+	// from different items/playlists converge on one blob, and there is
+	// no separate refcount to maintain (GC's mark-sweep re-derives what
+	// is live from the saved records instead).
+	//
+	// Writing content that already exists under its hash still REPLACES
+	// the stored blob rather than short-circuiting on its existence. That
+	// is a durability requirement, not a missed optimization: an
+	// existence check cannot tell a healthy blob from one left truncated
+	// by a power-loss torn write, and skipping the rename in that case
+	// discards the freshly-downloaded good bytes forever while ReadBlob's
+	// hash verification keeps rejecting the stored ones — the item
+	// reports ready and never plays, and no retry or recapture ever
+	// repairs it (only clearing the item, which lets GC reclaim the
+	// corrupt blob as an orphan, breaks the cycle). Overwriting costs
+	// only the rename (the bytes have already been streamed to the temp
+	// file either way), is atomic, and leaves concurrent readers on their
+	// existing inode. Do not reintroduce the existence shortcut.
 	WriteBlob(r io.Reader, maxBytes int64) (sha256Hex string, err error)
 	// ReadBlob reads a blob and re-verifies its hash before returning it,
 	// so on-disk corruption fails loudly instead of silently feeding a

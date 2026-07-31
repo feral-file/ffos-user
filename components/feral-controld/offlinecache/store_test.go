@@ -82,7 +82,11 @@ func TestStore_WriteBlob_DedupAndVerify(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, hash1)
 
-	// Writing identical content again must be a no-op that returns the same hash.
+	// Writing identical content again converges on the same hash — that
+	// convergence IS the dedup, not an early return: the blob is rewritten
+	// rather than skipped (see
+	// TestStore_WriteBlob_RepairsCorruptExistingBlob for why that
+	// difference is load-bearing).
 	hash2, err := store.WriteBlob(bytes.NewReader(data), 0)
 	require.NoError(t, err)
 	assert.Equal(t, hash1, hash2)
