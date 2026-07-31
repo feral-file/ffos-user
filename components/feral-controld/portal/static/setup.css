@@ -1,0 +1,204 @@
+/* FF1 setup design language, shared by every portal page: these pages must
+   read as part of the device, not a router admin panel. They mirror the
+   on-screen setup overlay (ff-player SetupOverlay): near-black ground,
+   white type in PP Mori, letterspaced uppercase micro-labels, sharp
+   corners, no color except muted semantic status tints. Committed
+   dark-only (color-scheme: dark) — the device's own UI never changes with
+   the phone's theme, so neither does this. Served as /setup.css from the
+   embedded FS (see portal.go), so there is exactly one copy to keep true. */
+
+@font-face {
+  font-family: 'PP Mori';
+  src: url(/fonts/PPMori-Regular.woff2) format('woff2');
+  font-weight: 400;
+}
+@font-face {
+  font-family: 'PP Mori';
+  src: url(/fonts/PPMori-Bold.woff2) format('woff2');
+  font-weight: 600 700;
+}
+
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; }
+body {
+  font-family: "PP Mori", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Helvetica Neue", Arial, sans-serif;
+  background: #0a0a0b;
+  color: #f5f5f6;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+main {
+  max-width: 26rem;
+  margin: 0 auto;
+  padding: 2.25rem 1.5rem 3.5rem;
+}
+.brand {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: #8a8a90;
+}
+h1 {
+  margin: 1.75rem 0 0.75rem;
+  font-size: 1.55rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+.lede { color: #a6a6ac; font-size: 0.95rem; }
+.lede strong { color: #f5f5f6; font-weight: 600; }
+
+/* Join-outcome banner on the picker page. */
+.status {
+  margin-top: 1.5rem;
+  padding: 0.85rem 1rem;
+  font-size: 0.92rem;
+  border: 1px solid #2e2e33;
+  background: #131315;
+  color: #c9c9ce;
+}
+.status-failed { border-color: #5f2120; color: #f2b8b5; }
+.status-joining { border-color: #1e3a5f; color: #a8c7fa; }
+.status-succeeded { border-color: #1e4620; color: #a6d4a8; }
+
+/* Inline notice on the rescan/result pages. Tint via modifier:
+   note-info (in progress) or note-warn (about to disconnect). */
+.note {
+  margin-top: 1.25rem;
+  padding: 0.9rem 1rem;
+  font-size: 0.92rem;
+  background: #131315;
+}
+.note strong { color: #f5f5f6; font-weight: 600; }
+.note-info { border: 1px solid #1e3a5f; color: #a8c7fa; }
+.note-warn { border: 1px solid #5c4813; color: #e3c26f; }
+
+form.connect { margin-top: 2rem; }
+label {
+  display: block;
+  margin: 1.4rem 0 0.5rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #9b9ba1;
+}
+select, input[type="text"], input[type="password"] {
+  width: 100%;
+  padding: 0.8rem 0.9rem;
+  font-size: 1rem;
+  font-family: inherit;
+  color: #f5f5f6;
+  background: #131315;
+  border: 1px solid #2e2e33;
+  border-radius: 2px;
+}
+select:focus, input:focus {
+  outline: none;
+  border-color: #f5f5f6;
+}
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2.6rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%239b9ba1' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.9rem center;
+}
+
+/* Password field wraps the input so the Show/Hide toggle can sit inside
+   its right edge; the input reserves room for it. The toggle ships
+   [hidden] and is revealed by the page script — without JS the field is
+   just a normal password input. */
+.pwfield { position: relative; }
+.pwfield input { padding-right: 4.6rem; }
+.pwtoggle {
+  position: absolute;
+  top: 50%;
+  right: 0.35rem;
+  transform: translateY(-50%);
+  padding: 0.55rem 0.6rem;
+  font-family: inherit;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #9b9ba1;
+  background: none;
+  border: 0;
+}
+.pwtoggle:active { color: #f5f5f6; }
+
+button.primary {
+  width: 100%;
+  margin-top: 2rem;
+  padding: 1rem;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #0a0a0b;
+  background: #f5f5f6;
+  border: 0;
+  border-radius: 2px;
+}
+button.primary:active { background: #c9c9ce; }
+button.secondary {
+  width: 100%;
+  margin-top: 0.9rem;
+  padding: 0.95rem;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #f5f5f6;
+  background: transparent;
+  border: 1px solid #3f3f46;
+  border-radius: 2px;
+}
+button.secondary:active { background: #1c1c1f; }
+
+/* Link styled as the primary action (result page). */
+a.action {
+  display: block;
+  margin-top: 1.75rem;
+  padding: 1rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  text-align: center;
+  text-decoration: none;
+  color: #0a0a0b;
+  background: #f5f5f6;
+  border-radius: 2px;
+}
+a.action:active { background: #c9c9ce; }
+/* Link styled as the secondary action (confirm page). */
+a.cancel {
+  display: block;
+  margin-top: 1rem;
+  padding: 0.95rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  text-align: center;
+  text-decoration: none;
+  color: #f5f5f6;
+  border: 1px solid #3f3f46;
+  border-radius: 2px;
+}
+a.cancel:active { background: #1c1c1f; }
+
+.hint {
+  margin-top: 2rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #1f1f23;
+  font-size: 0.85rem;
+  color: #8a8a90;
+}
+.hint strong { color: #c9c9ce; font-weight: 600; }

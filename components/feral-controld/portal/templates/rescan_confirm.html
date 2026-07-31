@@ -4,89 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Art Computer setup — Search for networks again?</title>
-<style>
-  @font-face {
-    font-family: 'PP Mori';
-    src: url(/fonts/PPMori-Regular.woff2) format('woff2');
-    font-weight: 400;
-  }
-  @font-face {
-    font-family: 'PP Mori';
-    src: url(/fonts/PPMori-Bold.woff2) format('woff2');
-    font-weight: 600 700;
-  }
-  /* Shares the FF1 setup design language with index.html (dark-only,
-     monochrome, letterspaced micro-labels); keep the two in sync. */
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; margin: 0; }
-  body {
-    font-family: "PP Mori", -apple-system, BlinkMacSystemFont, "Segoe UI",
-      "Helvetica Neue", Arial, sans-serif;
-    background: #0a0a0b;
-    color: #f5f5f6;
-    line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
-  main { max-width: 26rem; margin: 0 auto; padding: 2.25rem 1.5rem 3.5rem; }
-  .brand {
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 0.35em;
-    text-transform: uppercase;
-    color: #8a8a90;
-  }
-  h1 {
-    margin: 1.75rem 0 0.75rem;
-    font-size: 1.55rem;
-    font-weight: 500;
-    letter-spacing: -0.01em;
-  }
-  .note {
-    margin-top: 1.25rem;
-    padding: 0.9rem 1rem;
-    font-size: 0.92rem;
-    border: 1px solid #5c4813;
-    background: #131315;
-    color: #e3c26f;
-  }
-  .note strong { color: #f5f5f6; font-weight: 600; }
-  button.primary {
-    width: 100%;
-    margin-top: 1.75rem;
-    padding: 1rem;
-    font-family: inherit;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.22em;
-    text-transform: uppercase;
-    color: #0a0a0b;
-    background: #f5f5f6;
-    border: 0;
-    border-radius: 2px;
-  }
-  button.primary:active { background: #c9c9ce; }
-  a.cancel {
-    display: block;
-    margin-top: 1rem;
-    padding: 0.95rem;
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.22em;
-    text-transform: uppercase;
-    text-align: center;
-    text-decoration: none;
-    color: #f5f5f6;
-    border: 1px solid #3f3f46;
-    border-radius: 2px;
-  }
-  a.cancel:active { background: #1c1c1f; }
-</style>
+<link rel="stylesheet" href="/setup.css">
 </head>
 <body>
 <main>
   <p class="brand">Feral File · Art Computer</p>
   <h1>Search for networks again?</h1>
-  <p class="note">
+  <p class="note note-warn">
     Your Art Computer will restart its setup network
     (<strong>{{.APSSID}}</strong>) to look for nearby networks. Your phone
     will be disconnected while it searches. When the QR code appears on the

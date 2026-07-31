@@ -488,3 +488,25 @@ func TestFontsServeEmbeddedFaces(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode, path)
 	}
 }
+
+// TestSetupCSSServed: every template now links /setup.css instead of carrying
+// its own <style> block, so the route must serve real CSS (not bounce to the
+// captive-probe redirect) and every page must actually reference it.
+func TestSetupCSSServed(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{APSSID: "FF1-abc"})
+
+	resp, err := client.Get(ts.URL + "/setup.css")
+	require.NoError(t, err)
+	body, readErr := io.ReadAll(resp.Body)
+	require.NoError(t, readErr)
+	_ = resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "text/css; charset=utf-8", resp.Header.Get("Content-Type"))
+	assert.Contains(t, string(body), "PP Mori")
+
+	page, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = page.Body.Close() }()
+	assert.Contains(t, readAll(t, page), `href="/setup.css"`)
+}
