@@ -3,14 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FF1 Setup — Search for networks again?</title>
+<title>Art Computer setup — Search for networks again?</title>
 <style>
+  @font-face {
+    font-family: 'PP Mori';
+    src: url(/fonts/PPMori-Regular.woff2) format('woff2');
+    font-weight: 400;
+  }
+  @font-face {
+    font-family: 'PP Mori';
+    src: url(/fonts/PPMori-Bold.woff2) format('woff2');
+    font-weight: 600 700;
+  }
   /* Shares the FF1 setup design language with index.html (dark-only,
      monochrome, letterspaced micro-labels); keep the two in sync. */
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    font-family: "PP Mori", -apple-system, BlinkMacSystemFont, "Segoe UI",
       "Helvetica Neue", Arial, sans-serif;
     background: #0a0a0b;
     color: #f5f5f6;
@@ -74,16 +84,16 @@
 </head>
 <body>
 <main>
-  <p class="brand">Feral File · FF1</p>
+  <p class="brand">Feral File · Art Computer</p>
   <h1>Search for networks again?</h1>
   <p class="note">
-    The frame will restart its setup Wi-Fi (<strong>{{.APSSID}}</strong>) to
-    look for nearby networks. Your phone will be disconnected while it
-    searches. When the frame shows its QR code again, scan it to reconnect
-    and see the updated list.
+    Your Art Computer will restart its setup network
+    (<strong>{{.APSSID}}</strong>) to look for nearby networks. Your phone
+    will be disconnected while it searches. When the QR code appears on the
+    screen again, scan it to reconnect and see the updated list.
   </p>
   <form method="POST" action="/rescan">
-    <button type="submit" class="primary">Restart Wi-Fi search</button>
+    <button type="submit" class="primary">Search for networks again</button>
   </form>
   <a class="cancel" href="/">Cancel</a>
 </main>

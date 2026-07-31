@@ -24,13 +24,18 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-//go:embed templates/*.html
+// The woff2 fonts are embedded so the portal renders in PP Mori — the same
+// face as the on-screen setup overlay and the app — with no internet (the
+// phone is on the setup AP, which has none). ~76 KiB total in the binary.
+//
+//go:embed templates/*.html fonts/*.woff2
 var assets embed.FS
 
 var tmpl = template.Must(template.ParseFS(assets, "templates/*.html"))
@@ -185,6 +190,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/connect", s.handleConnect)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.HandleFunc("/rescan", s.handleRescan)
+	// Longest-prefix match keeps this subtree out of handleRoot's
+	// treat-unknown-paths-as-captive-probes redirect.
+	s.mux.HandleFunc("/fonts/", s.handleFonts)
 
 	// OS captive-portal probes. Returning a redirect (rather than the 204 /
 	// success body each OS looks for) is what makes the phone decide it is
@@ -266,6 +274,27 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderIndex(w, r)
+}
+
+// handleFonts serves the embedded woff2 faces. Names are matched against the
+// embedded FS only (no path traversal: a name containing "/" is rejected
+// before the lookup). Content-Type is set explicitly because Go's built-in
+// mime table has no woff2 entry, and the immutable cache header spares the
+// phone re-fetching fonts across the portal's redirect-heavy flow.
+func (s *Server) handleFonts(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/fonts/")
+	if name == "" || strings.Contains(name, "/") || !strings.HasSuffix(name, ".woff2") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := assets.ReadFile("fonts/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	_, _ = w.Write(data)
 }
 
 // renderIndex writes the picker page. It is path-independent so the /connect

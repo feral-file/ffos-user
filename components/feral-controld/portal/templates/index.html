@@ -3,8 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FF1 Setup — Connect to Wi-Fi</title>
+<title>Art Computer setup — Connect to Wi-Fi</title>
 <style>
+  @font-face {
+    font-family: 'PP Mori';
+    src: url(/fonts/PPMori-Regular.woff2) format('woff2');
+    font-weight: 400;
+  }
+  @font-face {
+    font-family: 'PP Mori';
+    src: url(/fonts/PPMori-Bold.woff2) format('woff2');
+    font-weight: 600 700;
+  }
   /* FF1 setup design language: this page must read as part of the device,
      not a router admin panel. It mirrors the on-screen setup overlay
      (ff-player SetupOverlay): near-black ground, white type, letterspaced
@@ -14,7 +24,7 @@
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    font-family: "PP Mori", -apple-system, BlinkMacSystemFont, "Segoe UI",
       "Helvetica Neue", Arial, sans-serif;
     background: #0a0a0b;
     color: #f5f5f6;
@@ -148,11 +158,11 @@
 </head>
 <body>
 <main>
-  <p class="brand">Feral File · FF1</p>
+  <p class="brand">Feral File · Art Computer</p>
   <h1>Connect to Wi-Fi</h1>
   <p class="lede">
-    Choose the network your frame should use. After you tap Connect, this
-    page may pause while the frame switches networks — if it does, reconnect
+    Choose the network your Art Computer should use. After you tap Connect,
+    this page may pause while it switches networks. If that happens, reconnect
     your phone to <strong>{{.APSSID}}</strong> and open
     <strong>http://ff1.config</strong> to check progress.
   </p>
@@ -192,9 +202,9 @@
 
   <p class="hint">
     Don't see your Wi-Fi network? Make sure your router is switched on, then
-    tap <strong>Search for networks again</strong>. The frame will restart
-    its setup Wi-Fi, so you'll need to scan the QR code on the frame again
-    afterwards.
+    tap <strong>Search for networks again</strong>. The Art Computer will
+    restart its setup network, so you'll need to scan the QR code on the
+    screen again afterwards.
   </p>
 </main>
 <script>

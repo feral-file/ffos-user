@@ -415,7 +415,7 @@ func TestRescanGetShowsConfirmationWithoutTriggering(t *testing.T) {
 	body := readAll(t, resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, body, "Restart Wi-Fi search", "confirm page must carry the POST button")
+	assert.Contains(t, body, `<form method="POST" action="/rescan">`, "confirm page must carry the POST button")
 	assert.Contains(t, body, "FF1-abc")
 	assert.Contains(t, body, "disconnected")
 	assert.Zero(t, called, "GET must not trigger a bounce")
@@ -454,4 +454,37 @@ func TestRescanRejectedReRendersPicker(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Back on the picker, not the rescan page.
 	assert.Contains(t, string(body), "Connect to Wi-Fi")
+}
+
+// TestFontsServeEmbeddedFaces: the /fonts/ subtree must serve the embedded
+// woff2 files (the portal's PP Mori faces) rather than falling into
+// handleRoot's treat-unknown-paths-as-captive-probes redirect, and must 404 —
+// not redirect — for anything else under it, including traversal shapes.
+func TestFontsServeEmbeddedFaces(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{APSSID: "FF1-abc"})
+
+	for _, name := range []string{"PPMori-Regular.woff2", "PPMori-Bold.woff2"} {
+		resp, err := client.Get(ts.URL + "/fonts/" + name)
+		require.NoError(t, err)
+		body, readErr := io.ReadAll(resp.Body)
+		require.NoError(t, readErr)
+		_ = resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode, name)
+		assert.Equal(t, "font/woff2", resp.Header.Get("Content-Type"), name)
+		assert.NotEmpty(t, body, name)
+	}
+
+	for _, path := range []string{
+		"/fonts/",
+		"/fonts/missing.woff2",
+		"/fonts/PPMori-Regular.ttf",          // only woff2 is embedded
+		"/fonts/sub/PPMori-Regular.woff2",    // no subdirectories
+		"/fonts/%2e%2e/templates/index.html", // encoded traversal
+	} {
+		resp, err := client.Get(ts.URL + path)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, path)
+	}
 }

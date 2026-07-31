@@ -3,14 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FF1 Setup — Searching for networks…</title>
+<title>Art Computer setup — Searching for networks</title>
 <style>
+  @font-face {
+    font-family: 'PP Mori';
+    src: url(/fonts/PPMori-Regular.woff2) format('woff2');
+    font-weight: 400;
+  }
+  @font-face {
+    font-family: 'PP Mori';
+    src: url(/fonts/PPMori-Bold.woff2) format('woff2');
+    font-weight: 600 700;
+  }
   /* Shares the FF1 setup design language with index.html (dark-only,
      monochrome, letterspaced micro-labels); keep the two in sync. */
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    font-family: "PP Mori", -apple-system, BlinkMacSystemFont, "Segoe UI",
       "Helvetica Neue", Arial, sans-serif;
     background: #0a0a0b;
     color: #f5f5f6;
@@ -44,13 +54,13 @@
 </head>
 <body>
 <main>
-  <p class="brand">Feral File · FF1</p>
-  <h1>Searching for networks…</h1>
+  <p class="brand">Feral File · Art Computer</p>
+  <h1>Searching for networks</h1>
   <p class="note">
-    The frame is restarting its setup Wi-Fi to look for nearby networks. Your
-    phone will be disconnected from <strong>{{.APSSID}}</strong> in a moment.
-    When the frame shows its QR code again, scan it to reconnect and see the
-    updated list.
+    Your Art Computer is restarting its setup network to look for nearby
+    networks. Your phone will be disconnected from
+    <strong>{{.APSSID}}</strong> in a moment. When the QR code appears on the
+    screen again, scan it to reconnect and see the updated list.
   </p>
 </main>
 </body>
