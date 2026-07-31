@@ -243,6 +243,43 @@ func TestModeRequiredVsAvailable(t *testing.T) {
 	}
 }
 
+// TestEnsureLatestAtStartupIsModeRequired pins the boot-time entry point to
+// Required-mode semantics (the setupd on_startup_with_internet port): a build
+// below min_runtime_version updates, a build at/above it does NOT — even when a
+// newer latest_version exists (optional updates stay with the daily timer and
+// the user-triggered command, exactly as on v1.0.21).
+func TestEnsureLatestAtStartupIsModeRequired(t *testing.T) {
+	manifest := okManifest("1.2.0", "0.9.0", "1.5.0")
+
+	// Below min-runtime (a force release): the updater must run.
+	forcedRunner := &fakeRunner{results: []error{nil}}
+	forcedGate := New(localDeps("1.0.0", manifest, forcedRunner, newFakeClock()))
+	res, err := forcedGate.EnsureLatestAtStartup(context.Background())
+	if err != nil {
+		t.Fatalf("forced-startup error: %v", err)
+	}
+	if res != ResultUpdateStarted {
+		t.Errorf("forced-startup result = %v, want ResultUpdateStarted", res)
+	}
+	if forcedRunner.calls() != 1 {
+		t.Errorf("forced startup should run updater once, got %d", forcedRunner.calls())
+	}
+
+	// At min-runtime but below latest: startup must NOT update.
+	satisfiedRunner := &fakeRunner{results: []error{nil}}
+	satisfiedGate := New(localDeps("1.2.0", manifest, satisfiedRunner, newFakeClock()))
+	res, err = satisfiedGate.EnsureLatestAtStartup(context.Background())
+	if err != nil {
+		t.Fatalf("satisfied-startup error: %v", err)
+	}
+	if res != ResultNoUpdateNeeded {
+		t.Errorf("satisfied-startup result = %v, want ResultNoUpdateNeeded", res)
+	}
+	if satisfiedRunner.calls() != 0 {
+		t.Error("startup must not update a build that satisfies min-runtime")
+	}
+}
+
 // TestUpdateProgressReachesOnProgress asserts the runner's parsed percent is
 // carried through the gate to Deps.OnProgress in order (the seam devicectl points
 // at the setupui updating overlay). A progress line with no percent surfaces as
@@ -304,6 +341,63 @@ func TestCanceledContextDoesNotLatch(t *testing.T) {
 	}
 	if fs := gate.Failure(); fs.Failed {
 		t.Errorf("a canceled ctx latched a permanent failure: %+v", fs)
+	}
+}
+
+// TestPostLadderWatchdogFiresWhenNoReboot pins [W10]: a successful ladder
+// arms the watchdog, and if the process is still running once the timeout
+// elapses (a real reboot would have killed it), OnUpdateSucceededNoReboot
+// fires exactly once — using the fake clock's deterministic SleepContext so
+// the test needs no wall-clock wait.
+func TestPostLadderWatchdogFiresWhenNoReboot(t *testing.T) {
+	clock := newFakeClock()
+	runner := &fakeRunner{results: []error{nil}}
+	deps := localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock)
+	fired := make(chan struct{}, 1)
+	deps.OnUpdateSucceededNoReboot = func() { fired <- struct{}{} }
+	deps.PostLadderWatchdogTimeout = time.Minute
+	gate := New(deps)
+
+	res, err := gate.RequestUpdate(context.Background())
+	if err != nil || res != ResultUpdateStarted {
+		t.Fatalf("RequestUpdate() = %v, %v; want ResultUpdateStarted, nil", res, err)
+	}
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnUpdateSucceededNoReboot never fired")
+	}
+
+	sleeps := clock.recordedSleeps()
+	if len(sleeps) == 0 || sleeps[len(sleeps)-1] != time.Minute {
+		t.Errorf("watchdog sleeps = %v, want last entry = 1m", sleeps)
+	}
+}
+
+// TestPostLadderWatchdogUsesDefaultTimeout: a zero PostLadderWatchdogTimeout
+// falls back to the package default rather than firing immediately.
+func TestPostLadderWatchdogUsesDefaultTimeout(t *testing.T) {
+	clock := newFakeClock()
+	runner := &fakeRunner{results: []error{nil}}
+	deps := localDeps("1.0.0", okManifest("1.0.0", "0.9.0", "2.0.0"), runner, clock)
+	fired := make(chan struct{}, 1)
+	deps.OnUpdateSucceededNoReboot = func() { fired <- struct{}{} }
+	gate := New(deps)
+
+	if _, err := gate.RequestUpdate(context.Background()); err != nil {
+		t.Fatalf("RequestUpdate error: %v", err)
+	}
+
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnUpdateSucceededNoReboot never fired")
+	}
+
+	sleeps := clock.recordedSleeps()
+	if len(sleeps) == 0 || sleeps[len(sleeps)-1] != postLadderWatchdogDefault {
+		t.Errorf("watchdog sleeps = %v, want last entry = %v", sleeps, postLadderWatchdogDefault)
 	}
 }
 

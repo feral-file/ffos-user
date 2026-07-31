@@ -398,10 +398,11 @@ RPCs that timeout should log the error and either fail the calling operation or 
 
 ### OTA gate (`otagate`)
 
-The OTA gate is single-flight across both its entry points via one `singleflight` key (`"ota"`): concurrent callers **coalesce** onto the one in-flight update and share its result rather than being rejected. The entry points are:
+The OTA gate is single-flight across its entry points via one `singleflight` key (`"ota"`): concurrent callers **coalesce** onto the one in-flight update and share its result rather than being rejected. The entry points are:
 
 - `RequestUpdate` — the user-triggered `updateToLatestVersion` command, mode `Available` (update to any newer version).
 - `EnsureLatestBeforeClaim` — the mandatory pre-claim gate, mode `Required` (update only if a mandatory/minimum version demands it).
+- `EnsureLatestAtStartup` — the boot-time mandatory check for **settled (claimed)** devices, mode `Required`, restoring the setupd-era "Required-mode check on every boot with internet" for the Ready phase. Triggered by the provisioning notifier's WAN-confirmed transitions (`StateOnline`, or `StateUnprovisioned` with reason `unprovisioned`), it runs once per process; a `VersionCheckFailed` outcome retries with the auto-claim backoff bounded at 8 attempts, after which the nightly updater timer owns the update. The trigger is wired **only when controld started within the two-minute kernel boot window** (`feral-controld.service` is `Restart=always`, so an ungated hook would let a mid-exhibition daemon crash-restart spring a required update and reboot on a healthy playing device). Its guard predicate is `claimSettled()` — the exact complement of the pre-claim gate's early return — so for any device state exactly one of the two online-triggered flows owns the boot gate. Independently of that trigger-wiring gate, the gate re-checks its OWN, WIDER `startupOTAGateEntryWindow` (30 minutes) at entry, every time the hook fires — deliberately wider than the two-minute wiring window above, because WAN routinely trails boot by several minutes on a site-wide power restore, exactly the boot this gate most needs to cover. Checked once, at entry only, not on every retry: a gate that started inside the 30-minute window may keep retrying a failing version check (bounded at ~22.5 minutes across `startupOTAGateMaxCheckAttempts`) well past it — boot-time DNS convergence is the common cause, and per-retry re-probing would defeat that rationale.
 
 Updates are **always driven locally** now — the gate starts the updater systemd unit on-device and tails its log. There is no remote/BLE-triggered update path, and the setupd `setup_phase` machine and `pre_failure_phase` persistence were deliberately not ported; the gate tracks only in-memory `Mode`/`Result` enums and a permanent-failure latch.
 
@@ -411,6 +412,8 @@ Two retry ladders:
 - **Update-spawn ladder:** up to `MaxUpdateRetries = 3` attempts; a transient failure before the final attempt backs off `2^attempt` seconds (2s then 4s) and retries. A permanent failure — or a transient failure on the final attempt — **latches** the in-memory permanent-failure state and fires the `OnPermanentFailure` callback. An explicit retry clears the latch. Transient vs. permanent is decided by exact-string matching against the `ffos` updater script messages (`classifyUpdaterMessage`), so that companion script output must stay aligned.
 
 The setupd one-attempt BLE refresh variant (`RefreshRetries::Single`) is intentionally absent — there is no BLE response deadline to protect.
+
+**Narrator policy on `OnPermanentFailure`** (all three entry points share one gate and one callback): decided at emit time by reading the LIVE claim state, not the state at flight start — a settled-device `updateToLatestVersion` call that joins an in-flight update another (pre-claim) caller started still gets the settled policy. Claim not settled: today's behavior, the pairing flow's `join_failed` narration. Claim settled: there is no "join" to fail, so the callback instead hides a stuck `updating` overlay (`HideIfShowing`) and logs — it never repaints `join_failed` over a claimed device. A separate post-ladder watchdog (`Deps.OnUpdateSucceededNoReboot`, default 5 minutes) hides a stuck `updating` overlay if a successful ladder's expected reboot never happens.
 
 ---
 

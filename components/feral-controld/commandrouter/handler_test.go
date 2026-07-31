@@ -8,6 +8,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
@@ -19,9 +20,25 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/commands"
 	"github.com/feral-file/ffos-user/components/feral-controld/devicectl"
 	"github.com/feral-file/ffos-user/components/feral-controld/dp1"
+	"github.com/feral-file/ffos-user/components/feral-controld/mintpairing"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
+	"github.com/feral-file/ffos-user/components/feral-controld/playersession"
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
+
+// fakeRecoverySession is a directly-controllable commandrouter.RecoverySession
+// double: err, when set, is what NavigateHomeInline returns.
+type fakeRecoverySession struct {
+	calls int
+	opts  playersession.NavOptions
+	err   error
+}
+
+func (f *fakeRecoverySession) NavigateHomeInline(opts playersession.NavOptions) error {
+	f.calls++
+	f.opts = opts
+	return f.err
+}
 
 type testSetup struct {
 	ctrl             *gomock.Controller
@@ -364,6 +381,10 @@ func (f *fakeMintPairingService) HandleApprovalDecision(_ context.Context, args 
 	f.approvalArgs = args
 	return f.approvalResult, nil
 }
+
+func (f *fakeMintPairingService) DisplayActive() bool { return false }
+
+func (f *fakeMintPairingService) SetSession(mintpairing.NavigationSession) {}
 
 func TestCommandHandler_Process_DisplayPlaylist_WithURL(t *testing.T) {
 	ts := setup(t)
@@ -1057,6 +1078,118 @@ func TestCommandHandler_Process_NonControldCommand(t *testing.T) {
 	assert.Equal(t, cdpResult, result)
 }
 
+// TestCommandHandler_SendCDPRequest_GenerationStable_ReturnsReply pins the
+// baseline: SetSessionGeneration wired but the generation does not move
+// across the send, so the reply passes through exactly as before the
+// re-check existed.
+func TestCommandHandler_SendCDPRequest_GenerationStable_ReturnsReply(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	commandrouter.SetSessionGeneration(ts.handler, func() uint64 { return 3 }, ts.logger)
+
+	cdpResult := map[string]interface{}{"result": "success"}
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(cdpResult, nil).
+		Times(1)
+	ts.mockStatusPoller.EXPECT().ForceRefresh().Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.Type("someCustomCommand"),
+		Arguments: map[string]interface{}{"key": "value"},
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, cdpResult, result)
+}
+
+// TestCommandHandler_SendCDPRequest_GenerationMovedDuringSend_LoudError pins
+// design doc §2.4: unlike devicectl's sleep apply, a command reply answered
+// while the page generation moved must surface loudly to the relayer/hub
+// caller instead of reporting the reply as delivered — a cast or control
+// command silently landing on a torn-down page must not read as success.
+func TestCommandHandler_SendCDPRequest_GenerationMovedDuringSend_LoudError(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	gen := uint64(1)
+	commandrouter.SetSessionGeneration(ts.handler, func() uint64 { return gen }, ts.logger)
+
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(string, map[string]interface{}) (interface{}, error) {
+			gen = 2 // the page navigated away while the send was in flight
+			return map[string]interface{}{"result": "success"}, nil
+		}).
+		Times(1)
+	// No ForceRefresh: Process returns the error before reaching it.
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.Type("someCustomCommand"),
+		Arguments: map[string]interface{}{"key": "value"},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "generation")
+	assert.ErrorIs(t, err, commandrouter.ErrGenerationRace)
+}
+
+// TestCommandHandler_Process_RefreshArtwork_GenerationRace_NoEscalation pins
+// M5: a generation-race failure on refreshArtwork's own send must NOT
+// escalate into NavigateHomeInline — the send itself succeeded and merely
+// raced an UNRELATED page-generation change (a connectivity reconciler
+// bump, a stamp-mismatch bump, ...), which is not evidence the page is
+// broken. Escalating it would visibly restart a healthy page for no reason;
+// the ErrGenerationRace error must instead reach the relayer so the caller
+// retries.
+func TestCommandHandler_Process_RefreshArtwork_GenerationRace_NoEscalation(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	sess := &fakeRecoverySession{}
+	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
+	gen := uint64(1)
+	commandrouter.SetSessionGeneration(ts.handler, func() uint64 { return gen }, ts.logger)
+
+	command := commands.Command{
+		Type:      commands.CMD_REFRESH_ARTWORK,
+		Arguments: map[string]interface{}{},
+	}
+
+	ts.mockCDP.EXPECT().
+		Send("Network.clearBrowserCache", map[string]interface{}{}).
+		Return(nil, nil).
+		Times(1)
+
+	// The evaluate itself SUCCEEDS, but the generation moves while it is in
+	// flight — a healthy page racing an unrelated bump, not a dead page.
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(string, map[string]interface{}) (interface{}, error) {
+			gen = 2
+			return map[string]interface{}{"message": map[string]interface{}{"ok": true}}, nil
+		}).
+		Times(1)
+	// No ForceRefresh: Process returns the error before reaching it.
+
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.ErrorIs(t, err, commandrouter.ErrGenerationRace)
+	assert.Equal(t, 0, sess.calls, "a generation-race failure must never escalate to NavigateHomeInline")
+}
+
+// TestSetSessionGeneration_GatedHandlerIsNoOp guards the documented caveat:
+// wiring it against the storm-protection gate (not the raw handler
+// commandrouter.New returns) must degrade to a harmless no-op, never a panic,
+// since the gate wrapper does not expose the private seam.
+func TestSetSessionGeneration_GatedHandlerIsNoOp(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+	gated := commandrouter.NewGate(ts.handler, commandrouter.GateConfig{Enabled: true, MaxConcurrent: 1}, ts.logger)
+	commandrouter.SetSessionGeneration(gated, func() uint64 { return 9 }, ts.logger)
+}
+
 // --- Playback metrics tests ---
 
 func TestCommandHandler_Metrics_DisplayPlaylist_Success(t *testing.T) {
@@ -1263,10 +1396,13 @@ func TestCommandHandler_Metrics_NonPlaybackCommand_NoMetrics(t *testing.T) {
 // refreshArtwork must survive a dead player page: the evaluate path needs
 // window.handleCDPRequest, which is exactly what's missing when Chromium is
 // serving a stale/broken bundle (#234) — the situation a refresh exists to
-// fix. Cache clear + browser-level Page.reload is the recovery.
-func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaReload(t *testing.T) {
+// fix. Cache clear + a session NavigateHomeInline (navigate-to-entry, never
+// reload-in-place — design doc §5) is the recovery.
+func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaNavigate(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	sess := &fakeRecoverySession{}
+	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
 
 	command := commands.Command{
 		Type:      commands.CMD_REFRESH_ARTWORK,
@@ -1284,11 +1420,6 @@ func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaReload(t *test
 		Return(nil, errors.New("evaluate failed: handleCDPRequest is not defined")).
 		Times(1)
 
-	ts.mockCDP.EXPECT().
-		Send("Page.reload", map[string]interface{}{"ignoreCache": true}).
-		Return(nil, nil).
-		Times(1)
-
 	ts.mockStatusPoller.EXPECT().
 		ForceRefresh().
 		Times(1)
@@ -1297,13 +1428,18 @@ func TestCommandHandler_Process_RefreshArtwork_DeadPageRecoversViaReload(t *test
 
 	assert.NoError(t, err)
 	assert.True(t, isPlayerResponseOkForTest(result))
+	assert.Equal(t, 1, sess.calls, "the dead evaluate must escalate to exactly one NavigateHomeInline")
+	assert.True(t, sess.opts.PurgeCache, "the recovery navigation must purge the cache")
 }
 
-// When both the evaluate and the reload fail, the command must report the
-// original failure — a dead CDP connection is not recoverable here.
-func TestCommandHandler_Process_RefreshArtwork_ReloadAlsoFails(t *testing.T) {
+// When both the evaluate and the navigate escalation fail, the command must
+// report the original failure — a dead CDP connection is not recoverable
+// here.
+func TestCommandHandler_Process_RefreshArtwork_NavigateAlsoFails(t *testing.T) {
 	ts := setup(t)
 	defer ts.teardown()
+	sess := &fakeRecoverySession{err: errors.New("no CDP connection")}
+	commandrouter.SetRecoverySession(ts.handler, sess, ts.logger)
 
 	command := commands.Command{
 		Type:      commands.CMD_REFRESH_ARTWORK,
@@ -1321,9 +1457,34 @@ func TestCommandHandler_Process_RefreshArtwork_ReloadAlsoFails(t *testing.T) {
 		Return(nil, evalErr).
 		Times(1)
 
+	result, err := ts.handler.Process(ts.ctx, command)
+
+	assert.Error(t, err)
+	assert.Equal(t, evalErr, err)
+	assert.Nil(t, result)
+	assert.Equal(t, 1, sess.calls)
+}
+
+// With no session wired (a build wired before Phase 2b, or a test double),
+// the escalation must degrade to the original failure rather than panicking.
+func TestCommandHandler_Process_RefreshArtwork_NoSessionWiredReportsOriginalFailure(t *testing.T) {
+	ts := setup(t)
+	defer ts.teardown()
+
+	command := commands.Command{
+		Type:      commands.CMD_REFRESH_ARTWORK,
+		Arguments: map[string]interface{}{},
+	}
+
 	ts.mockCDP.EXPECT().
-		Send("Page.reload", map[string]interface{}{"ignoreCache": true}).
-		Return(nil, errors.New("no CDP connection")).
+		Send("Network.clearBrowserCache", map[string]interface{}{}).
+		Return(nil, nil).
+		Times(1)
+
+	evalErr := errors.New("evaluate failed")
+	ts.mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		Return(nil, evalErr).
 		Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, command)

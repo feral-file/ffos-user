@@ -401,6 +401,156 @@ func TestPollPlayerStatus_ForwardsRenderStatus(t *testing.T) {
 	}
 }
 
+// TestPollPlayerStatus_StripsStampFromNotificationPayload pins that the
+// playersession generation carrier (an internal implementation detail) never
+// leaks onto the relayer/websocket-facing player_status payload, even though
+// it is reported to the stamp observer.
+func TestPollPlayerStatus_StripsStampFromNotificationPayload(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok":    true,
+				"stamp": "42-abc123",
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if mockWS.sendAllCalls != 1 {
+		t.Fatalf("expected one websocket send, got %d", mockWS.sendAllCalls)
+	}
+	payload, ok := mockWS.lastPayload.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected websocket payload map, got %T", mockWS.lastPayload)
+	}
+	message, ok := payload["message"].(*PlayerStatus)
+	if !ok {
+		t.Fatalf("expected payload message to be *PlayerStatus, got %T", payload["message"])
+	}
+	if message.Stamp != nil {
+		t.Fatalf("expected stamp to be stripped from the notification payload, got %+v", *message.Stamp)
+	}
+}
+
+// TestPollPlayerStatus_ReportsStampToObserver pins the design doc §2.1 source-3
+// carrier: an observed stamp rides the existing checkStatus round-trip and is
+// reported to the wired observer.
+func TestPollPlayerStatus_ReportsStampToObserver(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok":    true,
+				"stamp": "42-abc123",
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	var observed []string
+	var observedPresent []bool
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+		stampObserver: func(stamp string, present bool) {
+			observed = append(observed, stamp)
+			observedPresent = append(observedPresent, present)
+		},
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if len(observed) != 1 || observed[0] != "42-abc123" {
+		t.Fatalf("expected the observed stamp to be reported once, got %+v", observed)
+	}
+	if len(observedPresent) != 1 || !observedPresent[0] {
+		t.Fatalf("expected the stamp to be reported present, got %+v", observedPresent)
+	}
+}
+
+// TestPollPlayerStatus_ReportsAbsentStampWhenOmitted pins "absent stamp =
+// source unavailable": an old player's response (no stamp field) must still
+// notify the observer, with present=false and an empty string, not skip the
+// call — playersession relies on present (not the empty string alone) to
+// distinguish "old player, source unavailable" from "new player whose
+// document genuinely carries no stamp yet".
+func TestPollPlayerStatus_ReportsAbsentStampWhenOmitted(t *testing.T) {
+	mockCDP := &fakeCDP{
+		pageNavigationURL: constants.WEBAPP_URL,
+		noLogSendResult: map[string]interface{}{
+			"message": map[string]interface{}{
+				"ok": true,
+			},
+		},
+	}
+	mockRelayer := &fakeRelayer{connectedResponses: []bool{true}}
+	mockWS := &fakeWS{}
+
+	var observed []string
+	var observedPresent []bool
+	p := &poller{
+		cdp:                     mockCDP,
+		relayer:                 mockRelayer,
+		ws:                      mockWS,
+		json:                    wrapper.NewJSON(),
+		logger:                  zap.NewNop(),
+		lastRelayerStatusHashes: make(map[relayer.NotificationType]string),
+		lastWSStatusHashes:      make(map[relayer.NotificationType]string),
+		stampObserver: func(stamp string, present bool) {
+			observed = append(observed, stamp)
+			observedPresent = append(observedPresent, present)
+		},
+	}
+
+	p.pollPlayerStatus(context.Background())
+
+	if len(observed) != 1 || observed[0] != "" {
+		t.Fatalf("expected one empty-stamp report for an old player, got %+v", observed)
+	}
+	if len(observedPresent) != 1 || observedPresent[0] {
+		t.Fatalf("expected the stamp to be reported absent, got %+v", observedPresent)
+	}
+}
+
+func TestSetStampObserver_Wires(t *testing.T) {
+	p := NewPoller(&fakeCDP{}, &fakeRelayer{}, &fakeWS{}, nil, nil, wrapper.NewJSON(), zap.NewNop())
+	called := false
+	p.SetStampObserver(func(string, bool) { called = true })
+	// Reach into the concrete type only to confirm wiring; behavior is
+	// covered end-to-end by the two tests above.
+	pp, ok := p.(*poller)
+	if !ok {
+		t.Fatalf("expected *poller, got %T", p)
+	}
+	if pp.stampObserver == nil {
+		t.Fatal("expected stampObserver to be set")
+	}
+	pp.stampObserver("x", true)
+	if !called {
+		t.Fatal("expected the wired observer to be invoked")
+	}
+}
+
 func TestPollRound_ClearsDedupHashesWhenCDPReconnects(t *testing.T) {
 	fCDP := &fakeCDP{notInitialized: true}
 	p := &poller{

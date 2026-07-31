@@ -464,21 +464,25 @@ Example:
 ```
 
 Current success response: Chromium/player response — or, when the player page
-is unresponsive, a synthesized `{"message": {"ok": true, "recovered": "reload"}}`
+is unresponsive, a synthesized `{"message": {"ok": true, "recovered": "navigate"}}`
 (see below).
 
 Current error cases:
 
 - Cache clear failure is logged as a warning and does not stop the command.
 - CDP page-evaluate failure does NOT fail the command: controld falls back to
-  a browser-level `Page.reload` (`ignoreCache: true`), which needs no page JS.
-  A refresh is most needed exactly when the page is broken (e.g. Chromium
-  serving stale cached chunks after a player bundle swap), so cache clear +
-  forced reload is the complete recovery. The synthesized success response
-  carries `recovered: "reload"` so controllers can distinguish it from a
-  normal player reply.
-- Only when the fallback `Page.reload` also fails (dead CDP connection) does
-  the command fail, surfacing the original evaluate error.
+  the `playersession.Session` recovery primitive
+  (`NavigateHomeInline({PurgeCache: true})`) — navigate-to-entry, not
+  reload-in-place: the static export is flat files only, so a client-route
+  reload 404s. A refresh is most needed exactly when the page is broken (e.g.
+  Chromium serving stale cached chunks after a player bundle swap), so cache
+  clear + navigate is the complete recovery, and it runs through the same
+  sleep/error-page/overlay gates every recovery navigation does. The
+  synthesized success response carries `recovered: "navigate"` so controllers
+  can distinguish it from a normal player reply.
+- Only when the navigate escalation also fails (dead CDP connection, or no
+  session wired) does the command fail, surfacing the original evaluate
+  error.
 
 Current relayer error response: none standardized; command failure is logged.
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2154,6 +2155,78 @@ func TestRefresher_TransientURLError_RestoredPendingDoesNotResumeCache(t *testin
 
 	assert.Equal(t, 0, fakeSched.resumePersistedCount(), "pending source must wait for a successful fetch before scheduler resumes")
 	assert.Equal(t, 0, fakeSched.recomputesCount(), "fetch failure should leave current player artwork unchanged")
+}
+
+// TestRefresher_StartupLoop_EscalatesToForceCastAfterRepeatedPlayerRejection
+// pins the fix for a soft refresh that is permanently rejected because the
+// player has no active playlist to refresh, while the scheduler cache is
+// already warm. PrepareWithSource's own force-cast escape
+// (scheduler.HasCache() && (!hadDisplayAtCache || hadRestoredPending)) does
+// not fire in that state (the cache was warm both before and after
+// PrepareWithSource), so without escalation the startup loop would retry the
+// same rejected soft refresh at PLAYER_STATUS_POLLING_INTERVAL forever
+// instead of ever reaching the ticker.
+func TestRefresher_StartupLoop_EscalatesToForceCastAfterRepeatedPlayerRejection(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mockCDP := mocks.NewMockCDP(ctrl)
+	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
+	mockDP1 := mocks.NewMockDP1(ctrl)
+	mockClock := mocks.NewMockClock(ctrl)
+	playlistURL := "https://example.com/daily.json"
+	mockPlaylist := createMockPlaylist()
+	fakeSched := &fakePlaylistScheduler{
+		hasCache: true,
+		source:   playlistschedule.Source{PlaylistURL: playlistURL},
+	}
+
+	mockCDP.EXPECT().Initialized().Return(true).AnyTimes()
+	setupBackgroundMocks(&testSetup{ctrl: ctrl, mockClock: mockClock})
+
+	mockStatusPoller.EXPECT().FetchPlayerStatus(gomock.Any()).Times(0)
+	mockDP1.EXPECT().
+		ProcessPlaylistURL(ctx, playlistURL, false).
+		Return(mockPlaylist, nil).
+		AnyTimes()
+
+	mockClock.EXPECT().
+		SleepContext(gomock.Any(), refresher.PLAYER_STATUS_POLLING_INTERVAL).
+		Return(nil).
+		AnyTimes()
+
+	var rejectedSends int32
+	forceCastSucceeded := make(chan struct{})
+	var forceCastOnce sync.Once
+	mockCDP.EXPECT().
+		Send(cdp.METHOD_EVALUATE, gomock.Any()).
+		DoAndReturn(func(_ string, params map[string]interface{}) (interface{}, error) {
+			expr := params["expression"].(string)
+			if strings.Contains(expr, `"action":"now_display"`) {
+				forceCastOnce.Do(func() { close(forceCastSucceeded) })
+				return map[string]interface{}{"ok": true}, nil
+			}
+			atomic.AddInt32(&rejectedSends, 1)
+			return map[string]interface{}{"ok": false}, nil
+		}).
+		AnyTimes()
+
+	r := refresher.New(ctx, mockDP1, mockStatusPoller, mockCDP, nil, nil, wrapper.NewJSON(), fakeSched, mockClock,
+		zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel)))
+	r.Start()
+
+	select {
+	case <-forceCastSucceeded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the startup loop to escalate to a forced now_display cast")
+	}
+	r.Stop()
+
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&rejectedSends), int32(2),
+		"expected repeated rejected soft refreshes before the loop escalated to force-cast")
 }
 
 func TestRefresher_URLRefresh_PreparesAndUsesWithPlayerPush(t *testing.T) {

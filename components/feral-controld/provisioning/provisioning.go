@@ -65,6 +65,16 @@ const (
 	StateJoining State = "joining"
 )
 
+// ReasonUnprovisioned marks the ONLINE leg of StateUnprovisioned: sys-monitord
+// confirmed WAN reachability and the device merely has no Wi-Fi profile
+// (wired). Exported — unlike the narration-only Reason strings — because
+// consumers key network-work decisions on it: the wiring notifier runs its
+// WAN-dependent hooks only on StateOnline or on THIS reason, so every offline
+// leg of StateUnprovisioned (link-present, link-unknown, link-lost, and any
+// future one) fails closed by default. Renaming the literal must therefore
+// break the build, not silently disarm that positive match.
+const ReasonUnprovisioned = "unprovisioned"
+
 // Detail is the side-channel context published alongside a State change: enough
 // for a narration UI to explain WHY the state changed without re-deriving it.
 type Detail struct {
@@ -236,8 +246,14 @@ type Machine struct {
 
 	// shared state, guarded by mu; read by external goroutines (portal seams,
 	// State) and written only by the transition goroutine.
-	mu           sync.Mutex
-	state        State
+	mu    sync.Mutex
+	state State
+	// lastReason is the Detail.Reason of the most recent transition() call,
+	// notified or not. It exists so transition can detect a REASON change
+	// within StateUnprovisioned — whose legs encode WAN reachability — and
+	// notify on it; see transition for why a state-change-only notify loses
+	// the wired-boot online edge.
+	lastReason   string
 	status       portal.Status
 	apUp         bool
 	apInfo       softap.Info
@@ -536,7 +552,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 		} else {
 			// Reachable without a saved Wi-Fi profile: Ethernet. Never raise the AP.
 			m.transition(ctx, StateUnprovisioned, Detail{
-				Reason:  "unprovisioned",
+				Reason:  ReasonUnprovisioned,
 				Message: "Online via wired network; Wi-Fi not configured",
 			})
 		}
@@ -603,9 +619,10 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 			// original immediate raise.
 			if m.activeLink != nil && cur != StateStarting && cur != StateAPActive {
 				m.startOfflineWindow()
-				// From StateUnprovisioned (the common case) this transition is
-				// a state no-op and deliberately does not notify; it narrates
-				// only on a genuine entry into the parked state.
+				// From StateUnprovisioned (the common case) this notifies only
+				// on the LEG change into link-lost; the redundant confirmed-
+				// absent re-emissions that merely re-feed the running window
+				// (same state, same reason) stay suppressed — see transition.
 				m.transition(ctx, StateUnprovisioned, Detail{
 					Reason:  "link-lost",
 					Message: "Network link lost; watching for it to return",
@@ -967,10 +984,23 @@ func (m *Machine) applyRescan(ctx context.Context) {
 // transition sets the desired state (notifying on change) and reconciles the
 // AP/portal to match. Reconcile runs even when the state is unchanged so a
 // previously failed AP operation converges.
+//
+// "Change" is the state — plus, within StateUnprovisioned only, the REASON:
+// that state's legs encode WAN reachability (ReasonUnprovisioned is the online
+// leg; link-* are offline parking legs), and the notifier's online-triggered
+// hooks (claim QR, startup OTA gate, boot player recovery) hang off exactly
+// this notification. A wired device that boots offline parks on a link-* leg;
+// when the WAN probe later succeeds, onConnectivity re-targets the SAME state
+// with ReasonUnprovisioned — a state-change-only notify swallows that edge and
+// none of the hooks ever run for the boot. Same-state SAME-reason re-emissions
+// (sys-monitord restarts re-emit their first probe; the tick re-probes while
+// offline) stay suppressed, which is what the link-lost window path relies on.
 func (m *Machine) transition(ctx context.Context, target State, d Detail) {
 	m.mu.Lock()
-	changed := m.state != target
+	changed := m.state != target ||
+		(target == StateUnprovisioned && m.lastReason != d.Reason)
 	m.state = target
+	m.lastReason = d.Reason
 	m.mu.Unlock()
 
 	if changed {

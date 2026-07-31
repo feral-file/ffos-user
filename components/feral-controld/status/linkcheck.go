@@ -139,9 +139,14 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (boo
 	}
 	var cur record
 	surveyed, link := false, false
-	// flush evaluates the finished device block; field order within a block is
-	// not assumed (nmcli emits the requested order, but nothing here breaks if
-	// it ever did not).
+	// flush evaluates the finished device block. GENERAL.DEVICE is relied on as
+	// the block delimiter below: it is what triggers flushing the previous
+	// record and resetting cur for the next device, so it MUST be the first
+	// field nmcli emits per block. That holds because -f lists it first in the
+	// requested field order, which nmcli's terse mode honors. A GENERAL.TYPE/
+	// STATE/CONNECTION line arriving before its block's GENERAL.DEVICE would be
+	// attributed to whatever record is currently open (the previous device, or
+	// none) and then lost when GENERAL.DEVICE later resets cur.
 	flush := func() {
 		if cur.typ != "ethernet" && cur.typ != "wifi" {
 			return

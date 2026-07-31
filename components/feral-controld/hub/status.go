@@ -162,15 +162,14 @@ func NewStateStatusProvider(os wrapper.OS, json wrapper.JSON, link linkReporter,
 }
 
 func (p *stateStatusProvider) Status(ctx context.Context) StatusInfo {
-	s := state.GetState()
+	// Single snapshot: claimed-ness and the topic must come from the SAME
+	// write, never two separate GetState() field reads straddling a
+	// concurrent connect()/clearPersistedClaim()/topic assignment.
+	claim := state.ClaimSnapshot()
 
-	deviceID := p.deviceID(s)
-	claimed := s.ConnectedDevice != nil && strings.TrimSpace(s.ConnectedDevice.ID) != ""
-
-	topicID := ""
-	if s.Relayer != nil {
-		topicID = s.Relayer.TopicID
-	}
+	deviceID := p.deviceID(claim)
+	claimed := claim.Claimed
+	topicID := claim.TopicID
 
 	connectivity := "disconnected"
 	if p.link != nil && p.link.HasLink(ctx) {
@@ -197,17 +196,14 @@ func (p *stateStatusProvider) Status(ctx context.Context) StatusInfo {
 }
 
 // deviceID prefers the hostname (the identity mDNS also advertises) and falls
-// back to the connected-device ID from persisted state.
-func (p *stateStatusProvider) deviceID(s *state.State) string {
+// back to the connected-device ID from the claim snapshot.
+func (p *stateStatusProvider) deviceID(claim state.ClaimInfo) string {
 	if hostnameBytes, err := p.os.ReadFile(constants.HOSTNAME_FILE); err == nil {
 		if hostname := strings.TrimSpace(string(hostnameBytes)); hostname != "" {
 			return hostname
 		}
 	}
-	if s.ConnectedDevice != nil {
-		return strings.TrimSpace(s.ConnectedDevice.ID)
-	}
-	return ""
+	return strings.TrimSpace(claim.DeviceID)
 }
 
 // installedBuild reads the installed version and distribution branch from the

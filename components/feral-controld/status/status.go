@@ -60,6 +60,12 @@ type PlayerStatus struct {
 	} `json:"deviceSettings,omitempty"`
 	LoopMode *LoopMode `json:"loopMode,omitempty"`
 	Shuffle  *bool     `json:"shuffle,omitempty"`
+	// Stamp echoes window.__ffosDocStamp back from CheckDeviceStatusReply — the
+	// playersession generation carrier (design doc §2.1 source 3), riding this
+	// EXISTING checkStatus round-trip rather than a second evaluate. Old
+	// players omit it entirely (nil): callers must treat an absent stamp as
+	// "source unavailable", never as a mismatch.
+	Stamp *string `json:"stamp,omitempty"`
 }
 
 //go:generate mockgen -source=status.go -destination=../mocks/status.go -package=mocks -mock_names=Poller=MockStatusPoller
@@ -70,6 +76,18 @@ type Poller interface {
 	ForceRefresh()
 	FetchPlayerStatus(ctx context.Context) (*PlayerStatus, error)
 	SuppressPlayerNotifications(suppress bool)
+	// SetStampObserver registers the callback invoked with each round's
+	// observed document stamp (design doc §2.1 source 3: playersession bumps
+	// its generation on a mismatch against what IT last stamped). Called on
+	// every successful checkStatus round-trip. present reports whether the
+	// connected player carried a stamp field AT ALL: false (an old player
+	// that omits it entirely) must never be treated as a mismatch —
+	// playersession.Session.ObserveStatusStamp reads present to distinguish
+	// "source unavailable" from "the player's document has no stamp", which
+	// is itself a genuine mismatch once a baseline exists. Set once at wiring
+	// time, before Start; nil is safe (no-op) and is what a build without a
+	// session leaves it as.
+	SetStampObserver(fn func(stamp string, present bool))
 }
 
 // poller handles periodic polling of both player status via CDP and device status
@@ -112,6 +130,13 @@ type poller struct {
 	// against pre-restart hashes must be pushed fresh (the old
 	// PartOf=chromium-ready.target design reset these maps by restarting controld).
 	cdpWasInitialized bool
+
+	// stampObserver, when set (SetStampObserver), is notified with every
+	// successfully-fetched round's document stamp and whether the field was
+	// present at all. Written once at wiring time before Start; read without
+	// a lock on the polling goroutine, same single-writer contract as
+	// displayConnected.
+	stampObserver func(stamp string, present bool)
 }
 
 func NewPoller(
@@ -173,7 +198,8 @@ func (s *poller) updateStatusHash(lastHashes map[relayer.NotificationType]string
 func (s *poller) Start(ctx context.Context) {
 	s.logger.Info("Starting status polling (player and device)")
 
-	// Ticker for player and device status (every 10 seconds)
+	// Ticker for player and device status (every POLL_INTERVAL, currently 5s —
+	// see the constant; this comment previously said 10s, which was stale)
 	statusTicker := time.NewTicker(POLL_INTERVAL)
 	defer statusTicker.Stop()
 
@@ -218,6 +244,12 @@ func (s *poller) pollRound(ctx context.Context) {
 func (s *poller) Stop() {
 	s.logger.Info("Stopping status polling")
 	close(s.stopChan)
+}
+
+// SetStampObserver registers the document-stamp observer. See the Poller
+// interface doc.
+func (s *poller) SetStampObserver(fn func(stamp string, present bool)) {
+	s.stampObserver = fn
 }
 
 func (s *poller) SuppressPlayerNotifications(suppress bool) {
@@ -286,6 +318,22 @@ func (s *poller) pollPlayerStatus(ctx context.Context) {
 		s.updateArtPlaybackMetrics(false, now)
 		s.logger.Debug("Player status is nil, skipping notification")
 		return
+	}
+
+	// Report the observed stamp regardless of notification suppression below:
+	// generation tracking is not a player-facing notification, and an
+	// OOM-recovery-suppressed round still reflects a real document. present
+	// carries the nil/""-vs-absent distinction through untouched — Stamp==nil
+	// means the connected player omitted the field entirely (old player,
+	// source unavailable); Stamp!=nil (even pointing at "") means a new
+	// player answered and the observer must classify it as a real value.
+	if s.stampObserver != nil {
+		stamp := ""
+		present := playerStatus.Stamp != nil
+		if present {
+			stamp = *playerStatus.Stamp
+		}
+		s.stampObserver(stamp, present)
 	}
 
 	s.updateArtPlaybackMetrics(isArtworkPlaying(playerStatus), now)
@@ -453,6 +501,10 @@ func (s *poller) lightweightPlayerStatus(playerStatus *PlayerStatus) *PlayerStat
 
 	playerStatus.Items = &items
 	playerStatus.Playlist = &dp1.Playlist{}
+	// Stamp is the playersession generation carrier (§2.1 source 3), an
+	// internal implementation detail of this daemon — it must not leak onto
+	// the relayer-facing player_status payload.
+	playerStatus.Stamp = nil
 	return playerStatus
 }
 

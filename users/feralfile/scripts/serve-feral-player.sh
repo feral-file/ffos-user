@@ -143,8 +143,21 @@ start_server() {
 	# remove it. The match is anchored so a hypothetical --no-header (or a
 	# mention in prose) cannot false-positive into passing an unknown flag,
 	# which would exit darkhttpd and restart-loop the unit.
+	# A misbehaving darkhttpd wrapper/shim on PATH (or a build that blocks
+	# instead of exiting on a bad invocation) could hang this probe
+	# indefinitely, keeping the unit from ever reaching systemd-notify --ready
+	# and tripping the service manager's start timeout instead of failing fast
+	# here. `timeout 5` bounds the wait; the real no-arg usage dump is
+	# near-instant, so 5s is generous, not tight. Only wrapped when `timeout`
+	# is on PATH — the production image (Debian, systemd) always ships GNU
+	# coreutils, but dev/macOS commonly does not, and an unguarded probe there
+	# only weakens the local test path, not the deployed one.
 	local darkhttpd_usage
-	darkhttpd_usage=$(darkhttpd 2>&1 || true)
+	if command -v timeout >/dev/null 2>&1; then
+		darkhttpd_usage=$(timeout 5 darkhttpd 2>&1 || true)
+	else
+		darkhttpd_usage=$(darkhttpd 2>&1 || true)
+	fi
 	local -a cache_header_args=()
 	if grep -Eq -- '(^|[^-[:alnum:]])--header([[:space:]]|$)' <<<"$darkhttpd_usage"; then
 		cache_header_args=(--header 'Cache-Control: no-cache')
