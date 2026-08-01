@@ -403,9 +403,14 @@ func TestFFIndexer_QueryTokens_ArrayParamsWithSpaces(t *testing.T) {
 	assert.Len(t, result, 0)
 }
 
+// TestFFIndexer_ValidateEndpoint covers the endpoint host allowlist —
+// the check that stops a controller-supplied playlist from aiming this
+// device's indexer queries at an arbitrary server. It was skipped with a
+// stale reason ("validation is currently disabled"); QueryTokens calls
+// validateEndpoint on its first line, so the check has been live and
+// untested. Re-enabled here with the legacy-host case that motivated
+// widening the allowlist.
 func TestFFIndexer_ValidateEndpoint(t *testing.T) {
-	t.Skip("Endpoint validation is currently disabled in ff_indexer.go (line 116-119)")
-
 	tests := []struct {
 		name        string
 		endpoint    string
@@ -421,6 +426,31 @@ func TestFFIndexer_ValidateEndpoint(t *testing.T) {
 			name:        "valid endpoint with path",
 			endpoint:    "https://indexer-v2.feralfile.com/api/graphql",
 			expectError: false,
+		},
+		{
+			// The legacy hostname the mobile app still emits in
+			// dynamicQueries[]. Same v2 service behind a different name,
+			// so the query QueryTokens builds is valid against it.
+			name:        "legacy indexer hostname",
+			endpoint:    "https://indexer.feralfile.com/graphql",
+			expectError: false,
+		},
+		{
+			// Retired with the v2 migration and deliberately NOT
+			// reinstated: pinned so widening the allowlist for the
+			// legacy feralfile host never quietly brings this back.
+			name:        "retired autonomy host",
+			endpoint:    "https://indexer.autonomy.io/graphql",
+			expectError: true,
+			errorMsg:    "invalid endpoint",
+		},
+		{
+			// Host is matched exactly, never by suffix — a suffix match
+			// would accept an attacker-controlled parent domain.
+			name:        "lookalike host with allowed host as prefix",
+			endpoint:    "https://indexer.feralfile.com.attacker.example/graphql",
+			expectError: true,
+			errorMsg:    "invalid endpoint",
 		},
 		{
 			name:        "invalid host",
