@@ -61,9 +61,9 @@ func (h *handler) handleOfflineCacheCommand(ctx context.Context, commandType com
 
 func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[string]any) (interface{}, error) {
 	// The item is selected by its source URL — the cache identity (see
-	// offlinecache.SourceKey) — never by the DP-1 item id, which is
-	// optional per spec and regenerated on every resolution for
-	// dynamic-query playlists.
+	// offlinecache.SourceKey) — never by the DP-1 item id, which the DP-1
+	// core schema makes optional and defines as a random UUID v4, so a
+	// conforming playlist may omit or change it freely.
 	source, ok := stringArg(args["source"])
 	if !ok {
 		return errorResponse("invalid_request", "source is required", false), nil

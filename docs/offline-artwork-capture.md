@@ -794,14 +794,40 @@ offline-artworks/
 
 **An item's cache identity is its `source` URL, never its DP-1 `id`**
 (`SourceKey` in `types.go`: `hex(sha256(source))` over the exact byte
-string, no normalization). The DP-1 core schema makes `id` optional and
-specifies it as UUID v4 — a random identifier — and dynamic-query
-playlists regenerate ids on every resolution, which orphaned id-keyed
-records (replay scope missed, status lied `not_cached`, re-downloads
-stormed). `source` is the one field that is simultaneously mandatory in
-DP-1, what capture actually navigates to/downloads, and what replay
-matches paused requests against — so the storage identity and the lookup
-identity are the same thing. Hashing is deliberately byte-exact: replay
+string, no normalization).
+
+The argument is the spec, not any particular resolver's behavior: the
+DP-1 core schema makes `id` **optional** (only `source` is required) and
+defines it as a UUID v4 — a random identifier derived from nothing about
+the artwork — so a conforming playlist may omit it or change it freely.
+Nothing durable may key on a field with that contract. `source` is the
+one field that is simultaneously mandatory in DP-1, what capture actually
+navigates to/downloads, and what replay matches paused requests against,
+so keying on it makes the storage identity and the lookup identity the
+same thing.
+
+Observed instability is the symptom that surfaced this, not the
+justification. Items materialized from the spec `dynamicQuery` profile
+carry whatever id the remote resolver returned (`dp1-go` mints none), and
+in the field those ids arrived fresh on each resolution — orphaning
+id-keyed records, so replay scope missed, status lied `not_cached`, and
+re-downloads stormed. Do **not** generalize that to "dynamic playlists
+always regenerate ids": the legacy `dynamicQueries`/FFIndexer path in
+`dp1.go` mints a deterministic UUIDv5 over (contract, chain,
+tokenNumber). That is an implementation detail of one resolver rather
+than a contract — and the spec above is why neither behavior may be
+relied on.
+
+**The trade-off, stated plainly: `source` is mutable where an id may not
+be.** An FFIndexer-resolved item's source is the token's
+`animation_url`/`image_url`, so a CDN migration or a re-rendered preview
+changes it and orphans the cached record, costing a re-download. That is
+the correct outcome rather than a regression — the captured bytes are
+keyed to the exact URL replay will request, so a record under the old URL
+cannot serve the new one — but it is a real cost. Recovering "same
+artwork, new source" would need a separate provenance-based alias
+(`chain:contract:tokenId`), deliberately not built here; it is not
+something a change to this key could provide. Hashing is deliberately byte-exact: replay
 also matches exact URLs, so a "normalized" key could claim a cache hit
 for bytes captured under a different URL, the one direction that serves
 wrong content; under-normalization merely costs a duplicate capture for
@@ -824,14 +850,26 @@ holds:
 - **Across separate requests**, each call classifies independently — two
   concurrent `downloadPlaylist`/`downloadPlaylistItem` requests naming
   the same source do issue two probes, since classification happens
-  before either can observe the other's queued state. They still
-  converge to a SINGLE capture: `enqueue` re-checks the source's tracked
-  state under the same lock it commits the job with, so the second one
-  returns `enqueueAlreadyQueued` and schedules nothing. The duplicate
+  before either can observe the other's queued state. The duplicate
   probe is a bounded, accepted cost (one `HEAD`, or a small ranged `GET`
-  fallback); coalescing it would need an in-flight-classify registry
-  with its own synchronization on a path whose real dedup — the capture
-  itself — is already correct.
+  fallback); coalescing it would need an in-flight-classify registry with
+  its own synchronization on a path whose real dedup — the capture — is
+  already correct. **They converge to a single capture precisely when the
+  second `enqueue` still observes the first job as `queued`/
+  `downloading`**: that check and the `queue.push` are one critical
+  section, so the loser returns `enqueueAlreadyQueued` and schedules
+  nothing. That is the common case, since classification is bounded by
+  `classifyPhaseTimeout` while a capture holds the worker for far
+  longer. It is not an unconditional guarantee, and the boundary is worth
+  naming: if the first capture *completes* before the second request's
+  own classify returns, the second sees a terminal state and legitimately
+  schedules a fresh capture — which is the recapture case in the next
+  bullet, reached by an overlapping request rather than a later one. (An
+  eviction cannot manufacture that outcome by clearing an in-flight
+  item's tracked state: it may still reclaim such a source's stale
+  record, but `notifyEvicted` compare-and-sets the state downgrade under
+  the same lock `enqueue` commits `queued` under, so a scheduled job is
+  never downgraded and never becomes invisible to the idempotency check.)
 - **A later request for an already-captured source is a deliberate
   recapture**, not a missed dedup: it re-probes, re-captures, and
   refreshes the existing record in place under the same key.
@@ -1033,23 +1071,40 @@ There is deliberately **no** top-level manifest, no separate
   safe in a way it would not be from `GC()`. `Start` also runs one full
   `GC()` pass in that same window: GC is otherwise only reached through
   clears and eviction, and eviction can only free bytes by deleting
-  records `ListItemKeys` can see — so records GC must quarantine (a
-  legacy id-keyed cache from before source keying, or any
-  invalid/mismatched filename) would otherwise pin their blobs against
-  `maxDiskBytes` where no eviction pass could ever reclaim them,
-  starving every new capture's budget on a full store.
+  records `ListItemKeys` can see — so records GC must retire (a legacy
+  id-keyed cache from before source keying, or any invalid/mismatched
+  filename) would otherwise pin their blobs against `maxDiskBytes` where
+  no eviction pass could ever reclaim them, starving every new capture's
+  budget on a full store. **Operationally this means a device upgrading
+  from the id-keyed format loses its entire offline cache on the first
+  boot** — the records are unreadable under the new keying and their
+  blobs are reclaimed — and the transition is silent: `Start`'s rebuild
+  never sees those records, so no `offline_cache_status` notification is
+  emitted and clients learn of it at their next `getOfflineCacheStatus`.
+  Re-downloading is the recovery, and it is the accepted cost of shipping
+  this as a new on-disk format rather than carrying migration code.
 - Blobs are freed by a **sweep, not a refcount**: `store.go`'s `GC()` walks
   every saved item record's `Resources` to build the "keep" set, then
   deletes any blob not in it. There is no separate reference count kept in
   sync with saves/deletes — the saved item records are already the source
   of truth for what is live.
-- GC's mark phase also quarantines two unreachable-by-construction
-  shapes alongside genuinely unparsable records: a `.json` file whose
-  name is not a valid source key at all, and a parseable record whose
-  own `item.source` does not hash to its filename (`LoadItem` rejects
-  that identity mismatch as corrupt too, mirroring `ReadBlob`'s
-  hash-vs-name verification). No reader can ever load either one, so
-  keeping them "live" would pin their blobs forever for content nothing
+- GC's mark phase retires two further unreachable-by-construction
+  shapes alongside genuinely unparsable records, and treats them
+  differently on purpose. A `.json` file whose name is not a valid source
+  key is **deleted**: that is the expected bulk state of a pre-source-keying
+  cache, and renaming a whole store's worth of records to `*.corrupt`
+  would strand those bytes permanently inside the `maxDiskBytes` budget
+  (`DiskUsage` counts them, `DeleteItem` only targets `<key>.json`, and
+  eviction only walks `ListItemKeys`, so nothing could reclaim them);
+  they are a stale record of a format the daemon no longer reads, and the
+  blobs they referenced are freed by the same sweep. A parseable record
+  at a VALID key whose own `item.source` does not hash to that filename
+  is instead **quarantined**: bytes written under an identity they do not
+  carry are a genuine anomaly worth preserving evidence of, they are rare
+  by construction (so the quarantine comment's "a few KB of JSON" bound
+  holds), and `LoadItem` rejects the same mismatch as corrupt — mirroring
+  `ReadBlob`'s hash-vs-name verification. No reader can load either shape,
+  so keeping them "live" would pin their blobs forever for content nothing
   can serve.
 - A record the mark phase cannot load splits two ways, because the two
   failure shapes demand opposite responses. A **transient read error**

@@ -225,16 +225,43 @@ type Coverage struct {
 //
 // This is the identity EVERYWHERE inside the package: on-disk record
 // filenames (items/<sourceKey>.json), every service-side state map, the
-// capture queue, and replay scope resolution. The DP-1 item id is NOT an
-// identity anywhere — it is optional in the DP-1 core schema and specified
-// as a random UUID v4, and dynamic-query playlists regenerate it on every
-// resolution, which is exactly the instability that orphaned cached
-// records before this keying existed. The raw source string appears only
-// at package boundaries (the wire contract, resolved-playlist call sites)
-// and as reporting data carried alongside the key. Fixed-length keys also
-// keep map keys and filenames free of arbitrary-length,
-// externally-controlled URL strings — the same convention the store's
-// playlists/by-url/ index already uses.
+// capture queue, and replay scope resolution. The raw source string
+// appears only at package boundaries (the wire contract,
+// resolved-playlist call sites) and as reporting data carried alongside
+// the key. Fixed-length keys also keep map keys and filenames free of
+// arbitrary-length, externally-controlled URL strings — the same
+// convention the store's playlists/by-url/ index already uses.
+//
+// The DP-1 item id is deliberately NOT an identity anywhere, for a reason
+// that does not depend on how any particular resolver behaves: the DP-1
+// core schema makes `id` OPTIONAL (only `source` is required) and defines
+// it as a UUID v4 — a random identifier carrying no derivation from the
+// artwork — so a spec-conforming playlist may omit it entirely or change
+// it freely. Nothing durable may key on a field with that contract.
+// Source is also what replay actually matches paused requests against
+// (see resourceKey), so keying storage on it makes the storage identity
+// and the lookup identity the same thing.
+//
+// Observed instability is the symptom, not the argument. Items
+// materialized from the spec `dynamicQuery` profile carry whatever id the
+// remote resolver returned (dp1-go mints none), and in the field those
+// ids have been seen changing between resolutions of the same playlist —
+// which is what orphaned id-keyed records. Do not generalize that to
+// "dynamic playlists always regenerate ids": the legacy dynamicQueries/
+// FFIndexer path in dp1.go happens to mint a deterministic UUIDv5 over
+// (contract, chain, tokenNumber). That is an implementation detail of one
+// resolver, not a contract — and the spec above is why neither behavior
+// can be relied on.
+//
+// The trade-off this accepts, stated plainly: source is mutable where an
+// id may not be. An FFIndexer-resolved item's source is the token's
+// animation_url/image_url, so a CDN migration or a re-rendered preview
+// changes it and orphans the cached record, costing a re-download. That
+// is the correct outcome rather than a regression — the captured bytes
+// are keyed to the exact URL replay will request, so a record under the
+// old URL cannot serve the new one — but it is a real cost, and the
+// reason a future "same artwork, new source" recovery would need a
+// separate provenance-based alias rather than a change to this key.
 func SourceKey(source string) string {
 	sum := sha256.Sum256([]byte(source))
 	return hex.EncodeToString(sum[:])

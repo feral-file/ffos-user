@@ -635,14 +635,17 @@ func (s *fsStore) listJSONIDs(dir, opDescription string) ([]string, error) {
 // blob-scale data.
 const quarantineItemRecordSuffix = ".corrupt"
 
-// quarantineItemRecord renames an unparsable (or unreachable — see GC)
-// item record out of ListItemKeys' view. name is the raw directory-entry
-// name minus ".json", NOT necessarily a valid source key: GC must be able
-// to quarantine a record whose very problem is a filename LoadItem's key
-// validation would reject, so this deliberately joins the name directly
-// (safe — ReadDir entry names never contain path separators) instead of
-// going through itemPath. See GC's mark phase for why such records are
-// quarantined rather than aborting the sweep or being deleted outright.
+// quarantineItemRecord renames a record GC cannot use out of
+// ListItemKeys' view, preserving its bytes for forensics. name is the raw
+// directory-entry name minus ".json" and this joins it directly rather
+// than going through itemPath (safe — ReadDir entry names never contain
+// path separators), because one reachable shape is a record that is both
+// unparsable AND at a name key validation would reject. See GC's mark
+// phase for why these are quarantined rather than aborting the sweep —
+// and note that the bulk shape, a valid-JSON record simply sitting at a
+// non-source-key filename, is DELETED there instead: quarantining a whole
+// pre-source-keying store would strand those bytes inside maxDiskBytes
+// forever.
 func (s *fsStore) quarantineItemRecord(name string) error {
 	path := filepath.Join(s.itemsDir(), name+".json")
 	if err := s.os.Rename(path, path+quarantineItemRecordSuffix); err != nil {
@@ -686,22 +689,38 @@ func (s *fsStore) GC() (int, int64, error) {
 	keep := make(map[string]bool)
 	for _, id := range itemNames {
 		rec, err := s.loadItemByName(id)
-		// A record whose filename is not a valid source key — or is a
-		// valid key that does NOT match the record's own source (LoadItem
-		// rejects that mismatch as corrupt, see its identity check) — is
-		// unreachable by construction: no reader (status, replay scope,
-		// eviction) can ever load it, no matter how well its bytes parse.
-		// Treating it as live would keep its blobs pinned forever for
-		// content nothing can serve; treating it as a transient error
-		// would wedge GC on every pass (the name never becomes valid).
-		// Both get exactly the corrupt-record treatment: quarantined for
-		// forensics, their exclusive blobs reclaimed. This is also what
-		// retires a legacy id-keyed cache from before source keying —
-		// Service.Start's GC pass reaches here on first boot after the
-		// upgrade.
+		// A record whose filename is not a valid source key is
+		// unreachable by construction — LoadItem validates keys, so no
+		// reader (status, replay scope, eviction) can load it however
+		// well its bytes parse — and it is DELETED rather than
+		// quarantined. Quarantine exists to preserve evidence of a
+		// genuine anomaly, and this shape is not one: it is the expected,
+		// bulk-scale state of a cache written before source keying, which
+		// Service.Start's GC pass retires wholesale on the first boot
+		// after the upgrade. Renaming a whole store's worth of records to
+		// *.corrupt would leave that bulk permanently inside the
+		// maxDiskBytes budget — DiskUsage counts them, DeleteItem only
+		// targets <key>.json, and eviction only walks ListItemKeys, so
+		// nothing could ever reclaim them. Their bytes are a stale record
+		// of a format this daemon no longer reads; the blobs they
+		// referenced are reclaimed by this same sweep.
 		if err == nil && !validSourceKey(id) {
-			err = fmt.Errorf("%w: item %s: filename is not a source key", ErrItemRecordCorrupt, id)
+			if rmErr := s.os.Remove(filepath.Join(s.itemsDir(), id+".json")); rmErr != nil {
+				return 0, 0, fmt.Errorf("offline cache: GC aborted, could not remove unreachable item record %s: %w", id, rmErr)
+			}
+			s.logger.Info("offline cache GC: removed item record whose filename is not a source key",
+				zap.String("name", id))
+			continue
 		}
+		// A record at a VALID key that does not match its own source is a
+		// different matter: bytes were written under an identity they do
+		// not carry (tampering, a torn/misplaced write, or a bug), which
+		// is exactly the anomaly quarantine preserves evidence of. It is
+		// equally unreachable — LoadItem rejects the mismatch, see its
+		// identity check — so it takes the corrupt-record path below:
+		// quarantined for forensics, its exclusive blobs reclaimed.
+		// Rare by construction, so the "a few KB of JSON" bound the
+		// quarantine comment relies on genuinely holds here.
 		if err == nil && SourceKey(rec.Item.Source) != id {
 			err = fmt.Errorf("%w: item %s: record's own source hashes to %s (filename/content identity mismatch)",
 				ErrItemRecordCorrupt, id, SourceKey(rec.Item.Source))

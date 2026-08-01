@@ -410,6 +410,67 @@ func TestKioskReplay_SyncPlaylist_EnablesOnlyCachedItemsAsMixedScope(t *testing.
 	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("cached-1"), sourceFor("uncached-1"), ""}))
 }
 
+// TestKioskReplay_SyncPlaylist_DuplicateSourcesCollapseInScope pins
+// scopeFor's per-source dedup: two playlist items sharing a source are
+// ONE cache entry (see ItemRecord's doc), so the scope handed to
+// EnableForPlaylist must name it once — a repeat would make the replayer
+// load the same record twice — and the duplicate must not be counted
+// against the mixed calculation's totals either.
+//
+// The mixed=false assertion is what makes this test load-bearing rather
+// than cosmetic: with a duplicate CACHED source the boolean is unchanged
+// (both totals move together), but pair a duplicated cached source with a
+// genuinely uncached sibling and the scope must still be reported mixed
+// exactly once, on the strength of the uncached item alone.
+func TestKioskReplay_SyncPlaylist_DuplicateSourcesCollapseInScope(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	store, _ := newTestStore(t)
+	seedItem(t, store, "cached-1", "software payload")
+
+	// The cached source is listed twice and one uncached sibling is
+	// present: the scope must carry the cached source exactly once, and
+	// mixed must be true because of the uncached item.
+	mockReplayer.EXPECT().
+		EnableForPlaylist(gomock.Any(), []string{sourceFor("cached-1")}, true).
+		Return(nil).Times(1)
+
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
+
+	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{
+		sourceFor("cached-1"), sourceFor("cached-1"), sourceFor("uncached-1"),
+	}))
+}
+
+// TestKioskReplay_SyncPlaylist_AllItemsCachedWithDuplicatesIsNotMixed is
+// the other half: when the ONLY reason a playlist has more items than
+// distinct sources is duplication, every real source is cached and the
+// scope must stay non-mixed — i.e. keep fail_closed's strict guarantee.
+// Counting the duplicate as an extra uncached item would silently relax
+// the miss policy to pass-through for a fully-cached playlist.
+func TestKioskReplay_SyncPlaylist_AllItemsCachedWithDuplicatesIsNotMixed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockReplayer := mocks.NewMockOfflineCacheReplayer(ctrl)
+	store, _ := newTestStore(t)
+	seedItem(t, store, "cached-1", "software payload")
+
+	mockReplayer.EXPECT().
+		EnableForPlaylist(gomock.Any(), []string{sourceFor("cached-1")}, false).
+		Return(nil).Times(1)
+
+	kr := offlinecache.NewKioskReplay(mockReplayer, store, "http://127.0.0.1:9222",
+		nil, nil, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), zaptest.NewLogger(t))
+
+	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{
+		sourceFor("cached-1"), sourceFor("cached-1"),
+	}))
+}
+
 func TestKioskReplay_SyncPlaylist_AllItemsCachedIsNotMixedScope(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -447,7 +508,7 @@ func TestKioskReplay_SyncPlaylist_NoCachedItemsDisables(t *testing.T) {
 	require.NoError(t, kr.SyncPlaylist(context.Background(), []string{sourceFor("uncached-1"), sourceFor("uncached-2")}))
 }
 
-func TestKioskReplay_SyncPlaylist_EmptyItemIDsDisables(t *testing.T) {
+func TestKioskReplay_SyncPlaylist_EmptySourceListDisables(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 

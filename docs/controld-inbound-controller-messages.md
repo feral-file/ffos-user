@@ -1464,15 +1464,30 @@ on a daemon restart (or after the underlying startup failure is fixed).
 
 **Item identity on the wire is the item's `source` URL, never its DP-1
 `id`.** The DP-1 core schema makes `id` optional (only `source` is
-required) and specifies it as UUID v4 — a random identifier — and
-dynamic-query playlists (including address-based playlists) regenerate
-ids on every resolution, so nothing durable can key on them. Every
+required) and specifies it as UUID v4 — a random identifier — so a
+conforming playlist may omit it or change it between resolutions, and
+nothing durable can key on it. In the field, items materialized from a
+`dynamicQuery` (including address-based playlists) have been observed
+arriving with fresh ids on each resolution, which is what orphaned
+records keyed the old way. Every
 command and notification below identifies an item by the exact,
 byte-for-byte `source` string as it appears in the resolved playlist (no
 URL normalization — `https://a/x` and `https://a/x/` are distinct).
 Items sharing a `source` share ONE cache entry, within and across
 playlists: downloading one downloads them all, and clearing one clears
 them all (no refcounting, by design).
+
+This **replaced** an earlier `itemId`/`itemIds` shape for these same five
+commands and the notification. `docs/api-design.md`'s current-v1 posture
+(rule 2) forbids renaming a wire field without a version bump or a
+coordinated release that updates every caller; this rename satisfies it
+because the offline-cache command family had never shipped in any release
+when it changed — it has no `RELEASES.md` entry and no tag contains it —
+so there was no fielded caller to strand, and the coordinated mobile
+release introduces the first one already speaking `source`. A stale
+client is failed closed rather than silently misread: `itemIds` is
+rejected by name (see `getOfflineCacheStatus`), and the other commands
+reject a request with no `source` as a non-retryable `invalid_request`.
 
 All five commands use the explicit RPC ok/error shape from
 ["Response Shape Recommendation for New Inbound Commands"](#response-shape-recommendation-for-new-inbound-commands)
@@ -1777,7 +1792,7 @@ Request fields, all optional:
 | Field | Type | Meaning |
 |---|---|---|
 | `sources` | string[] | Restrict the report to the items with these source URLs. Omitted or `[]` means every known item. At most **1024** sources per request. |
-| `limit` | integer | Cap on how many entries `items` carries. Omitted, `0`, or above the cap is clamped to **1000**, which is also the maximum. |
+| `limit` | integer | Cap on how many entries `items` carries. Omitted, `0`, or above the cap is clamped to **1000**, which is also the maximum. (A value above 2^20 is rejected as `invalid_request` rather than clamped — an overflow guard, far above any meaningful page size.) |
 | `cursor` | string | The `nextCursor` from the previous page — an opaque token, not a source URL. Omitted means the first page. |
 | `totalsOnly` | boolean | Return `totals`/`diskUsed` with an empty `items`, for a summary view. Cannot be combined with `cursor`. |
 
@@ -1825,6 +1840,12 @@ Success response:
   "diskUsed": 4402690
 }
 ```
+
+Both `coverageComplete` and `bytes` are **omitted when they would be
+`false`/`0`** (the example above shows them spelled out for readability;
+on the wire a `coverageComplete: false` entry simply has no
+`coverageComplete` key). Clients must read a missing `coverageComplete`
+as `false` and a missing `bytes` as `0`.
 
 `items` is always ordered by the source's internal cache key
 (`sha256(source)` — fixed-length and stable, the same value `nextCursor`

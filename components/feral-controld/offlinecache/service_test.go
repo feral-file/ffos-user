@@ -112,14 +112,14 @@ func (o *recordingObserver) OnItemStateChanged(status offlinecache.ItemStatus) {
 	o.statuses = append(o.statuses, status)
 }
 
-// statesFor returns, in order, the states pushed for itemID — nil when
+// statesFor returns, in order, the states pushed for source — nil when
 // nothing was pushed for it at all.
-func (o *recordingObserver) statesFor(itemID string) []offlinecache.ItemState {
+func (o *recordingObserver) statesFor(source string) []offlinecache.ItemState {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var states []offlinecache.ItemState
 	for _, status := range o.statuses {
-		if status.Source == itemID {
+		if status.Source == source {
 			states = append(states, status.State)
 		}
 	}
@@ -1740,6 +1740,43 @@ func TestService_ClearPlaylist_RemovesPlaylistAndItsItems(t *testing.T) {
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound)
 }
 
+// TestService_ClearPlaylist_DuplicateSourceSettlesAndNotifiesOnce pins the
+// wire promise in docs/controld-inbound-controller-messages.md that
+// "duplicate sources within the playlist settle, and notify, once".
+// ClearPlaylist walks the playlist's own item order (so deletions stay
+// deterministic) and dedups with a `done` set; without it, a source
+// listed twice would emit two not_cached notifications for one
+// transition, since res.settled stays true on the second pass.
+func TestService_ClearPlaylist_DuplicateSourceSettlesAndNotifiesOnce(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+
+	sharedSource := "https://example.com/listed-twice"
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		Item:     dp1playlist.PlaylistItem{ID: "id-a", Source: sharedSource},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t",
+		// One source, two entries — different resolution-minted ids.
+		"items": []map[string]interface{}{
+			{"id": "id-a", "source": sharedSource},
+			{"id": "id-b", "source": sharedSource},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ts.store.SavePlaylist("playlist-1", raw))
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	require.NoError(t, ts.service.ClearPlaylist("playlist-1"))
+
+	assert.Equal(t, []offlinecache.ItemState{offlinecache.StateNotCached}, obs.statesFor(sharedSource),
+		"one source, one transition, one notification — a playlist listing it twice must not double-announce it")
+}
+
 // TestService_ClearPlaylist_NotifiesNotCachedForClearedItemsOnly is the
 // playlist-level twin of
 // TestService_ClearItem_NotifiesNotCachedAfterClearingCachedItem: every
@@ -2171,8 +2208,14 @@ func TestService_Start_ReclaimsBlobsPinnedByLegacyIdKeyedRecords(t *testing.T) {
 
 	_, statErr := os.Stat(legacyPath)
 	assert.True(t, os.IsNotExist(statErr), "the legacy record must leave ListItemKeys' blind spot")
+	// Removed outright, not quarantined: retiring a whole store's worth
+	// of pre-source-keying records as *.corrupt would strand those bytes
+	// permanently inside the maxDiskBytes budget, with DeleteItem and
+	// eviction both unable to reach them. Quarantine is reserved for
+	// genuine anomalies — see TestStore_GC_QuarantinesIdentityMismatchedRecord.
 	_, statErr = os.Stat(legacyPath + ".corrupt")
-	assert.NoError(t, statErr, "quarantined, not silently deleted — bytes preserved for forensics")
+	assert.True(t, os.IsNotExist(statErr),
+		"a legacy record must not become permanent residue inside the disk budget")
 	_, err = ts.store.ReadBlob(legacyHash)
 	assert.ErrorIs(t, err, offlinecache.ErrBlobNotFound,
 		"the legacy record's blob must be reclaimed at startup, not pinned against maxDiskBytes until a clear that may never come")
@@ -2193,6 +2236,34 @@ func TestService_Start_RebuildsIndexFromExistingDiskState(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, snap.Items, 1)
 	assert.Equal(t, offlinecache.StateReady, snap.Items[0].State)
+}
+
+// TestService_Start_GCFailureIsBestEffort pins that the startup GC pass
+// is advisory: it exists to retire records no reader can load (and free
+// their blobs) before the first capture samples its disk budget, but a
+// GC that aborts — its mark phase deliberately does so on a transiently
+// unreadable record rather than narrowing the keep-set and deleting live
+// blobs — must not stop the daemon's offline cache from starting. The
+// same posture as the incomplete-blob sweep beside it.
+func TestService_Start_GCFailureIsBestEffort(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockStore := mocks.NewMockOfflineCacheStore(ctrl)
+	mockCapturer := mocks.NewMockOfflineCacheCapturer(ctrl)
+	mockCapturer.EXPECT().Close().Return(nil).AnyTimes()
+
+	mockStore.EXPECT().SweepIncompleteBlobs().Return(0, int64(0), nil).Times(1)
+	mockStore.EXPECT().GC().Return(0, int64(0), assertError("transiently unreadable record")).Times(1)
+	// Start must carry on to the rebuild despite the failed sweep.
+	mockStore.EXPECT().ListItemKeys().Return(nil, nil).Times(1)
+
+	svc := offlinecache.NewService(mockStore, mocks.NewMockOfflineCacheClassifier(ctrl), mockCapturer,
+		mocks.NewMockOfflineCacheMediaCapturer(ctrl), wrapper.NewJSON(), 5000, 0, nil,
+		offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
+
+	require.NoError(t, svc.Start(context.Background()),
+		"a failed startup GC is logged and tolerated, never fatal to Start")
+	svc.Stop()
 }
 
 func TestService_Start_PropagatesListItemKeysError(t *testing.T) {

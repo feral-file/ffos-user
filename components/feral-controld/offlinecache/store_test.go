@@ -532,14 +532,15 @@ func TestStore_GC_QuarantinesCorruptRecordAndKeepsSweeping(t *testing.T) {
 	assert.Zero(t, removed)
 }
 
-// TestStore_GC_QuarantinesRecordAtInvalidKeyFilename pins the invalid-name
+// TestStore_GC_RemovesRecordAtInvalidKeyFilename pins the invalid-name
 // branch: a .json record whose filename is not a valid source key —
 // however well its bytes parse — is unreachable by every reader (LoadItem
-// validates keys, ListItemKeys filters names), so GC must quarantine it
-// and reclaim its exclusive blobs rather than pin them forever or, worse,
+// validates keys, ListItemKeys filters names), so GC must retire it and
+// reclaim its exclusive blobs rather than pin them forever or, worse,
 // treat the permanently-invalid name as a transient error and wedge every
-// future sweep.
-func TestStore_GC_QuarantinesRecordAtInvalidKeyFilename(t *testing.T) {
+// future sweep. This is the path that retires a legacy id-keyed cache
+// wholesale on the first boot after the upgrade.
+func TestStore_GC_RemovesRecordAtInvalidKeyFilename(t *testing.T) {
 	store, root := newTestStore(t)
 
 	strayHash := writeBlobString(t, store, "referenced only by the stray record")
@@ -565,10 +566,23 @@ func TestStore_GC_QuarantinesRecordAtInvalidKeyFilename(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, removed, "the stray record's exclusive blob is reclaimed")
 
+	// Deleted, NOT quarantined: this is the bulk shape of a
+	// pre-source-keying cache, and a whole store's worth of *.corrupt
+	// files would sit inside the maxDiskBytes budget with nothing able to
+	// reclaim them (DiskUsage counts them; DeleteItem and eviction only
+	// reach <key>.json). Quarantine is reserved for genuine anomalies —
+	// see TestStore_GC_QuarantinesIdentityMismatchedRecord.
 	_, statErr := wrapper.NewOS().Stat(strayPath)
 	assert.True(t, wrapper.NewOS().IsNotExist(statErr))
 	_, statErr = wrapper.NewOS().Stat(strayPath + ".corrupt")
-	assert.NoError(t, statErr, "the stray record's bytes must be preserved for forensics")
+	assert.True(t, wrapper.NewOS().IsNotExist(statErr),
+		"an unreadable-by-name legacy record must be removed outright, not left as permanent residue inside the disk budget")
+
+	// And the budget genuinely reflects that: nothing of the stray
+	// record survives to be counted.
+	usage, err := store.DiskUsage()
+	require.NoError(t, err)
+	assert.Zero(t, usage, "neither the stray record nor its blob may still count against maxDiskBytes")
 }
 
 // failReadOS delegates to a real OS wrapper but fails ReadFile for one

@@ -155,8 +155,9 @@ type ItemStatus struct {
 	// Source is the item's source URL — the cache identity (see
 	// SourceKey) and the field clients match entries against their own
 	// playlist items by. The DP-1 item id is deliberately absent from the
-	// wire: it is optional per spec and regenerated per resolution for
-	// dynamic playlists, so nothing durable can key on it.
+	// wire: the DP-1 core schema makes it optional and defines it as a
+	// random UUID v4, so nothing durable can key on it (see SourceKey's
+	// doc for why observed id churn is the symptom, not the argument).
 	Source string    `json:"source"`
 	State  ItemState `json:"state"`
 	// Percent is coarse (0 or 100): capture is a single bounded-window
@@ -1320,9 +1321,9 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	if !s.started.Load() {
 		return ErrServiceNotStarted
 	}
-	// Source is the cache identity (see SourceKey); the DP-1 item id is
-	// optional per spec — a dynamic-query playlist regenerates it per
-	// resolution, and some publishers omit it entirely — so it is
+	// Source is the cache identity (see SourceKey); the DP-1 core schema
+	// makes the item id optional and defines it as a random UUID v4, so a
+	// conforming playlist may omit it or change it freely — it is
 	// deliberately NOT required here.
 	if item.Source == "" {
 		return errors.New("offline cache: item must have a source")
@@ -2026,7 +2027,7 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 			s.logger.Warn("offline cache: evict item failed", zap.String("source", victimSource), zap.Error(err))
 			return
 		}
-		s.notify(victimSource, StateNotCached, Coverage{Reason: reason})
+		s.notifyEvicted(victimSource, Coverage{Reason: reason})
 
 		if _, _, err := s.gc(); err != nil {
 			s.logger.Warn("offline cache: GC during eviction failed", zap.Error(err))
@@ -2512,13 +2513,23 @@ func (s *service) itemStatus(key, sourceHint string, withBytes bool) (ItemStatus
 
 	rec, err := s.store.LoadItem(key)
 	if err != nil {
+		// No record to read the source back from, so sourceHint is the
+		// only identity this entry can carry. Checked once for BOTH
+		// branches below: an entry with an empty source is unmatchable by
+		// any client (it is the field they key on — see ItemStatus.Source),
+		// so dropping it from the page is the honest outcome, and the
+		// tracked branch must not be the one place that emits one anyway.
+		// Unreachable today for a tracked key — sourceByKey is in lockstep
+		// with state — which is exactly why the guard belongs here rather
+		// than duplicated into the untracked branch alone: it holds if a
+		// future edit ever breaks that lockstep.
+		if sourceHint == "" {
+			return ItemStatus{}, false
+		}
 		if tracked {
 			// Queued/downloading (or failed with no prior successful
 			// capture) items have no record on disk yet.
 			return ItemStatus{Source: sourceHint, State: trackedState, Percent: percentForState(trackedState)}, true
-		}
-		if sourceHint == "" {
-			return ItemStatus{}, false
 		}
 		return ItemStatus{Source: sourceHint, State: StateNotCached}, true
 	}
@@ -2574,6 +2585,51 @@ func (s *service) recordBytes(rec *ItemRecord) int64 {
 		}
 	}
 	return total
+}
+
+// notifyEvicted is notify's eviction-only variant: it records the victim
+// as not_cached UNLESS that source still has a job scheduled, in which
+// case the tracked state is left alone and nothing is announced.
+//
+// Eviction is the one notify caller that writes a state DOWNWARD for an
+// item it is not itself processing, and a victim can legitimately be a
+// source whose stale record is the oldest on disk while a recapture for
+// it sits in the queue. Letting the plain notify run there overwrote
+// StateQueued with StateNotCached and broke two contracts at once:
+// enqueue's idempotency check stopped seeing the job as scheduled, so
+// the next request for that source pushed a DUPLICATE job and the same
+// artwork was captured twice (the cross-request "one capture" contract
+// in docs/offline-artwork-capture.md §5); and reserveForClear stopped
+// counting it as settled, so a ClearItem that really did cancel the
+// queued job answered a NON-retryable ErrItemNotFound.
+//
+// The check and the write are ONE critical section under the same s.mu
+// enqueue commits StateQueued under, so there is no window where a
+// concurrent enqueue can slip between them — which is why this is a
+// compare-and-set here rather than a filter in oldestEvictableItem's
+// victim scan. Filtering the scan instead would also be actively harmful:
+// DownloadPlaylist enqueues every classified item, so a playlist refresh
+// marks nearly every record in the store in-flight, and skipping them all
+// would leave the pre-capture reclaim with no victims exactly when the
+// store is full — starving each capture of budget, which the software
+// path records as an all-resources-over-budget partial that OVERWRITES
+// the previously complete record. Evicting the stale bytes is correct;
+// only the state downgrade is not.
+//
+// The item's own capture still announces its real terminal state when it
+// finishes, so nothing is lost by staying quiet here: the record this
+// call deleted is one the queued job is about to replace.
+func (s *service) notifyEvicted(source string, coverage Coverage) {
+	key := SourceKey(source)
+	s.mu.Lock()
+	if st, tracked := s.state[key]; tracked && (st == StateQueued || st == StateDownloading) {
+		s.mu.Unlock()
+		return
+	}
+	s.state[key] = StateNotCached
+	s.sourceByKey[key] = source
+	s.mu.Unlock()
+	s.notifyObserver(source, StateNotCached, coverage)
 }
 
 func (s *service) notify(source string, state ItemState, coverage Coverage) {
