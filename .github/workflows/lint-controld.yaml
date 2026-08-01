@@ -6,6 +6,8 @@ on:
     paths:
       - 'components/feral-controld/**/*.go'
       - 'components/feral-controld/**/*.html'
+      - 'components/feral-controld/**/*.woff2'
+      - 'components/feral-controld/**/*.css'
       - '.golangci.yml'
       - 'Makefile'
       - 'components/Makefile'
@@ -16,6 +18,8 @@ on:
     paths:
       - 'components/feral-controld/**/*.go'
       - 'components/feral-controld/**/*.html'
+      - 'components/feral-controld/**/*.woff2'
+      - 'components/feral-controld/**/*.css'
       - '.golangci.yml'
       - 'Makefile'
       - 'components/Makefile'

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -505,8 +506,16 @@ func TestSetupCSSServed(t *testing.T) {
 	assert.Equal(t, "text/css; charset=utf-8", resp.Header.Get("Content-Type"))
 	assert.Contains(t, string(body), "PP Mori")
 
-	page, err := client.Get(ts.URL + "/")
+	// Every template must link the shared sheet — checked against the embedded
+	// sources rather than by rendering each route, so a future page cannot
+	// slip in unstyled regardless of how it is reached.
+	names, err := fs.Glob(assets, "templates/*.html")
 	require.NoError(t, err)
-	defer func() { _ = page.Body.Close() }()
-	assert.Contains(t, readAll(t, page), `href="/setup.css"`)
+	require.NotEmpty(t, names)
+	for _, name := range names {
+		raw, readErr := assets.ReadFile(name)
+		require.NoError(t, readErr)
+		assert.Contains(t, string(raw), `href="/setup.css"`, name)
+		assert.NotContains(t, string(raw), "<style>", name)
+	}
 }
