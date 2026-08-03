@@ -262,35 +262,57 @@ func alignHeadlessLimits(l HeadlessLimits) (HeadlessLimits, string) {
 	return l, ""
 }
 
-// countAllowedCPUs counts the CPUs in a systemd AllowedCPUs list
-// ("0-3", "0,2,4", "0-3,8-11"). Returns 0 for an empty or unparseable
-// spec, which callers treat as "no pin" rather than guessing.
+// maxPlausibleCPUID bounds a CPU id in an AllowedCPUs/taskset list. Well
+// above any machine this ships on, and it keeps a hostile or fat-fingered
+// "0-9999999999" from materializing a set large enough to matter.
+const maxPlausibleCPUID = 4095
+
+// countAllowedCPUs reports how many DISTINCT CPUs a systemd AllowedCPUs /
+// `taskset -c` list selects, or 0 when the spec is one taskset cannot
+// apply. Callers treat 0 as "no pin" (see alignHeadlessLimits and
+// captureWrapperArgv).
+//
+// DISTINCT, not the sum of segment widths. taskset accepts overlapping and
+// repeated segments and simply unions them — verified: `0-3,2-5` pins six
+// CPUs (0-5), not eight, and `0,0,1` pins two, not three. Summing widths
+// overstates what the pin can deliver, which would let alignHeadlessLimits
+// admit a CPUQuota above it; the quota then silently stops being a limit,
+// which is the exact failure that clamp exists to prevent.
+//
+// Empty segments are MALFORMED, not skippable: `taskset -c "0-3,,4"` is
+// rejected outright, so counting it as five would hand the spawn a spec
+// that cannot exec — and the whole wrapper would then fall back, costing
+// the pin. Returning 0 routes it to the configured-but-unusable warning
+// instead.
 func countAllowedCPUs(spec string) int {
 	if strings.TrimSpace(spec) == "" {
 		return 0
 	}
-	total := 0
+	cpus := make(map[int]struct{})
 	for part := range strings.SplitSeq(spec, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			continue
+			return 0
 		}
 		lo, hi, isRange := strings.Cut(part, "-")
 		start, err := strconv.Atoi(strings.TrimSpace(lo))
-		if err != nil {
+		if err != nil || start < 0 {
 			return 0
 		}
-		if !isRange {
-			total++
-			continue
+		end := start
+		if isRange {
+			if end, err = strconv.Atoi(strings.TrimSpace(hi)); err != nil || end < start {
+				return 0
+			}
 		}
-		end, err := strconv.Atoi(strings.TrimSpace(hi))
-		if err != nil || end < start {
+		if end > maxPlausibleCPUID {
 			return 0
 		}
-		total += end - start + 1
+		for id := start; id <= end; id++ {
+			cpus[id] = struct{}{}
+		}
 	}
-	return total
+	return len(cpus)
 }
 
 // defaultHeadlessLimits derives the CPU pin and the CPU quota TOGETHER so

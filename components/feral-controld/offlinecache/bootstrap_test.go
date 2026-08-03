@@ -361,3 +361,77 @@ func TestOptionsFromConfig_WarnsOnUnparseableAllowedCPUs(t *testing.T) {
 	assert.Empty(t, opts.HeadlessLimitsWarning)
 	assert.Equal(t, "0-3", opts.HeadlessLimits.AllowedCPUs)
 }
+
+// TestOptionsFromConfig_ClampsQuotaAgainstDistinctCPUs pins that the
+// quota clamp counts DISTINCT CPUs, not the sum of segment widths.
+// `taskset -c` unions overlapping and repeated segments — verified on the
+// target: "0-3,2-5" pins 0-5 (six CPUs) and "0,0,1" pins 0-1 (two) — so
+// summing widths overstates what the pin can deliver and lets a quota
+// above it through the clamp, at which point the quota silently stops
+// being a limit. That is the exact failure alignHeadlessLimits exists to
+// prevent, so an overlapping spec must clamp against the real count.
+func TestOptionsFromConfig_ClampsQuotaAgainstDistinctCPUs(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		allowedCPUs string
+		quota       int
+		wantQuota   int
+	}{
+		// Six distinct CPUs (0-5), not eight: 700% must clamp to 600%.
+		{"overlapping ranges", "0-3,2-5", 700, 600},
+		// Two distinct CPUs (0-1), not three: 300% must clamp to 200%.
+		{"repeated ids", "0,0,1", 300, 200},
+		// Disjoint segments still sum normally.
+		{"disjoint ranges", "0-1,4-5", 500, 400},
+		// Fully contained duplicate collapses to the outer range.
+		{"nested range", "0-7,2-3", 900, 800},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.OfflineCacheConfig{
+				Enabled: true,
+				HeadlessLimits: &config.OfflineCacheHeadlessLimitsConfig{
+					CPUQuotaPercent: tc.quota,
+					AllowedCPUs:     tc.allowedCPUs,
+				},
+			}
+			opts := offlinecache.OptionsFromConfig(cfg, "http://127.0.0.1:9222")
+			assert.Equal(t, tc.wantQuota, opts.HeadlessLimits.CPUQuotaPercent)
+			assert.Contains(t, opts.HeadlessLimitsWarning, "clamped to")
+			// The spec itself is passed through untouched — systemd and
+			// taskset both accept it; only the quota needed correcting.
+			assert.Equal(t, tc.allowedCPUs, opts.HeadlessLimits.AllowedCPUs)
+		})
+	}
+}
+
+// TestOptionsFromConfig_RejectsSpecsTasksetCannotApply covers the specs
+// that must count as "no pin" so they surface the configured-but-unusable
+// warning instead of being handed to a spawn that cannot exec. Each is a
+// form `taskset -c` rejects outright (verified on the target) or that
+// systemd accepts while taskset does not.
+func TestOptionsFromConfig_RejectsSpecsTasksetCannotApply(t *testing.T) {
+	for _, spec := range []string{
+		"0-3,,4",     // empty segment — taskset: rejected
+		"0-3,4-",     // dangling range end — taskset: rejected
+		"0 1 2 3",    // systemd accepts whitespace lists, taskset does not
+		"3-1",        // reversed range
+		"a-b",        // non-numeric
+		"0-99999999", // absurd id, beyond any real machine
+	} {
+		t.Run(spec, func(t *testing.T) {
+			cfg := &config.OfflineCacheConfig{
+				Enabled: true,
+				HeadlessLimits: &config.OfflineCacheHeadlessLimitsConfig{
+					CPUQuotaPercent: 300,
+					AllowedCPUs:     spec,
+				},
+			}
+			opts := offlinecache.OptionsFromConfig(cfg, "http://127.0.0.1:9222")
+			assert.Contains(t, opts.HeadlessLimitsWarning, "WITHOUT a cpu pin",
+				"a spec taskset cannot apply must warn, not silently yield a broken pin")
+			// No clamp is possible without a usable pin, so the quota is
+			// left exactly as configured.
+			assert.Equal(t, 300, opts.HeadlessLimits.CPUQuotaPercent)
+		})
+	}
+}

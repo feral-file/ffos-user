@@ -516,8 +516,16 @@ func (d *downloader) start(ctx context.Context) error {
 }
 
 // scopeRunArgs builds the systemd-run argument list for one capture
-// scope. `--scope` keeps systemd-run in the foreground as Chromium's
-// parent (so the existing cmd.Wait reaper still observes process exit);
+// scope. `--scope` keeps systemd-run in the FOREGROUND — it creates the
+// unit and then execs the command in place rather than daemonizing it, so
+// the existing cmd.Wait reaper still observes process exit and the PID
+// Start() returned BECOMES Chromium's browser process (this is what lets
+// warnOnScopeEscape read that PID's cgroup directly; see its doc and
+// wrapper.ExecCmd.Pid). It is emphatically not a surviving systemd-run
+// parent — an earlier version of this comment said "Chromium's parent",
+// which is wrong and is corrected in stopLocked's doc too, along with the
+// reason the cgroup kill is still required despite that.
+//
 // `--collect` garbage-collects the unit even if it fails, so a failed
 // generation can never leave a stuck unit behind. TimeoutStopSec bounds
 // the SIGTERM->SIGKILL escalation `systemctl stop` performs at teardown.
