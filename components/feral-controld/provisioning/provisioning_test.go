@@ -107,6 +107,11 @@ type fakeWifi struct {
 	// scan). nil scanAll falls back to ["Net"].
 	scanAll    []string
 	scanAllErr error
+	// scanAllHook, when set, runs during each ScanAllSSIDs call (outside the
+	// fake's lock) with the 1-based call number: final-gate tests use it to
+	// flip the link state WHILE the scan is in flight.
+	scanAllHook  func(call int)
+	scanAllCalls int
 }
 
 func (w *fakeWifi) HasSavedProfile(context.Context) (bool, error) {
@@ -167,12 +172,25 @@ func (w *fakeWifi) SavedWifiSSIDs(context.Context) ([]string, bool, error) {
 func (w *fakeWifi) ScanAllSSIDs(context.Context) ([]string, error) {
 	w.rec.add("wifi.ScanAllSSIDs")
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.scanAllErr != nil {
-		return nil, w.scanAllErr
+	w.scanAllCalls++
+	call := w.scanAllCalls
+	hook := w.scanAllHook
+	err := w.scanAllErr
+	// nil scanAll means "unscripted" (falls back to ["Net"]); a non-nil EMPTY
+	// scanAll is a scripted empty scan and must stay empty, so copy without
+	// collapsing empty-to-nil.
+	scripted := w.scanAll != nil
+	res := make([]string, len(w.scanAll))
+	copy(res, w.scanAll)
+	w.mu.Unlock()
+	if hook != nil {
+		hook(call)
 	}
-	if w.scanAll != nil {
-		return append([]string(nil), w.scanAll...), nil
+	if err != nil {
+		return nil, err
+	}
+	if scripted {
+		return res, nil
 	}
 	return []string{"Net"}, nil
 }
@@ -1301,6 +1319,163 @@ func TestBootClassificationLatchedAtConstruction(t *testing.T) {
 	assert.Equal(t, ReasonBootOffline, d.Reason,
 		"a process that started at boot must narrate even when the assessment itself lands past the window")
 	assert.Equal(t, 1, probeCalls, "the assessment must consume the latched value, never re-read the probe")
+}
+
+// TestRelocationFinalGateLinkRestoredDuringLastScanDefersToWindow (review P1):
+// the top-of-tick link probe predates the multi-second final scan, and a link
+// that comes back while it runs (the ethernet escape hatch plugged in; an AP
+// whose beacons the scan pass missed but the supplicant then caught) has its
+// event queued BEHIND this tick — invisible before the raise. The raise is a
+// one-way door on Wi-Fi, so the machine must re-probe immediately before it
+// and treat anything short of confirmed absence as a sighting.
+func TestRelocationFinalGateLinkRestoredDuringLastScanDefersToWindow(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	// The link recovers WHILE the third (confirming) scan is in flight.
+	h.wifi.scanAllHook = func(call int) {
+		if call == 3 {
+			fl.up = true
+		}
+	}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // scan 1 (boot assessment)
+	h.m.onTick(ctx)                       // scan 2
+	h.m.onTick(ctx)                       // scan 3 — would raise without the gate
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(), "a link sighted by the final gate must veto the raise")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	// Sighting semantics: the ladder is disarmed for good (arming is
+	// boot-assessment-only), so later absent ticks fall back to the plain
+	// window and never scan again.
+	fl.up = false
+	h.m.onTick(ctx)
+	assert.Equal(t, 3, h.rec.count("wifi.ScanAllSSIDs"), "ladder must stay disarmed after the veto")
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+}
+
+// TestRelocationFinalGateLinkUnknownDuringLastScanDefersToWindow: the gate's
+// unknown flavor — a probe that FAILS during the final scan cannot confirm
+// absence, and unknown never authorizes a raise (the same bias as the window
+// path and hasProfile).
+func TestRelocationFinalGateLinkUnknownDuringLastScanDefersToWindow(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	h.wifi.scanAllHook = func(call int) {
+		if call == 3 {
+			fl.err = errors.New("injected: nmcli timed out")
+		}
+	}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	h.m.onTick(ctx)
+	h.m.onTick(ctx)
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(), "an unknown link at the final gate must veto the raise")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+}
+
+// TestBootNarrationUpgradesWhenLinkAppears (review P1): the boot entry's
+// "setup will start in a few minutes" promise is painted off a confirmed-
+// absent link; when a link then returns, the AP is correctly suppressed —
+// but the same-state transition dedupe repaints nothing, so on an air-gapped
+// LAN the false promise would sit on screen forever. A linkPresent tick must
+// repaint the no-internet wording, exactly once.
+func TestBootNarrationUpgradesWhenLinkAppears(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	_, d := h.notifier.lastDetail(t)
+	require.Equal(t, ReasonBootOffline, d.Reason)
+
+	fl.up = true
+	h.m.onTick(ctx)
+	st, d := h.notifier.lastDetail(t)
+	assert.Equal(t, StateOfflineRetrying, st)
+	assert.Equal(t, ReasonBootNoInternet, d.Reason,
+		"a sighted link must replace the setup promise with the no-internet wording")
+	assert.Contains(t, d.Message, "no internet access")
+
+	// Further link-present ticks must not spam the narration surface.
+	n := len(h.notifier.details())
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n)
+}
+
+// TestBootNarrationDowngradesWhenLinkDropsAgain: the upgrade's mirror. An
+// entry (or upgrade) that asserted "connected, no internet" stops being true
+// when the link is confirmed gone, and the setup promise becomes accurate
+// again — the window is arming below it.
+func TestBootNarrationDowngradesWhenLinkDropsAgain(t *testing.T) {
+	fl := &fakeLink{up: true}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // boot with a live link: no-internet wording
+	_, d := h.notifier.lastDetail(t)
+	require.Equal(t, ReasonBootNoInternet, d.Reason)
+
+	fl.up = false
+	h.m.onTick(ctx)
+	_, d = h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootOffline, d.Reason,
+		"a confirmed-lost link must restore the setup promise")
+	assert.Contains(t, d.Message, "Setup mode will start")
+}
+
+// TestExhibitionOutageLinkSightingStaysSilent: the narration-truthfulness
+// ticks are gated on the boot marker — a mid-life restart's un-narrated
+// offline entry must stay silent through link comings and goings.
+func TestExhibitionOutageLinkSightingStaysSilent(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl) // startedAtBoot deliberately left false
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	n := len(h.notifier.details()) // the entry transition (generic, un-painted)
+
+	fl.up = true
+	h.m.onTick(ctx)
+	fl.up = false
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n, "no narration repaints outside a boot-narrated episode")
+}
+
+// TestBootNarrationDoesNotLeakIntoLaterOutage: any transition away from
+// offline_retrying clears the marker, so a later mid-exhibition outage
+// (deliberately silent) can never inherit the boot narration's repaints.
+func TestBootNarrationDoesNotLeakIntoLaterOutage(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // narrated boot entry
+	h.m.onConnectivity(ctx, true, false)  // recovery: leaving the state clears the marker
+	h.m.onConnectivity(ctx, false, false) // mid-exhibition outage: silent entry
+	n := len(h.notifier.details())
+
+	fl.up = true
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n, "the boot marker must not survive an online transition")
 }
 
 // TestBootRelocationConfirmedByRepeatedScansRaisesAP (M-0b): the moved-frame

@@ -370,6 +370,22 @@ type Machine struct {
 	// Loop-goroutine-only, like connUnknown.
 	linkProbeFailing bool
 
+	// bootNarration is the Reason of the boot-entry narration currently on
+	// screen ("" when none). The tick uses it to keep that prose truthful as
+	// the link comes and goes: a sighted link falsifies "setup will start in
+	// a few minutes" (the AP is correctly suppressed while a link holds, so
+	// the promise would sit on an air-gapped LAN forever), and a lost link
+	// falsifies "connected" — and a same-state re-transition is deduped, so
+	// nothing else would ever repaint. A dedicated marker rather than
+	// lastReason: a redundant offline re-emission (a monitord restart)
+	// re-targets StateOfflineRetrying with the generic reason and overwrites
+	// lastReason WITHOUT any screen change. Set only at the boot assessment's
+	// narrated entry and cleared by every transition that leaves
+	// StateOfflineRetrying, so the deliberately silent exhibition outage path
+	// (which never sets it) can never inherit a stale marker from an earlier
+	// boot episode. Loop-goroutine-only, like connUnknown.
+	bootNarration string
+
 	// relocConfirms/relocArmTriesLeft drive the boot relocation confirmation
 	// (M-0b). The check may only START at a boot assessment (BootAssessment
 	// true) whose link is confirmed absent: that grants relocArmTriesLeft
@@ -827,7 +843,12 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 			if m.activeLink == nil {
 				m.startOfflineWindow()
 			}
-			m.transition(ctx, StateOfflineRetrying, bootOfflineDetail(probe))
+			d := bootOfflineDetail(probe)
+			m.transition(ctx, StateOfflineRetrying, d)
+			// Set AFTER the transition (which clears the marker only for
+			// non-OfflineRetrying targets): the marker must describe what the
+			// paint above actually put on screen.
+			m.bootNarration = d.Reason
 			// Relocation check, first scan attempt (the radio is back in station
 			// mode — the boot AP sweep precedes this assessment — so a live scan
 			// is possible). ORDERING IS LOAD-BEARING: the fields are set AFTER
@@ -1055,7 +1076,8 @@ func (m *Machine) onTick(ctx context.Context) {
 		// raise the AP after seconds of link loss — and on Wi-Fi that raise
 		// is unrecoverable without a human (the hotspot takes the radio, so
 		// reachability can never return on its own to tear it down).
-		switch m.probeLink(ctx) {
+		probe := m.probeLink(ctx)
+		switch probe {
 		case linkPresent, linkUnknown:
 			// A sighting DISARMS the window entirely; the next confirmed
 			// absence arms a fresh one below. Disarm-then-rearm (rather than
@@ -1071,6 +1093,21 @@ func (m *Machine) onTick(ctx context.Context) {
 			// (via clearOffline) — the link's existence is direct
 			// counter-evidence.
 			m.clearOffline()
+			// Boot-narration upgrade: the boot entry may have promised "setup
+			// will start in a few minutes" off a confirmed-absent link. With a
+			// link now held the AP is correctly suppressed, so on an
+			// air-gapped LAN that promise would sit on screen forever — the
+			// same-state transition dedupe repaints nothing. Repaint with the
+			// wording the entry table would have chosen for a present link.
+			// Gated on linkPresent only (an unknown probe cannot assert
+			// "connected") and on the bootNarration marker, so the
+			// deliberately silent exhibition path — which never sets the
+			// marker — is untouched.
+			if probe == linkPresent && m.bootNarration != "" && m.bootNarration != ReasonBootNoInternet {
+				d := bootOfflineDetail(linkPresent)
+				m.bootNarration = d.Reason
+				m.notify(StateOfflineRetrying, d)
+			}
 		case linkAbsent:
 			// Boot relocation confirmation (M-0b): may only START at a boot
 			// assessment with a confirmed-absent link; each still-link-less
@@ -1082,6 +1119,24 @@ func (m *Machine) onTick(ctx context.Context) {
 			// window below is the fallback either way, and keeps running
 			// throughout.
 			if m.relocationScanStep(ctx) {
+				// FINAL link re-check before the one-way door: the probe at
+				// the top of this tick predates the scan above, which runs
+				// multi-second radio work on this same goroutine — a link
+				// that appeared meanwhile (the ethernet escape hatch plugged
+				// in; an AP whose beacons the scan pass missed but the
+				// supplicant then caught) has its event QUEUED behind this
+				// tick and cannot be seen before the raise. Anything short of
+				// a confirmed-absent link right now takes the standard
+				// sighting semantics — clearOffline disarms the ladder and
+				// the window, and the next confirmed absence re-arms the
+				// plain window — because on Wi-Fi the raise drops the
+				// recovered link and nothing can lower the AP again without a
+				// human.
+				if m.probeLink(ctx) != linkAbsent {
+					m.logger.Info("provisioning: link sighted during the final relocation scan; deferring to the offline window")
+					m.clearOffline()
+					break
+				}
 				m.logger.Info("provisioning: relocation confirmed by repeated scans; starting setup",
 					zap.Int("scans", relocConfirmScans))
 				m.disarmRelocation("")
@@ -1092,6 +1147,16 @@ func (m *Machine) onTick(ctx context.Context) {
 					Message: "None of the saved Wi-Fi networks are nearby; starting setup",
 				})
 				return
+			}
+			// Boot-narration downgrade, the upgrade's mirror: an entry that
+			// asserted "connected, no internet" (or hedged "checking") stops
+			// being true once the link is confirmed gone, and the setup
+			// promise becomes accurate again — the window below is arming.
+			// Same marker gate, so the silent exhibition path never paints.
+			if m.bootNarration != "" && m.bootNarration != ReasonBootOffline {
+				d := bootOfflineDetail(linkAbsent)
+				m.bootNarration = d.Reason
+				m.notify(StateOfflineRetrying, d)
 			}
 			switch {
 			case since.IsZero():
@@ -1337,6 +1402,14 @@ func (m *Machine) applyRescan(ctx context.Context) {
 // (sys-monitord restarts re-emit their first probe; the tick re-probes while
 // offline) stay suppressed, which is what the link-lost window path relies on.
 func (m *Machine) transition(ctx context.Context, target State, d Detail) {
+	// Leaving StateOfflineRetrying ends the boot narration's on-screen life —
+	// whatever paints next owns the screen. Without this clear, a narrated
+	// boot outage followed by online and a LATER mid-exhibition outage would
+	// let the tick repaint boot prose over the deliberately silent exhibition
+	// path. Loop-goroutine-only field, deliberately outside the lock.
+	if target != StateOfflineRetrying {
+		m.bootNarration = ""
+	}
 	m.mu.Lock()
 	changed := m.state != target ||
 		(target == StateUnprovisioned && m.lastReason != d.Reason)
