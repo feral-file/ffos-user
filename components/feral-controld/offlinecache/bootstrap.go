@@ -84,14 +84,19 @@ type Options struct {
 	// (see alignHeadlessLimits, which covers both cases). Bootstrap logs
 	// it; carried as data so the mapping stays a pure, testable function.
 	HeadlessLimitsWarning string
+	// ResourceGateWarning is non-empty when the resource-gate config
+	// carries a setting that no longer does anything. Kept as its own
+	// named field rather than folded into a generic slice for the same
+	// reason HeadlessLimitsWarning is: the name says which subsystem is
+	// complaining. A third one is the signal to generalize.
+	ResourceGateWarning string
 }
 
 // ResourceGateOptions is the fully-defaulted admission-gate slice of
 // Options, mirroring the parent struct's convention.
 type ResourceGateOptions struct {
-	Enabled  bool
-	Policy   AdmissionPolicy
-	MaxDefer time.Duration
+	Enabled bool
+	Policy  AdmissionPolicy
 }
 
 // OptionsFromConfig fills Options from cfg (nil is treated as "feature
@@ -118,7 +123,6 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 				MetricsStaleAfter:          DefaultMetricsStaleAfter,
 				MemorySafetyCeilingPercent: DefaultMemorySafetyCeilingPercent,
 			},
-			MaxDefer: DefaultAdmissionMaxDefer,
 		},
 		HeadlessLimits: defaultHeadlessLimits(),
 	}
@@ -177,7 +181,14 @@ func OptionsFromConfig(cfg *config.OfflineCacheConfig, kioskCDPEndpoint string) 
 			opts.ResourceGate.Policy.MetricsStaleAfter = time.Duration(rg.MetricsStaleAfterSeconds) * time.Second
 		}
 		if rg.MaxDeferSeconds > 0 {
-			opts.ResourceGate.MaxDefer = time.Duration(rg.MaxDeferSeconds) * time.Second
+			// Honoring this silently is exactly the class of quiet
+			// inertness this package now refuses to ship: the operator
+			// asked for a deferral deadline and there is no longer any
+			// such thing (see dequeueAdmitted — a deferred download waits
+			// for the device instead of failing on a timer).
+			opts.ResourceGateWarning = fmt.Sprintf(
+				"offlineCache.resourceGate.maxDeferSeconds (%d) is no longer honored: a deferred download now waits for the device to recover instead of failing on a deadline, so downloads are never dropped from the queue except by an explicit clear",
+				rg.MaxDeferSeconds)
 		}
 	}
 	if hl := cfg.HeadlessLimits; hl != nil {
@@ -374,6 +385,9 @@ func Bootstrap(
 	if opts.HeadlessLimitsWarning != "" {
 		logger.Warn("offline cache: " + opts.HeadlessLimitsWarning)
 	}
+	if opts.ResourceGateWarning != "" {
+		logger.Warn("offline cache: " + opts.ResourceGateWarning)
+	}
 	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
 	classifier := NewClassifier(httpClient)
 	headlessDebugPort := safeHeadlessDebugPort(opts.HeadlessDebugPort, opts.KioskCDPEndpoint, logger)
@@ -419,7 +433,7 @@ func Bootstrap(
 	// treats as "no prompt recovery wired", not as a startup failure.
 	scopeLost, _ := replayer.(ScopeLostRegistrar)
 	notifier := NewNotifier(relayerClient, wsHandler, logger)
-	admissionOpts := AdmissionOptions{Clock: clockWrapper, MaxDefer: opts.ResourceGate.MaxDefer}
+	admissionOpts := AdmissionOptions{Clock: clockWrapper}
 	var sysMetricsSink func(raw []byte)
 	if opts.ResourceGate.Enabled {
 		gate := NewAdmissionGate(opts.ResourceGate.Policy, clockWrapper, jsonWrapper, logger)

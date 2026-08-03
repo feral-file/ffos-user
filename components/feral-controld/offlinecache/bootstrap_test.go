@@ -95,7 +95,6 @@ func TestOptionsFromConfig_ResourceGateDefaultsOn(t *testing.T) {
 			assert.Equal(t, float64(offlinecache.DefaultMediaBlockMemoryPercent), opts.ResourceGate.Policy.MediaBlockMemoryPercent)
 			assert.Equal(t, float64(offlinecache.DefaultMediaBlockCPUTempC), opts.ResourceGate.Policy.MediaBlockCPUTempC)
 			assert.Equal(t, offlinecache.DefaultMetricsStaleAfter, opts.ResourceGate.Policy.MetricsStaleAfter)
-			assert.Equal(t, offlinecache.DefaultAdmissionMaxDefer, opts.ResourceGate.MaxDefer)
 		})
 	}
 }
@@ -255,7 +254,10 @@ func TestOptionsFromConfig_ResourceGateOverrides(t *testing.T) {
 	assert.Equal(t, 85.0, opts.ResourceGate.Policy.MediaBlockMemoryPercent)
 	assert.Equal(t, 88.0, opts.ResourceGate.Policy.MediaBlockCPUTempC)
 	assert.Equal(t, 30*time.Second, opts.ResourceGate.Policy.MetricsStaleAfter)
-	assert.Equal(t, 600*time.Second, opts.ResourceGate.MaxDefer)
+	// maxDeferSeconds is accepted but inert: deferral no longer has a
+	// deadline. Setting it must say so rather than be quietly dropped.
+	assert.Contains(t, opts.ResourceGateWarning, "maxDeferSeconds")
+	assert.Contains(t, opts.ResourceGateWarning, "no longer honored")
 }
 
 // A partial resourceGate section overrides only what it sets; every other
@@ -272,7 +274,9 @@ func TestOptionsFromConfig_ResourceGatePartialOverrideKeepsDefaults(t *testing.T
 	assert.Equal(t, 70.0, opts.ResourceGate.Policy.SoftwareBlockMemoryPercent)
 	assert.Equal(t, float64(offlinecache.DefaultSoftwareBlockCPUTempC), opts.ResourceGate.Policy.SoftwareBlockCPUTempC)
 	assert.Equal(t, float64(offlinecache.DefaultMediaBlockMemoryPercent), opts.ResourceGate.Policy.MediaBlockMemoryPercent)
-	assert.Equal(t, offlinecache.DefaultAdmissionMaxDefer, opts.ResourceGate.MaxDefer)
+	// A resourceGate section that does not mention maxDeferSeconds warns
+	// about nothing.
+	assert.Empty(t, opts.ResourceGateWarning)
 }
 
 func TestBootstrap_WiresEveryComponent(t *testing.T) {

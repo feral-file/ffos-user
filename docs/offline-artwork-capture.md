@@ -141,15 +141,65 @@ STARTING queued jobs while the device is under pressure:
   (93) − softwareThermalHeadroomC (18)`, and that 18°C is sized to cover
   the heat a capture bounded by `headlessLimits` can add. Latching
   hysteresis (resume = block − 5 units) prevents flapping at the metrics
-  cadence, and `maxDeferSeconds` defaults to an hour so a queued download
-  can wait out a single hot-running artwork's display slot rather than
-  fail midway through it.
-- **Deferral is not an error**: the gate only delays the head-of-queue pop
-  (`dequeueAdmitted`), strictly FIFO — no skip-ahead. A deferred item
-  stays `queued` on the wire (no new state in the app contract), remains
-  clearable without `busy`, and in-flight captures are never aborted. A
-  head deferred past `maxDeferSeconds` (default 60 min) fails with a
-  visible reason; re-issuing the download is the established retry path.
+  cadence.
+
+  > **Calibration warning — the derivation is not self-evidently
+  > well-sized.** It reserves an 18°C berth beneath the watchdog, but on
+  > the FF1 target `k10temp` measures **77.8–79.2°C during normal WebGL
+  > playback** (40/40 samples over two minutes above the 75°C block line,
+  > 0/40 below the 70°C resume line). The berth therefore exceeds the
+  > ~13.8°C of headroom the hardware actually has, and the software bucket
+  > is not "defer under pressure" but "never admit" outside a cold-boot
+  > window. Combined with the no-deadline policy above, that means software
+  > captures queue forever. **This number, not the queue policy, is where
+  > the intended behavior lives** — resizing it (or scheduling captures for
+  > genuinely idle windows instead of gating on temperature) is the open
+  > work, and it needs the thermal delta of one pinned capture measured
+  > before picking a value.
+- **Deferral is not an error**: a deferred item stays `queued` on the wire
+  (no new state in the app contract), remains clearable without `busy`,
+  and in-flight captures are never aborted.
+- **Selection is skip-scan, not head-only** (`dequeueAdmitted`). The gate's
+  verdict depends only on a job's CLASS, and the two classes are gated very
+  differently — software strictly on temperature, media permissively. Under
+  the original head-only pop, one thermally deferred software job blocked
+  media downloads behind it in the shared FIFO that the gate would have
+  admitted instantly. The worker now takes the first job the gate currently
+  admits, so a hot device keeps draining media work while its software jobs
+  wait. FIFO order is preserved **within** each class, which is the only
+  ordering anything depends on; only cross-class overtaking is intended.
+- **Deferral never drops a job, for any class.** A job leaves the queue
+  only by being processed or by an explicit clear — never on a timer.
+  Caching an artwork is optional, deferrable work; keeping the panel stable
+  is not, so a device under pressure postpones downloads rather than
+  turning them into client-visible errors it had no way to avoid.
+
+  This replaced a `maxDeferSeconds` bound that failed a job deferred too
+  long. Its justification was that "the FIFO cannot be wedged forever
+  behind one item on a persistently hot device" — which skip-scan answers
+  directly: nothing is wedged, so nothing has to be failed to unwedge it.
+  The config key is still accepted but **inert**, and setting it logs a
+  warning saying so rather than being quietly ignored.
+
+  What is unbounded is the WAIT, not any resource: the queue is
+  memory-only, capped by `maxQueueLen` (4096) with `enqueue` idempotent per
+  source, and dropped on restart. Saturating it would take thousands of
+  *distinct* permanently-deferred sources, so `ErrQueueFull` is the
+  theoretical backstop, not the realistic outcome. Starvation is not the
+  mirror risk either: software is not waiting behind media, it is waiting
+  on temperature, and media draining meanwhile costs it nothing.
+
+  **Known gap — the software path can be silently non-functional.** The
+  realistic consequence is that `queued` persists indefinitely with the
+  cause visible only in the daemon log, where it is indistinguishable from
+  healthy in-progress work. On a device whose steady-state temperature sits
+  above the software block threshold (see the calibration warning above),
+  software captures never start *and* never fail. The daemon log is not
+  reachable from the mobile app, so today there is no supported way for a
+  client or a field engineer to tell "deferred" from "wedged". Surfacing
+  the deferral reason on the status payload — an additive field, not a new
+  state — is what closes this, and it is a correctness gap rather than
+  polish.
 - **Fail-open**: no sysmetrics for `metricsStaleAfterSeconds` (default
   15s), or nonsensical readings (zero capacity/temperature), admit
   unconditionally — absence of metrics is not evidence of pressure,

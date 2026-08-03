@@ -578,18 +578,51 @@ func (q *jobQueue) pop() (captureJob, bool) {
 	return j, true
 }
 
-// peek returns the head job without popping it — dequeueAdmitted's
-// look-before-pop, so an admission denial leaves the job in the queue
-// (still StateQueued, still clearable). Only meaningful while the caller
-// holds s.mu: without it a reserveForClear could remove the peeked job
-// before any decision about it lands.
-func (q *jobQueue) peek() (captureJob, bool) {
+// firstMatch reports the index and job of the first queued job satisfying
+// pred, scanning in FIFO order, or ok=false when none does. Read-only, so
+// an admission denial leaves every job exactly where it was.
+//
+// pred runs while q.mu is held, and dequeueAdmitted's predicate calls the
+// admission gate — so the lock order is s.mu -> q.mu -> gate.mu. That is
+// consistent with every other path: no queue method ever calls back into
+// service, and the gate's mu is a leaf (see AdmissionController's
+// lock-ordering contract). Do not add a predicate that takes s.mu.
+func (q *jobQueue) firstMatch(pred func(captureJob) bool) (int, captureJob, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.items) == 0 {
+	for i, j := range q.items {
+		if pred(j) {
+			return i, j, true
+		}
+	}
+	return -1, captureJob{}, false
+}
+
+// forEach runs fn over the queued jobs in FIFO order, stopping early when
+// fn returns false. Read-only; same lock-ordering note as firstMatch.
+func (q *jobQueue) forEach(fn func(captureJob) bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, j := range q.items {
+		if !fn(j) {
+			return
+		}
+	}
+}
+
+// popAt removes and returns the job at index i. Paired with firstMatch
+// under a single s.mu critical section — the queue cannot change in
+// between, because every mutation path (enqueue's push, reserveForClear's
+// removeItems) holds s.mu across its queue call.
+func (q *jobQueue) popAt(i int) (captureJob, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if i < 0 || i >= len(q.items) {
 		return captureJob{}, false
 	}
-	return q.items[0], true
+	j := q.items[i]
+	q.items = append(q.items[:i], q.items[i+1:]...)
+	return j, true
 }
 
 // len reports how many jobs are currently queued (not yet popped) —
@@ -636,28 +669,23 @@ type service struct {
 	maxQueueLen     int   // see ErrQueueFull's doc
 	observer        ProgressObserver
 
-	// admission gates head-of-queue pops while the device is under
-	// resource pressure (nil = always admit). See AdmissionController's
-	// doc for the lock-ordering contract its Admit must honor and
-	// dequeueAdmitted for the pop semantics.
+	// admission gates which queued job may be popped while the device is
+	// under resource pressure (nil = always admit). See
+	// AdmissionController's doc for the lock-ordering contract its Admit
+	// must honor and dequeueAdmitted for the skip-scan pop semantics.
 	admission     AdmissionController
 	clock         wrapper.Clock
-	maxDefer      time.Duration
 	retryInterval time.Duration
-	// deferredSourceKey/deferredSince track how long the CURRENT head of
-	// the queue has been denied admission, for the maxDefer bound and the
-	// admitted-after-deferral log. Head-only tracking is sufficient: the
-	// single worker only ever defers on the head. The tracking MUST be
-	// reset on every path that retires the tracked job — admitted pop,
-	// expiry pop, empty queue, and reserveForClear removing the tracked
-	// key — because a stale deferredSince would otherwise be inherited by
-	// a LATER job for the same source (clear-then-re-download, exactly the
-	// retry the expiry failure reason tells the client to perform) and
-	// could expire that fresh job on its first denial. Always written
-	// under s.mu; both the worker (dequeueAdmitted) and clear callers
-	// (reserveForClear) write it.
-	deferredSourceKey string
-	deferredSince     time.Time
+	// deferLogged latches, per admission bucket, that the current deferral
+	// episode has already been logged — the worker re-evaluates every
+	// retryInterval for as long as pressure lasts, which is now unbounded,
+	// so without this the journal would fill with one line per tick
+	// forever. Cleared for a bucket when a job of that bucket is finally
+	// admitted, and wholesale when the queue empties. Purely cosmetic: no
+	// scheduling decision reads it, so a stale entry can only cost one
+	// missed or duplicated log line, never a dropped or mis-ordered job.
+	// Always written under s.mu.
+	deferLogged map[admissionBucket]bool
 
 	queue *jobQueue
 
@@ -800,10 +828,6 @@ func NewService(
 	if clock == nil {
 		clock = wrapper.NewClock()
 	}
-	maxDefer := admission.MaxDefer
-	if maxDefer <= 0 {
-		maxDefer = DefaultAdmissionMaxDefer
-	}
 	retryInterval := admission.RetryInterval
 	if retryInterval <= 0 {
 		retryInterval = defaultAdmissionRetryInterval
@@ -821,7 +845,6 @@ func NewService(
 		observer:           observer,
 		admission:          admission.Controller,
 		clock:              clock,
-		maxDefer:           maxDefer,
 		retryInterval:      retryInterval,
 		queue:              newJobQueue(),
 		state:              make(map[string]ItemState),
@@ -920,12 +943,14 @@ func (s *service) Stop() {
 
 func (s *service) run(ctx context.Context) {
 	defer close(s.doneCh)
-	// The ticker only matters while the head of the queue is deferred by
-	// the admission gate: pressure clearing produces no queue.wake, so
-	// without a periodic re-check a deferred head would wait for the next
-	// enqueue that may never come. It ticks while idle too — a harmless
-	// spurious loop iteration every retryInterval, accepted as cheaper and
-	// simpler than arming/disarming the ticker around deferral episodes.
+	// The ticker only matters while the queue holds nothing the admission
+	// gate will currently admit: pressure clearing produces no queue.wake,
+	// so without a periodic re-check those deferred jobs would wait for
+	// the next enqueue that may never come. Deferral is now unbounded, so
+	// this ticker is the ONLY thing that ever resumes them. It ticks while
+	// idle too — a harmless spurious loop iteration every retryInterval,
+	// accepted as cheaper and simpler than arming/disarming the ticker
+	// around deferral episodes.
 	// With no gate at all there is nothing to re-evaluate, so no ticker is
 	// created (a nil channel in the select below simply never fires).
 	var retryTick <-chan time.Time
@@ -935,11 +960,7 @@ func (s *service) run(ctx context.Context) {
 		retryTick = ticker.C()
 	}
 	for {
-		j, ok, expired, expiredReason := s.dequeueAdmitted()
-		if expired {
-			s.failDeferred(ctx, j, expiredReason)
-			continue
-		}
+		j, ok := s.dequeueAdmitted()
 		if !ok {
 			select {
 			case <-s.queue.wake:
@@ -965,7 +986,7 @@ func (s *service) run(ctx context.Context) {
 				// The drain deliberately uses the UNGATED
 				// dequeueForProcessing, bypassing the admission gate: a
 				// hot device must never be able to stall Stop() behind
-				// a deferred head, and every drained job fails fast and
+				// deferred work, and every drained job fails fast and
 				// quietly via process's ctx.Err() early return anyway.
 				for {
 					j, ok := s.dequeueForProcessing()
@@ -1010,96 +1031,136 @@ func (s *service) dequeueForProcessing() (captureJob, bool) {
 
 // dequeueAdmitted is dequeueForProcessing's admission-gated twin, used by
 // run()'s steady state (the shutdown drain keeps using the ungated
-// original — see run's drain comment). The admission check and the pop are
+// original — see run's drain comment). The admission scan and the pop are
 // ONE s.mu critical section for the same reason dequeueForProcessing fuses
-// its pop with the state write: a denied head stays in the queue in
+// its pop with the state write: a denied job stays in the queue in
 // StateQueued, so a racing reserveForClear can still remove it without
 // ErrItemBusy, and an admitted pop can never race a clear or pop a job of
 // a different class than the one just admitted (the clear would have had
-// to run inside this critical section to swap the head).
+// to run inside this critical section to change the queue).
 //
-// Return shape: ok means j was popped (marked StateDownloading) and must
-// be processed. expired means the head outlived maxDefer: it was popped
-// and marked StateFailed atomically here — mirroring the pop+state-write
-// invariant — and the caller owns the observer notification via
-// failDeferred (state writes happen under s.mu, observer callouts never do
-// — see notifyObserver's doc); expiredReason carries the gate's last
-// denial cause for that notification. Neither flag set means the queue is
-// empty or its head is deferred; the caller waits and retries either way.
-func (s *service) dequeueAdmitted() (j captureJob, ok bool, expired bool, expiredReason string) {
+// SELECTION IS SKIP-SCAN, NOT HEAD-ONLY. The gate's verdict depends only
+// on a job's CLASS, and the two classes have very different thresholds:
+// software (headless Chromium, CPU-bound SwiftShader rendering) is gated
+// strictly on temperature, media (a plain HTTP GET, negligible CPU) is
+// gated permissively. Taking only the head therefore let one thermally
+// deferred software job block media downloads behind it that the gate
+// would have admitted immediately — head-of-line blocking between classes
+// that share one FIFO. The scan instead takes the first job the gate
+// currently admits, so a hot device keeps draining media work while its
+// software jobs wait. FIFO order is preserved WITHIN each class, which is
+// the only ordering anything actually depends on.
+//
+// DEFERRAL NEVER DROPS A JOB, for any class. A job leaves this queue only
+// by being processed or by an explicit clear — never on a timer. Caching
+// an artwork is optional, deferrable work; keeping the panel stable is
+// not, so a device under pressure postpones downloads rather than turning
+// them into client-visible errors it had no way to avoid.
+//
+// This replaced a maxDefer bound that failed a job deferred too long. Its
+// justification ("so the FIFO cannot be wedged forever behind one item on
+// a persistently hot device") was answered by the skip-scan above:
+// nothing is wedged, so nothing has to be failed to unwedge it. What
+// remains unbounded is the WAIT, not any resource — the queue is
+// memory-only, capped by maxQueueLen (4096) with enqueue idempotent per
+// source, and dropped entirely on restart. Saturating it would take
+// thousands of DISTINCT permanently-deferred sources, so ErrQueueFull is
+// the theoretical backstop here, not the realistic outcome.
+//
+// The realistic outcome, and the actual cost, is diagnostic: "queued" can
+// persist indefinitely with the cause visible only in the daemon log
+// (once per bucket per episode, see below), where it is indistinguishable
+// from healthy in-progress work. On a device whose steady-state
+// temperature sits above the software block threshold, that means the
+// software caching path never starts AND never fails. Surfacing the
+// deferral reason on the status payload — an additive field, not a new
+// state — is what makes "deferred" tellable from "wedged" by anything
+// that cannot read the journal.
+//
+// Return shape: ok means the returned job was popped (marked
+// StateDownloading) and must be processed. Not-ok means the queue is
+// empty or everything in it is currently deferred; the caller waits and
+// retries either way.
+func (s *service) dequeueAdmitted() (captureJob, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	head, exists := s.queue.peek()
-	if !exists {
-		// An emptied queue retires whatever was being tracked (the head
-		// was popped, cleared, or drained) — see the field doc on why
-		// stale tracking must never outlive its job.
-		s.deferredSourceKey = ""
-		return captureJob{}, false, false, ""
+	if s.queue.len() == 0 {
+		s.deferLogged = nil
+		return captureJob{}, false
 	}
 
-	if s.admission != nil {
-		if decision := s.admission.Admit(head.class); !decision.Allowed {
-			now := s.clock.Now()
-			if s.deferredSourceKey != head.sourceKey {
-				// A new head started deferring (first denial, or the
-				// previous head was cleared/expired out from under the
-				// tracking): restart the clock.
-				s.deferredSourceKey = head.sourceKey
-				s.deferredSince = now
-				s.logger.Info("offline cache: deferring download under system pressure",
-					zap.String("source", head.item.Source),
-					zap.String("class", string(head.class)),
-					zap.String("reason", decision.Reason))
-			}
-			if now.Sub(s.deferredSince) <= s.maxDefer {
-				return captureJob{}, false, false, ""
-			}
-			// Deferred past the bound: fail it so the FIFO cannot be
-			// wedged forever behind one item on a persistently hot
-			// device. Pop + terminal state in this same critical
-			// section, exactly like the ok path below.
-			popped, _ := s.queue.pop()
-			s.state[popped.sourceKey] = StateFailed
-			s.deferredSourceKey = ""
-			s.logger.Warn("offline cache: failing download deferred past the admission bound",
-				zap.String("source", popped.item.Source),
-				zap.String("class", string(popped.class)),
-				zap.Duration("deferred_for", now.Sub(s.deferredSince)),
-				zap.String("reason", decision.Reason))
-			return popped, false, true, decision.Reason
+	if s.admission == nil {
+		popped, _ := s.queue.pop()
+		s.state[popped.sourceKey] = StateDownloading
+		return popped, true
+	}
+
+	// One Admit call per distinct class per scan, memoized: the gate's
+	// verdict is a pure function of class within a single critical
+	// section, and a long queue of one class must not turn one dequeue
+	// into N gate evaluations.
+	decisions := make(map[MediaClass]AdmissionDecision, 2)
+	decide := func(c MediaClass) AdmissionDecision {
+		if d, seen := decisions[c]; seen {
+			return d
 		}
+		d := s.admission.Admit(c)
+		decisions[c] = d
+		return d
 	}
 
-	popped, _ := s.queue.pop()
-	s.state[popped.sourceKey] = StateDownloading
-	if s.deferredSourceKey == popped.sourceKey {
-		s.logger.Info("offline cache: admitting download after deferral",
-			zap.String("source", popped.item.Source),
-			zap.Duration("deferred_for", s.clock.Now().Sub(s.deferredSince)))
+	if idx, _, found := s.queue.firstMatch(func(j captureJob) bool {
+		return decide(j.class).Allowed
+	}); found {
+		popped, _ := s.queue.popAt(idx)
+		s.state[popped.sourceKey] = StateDownloading
+		bucket, name := bucketForClass(popped.class)
+		if s.deferLogged[bucket] {
+			delete(s.deferLogged, bucket)
+			s.logger.Info("offline cache: admitting download after deferral",
+				zap.String("source", popped.item.Source),
+				zap.String("bucket", name))
+		}
+		return popped, true
 	}
-	s.deferredSourceKey = ""
-	return popped, true, false, ""
+
+	// Nothing queued is admissible right now. Log once per bucket per
+	// deferral episode — the worker re-checks every retryInterval for as
+	// long as the pressure lasts, which on a persistently hot device is
+	// indefinitely, so logging per attempt would bury the journal.
+	for bucket, sample := range s.deferralSamples() {
+		if s.deferLogged[bucket] {
+			continue
+		}
+		if s.deferLogged == nil {
+			s.deferLogged = make(map[admissionBucket]bool, 2)
+		}
+		s.deferLogged[bucket] = true
+		_, name := bucketForClass(sample.class)
+		s.logger.Info("offline cache: deferring download under system pressure; it waits for the device to recover rather than failing",
+			zap.String("source", sample.item.Source),
+			zap.String("class", string(sample.class)),
+			zap.String("bucket", name),
+			zap.String("reason", decide(sample.class).Reason))
+	}
+	return captureJob{}, false
 }
 
-// failDeferred emits the observer notification for a job dequeueAdmitted
-// expired (its StateFailed was already written there, under s.mu). The
-// queuedNotified barrier is honored with the same ctx escape process uses,
-// so failed can never reach a client before its own queued did — and a
-// canceled ctx means shutdown is tearing everything down and ordering no
-// longer matters. gateReason is the gate's last denial cause, embedded so
-// the client sees WHAT was over threshold, not just that something was.
-func (s *service) failDeferred(ctx context.Context, j captureJob, gateReason string) {
-	if j.queuedNotified != nil {
-		select {
-		case <-j.queuedNotified:
-		case <-ctx.Done():
+// deferralSamples returns one representative still-queued job per
+// admission bucket — whichever is first in FIFO order — so the deferral
+// log can name a concrete source per bucket without walking the queue
+// once per class. Caller must hold s.mu.
+func (s *service) deferralSamples() map[admissionBucket]captureJob {
+	samples := make(map[admissionBucket]captureJob, 2)
+	s.queue.forEach(func(j captureJob) bool {
+		bucket, _ := bucketForClass(j.class)
+		if _, seen := samples[bucket]; !seen {
+			samples[bucket] = j
 		}
-	}
-	s.notifyObserver(j.item.Source, StateFailed, Coverage{
-		Reason: "download deferred too long under sustained system pressure (" + gateReason + "); re-issue the download once the device recovers",
+		return len(samples) < 2 // both buckets sampled: stop early
 	})
+	return samples
 }
 
 // reserveForClear is dequeueForProcessing's counterpart on the
@@ -1150,16 +1211,13 @@ func (s *service) reserveForClear(keys map[string]bool) (res clearReservation, b
 			res.queuedNotified = append(res.queuedNotified, j.queuedNotified)
 		}
 	}
-	// Retire the admission-deferral tracking if this clear just removed
-	// the tracked head: a later re-download of the same source is a NEW
-	// job and must start with a fresh deferral clock, not inherit this
-	// one's (see the deferredSourceKey field doc for the instant-expiry
-	// failure this prevents). Same s.mu section as the removal, so the
-	// worker can never observe the removed job with tracking still
-	// attached.
-	if keys[s.deferredSourceKey] {
-		s.deferredSourceKey = ""
-	}
+	// No admission-deferral tracking to retire here any more. It used to
+	// carry a per-job clock that a clear had to reset, or a re-download of
+	// the same source would inherit it and expire on its first denial —
+	// but deferral no longer has a deadline, so nothing per-job survives a
+	// clear. What remains (deferLogged) is keyed by bucket, not by job,
+	// and is cosmetic: dequeueAdmitted re-derives it from whatever is
+	// actually queued on the next scan.
 	return res, "", nil
 }
 
