@@ -1093,20 +1093,25 @@ func (m *Machine) onTick(ctx context.Context) {
 			// (via clearOffline) — the link's existence is direct
 			// counter-evidence.
 			m.clearOffline()
-			// Boot-narration upgrade: the boot entry may have promised "setup
-			// will start in a few minutes" off a confirmed-absent link. With a
-			// link now held the AP is correctly suppressed, so on an
-			// air-gapped LAN that promise would sit on screen forever — the
-			// same-state transition dedupe repaints nothing. Repaint with the
-			// wording the entry table would have chosen for a present link.
-			// Gated on linkPresent only (an unknown probe cannot assert
-			// "connected") and on the bootNarration marker, so the
-			// deliberately silent exhibition path — which never sets the
-			// marker — is untouched.
-			if probe == linkPresent && m.bootNarration != "" && m.bootNarration != ReasonBootNoInternet {
-				d := bootOfflineDetail(linkPresent)
-				m.bootNarration = d.Reason
-				m.notify(StateOfflineRetrying, d)
+			// Boot-narration repaint: the clearOffline above just changed what
+			// is TRUE (a present link suppresses the AP outright; an unknown
+			// probe disarms the window, deferring setup to a future confirmed
+			// absence), so the boot prose must follow — the same-state
+			// transition dedupe repaints nothing on its own, and a stale
+			// "setup will start in a few minutes" would sit on screen forever
+			// on an air-gapped LAN (linkPresent) or under a persistently
+			// failing probe (linkUnknown). Route the probe through the SAME
+			// entry table that chose the original wording (present → "no
+			// internet", unknown → the "checking" hedge; the entry table is
+			// the single source of probe→prose truth) and repaint only when
+			// the wording actually changes. Gated on the bootNarration
+			// marker, so the deliberately silent exhibition path — which
+			// never sets it — is untouched.
+			if m.bootNarration != "" {
+				if d := bootOfflineDetail(probe); m.bootNarration != d.Reason {
+					m.bootNarration = d.Reason
+					m.notify(StateOfflineRetrying, d)
+				}
 			}
 		case linkAbsent:
 			// Boot relocation confirmation (M-0b): may only START at a boot

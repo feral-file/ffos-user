@@ -1416,6 +1416,44 @@ func TestBootNarrationUpgradesWhenLinkAppears(t *testing.T) {
 	assert.Len(t, h.notifier.details(), n)
 }
 
+// TestBootNarrationHedgesWhenProbeTurnsUnknown (review P1): an unknown probe
+// disarms the window — setup is deferred until a FUTURE confirmed absence —
+// so the "setup will start in a few minutes" promise painted at a
+// confirmed-absent boot entry stops being true, indefinitely so under a
+// persistently failing probe. The tick must repaint the same hedge the entry
+// table would have chosen ("Checking the network connection…"), exactly once,
+// and restore the promise when absence is confirmed again.
+func TestBootNarrationHedgesWhenProbeTurnsUnknown(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	_, d := h.notifier.lastDetail(t)
+	require.Equal(t, ReasonBootOffline, d.Reason)
+
+	fl.err = errors.New("injected: nmcli timed out")
+	h.m.onTick(ctx)
+	_, d = h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootLinkUnknown, d.Reason,
+		"an unknown probe defers setup, so the promise must give way to the hedge")
+	assert.Contains(t, d.Message, "Checking the network connection")
+
+	// Further unknown ticks must not spam the narration surface.
+	n := len(h.notifier.details())
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n)
+
+	// A confirmed absence re-arms the window and restores the promise.
+	fl.err = nil
+	h.m.onTick(ctx)
+	_, d = h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootOffline, d.Reason)
+	assert.Contains(t, d.Message, "Setup mode will start")
+}
+
 // TestBootNarrationDowngradesWhenLinkDropsAgain: the upgrade's mirror. An
 // entry (or upgrade) that asserted "connected, no internet" stops being true
 // when the link is confirmed gone, and the setup promise becomes accurate
