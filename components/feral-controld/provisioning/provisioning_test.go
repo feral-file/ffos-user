@@ -1205,10 +1205,10 @@ func (n *fakeNotifier) lastDetail(t *testing.T) (State, Detail) {
 }
 
 // markBoot wires the harness machine as a device-boot process start
-// (Config.BootAssessment true), the precondition for every boot-entry
-// narration and the relocation check.
+// (Config.BootAssessment true, as latched by New), the precondition for every
+// boot-entry narration and the relocation check.
 func markBoot(h *harness) {
-	h.m.bootProbe = func() bool { return true }
+	h.m.startedAtBoot = true
 }
 
 // TestBootOfflineEntryNarratesAndKeepsWindow (M-0a): a provisioned device
@@ -1243,7 +1243,7 @@ func TestBootOfflineEntryNarratesAndKeepsWindow(t *testing.T) {
 // exhibition-long outage must take the generic un-narrated path — no boot
 // narration over playing offline-cache artwork, no relocation scan, no AP.
 func TestDaemonRestartMidOutageStaysSilent(t *testing.T) {
-	h := newHarness(t) // bootProbe deliberately NOT wired
+	h := newHarness(t) // startedAtBoot deliberately left false
 	h.wifi.setProfile(true)
 	h.wifi.savedSSIDs = []string{"HomeNet"}
 	h.wifi.scanAll = []string{"CafeNet"} // would confirm relocation IF consulted
@@ -1262,6 +1262,45 @@ func TestDaemonRestartMidOutageStaysSilent(t *testing.T) {
 	h.m.onTick(ctx)
 	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"))
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
+}
+
+// TestBootClassificationLatchedAtConstruction (review P1): boot-vs-restart is
+// a property of PROCESS START, so New must latch it at construction (wiring
+// time, moments after exec) instead of re-reading /proc/uptime at the initial
+// offline assessment — which runs after the boot AP sweep and the initial
+// connectivity query and can therefore land past the boot window's edge on a
+// slow boot (large offline cache, monitord D-Bus timeout). A probe that is
+// true at New but false by assessment time is exactly that shape, and it must
+// still take the narrated boot path.
+func TestBootClassificationLatchedAtConstruction(t *testing.T) {
+	rec := &recorder{}
+	wifi := &fakeWifi{rec: rec}
+	wifi.setProfile(true)
+	notifier := &fakeNotifier{rec: rec}
+	probeCalls := 0
+	m := New(Config{
+		AP:           &fakeAP{rec: rec, info: softap.Info{SSID: "FF1-abc", PSK: "abc12345"}},
+		Wifi:         wifi,
+		Connectivity: &fakeConn{},
+		Clock:        newFakeClock(),
+		Logger:       zap.NewNop(),
+		Notifier:     notifier,
+		PortalAddr:   "127.0.0.1:0",
+		BootAssessment: func() bool {
+			probeCalls++
+			return probeCalls == 1 // inside the window at New, outside ever after
+		},
+	})
+	require.Equal(t, 1, probeCalls, "New must evaluate the probe exactly once, at construction")
+
+	m.onConnectivity(context.Background(), false, false) // the (late) boot assessment
+
+	require.Equal(t, StateOfflineRetrying, m.State())
+	st, d := notifier.lastDetail(t)
+	assert.Equal(t, StateOfflineRetrying, st)
+	assert.Equal(t, ReasonBootOffline, d.Reason,
+		"a process that started at boot must narrate even when the assessment itself lands past the window")
+	assert.Equal(t, 1, probeCalls, "the assessment must consume the latched value, never re-read the probe")
 }
 
 // TestBootRelocationConfirmedByRepeatedScansRaisesAP (M-0b): the moved-frame

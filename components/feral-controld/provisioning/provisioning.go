@@ -222,15 +222,24 @@ type Config struct {
 	// Notifier is optional.
 	Notifier Notifier
 
-	// BootAssessment, when non-nil and true at the initial assessment, marks
-	// this process start as part of a DEVICE boot (kernel boot window) rather
-	// than a Restart=always daemon restart mid-life. Only a boot gets the
-	// StateOfflineRetrying entry narration and the relocation check: a daemon
-	// restart during an exhibition-long outage re-enters StateStarting too,
-	// and narrating (or worse, raising the AP) there would paint setup over
-	// artwork that is playing fine from the offline cache — the same rationale
-	// as the executor's wireBootLifecycleHooks gate. nil fails closed (never a
+	// BootAssessment, when non-nil and true, marks this process start as part
+	// of a DEVICE boot (kernel boot window) rather than a Restart=always
+	// daemon restart mid-life. Only a boot gets the StateOfflineRetrying entry
+	// narration and the relocation check: a daemon restart during an
+	// exhibition-long outage re-enters StateStarting too, and narrating (or
+	// worse, raising the AP) there would paint setup over artwork that is
+	// playing fine from the offline cache — the same rationale as the
+	// executor's wireBootLifecycleHooks gate. nil fails closed (never a
 	// boot).
+	//
+	// Evaluated exactly ONCE, inside New: the classification is a property of
+	// PROCESS START, and New runs at wiring time, moments after exec — the
+	// same instant wireBootLifecycleHooks makes its decision. Deferring the
+	// read to the initial offline assessment (which runs after the boot AP
+	// sweep and the initial connectivity query) would let a slow boot — large
+	// offline cache replay, a monitord D-Bus timeout — drift past the
+	// window's edge and misclassify a genuine boot as a mid-life restart,
+	// silently dropping both the narration and the relocation recovery.
 	BootAssessment func() bool
 
 	// ActiveLink is an optional guard against raising the setup AP on a device
@@ -291,9 +300,12 @@ type Machine struct {
 	notifier   Notifier
 	activeLink func(ctx context.Context) (bool, error)
 
-	// bootProbe is Config.BootAssessment (nil = never a boot).
-	bootProbe func() bool
-	newPortal func(portal.Config) PortalServer
+	// startedAtBoot is Config.BootAssessment latched once by New (nil probe =
+	// never a boot). A bool, not the probe itself, so the boot-vs-restart
+	// classification cannot drift with /proc/uptime between wiring and the
+	// initial offline assessment — see the Config field's doc.
+	startedAtBoot bool
+	newPortal     func(portal.Config) PortalServer
 
 	portalAddr    string
 	offlineWindow time.Duration
@@ -429,14 +441,18 @@ func New(cfg Config) *Machine {
 		cfg.NewPortal = func(pc portal.Config) PortalServer { return portal.NewServer(pc) }
 	}
 	return &Machine{
-		ap:            cfg.AP,
-		wifi:          cfg.Wifi,
-		conn:          cfg.Connectivity,
-		clock:         cfg.Clock,
-		logger:        logger,
-		notifier:      cfg.Notifier,
-		activeLink:    cfg.ActiveLink,
-		bootProbe:     cfg.BootAssessment,
+		ap:         cfg.AP,
+		wifi:       cfg.Wifi,
+		conn:       cfg.Connectivity,
+		clock:      cfg.Clock,
+		logger:     logger,
+		notifier:   cfg.Notifier,
+		activeLink: cfg.ActiveLink,
+		// Latched HERE, not read at the offline assessment: New runs at
+		// wiring time (moments after process start), so this is the honest
+		// "did this process start at boot" answer regardless of how long the
+		// boot AP sweep or the initial connectivity query later takes.
+		startedAtBoot: cfg.BootAssessment != nil && cfg.BootAssessment(),
 		newPortal:     cfg.NewPortal,
 		portalAddr:    cfg.PortalAddr,
 		offlineWindow: cfg.OfflineWindow,
@@ -781,7 +797,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 	// DEVICE-BOOT assessment of a provisioned-but-offline device (M-0): the
 	// screen would otherwise stay black for the whole sustained-offline
 	// window, and a frame moved to a new site cannot self-heal at all — its
-	// saved SSID is simply not there. Gated on bootProbe, NOT on
+	// saved SSID is simply not there. Gated on startedAtBoot, NOT on
 	// StateStarting alone: controld is Restart=always, so a daemon restart
 	// during an exhibition-long outage re-enters StateStarting too, and
 	// narrating (or raising the AP) there would paint setup over artwork
@@ -794,17 +810,18 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 	// confirmed absence), so #233's continuous-confirmed-absence contract is
 	// untouched.
 	if cur == StateStarting {
-		// isBootAssessment is read ONCE: two reads could straddle the boot
-		// window's edge and both emit the decline log AND take the narrated
-		// path.
-		if !m.isBootAssessment() {
+		// startedAtBoot was latched by New at wiring time, so a slow path to
+		// this assessment (boot AP sweep, a monitord D-Bus timeout, offline
+		// cache replay) cannot drift the classification past the boot
+		// window's edge — a process that started at boot narrates no matter
+		// how late this line runs.
+		if !m.startedAtBoot {
 			// Telemetry for the feature's silent-decline mode: without this
 			// line a field report of "the moved frame stayed black / waited
-			// the full window" cannot be told apart from a slow boot that
-			// pushed the assessment past the boot window (large offline
-			// cache, monitord D-Bus timeout) versus a genuine mid-life
-			// daemon restart.
-			m.logger.Info("provisioning: StateStarting offline assessment is outside the device-boot window; keeping the un-narrated path")
+			// the full window" cannot be told apart from a mid-life daemon
+			// restart versus a boot so slow the daemon itself was started
+			// outside the window.
+			m.logger.Info("provisioning: this process did not start within the device-boot window; keeping the un-narrated path")
 		} else {
 			probe := m.probeLink(ctx)
 			if m.activeLink == nil {
@@ -864,14 +881,6 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 		}
 	}
 	m.transition(ctx, StateOfflineRetrying, detail)
-}
-
-// isBootAssessment reports whether this process start belongs to a device
-// boot (Config.BootAssessment). nil fails closed: without the probe every
-// StateStarting entry is treated as a mid-life daemon restart and takes the
-// un-narrated path.
-func (m *Machine) isBootAssessment() bool {
-	return m.bootProbe != nil && m.bootProbe()
 }
 
 // bootOfflineDetail picks the boot-entry narration for StateOfflineRetrying by
