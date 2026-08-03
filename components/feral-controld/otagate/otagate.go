@@ -92,6 +92,14 @@ func (r Result) String() string {
 // FailureState is the latched permanent-failure snapshot, surfaced to a future
 // setupui package via Failure() or the OnPermanentFailure callback. The zero
 // value (Failed == false) means no latched failure.
+//
+// At is stamped from Deps.Clock.Now() and keeps Go's monotonic reading.
+// devicectl's claim retry loop compares it (raw — never .UTC()/.Round()/
+// serialized, which would strip the monotonic part) against a t0 taken from
+// the SAME clock to decide whether a latch was set by the current gate call;
+// see permanentUpdateFailureLatchedSince. Err is the exact error object the
+// gate returned for that run (the same object every singleflight joiner
+// received), which that check uses as auxiliary identity evidence.
 type FailureState struct {
 	Failed bool
 	Err    error
@@ -187,11 +195,17 @@ func (g *Gate) EnsureLatestAtStartup(ctx context.Context) (Result, error) {
 //
 // ctx caveat: the shared run executes under the FIRST caller's ctx (captured in
 // fn's closure); singleflight ignores joiners' ctx entirely, so a joiner cannot
-// cancel or outlive the flight it joined. Today both entry points pass the
-// app-lifetime ctx, so this only matters at shutdown. If a future caller passes
-// a deadline ctx, its expiry cancels the shared update for every joiner — the
-// runLocal ctx.Err() guard keeps that from latching a bogus permanent failure,
-// but the shared-cancellation behavior itself is inherent to coalescing.
+// cancel or outlive the flight it joined. All three entry points receive the
+// daemon-lifetime ctx in production — the relayer read loop dispatches command
+// handlers with the ctx main() started it with (there is no per-command ctx
+// anywhere in that chain), and the provisioning online hooks pass the same
+// root ctx — so cancellation here means process shutdown. devicectl's
+// latch-freshness terminal check additionally leans on that: a ctx cancel
+// never latches (see runLocal), so shutdown cannot be misread as a permanent
+// claim failure. If a future caller passes a deadline ctx, its expiry cancels
+// the shared update for every joiner — the runLocal ctx.Err() guard keeps that
+// from latching a bogus permanent failure, but the shared-cancellation
+// behavior itself is inherent to coalescing.
 func (g *Gate) do(_ context.Context, fn func() (Result, error)) (Result, error, bool) {
 	v, err, shared := g.group.Do(singleFlightKey, func() (interface{}, error) {
 		return fn()
@@ -269,11 +283,14 @@ func (g *Gate) runLocal(ctx context.Context, mode Mode) (Result, error) {
 const postLadderWatchdogDefault = 5 * time.Minute
 
 // scheduleLadderRebootWatchdog arms the post-ladder watchdog (design doc
-// §6) after a successful update ladder. Detached from the caller's
-// ctx deliberately: both entry points typically pass a request-scoped ctx
-// (e.g. the relayer command that triggered RequestUpdate), which is canceled
-// the moment the handler returns — long before a real reboot would land —
-// and using it here would fire the watchdog immediately on every success.
+// §6) after a successful update ladder. Detached from the caller's ctx
+// deliberately — though NOT because that ctx is request-scoped: in production
+// every entry point (the relayer command chain included) runs under the
+// daemon-lifetime ctx, canceled only at process shutdown, at which point a
+// missed watchdog callback is moot anyway. The detachment simply keeps the
+// watchdog wait independent of any caller's lifecycle should a future caller
+// pass a scoped ctx (a canceled ctx would make SleepContext return early and
+// silently skip the callback, not fire it).
 func (g *Gate) scheduleLadderRebootWatchdog() {
 	if g.deps.OnUpdateSucceededNoReboot == nil {
 		return

@@ -134,6 +134,15 @@ type executor struct {
 	// pre-claim gates.
 	autoClaimInFlight atomic.Bool
 
+	// autoClaimWake (built lazily via autoClaimWakeChan, buffered 1) lets an
+	// online transition or topic assignment that lands while a claim-flow run
+	// is in flight preempt that run's stretched ladder-failure backoff. The
+	// in-flight guard above would otherwise silently swallow those
+	// re-triggers for hours — the invariant the guard protects is "no
+	// concurrent gate runs", not "no wake-ups".
+	autoClaimWakeOnce sync.Once
+	autoClaimWake     chan struct{}
+
 	// pairingConfirmed latches the cloud's showPairingQRCode(false) pairing
 	// confirmation. connect() (the claim) sets ConnectedDevice, but the
 	// confirmation does NOT — without this latch the auto-claim loop stayed
@@ -685,20 +694,57 @@ func (e *executor) showPairingQRCodeInProcess(ctx context.Context, show bool) (i
 
 // runPreClaimGateAndPaint runs the mandatory pre-claim OTA gate and paints the
 // claim QR only when the gate settles on a supported build: the device must
-// reach one before it can be claimed. It reports whether the QR was painted
-// and whether the outcome is terminal for this process (ResultUpdateStarted:
+// reach one before it can be claimed. It reports whether the QR was painted,
+// whether the outcome is terminal for this process (ResultUpdateStarted:
 // the device is rebooting into the new build; ResultTooOldToUpgrade: nothing
 // short of a reflash helps) so the auto-claim retry loop knows when another
-// attempt is pointless.
-func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bool) (painted, terminal bool) {
+// attempt is pointless, and whether this call latched an update-LADDER
+// failure so the loop stretches its retry cadence (see
+// autoClaimLadderFailureBackoffMin/Max for why that is neither terminal nor
+// the normal backoff).
+func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bool) (painted, terminal, ladderFailed bool) {
+	// t0 anchors the latch-freshness check in the error branch below. It MUST
+	// be read from the same clock the gate stamps FailureState.At with (both
+	// are e.clock — see otaGateInstance) and MUST stay raw: no .UTC()/.Round()
+	// or serialization, so the comparison keeps Go's monotonic reading and an
+	// NTP step between t0 and the latch cannot reorder them.
+	t0 := e.clock.Now()
 	result, err := e.otaGateInstance().EnsureLatestBeforeClaim(ctx)
 	if err != nil {
-		// Retryable: version-check failures (often fresh-network DNS/route
-		// convergence) and failed update ladders (the ladder clears its own
-		// latch on the next explicit run).
+		// Two retryable failure shapes with very different costs (F-12):
+		//  - A version-check failure (often fresh-network DNS/route
+		//    convergence) or a ctx cancel (which never latches — see otagate
+		//    runLocal) is cheap; the normal 30s..5m backoff is right, and the
+		//    ladder clears its own latch on the next explicit run.
+		//  - The update LADDER ran and latched Failure() during this call.
+		//    The latch means ladder EXHAUSTION — a bad signature latches on
+		//    attempt one, three transient download failures latch on attempt
+		//    three; the latch does NOT carry the classifier's verdict. Either
+		//    way the round burned up to MaxUpdateRetries full multi-GB
+		//    downloads, so the normal cadence would re-download
+		//    near-continuously forever on an unattended device — and a bad
+		//    published signature/image strands every unclaimed device in the
+		//    batch at once. Report it so the retry loop stretches the cadence
+		//    (escalating, so the flaky-network shape recovers within the
+		//    hour) — but never hard-terminal: unlike the startup gate, the
+		//    claim flow has NO nightly-timer fallback, so a device that
+		//    simply stays online would otherwise remain unclaimable for the
+		//    whole process lifetime.
+		// Failure() is read AFTER the gate returned, so a concurrent
+		// RequestUpdate ladder latching inside that tiny window would be
+		// misattributed to this round and stretch a cheap version-check
+		// failure. Accepted: the loop only runs on unclaimed devices, the
+		// singleflight serializes gate runs, and the error direction is
+		// conservative (a slower retry, never a lost one — the wake channel
+		// still preempts it).
+		if updateLadderFailureLatchedSince(e.otaGateInstance().Failure(), err, t0) {
+			e.logger.Warn("Pre-claim OTA gate's update ladder failed; stretching claim retry cadence",
+				zap.Error(err), zap.Stringer("gateResult", result))
+			return false, false, true
+		}
 		e.logger.Warn("Pre-claim OTA gate did not pass; withholding claim QR",
 			zap.Error(err), zap.Stringer("gateResult", result))
-		return false, false
+		return false, false, false
 	}
 	if result != otagate.ResultNoUpdateNeeded {
 		e.logger.Info("Pre-claim OTA gate did not settle on no-update; withholding claim QR",
@@ -713,7 +759,7 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 		if result == otagate.ResultTooOldToUpgrade {
 			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		}
-		return false, true
+		return false, true, false
 	}
 	// The gate is slow (live version check, possibly an update ladder); the
 	// device may have been claimed or pairing-confirmed while it ran. The
@@ -726,10 +772,30 @@ func (e *executor) runPreClaimGateAndPaint(ctx context.Context, skipIfSettled bo
 	// the same intent.
 	if skipIfSettled && e.claimSettled() {
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
-		return false, true
+		return false, true, false
 	}
 	e.setupUI().ShowClaimQR(e.buildDeviceConnectURL(ctx), e.deviceID())
-	return true, false
+	return true, false, false
+}
+
+// updateLadderFailureLatchedSince reports whether the OTA gate's failure latch
+// was set by the gate call that started at t0 (t0 read from the SAME clock the
+// gate stamps FailureState.At with). The latch records that an update LADDER
+// ran to exhaustion — it does NOT carry the transient/permanent classifier
+// verdict, so callers must not read "latched" as "unrecoverable". Freshness
+// (At not before t0) is the primary criterion: the gate clears its latch only
+// on NoUpdateNeeded/ladder entry — deliberately NOT on VersionCheckFailed — so
+// a stale latch from an earlier round must not reclassify a cheap transient
+// failure as a ladder one. Error identity is the auxiliary criterion: a caller
+// that joined an already in-flight run (otagate singleflight) can have taken
+// t0 AFTER that run stamped its latch, and the shared error object is then the
+// only evidence the failure belongs to this round. Times are compared raw so
+// the monotonic clock reading survives (NTP-step immune).
+func updateLadderFailureLatchedSince(fs otagate.FailureState, gateErr error, t0 time.Time) bool {
+	if gateErr == nil || !fs.Failed {
+		return false
+	}
+	return !fs.At.Before(t0) || errors.Is(gateErr, fs.Err)
 }
 
 const (
@@ -790,6 +856,34 @@ const (
 	// raced fresh-network DNS convergence would withhold the claim QR forever.
 	autoClaimRetryMin = 30 * time.Second
 	autoClaimRetryMax = 5 * time.Minute
+
+	// autoClaimLadderFailureBackoffMin/Max bound the stretched retry cadence
+	// after a pre-claim gate round whose update LADDER failed. The gate's
+	// failure latch records ladder EXHAUSTION, not a classifier verdict:
+	// three transient download failures latch exactly like a bad signature
+	// (otagate's runUpdateLadder returns the final error either way). Each
+	// latched round cost up to MaxUpdateRetries full multi-GB image
+	// downloads, so the transient 30s..5m cadence would re-download nearly
+	// continuously (F-12) — but a flat hours-long wait would equally punish a
+	// device that merely lost three download races on flaky Wi-Fi. Hence the
+	// escalation: the first latched round retries within the hour (the flaky
+	// network case), and consecutive latched rounds double toward one ladder
+	// per day (the bad published image case). Never hard-terminal: the claim
+	// flow has no nightly-timer fallback, so the loop must keep retrying on
+	// its own; an online transition or topic assignment arriving while the
+	// loop is PARKED shortens the wait to at most autoClaimLadderWakeFloor
+	// (pokes landing while the gate itself runs are dropped —
+	// drain-before-park), so a moved/fixed device recovers within minutes,
+	// not hours, without flapping links running ladders back-to-back.
+	autoClaimLadderFailureBackoffMin = 1 * time.Hour
+	autoClaimLadderFailureBackoffMax = 24 * time.Hour
+
+	// autoClaimLadderWakeFloor is the minimum spacing a wake-preempted park
+	// still enforces before re-entering the gate. Deliberately aliased to
+	// autoClaimRetryMax so the wake path can never re-run a download ladder
+	// faster than the transient cadence's cap allows — retuning either value
+	// means deciding for both.
+	autoClaimLadderWakeFloor = autoClaimRetryMax
 )
 
 // MaybeShowClaimQROnOnline is the SoftAP-era replacement for launcher-ui's
@@ -802,6 +896,14 @@ const (
 // no-ops; a later online transition re-triggers.
 func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 	if !e.autoClaimInFlight.CompareAndSwap(false, true) {
+		// A run is already in flight — possibly parked in the stretched
+		// ladder-failure backoff. Poke it (non-blocking, buffered 1) so the
+		// online transition or topic assignment that landed here still
+		// shortens the wait instead of being silently swallowed for hours.
+		select {
+		case e.autoClaimWakeChan() <- struct{}{}:
+		default:
+		}
 		return
 	}
 	defer e.autoClaimInFlight.Store(false)
@@ -848,13 +950,40 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 
 	e.logger.Info("Auto claim flow: device online and unclaimed; running pre-claim gate")
 	backoff := autoClaimRetryMin
+	ladderBackoff := autoClaimLadderFailureBackoffMin
 	for {
-		painted, terminal := e.runPreClaimGateAndPaint(ctx, true)
+		painted, terminal, ladderFailed := e.runPreClaimGateAndPaint(ctx, true)
 		if painted || terminal {
 			return
 		}
-		e.logger.Info("Auto claim flow: gate not settled; retrying", zap.Duration("backoff", backoff))
-		if err := e.clock.SleepContext(ctx, backoff); err != nil {
+		wait := backoff
+		if ladderFailed {
+			// This round already burned a full download ladder (see
+			// runPreClaimGateAndPaint). The stretched cadence escalates across
+			// consecutive latched rounds (flaky Wi-Fi retries within the
+			// hour; a bad published image converges toward one ladder per
+			// day) and keeps recovery automatic: the wake channel below lets
+			// an online transition or topic assignment preempt the wait. The
+			// transient backoff is deliberately NOT advanced by these rounds:
+			// a later transient failure resumes the cheap cadence where it
+			// left off.
+			wait = ladderBackoff
+			ladderBackoff *= 2
+			if ladderBackoff > autoClaimLadderFailureBackoffMax {
+				ladderBackoff = autoClaimLadderFailureBackoffMax
+			}
+		}
+		e.logger.Info("Auto claim flow: gate not settled; retrying", zap.Duration("backoff", wait))
+		if ladderFailed {
+			// Preemptible sleep, stretched cadence ONLY: transient rounds
+			// keep the plain sleep so connectivity flaps cannot multiply
+			// cheap gate rounds into extra load, while a parked hours-long
+			// wait stays responsive to the re-triggers the narration
+			// promises.
+			if err := e.sleepClaimBackoffPreemptible(ctx, wait); err != nil {
+				return
+			}
+		} else if err := e.clock.SleepContext(ctx, wait); err != nil {
 			return
 		}
 		if e.claimSettled() {
@@ -863,10 +992,80 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 			e.setupUI().HideIfShowing(setupui.StateFinalizing)
 			return
 		}
-		backoff *= 2
-		if backoff > autoClaimRetryMax {
-			backoff = autoClaimRetryMax
+		if !ladderFailed {
+			backoff *= 2
+			if backoff > autoClaimRetryMax {
+				backoff = autoClaimRetryMax
+			}
+			// Symmetric to the transient backoff surviving ladder rounds: a
+			// transient round resets the ladder escalation. The escalation
+			// accumulates evidence of a persistently bad published image
+			// (every round latches on a solid network), and a cheap failure
+			// slipping in between means the NETWORK itself just broke — which
+			// reattributes the earlier exhaustion toward the flaky-network
+			// cause the 1h floor exists for. Only consecutive latched rounds
+			// converge toward one ladder per day.
+			ladderBackoff = autoClaimLadderFailureBackoffMin
 		}
+	}
+}
+
+// autoClaimWakeChan lazily builds the buffered(1) wake channel that lets
+// MaybeShowClaimQROnOnline invocations arriving while a run is in flight
+// preempt that run's stretched ladder-failure backoff. Lazy (like setupUI) so
+// tests constructing a bare executor get a working channel from either side.
+func (e *executor) autoClaimWakeChan() chan struct{} {
+	e.autoClaimWakeOnce.Do(func() { e.autoClaimWake = make(chan struct{}, 1) })
+	return e.autoClaimWake
+}
+
+// sleepClaimBackoffPreemptible sleeps like clock.SleepContext but returns
+// early when the auto-claim wake channel is poked — an online transition or
+// topic assignment landed while this loop was parked in the stretched
+// ladder-failure backoff, and both of those wirings call the same in-flight-
+// guarded entry point, so without the poke they would be silently swallowed
+// for hours. Returns non-nil only when ctx is done (SleepContext's contract),
+// so the caller's abort path is unchanged.
+//
+// Two guards keep the wake path from re-opening F-12's back-to-back download
+// loop (a link flap DURING the ladder is the expected case on exactly the
+// device whose downloads fail, and the factory-fresh topic assignment
+// routinely lands before the first park):
+//   - Drain-before-park: a wake buffered while the gate was RUNNING is
+//     discarded, so only a transition that arrives while actually parked can
+//     preempt the wait.
+//   - Wake floor: even a legitimate mid-park wake re-enters the gate no
+//     sooner than autoClaimLadderWakeFloor after the park began — the remainder is
+//     slept non-preemptibly, capping download volume at one ladder per floor
+//     no matter how hard the link flaps, while still recovering a moved or
+//     fixed device within minutes instead of hours.
+func (e *executor) sleepClaimBackoffPreemptible(ctx context.Context, d time.Duration) error {
+	select {
+	case <-e.autoClaimWakeChan():
+	default:
+	}
+	parkedAt := e.clock.Now()
+	sleepCtx, cancelSleep := context.WithCancel(ctx)
+	defer cancelSleep()
+	done := make(chan error, 1)
+	go func() { done <- e.clock.SleepContext(sleepCtx, d) }()
+	select {
+	case err := <-done:
+		// sleepCtx can only have been canceled via ctx here, so the error
+		// passes through as the caller's own cancellation.
+		return err
+	case <-e.autoClaimWakeChan():
+		// Reap the sleeper before returning so no goroutine outlives the
+		// loop iteration holding a stale timer.
+		cancelSleep()
+		<-done
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if elapsed := e.clock.Now().Sub(parkedAt); elapsed < autoClaimLadderWakeFloor {
+			return e.clock.SleepContext(ctx, autoClaimLadderWakeFloor-elapsed)
+		}
+		return nil
 	}
 }
 
@@ -2334,6 +2533,12 @@ func (e *executor) updateToLatest(ctx context.Context) (interface{}, error) {
 // across relayer commands.
 func (e *executor) otaGateInstance() *otagate.Gate {
 	e.otaGateOnce.Do(func() {
+		// Test seam (same pattern as setupNarrator): a pre-set gate is kept
+		// as-is so tests can drive the failure latch through a Gate built on
+		// fake deps. Production wiring never pre-sets it.
+		if e.otaGate != nil {
+			return
+		}
 		e.otaGate = otagate.New(otagate.Deps{
 			HTTP:   wrapper.NewHTTPClient(),
 			Clock:  e.clock,
@@ -2370,16 +2575,20 @@ func (e *executor) otaGateInstance() *otagate.Gate {
 // is directly unit-testable without driving the gate's real HTTP/runner
 // plumbing.
 func (e *executor) otaPermanentFailureNarration(fs otagate.FailureState) {
-	reason := "update-failed"
-	if fs.Err != nil {
-		reason = fs.Err.Error()
-	}
 	if e.claimSettled() {
 		e.setupUI().HideIfShowing(setupui.StateUpdating)
 		e.logger.Warn("OTA update permanently failed on a settled device", zap.Error(fs.Err))
 		return
 	}
-	e.setupUI().ShowJoinFailed(reason)
+	// The only pre-claim narration surface is the player's join_failed screen,
+	// whose TITLE is player-owned ("Wi-Fi join failed") — only the body text
+	// is controllable from here, so a truthful title needs a new ff-player
+	// state and remains the open half of F-12 (ux-must-fix M-2 驗收:
+	// "畫面不再顯示 Wi-Fi 失敗"). Until then keep the body honest and legible:
+	// a fixed sentence the user can act on, never raw updater internals. The
+	// raw error goes to the log, where it belongs.
+	e.logger.Warn("OTA update ladder failed before claim; narrating via join_failed", zap.Error(fs.Err))
+	e.setupUI().ShowJoinFailed("System update failed. The device will keep retrying automatically.")
 }
 
 // clearStuckUpdatingOverlay is the post-ladder watchdog's fired callback
