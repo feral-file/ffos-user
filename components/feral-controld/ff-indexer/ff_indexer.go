@@ -160,6 +160,15 @@ func validateEndpoint(endpoint string) error {
 	if err != nil {
 		return err
 	}
+	// Scheme is checked as well as host. The endpoint comes from a
+	// CONTROLLER-SUPPLIED dynamic playlist, and its GraphQL response
+	// decides what the device displays — so fetching it over cleartext
+	// would let anyone on the path rewrite that answer, host allowlist or
+	// not. Allowlisting the host alone left `http://<allowed-host>/...`
+	// accepted; a test even pinned that as expected behavior.
+	if url.Scheme != "https" {
+		return fmt.Errorf("invalid endpoint scheme %q (https required): %s", url.Scheme, endpoint)
+	}
 	if !FF_INDEXER_HOSTS[url.Host] {
 		return fmt.Errorf("invalid endpoint: %s", endpoint)
 	}

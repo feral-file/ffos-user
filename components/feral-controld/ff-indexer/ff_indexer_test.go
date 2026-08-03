@@ -470,10 +470,34 @@ func TestFFIndexer_ValidateEndpoint(t *testing.T) {
 			expectError: true,
 			errorMsg:    "invalid endpoint",
 		},
+		// The endpoint comes from a controller-supplied dynamic playlist
+		// and its GraphQL response decides what the device displays, so
+		// cleartext must be rejected however well-known the host is.
+		// This case previously asserted expectError:false — it pinned the
+		// hole rather than the contract.
 		{
-			name:        "HTTP instead of HTTPS",
+			name:        "HTTP instead of HTTPS on the v2 host",
 			endpoint:    "http://indexer-v2.feralfile.com/graphql",
-			expectError: false,
+			expectError: true,
+			errorMsg:    "https required",
+		},
+		{
+			name:        "HTTP instead of HTTPS on the legacy host",
+			endpoint:    "http://indexer.feralfile.com/graphql",
+			expectError: true,
+			errorMsg:    "https required",
+		},
+		{
+			name:        "scheme-relative URL parses with no scheme at all",
+			endpoint:    "//indexer.feralfile.com/graphql",
+			expectError: true,
+			errorMsg:    "https required",
+		},
+		{
+			name:        "non-http scheme on an allowed host",
+			endpoint:    "ftp://indexer.feralfile.com/graphql",
+			expectError: true,
+			errorMsg:    "https required",
 		},
 	}
 

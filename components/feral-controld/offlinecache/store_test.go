@@ -885,3 +885,66 @@ func TestStore_PrunePlaylistRecords_BoundsMetadataGrowth(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, afterUsage, beforeUsage, "pruning must actually reclaim accounted bytes")
 }
+
+// TestStore_EmptySourceRecordIsCorrupt covers the one identity failure the
+// filename/content check cannot catch on its own: a record whose source is
+// empty, stored under SourceKey(""). That name is a perfectly well-formed
+// hash and the record genuinely agrees with its own (empty) content, so
+// the mismatch check passes it. It is corrupt regardless — SaveItem
+// refuses to write one, so it cannot have come from this code, and the
+// source is the identity every reader keys on. Left readable it would put
+// an entry with an empty Source into status, which no client can match,
+// and GC would keep it and its blobs inside the disk budget forever.
+//
+// Both readers are asserted because they are separate paths: LoadItem
+// validates, while GC reads through loadItemByName and re-derives its own
+// verdict.
+func TestStore_EmptySourceRecordIsCorrupt(t *testing.T) {
+	emptyKey := offlinecache.SourceKey("")
+
+	t.Run("LoadItem rejects it as corrupt", func(t *testing.T) {
+		store, root := newTestStore(t)
+		rec := &offlinecache.ItemRecord{
+			Item: dp1playlist.PlaylistItem{Source: ""},
+		}
+		data, err := json.Marshal(rec)
+		require.NoError(t, err)
+		require.NoError(t, wrapper.NewOS().MkdirAll(filepath.Join(root, "items"), 0o755))
+		require.NoError(t, wrapper.NewOS().WriteFile(
+			filepath.Join(root, "items", emptyKey+".json"), data, 0o644))
+
+		_, err = store.LoadItem(emptyKey)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, offlinecache.ErrItemRecordCorrupt,
+			"an empty source is an identity failure, not a clean miss")
+	})
+
+	t.Run("GC quarantines it and reclaims its blobs", func(t *testing.T) {
+		store, root := newTestStore(t)
+		pinnedHash := writeBlobString(t, store, "referenced only by the empty-source record")
+		rec := &offlinecache.ItemRecord{
+			Item:      dp1playlist.PlaylistItem{Source: ""},
+			Resources: []offlinecache.Resource{{URL: "https://example.com/a.js", Status: 200, SHA256: pinnedHash}},
+		}
+		data, err := json.Marshal(rec)
+		require.NoError(t, err)
+		path := filepath.Join(root, "items", emptyKey+".json")
+		require.NoError(t, wrapper.NewOS().MkdirAll(filepath.Join(root, "items"), 0o755))
+		require.NoError(t, wrapper.NewOS().WriteFile(path, data, 0o644))
+
+		removed, _, err := store.GC()
+		require.NoError(t, err)
+		assert.Equal(t, 1, removed, "the empty-source record's exclusive blob is reclaimed")
+
+		_, statErr := wrapper.NewOS().Stat(path)
+		assert.True(t, wrapper.NewOS().IsNotExist(statErr), "the record must not be left in place")
+		_, statErr = wrapper.NewOS().Stat(path + ".corrupt")
+		assert.NoError(t, statErr, "its bytes must be preserved for forensics")
+	})
+
+	t.Run("SaveItem still refuses to create one", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		err := store.SaveItem(&offlinecache.ItemRecord{Item: dp1playlist.PlaylistItem{Source: ""}})
+		require.Error(t, err, "the write path is what keeps this shape unreachable in the first place")
+	})
+}

@@ -478,6 +478,18 @@ func (s *fsStore) LoadItem(sourceKey string) (*ItemRecord, error) {
 		return nil, fmt.Errorf("%w: item %s: record's own source hashes to %s (filename/content identity mismatch)",
 			ErrItemRecordCorrupt, sourceKey, got)
 	}
+	// An empty source passes the identity check above — SourceKey("") is a
+	// perfectly well-formed hash, so a record named after it agrees with
+	// its own (empty) content. It is still corrupt: SaveItem refuses to
+	// write one, so such a file cannot have come from this code, and the
+	// source is the cache identity every reader keys on. Serving it would
+	// put an entry with an empty source into status, which no client can
+	// match (ItemStatus.Source is the field they key on) and which GC
+	// would keep forever. Deterministic, so it takes the same quarantine
+	// path as any other identity failure.
+	if rec.Item.Source == "" {
+		return nil, fmt.Errorf("%w: item %s: record has an empty source", ErrItemRecordCorrupt, sourceKey)
+	}
 	return &rec, nil
 }
 
@@ -724,6 +736,18 @@ func (s *fsStore) GC() (int, int64, error) {
 		if err == nil && SourceKey(rec.Item.Source) != id {
 			err = fmt.Errorf("%w: item %s: record's own source hashes to %s (filename/content identity mismatch)",
 				ErrItemRecordCorrupt, id, SourceKey(rec.Item.Source))
+		}
+		// An empty source slips past the mismatch check above, because
+		// SourceKey("") is a well-formed hash and a record named after it
+		// genuinely agrees with its own content. It is corrupt all the
+		// same — SaveItem refuses to write one, so it cannot have come
+		// from this code, and the source is the identity every reader
+		// keys on. Checked HERE as well as in LoadItem because GC reads
+		// through loadItemByName, which deliberately does not go through
+		// LoadItem's validation; without this the record would be kept
+		// forever, holding its blobs inside the maxDiskBytes budget.
+		if err == nil && rec.Item.Source == "" {
+			err = fmt.Errorf("%w: item %s: record has an empty source", ErrItemRecordCorrupt, id)
 		}
 		switch {
 		case errors.Is(err, ErrItemRecordCorrupt):
