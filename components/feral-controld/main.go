@@ -1055,6 +1055,11 @@ func initializeApp(
 		Logger:       logger,
 		Notifier:     provisioningNotifier,
 		ActiveLink:   externalLinkProbe(linkChecker),
+		// Same boot-vs-restart discriminator as wireBootLifecycleHooks above:
+		// the machine narrates its boot offline assessment (and may run the
+		// relocation check) only when this process start IS a device boot —
+		// a Restart=always daemon restart mid-outage must stay silent.
+		BootAssessment: func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
 	})
 
 	// Hub status provider. The base provider reads identity/version/claim/topic

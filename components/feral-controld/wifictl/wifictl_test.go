@@ -2,6 +2,7 @@ package wifictl
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -746,4 +747,122 @@ func TestJoinFailureCleanupSurvivesCanceledContext(t *testing.T) {
 	ctxErrs := exec.recordedCtxErrs()
 	require.Len(t, ctxErrs, 4)
 	assert.NoError(t, ctxErrs[3], "cleanup must run on a detached, live context")
+}
+
+// --- SavedWifiSSIDs / ScanAllSSIDs (boot relocation evidence, M-0b) -----------
+
+// TestSavedWifiSSIDsReadsProfileFieldsNotNames: the SSID must come from the
+// profile's 802-11-wireless.ssid resolved by UUID (an ops-created profile may
+// be named anything, and name resolution can match a same-named profile of a
+// different type), and a hidden profile must flip anyHidden — scan absence is
+// not evidence for a network that never appears in scans.
+func TestSavedWifiSSIDsReadsProfileFieldsNotNames(t *testing.T) {
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		switch {
+		case strings.Contains(joined, "-f UUID,TYPE,NAME connection show"):
+			return []byte("uuid-office:802-11-wireless:office-frame\nuuid-eth:802-3-ethernet:office-frame\nuuid-home:802-11-wireless:HomeNet\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-office"):
+			return []byte("Gallery5G\n"), nil
+		case strings.Contains(joined, "802-11-wireless.hidden connection show uuid uuid-office"):
+			return []byte("yes\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-home"):
+			return []byte("HomeNet\n"), nil
+		case strings.Contains(joined, "802-11-wireless.hidden connection show uuid uuid-home"):
+			return []byte("no\n"), nil
+		}
+		return nil, fakeExitError{code: 1, msg: "unexpected: " + joined}
+	})
+
+	ssids, anyHidden, err := c.SavedWifiSSIDs(context.Background())
+	if err != nil {
+		t.Fatalf("SavedWifiSSIDs: %v", err)
+	}
+	if len(ssids) != 2 || ssids[0] != "Gallery5G" || ssids[1] != "HomeNet" {
+		t.Fatalf("ssids = %v, want [Gallery5G HomeNet] (profile fields, not names)", ssids)
+	}
+	if !anyHidden {
+		t.Fatal("anyHidden = false, want true (office-frame targets a hidden network)")
+	}
+	// The same-named ethernet profile must never be queried: name-based
+	// resolution would have hit it and read back an empty ssid.
+	for _, call := range exec.recorded() {
+		if strings.Contains(strings.Join(call, " "), "uuid-eth") {
+			t.Fatalf("non-wifi profile was queried: %v", call)
+		}
+	}
+}
+
+// TestSavedWifiSSIDsEmptySSIDIsError: a wifi profile whose ssid reads back
+// empty (exit 0) must be an error, not a silent skip — a list silently
+// missing a profile is the false "none in range" the relocation check must
+// never act on.
+func TestSavedWifiSSIDsEmptySSIDIsError(t *testing.T) {
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		switch {
+		case strings.Contains(joined, "-f UUID,TYPE,NAME connection show"):
+			return []byte("uuid-weird:802-11-wireless:imported-profile\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-weird"):
+			return []byte("\n"), nil
+		}
+		return nil, fakeExitError{code: 1, msg: "unexpected: " + joined}
+	})
+
+	if _, _, err := c.SavedWifiSSIDs(context.Background()); err == nil {
+		t.Fatal("expected an error for an empty ssid read; got nil")
+	}
+}
+
+// TestSavedWifiSSIDsFailsClosedOnProfileReadError: a partial list silently
+// missing a profile is exactly the false "none in range" the relocation check
+// must never act on, so any per-profile read failure is an error, not a skip.
+func TestSavedWifiSSIDsFailsClosedOnProfileReadError(t *testing.T) {
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "-f UUID,TYPE,NAME connection show") {
+			return []byte("uuid-home:802-11-wireless:HomeNet\n"), nil
+		}
+		return nil, fakeExitError{code: 10, msg: "nmcli: unknown connection"}
+	})
+
+	if _, _, err := c.SavedWifiSSIDs(context.Background()); err == nil {
+		t.Fatal("expected an error when a profile read fails; got nil")
+	}
+}
+
+// TestScanAllSSIDsIsUncapped: Scan truncates at the portal display cap
+// (maxSSIDs); ScanAllSSIDs must not — a saved network ranked below the cap
+// would otherwise read as absent and fire a false relocation.
+func TestScanAllSSIDsIsUncapped(t *testing.T) {
+	var lines []string
+	for i := 0; i < maxSSIDs+3; i++ {
+		lines = append(lines, fmt.Sprintf("Net%02d", i))
+	}
+	out := []byte(strings.Join(lines, "\n") + "\n")
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		return out, nil
+	})
+
+	capped, err := c.Scan(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(capped) != maxSSIDs {
+		t.Fatalf("Scan returned %d SSIDs, want the %d display cap", len(capped), maxSSIDs)
+	}
+
+	all, err := c.ScanAllSSIDs(context.Background())
+	if err != nil {
+		t.Fatalf("ScanAllSSIDs: %v", err)
+	}
+	if len(all) != maxSSIDs+3 {
+		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), maxSSIDs+3)
+	}
+	// And it must force a fresh scan: stale results are not relocation evidence.
+	last := exec.recorded()[len(exec.recorded())-1]
+	joined := strings.Join(last, " ")
+	if !strings.Contains(joined, "--rescan yes") {
+		t.Fatalf("ScanAllSSIDs must force a rescan; argv = %v", last)
+	}
 }

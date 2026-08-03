@@ -339,8 +339,30 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			go n.playerRecovery(n.claimCtx)
 		}
 	case provisioning.StateOfflineRetrying:
-		// Transient provisioned-device outage: leave the screen as-is rather than
-		// flashing a setup overlay on a blip.
+		switch d.Reason {
+		case provisioning.ReasonBootOffline,
+			provisioning.ReasonBootNoInternet,
+			provisioning.ReasonBootLinkUnknown,
+			provisioning.ReasonJoinedNoInternet,
+			provisioning.ReasonJoinedConnUnknown:
+			// Entry edges that would otherwise be a silent black screen for
+			// minutes or forever, in front of a user who is actively watching
+			// (a moved frame booting offline; a join that associated to a
+			// network with no internet — F-01 / ux-must-fix M-0/M-1). The
+			// machine's Message says exactly what is happening and what will
+			// happen next; join_failed is the only existing player state that
+			// can carry that prose, so its body is used — the player-owned
+			// TITLE still reads as a Wi-Fi join failure, which is the
+			// recorded remaining gap (needs a new ff-player state).
+			n.narrating = true
+			n.ui.ShowJoinFailed(d.Message)
+		default:
+			// Transient provisioned-device outage (the exhibition
+			// online→offline edge, redundant re-emissions): leave the screen
+			// as-is rather than flashing a setup overlay on a blip. This
+			// default is load-bearing — narrating here would put a "join
+			// failed" screen over playing artwork on every WAN blip.
+		}
 	}
 }
 

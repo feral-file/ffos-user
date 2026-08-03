@@ -18,13 +18,20 @@ import (
 // spyNarrationUI records the narration calls the notifier makes.
 type spyNarrationUI struct {
 	calls []string
+	// joinFailedReasons records ShowJoinFailed bodies in order: the offline
+	// entry-edge narration reuses join_failed and the tests must assert the
+	// machine's prose (not a reason code) is what reaches the player.
+	joinFailedReasons []string
 }
 
 func (s *spyNarrationUI) ShowScanning()                 { s.calls = append(s.calls, "scanning") }
 func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk string) { s.calls = append(s.calls, "softap") }
-func (s *spyNarrationUI) ShowJoinFailed(reason string)  { s.calls = append(s.calls, "join_failed") }
-func (s *spyNarrationUI) ShowJoining()                  { s.calls = append(s.calls, "joining") }
-func (s *spyNarrationUI) Hide()                         { s.calls = append(s.calls, "hide") }
+func (s *spyNarrationUI) ShowJoinFailed(reason string) {
+	s.calls = append(s.calls, "join_failed")
+	s.joinFailedReasons = append(s.joinFailedReasons, reason)
+}
+func (s *spyNarrationUI) ShowJoining() { s.calls = append(s.calls, "joining") }
+func (s *spyNarrationUI) Hide()        { s.calls = append(s.calls, "hide") }
 
 // TestSetupNotifierHidesOnlyOwnNarration is the G6 regression: a connectivity
 // flap (OfflineRetrying→Online) while the EXECUTOR's claim QR owns the overlay
@@ -432,5 +439,53 @@ func TestWireBootLifecycleHooksProbeInjectionIsIndependent(t *testing.T) {
 	}
 	if n.playerRecovery != nil {
 		t.Fatal("an OTA-only flow must not have a player recovery wired")
+	}
+}
+
+// TestSetupNotifierNarratesOfflineEntryEdges (M-0/M-1): the narrated
+// StateOfflineRetrying entry edges paint join_failed with the machine's
+// Message as the body; the generic exhibition edge ("offline") stays silent —
+// that default is what keeps a WAN blip from covering artwork with a setup
+// overlay. The narration counts as owned, so a later Online must hide it.
+func TestSetupNotifierNarratesOfflineEntryEdges(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonBootOffline, Message: "Unable to connect to your Wi-Fi network. Setup mode will start in a few minutes if the connection does not return."})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonJoinedNoInternet, Message: "Connected to X, but this network has no internet access"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonJoinedConnUnknown, Message: "Connected to X. Checking internet access…"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonBootNoInternet, Message: "Connected to the network, but there is no internet access. Retrying…"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonBootLinkUnknown, Message: "Checking the network connection…"})
+	// The exhibition edge and future unknown reasons must fail silent.
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: "offline", Message: "Reconnecting to Wi-Fi"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: "link-present", Message: "Reconnecting to Wi-Fi"})
+
+	if got := len(spy.joinFailedReasons); got != 5 {
+		t.Fatalf("join_failed narrations = %d (%v); want 5 — un-narrated reasons must stay silent",
+			got, spy.calls)
+	}
+	for i, want := range []string{
+		"Unable to connect to your Wi-Fi network. Setup mode will start in a few minutes if the connection does not return.",
+		"Connected to X, but this network has no internet access",
+		"Connected to X. Checking internet access…",
+		"Connected to the network, but there is no internet access. Retrying…",
+		"Checking the network connection…",
+	} {
+		if spy.joinFailedReasons[i] != want {
+			t.Fatalf("narration %d = %q, want the machine's Message %q", i, spy.joinFailedReasons[i], want)
+		}
+	}
+
+	// The narration is owned: Online clears it exactly once.
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
+	if spy.calls[len(spy.calls)-1] != "hide" {
+		t.Fatalf("expected Online to hide the owned narration; calls = %v", spy.calls)
 	}
 }
