@@ -428,16 +428,17 @@ fi
 # --- 6. no blocking start/enable may abort boot (F-03) --------------------------
 
 # .start-services.sh runs under set -euo pipefail. Every state-changing
-# `systemctl` line — `start`, `enable --now`, and the backward-compat
-# `disable`/`stop` cleanup — must be failure-tolerant (`|| true`, or the
-# preferred `|| echo WARN` breadcrumb): one broken unit aborting the script
-# kills kiosk + watchdog + the update timers, and a device with a bad build
-# then never self-heals (F-03). No exemptions: `--no-block` only skips
-# waiting for the job — submission can still fail synchronously (unit file
-# missing after a bad OTA, D-Bus unreachable) — and the disable/stop cleanup
-# runs BEFORE controld ever starts, so its failure aborts recovery too.
-# `is-enabled` lines stay out of scope: they run inside `if` conditions,
-# where set -e does not apply.
+# `systemctl` line — `start`, `enable --now`, `daemon-reload`, and the
+# backward-compat `disable`/`stop` cleanup — must be failure-tolerant
+# (`|| true`, or the preferred `|| echo WARN` breadcrumb): one broken unit
+# aborting the script kills kiosk + watchdog + the update timers, and a
+# device with a bad build then never self-heals (F-03). No exemptions:
+# `--no-block` only skips waiting for the job — submission can still fail
+# synchronously (unit file missing after a bad OTA, D-Bus unreachable) —
+# `daemon-reload` fails outright when the user manager is unavailable, and
+# the disable/stop cleanup runs BEFORE controld ever starts, so its failure
+# aborts recovery too. `is-enabled` lines stay out of scope: they run inside
+# `if` conditions, where set -e does not apply.
 f03_lines=0
 while IFS= read -r line; do
   f03_lines=$((f03_lines + 1))
@@ -445,13 +446,15 @@ while IFS= read -r line; do
     *"|| true"*|*"|| echo"*) continue ;;
     *) fail "F-03: state-changing systemctl line must be failure-tolerant: $line" ;;
   esac
-done < <(grep -E '^[[:space:]]*(sudo )?systemctl ((--user|--global) )?(start |enable --now |disable |stop )' "$start_services")
-# The scan must actually see the boot-critical lines: six service starts, the
-# target start, three enable blocks, the watchdog, the --no-block controld
-# start, and the four backward-compat disable/stop lines — a regex drift that
-# matches nothing would pass vacuously.
-[ "$f03_lines" -ge 15 ] || \
-  fail "F-03 scan matched only $f03_lines systemctl lines (expected >= 15) — pattern drift?"
+done < <(grep -E '^[[:space:]]*(sudo )?systemctl ((--user|--global) )?(start |enable --now |disable |stop |daemon-reload)' "$start_services")
+# EXACT count, not a floor: the scan must see precisely the boot-critical
+# set — six service starts, the system-ready.target start, three enable
+# blocks, the watchdog, the --no-block controld start, four backward-compat
+# disable/stop lines, and daemon-reload (6+1+3+1+1+4+1 = 17). An inequality
+# would let a REMOVED required command pass as silently as an unguarded one;
+# adding or removing a systemctl line means updating this count deliberately.
+[ "$f03_lines" -eq 17 ] || \
+  fail "F-03 scan matched $f03_lines systemctl lines (expected exactly 17) — command added/removed or pattern drift?"
 
 # --- 7. controld start-limit never latches -------------------------------------
 

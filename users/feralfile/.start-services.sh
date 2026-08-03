@@ -11,17 +11,21 @@ DEFAULT_VOLUME=63
 PACTL_PERCENT=$(cat "$VOLUME_FILE" 2>/dev/null || true)
 if ! [[ "$PACTL_PERCENT" =~ ^[0-9]+$ ]] || [ "$PACTL_PERCENT" -gt 100 ]; then
     PACTL_PERCENT=$DEFAULT_VOLUME
-    echo "$DEFAULT_VOLUME" > "$VOLUME_FILE"
+    # The rewrite is best-effort (F-03): a failed state write (read-only or
+    # corrupt .state) must not abort boot before any service starts —
+    # PACTL_PERCENT is already sane, so only the self-heal is lost.
+    echo "$DEFAULT_VOLUME" > "$VOLUME_FILE" || echo "WARN: could not rewrite $VOLUME_FILE"
 fi
 
 # Volume is best-effort: audio failure must not block service startup.
 pamixer --set-volume "$PACTL_PERCENT" || echo "WARN: pamixer failed to set volume to $PACTL_PERCENT"
 
-# Reset chromium OOM recovery state on each boot
+# Reset chromium OOM recovery state on each boot. Best-effort (F-03): a
+# permission/fs failure here costs one boot's OOM-counter reset, not the boot.
 if [ -d /var/lib/oom_state ]; then
-    echo "0" > /var/lib/oom_state/chromium-oom-kill-count
-    echo "0" > /var/lib/oom_state/chromium-oom-kill-handled-count
-    echo "0" > /var/lib/oom_state/chromium-oom-kill-last-event
+    echo "0" > /var/lib/oom_state/chromium-oom-kill-count || echo "WARN: could not reset chromium-oom-kill-count"
+    echo "0" > /var/lib/oom_state/chromium-oom-kill-handled-count || echo "WARN: could not reset chromium-oom-kill-handled-count"
+    echo "0" > /var/lib/oom_state/chromium-oom-kill-last-event || echo "WARN: could not reset chromium-oom-kill-last-event"
 fi
 
 # Backward compatibility: Disable and stop old services if they are enabled.
@@ -39,12 +43,17 @@ if systemctl --user is-enabled "feral-watchdog.service" >/dev/null 2>&1; then
     systemctl --user stop "feral-watchdog.service" || echo "WARN: failed to stop legacy feral-watchdog.service"
 fi
 
-mkdir -p /home/feralfile/.config/systemd/user/
+# The unit-dir mount and daemon-reload degrade too (F-03): if they fail, the
+# guarded starts below fail one by one with their own WARNs (or run against
+# stale unit definitions, which Restart=always/the watchdog/the nightly
+# timers repair), while the system-scope `sudo systemctl` blocks below do not
+# depend on the user manager at all — an abort here would lose those with it.
+mkdir -p /home/feralfile/.config/systemd/user/ || echo "WARN: could not create user systemd unit dir"
 if ! mountpoint -q /home/feralfile/.config/systemd/user/; then
-    sudo mount /home/feralfile/systemd-services/ /home/feralfile/.config/systemd/user/ -o bind
+    sudo mount /home/feralfile/systemd-services/ /home/feralfile/.config/systemd/user/ -o bind || echo "WARN: failed to bind-mount user systemd units"
 fi
 
-systemctl --user daemon-reload
+systemctl --user daemon-reload || echo "WARN: systemctl --user daemon-reload failed"
 # Best-effort for the same F-03 reason as the service starts below: a target
 # start failing (broken unit graph after a bad OTA) must degrade, not abort
 # the script before controld — the only recovery path — ever starts.
