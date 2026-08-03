@@ -859,7 +859,22 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 			// and fires the raise.
 			if probe == linkAbsent {
 				m.relocArmTriesLeft = relocArmTries
-				m.relocationScanStep(ctx)
+				// The first sample runs only on a MEASURED offline reading.
+				// On an assumed-offline boot (the Online query failed — the
+				// documented monitord startup race) the ladder keeps its
+				// budget but does not scan: three early scans could raise
+				// the one-way AP on a device whose connectivity was never
+				// actually read — the exact false assumption connUnknown
+				// exists to contain. onTick applies the same gate, so the
+				// ladder stays frozen until a successful query confirms
+				// offline (it then advances normally) or reads online
+				// (clearOffline disarms everything). Freezing rather than
+				// declining to arm matters: arming happens ONLY here, so a
+				// decline would leave the feature inert for the whole boot
+				// over a few seconds of monitord lag.
+				if !m.connUnknown {
+					m.relocationScanStep(ctx)
+				}
 			}
 			return
 		}
@@ -1123,7 +1138,14 @@ func (m *Machine) onTick(ctx context.Context) {
 			// from the same power cut gets that long to reappear). The plain
 			// window below is the fallback either way, and keeps running
 			// throughout.
-			if m.relocationScanStep(ctx) {
+			// The connUnknown gate mirrors the boot entry's: while offline is
+			// only ASSUMED (every query so far failed), the ladder neither
+			// scans nor spends budget — scan-confirmed absence must never
+			// compound an unmeasured connectivity assumption into the one-way
+			// raise. The re-query at the top of this tick clears the flag on
+			// the first successful offline reading, so the ladder resumes on
+			// the same tick that confirms.
+			if !m.connUnknown && m.relocationScanStep(ctx) {
 				// FINAL link re-check before the one-way door: the probe at
 				// the top of this tick predates the scan above, which runs
 				// multi-second radio work on this same goroutine — a link

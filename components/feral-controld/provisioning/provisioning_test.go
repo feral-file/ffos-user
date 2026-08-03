@@ -1385,6 +1385,67 @@ func TestRelocationFinalGateLinkUnknownDuringLastScanDefersToWindow(t *testing.T
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
 }
 
+// TestBootRelocationAssumedOfflineNeverScansWhileQueriesFail (review P1): a
+// boot whose EVERY connectivity query fails runs on an assumed offline state
+// (connUnknown) — the documented monitord startup race. The relocation ladder
+// must not turn that assumption into the one-way raise: no scan may run (at
+// the entry or on ticks) until a query actually succeeds, no matter how long
+// the failures persist. The narration still paints (link absence is real,
+// probed evidence).
+func TestBootRelocationAssumedOfflineNeverScansWhileQueriesFail(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"} // would confirm relocation IF consulted
+	h.conn.setErr(errors.New("injected: monitord not up yet"))
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, true) // boot assessment off a FAILED query
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"), "no scan on an assumed-offline entry")
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootOffline, d.Reason, "narration itself keys off the real link probe")
+
+	// Re-queries keep failing: the ladder must stay frozen through more ticks
+	// than the whole confirmation ladder would need.
+	for i := 0; i < 5; i++ {
+		h.m.onTick(ctx)
+	}
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"), "no scan may run while offline is assumed")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, relocArmTries, h.m.relocArmTriesLeft,
+		"frozen ticks must not spend the arming budget either")
+}
+
+// TestBootRelocationResumesAfterOfflineConfirmed: the freeze must not render
+// the feature inert — arming happens only at the boot entry, so once a
+// re-query finally measures a real offline the ladder proceeds from its held
+// budget and can still confirm the relocation.
+func TestBootRelocationResumesAfterOfflineConfirmed(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	h.conn.setErr(errors.New("injected: monitord not up yet"))
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, true) // assumed entry: armed, frozen
+	h.m.onTick(ctx)                      // still failing: frozen
+	require.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"))
+
+	h.conn.setErr(nil) // monitord is up; Online reads a REAL offline
+	h.m.onTick(ctx)    // re-query succeeds -> scan 1
+	h.m.onTick(ctx)    // scan 2
+	h.m.onTick(ctx)    // scan 3 -> raise
+	assert.Equal(t, 3, h.rec.count("wifi.ScanAllSSIDs"))
+	assert.Equal(t, StateAPActive, h.m.State(), "a confirmed offline must let the held ladder complete")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
 // TestBootNarrationUpgradesWhenLinkAppears (review P1): the boot entry's
 // "setup will start in a few minutes" promise is painted off a confirmed-
 // absent link; when a link then returns, the AP is correctly suppressed —
