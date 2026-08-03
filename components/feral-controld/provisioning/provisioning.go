@@ -943,6 +943,24 @@ func bootOfflineDetail(probe linkProbe) Detail {
 	}
 }
 
+// repaintBootNarration keeps the boot-entry prose in lockstep with the most
+// recent link probe: every site that acts on a probe result while the boot
+// narration is on screen routes it here, so the screen can never disagree
+// with the evidence the machine just used. Routes through bootOfflineDetail —
+// the single probe→prose table — and repaints only when the wording actually
+// changes, so repeated same-outcome probes cost nothing. No-op outside a
+// boot-narrated episode (the marker is set only at the narrated boot entry),
+// which is what keeps the deliberately silent exhibition path silent.
+func (m *Machine) repaintBootNarration(probe linkProbe) {
+	if m.bootNarration == "" {
+		return
+	}
+	if d := bootOfflineDetail(probe); m.bootNarration != d.Reason {
+		m.bootNarration = d.Reason
+		m.notify(StateOfflineRetrying, d)
+	}
+}
+
 // relocScanOutcome is the tri-state result of one relocation scan attempt.
 // Three states because the two negatives have opposite consequences: a
 // DISPROVED result ends the check for this boot, an INCONCLUSIVE one may be
@@ -1108,26 +1126,15 @@ func (m *Machine) onTick(ctx context.Context) {
 			// (via clearOffline) — the link's existence is direct
 			// counter-evidence.
 			m.clearOffline()
-			// Boot-narration repaint: the clearOffline above just changed what
-			// is TRUE (a present link suppresses the AP outright; an unknown
-			// probe disarms the window, deferring setup to a future confirmed
-			// absence), so the boot prose must follow — the same-state
-			// transition dedupe repaints nothing on its own, and a stale
-			// "setup will start in a few minutes" would sit on screen forever
-			// on an air-gapped LAN (linkPresent) or under a persistently
-			// failing probe (linkUnknown). Route the probe through the SAME
-			// entry table that chose the original wording (present → "no
-			// internet", unknown → the "checking" hedge; the entry table is
-			// the single source of probe→prose truth) and repaint only when
-			// the wording actually changes. Gated on the bootNarration
-			// marker, so the deliberately silent exhibition path — which
-			// never sets it — is untouched.
-			if m.bootNarration != "" {
-				if d := bootOfflineDetail(probe); m.bootNarration != d.Reason {
-					m.bootNarration = d.Reason
-					m.notify(StateOfflineRetrying, d)
-				}
-			}
+			// The clearOffline above just changed what is TRUE (a present
+			// link suppresses the AP outright; an unknown probe disarms the
+			// window, deferring setup to a future confirmed absence), so the
+			// boot prose must follow — the same-state transition dedupe
+			// repaints nothing on its own, and a stale "setup will start in
+			// a few minutes" would sit on screen forever on an air-gapped
+			// LAN (linkPresent) or under a persistently failing probe
+			// (linkUnknown).
+			m.repaintBootNarration(probe)
 		case linkAbsent:
 			// Boot relocation confirmation (M-0b): may only START at a boot
 			// assessment with a confirmed-absent link; each still-link-less
@@ -1159,9 +1166,14 @@ func (m *Machine) onTick(ctx context.Context) {
 				// plain window — because on Wi-Fi the raise drops the
 				// recovered link and nothing can lower the AP again without a
 				// human.
-				if m.probeLink(ctx) != linkAbsent {
+				if g := m.probeLink(ctx); g != linkAbsent {
 					m.logger.Info("provisioning: link sighted during the final relocation scan; deferring to the offline window")
 					m.clearOffline()
+					// The veto acts on this fresh probe, so the narration
+					// must too — waiting for the next tick's repaint would
+					// leave the setup promise up for 15s after setup was
+					// just deferred.
+					m.repaintBootNarration(g)
 					break
 				}
 				m.logger.Info("provisioning: relocation confirmed by repeated scans; starting setup",
@@ -1179,12 +1191,12 @@ func (m *Machine) onTick(ctx context.Context) {
 			// asserted "connected, no internet" (or hedged "checking") stops
 			// being true once the link is confirmed gone, and the setup
 			// promise becomes accurate again — the window below is arming.
-			// Same marker gate, so the silent exhibition path never paints.
-			if m.bootNarration != "" && m.bootNarration != ReasonBootOffline {
-				d := bootOfflineDetail(linkAbsent)
-				m.bootNarration = d.Reason
-				m.notify(StateOfflineRetrying, d)
-			}
+			// (No double paint on the expiry-veto path below: with a wired
+			// guard, expiry requires earlier absent ticks whose downgrade
+			// already settled the marker on the promise; with a nil guard
+			// the entry probe was necessarily linkAbsent — marker already
+			// the promise — and the re-probe can never veto.)
+			m.repaintBootNarration(linkAbsent)
 			switch {
 			case since.IsZero():
 				// First confirmed absence since the last sighting (or since
@@ -1193,6 +1205,22 @@ func (m *Machine) onTick(ctx context.Context) {
 				// the AP only ever rises off repeated confirmations.
 				m.startOfflineWindow()
 			case m.clock.Now().Sub(since) >= m.offlineWindow:
+				// Re-probe before THIS one-way door too: the relocation scan
+				// above runs multi-second radio work after the top-of-tick
+				// probe, and its stall time counts toward this expiry check
+				// (Now() is read here, not at the probe). A link that came
+				// back during a non-confirming scan would otherwise be
+				// dropped by a raise justified only by the pre-scan probe.
+				// Anything short of confirmed absence is a sighting: disarm
+				// and let the next confirmed absence arm a fresh window. On
+				// scan-free ticks the two probes are milliseconds apart, so
+				// this is effectively free.
+				if g := m.probeLink(ctx); g != linkAbsent {
+					m.logger.Info("provisioning: link sighted at the expiry re-check; deferring the sustained-offline raise")
+					m.clearOffline()
+					m.repaintBootNarration(g)
+					break
+				}
 				m.clearOffline()
 				m.resetJoinStatus()
 				m.transition(ctx, StateAPActive, Detail{

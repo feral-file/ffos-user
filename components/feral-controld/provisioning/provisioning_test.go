@@ -1349,6 +1349,11 @@ func TestRelocationFinalGateLinkRestoredDuringLastScanDefersToWindow(t *testing.
 
 	assert.Equal(t, StateOfflineRetrying, h.m.State(), "a link sighted by the final gate must veto the raise")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	// The veto acted on a fresh linkPresent probe, so the narration must
+	// follow immediately — not wait for the next tick's repaint.
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootNoInternet, d.Reason,
+		"the veto's own probe must repaint the setup promise away")
 
 	// Sighting semantics: the ladder is disarmed for good (arming is
 	// boot-assessment-only), so later absent ticks fall back to the plain
@@ -1383,6 +1388,46 @@ func TestRelocationFinalGateLinkUnknownDuringLastScanDefersToWindow(t *testing.T
 
 	assert.Equal(t, StateOfflineRetrying, h.m.State(), "an unknown link at the final gate must veto the raise")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootLinkUnknown, d.Reason,
+		"an unknown veto probe must swap the promise for the hedge")
+}
+
+// TestSustainedRaiseReprobesAfterStalledRelocationScan (review P1): the
+// tick's window-expiry check reads Now() AFTER the relocation scan, so a
+// multi-second scan stall counts toward the window — and the top-of-tick
+// probe predates that stall. A link recovering during a NON-confirming scan
+// (here: inconclusive, budget-consuming) must veto the sustained-offline
+// raise via a fresh re-probe, repaint the narration off that same probe, and
+// fall back to sighting semantics.
+func TestSustainedRaiseReprobesAfterStalledRelocationScan(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAllErr = errors.New("injected: scan flaking") // every scan inconclusive
+	// The link recovers WHILE the third scan (this tick's) is in flight —
+	// after the top-of-tick probe already read absent.
+	h.wifi.scanAllHook = func(call int) {
+		if call == 3 {
+			fl.up = true
+		}
+	}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // scan 1 (inconclusive), narration painted
+	h.m.onTick(ctx)                       // scan 2 (inconclusive), window arms
+	h.clk.advance(6 * time.Minute)        // past the 5m window
+	h.m.onTick(ctx)                       // scan 3 stalls past expiry; link recovers mid-scan
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"the expiry raise must re-probe after the scan and defer on a sighting")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	assert.Equal(t, 3, h.rec.count("wifi.ScanAllSSIDs"))
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootNoInternet, d.Reason,
+		"the expiry veto's probe must repaint the narration too")
 }
 
 // TestBootRelocationAssumedOfflineNeverScansWhileQueriesFail (review P1): a
