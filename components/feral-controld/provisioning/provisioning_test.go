@@ -95,6 +95,23 @@ type fakeWifi struct {
 	// panicNext makes the next HasSavedProfile call panic (once), injecting a
 	// loop-goroutine panic for supervisor-recovery tests.
 	panicNext bool
+	// savedSSIDs/savedHidden/savedSSIDsErr script SavedWifiSSIDs. nil
+	// savedSSIDs falls back to ["Net"] when hasProfile is true — an SSID
+	// present in the default ScanAllSSIDs result — so a test that wires
+	// BootAssessment without overriding these stays on the windowed path;
+	// relocation tests override explicitly.
+	savedSSIDs    []string
+	savedHidden   bool
+	savedSSIDsErr error
+	// scanAll/scanAllErr script ScanAllSSIDs (the relocation check's uncapped
+	// scan). nil scanAll falls back to ["Net"].
+	scanAll    []string
+	scanAllErr error
+	// scanAllHook, when set, runs during each ScanAllSSIDs call (outside the
+	// fake's lock) with the 1-based call number: final-gate tests use it to
+	// flip the link state WHILE the scan is in flight.
+	scanAllHook  func(call int)
+	scanAllCalls int
 }
 
 func (w *fakeWifi) HasSavedProfile(context.Context) (bool, error) {
@@ -134,6 +151,47 @@ func (w *fakeWifi) RefreshScanCache(context.Context) ([]string, error) {
 	return []string{"Net"}, nil
 }
 func (w *fakeWifi) CachedScan(context.Context) ([]string, error) {
+	return []string{"Net"}, nil
+}
+
+func (w *fakeWifi) SavedWifiSSIDs(context.Context) ([]string, bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.savedSSIDsErr != nil {
+		return nil, false, w.savedSSIDsErr
+	}
+	if w.savedSSIDs != nil {
+		return append([]string(nil), w.savedSSIDs...), w.savedHidden, nil
+	}
+	if w.hasProfile {
+		return []string{"Net"}, w.savedHidden, nil
+	}
+	return nil, w.savedHidden, nil
+}
+
+func (w *fakeWifi) ScanAllSSIDs(context.Context) ([]string, error) {
+	w.rec.add("wifi.ScanAllSSIDs")
+	w.mu.Lock()
+	w.scanAllCalls++
+	call := w.scanAllCalls
+	hook := w.scanAllHook
+	err := w.scanAllErr
+	// nil scanAll means "unscripted" (falls back to ["Net"]); a non-nil EMPTY
+	// scanAll is a scripted empty scan and must stay empty, so copy without
+	// collapsing empty-to-nil.
+	scripted := w.scanAll != nil
+	res := make([]string, len(w.scanAll))
+	copy(res, w.scanAll)
+	w.mu.Unlock()
+	if hook != nil {
+		hook(call)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if scripted {
+		return res, nil
+	}
 	return []string{"Net"}, nil
 }
 func (w *fakeWifi) Join(_ context.Context, ssid, _ string) error {
@@ -283,7 +341,7 @@ func TestTransientOutageBelowWindowDoesNotRaiseAP(t *testing.T) {
 	h.wifi.setProfile(true) // provisioned
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // go offline
+	h.m.onConnectivity(ctx, false, false) // go offline
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
 
 	// A router reboot: still offline but only 2 minutes elapsed.
@@ -299,7 +357,7 @@ func TestSustainedOfflineRaisesAP(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	h.clk.advance(6 * time.Minute) // past the 5-minute window
 	h.m.onTick(ctx)
 
@@ -317,13 +375,13 @@ func TestRecoveryTakesAPDown(t *testing.T) {
 	ctx := context.Background()
 
 	// Drive it up first.
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	h.clk.advance(6 * time.Minute)
 	h.m.onTick(ctx)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// Known network returns.
-	h.m.onConnectivity(ctx, true)
+	h.m.onConnectivity(ctx, true, false)
 	assert.Equal(t, StateOnline, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Down"))
 	assert.Equal(t, 1, h.rec.count("portal.Stop"))
@@ -334,7 +392,7 @@ func TestUnprovisionedNoEthernetRaisesAPImmediately(t *testing.T) {
 	h.wifi.setProfile(false) // no saved wifi profile
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // offline and no other connectivity
+	h.m.onConnectivity(ctx, false, false) // offline and no other connectivity
 
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"), "unprovisioned + offline raises AP immediately")
@@ -345,7 +403,7 @@ func TestUnprovisionedWithEthernetDoesNotRaiseAP(t *testing.T) {
 	h.wifi.setProfile(false) // no saved wifi profile
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, true) // reachable via Ethernet
+	h.m.onConnectivity(ctx, true, false) // reachable via Ethernet
 
 	assert.Equal(t, StateUnprovisioned, h.m.State())
 	assert.Equal(t, 0, h.rec.count("ap.Up"), "Ethernet devices never raise the AP")
@@ -357,7 +415,7 @@ func TestAuthFailureReRaisesAPAndRecordsOutcome(t *testing.T) {
 	ctx := context.Background()
 
 	// Get to APActive.
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// User submits a wrong password.
@@ -389,7 +447,7 @@ func TestSuccessfulJoinGoesOnlineAndLeavesAPDown(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	h.wifi.joinErr = nil
@@ -420,7 +478,7 @@ func TestJoinAbortsWhenAPTeardownFails(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	h.ap.downErr = errors.New("nmcli connection delete timed out")
@@ -476,7 +534,7 @@ func TestRescanTeardownFailureGatesReRaise(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	h.ap.downErr = errors.New("nmcli connection delete timed out")
@@ -504,7 +562,7 @@ func TestJoinSucceedsButStillOfflineArmsRecovery(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// Association succeeds; reachability stays false; the join persisted a
@@ -528,7 +586,7 @@ func TestJoinSucceedsButStillOfflineArmsRecovery(t *testing.T) {
 	assert.Equal(t, 2, h.rec.count("ap.Up"), "recovery AP re-raised after the window")
 
 	// And if reachability arrives instead, the machine settles Online.
-	h.m.onConnectivity(ctx, true)
+	h.m.onConnectivity(ctx, true, false)
 	assert.Equal(t, StateOnline, h.m.State())
 }
 
@@ -541,13 +599,13 @@ func TestOnlineRecoveryRetriesFailedAPTeardown(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// Reachability returns while the AP teardown fails.
 	h.ap.downErr = errors.New("nmcli connection delete timed out")
 	h.wifi.setProfile(true)
-	h.m.onConnectivity(ctx, true)
+	h.m.onConnectivity(ctx, true, false)
 	require.Equal(t, StateOnline, h.m.State())
 	downsAfterFailure := h.rec.count("ap.Down")
 	require.GreaterOrEqual(t, downsAfterFailure, 1)
@@ -569,7 +627,7 @@ func TestJoinIgnoredWhenNotAPActive(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, true) // Online, AP down
+	h.m.onConnectivity(ctx, true, false) // Online, AP down
 	require.Equal(t, StateOnline, h.m.State())
 
 	h.m.applyJoin(ctx, "HomeNet", "pw") // stray submission
@@ -582,7 +640,7 @@ func TestPortalSeamsWireToMachine(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 	require.Len(t, h.portals, 1)
 
@@ -606,10 +664,10 @@ func TestNotifierReceivesStateChanges(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // OfflineRetrying
+	h.m.onConnectivity(ctx, false, false) // OfflineRetrying
 	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)               // APActive
-	h.m.onConnectivity(ctx, true) // Online
+	h.m.onTick(ctx)                      // APActive
+	h.m.onConnectivity(ctx, true, false) // Online
 
 	states := h.notifier.states()
 	assert.Contains(t, states, StateOfflineRetrying)
@@ -670,7 +728,7 @@ func TestJoinWithFailedPostJoinQueryRecoversOnTick(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// Association succeeds; the uplink genuinely works, but the post-join
@@ -773,7 +831,7 @@ func TestPortalBindFailureTearsAPBackDown(t *testing.T) {
 	ctx := context.Background()
 
 	// Offline + unprovisioned + no wire → APActive → reconcile → portal fails.
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 
 	events := h.rec.list()
 	iUp := indexOf(events, "ap.Up")
@@ -810,7 +868,7 @@ func TestFreshAPRaiseResetsStaleJoinStatus(t *testing.T) {
 	ctx := context.Background()
 
 	// Full successful setup: the join brings real reachability.
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 	h.conn.online = true
 	h.wifi.setProfile(true)
@@ -820,7 +878,7 @@ func TestFreshAPRaiseResetsStaleJoinStatus(t *testing.T) {
 
 	// Weeks later: provisioned but sustained-offline past the window.
 	h.conn.online = false
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	h.clk.advance(6 * time.Minute)
 	h.m.onTick(ctx)
 	require.Equal(t, StateAPActive, h.m.State())
@@ -838,7 +896,7 @@ func TestRedundantOfflineKeepsJoinFailureStatus(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// User submits a wrong password; the failure outcome must be recorded.
@@ -848,7 +906,7 @@ func TestRedundantOfflineKeepsJoinFailureStatus(t *testing.T) {
 	require.Equal(t, portal.JoinFailed, h.m.Status().State)
 
 	// Redundant offline event with the AP already up: status must survive.
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, portal.JoinFailed, h.m.Status().State)
 }
@@ -875,7 +933,7 @@ func TestAPRaiseScanRetriesUntilComplete(t *testing.T) {
 	h.wifi.scanErrs = []error{errors.New("busy"), errors.New("busy")}
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 
 	require.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 3, h.rec.count("wifi.RefreshScanCache"), "two failures then a success")
@@ -900,7 +958,7 @@ func TestAPRaiseProceedsAfterScanRetriesExhausted(t *testing.T) {
 	h.wifi.scanErrs = repeatErrs(preAPScanAttempts, "busy")
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 
 	require.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, preAPScanAttempts, h.rec.count("wifi.RefreshScanCache"))
@@ -917,7 +975,7 @@ func TestAPRaiseRetriesEmptyScan(t *testing.T) {
 	h.wifi.emptyScans = 2
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 
 	require.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 3, h.rec.count("wifi.RefreshScanCache"), "two empty scans then a populated one")
@@ -941,7 +999,7 @@ func TestAPRaiseProceedsAfterEmptyScansExhausted(t *testing.T) {
 	h.wifi.emptyScans = preAPScanAttempts
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 
 	require.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, preAPScanAttempts, h.rec.count("wifi.RefreshScanCache"))
@@ -965,7 +1023,7 @@ func TestScanningNarrationPrecedesAPRaise(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	scanIdx, apIdx := -1, -1
@@ -995,7 +1053,7 @@ func TestRescanBouncesAPAndRunsFreshScan(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 	require.Equal(t, 1, h.rec.count("ap.Up"))
 
@@ -1024,7 +1082,7 @@ func TestRescanClearsStaleJoinOutcome(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
 	h.m.applyJoin(ctx, "HomeNet", "wrong-pw")
@@ -1042,7 +1100,7 @@ func TestRescanIgnoredOutsideAPActive(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, true)
+	h.m.onConnectivity(ctx, true, false)
 	require.Equal(t, StateOnline, h.m.State())
 
 	h.m.applyRescan(ctx)
@@ -1058,7 +1116,7 @@ func TestRescanNarratesScanningThenQR(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 	before := len(h.notifier.details())
 
@@ -1087,7 +1145,7 @@ func TestRescanFlipsToScanningBeforeTeardown(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	h.m.applyRescan(ctx)
@@ -1150,4 +1208,782 @@ func TestBootWhileOnlineNotifiesInitialState(t *testing.T) {
 		return false
 	}, 2*time.Second, 5*time.Millisecond,
 		"boot-while-online must notify StateOnline (the claim trigger depends on it)")
+}
+
+// --- offline entry-edge narration + boot relocation (F-01 / M-0 / M-1) -------
+
+// lastDetail returns the most recent notification, failing the test when none
+// was recorded.
+func (n *fakeNotifier) lastDetail(t *testing.T) (State, Detail) {
+	t.Helper()
+	all := n.details()
+	require.NotEmpty(t, all, "expected at least one notification")
+	last := all[len(all)-1]
+	return last.State, last.Detail
+}
+
+// markBoot wires the harness machine as a device-boot process start
+// (Config.BootAssessment true, as latched by New), the precondition for every
+// boot-entry narration and the relocation check.
+func markBoot(h *harness) {
+	h.m.startedAtBoot = true
+}
+
+// TestBootOfflineEntryNarratesAndKeepsWindow (M-0a): a provisioned device
+// booting with its network out of reach must say so on screen immediately —
+// the previous behavior was a black screen for the whole sustained-offline
+// window — while the window itself still governs the AP raise.
+func TestBootOfflineEntryNarratesAndKeepsWindow(t *testing.T) {
+	h := newHarness(t)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // boot assessment: state is StateStarting
+
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	st, d := h.notifier.lastDetail(t)
+	assert.Equal(t, StateOfflineRetrying, st)
+	assert.Equal(t, ReasonBootOffline, d.Reason)
+	assert.Contains(t, d.Message, "Setup mode will start",
+		"the narration must set the expectation the window creates")
+	assert.Equal(t, 0, h.rec.count("ap.Up"), "narration alone must not shortcut the window")
+
+	// The window is untouched: the AP still rises only after it elapses.
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State())
+}
+
+// TestDaemonRestartMidOutageStaysSilent (C-1 regression): controld is
+// Restart=always, so StateStarting alone does NOT mean a device boot. Without
+// the BootAssessment probe (nil, or false), a restart during an
+// exhibition-long outage must take the generic un-narrated path — no boot
+// narration over playing offline-cache artwork, no relocation scan, no AP.
+func TestDaemonRestartMidOutageStaysSilent(t *testing.T) {
+	h := newHarness(t) // startedAtBoot deliberately left false
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"} // would confirm relocation IF consulted
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, "offline", d.Reason,
+		"a mid-life restart must keep the reason the notifier leaves un-narrated")
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"), "no relocation scan outside a device boot")
+
+	// Ticks keep the plain window semantics: no relocation raise ever.
+	h.m.onTick(ctx)
+	h.m.onTick(ctx)
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"))
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+}
+
+// TestBootClassificationLatchedAtConstruction (review P1): boot-vs-restart is
+// a property of PROCESS START, so New must latch it at construction (wiring
+// time, moments after exec) instead of re-reading /proc/uptime at the initial
+// offline assessment — which runs after the boot AP sweep and the initial
+// connectivity query and can therefore land past the boot window's edge on a
+// slow boot (large offline cache, monitord D-Bus timeout). A probe that is
+// true at New but false by assessment time is exactly that shape, and it must
+// still take the narrated boot path.
+func TestBootClassificationLatchedAtConstruction(t *testing.T) {
+	rec := &recorder{}
+	wifi := &fakeWifi{rec: rec}
+	wifi.setProfile(true)
+	notifier := &fakeNotifier{rec: rec}
+	probeCalls := 0
+	m := New(Config{
+		AP:           &fakeAP{rec: rec, info: softap.Info{SSID: "FF1-abc", PSK: "abc12345"}},
+		Wifi:         wifi,
+		Connectivity: &fakeConn{},
+		Clock:        newFakeClock(),
+		Logger:       zap.NewNop(),
+		Notifier:     notifier,
+		PortalAddr:   "127.0.0.1:0",
+		BootAssessment: func() bool {
+			probeCalls++
+			return probeCalls == 1 // inside the window at New, outside ever after
+		},
+	})
+	require.Equal(t, 1, probeCalls, "New must evaluate the probe exactly once, at construction")
+
+	m.onConnectivity(context.Background(), false, false) // the (late) boot assessment
+
+	require.Equal(t, StateOfflineRetrying, m.State())
+	st, d := notifier.lastDetail(t)
+	assert.Equal(t, StateOfflineRetrying, st)
+	assert.Equal(t, ReasonBootOffline, d.Reason,
+		"a process that started at boot must narrate even when the assessment itself lands past the window")
+	assert.Equal(t, 1, probeCalls, "the assessment must consume the latched value, never re-read the probe")
+}
+
+// TestRelocationFinalGateLinkRestoredDuringLastScanDefersToWindow (review P1):
+// the top-of-tick link probe predates the multi-second final scan, and a link
+// that comes back while it runs (the ethernet escape hatch plugged in; an AP
+// whose beacons the scan pass missed but the supplicant then caught) has its
+// event queued BEHIND this tick — invisible before the raise. The raise is a
+// one-way door on Wi-Fi, so the machine must re-probe immediately before it
+// and treat anything short of confirmed absence as a sighting.
+func TestRelocationFinalGateLinkRestoredDuringLastScanDefersToWindow(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	// The link recovers WHILE the third (confirming) scan is in flight.
+	h.wifi.scanAllHook = func(call int) {
+		if call == 3 {
+			fl.up = true
+		}
+	}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // scan 1 (boot assessment)
+	h.m.onTick(ctx)                       // scan 2
+	h.m.onTick(ctx)                       // scan 3 — would raise without the gate
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(), "a link sighted by the final gate must veto the raise")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	// The veto acted on a fresh linkPresent probe, so the narration must
+	// follow immediately — not wait for the next tick's repaint.
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootNoInternet, d.Reason,
+		"the veto's own probe must repaint the setup promise away")
+
+	// Sighting semantics: the ladder is disarmed for good (arming is
+	// boot-assessment-only), so later absent ticks fall back to the plain
+	// window and never scan again.
+	fl.up = false
+	h.m.onTick(ctx)
+	assert.Equal(t, 3, h.rec.count("wifi.ScanAllSSIDs"), "ladder must stay disarmed after the veto")
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+}
+
+// TestRelocationFinalGateLinkUnknownDuringLastScanDefersToWindow: the gate's
+// unknown flavor — a probe that FAILS during the final scan cannot confirm
+// absence, and unknown never authorizes a raise (the same bias as the window
+// path and hasProfile).
+func TestRelocationFinalGateLinkUnknownDuringLastScanDefersToWindow(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	h.wifi.scanAllHook = func(call int) {
+		if call == 3 {
+			fl.err = errors.New("injected: nmcli timed out")
+		}
+	}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	h.m.onTick(ctx)
+	h.m.onTick(ctx)
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(), "an unknown link at the final gate must veto the raise")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootLinkUnknown, d.Reason,
+		"an unknown veto probe must swap the promise for the hedge")
+}
+
+// TestSustainedRaiseReprobesAfterStalledRelocationScan (review P1): the
+// tick's window-expiry check reads Now() AFTER the relocation scan, so a
+// multi-second scan stall counts toward the window — and the top-of-tick
+// probe predates that stall. A link recovering during a NON-confirming scan
+// (here: inconclusive, budget-consuming) must veto the sustained-offline
+// raise via a fresh re-probe, repaint the narration off that same probe, and
+// fall back to sighting semantics.
+func TestSustainedRaiseReprobesAfterStalledRelocationScan(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAllErr = errors.New("injected: scan flaking") // every scan inconclusive
+	// The link recovers WHILE the third scan (this tick's) is in flight —
+	// after the top-of-tick probe already read absent.
+	h.wifi.scanAllHook = func(call int) {
+		if call == 3 {
+			fl.up = true
+		}
+	}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // scan 1 (inconclusive), narration painted
+	h.m.onTick(ctx)                       // scan 2 (inconclusive), window arms
+	h.clk.advance(6 * time.Minute)        // past the 5m window
+	h.m.onTick(ctx)                       // scan 3 stalls past expiry; link recovers mid-scan
+
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"the expiry raise must re-probe after the scan and defer on a sighting")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	assert.Equal(t, 3, h.rec.count("wifi.ScanAllSSIDs"))
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootNoInternet, d.Reason,
+		"the expiry veto's probe must repaint the narration too")
+}
+
+// TestBootRelocationAssumedOfflineNeverScansWhileQueriesFail (review P1): a
+// boot whose EVERY connectivity query fails runs on an assumed offline state
+// (connUnknown) — the documented monitord startup race. The relocation ladder
+// must not turn that assumption into the one-way raise: no scan may run (at
+// the entry or on ticks) until a query actually succeeds, no matter how long
+// the failures persist. The narration still paints (link absence is real,
+// probed evidence).
+func TestBootRelocationAssumedOfflineNeverScansWhileQueriesFail(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"} // would confirm relocation IF consulted
+	h.conn.setErr(errors.New("injected: monitord not up yet"))
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, true) // boot assessment off a FAILED query
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"), "no scan on an assumed-offline entry")
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootOffline, d.Reason, "narration itself keys off the real link probe")
+
+	// Re-queries keep failing: the ladder must stay frozen through more ticks
+	// than the whole confirmation ladder would need.
+	for i := 0; i < 5; i++ {
+		h.m.onTick(ctx)
+	}
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"), "no scan may run while offline is assumed")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, relocArmTries, h.m.relocArmTriesLeft,
+		"frozen ticks must not spend the arming budget either")
+}
+
+// TestBootRelocationResumesAfterOfflineConfirmed: the freeze must not render
+// the feature inert — arming happens only at the boot entry, so once a
+// re-query finally measures a real offline the ladder proceeds from its held
+// budget and can still confirm the relocation.
+func TestBootRelocationResumesAfterOfflineConfirmed(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	h.conn.setErr(errors.New("injected: monitord not up yet"))
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, true) // assumed entry: armed, frozen
+	h.m.onTick(ctx)                      // still failing: frozen
+	require.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"))
+
+	h.conn.setErr(nil) // monitord is up; Online reads a REAL offline
+	h.m.onTick(ctx)    // re-query succeeds -> scan 1
+	h.m.onTick(ctx)    // scan 2
+	h.m.onTick(ctx)    // scan 3 -> raise
+	assert.Equal(t, 3, h.rec.count("wifi.ScanAllSSIDs"))
+	assert.Equal(t, StateAPActive, h.m.State(), "a confirmed offline must let the held ladder complete")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestBootNarrationUpgradesWhenLinkAppears (review P1): the boot entry's
+// "setup will start in a few minutes" promise is painted off a confirmed-
+// absent link; when a link then returns, the AP is correctly suppressed —
+// but the same-state transition dedupe repaints nothing, so on an air-gapped
+// LAN the false promise would sit on screen forever. A linkPresent tick must
+// repaint the no-internet wording, exactly once.
+func TestBootNarrationUpgradesWhenLinkAppears(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	_, d := h.notifier.lastDetail(t)
+	require.Equal(t, ReasonBootOffline, d.Reason)
+
+	fl.up = true
+	h.m.onTick(ctx)
+	st, d := h.notifier.lastDetail(t)
+	assert.Equal(t, StateOfflineRetrying, st)
+	assert.Equal(t, ReasonBootNoInternet, d.Reason,
+		"a sighted link must replace the setup promise with the no-internet wording")
+	assert.Contains(t, d.Message, "no internet access")
+
+	// Further link-present ticks must not spam the narration surface.
+	n := len(h.notifier.details())
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n)
+}
+
+// TestBootNarrationHedgesWhenProbeTurnsUnknown (review P1): an unknown probe
+// disarms the window — setup is deferred until a FUTURE confirmed absence —
+// so the "setup will start in a few minutes" promise painted at a
+// confirmed-absent boot entry stops being true, indefinitely so under a
+// persistently failing probe. The tick must repaint the same hedge the entry
+// table would have chosen ("Checking the network connection…"), exactly once,
+// and restore the promise when absence is confirmed again.
+func TestBootNarrationHedgesWhenProbeTurnsUnknown(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	_, d := h.notifier.lastDetail(t)
+	require.Equal(t, ReasonBootOffline, d.Reason)
+
+	fl.err = errors.New("injected: nmcli timed out")
+	h.m.onTick(ctx)
+	_, d = h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootLinkUnknown, d.Reason,
+		"an unknown probe defers setup, so the promise must give way to the hedge")
+	assert.Contains(t, d.Message, "Checking the network connection")
+
+	// Further unknown ticks must not spam the narration surface.
+	n := len(h.notifier.details())
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n)
+
+	// A confirmed absence re-arms the window and restores the promise.
+	fl.err = nil
+	h.m.onTick(ctx)
+	_, d = h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootOffline, d.Reason)
+	assert.Contains(t, d.Message, "Setup mode will start")
+}
+
+// TestBootNarrationDowngradesWhenLinkDropsAgain: the upgrade's mirror. An
+// entry (or upgrade) that asserted "connected, no internet" stops being true
+// when the link is confirmed gone, and the setup promise becomes accurate
+// again — the window is arming below it.
+func TestBootNarrationDowngradesWhenLinkDropsAgain(t *testing.T) {
+	fl := &fakeLink{up: true}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // boot with a live link: no-internet wording
+	_, d := h.notifier.lastDetail(t)
+	require.Equal(t, ReasonBootNoInternet, d.Reason)
+
+	fl.up = false
+	h.m.onTick(ctx)
+	_, d = h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootOffline, d.Reason,
+		"a confirmed-lost link must restore the setup promise")
+	assert.Contains(t, d.Message, "Setup mode will start")
+}
+
+// TestExhibitionOutageLinkSightingStaysSilent: the narration-truthfulness
+// ticks are gated on the boot marker — a mid-life restart's un-narrated
+// offline entry must stay silent through link comings and goings.
+func TestExhibitionOutageLinkSightingStaysSilent(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl) // startedAtBoot deliberately left false
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	n := len(h.notifier.details()) // the entry transition (generic, un-painted)
+
+	fl.up = true
+	h.m.onTick(ctx)
+	fl.up = false
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n, "no narration repaints outside a boot-narrated episode")
+}
+
+// TestBootNarrationDoesNotLeakIntoLaterOutage: any transition away from
+// offline_retrying clears the marker, so a later mid-exhibition outage
+// (deliberately silent) can never inherit the boot narration's repaints.
+func TestBootNarrationDoesNotLeakIntoLaterOutage(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // narrated boot entry
+	h.m.onConnectivity(ctx, true, false)  // recovery: leaving the state clears the marker
+	h.m.onConnectivity(ctx, false, false) // mid-exhibition outage: silent entry
+	n := len(h.notifier.details())
+
+	fl.up = true
+	h.m.onTick(ctx)
+	assert.Len(t, h.notifier.details(), n, "the boot marker must not survive an online transition")
+}
+
+// TestBootRelocationConfirmedByRepeatedScansRaisesAP (M-0b): the moved-frame
+// shape — saved profile, confirmed absent link, and relocConfirmScans
+// consecutive full scans with no saved SSID. The AP must rise only after the
+// LAST confirming scan (~30-45s), never off the single boot-time sample: one
+// scan at t≈0 cannot tell a moved frame from a router still booting after the
+// same power cut, and the raise is a one-way door.
+func TestBootRelocationConfirmedByRepeatedScansRaisesAP(t *testing.T) {
+	fl := &fakeLink{up: false} // wired guard, REAL confirmed absence
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet", "NeighborNet"}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // sample 1 (boot)
+	require.Equal(t, StateOfflineRetrying, h.m.State(), "no raise off a single scan")
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootOffline, d.Reason, "the boot narration paints before/despite the scan")
+
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // sample 2
+	require.Equal(t, StateOfflineRetrying, h.m.State(), "still confirming")
+
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // sample 3 → confirmed
+	assert.Equal(t, StateAPActive, h.m.State(), "three consecutive positive scans confirm relocation")
+	assert.Equal(t, 3, h.rec.count("wifi.ScanAllSSIDs"))
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+	found := false
+	for _, c := range h.notifier.details() {
+		if c.State == StateAPActive && c.Detail.Reason == ReasonRelocated {
+			found = true
+		}
+	}
+	assert.True(t, found, "the raise must carry the relocated reason")
+}
+
+// TestBootRelocationLiveLinkNeverArms (M-0b ⚠, pins the linkAbsent conjunct):
+// a wired frame with a stale Wi-Fi profile boots offline with a LIVE link and
+// a scan that shows none of the saved SSIDs — the relocation check must not
+// even arm: the link is direct counter-evidence, and raising would drop it.
+func TestBootRelocationLiveLinkNeverArms(t *testing.T) {
+	fl := &fakeLink{up: true}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"), "a live link must skip the relocation scan entirely")
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootNoInternet, d.Reason)
+
+	h.m.onTick(ctx)
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"))
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+}
+
+// TestBootRelocationDisconfirmedMidwayFallsBackToWindow (M-0b / C-4): the
+// saved SSID reappears on the second sample (router finished booting) — the
+// confirmation must disarm permanently for this boot and leave the plain
+// sustained-offline window in charge.
+func TestBootRelocationDisconfirmedMidwayFallsBackToWindow(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // sample 1: positive
+	h.clk.advance(15 * time.Second)
+	h.wifi.mu.Lock()
+	h.wifi.scanAll = []string{"CafeNet", "HomeNet"} // router came back
+	h.wifi.mu.Unlock()
+	h.m.onTick(ctx) // sample 2: disconfirmed → disarm
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+
+	h.wifi.mu.Lock()
+	h.wifi.scanAll = []string{"CafeNet"} // even if it vanishes again…
+	h.wifi.mu.Unlock()
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+	scans := h.rec.count("wifi.ScanAllSSIDs")
+	assert.Equal(t, 2, scans, "…the disarmed check must not keep scanning")
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+
+	// The plain window still recovers the device.
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State())
+}
+
+// TestBootRelocationInconclusiveEvidenceNeverArms (M-0b ⚠): every
+// inconclusive input — scan error, empty scan (radio still settling), an
+// unreadable profile list, or a saved profile targeting a HIDDEN network
+// (whose SSID can never appear in a scan) — must keep the full window.
+func TestBootRelocationInconclusiveEvidenceNeverArms(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(w *fakeWifi)
+	}{
+		{"scan error", func(w *fakeWifi) { w.scanAllErr = errors.New("nmcli scan failed") }},
+		{"empty scan", func(w *fakeWifi) { w.scanAll = []string{} }},
+		{"profile list error", func(w *fakeWifi) { w.savedSSIDsErr = errors.New("nmcli list failed") }},
+		{"hidden saved network", func(w *fakeWifi) { w.savedHidden = true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fl := &fakeLink{up: false}
+			h := newLinkHarness(t, fl)
+			markBoot(h)
+			h.wifi.setProfile(true)
+			h.wifi.savedSSIDs = []string{"HomeNet"}
+			h.wifi.scanAll = []string{"CafeNet"}
+			tc.mut(h.wifi)
+			ctx := context.Background()
+
+			h.m.onConnectivity(ctx, false, false)
+			h.clk.advance(15 * time.Second)
+			h.m.onTick(ctx)
+			h.clk.advance(15 * time.Second)
+			h.m.onTick(ctx)
+
+			assert.Equal(t, StateOfflineRetrying, h.m.State())
+			assert.Equal(t, 0, h.rec.count("ap.Up"))
+			_, d := h.notifier.lastDetail(t)
+			assert.Equal(t, ReasonBootOffline, d.Reason)
+		})
+	}
+}
+
+// TestBootOfflineLinkUnknownHedges (M-0a honesty): a failed link probe knows
+// nothing — the narration must hedge, not assert a missing network or promise
+// setup mode.
+func TestBootOfflineLinkUnknownHedges(t *testing.T) {
+	fl := &fakeLink{err: errors.New("nmcli probe timeout")}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonBootLinkUnknown, d.Reason)
+	assert.Contains(t, d.Message, "Checking")
+	assert.Equal(t, 0, h.rec.count("wifi.ScanAllSSIDs"), "an unknown link must not arm the relocation check")
+}
+
+// TestJoinOfflineEdgeNarratesNoInternet (M-1a): the F-01 shape — the join
+// ASSOCIATED but the upstream is dead. The machine already refused to park in
+// StateOnline (TestJoinSucceedsButStillOfflineArmsRecovery); now the entry
+// into offline_retrying must also SAY what happened instead of leaving the
+// "Connecting to X" screen up forever.
+func TestJoinOfflineEdgeNarratesNoInternet(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.conn.online = false
+	h.wifi.setProfile(true) // the join persisted a profile
+	h.m.applyJoin(ctx, "DeadUplink", "pw")
+
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonJoinedNoInternet, d.Reason)
+	assert.Equal(t, "DeadUplink", d.SSID)
+	assert.Contains(t, d.Message, "no internet access")
+	assert.Contains(t, d.Message, "DeadUplink")
+	assert.Equal(t, portal.JoinSucceeded, h.m.Status().State,
+		"the portal contract is untouched: the association DID succeed")
+}
+
+// TestJoinOfflineQueryFailureHedges (M-1a ⚠): when the post-join reachability
+// QUERY fails, offline is an assumption — the narration must hedge, never
+// assert a dead network (the network may be fine and sys-monitord briefly
+// down). The hedge is the leg's terminal narration by design (same-state
+// re-notifications are deduped), pinned here so a future "improvement" that
+// asserts no-internet off a failed query fails this test.
+func TestJoinOfflineQueryFailureHedges(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.conn.setErr(errors.New("monitord unavailable"))
+	h.wifi.setProfile(true)
+	h.m.applyJoin(ctx, "MaybeFineNet", "pw")
+
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, ReasonJoinedConnUnknown, d.Reason)
+	assert.Contains(t, d.Message, "Checking internet access")
+	assert.NotContains(t, d.Message, "no internet",
+		"a failed query must not assert a dead network")
+
+	// The assumption self-heals: the next tick re-queries, and a real online
+	// reading settles the machine (connUnknown ownership moved into
+	// onConnectivity with the assumed parameter — this pins it end to end).
+	h.conn.setErr(nil)
+	h.conn.online = true
+	h.m.onTick(ctx)
+	assert.Equal(t, StateOnline, h.m.State())
+}
+
+// TestExhibitionOfflineEdgeKeepsGenericReason (M-0 ⚠): the online→offline edge
+// on a playing device keeps the un-narrated generic reason — flashing a setup
+// overlay over artwork on a WAN blip is exactly what the notifier's silent
+// default exists to prevent.
+func TestExhibitionOfflineEdgeKeepsGenericReason(t *testing.T) {
+	h := newHarness(t)
+	markBoot(h) // even on a boot-window process, the ONLINE→offline edge is not a boot entry
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, true, false)
+	require.Equal(t, StateOnline, h.m.State())
+
+	h.m.onConnectivity(ctx, false, false)
+
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	_, d := h.notifier.lastDetail(t)
+	assert.Equal(t, "offline", d.Reason,
+		"the exhibition edge must keep the reason the notifier leaves un-narrated")
+}
+
+// TestBootRelocationEmptyFirstScanArmsOnLaterTick (R-1): the first scan runs
+// moments after the boot AP sweep flips the radio to station mode — the
+// documented moment an empty (inconclusive) result is expected. That must
+// consume arming budget, not forfeit the feature: a later clean positive
+// within the budget still arms, and the ladder completes.
+func TestBootRelocationEmptyFirstScanArmsOnLaterTick(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{} // radio still settling at the assessment
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // attempt 1: inconclusive
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+
+	h.wifi.mu.Lock()
+	h.wifi.scanAll = []string{"CafeNet"} // radio settled; still no saved SSID
+	h.wifi.mu.Unlock()
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // attempt 2: positive → armed (confirm 1)
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // confirm 2
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // confirm 3 → raise
+	assert.Equal(t, StateAPActive, h.m.State(),
+		"an empty first scan must not render the relocation check inert")
+	assert.Equal(t, 4, h.rec.count("wifi.ScanAllSSIDs"))
+}
+
+// TestBootRelocationArmingBudgetExhausts (R-1 bound): persistent inconclusive
+// scans may only burn relocArmTries attempts; after that the check goes quiet
+// (no further scans) and the plain window owns recovery.
+func TestBootRelocationArmingBudgetExhausts(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAllErr = errors.New("nmcli keeps failing")
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // attempt 1
+	for i := 0; i < 4; i++ {
+		h.clk.advance(15 * time.Second)
+		h.m.onTick(ctx) // attempts 2..3, then no-ops
+	}
+	assert.Equal(t, relocArmTries, h.rec.count("wifi.ScanAllSSIDs"),
+		"scanning must stop once the arming budget is spent")
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+
+	// The plain window still recovers the device.
+	h.clk.advance(6 * time.Minute)
+	h.m.onTick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State())
+}
+
+// TestBootRelocationStaleArmDoesNotSurviveLaterEpisode pins the clearOffline
+// coupling: a check armed at boot, resolved by the device coming ONLINE, must
+// be fully disarmed — hours later a fresh offline episode with an absent link
+// must go through the plain window, never resume a stale confirmation ladder
+// and raise the AP over artwork after ~30s.
+func TestBootRelocationStaleArmDoesNotSurviveLaterEpisode(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // boot: armed (confirm 1)
+	require.Equal(t, 1, h.rec.count("wifi.ScanAllSSIDs"))
+
+	h.m.onConnectivity(ctx, true, false) // internet arrives → resolved
+	require.Equal(t, StateOnline, h.m.State())
+
+	// Hours later: an exhibition offline episode with the link genuinely gone.
+	h.clk.advance(3 * time.Hour)
+	h.m.onConnectivity(ctx, false, false)
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+
+	assert.Equal(t, 1, h.rec.count("wifi.ScanAllSSIDs"),
+		"a resolved boot check must never scan again in a later episode")
+	assert.Equal(t, StateOfflineRetrying, h.m.State(),
+		"the later episode is owned by the plain window, not a stale ladder")
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+}
+
+// TestBootRelocationLinkUnknownMidConfirmationForfeits: an inconclusive link
+// probe between confirmations disarms via the sighting path (clearOffline) —
+// the ladder is consecutive clean probe+scan pairs by design, and the forfeit
+// is permanent for this boot (arming is boot-assessment-only).
+func TestBootRelocationLinkUnknownMidConfirmationForfeits(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // boot: armed (confirm 1)
+
+	fl.err = errors.New("nmcli probe flake")
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx) // linkUnknown → clearOffline → disarm
+
+	fl.err = nil // link reads absent again; scans stay positive
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+
+	assert.Equal(t, 1, h.rec.count("wifi.ScanAllSSIDs"),
+		"a probe flake mid-confirmation must forfeit the check for this boot")
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
 }

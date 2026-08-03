@@ -12,6 +12,7 @@ package wifictl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,6 +150,70 @@ func (c *Controller) HasSavedProfile(ctx context.Context) (bool, error) {
 	return len(names) > 0, nil
 }
 
+// SavedWifiSSIDs returns the SSID each saved Wi-Fi profile actually targets —
+// read from the profile itself (802-11-wireless.ssid), NOT from the profile
+// name: profiles this codebase creates are SSID-named (`nmcli device wifi
+// connect <ssid>`), but out-of-band profiles (factory image, an ops-side
+// `nmcli connection add con-name …`) need not be, and a name-based comparison
+// would misread such a device as relocated on every offline boot. anyHidden
+// reports whether any profile targets a hidden network (802-11-wireless.hidden):
+// hidden SSIDs never appear in scan output, so scan-presence evidence is
+// unobtainable for them and callers must treat the whole saved set as
+// unverifiable rather than "absent".
+//
+// Fail-closed contract: the caller uses this as evidence for a one-way
+// decision, and a list silently missing a profile is exactly the false
+// positive it must never act on — so any per-profile read failure AND any
+// wifi profile whose ssid reads back EMPTY are errors, never skips. Profiles
+// are resolved by UUID (same rationale as deleteWifiProfiles): resolving by
+// name matches ANY profile type sharing the id, and `-g 802-11-wireless.ssid`
+// against, say, an ethernet profile exits 0 with empty output — which the
+// empty-is-error rule would misreport without the UUID pinning. The two
+// fields are read with separate -g calls because multi-field -g output layout
+// differs across nmcli versions.
+func (c *Controller) SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHidden bool, err error) {
+	out, _, err := c.run(ctx, "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
+	if err != nil {
+		return nil, false, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		// UUID and TYPE never contain colons, so the third field is NAME with
+		// terse-mode escaping intact (kept only for error legibility).
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		uuid, typ, name := parts[0], parts[1], unescapeTerse(parts[2])
+		if typ != "802-11-wireless" {
+			continue
+		}
+		out, _, err := c.run(ctx, "-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, false, fmt.Errorf("reading ssid of profile %q (%s): %w", name, uuid, err)
+		}
+		// Strip ONLY nmcli's record terminator (a single trailing newline).
+		// Leading/trailing spaces are valid SSID bytes, and the scan side
+		// (parseSSIDsCapped) preserves them — TrimSpace here made a
+		// whitespace-padded saved SSID compare unequal to its own scan
+		// sighting, so an in-range network read as "absent" and could satisfy
+		// every relocation confirmation: exactly the false positive this
+		// function's fail-closed contract exists to prevent.
+		ssid := unescapeTerse(strings.TrimSuffix(string(out), "\n"))
+		if ssid == "" {
+			return nil, false, fmt.Errorf("profile %q (%s) reports an empty ssid", name, uuid)
+		}
+		ssids = append(ssids, ssid)
+		out, _, err = c.run(ctx, "-g", "802-11-wireless.hidden", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, false, fmt.Errorf("reading hidden flag of profile %q (%s): %w", name, uuid, err)
+		}
+		if strings.TrimSpace(string(out)) == "yes" {
+			anyHidden = true
+		}
+	}
+	return ssids, anyHidden, nil
+}
+
 // -----------------------------------------------------------------------------
 // Scanning (with pre-AP cache)
 // -----------------------------------------------------------------------------
@@ -166,6 +231,37 @@ func (c *Controller) Scan(ctx context.Context, force bool) ([]string, error) {
 		return nil, err
 	}
 	return parseSSIDs(string(out)), nil
+}
+
+// ScanAllSSIDs performs a forced live scan and returns every unique SSID in
+// range, uncapped. Scan's maxSSIDs cap is a captive-portal DISPLAY concern;
+// callers that use scan presence as EVIDENCE (the boot relocation check reads
+// "no saved SSID in the scan" as "the device was moved" and raises the setup
+// AP on it — a one-way door on this hardware) must see the full list: a
+// weaker in-range saved network truncated out by a display cap would read as
+// absent and fire a false relocation.
+func (c *Controller) ScanAllSSIDs(ctx context.Context) ([]string, error) {
+	// Same radio-readiness gate as RefreshScanCache, and it matters MORE here:
+	// the relocation check runs its first sample right after the boot AP
+	// sweep flips the radio AP→station, exactly when an early `wifi list`
+	// exits 0 with an empty row set — which the caller must treat as
+	// inconclusive and may only retry a bounded number of times. Fails open
+	// after scanReadyTimeout, so a healthy radio pays nothing.
+	c.waitForScanReady(ctx)
+	args := []string{"-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "yes"}
+	// Pin to the configured interface like the other radio commands (Join,
+	// waitForSSID, wifiDeviceState — including this call's own readiness
+	// gate): on multi-radio hardware an unpinned list can report a different
+	// radio's air, and "saved SSID absent" from the wrong radio is fabricated
+	// relocation evidence.
+	if c.iface != "" {
+		args = append(args, "ifname", c.iface)
+	}
+	out, _, err := c.run(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	return parseSSIDsUncapped(string(out)), nil
 }
 
 // CachedScan returns a cached scan when it is still fresh, otherwise performs a
@@ -568,8 +664,18 @@ func exitCode(err error) int {
 }
 
 // parseSSIDs extracts unique, non-empty SSIDs from nmcli terse output, ordered
-// as nmcli returned them and capped at maxSSIDs.
+// as nmcli returned them and capped at maxSSIDs (the portal display cap).
 func parseSSIDs(out string) []string {
+	return parseSSIDsCapped(out, maxSSIDs)
+}
+
+// parseSSIDsUncapped is parseSSIDs without the display cap — for callers that
+// treat scan CONTENTS as evidence, where truncation would fabricate absence.
+func parseSSIDsUncapped(out string) []string {
+	return parseSSIDsCapped(out, 0)
+}
+
+func parseSSIDsCapped(out string, limit int) []string {
 	seen := make(map[string]struct{})
 	var ssids []string
 	for _, line := range strings.Split(out, "\n") {
@@ -582,7 +688,7 @@ func parseSSIDs(out string) []string {
 		}
 		seen[ssid] = struct{}{}
 		ssids = append(ssids, ssid)
-		if len(ssids) >= maxSSIDs {
+		if limit > 0 && len(ssids) >= limit {
 			break
 		}
 	}

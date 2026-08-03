@@ -101,7 +101,7 @@ func TestActiveLinkGuard(t *testing.T) {
 			h.wifi.setProfile(false) // unprovisioned: no saved wifi profile
 			ctx := context.Background()
 
-			h.m.onConnectivity(ctx, false) // offline
+			h.m.onConnectivity(ctx, false, false) // offline
 
 			assert.Equal(t, tt.wantState, h.m.State(), tt.description)
 			assert.Equal(t, tt.wantAPUps, h.rec.count("ap.Up"), tt.description)
@@ -123,7 +123,7 @@ func TestActiveLinkGuardWindowMeasuresLinkLoss(t *testing.T) {
 	h.wifi.setProfile(true) // provisioned
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // WAN dies at t0; association still up
+	h.m.onConnectivity(ctx, false, false) // WAN dies at t0; association still up
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
 
 	h.clk.advance(4*time.Minute + 45*time.Second)
@@ -152,7 +152,7 @@ func TestActiveLinkGuardSustainedLinkPresence(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	for i := 0; i < 6; i++ { // 36+ minutes of link-up-but-offline
 		h.clk.advance(6 * time.Minute)
 		h.m.onTick(ctx)
@@ -174,7 +174,7 @@ func TestActiveLinkGuardProbeErrorNeverRaises(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	for i := 0; i < 4; i++ { // 24 minutes of failing probes past the window
 		h.clk.advance(6 * time.Minute)
 		h.m.onTick(ctx)
@@ -207,7 +207,7 @@ func TestActiveLinkGuardUnprovisionedCableUnplug(t *testing.T) {
 	h.wifi.setProfile(false) // unprovisioned
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // offline, wired: parked with AP down
+	h.m.onConnectivity(ctx, false, false) // offline, wired: parked with AP down
 	assert.Equal(t, StateUnprovisioned, h.m.State())
 
 	fl.err = errors.New("nmcli busy") // probe flakes while still wired
@@ -242,7 +242,7 @@ func TestActiveLinkGuardUnprovisionedWiredBlipNeverRaises(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // air-gapped wired frame: offline forever
+	h.m.onConnectivity(ctx, false, false) // air-gapped wired frame: offline forever
 	assert.Equal(t, StateUnprovisioned, h.m.State())
 
 	fl.up = false // switch reboots
@@ -271,7 +271,7 @@ func TestActiveLinkGuardUnprovisionedTickRechecksProfile(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	assert.Equal(t, StateUnprovisioned, h.m.State())
 
 	fl.up = false           // link lost
@@ -297,13 +297,13 @@ func TestActiveLinkGuardUnknownNeverEvictsFailedAPRaise(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.ap.upErr = errors.New("nm busy") // the raise will fail
-	h.m.onConnectivity(ctx, false)     // confirmed link-less: enter APActive
+	h.ap.upErr = errors.New("nm busy")    // the raise will fail
+	h.m.onConnectivity(ctx, false, false) // confirmed link-less: enter APActive
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 0, h.rec.count("portal.Start"), "raise failed: no portal")
 
-	fl.err = errors.New("nmcli busy") // probe starts flaking
-	h.m.onConnectivity(ctx, false)    // redundant offline reading
+	fl.err = errors.New("nmcli busy")     // probe starts flaking
+	h.m.onConnectivity(ctx, false, false) // redundant offline reading
 	assert.Equal(t, StateAPActive, h.m.State(),
 		"an unknown link reading must not evict a failed-but-retrying AP raise")
 
@@ -325,7 +325,7 @@ func TestActiveLinkGuardOnlineUnprovisionedSkipsProbe(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, true) // online via ethernet, no wifi profile
+	h.m.onConnectivity(ctx, true, false) // online via ethernet, no wifi profile
 	assert.Equal(t, StateUnprovisioned, h.m.State())
 
 	h.clk.advance(6 * time.Minute)
@@ -355,11 +355,11 @@ func TestActiveLinkGuardIgnoresOwnAP(t *testing.T) {
 	h.wifi.setProfile(false) // unprovisioned, and truly link-less
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // offline: raises the AP
+	h.m.onConnectivity(ctx, false, false) // offline: raises the AP
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 
-	h.m.onConnectivity(ctx, false) // redundant offline while the AP is up
+	h.m.onConnectivity(ctx, false, false) // redundant offline while the AP is up
 
 	assert.Equal(t, StateAPActive, h.m.State(),
 		"our own hotspot must not count as a link and suppress the AP it belongs to")
@@ -383,14 +383,14 @@ func TestActiveLinkGuardRedundantOfflineKeepsProvisionedAP(t *testing.T) {
 	h.wifi.setProfile(true) // provisioned
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // WAN and link both gone
-	h.m.onTick(ctx)                // first confirmed absence arms the window
+	h.m.onConnectivity(ctx, false, false) // WAN and link both gone
+	h.m.onTick(ctx)                       // first confirmed absence arms the window
 	h.clk.advance(6 * time.Minute)
 	h.m.onTick(ctx) // sustained absence: AP up
 	require.Equal(t, StateAPActive, h.m.State())
 	require.Equal(t, 1, h.rec.count("ap.Up"))
 
-	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline
+	h.m.onConnectivity(ctx, false, false) // monitord restart re-emits offline
 
 	assert.Equal(t, StateAPActive, h.m.State(),
 		"a redundant offline reading must not evict the AP the window just raised")
@@ -411,7 +411,7 @@ func TestActiveLinkGuardWindowStartsAtFirstConfirmedAbsence(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // t0: no probe has run yet
+	h.m.onConnectivity(ctx, false, false) // t0: no probe has run yet
 	require.Equal(t, StateOfflineRetrying, h.m.State())
 
 	h.clk.advance(15 * time.Second)
@@ -443,14 +443,14 @@ func TestActiveLinkGuardRedundantOfflineRespectsUnprovisionedWindow(t *testing.T
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // air-gapped wired frame: parked with AP down
+	h.m.onConnectivity(ctx, false, false) // air-gapped wired frame: parked with AP down
 	require.Equal(t, StateUnprovisioned, h.m.State())
 
 	fl.up = false   // LAN switch reboots
 	h.m.onTick(ctx) // first confirmed absence arms the window
 
 	h.clk.advance(5 * time.Second)
-	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline mid-blip
+	h.m.onConnectivity(ctx, false, false) // monitord restart re-emits offline mid-blip
 	assert.Equal(t, StateUnprovisioned, h.m.State(),
 		"a redundant offline reading must not jump the sustained-absence window")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
@@ -464,7 +464,7 @@ func TestActiveLinkGuardRedundantOfflineRespectsUnprovisionedWindow(t *testing.T
 		"the wired blip must ride out entirely, re-emission or not")
 
 	fl.up = false // now a REAL sustained loss, noticed first by a re-emission
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	assert.Equal(t, 0, h.rec.count("ap.Up"),
 		"the re-emission arms the window; it must not raise by itself")
 	h.clk.advance(6 * time.Minute)
@@ -486,10 +486,10 @@ func TestActiveLinkGuardOnlineWiredEdgeGetsWindow(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, true) // online via ethernet: the wired steady state
+	h.m.onConnectivity(ctx, true, false) // online via ethernet: the wired steady state
 	require.Equal(t, StateUnprovisioned, h.m.State())
 
-	h.m.onConnectivity(ctx, false) // switch reboots: link + internet die together
+	h.m.onConnectivity(ctx, false, false) // switch reboots: link + internet die together
 	assert.Equal(t, StateUnprovisioned, h.m.State(),
 		"the online→offline edge must arm the window, not raise immediately")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
@@ -523,12 +523,12 @@ func TestActiveLinkGuardRedundantOfflinePreservesProvisionedWindow(t *testing.T)
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // offline reading; nothing armed yet
+	h.m.onConnectivity(ctx, false, false) // offline reading; nothing armed yet
 	h.clk.advance(15 * time.Second)
 	h.m.onTick(ctx) // first confirmed absence arms the window
 
 	h.clk.advance(4 * time.Minute)
-	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline mid-window
+	h.m.onConnectivity(ctx, false, false) // monitord restart re-emits offline mid-window
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
 
@@ -555,7 +555,7 @@ func TestActiveLinkGuardJoinWithoutInternetKeepsAPDown(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false) // boot: link-less unprovisioned -> AP up
+	h.m.onConnectivity(ctx, false, false) // boot: link-less unprovisioned -> AP up
 	require.Equal(t, StateAPActive, h.m.State())
 	require.Equal(t, 1, h.rec.count("ap.Up"))
 
@@ -591,7 +591,7 @@ func TestActiveLinkGuardRecoveredLinkExitsFailedRaise(t *testing.T) {
 	ctx := context.Background()
 
 	h.ap.upErr = errors.New("nm busy") // every raise attempt fails
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	h.m.onTick(ctx) // first confirmed absence arms the window
 	h.clk.advance(6 * time.Minute)
 	h.m.onTick(ctx) // window expires: the raise is attempted and FAILS
@@ -627,14 +627,14 @@ func TestActiveLinkGuardRecoveredLinkExitsFailedRaiseOnRedundantReading(t *testi
 	ctx := context.Background()
 
 	h.ap.upErr = errors.New("nm busy")
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	h.m.onTick(ctx)
 	h.clk.advance(6 * time.Minute)
 	h.m.onTick(ctx) // raise attempted and failed
 	require.Equal(t, StateAPActive, h.m.State())
 
-	fl.up = true                   // link recovers between retry ticks
-	h.m.onConnectivity(ctx, false) // monitord restart re-emits offline
+	fl.up = true                          // link recovers between retry ticks
+	h.m.onConnectivity(ctx, false, false) // monitord restart re-emits offline
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
 		"a redundant reading with a recovered link must exit the pending raise")
 	assert.Equal(t, 0, h.rec.count("portal.Start"))
@@ -652,7 +652,7 @@ func TestActiveLinkGuardRecoveredWireExitsFailedUnprovisionedRaise(t *testing.T)
 	ctx := context.Background()
 
 	h.ap.upErr = errors.New("nm busy")
-	h.m.onConnectivity(ctx, false) // boot: link-less unprovisioned -> raise fails
+	h.m.onConnectivity(ctx, false, false) // boot: link-less unprovisioned -> raise fails
 	require.Equal(t, StateAPActive, h.m.State())
 
 	fl.up = true // cable plugged back in; the device stays offline (air-gapped)
@@ -672,7 +672,7 @@ func TestActiveLinkGuardNilDefaultsToNoSuppression(t *testing.T) {
 	h.wifi.setProfile(false)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
@@ -693,13 +693,13 @@ func TestWiredOfflineBootNotifiesWhenWANArrives(t *testing.T) {
 	ctx := context.Background()
 
 	// Boot assessment: offline with a live wired link parks without the AP.
-	h.m.onConnectivity(ctx, false)
+	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateUnprovisioned, h.m.State())
 	require.NotEmpty(t, h.notifier.calls)
 	require.Equal(t, "link-present", h.notifier.calls[len(h.notifier.calls)-1].Detail.Reason)
 
 	// WAN becomes reachable: same state, online leg — MUST notify.
-	h.m.onConnectivity(ctx, true)
+	h.m.onConnectivity(ctx, true, false)
 	last := h.notifier.calls[len(h.notifier.calls)-1]
 	require.Equal(t, StateUnprovisioned, last.State)
 	require.Equal(t, ReasonUnprovisioned, last.Detail.Reason,
@@ -708,7 +708,7 @@ func TestWiredOfflineBootNotifiesWhenWANArrives(t *testing.T) {
 
 	// A re-emitted online reading (sys-monitord restart, periodic re-query) is
 	// the same state AND reason: suppressed.
-	h.m.onConnectivity(ctx, true)
+	h.m.onConnectivity(ctx, true, false)
 	require.Equal(t, notified, len(h.notifier.calls),
 		"same-state same-reason re-emission must not re-notify")
 }

@@ -75,6 +75,46 @@ const (
 // break the build, not silently disarm that positive match.
 const ReasonUnprovisioned = "unprovisioned"
 
+// StateOfflineRetrying entry-edge reasons (F-01 / ux-must-fix M-0/M-1).
+// Exported for the same build-breakage rationale as ReasonUnprovisioned: the
+// wiring notifier narrates ONLY these reasons on StateOfflineRetrying — every
+// other reason ("offline", "link-present", and any future one) deliberately
+// leaves the screen as-is, because on the exhibition online→offline edge
+// "keep showing artwork" is the correct behavior. These edges are different:
+// each is an entry into a wait that is otherwise a silent black screen for
+// minutes (or forever), on a device whose user is actively watching.
+const (
+	// ReasonBootOffline: boot assessment found a saved profile but a confirmed
+	// absent link — the classic "frame moved to a new site" shape when the
+	// scan still (or inconclusively) shows a saved SSID.
+	ReasonBootOffline = "boot-offline"
+	// ReasonBootNoInternet: boot assessment found a live link but no WAN —
+	// the network exists and is joined, its upstream is dead. The AP will
+	// deliberately never rise while the link holds, so the narration must not
+	// promise setup mode.
+	ReasonBootNoInternet = "boot-no-internet"
+	// ReasonBootLinkUnknown: boot assessment could not read the link state;
+	// conservative wording only (no assertions about the network).
+	ReasonBootLinkUnknown = "boot-link-unknown"
+	// ReasonJoinedNoInternet: a portal join ASSOCIATED but the post-join
+	// reachability query confirmed no internet (F-01's captive/hotel Wi-Fi
+	// shape). The association is real, so the AP stays down by design.
+	ReasonJoinedNoInternet = "joined-no-internet"
+	// ReasonJoinedConnUnknown: a portal join associated but the reachability
+	// QUERY FAILED — offline is an assumption here, so the wording must hedge
+	// ("checking…") rather than assert a dead network. Accepted gap: when a
+	// later re-query confirms offline the machine is already in
+	// StateOfflineRetrying, and the same-state transition does not re-notify
+	// (see transition), so the hedge is the terminal narration for this leg.
+	ReasonJoinedConnUnknown = "joined-conn-unknown"
+	// ReasonRelocated marks the StateAPActive raise taken by the boot
+	// relocation shortcut: saved profile + confirmed absent link + a live
+	// station scan that positively shows NO saved SSID in range. Waiting out
+	// the sustained-offline window cannot self-heal that, so the AP rises
+	// immediately, mirroring the unprovisioned boot raise.
+	ReasonRelocated = "relocated"
+)
+
 // Detail is the side-channel context published alongside a State change: enough
 // for a narration UI to explain WHY the state changed without re-deriving it.
 type Detail struct {
@@ -110,6 +150,15 @@ type Notifier interface {
 // *wifictl.JoinError, matched with errors.As to classify failures.
 type WifiController interface {
 	HasSavedProfile(ctx context.Context) (bool, error)
+	// SavedWifiSSIDs returns the SSID each saved profile actually targets
+	// (read from the profile, not its name) and whether any targets a hidden
+	// network. The relocation check treats anyHidden as unverifiable: hidden
+	// SSIDs never appear in scans, so their absence is not evidence.
+	SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHidden bool, err error)
+	// ScanAllSSIDs is a forced live scan with NO display cap — the relocation
+	// check reads scan absence as evidence for a one-way AP raise, and a
+	// truncated list would fabricate absence for a weak in-range network.
+	ScanAllSSIDs(ctx context.Context) ([]string, error)
 	RefreshScanCache(ctx context.Context) ([]string, error)
 	CachedScan(ctx context.Context) ([]string, error)
 	Join(ctx context.Context, ssid, psk string) error
@@ -173,6 +222,26 @@ type Config struct {
 	// Notifier is optional.
 	Notifier Notifier
 
+	// BootAssessment, when non-nil and true, marks this process start as part
+	// of a DEVICE boot (kernel boot window) rather than a Restart=always
+	// daemon restart mid-life. Only a boot gets the StateOfflineRetrying entry
+	// narration and the relocation check: a daemon restart during an
+	// exhibition-long outage re-enters StateStarting too, and narrating (or
+	// worse, raising the AP) there would paint setup over artwork that is
+	// playing fine from the offline cache — the same rationale as the
+	// executor's wireBootLifecycleHooks gate. nil fails closed (never a
+	// boot).
+	//
+	// Evaluated exactly ONCE, inside New: the classification is a property of
+	// PROCESS START, and New runs at wiring time, moments after exec — the
+	// same instant wireBootLifecycleHooks makes its decision. Deferring the
+	// read to the initial offline assessment (which runs after the boot AP
+	// sweep and the initial connectivity query) would let a slow boot — large
+	// offline cache replay, a monitord D-Bus timeout — drift past the
+	// window's edge and misclassify a genuine boot as a mid-life restart,
+	// silently dropping both the narration and the relocation recovery.
+	BootAssessment func() bool
+
 	// ActiveLink is an optional guard against raising the setup AP on a device
 	// that has an active local link (ethernet OR an associated Wi-Fi station) but
 	// is reported offline. The Connectivity source is internet-reachability only,
@@ -230,7 +299,13 @@ type Machine struct {
 	logger     *zap.Logger
 	notifier   Notifier
 	activeLink func(ctx context.Context) (bool, error)
-	newPortal  func(portal.Config) PortalServer
+
+	// startedAtBoot is Config.BootAssessment latched once by New (nil probe =
+	// never a boot). A bool, not the probe itself, so the boot-vs-restart
+	// classification cannot drift with /proc/uptime between wiring and the
+	// initial offline assessment — see the Config field's doc.
+	startedAtBoot bool
+	newPortal     func(portal.Config) PortalServer
 
 	portalAddr    string
 	offlineWindow time.Duration
@@ -294,7 +369,59 @@ type Machine struct {
 	// uploadLogs. Warn on the transition into failure, Debug on repeats.
 	// Loop-goroutine-only, like connUnknown.
 	linkProbeFailing bool
+
+	// bootNarration is the Reason of the boot-entry narration currently on
+	// screen ("" when none). The tick uses it to keep that prose truthful as
+	// the link comes and goes: a sighted link falsifies "setup will start in
+	// a few minutes" (the AP is correctly suppressed while a link holds, so
+	// the promise would sit on an air-gapped LAN forever), and a lost link
+	// falsifies "connected" — and a same-state re-transition is deduped, so
+	// nothing else would ever repaint. A dedicated marker rather than
+	// lastReason: a redundant offline re-emission (a monitord restart)
+	// re-targets StateOfflineRetrying with the generic reason and overwrites
+	// lastReason WITHOUT any screen change. Set only at the boot assessment's
+	// narrated entry and cleared by every transition that leaves
+	// StateOfflineRetrying, so the deliberately silent exhibition outage path
+	// (which never sets it) can never inherit a stale marker from an earlier
+	// boot episode. Loop-goroutine-only, like connUnknown.
+	bootNarration string
+
+	// relocConfirms/relocArmTriesLeft drive the boot relocation confirmation
+	// (M-0b). The check may only START at a boot assessment (BootAssessment
+	// true) whose link is confirmed absent: that grants relocArmTriesLeft
+	// scan attempts (the assessment itself plus the first link-less ticks) to
+	// obtain the FIRST positive "no saved SSID" result — the arming budget
+	// exists because the very first scan runs moments after the boot AP
+	// sweep flips the radio to station mode, when an empty (inconclusive)
+	// result is the documented failure shape, and a one-shot arming would
+	// silently render the whole feature inert. Once armed (relocConfirms >
+	// 0), each link-less 15s tick rescans and only relocConfirmScans
+	// consecutive positives raise the AP (reason "relocated"): a single scan
+	// at t≈0 cannot distinguish "the frame moved" from "the router is still
+	// booting after the same power cut", and the raise is a one-way door. A
+	// saved-SSID sighting (or a hidden-network profile) cancels the check
+	// terminally for this boot; an inconclusive scan mid-confirmation
+	// cancels too (the ladder is consecutive-positives by design); a link
+	// sighting or any clearOffline cancels everything. The plain
+	// sustained-offline window keeps running throughout, untouched.
+	// Loop-goroutine-only, like connUnknown.
+	relocConfirms     int
+	relocArmTriesLeft int
 }
+
+// relocConfirmScans is how many consecutive positive "no saved SSID in a full
+// live scan" results (one 15s tick apart once armed) the relocation shortcut
+// requires before raising the AP: ~30-45s to setup on a genuinely moved frame
+// that arms at boot — within M-0's ≤1 minute acceptance — while a router
+// rebooting from the same power cut gets that long to reappear.
+// relocArmTries bounds how many scans may be SPENT trying to arm (boot
+// assessment + the next link-less ticks): late arming trades a slightly later
+// raise (~60-75s worst case) for not forfeiting the feature to one
+// radio-settling empty scan.
+const (
+	relocConfirmScans = 3
+	relocArmTries     = 3
+)
 
 type eventKind int
 
@@ -330,13 +457,18 @@ func New(cfg Config) *Machine {
 		cfg.NewPortal = func(pc portal.Config) PortalServer { return portal.NewServer(pc) }
 	}
 	return &Machine{
-		ap:            cfg.AP,
-		wifi:          cfg.Wifi,
-		conn:          cfg.Connectivity,
-		clock:         cfg.Clock,
-		logger:        logger,
-		notifier:      cfg.Notifier,
-		activeLink:    cfg.ActiveLink,
+		ap:         cfg.AP,
+		wifi:       cfg.Wifi,
+		conn:       cfg.Connectivity,
+		clock:      cfg.Clock,
+		logger:     logger,
+		notifier:   cfg.Notifier,
+		activeLink: cfg.ActiveLink,
+		// Latched HERE, not read at the offline assessment: New runs at
+		// wiring time (moments after process start), so this is the honest
+		// "did this process start at boot" answer regardless of how long the
+		// boot AP sweep or the initial connectivity query later takes.
+		startedAtBoot: cfg.BootAssessment != nil && cfg.BootAssessment(),
 		newPortal:     cfg.NewPortal,
 		portalAddr:    cfg.PortalAddr,
 		offlineWindow: cfg.OfflineWindow,
@@ -455,12 +587,7 @@ func (m *Machine) loop(ctx context.Context) {
 		m.logger.Warn("provisioning: initial connectivity query failed; assuming offline until a query succeeds", zap.Error(err))
 		online = false
 	}
-	m.onConnectivity(ctx, online)
-	if err != nil {
-		// AFTER onConnectivity: it clears the flag (any assessment normally
-		// resolves it), and this one did not.
-		m.connUnknown = true
-	}
+	m.onConnectivity(ctx, online, err != nil)
 
 	for {
 		select {
@@ -470,7 +597,7 @@ func (m *Machine) loop(ctx context.Context) {
 		case ev := <-m.events:
 			switch ev.kind {
 			case evConnectivity:
-				m.onConnectivity(ctx, ev.online)
+				m.onConnectivity(ctx, ev.online, false)
 			case evJoin:
 				m.applyJoin(ctx, ev.ssid, ev.psk)
 			case evRescan:
@@ -537,13 +664,17 @@ func (m *Machine) State() State {
 // Transition logic (runs on the loop goroutine, or directly in tests)
 // -----------------------------------------------------------------------------
 
-// onConnectivity applies a reachability reading and drives the resting-state
-// decision. See the rule table in the package doc.
-func (m *Machine) onConnectivity(ctx context.Context, online bool) {
-	// Any reading — a connectivity_change event or a successful re-query —
-	// resolves an assumed-offline boot. (The loop re-arms the flag itself for
-	// the one call it makes on a FAILED initial query.)
-	m.connUnknown = false
+// onConnectivity applies one reachability assessment. assumed marks a reading
+// that is an ASSUMPTION, not a measurement: the caller's Online query failed
+// and offline was substituted (boot assessment, post-join assessment). The
+// flag owns connUnknown directly — callers no longer re-arm it after the call
+// — and it also picks the hedged narration on the Joining entry edge, where
+// asserting "this network has no internet" off a failed query would be a lie.
+func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool) {
+	// Any real reading — a connectivity_change event or a successful re-query
+	// — resolves an assumed-offline state; an assumed one (re-)arms it so
+	// onTick keeps re-querying until a real answer arrives.
+	m.connUnknown = assumed
 	m.online = online
 	if online {
 		m.clearOffline()
@@ -679,6 +810,76 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 		return
 	}
 
+	// DEVICE-BOOT assessment of a provisioned-but-offline device (M-0): the
+	// screen would otherwise stay black for the whole sustained-offline
+	// window, and a frame moved to a new site cannot self-heal at all — its
+	// saved SSID is simply not there. Gated on startedAtBoot, NOT on
+	// StateStarting alone: controld is Restart=always, so a daemon restart
+	// during an exhibition-long outage re-enters StateStarting too, and
+	// narrating (or raising the AP) there would paint setup over artwork
+	// playing fine from the offline cache. Ordering: narrate FIRST from one
+	// link probe (the relocation check below runs multi-second radio scans,
+	// and this edge exists precisely so the screen stops being silently
+	// black), then arm the tick-confirmed relocation check. The probe/scan
+	// feed narration and the shortcut ONLY: window arming stays exactly as
+	// before (nil-guard arms here, a wired guard arms on onTick's first
+	// confirmed absence), so #233's continuous-confirmed-absence contract is
+	// untouched.
+	if cur == StateStarting {
+		// startedAtBoot was latched by New at wiring time, so a slow path to
+		// this assessment (boot AP sweep, a monitord D-Bus timeout, offline
+		// cache replay) cannot drift the classification past the boot
+		// window's edge — a process that started at boot narrates no matter
+		// how late this line runs.
+		if !m.startedAtBoot {
+			// Telemetry for the feature's silent-decline mode: without this
+			// line a field report of "the moved frame stayed black / waited
+			// the full window" cannot be told apart from a mid-life daemon
+			// restart versus a boot so slow the daemon itself was started
+			// outside the window.
+			m.logger.Info("provisioning: this process did not start within the device-boot window; keeping the un-narrated path")
+		} else {
+			probe := m.probeLink(ctx)
+			if m.activeLink == nil {
+				m.startOfflineWindow()
+			}
+			d := bootOfflineDetail(probe)
+			m.transition(ctx, StateOfflineRetrying, d)
+			// Set AFTER the transition (which clears the marker only for
+			// non-OfflineRetrying targets): the marker must describe what the
+			// paint above actually put on screen.
+			m.bootNarration = d.Reason
+			// Relocation check, first scan attempt (the radio is back in station
+			// mode — the boot AP sweep precedes this assessment — so a live scan
+			// is possible). ORDERING IS LOAD-BEARING: the fields are set AFTER
+			// the transition above because clearOffline() disarms the check, and
+			// while today's reconcile path for OfflineRetrying happens not to
+			// call clearOffline, arming first would couple the feature's
+			// survival to that incidental fact. onTick takes every later sample
+			// and fires the raise.
+			if probe == linkAbsent {
+				m.relocArmTriesLeft = relocArmTries
+				// The first sample runs only on a MEASURED offline reading.
+				// On an assumed-offline boot (the Online query failed — the
+				// documented monitord startup race) the ladder keeps its
+				// budget but does not scan: three early scans could raise
+				// the one-way AP on a device whose connectivity was never
+				// actually read — the exact false assumption connUnknown
+				// exists to contain. onTick applies the same gate, so the
+				// ladder stays frozen until a successful query confirms
+				// offline (it then advances normally) or reads online
+				// (clearOffline disarms everything). Freezing rather than
+				// declining to arm matters: arming happens ONLY here, so a
+				// decline would leave the feature inert for the whole boot
+				// over a few seconds of monitord lag.
+				if !m.connUnknown {
+					m.relocationScanStep(ctx)
+				}
+			}
+			return
+		}
+	}
+
 	// Keep NM retrying, and arm the sustained-offline window — but only when
 	// no link guard is wired. That entry arming is the nil-guard baseline
 	// ("5m from the offline event"); with a guard, the clock must start at the
@@ -690,10 +891,184 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool) {
 	if m.activeLink == nil {
 		m.startOfflineWindow()
 	}
-	m.transition(ctx, StateOfflineRetrying, Detail{
-		Reason:  "offline",
-		Message: "Reconnecting to Wi-Fi",
-	})
+	// The Joining entry edge is F-01's silent-forever screen: the join
+	// ASSOCIATED (the portal already reported JoinSucceeded) but the upstream
+	// is dead, and with the association holding the link, the AP deliberately
+	// never returns. Narrate it. Every other edge (online→offline on an
+	// exhibition device, redundant re-emissions) keeps the generic reason,
+	// which the notifier deliberately does not paint.
+	detail := Detail{Reason: "offline", Message: "Reconnecting to Wi-Fi"}
+	if cur == StateJoining {
+		m.mu.Lock()
+		ssid := m.status.SSID
+		m.mu.Unlock()
+		if assumed {
+			// The reachability QUERY failed; offline is an assumption, so
+			// hedge — asserting a dead network here would smear a possibly
+			// healthy one. If a later re-query confirms offline the machine
+			// is already in this state and will not re-notify (transition
+			// dedupe), so this hedge is the leg's terminal narration by
+			// design.
+			detail = Detail{SSID: ssid, Reason: ReasonJoinedConnUnknown,
+				Message: "Connected to " + ssid + ". Checking internet access…"}
+		} else {
+			detail = Detail{SSID: ssid, Reason: ReasonJoinedNoInternet,
+				Message: "Connected to " + ssid + ", but this network has no internet access"}
+		}
+	}
+	m.transition(ctx, StateOfflineRetrying, detail)
+}
+
+// bootOfflineDetail picks the boot-entry narration for StateOfflineRetrying by
+// what the link probe could actually confirm — each message must only promise
+// what the machine will really do (the AP never rises while a link holds, and
+// the wait before setup is a floor, not a bound: a wired guard arms the window
+// at the first confirmed-absent tick and any inconclusive probe restarts it,
+// while the relocation check can legitimately start setup sooner — hence
+// "a few minutes … if the connection does not return" rather than a number).
+func bootOfflineDetail(probe linkProbe) Detail {
+	switch probe {
+	case linkPresent:
+		return Detail{Reason: ReasonBootNoInternet,
+			Message: "Connected to the network, but there is no internet access. Retrying…"}
+	case linkUnknown:
+		return Detail{Reason: ReasonBootLinkUnknown,
+			Message: "Checking the network connection…"}
+	default:
+		// Deliberately does not assert "network not found": this branch also
+		// covers "SSID in range but cannot associate" (changed password), and
+		// the narration is painted BEFORE any scan runs.
+		return Detail{Reason: ReasonBootOffline,
+			Message: "Unable to connect to your Wi-Fi network. Setup mode will start in a few minutes if the connection does not return."}
+	}
+}
+
+// repaintBootNarration keeps the boot-entry prose in lockstep with the most
+// recent link probe: every site that acts on a probe result while the boot
+// narration is on screen routes it here, so the screen can never disagree
+// with the evidence the machine just used. Routes through bootOfflineDetail —
+// the single probe→prose table — and repaints only when the wording actually
+// changes, so repeated same-outcome probes cost nothing. No-op outside a
+// boot-narrated episode (the marker is set only at the narrated boot entry),
+// which is what keeps the deliberately silent exhibition path silent.
+func (m *Machine) repaintBootNarration(probe linkProbe) {
+	if m.bootNarration == "" {
+		return
+	}
+	if d := bootOfflineDetail(probe); m.bootNarration != d.Reason {
+		m.bootNarration = d.Reason
+		m.notify(StateOfflineRetrying, d)
+	}
+}
+
+// relocScanOutcome is the tri-state result of one relocation scan attempt.
+// Three states because the two negatives have opposite consequences: a
+// DISPROVED result ends the check for this boot, an INCONCLUSIVE one may be
+// retried while the arming budget lasts.
+type relocScanOutcome int
+
+const (
+	// relocScanInconclusive: profile list or scan failed, or the scan came
+	// back EMPTY (the documented radio-settling shape right after the boot
+	// AP sweep). Retryable within the arming budget; forfeits an in-progress
+	// confirmation (the ladder is consecutive clean positives by design).
+	relocScanInconclusive relocScanOutcome = iota
+	// relocScanConfirmedAbsent: a successful, non-empty, uncapped live scan
+	// positively showed none of the profile-declared saved SSIDs.
+	relocScanConfirmedAbsent
+	// relocScanDisproved: terminal for this boot — a saved SSID is actually
+	// in range (the device may associate on its own), a saved profile
+	// targets a hidden network (its SSID can never appear in a scan, so
+	// absence is unobtainable as evidence for the whole set), or there are
+	// no saved Wi-Fi profiles at all.
+	relocScanDisproved
+)
+
+// relocationScan runs one saved-SSIDs-vs-full-scan comparison. Every outcome
+// is logged: this check's failure mode is silently never firing, and a field
+// report of "the moved frame still waited five minutes" must be diagnosable
+// from the journal alone.
+func (m *Machine) relocationScan(ctx context.Context) relocScanOutcome {
+	saved, anyHidden, err := m.wifi.SavedWifiSSIDs(ctx)
+	if err != nil {
+		m.logger.Warn("provisioning: relocation check: saved-SSID list failed", zap.Error(err))
+		return relocScanInconclusive
+	}
+	if len(saved) == 0 {
+		m.logger.Info("provisioning: relocation check: no saved Wi-Fi profiles")
+		return relocScanDisproved
+	}
+	if anyHidden {
+		m.logger.Info("provisioning: relocation check: a saved profile targets a hidden network; not scan-verifiable")
+		return relocScanDisproved
+	}
+	ssids, err := m.wifi.ScanAllSSIDs(ctx)
+	if err != nil {
+		m.logger.Warn("provisioning: relocation check: scan failed", zap.Error(err))
+		return relocScanInconclusive
+	}
+	if len(ssids) == 0 {
+		m.logger.Info("provisioning: relocation check: empty scan (radio still settling?)")
+		return relocScanInconclusive
+	}
+	inRange := make(map[string]struct{}, len(ssids))
+	for _, s := range ssids {
+		inRange[s] = struct{}{}
+	}
+	for _, s := range saved {
+		if _, ok := inRange[s]; ok {
+			m.logger.Info("provisioning: relocation check: a saved network is in range", zap.Int("scanned", len(ssids)))
+			return relocScanDisproved
+		}
+	}
+	m.logger.Info("provisioning: relocation check: no saved network in a full scan",
+		zap.Int("saved", len(saved)), zap.Int("scanned", len(ssids)))
+	return relocScanConfirmedAbsent
+}
+
+// relocationScanStep runs ONE relocation scan attempt (at the boot assessment
+// or a link-less tick) and advances the arming/confirmation state. It returns
+// true once relocConfirmScans consecutive positives have been observed — the
+// caller then raises the AP. No-op when the check is neither armed nor has
+// arming budget left, so post-budget ticks cost no scans.
+func (m *Machine) relocationScanStep(ctx context.Context) bool {
+	if m.relocConfirms == 0 && m.relocArmTriesLeft == 0 {
+		return false
+	}
+	switch m.relocationScan(ctx) {
+	case relocScanConfirmedAbsent:
+		m.relocConfirms++
+		m.relocArmTriesLeft = 0 // armed: consecutive positives only from here
+		return m.relocConfirms >= relocConfirmScans
+	case relocScanDisproved:
+		m.disarmRelocation("a saved network is in range, unverifiable, or absent entirely")
+	case relocScanInconclusive:
+		if m.relocConfirms > 0 {
+			m.disarmRelocation("inconclusive scan mid-confirmation")
+			return false
+		}
+		m.relocArmTriesLeft--
+		if m.relocArmTriesLeft <= 0 {
+			m.relocArmTriesLeft = 0
+			m.logger.Info("provisioning: boot relocation check disarmed",
+				zap.String("reason", "arming budget exhausted on inconclusive scans"))
+		}
+	}
+	return false
+}
+
+// disarmRelocation cancels a pending boot relocation confirmation, logging
+// why when it actually cancels something (reason "" fires silently — used
+// where the caller logs its own outcome, e.g. the confirmed raise).
+func (m *Machine) disarmRelocation(reason string) {
+	if m.relocConfirms == 0 && m.relocArmTriesLeft == 0 {
+		return
+	}
+	if reason != "" {
+		m.logger.Info("provisioning: boot relocation check disarmed", zap.String("reason", reason))
+	}
+	m.relocConfirms = 0
+	m.relocArmTriesLeft = 0
 }
 
 // onTick fires the sustained-offline window and retries any deferred AP op.
@@ -708,7 +1083,7 @@ func (m *Machine) onTick(ctx context.Context) {
 			m.logger.Warn("provisioning: connectivity re-query failed; still assuming offline", zap.Error(err))
 		} else {
 			m.logger.Info("provisioning: connectivity re-query resolved the assumed-offline boot", zap.Bool("online", online))
-			m.onConnectivity(ctx, online)
+			m.onConnectivity(ctx, online, false)
 		}
 	}
 
@@ -734,7 +1109,8 @@ func (m *Machine) onTick(ctx context.Context) {
 		// raise the AP after seconds of link loss — and on Wi-Fi that raise
 		// is unrecoverable without a human (the hotspot takes the radio, so
 		// reachability can never return on its own to tear it down).
-		switch m.probeLink(ctx) {
+		probe := m.probeLink(ctx)
+		switch probe {
 		case linkPresent, linkUnknown:
 			// A sighting DISARMS the window entirely; the next confirmed
 			// absence arms a fresh one below. Disarm-then-rearm (rather than
@@ -745,9 +1121,82 @@ func (m *Machine) onTick(ctx context.Context) {
 			// a SINGLE absent sample — the window must measure confirmed
 			// absence, not time since the probe last ran. Fall through to
 			// reconcile rather than returning: a pending AP-profile teardown
-			// (apDownPending) must keep retrying on guarded ticks too.
+			// (apDownPending) must keep retrying on guarded ticks too. A
+			// sighting also cancels any pending boot relocation confirmation
+			// (via clearOffline) — the link's existence is direct
+			// counter-evidence.
 			m.clearOffline()
+			// The clearOffline above just changed what is TRUE (a present
+			// link suppresses the AP outright; an unknown probe disarms the
+			// window, deferring setup to a future confirmed absence), so the
+			// boot prose must follow — the same-state transition dedupe
+			// repaints nothing on its own, and a stale "setup will start in
+			// a few minutes" would sit on screen forever on an air-gapped
+			// LAN (linkPresent) or under a persistently failing probe
+			// (linkUnknown).
+			m.repaintBootNarration(probe)
 		case linkAbsent:
+			// Boot relocation confirmation (M-0b): may only START at a boot
+			// assessment with a confirmed-absent link; each still-link-less
+			// tick runs one scan step (arming within the bounded budget, or
+			// confirming once armed — see relocationScanStep). Only
+			// relocConfirmScans consecutive positives raise the AP (~30-45s
+			// after boot when armed at the assessment — a router recovering
+			// from the same power cut gets that long to reappear). The plain
+			// window below is the fallback either way, and keeps running
+			// throughout.
+			// The connUnknown gate mirrors the boot entry's: while offline is
+			// only ASSUMED (every query so far failed), the ladder neither
+			// scans nor spends budget — scan-confirmed absence must never
+			// compound an unmeasured connectivity assumption into the one-way
+			// raise. The re-query at the top of this tick clears the flag on
+			// the first successful offline reading, so the ladder resumes on
+			// the same tick that confirms.
+			if !m.connUnknown && m.relocationScanStep(ctx) {
+				// FINAL link re-check before the one-way door: the probe at
+				// the top of this tick predates the scan above, which runs
+				// multi-second radio work on this same goroutine — a link
+				// that appeared meanwhile (the ethernet escape hatch plugged
+				// in; an AP whose beacons the scan pass missed but the
+				// supplicant then caught) has its event QUEUED behind this
+				// tick and cannot be seen before the raise. Anything short of
+				// a confirmed-absent link right now takes the standard
+				// sighting semantics — clearOffline disarms the ladder and
+				// the window, and the next confirmed absence re-arms the
+				// plain window — because on Wi-Fi the raise drops the
+				// recovered link and nothing can lower the AP again without a
+				// human.
+				if g := m.probeLink(ctx); g != linkAbsent {
+					m.logger.Info("provisioning: link sighted during the final relocation scan; deferring to the offline window")
+					m.clearOffline()
+					// The veto acts on this fresh probe, so the narration
+					// must too — waiting for the next tick's repaint would
+					// leave the setup promise up for 15s after setup was
+					// just deferred.
+					m.repaintBootNarration(g)
+					break
+				}
+				m.logger.Info("provisioning: relocation confirmed by repeated scans; starting setup",
+					zap.Int("scans", relocConfirmScans))
+				m.disarmRelocation("")
+				m.clearOffline()
+				m.resetJoinStatus()
+				m.transition(ctx, StateAPActive, Detail{
+					Reason:  ReasonRelocated,
+					Message: "None of the saved Wi-Fi networks are nearby; starting setup",
+				})
+				return
+			}
+			// Boot-narration downgrade, the upgrade's mirror: an entry that
+			// asserted "connected, no internet" (or hedged "checking") stops
+			// being true once the link is confirmed gone, and the setup
+			// promise becomes accurate again — the window below is arming.
+			// (No double paint on the expiry-veto path below: with a wired
+			// guard, expiry requires earlier absent ticks whose downgrade
+			// already settled the marker on the promise; with a nil guard
+			// the entry probe was necessarily linkAbsent — marker already
+			// the promise — and the re-probe can never veto.)
+			m.repaintBootNarration(linkAbsent)
 			switch {
 			case since.IsZero():
 				// First confirmed absence since the last sighting (or since
@@ -756,6 +1205,22 @@ func (m *Machine) onTick(ctx context.Context) {
 				// the AP only ever rises off repeated confirmations.
 				m.startOfflineWindow()
 			case m.clock.Now().Sub(since) >= m.offlineWindow:
+				// Re-probe before THIS one-way door too: the relocation scan
+				// above runs multi-second radio work after the top-of-tick
+				// probe, and its stall time counts toward this expiry check
+				// (Now() is read here, not at the probe). A link that came
+				// back during a non-confirming scan would otherwise be
+				// dropped by a raise justified only by the pre-scan probe.
+				// Anything short of confirmed absence is a sighting: disarm
+				// and let the next confirmed absence arm a fresh window. On
+				// scan-free ticks the two probes are milliseconds apart, so
+				// this is effectively free.
+				if g := m.probeLink(ctx); g != linkAbsent {
+					m.logger.Info("provisioning: link sighted at the expiry re-check; deferring the sustained-offline raise")
+					m.clearOffline()
+					m.repaintBootNarration(g)
+					break
+				}
 				m.clearOffline()
 				m.resetJoinStatus()
 				m.transition(ctx, StateAPActive, Detail{
@@ -923,15 +1388,11 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
 			m.logger.Warn("provisioning: post-join connectivity query failed; assuming offline until a query succeeds", zap.Error(oerr))
 			online = false
 		}
-		m.onConnectivity(ctx, online)
-		if oerr != nil {
-			// Same assumed-vs-read discipline as the boot-time query (and the
-			// same AFTER-onConnectivity ordering, since it clears the flag):
-			// sys-monitord being briefly unavailable during the join must not
-			// become a permanent offline verdict that raises the AP over a
-			// working uplink after the offline window.
-			m.connUnknown = true
-		}
+		// assumed carries the failed-query fact into the assessment: it keeps
+		// connUnknown armed (sys-monitord being briefly unavailable during
+		// the join must not become a permanent offline verdict) and it picks
+		// the hedged Joining-edge narration over the "no internet" assertion.
+		m.onConnectivity(ctx, online, oerr != nil)
 		return
 	}
 
@@ -996,6 +1457,14 @@ func (m *Machine) applyRescan(ctx context.Context) {
 // (sys-monitord restarts re-emit their first probe; the tick re-probes while
 // offline) stay suppressed, which is what the link-lost window path relies on.
 func (m *Machine) transition(ctx context.Context, target State, d Detail) {
+	// Leaving StateOfflineRetrying ends the boot narration's on-screen life —
+	// whatever paints next owns the screen. Without this clear, a narrated
+	// boot outage followed by online and a LATER mid-exhibition outage would
+	// let the tick repaint boot prose over the deliberately silent exhibition
+	// path. Loop-goroutine-only field, deliberately outside the lock.
+	if target != StateOfflineRetrying {
+		m.bootNarration = ""
+	}
 	m.mu.Lock()
 	changed := m.state != target ||
 		(target == StateUnprovisioned && m.lastReason != d.Reason)
@@ -1296,6 +1765,12 @@ func (m *Machine) clearOffline() {
 	m.mu.Lock()
 	m.offlineSince = time.Time{}
 	m.mu.Unlock()
+	// Every path that clears the offline window — going online, a link
+	// sighting, an AP raise — is also direct counter-evidence against (or the
+	// resolution of) a pending boot relocation confirmation. Disarming here
+	// guarantees a stale armed check can never survive into a LATER offline
+	// episode and bypass the sustained-offline window mid-exhibition.
+	m.disarmRelocation("offline state cleared (online, link sighted, or AP raised)")
 }
 
 // notify publishes a state change to the Notifier, guarded against panics. See
