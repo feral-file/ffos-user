@@ -166,10 +166,12 @@ gate cannot: a capture already in flight is never aborted and can run for
 up to the 30-minute transfer ceiling. `downloader.go` therefore wraps the
 capture Chromium spawn in a transient systemd scope (`systemd-run --user
 --scope`, a runtime invocation — deliberately NOT unit-file properties,
-which would drag this onto the full-image rail):
+which would drag this onto the full-image rail) **plus an argv wrapper**
+(`env -u DBUS_SESSION_BUS_ADDRESS taskset -c <cpus>`). Both halves are
+load-bearing; see "Why the scope alone does not hold" below.
 
 - `CPUQuota` (default 300%) caps total cycles — bounding the heat and
-  scheduling pressure an in-flight capture can generate; `AllowedCPUs`
+  scheduling pressure an in-flight capture can generate; the CPU pin
   (default: first quarter of the machine's logical CPUs, "0-3" on the
   16-thread target) additionally pins it so short bursts cannot light up
   every core's boost clocks (a quota alone still allows that); `MemoryMax`
@@ -183,10 +185,90 @@ which would drag this onto the full-image rail):
   profile lock. A scope also survives a crashed daemon by design, so the
   first spawn of each daemon run sweeps stale `feral-offline-capture-*`
   scopes before probing.
-- Scope support is probed once (`systemd-run ... /bin/true`); on failure
-  (no session bus, missing binary) the downloader logs one warning and
-  degrades to the plain uncapped spawn — a broken environment slows
-  nothing and blocks nothing, it just loses the cap.
+- Support is probed once, against the **exact spawn shape** a real capture
+  uses (scope properties *and* argv wrapper, running `/bin/true`). The two
+  capabilities are probed **independently** and then composed — a combined
+  probe cannot say which half failed, so a broken wrapper would surrender
+  the scope with it and blame systemd in the log while systemd was fine.
+  The resulting matrix, each cell logging what is left:
+
+  | available | in force |
+  |---|---|
+  | scope + pinned wrapper | quota, memory ceiling, CPU pin |
+  | scope + env-only wrapper | quota, memory ceiling |
+  | scope, no wrapper | quota and memory ceiling *until Chromium escapes* |
+  | pinned wrapper only | CPU pin |
+  | neither | nothing (pre-limits behavior) |
+
+  A broken environment slows nothing and blocks nothing. The third row is
+  the one cell where the `resource limits active` line reads more
+  optimistically than reality: with `env` itself unusable there is nothing
+  stopping the escape, so the cgroup limits hold only until Chromium
+  re-parents. The containment check below corrects the record on that very
+  spawn.
+
+#### Why the scope alone does not hold
+
+An FF1 hard-reset at the instant a capture started, with the cap nominally
+enabled. Neither limit was actually in force, for two independent reasons
+— either alone is enough to void the protection:
+
+1. **Chromium escapes the scope.** Given a reachable user session bus,
+   Chromium moves its own browser process into a transient
+   `app-org.chromium.Chromium-<pid>.scope` under `app.slice` at startup —
+   a sibling of ours with every property at its default (`CPUQuota=
+   infinity`, `MemoryMax=infinity`). Everything set on our scope is
+   silently voided. `env -u DBUS_SESSION_BUS_ADDRESS` denies the bus;
+   headless capture has no other use for it.
+2. **`AllowedCPUs=` writes nowhere.** systemd accepts and reports the
+   property, but applying it needs the `cpuset` controller delegated to
+   the user manager. On the FF1 only `cpu`, `memory` and `pids` are
+   (`user@.service` `DelegateControllers`), so no `cpuset.cpus` file is
+   ever created and the pin lands nowhere. `taskset` sets CPU *affinity*
+   instead — a plain process attribute that children inherit and that a
+   cgroup migration does not reset, so the pin survives even an escape
+   that voids everything else.
+
+The pin is the limit that matters most, because it is the one that bounds
+package power draw — and an unpinned SwiftShader capture lighting up all 16
+threads was the load in flight when the device reset. Whether that draw was
+the mechanism is the leading hypothesis, not a proven fact (see **Open:**
+below); the pin is the cheapest defense against it either way, which is why
+the matrix above drops it last rather than first. Note that this is a
+property of the matrix, not an ordering: the scope and the wrapper are
+probed independently, so neither is ever surrendered to buy the other.
+
+Two guards keep this from silently regressing. The probe exercises the
+real shape (the previous `/bin/true`-only probe passed happily while both
+limits were inert, then logged that they were "active"). And every scoped
+spawn checks containment directly: `systemd-run --scope` creates the unit
+and then **execs in place**, so the PID `Start()` returned is the capture
+Chromium's own browser process, and `/proc/<pid>/cgroup` must name the unit
+we spawned it into. An escape moves that process to another cgroup but
+never changes its PID, so the check is exact — and it warns loudly instead
+of reporting limits that enforce nothing.
+
+One trap worth naming, since the CPU spec crosses two parsers: systemd's
+`AllowedCPUs=` accepts whitespace-separated lists (`"0 1 2 3"`) that
+`taskset -c` rejects outright. Handing such a spec to taskset would make
+every spawn fail to exec and drop capture to a bare, fully uncapped
+Chromium — strictly worse than not pinning. The wrapper therefore gates the
+taskset element on `countAllowedCPUs`, the same parser `alignHeadlessLimits`
+uses, so the two always agree about what a CPU list is.
+
+**Open:** whether the default pin (4 CPUs @ 300%) is actually *sufficient*
+to prevent the brownout is unmeasured. Nothing was capped during the field
+reset, so it yields no data on real draw; the fix restores the intended
+protection without proving the protection is enough. If a reset recurs with
+the pin verifiably applied, the lever is a tighter pin (`0-1`) via
+`offlineCache.headlessLimits` — a config change, no rebuild.
+
+Delegating `cpuset` to the user manager would make `AllowedCPUs=` real and
+would also cap the escaped scope, but it is a system-level unit change —
+the full-image rail — so it is deliberately *not* part of this
+package-rail fix. The `--property=AllowedCPUs=` is still passed: it costs
+nothing, documents intent where an operator looks first, and becomes the
+enforcement the day that delegation lands.
 
 **The gate and the cap are one system, not two knobs.** Three couplings
 keep them from drifting into a combination that only works on one device:
@@ -214,12 +296,13 @@ keep them from drifting into a combination that only works on one device:
    revisiting the berth is the amendment hazard to watch.
 
 **Not** attempted: telling Chromium how many CPUs to assume. There is no
-reliable flag for it, and whether Chromium's thread-pool sizing observes a
-cpuset at all is glibc-version dependent. `AllowedCPUs` is enforced by the
-kernel regardless of how many threads Chromium spawns, so the worst case
-is some extra mostly-idle threads — cheap, and not a heat or correctness
-problem. Speculative flags (`--renderer-process-limit`, `--single-process`)
-were rejected as capture-fidelity risks for no bounded gain.
+reliable flag for it, and whether Chromium's thread-pool sizing observes
+its CPU restriction at all is glibc-version dependent. The pin is enforced
+by the kernel regardless of how many threads Chromium spawns, so the worst
+case is some extra mostly-idle threads — cheap, and not a heat or
+correctness problem. Speculative flags (`--renderer-process-limit`,
+`--single-process`) were rejected as capture-fidelity risks for no bounded
+gain.
 
 ---
 

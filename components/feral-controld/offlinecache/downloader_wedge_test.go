@@ -18,6 +18,7 @@ func (f *fakeExecCmd) Start() error                    { return nil }
 func (f *fakeExecCmd) Wait() error                     { return nil }
 func (f *fakeExecCmd) Output() ([]byte, error)         { return nil, nil }
 func (f *fakeExecCmd) CombinedOutput() ([]byte, error) { return nil, nil }
+func (f *fakeExecCmd) Pid() int                        { return 0 }
 
 // TestDownloader_ReapCompleted_DoesNotClobberNewerGeneration is a
 // white-box regression test (package offlinecache, not offlinecache_test

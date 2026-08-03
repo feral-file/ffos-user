@@ -240,3 +240,4 @@ func (c fakeCmd) Start() error                    { return c.exec.errFor(c.line)
 func (c fakeCmd) Wait() error                     { return nil }
 func (c fakeCmd) Output() ([]byte, error)         { return nil, c.exec.errFor(c.line) }
 func (c fakeCmd) CombinedOutput() ([]byte, error) { return nil, c.exec.errFor(c.line) }
+func (c fakeCmd) Pid() int                        { return 0 }

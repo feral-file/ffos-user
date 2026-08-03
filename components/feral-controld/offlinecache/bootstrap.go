@@ -79,9 +79,10 @@ type Options struct {
 	// gate cannot cover.
 	HeadlessLimits HeadlessLimits
 	// HeadlessLimitsWarning is non-empty when OptionsFromConfig had to
-	// correct an internally inconsistent HeadlessLimits (see
-	// alignHeadlessLimits). Bootstrap logs it; carried as data so the
-	// mapping stays a pure, testable function.
+	// correct an internally inconsistent HeadlessLimits, or found one it
+	// deliberately does NOT correct but that will not apply as written
+	// (see alignHeadlessLimits, which covers both cases). Bootstrap logs
+	// it; carried as data so the mapping stays a pure, testable function.
 	HeadlessLimitsWarning string
 }
 
@@ -221,12 +222,24 @@ func finalizeOptions(opts Options) Options {
 // caller logs (this function stays pure so OptionsFromConfig's tests can
 // assert the mapping).
 func alignHeadlessLimits(l HeadlessLimits) (HeadlessLimits, string) {
-	if !l.Enabled || l.CPUQuotaPercent <= 0 {
+	if !l.Enabled {
 		return l, ""
 	}
 	allowed := countAllowedCPUs(l.AllowedCPUs)
-	if allowed <= 0 {
-		return l, "" // no cpuset pin: the quota alone governs
+	// A spec that is present but unparseable is a CONFIGURED pin that will
+	// silently apply nowhere — the same class of quiet inertness this whole
+	// area exists to make loud. It is easy to hit by accident because
+	// systemd's AllowedCPUs= accepts whitespace-separated forms that
+	// taskset -c rejects, so an operator can copy a legal systemd value
+	// straight into config and lose the pin without a word. Reported here
+	// rather than left to a Bool field on a later Info line.
+	if allowed <= 0 && strings.TrimSpace(l.AllowedCPUs) != "" {
+		return l, fmt.Sprintf(
+			"offlineCache.headlessLimits.allowedCpus %q is not a CPU list taskset can apply (systemd accepts whitespace-separated forms that taskset -c rejects); the capture chromium will run WITHOUT a cpu pin",
+			l.AllowedCPUs)
+	}
+	if l.CPUQuotaPercent <= 0 || allowed <= 0 {
+		return l, "" // no pin: the quota alone governs
 	}
 	if maxQuota := allowed * 100; l.CPUQuotaPercent > maxQuota {
 		warning := fmt.Sprintf(
@@ -280,6 +293,12 @@ func countAllowedCPUs(spec string) int {
 // artwork's code does; a CPUQuota alone still lets short bursts light up
 // every core's boost clocks, which is the spike that can brown out the
 // whole device. On the 16-thread target this yields "0-3" @ 300%.
+//
+// That hazard is not theoretical: an FF1 hard-reset the instant a capture
+// started, with the pin turning out to be applying nowhere. Whether the
+// draw was the mechanism is unproven, but the pin is the defense either
+// way — and it is therefore enforced by taskset rather than by the systemd
+// AllowedCPUs= property, which is inert here (see captureWrapperArgv).
 func defaultHeadlessLimits() HeadlessLimits {
 	total := runtime.NumCPU()
 	pinned := max(2, total/4)

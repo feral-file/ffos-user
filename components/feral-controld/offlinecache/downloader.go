@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	go_http "net/http"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,14 +25,22 @@ const (
 	chromiumPollInterval   = 200 * time.Millisecond
 )
 
-// Headless-Chromium resource-limit defaults (HeadlessLimits, applied via a
-// transient systemd scope — see startScoped). These bound how much of the
-// machine an IN-FLIGHT capture can consume — the one window the admission
-// gate (admission.go) cannot cover, since it only defers jobs from
-// starting and a running capture is never aborted. The capture Chromium
-// renders WebGL on the CPU (SwiftShader), so without a cap a single heavy
-// artwork capture can pull sustained all-core boost load: heat toward the
-// firmware thermal envelope and scheduling pressure on the live kiosk.
+// Headless-Chromium resource-limit defaults (HeadlessLimits, applied by
+// start() via a transient systemd scope plus a taskset/env argv wrapper —
+// see captureWrapperArgv for why the wrapper is load-bearing rather than
+// belt-and-braces). These bound how much of the machine an IN-FLIGHT
+// capture can consume — the one window the admission gate (admission.go)
+// cannot cover, since it only defers jobs from starting and a running
+// capture is never aborted. The capture Chromium renders WebGL on the CPU
+// (SwiftShader), so without a cap a single heavy artwork capture can pull
+// sustained all-core boost load: heat toward the firmware thermal envelope
+// and scheduling pressure on the live kiosk. An FF1 also hard-reset in the
+// field at the instant such a capture started, with every limit here
+// inert; the evidence (empty pstore, no oops/OOM/panic, journal truncated
+// mid-line) points to an abrupt power event and rules out the software
+// causes, but does not by itself prove the capture's draw was the
+// mechanism. Treat the power spike as the leading hypothesis, not settled
+// fact -- see docs/offline-artwork-capture.md 2.1.
 const (
 	// DefaultHeadlessCPUShareOfPinned is what the default CPUQuota is
 	// derived FROM rather than a fixed percentage: the quota is this
@@ -58,7 +68,7 @@ const (
 	DefaultHeadlessMemoryMaxBytes = int64(2) << 30 // 2 GiB
 	// scopeUnitPrefix names the transient scopes so stale ones from a
 	// crashed daemon can be swept by glob on the next start (see
-	// ensureScopeSupport) and so operators can find them in systemctl.
+	// ensureCaptureSupport) and so operators can find them in systemctl.
 	scopeUnitPrefix = "feral-offline-capture-"
 	// scopeStopTimeoutSec is the scope's own SIGTERM->SIGKILL escalation
 	// (systemd TimeoutStopSec). Short: nothing in a capture Chromium
@@ -76,7 +86,7 @@ const (
 	// escalation is also unnecessary: the stop job is already enqueued in
 	// systemd and the scope dies on its own, outside our cgroup, whether
 	// or not this process is still around to observe it; the next daemon
-	// run's ensureScopeSupport sweep covers any residue. Idle/steady-state
+	// run's ensureCaptureSupport sweep covers any residue. Idle/steady-state
 	// teardowns (scheduleTeardown) still wait unbounded — only shutdown
 	// is budget-constrained.
 	scopeCloseWait = 1 * time.Second
@@ -88,30 +98,41 @@ const (
 	// scopeProbeTimeout bounds the one-time systemd-run capability probe
 	// and each systemctl invocation.
 	scopeProbeTimeout = 10 * time.Second
+	// sessionBusEnvVar is unset for the capture Chromium (see
+	// captureWrapperArgv): reaching the user session bus is precisely what
+	// lets Chromium move itself OUT of the scope we just capped it with.
+	sessionBusEnvVar = "DBUS_SESSION_BUS_ADDRESS"
 )
 
 // HeadlessLimits configures the resource cap applied to the headless
 // capture Chromium via a transient systemd scope (`systemd-run --user
-// --scope`). The zero value disables the cap entirely (plain spawn —
-// pre-limits behavior); OptionsFromConfig enables it with the defaults
-// above. Applying limits through a RUNTIME transient scope rather than
-// unit-file properties is deliberate: unit files ship on the full-image
-// rail (users/**), and this must stay a package-rail change. Scope
-// support is probed once at first use and the downloader degrades to a
-// plain spawn (with a warning) when systemd-run is unavailable, so a
-// broken session bus can never block captures outright.
+// --scope`) plus an argv wrapper (captureWrapperArgv). The zero value
+// disables the cap entirely (plain spawn — pre-limits behavior);
+// OptionsFromConfig enables it with the defaults above. Applying limits
+// through a RUNTIME transient scope rather than unit-file properties is
+// deliberate: unit files ship on the full-image rail (users/**), and this
+// must stay a package-rail change. The two capabilities are probed once at
+// first use and INDEPENDENTLY (see ensureCaptureSupport), so losing one
+// never surrenders the other, and a broken environment degrades with a
+// warning naming what is left rather than blocking captures outright.
 type HeadlessLimits struct {
 	Enabled bool
 	// CPUQuotaPercent caps total CPU cycles (systemd CPUQuota=; 100 = one
-	// full CPU). <=0 disables the quota property.
+	// full CPU). <=0 disables the quota property. Enforced ONLY by the
+	// cgroup, so it depends on Chromium staying inside our scope — see
+	// captureWrapperArgv.
 	CPUQuotaPercent int
-	// AllowedCPUs pins the capture Chromium to a CPU subset (systemd
-	// AllowedCPUs=, e.g. "0-3"), bounding worst-case package power draw
-	// from all-core boost — a quota alone still lets short bursts light
-	// up every core. Empty disables the property.
+	// AllowedCPUs pins the capture Chromium to a CPU subset (e.g. "0-3"),
+	// bounding worst-case package power draw from all-core boost — a quota
+	// alone still lets short bursts light up every core. Empty disables the
+	// pin. Passed BOTH as systemd AllowedCPUs= and to taskset in the argv
+	// wrapper: the systemd property is inert unless the cpuset controller
+	// is delegated to the user manager (on the FF1 target it is not — only
+	// cpu, memory and pids are), so taskset is what actually enforces this.
 	AllowedCPUs string
 	// MemoryMaxBytes is the cgroup memory ceiling (systemd MemoryMax=).
-	// <=0 disables the property.
+	// <=0 disables the property. Cgroup-only, same caveat as
+	// CPUQuotaPercent.
 	MemoryMaxBytes int64
 }
 
@@ -166,11 +187,13 @@ type downloader struct {
 
 	sem chan struct{} // capacity 1: the single-job-at-a-time gate
 
-	// scopeProbed/scopeOK cache the one-time systemd-run capability probe
-	// (ensureScopeSupport). Written and read only from start(), which the
+	// scopeProbed/scopeOK/wrapperArgv cache the one-time capability probe
+	// (ensureCaptureSupport). Written and read only from start(), which the
 	// sem above already serializes, so they need no lock of their own.
+	// wrapperArgv is the resolved argv prefix (nil = spawn Chromium bare).
 	scopeProbed bool
 	scopeOK     bool
+	wrapperArgv []string
 	// scopeSeq numbers transient scope units so a new generation can
 	// never collide with a predecessor's still-deactivating scope name.
 	// Same serialization argument as scopeProbed.
@@ -181,7 +204,7 @@ type downloader struct {
 	// its scope, still holding the debug port and profile lock, and the
 	// next scoped spawn's readiness probe would otherwise succeed against
 	// that stale orphan as if it were its own process. The next
-	// ensureScopeSupport call re-runs the glob sweep before spawning to
+	// ensureCaptureSupport call re-runs the glob sweep before spawning to
 	// clear it.
 	needScopeSweep bool
 
@@ -419,19 +442,33 @@ func (d *downloader) start(ctx context.Context) error {
 	}
 
 	// Wrap the spawn in a resource-capped transient systemd scope when
-	// enabled and available (see HeadlessLimits). The fallback to a plain
-	// spawn is deliberate: a missing systemd-run or session bus must
-	// degrade to today's uncapped behavior, never block capture.
+	// enabled and available, and prefix the binary with the argv wrapper
+	// that carries the CPU pin (see captureWrapperArgv). The fallback to a
+	// plain spawn is deliberate: a missing systemd-run or session bus must
+	// degrade — never block capture. Note the wrapper applies on BOTH
+	// paths, so the degraded path still gets the pin that bounds power
+	// draw; only the cgroup quota and memory ceiling are lost with it.
+	wrapperArgv, scopeOK := d.ensureCaptureSupport(ctx)
+
 	var cmd wrapper.ExecCmd
 	scopeUnit := ""
-	if d.limits.Enabled && d.ensureScopeSupport(ctx) {
+	if scopeOK {
 		d.scopeSeq++
 		scopeUnit = fmt.Sprintf("%s%d.scope", scopeUnitPrefix, d.scopeSeq)
-		runArgs := append(d.scopeRunArgs(scopeUnit), d.binaryPath)
+		runArgs := append(d.scopeRunArgs(scopeUnit), wrapperArgv...)
+		runArgs = append(runArgs, d.binaryPath)
 		runArgs = append(runArgs, args...)
 		cmd = d.exec.CommandContext(procCtx, "systemd-run", runArgs...)
 	} else {
-		cmd = d.exec.CommandContext(procCtx, d.binaryPath, args...)
+		name, spawnArgs := d.binaryPath, args
+		if len(wrapperArgv) > 0 {
+			name = wrapperArgv[0]
+			spawnArgs = make([]string, 0, len(wrapperArgv)+len(args))
+			spawnArgs = append(spawnArgs, wrapperArgv[1:]...)
+			spawnArgs = append(spawnArgs, d.binaryPath)
+			spawnArgs = append(spawnArgs, args...)
+		}
+		cmd = d.exec.CommandContext(procCtx, name, spawnArgs...)
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -470,6 +507,11 @@ func (d *downloader) start(ctx context.Context) error {
 		}
 		return err
 	}
+	// Chromium is up and has finished its own startup re-parenting by now,
+	// so this is the earliest point the escape check is meaningful.
+	if scopeUnit != "" {
+		d.warnOnScopeEscape(scopeUnit, cmd.Pid())
+	}
 	return nil
 }
 
@@ -489,6 +531,12 @@ func (d *downloader) scopeRunArgs(unit string) []string {
 		runArgs = append(runArgs, fmt.Sprintf("--property=CPUQuota=%d%%", d.limits.CPUQuotaPercent))
 	}
 	if d.limits.AllowedCPUs != "" {
+		// Kept even though taskset is what enforces the pin today (see
+		// captureWrapperArgv): the property costs nothing, documents intent
+		// where an operator looks first (`systemctl show`), and becomes the
+		// real enforcement the day the cpuset controller is delegated to the
+		// user manager. It must NOT be read as evidence the pin applied —
+		// systemd reports it verbatim whether or not it landed anywhere.
 		runArgs = append(runArgs, "--property=AllowedCPUs="+d.limits.AllowedCPUs)
 	}
 	if d.limits.MemoryMaxBytes > 0 {
@@ -497,18 +545,84 @@ func (d *downloader) scopeRunArgs(unit string) []string {
 	return append(runArgs, "--")
 }
 
-// ensureScopeSupport runs once per process: it sweeps any capture scopes a
-// previous daemon run may have leaked (a scope survives its spawner —
+// captureWrapperArgv builds the argv prefix that must sit between the
+// scope (if any) and the Chromium binary. Both elements exist because the
+// systemd scope ALONE does not actually constrain Chromium:
+//
+//   - `env -u DBUS_SESSION_BUS_ADDRESS` stops the escape. Given a reachable
+//     user session bus, Chromium moves its own browser process into a
+//     transient "app-org.chromium.Chromium-<pid>.scope" under app.slice at
+//     startup — a sibling of ours with every property at its default
+//     (CPUQuota=infinity, MemoryMax=infinity). Everything we set on our
+//     scope is silently voided the moment that happens. Headless capture
+//     has no use for the session bus, so denying it is free.
+//
+//   - `taskset -c` is what actually applies the CPU pin. systemd accepts
+//     and reports AllowedCPUs=, but writing it needs the cpuset controller
+//     delegated to the user manager, and on the FF1 target only cpu, memory
+//     and pids are — so the property lands nowhere and no cpuset.cpus file
+//     is ever created. CPU affinity, by contrast, is a plain process
+//     attribute: children inherit it and a cgroup migration does not reset
+//     it, so the pin survives even an escape that voids everything else.
+//
+// The pin is the limit that matters most here: it is what bounds package
+// power draw, and an unpinned SwiftShader capture lighting up every core
+// was the load in flight when an FF1 hard-reset in the field (leading
+// hypothesis, not proven -- see the const block above). Returns nil when
+// limits are disabled, in which case Chromium is spawned bare.
+//
+// withPin=false drops the taskset element, keeping only the escape
+// prevention — the fallback when taskset itself is unusable (see
+// resolveWrapper).
+func (d *downloader) captureWrapperArgv(withPin bool) []string {
+	if !d.limits.Enabled {
+		return nil
+	}
+	argv := []string{"env", "-u", sessionBusEnvVar}
+	// countAllowedCPUs, not a bare != "" check: systemd's AllowedCPUs=
+	// accepts whitespace-separated lists ("0 1 2 3") that taskset -c
+	// rejects outright, and alignHeadlessLimits already treats exactly
+	// those specs as "no pin". Gating on the same parser keeps the two
+	// helpers agreeing about what a CPU list is, so a config spelling that
+	// is legal upstream cannot turn into a spawn that fails to exec.
+	if withPin && countAllowedCPUs(d.limits.AllowedCPUs) > 0 {
+		argv = append(argv, "taskset", "-c", d.limits.AllowedCPUs)
+	}
+	return argv
+}
+
+// ensureCaptureSupport runs once per process: it sweeps any capture scopes
+// a previous daemon run may have leaked (a scope survives its spawner —
 // that is the point of it being outside our cgroup — so a SIGKILLed
 // daemon leaves its capture Chromium running, still holding the debug
 // port and profile lock, and the next spawn would probe THAT stale
-// process's DevTools endpoint as if it were its own), then probes that a
-// transient scope with our exact properties can actually be created.
-// Probe failure (no systemd-run, no session bus, property rejected)
-// disables scoping for the daemon's lifetime with one warning — capture
-// then runs uncapped, exactly the pre-limits behavior. Serialized by the
-// Acquire semaphore; see the scopeProbed field comment.
-func (d *downloader) ensureScopeSupport(ctx context.Context) bool {
+// process's DevTools endpoint as if it were its own), then probes the
+// EXACT spawn shape a real capture will use.
+//
+// Probing the real shape matters: the previous version probed a bare
+// `/bin/true` and, on success, logged that every configured limit was
+// "active". /bin/true neither re-parents itself out of the scope nor needs
+// a cpuset, so it passed on a device where the pin and the ceiling were
+// both inert — a false all-clear over exactly the defect that crashed the
+// device.
+//
+// The two capabilities are probed INDEPENDENTLY and then composed, rather
+// than as one ladder of combined shapes. A single combined probe cannot
+// say which half failed, so a broken wrapper would surrender the scope too
+// (dropping straight to a bare, fully uncapped spawn) and would blame
+// systemd in the log while systemd was fine. Resolving the wrapper first
+// and then probing the scope WITH it yields the honest matrix:
+//
+//	scope + pinned wrapper -> quota, memory ceiling and pin all in force
+//	scope + env-only       -> quota and ceiling in force; no pin
+//	pinned wrapper only    -> pin in force; quota and ceiling lost
+//	neither                -> uncapped, the pre-limits behavior
+//
+// Serialized by the Acquire semaphore; see the scopeProbed field comment.
+func (d *downloader) ensureCaptureSupport(ctx context.Context) ([]string, bool) {
+	if !d.limits.Enabled {
+		return nil, false
+	}
 	if d.scopeProbed {
 		if d.scopeOK && d.takeNeedScopeSweep() {
 			// A prior backstop kill may have orphaned a Chromium in its
@@ -517,35 +631,160 @@ func (d *downloader) ensureScopeSupport(ctx context.Context) bool {
 			// DevTools endpoint.
 			d.sweepStaleScopes(ctx)
 		}
-		return d.scopeOK
+		return d.wrapperArgv, d.scopeOK
 	}
 
 	d.sweepStaleScopes(ctx)
 
-	probeCtx, cancelProbe := context.WithTimeout(ctx, scopeProbeTimeout)
-	defer cancelProbe()
-	probeArgs := append(d.scopeRunArgs(fmt.Sprintf("%sprobe.scope", scopeUnitPrefix)), "/bin/true")
-	if out, err := d.exec.CommandContext(probeCtx, "systemd-run", probeArgs...).CombinedOutput(); err != nil {
-		// A probe cut short by the CALLER's cancellation (shutdown
-		// landing mid-probe) says nothing about scope support — leave
-		// the question open for the next start rather than latching
-		// "unsupported" off a canceled attempt.
-		if ctx.Err() != nil {
-			return false
-		}
-		d.scopeProbed = true
-		d.logger.Warn("offline cache: transient systemd scope unavailable, capture chromium will run WITHOUT resource limits",
-			zap.Error(err), zap.ByteString("output", out))
-		d.scopeOK = false
-		return false
+	wrapperArgv, ok := d.resolveWrapper(ctx)
+	if !ok {
+		return nil, false // canceled mid-probe: leave the question open
 	}
-	d.scopeProbed = true
-	d.logger.Info("offline cache: capture chromium resource limits active",
-		zap.Int("cpu_quota_percent", d.limits.CPUQuotaPercent),
-		zap.String("allowed_cpus", d.limits.AllowedCPUs),
-		zap.Int64("memory_max_bytes", d.limits.MemoryMaxBytes))
-	d.scopeOK = true
-	return true
+	scopeOK, ok := d.probeScope(ctx, wrapperArgv)
+	if !ok {
+		return nil, false
+	}
+
+	d.scopeProbed, d.scopeOK, d.wrapperArgv = true, scopeOK, wrapperArgv
+	switch {
+	case scopeOK:
+		d.logger.Info("offline cache: capture chromium resource limits active",
+			zap.Int("cpu_quota_percent", d.limits.CPUQuotaPercent),
+			zap.String("allowed_cpus", d.limits.AllowedCPUs),
+			zap.Int64("memory_max_bytes", d.limits.MemoryMaxBytes),
+			zap.Strings("wrapper", wrapperArgv),
+			zap.Bool("cpu_pin_active", slices.Contains(wrapperArgv, "taskset")))
+	case len(wrapperArgv) > 0:
+		d.logger.Warn("offline cache: transient systemd scope unavailable, capture chromium runs WITHOUT the cpu quota and memory ceiling",
+			zap.Strings("wrapper", wrapperArgv),
+			zap.Bool("cpu_pin_active", slices.Contains(wrapperArgv, "taskset")))
+	default:
+		d.logger.Warn("offline cache: neither transient systemd scope nor argv wrapper available, capture chromium will run WITHOUT resource limits")
+	}
+	return wrapperArgv, scopeOK
+}
+
+// resolveWrapper picks the strongest usable argv wrapper: pinned, then
+// env-only (escape prevention without the pin), then none. The bool is
+// false only when the caller's context was canceled mid-probe, which says
+// nothing about support and must not latch a verdict.
+func (d *downloader) resolveWrapper(ctx context.Context) ([]string, bool) {
+	pinned := d.captureWrapperArgv(true)
+	if len(pinned) == 0 {
+		return nil, true // limits disabled
+	}
+	if _, err := d.probeCaptureShape(ctx, nil, pinned); err == nil {
+		return pinned, true
+	} else if ctx.Err() != nil {
+		return nil, false
+	}
+
+	// taskset is what just failed (env alone is coreutils and the spec was
+	// already validated by countAllowedCPUs), so retry without the pin
+	// rather than lose the escape prevention with it. When the spec carried
+	// no pin to begin with the two wrappers are identical, and re-probing
+	// the same argv would only burn another probe timeout on an image that
+	// is already broken.
+	envOnly := d.captureWrapperArgv(false)
+	if slices.Equal(pinned, envOnly) {
+		d.logger.Warn("offline cache: argv wrapper unusable for capture chromium; it may re-parent itself out of any resource scope",
+			zap.Strings("wrapper", envOnly))
+		return nil, true
+	}
+	out, err := d.probeCaptureShape(ctx, nil, envOnly)
+	if err == nil {
+		d.logger.Warn("offline cache: cpu pin unavailable for capture chromium; the cgroup quota and memory ceiling still apply, but package power draw is no longer bounded",
+			zap.String("allowed_cpus", d.limits.AllowedCPUs))
+		return envOnly, true
+	}
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	d.logger.Warn("offline cache: argv wrapper unusable for capture chromium; it may re-parent itself out of any resource scope",
+		zap.Error(err), zap.ByteString("output", out))
+	return nil, true
+}
+
+// probeScope checks that a transient scope carrying our exact properties
+// can be created around the resolved wrapper. Same cancellation contract
+// as resolveWrapper.
+func (d *downloader) probeScope(ctx context.Context, wrapperArgv []string) (bool, bool) {
+	scopeArgs := d.scopeRunArgs(fmt.Sprintf("%sprobe.scope", scopeUnitPrefix))
+	out, err := d.probeCaptureShape(ctx, scopeArgs, wrapperArgv)
+	if err == nil {
+		return true, true
+	}
+	if ctx.Err() != nil {
+		return false, false
+	}
+	d.logger.Warn("offline cache: transient systemd scope probe failed",
+		zap.Error(err), zap.ByteString("output", out))
+	return false, true
+}
+
+// probeCaptureShape runs /bin/true through the given scope args (nil for
+// no scope) and argv wrapper — the same composition a real spawn uses, so
+// what is validated is what will actually run.
+func (d *downloader) probeCaptureShape(ctx context.Context, scopeArgs, wrapperArgv []string) ([]byte, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, scopeProbeTimeout)
+	defer cancel()
+
+	var name string
+	var args []string
+	switch {
+	case len(scopeArgs) > 0:
+		name = "systemd-run"
+		args = append(append([]string{}, scopeArgs...), wrapperArgv...)
+		args = append(args, "/bin/true")
+	case len(wrapperArgv) > 0:
+		name, args = wrapperArgv[0], append(append([]string{}, wrapperArgv[1:]...), "/bin/true")
+	default:
+		name = "/bin/true"
+	}
+	return d.exec.CommandContext(probeCtx, name, args...).CombinedOutput()
+}
+
+// warnOnScopeEscape detects the failure mode captureWrapperArgv exists to
+// prevent: a Chromium build that re-parents itself out of our capped scope
+// anyway, leaving the cpu quota and memory ceiling enforcing nothing.
+//
+// It asks the process directly — /proc/<pid>/cgroup must name the unit we
+// spawned it into — which is exact, and cheap enough to run on every
+// scoped spawn. `systemd-run --scope` creates the unit and then execs in
+// place, so the PID Start() returned IS the capture Chromium's browser
+// process (see wrapper.ExecCmd.Pid); an escape moves that process to
+// another cgroup but never changes its PID. An earlier version instead
+// diffed `app-org.chromium.Chromium-*.scope` units before and after the
+// spawn, which was both false-positive prone (a kiosk Chromium restart
+// inside the window — exactly what the watchdog does under the OOM
+// pressure a capture creates — looked like an escape) and false-negative
+// prone (a future Chromium whose unit name missed the glob would slip
+// through, in precisely the case the check exists for).
+//
+// Never fails a spawn: capture with a pin but no ceiling still beats no
+// capture. The loud log is the point — this went unnoticed in the field
+// precisely because nothing ever said the limits had stopped applying.
+func (d *downloader) warnOnScopeEscape(scopeUnit string, pid int) {
+	if pid <= 0 {
+		return
+	}
+	raw, err := d.os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		// The process may simply have exited already (a capture Chromium
+		// that died on startup); that is the readiness probe's problem to
+		// report, not evidence about cgroup containment either way.
+		d.logger.Debug("offline cache: could not read capture chromium cgroup",
+			zap.Int("pid", pid), zap.Error(err))
+		return
+	}
+	cgroup := strings.TrimSpace(string(raw))
+	if strings.Contains(cgroup, scopeUnit) {
+		return
+	}
+	d.logger.Warn("offline cache: capture chromium moved itself out of its resource scope; the cpu quota and memory ceiling are NOT in force (an argv-wrapper cpu pin, if any, still is)",
+		zap.String("expected_unit", scopeUnit),
+		zap.String("actual_cgroup", cgroup),
+		zap.String("hint", "chromium reached a session bus despite env -u "+sessionBusEnvVar))
 }
 
 // sweepStaleScopes glob-stops every capture scope. Best-effort: with
@@ -648,14 +887,22 @@ func (d *downloader) probeDebugEndpoint(ctx context.Context) bool {
 // d.mu; it is safe to call when no process is running (returns nil).
 //
 // Plain spawn: cancels the process context (killing Chromium via
-// CommandContext's contract) synchronously. Scoped spawn: cmd is
-// systemd-run, Chromium's PARENT, and SIGKILLing it would orphan
-// Chromium inside the scope while cmd.Wait returned early — freeing
-// Acquire to start a replacement against a debug port the orphan still
-// holds. So the scope path hands teardown to an async stopScope
-// goroutine (systemctl stop first, direct kill only as a bounded
-// backstop) and does NOT cancel here; the returned done channel keeps
-// its meaning ("process actually gone") on both paths.
+// CommandContext's contract) synchronously.
+//
+// Scoped spawn: `systemd-run --scope` creates the unit and then execs in
+// place, so cmd is NOT a surviving systemd-run parent — the PID it holds
+// is Chromium's own browser process. (An earlier version of this comment
+// claimed otherwise; the conclusion below is unchanged, but the mechanism
+// matters, because "just kill cmd" looks safe if you believe the parent
+// story is false without checking WHY the cgroup kill is needed.) A
+// SIGKILL to that PID reaps the browser process only, leaving its forked
+// children — zygote, renderers, the GPU process — alive inside the scope
+// still holding the debug port and the profile lock, while cmd.Wait
+// returns early and frees Acquire to start a replacement against them. So
+// the scope path hands teardown to an async stopScope goroutine (systemctl
+// stop, which kills the whole cgroup, with a direct kill only as a bounded
+// backstop) and does NOT cancel here; the returned done channel keeps its
+// meaning ("process actually gone") on both paths.
 //
 // It clears cmd/procCancel/scopeUnit immediately (nothing else needs
 // them once teardown is initiated) but deliberately leaves procDone set

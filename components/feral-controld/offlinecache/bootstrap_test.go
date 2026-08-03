@@ -324,3 +324,36 @@ func TestBootstrap_DisabledResourceGateHasNoSysMetricsSink(t *testing.T) {
 
 	assert.Nil(t, rt.SysMetricsSink)
 }
+
+// TestOptionsFromConfig_WarnsOnUnparseableAllowedCPUs pins the config-shape
+// trap the CPU spec sits in: systemd's AllowedCPUs= accepts
+// whitespace-separated lists that `taskset -c` rejects outright, so an
+// operator can copy a perfectly legal systemd value into config and lose
+// the CPU pin — the limit that bounds package power draw — without a word
+// being said. A configured-but-inert pin must be as loud as any other kind
+// of inertness here.
+func TestOptionsFromConfig_WarnsOnUnparseableAllowedCPUs(t *testing.T) {
+	cfg := &config.OfflineCacheConfig{
+		Enabled: true,
+		HeadlessLimits: &config.OfflineCacheHeadlessLimitsConfig{
+			CPUQuotaPercent: 300,
+			AllowedCPUs:     "0 1 2 3", // systemd accepts this; taskset does not
+		},
+	}
+	opts := offlinecache.OptionsFromConfig(cfg, "http://127.0.0.1:9222")
+	assert.Contains(t, opts.HeadlessLimitsWarning, "WITHOUT a cpu pin")
+	assert.Contains(t, opts.HeadlessLimitsWarning, "0 1 2 3")
+	// The spec is reported, not silently rewritten: the systemd property is
+	// still worth passing (it becomes real if cpuset is ever delegated), and
+	// the quota is untouched since there is no cpuset ceiling to clamp to.
+	assert.Equal(t, "0 1 2 3", opts.HeadlessLimits.AllowedCPUs)
+	assert.Equal(t, 300, opts.HeadlessLimits.CPUQuotaPercent)
+
+	// The same spec written in a form taskset accepts warns about nothing.
+	// (An empty AllowedCPUs is NOT the contrast case: at the config layer
+	// it means "keep the derived default", not "no pin".)
+	cfg.HeadlessLimits.AllowedCPUs = "0-3"
+	opts = offlinecache.OptionsFromConfig(cfg, "http://127.0.0.1:9222")
+	assert.Empty(t, opts.HeadlessLimitsWarning)
+	assert.Equal(t, "0-3", opts.HeadlessLimits.AllowedCPUs)
+}

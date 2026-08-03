@@ -174,6 +174,12 @@ type AdmissionPolicy struct {
 	// memory check becomes derived rather than a bare percentage: see
 	// softwareMemoryBlockPercent.
 	//
+	// Note the ceiling is enforced by the cgroup ALONE, so it holds only
+	// while the capture Chromium stays inside the scope we spawned it in.
+	// captureWrapperArgv is what keeps it there, and warnOnScopeEscape is
+	// what says so out loud if a future Chromium build escapes anyway —
+	// at which point this reserve is describing a limit nothing enforces.
+	//
 	// This coupling is the point. A static "block above 80%" is only
 	// safe at one RAM size: with a 2 GiB cap on a 16 GB device a capture
 	// admitted at 80% peaks near 92%, under the watchdog's 95% line —
@@ -187,7 +193,7 @@ type AdmissionPolicy struct {
 	// intent, and the downloader degrades to an uncapped spawn when
 	// transient systemd scopes are unavailable (no session bus, no
 	// systemd-run — it warns and continues rather than failing captures
-	// outright; see ensureScopeSupport). On that path the capture is
+	// outright; see ensureCaptureSupport). On that path the capture is
 	// unbounded and the projection no longer holds.
 	//
 	// That degradation is safe by construction rather than by luck:
