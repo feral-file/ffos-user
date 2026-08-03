@@ -427,27 +427,31 @@ fi
 
 # --- 6. no blocking start/enable may abort boot (F-03) --------------------------
 
-# .start-services.sh runs under set -euo pipefail. Every blocking
-# `systemctl ... start` / `enable --now` line must be failure-tolerant
-# (`|| true`, or the preferred `|| echo WARN` breadcrumb): one broken unit
-# aborting the script kills kiosk + watchdog + the update timers, and a device
-# with a bad build then never self-heals (F-03). The `--no-block` controld
-# start is exempt here (it cannot block-fail) and is pinned by section 2;
-# `is-enabled`/`stop`/`disable` lines don't block boot and are out of scope.
+# .start-services.sh runs under set -euo pipefail. Every state-changing
+# `systemctl` line — `start`, `enable --now`, and the backward-compat
+# `disable`/`stop` cleanup — must be failure-tolerant (`|| true`, or the
+# preferred `|| echo WARN` breadcrumb): one broken unit aborting the script
+# kills kiosk + watchdog + the update timers, and a device with a bad build
+# then never self-heals (F-03). No exemptions: `--no-block` only skips
+# waiting for the job — submission can still fail synchronously (unit file
+# missing after a bad OTA, D-Bus unreachable) — and the disable/stop cleanup
+# runs BEFORE controld ever starts, so its failure aborts recovery too.
+# `is-enabled` lines stay out of scope: they run inside `if` conditions,
+# where set -e does not apply.
 f03_lines=0
 while IFS= read -r line; do
   f03_lines=$((f03_lines + 1))
   case "$line" in
-    *--no-block*) continue ;;
     *"|| true"*|*"|| echo"*) continue ;;
-    *) fail "F-03: blocking systemctl start/enable must be failure-tolerant: $line" ;;
+    *) fail "F-03: state-changing systemctl line must be failure-tolerant: $line" ;;
   esac
-done < <(grep -E '^[[:space:]]*(sudo )?systemctl ((--user|--global) )?(start |enable --now )' "$start_services")
+done < <(grep -E '^[[:space:]]*(sudo )?systemctl ((--user|--global) )?(start |enable --now |disable |stop )' "$start_services")
 # The scan must actually see the boot-critical lines: six service starts, the
-# target start, three enable blocks, the watchdog, and the --no-block controld
-# start — a regex drift that matches nothing would pass vacuously.
-[ "$f03_lines" -ge 11 ] || \
-  fail "F-03 scan matched only $f03_lines systemctl start/enable lines (expected >= 11) — pattern drift?"
+# target start, three enable blocks, the watchdog, the --no-block controld
+# start, and the four backward-compat disable/stop lines — a regex drift that
+# matches nothing would pass vacuously.
+[ "$f03_lines" -ge 15 ] || \
+  fail "F-03 scan matched only $f03_lines systemctl lines (expected >= 15) — pattern drift?"
 
 # --- 7. controld start-limit never latches -------------------------------------
 

@@ -997,6 +997,15 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 			if backoff > autoClaimRetryMax {
 				backoff = autoClaimRetryMax
 			}
+			// Symmetric to the transient backoff surviving ladder rounds: a
+			// transient round resets the ladder escalation. The escalation
+			// accumulates evidence of a persistently bad published image
+			// (every round latches on a solid network), and a cheap failure
+			// slipping in between means the NETWORK itself just broke — which
+			// reattributes the earlier exhaustion toward the flaky-network
+			// cause the 1h floor exists for. Only consecutive latched rounds
+			// converge toward one ladder per day.
+			ladderBackoff = autoClaimLadderFailureBackoffMin
 		}
 	}
 }

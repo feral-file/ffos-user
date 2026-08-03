@@ -24,15 +24,19 @@ if [ -d /var/lib/oom_state ]; then
     echo "0" > /var/lib/oom_state/chromium-oom-kill-last-event
 fi
 
-# Backward compatibility: Disable and stop old services if they are enabled
+# Backward compatibility: Disable and stop old services if they are enabled.
+# Best-effort for the same F-03 reason as the starts below: this cleanup runs
+# BEFORE controld — the only recovery path — ever starts, and a disable/stop
+# failure (polkit denial, a unit that refuses to stop) under set -e would
+# abort the whole boot over a unit we are about to re-start anyway.
 if systemctl --user is-enabled "feral-sys-monitord.service" >/dev/null 2>&1; then
-    systemctl --user disable "feral-sys-monitord.service"
-    systemctl --user stop "feral-sys-monitord.service"
+    systemctl --user disable "feral-sys-monitord.service" || echo "WARN: failed to disable legacy feral-sys-monitord.service"
+    systemctl --user stop "feral-sys-monitord.service" || echo "WARN: failed to stop legacy feral-sys-monitord.service"
 fi
 
 if systemctl --user is-enabled "feral-watchdog.service" >/dev/null 2>&1; then
-    systemctl --user disable "feral-watchdog.service"
-    systemctl --user stop "feral-watchdog.service"
+    systemctl --user disable "feral-watchdog.service" || echo "WARN: failed to disable legacy feral-watchdog.service"
+    systemctl --user stop "feral-watchdog.service" || echo "WARN: failed to stop legacy feral-watchdog.service"
 fi
 
 mkdir -p /home/feralfile/.config/systemd/user/
@@ -58,8 +62,11 @@ systemctl --user start system-ready.target || echo "WARN: system-ready.target fa
 # (e.g. relayer handshake failure on a warm reboot). A blocking start would then
 # fail and, under set -e, abort this script before chromium-kiosk/feral-watchdog
 # ever start. Restart=always recovers the daemon on its own; the rest of boot
-# must never hinge on it reaching READY.
-systemctl --user start --no-block "feral-controld.service"
+# must never hinge on it reaching READY. The guard is still needed: --no-block
+# only skips waiting for the job — job SUBMISSION can fail synchronously (unit
+# file missing after a bad OTA, user manager D-Bus unreachable), and under
+# set -e that would abort here, before kiosk/watchdog/timers (F-03).
+systemctl --user start --no-block "feral-controld.service" || echo "WARN: feral-controld.service failed to start"
 
 # Every blocking start/enable below is best-effort (|| echo WARN): this script
 # runs under set -euo pipefail, so without that ONE failed unit (e.g.

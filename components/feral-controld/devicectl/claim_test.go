@@ -705,16 +705,19 @@ func TestMaybeShowClaimQROnOnline_UnclaimedRunsPreClaimGate(t *testing.T) {
 // fakeGateConfig satisfies otagate.ConfigProvider with a build below the
 // distributor minimum, so a ModeRequired gate always decides to update.
 // failFromCall (when > 0) makes every call numbered >= failFromCall error,
-// letting a test turn a later round into a version-check failure. Note the
-// gate reads LocalBuild TWICE per round (runLocal + fetchRemoteVersion).
+// letting a test turn a later round into a version-check failure; failCalls
+// errors only the listed call numbers, so a test can make ONE mid-sequence
+// round transient and then let ladder rounds resume. Note the gate reads
+// LocalBuild TWICE per round (runLocal + fetchRemoteVersion).
 type fakeGateConfig struct {
 	calls        int
 	failFromCall int
+	failCalls    map[int]bool
 }
 
 func (c *fakeGateConfig) LocalBuild(context.Context) (string, string, string, error) {
 	c.calls++
-	if c.failFromCall > 0 && c.calls >= c.failFromCall {
+	if (c.failFromCall > 0 && c.calls >= c.failFromCall) || c.failCalls[c.calls] {
 		return "", "", "", errors.New("simulated local-config read failure")
 	}
 	return "stable", "1.0.0", "http://distributor.test", nil
@@ -948,6 +951,45 @@ func TestMaybeShowClaimQROnOnline_LadderThenTransientResumesCheapCadence(t *test
 		[]time.Duration{autoClaimLadderFailureBackoffMin, autoClaimRetryMin},
 		scheduledBackoffs(observed),
 		"the transient cadence must resume at its minimum: ladder rounds do not advance it")
+}
+
+// TestMaybeShowClaimQROnOnline_TransientRoundResetsLadderEscalation pins the
+// consecutive-keying of the stretched cadence: ladder → transient → ladder
+// must schedule 1h, 30s, 1h — NOT 1h, 30s, 2h. The escalation accumulates
+// bad-published-image evidence; a transient round in between means the
+// network itself broke, which reattributes the earlier exhaustion toward the
+// flaky-network cause, so the next latched round returns to the 1h floor.
+func TestMaybeShowClaimQROnOnline_TransientRoundResetsLadderEscalation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Round 1 latches a ladder failure (LocalBuild calls 1+2). Round 2 fails
+	// its version check outright (call 3 errors — transient). Round 3 (calls
+	// 4+5) runs the ladder again and latches fresh (the backoff sleeps
+	// advanced the shared clock past round 1's At, so freshness is decided by
+	// timestamp, not the joined-error identity). Cancel at sleep 3 so exactly
+	// three scheduled retries are observed.
+	sleeps := 0
+	clk := &autoClaimClock{now: time.Unix(1_000_000, 0)}
+	clk.onSleep = func() {
+		sleeps++
+		if sleeps == 3 {
+			cancel()
+		}
+	}
+	e, observed, _ := newLadderFailureExecutor(t, ctrl, clk,
+		fakeGateRunner{err: errors.New("Error: Signature verification failed for image.sig")},
+		&fakeGateConfig{failCalls: map[int]bool{3: true}})
+
+	e.MaybeShowClaimQROnOnline(ctx)
+
+	assert.Equal(t, 2, countLogs(observed, ladderStretchLog),
+		"rounds 1 and 3 are ladder failures; round 2 is transient")
+	require.Equal(t,
+		[]time.Duration{autoClaimLadderFailureBackoffMin, autoClaimRetryMin, autoClaimLadderFailureBackoffMin},
+		scheduledBackoffs(observed),
+		"a transient round must reset the ladder escalation: only CONSECUTIVE latched rounds double")
 }
 
 // TestMaybeShowClaimQROnOnline_CtxCancelDuringLadderNotStretched pins the trap
