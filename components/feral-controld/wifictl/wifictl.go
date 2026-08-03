@@ -191,7 +191,14 @@ func (c *Controller) SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHid
 		if err != nil {
 			return nil, false, fmt.Errorf("reading ssid of profile %q (%s): %w", name, uuid, err)
 		}
-		ssid := unescapeTerse(strings.TrimSpace(string(out)))
+		// Strip ONLY nmcli's record terminator (a single trailing newline).
+		// Leading/trailing spaces are valid SSID bytes, and the scan side
+		// (parseSSIDsCapped) preserves them — TrimSpace here made a
+		// whitespace-padded saved SSID compare unequal to its own scan
+		// sighting, so an in-range network read as "absent" and could satisfy
+		// every relocation confirmation: exactly the false positive this
+		// function's fail-closed contract exists to prevent.
+		ssid := unescapeTerse(strings.TrimSuffix(string(out), "\n"))
 		if ssid == "" {
 			return nil, false, fmt.Errorf("profile %q (%s) reports an empty ssid", name, uuid)
 		}
@@ -241,7 +248,16 @@ func (c *Controller) ScanAllSSIDs(ctx context.Context) ([]string, error) {
 	// inconclusive and may only retry a bounded number of times. Fails open
 	// after scanReadyTimeout, so a healthy radio pays nothing.
 	c.waitForScanReady(ctx)
-	out, _, err := c.run(ctx, "-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "yes")
+	args := []string{"-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "yes"}
+	// Pin to the configured interface like the other radio commands (Join,
+	// waitForSSID, wifiDeviceState — including this call's own readiness
+	// gate): on multi-radio hardware an unpinned list can report a different
+	// radio's air, and "saved SSID absent" from the wrong radio is fabricated
+	// relocation evidence.
+	if c.iface != "" {
+		args = append(args, "ifname", c.iface)
+	}
+	out, _, err := c.run(ctx, args...)
 	if err != nil {
 		return nil, err
 	}

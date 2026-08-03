@@ -831,6 +831,59 @@ func TestSavedWifiSSIDsFailsClosedOnProfileReadError(t *testing.T) {
 	}
 }
 
+// TestSavedWifiSSIDsPreservesWhitespaceSSID (review P1): leading/trailing
+// spaces are valid SSID bytes and the scan side preserves them, so the
+// profile read may strip ONLY nmcli's trailing newline. A TrimSpace here made
+// a saved " Cafe " compare unequal to its own scan sighting — an in-range
+// network reading as "absent" is the false relocation evidence the
+// fail-closed contract exists to prevent.
+func TestSavedWifiSSIDsPreservesWhitespaceSSID(t *testing.T) {
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		switch {
+		case strings.Contains(joined, "-f UUID,TYPE,NAME connection show"):
+			return []byte("uuid-cafe:802-11-wireless:cafe\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-cafe"):
+			return []byte(" Cafe \n"), nil
+		case strings.Contains(joined, "802-11-wireless.hidden connection show uuid uuid-cafe"):
+			return []byte("no\n"), nil
+		}
+		return nil, fakeExitError{code: 1, msg: "unexpected: " + joined}
+	})
+
+	ssids, _, err := c.SavedWifiSSIDs(context.Background())
+	if err != nil {
+		t.Fatalf("SavedWifiSSIDs: %v", err)
+	}
+	if len(ssids) != 1 || ssids[0] != " Cafe " {
+		t.Fatalf("ssids = %q, want [\" Cafe \"] (SSID whitespace preserved, only the newline terminator stripped)", ssids)
+	}
+}
+
+// TestScanAllSSIDsPinsConfiguredInterface (review P1): every other
+// radio-touching command pins ifname when the controller is configured with
+// one; the relocation-evidence scan must too, or on multi-radio hardware it
+// can report a different radio's air and fabricate "saved SSID absent".
+func TestScanAllSSIDsPinsConfiguredInterface(t *testing.T) {
+	exec := &scriptedExec{reply: func(argv []string) ([]byte, error) {
+		return []byte("Net\n"), nil
+	}}
+	clock := &fakeClock{now: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
+	c := New(exec, clock, zap.NewNop(), "wlan1")
+
+	if _, err := c.ScanAllSSIDs(context.Background()); err != nil {
+		t.Fatalf("ScanAllSSIDs: %v", err)
+	}
+	last := exec.recorded()[len(exec.recorded())-1]
+	joined := strings.Join(last, " ")
+	if !strings.Contains(joined, "device wifi list") {
+		t.Fatalf("last call is not the scan; argv = %v", last)
+	}
+	if !strings.Contains(joined, "ifname wlan1") {
+		t.Fatalf("ScanAllSSIDs must pin the configured interface; argv = %v", last)
+	}
+}
+
 // TestScanAllSSIDsIsUncapped: Scan truncates at the portal display cap
 // (maxSSIDs); ScanAllSSIDs must not — a saved network ranked below the cap
 // would otherwise read as absent and fire a false relocation.
