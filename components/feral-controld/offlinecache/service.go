@@ -1394,16 +1394,32 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	// deleted and reported success for — see downloadEpoch's doc.
 	epoch := s.currentEpoch(SourceKey(item.Source))
 
-	class, err := s.classifier.Classify(ctx, item.Source)
+	// Bounded by the same per-item budget the playlist path uses, so a
+	// single dead origin cannot pin this call for the client's whole
+	// request — see classifyItemTimeout's doc.
+	class, err := func() (MediaClass, error) {
+		itemCtx, cancel := context.WithTimeout(ctx, classifyItemTimeout)
+		defer cancel()
+		return s.classifier.Classify(itemCtx, item.Source)
+	}()
 	if err != nil {
-		return fmt.Errorf("offline cache: classify %s: %w", item.Source, err)
+		return fmt.Errorf("offline cache: classify %s: %w", truncateSourceForLog(item.Source), err)
 	}
-	// ClassStreaming is the only rejected class — see
-	// ErrUnsupportedMediaClass's doc. Every other class (software,
-	// media, or unknown-but-still-single-file) is enqueued and routed
-	// by captureForClass once the worker dequeues it.
+	// ClassStreaming and ClassInline are the rejected classes — see
+	// ErrUnsupportedMediaClass's and ClassInline's docs. Every other
+	// class (software, media, or unknown-but-still-single-file) is
+	// enqueued and routed by captureForClass once the worker dequeues
+	// it.
+	//
+	// ClassInline reports success with nothing queued rather than an
+	// error: the caller asked for the item to be available offline, and
+	// it already is — its bytes travel inside the playlist body this
+	// service persists, so there is genuinely nothing left to do.
 	if class == ClassStreaming {
 		return ErrUnsupportedMediaClass
+	}
+	if class == ClassInline {
+		return nil
 	}
 
 	// Classify above can be slow (network I/O), so the started.Load()
@@ -1431,33 +1447,107 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	return nil
 }
 
-// classifyPhaseTimeout bounds the whole classification step of one
-// DownloadPlaylist call.
+// classifyItemTimeout bounds ONE item's classification, not the whole
+// phase.
 //
 // Classification is a real network round trip per item (a HEAD, with a
 // ranged-GET fallback — see classify.go) on the daemon-wide 30s client,
 // and it runs BEFORE the command can answer. Serially, a playlist of
-// unreachable sources therefore held the command — and its heavy
-// storm-gate weight — for (item count) x up to 30s, i.e. hours, while
-// the LAN hub gave up on the response at its own 30s write deadline and
-// the work carried on regardless (hub.go passes the daemon context, not
-// the request's, so the client hanging up cancels nothing).
+// unreachable sources held the command — and its heavy storm-gate
+// weight — for (item count) x up to 30s, i.e. hours, while the LAN hub
+// gave up on the response at its own 30s write deadline and the work
+// carried on regardless (hub.go passes the daemon context, not the
+// request's, so the client hanging up cancels nothing). That is what a
+// deadline on this path exists to prevent.
 //
-// Bounding the phase — rather than moving classification into the
-// background — keeps every documented response field honest:
-// queuedCount still means "actually queued", and the all-failed case is
-// still distinguishable from "no cacheable items". An item not
-// classified before this deadline is treated exactly like a classify
-// failure, which is already a logged, skipped, excluded-from-queuedCount
-// outcome. A caller that wants those items simply retries.
-const classifyPhaseTimeout = 10 * time.Second
+// It was originally a single 10s budget shared by the entire phase, and
+// that shape had a failure mode worth not re-introducing: because the
+// deadline was wall-clock across all items, a healthy playlist that was
+// merely LARGE blew it and lost whichever items happened to still be in
+// flight. A 163-item playlist against an origin with a 178ms median
+// took ~9.9s of the 10s — the slowest handful of probes (up to 5.7s
+// each) each held one of classifyConcurrency slots for over half the
+// budget — so 133 items queued and the last 30 were dropped as
+// "classify failed" purely for being at the back of the queue. Nothing
+// about those 30 was wrong, and nothing retried them.
+//
+// Scoping the deadline to each item removes that coupling entirely: a
+// slow or dead origin now costs only its own item, and every other item
+// is judged on its own round trip. The phase's worst case is still
+// bounded and now proportional rather than lossy —
+// ceil(items / classifyConcurrency) x classifyItemTimeout — and a
+// caller that wants a timed-out item simply retries it.
+//
+// Keep this at or below wrapper.HTTPClientTimeout (30s): above it the
+// client's own timeout would fire first and this bound would be dead
+// code.
+const classifyItemTimeout = 10 * time.Second
+
+// classifyPhaseCeiling is the LAST-RESORT bound on the whole phase, kept
+// so DownloadPlaylist always answers.
+//
+// classifyItemTimeout is what decides an individual item's fate; this
+// only stops the phase as a whole from running long enough that the
+// caller is gone before it returns. The LAN hub abandons the response at
+// its own 30s write deadline while the work carries on regardless
+// (hub.go passes the daemon context, not the request's), so a bound
+// above that would be answering into a closed socket — hence 25s, with
+// headroom beneath it rather than sitting exactly on it.
+//
+// The division of labor matters, and is what keeps the original drop
+// from coming back: with per-item deadlines a HEALTHY playlist finishes
+// far under this ceiling no matter how long it is (163 real items over a
+// 178ms-median origin classify in ~3.8s at classifyConcurrency), so
+// this fires only when items are genuinely dead — never merely because
+// there are many of them, which is exactly the case that used to lose
+// the tail of a good playlist.
+//
+// Residual, stated rather than hidden: a playlist large enough that even
+// healthy classification exceeds 25s would still be truncated here. At
+// the measured rate that needs roughly 1000 items — about 6x the largest
+// playlist observed in the field — and the fix if it ever bites is to
+// move classification off the synchronous command path, not to widen
+// this number until the caller times out instead.
+const classifyPhaseCeiling = 25 * time.Second
 
 // classifyConcurrency caps how many classify probes are in flight at
-// once. Enough to make a large playlist finish well inside
-// classifyPhaseTimeout when origins are healthy, small enough not to
-// fan out a burst at one origin (a playlist's items commonly share a
-// host).
-const classifyConcurrency = 8
+// once, and is the lever that keeps a healthy playlist clear of
+// classifyPhaseCeiling.
+//
+// Measured on-device against the real origins, classifying the same
+// 163-item playlist: 8 slots took 9.9s, 16 took 3.8s, 32 took 5.3s. The
+// win from 8 to 16 is the tail — a straggler HEAD (up to 5.7s observed)
+// holds a slot for the whole time, so with only 8 of them a couple of
+// slow probes dominate the wall clock. Past 16 the device's uplink is
+// the limit and adding slots makes it worse, not better, which is why
+// this is 16 and not simply "high".
+//
+// Still deliberately bounded rather than unlimited: a playlist's items
+// commonly share one host, and this is the fan-out that host sees.
+const classifyConcurrency = 16
+
+// maxLoggedSourceBytes bounds how much of a source URL reaches the log.
+//
+// A data: URI IS the asset, so an inline cover image lands here as tens
+// of KB of base64 on a single line — and the classify-failure log below
+// emitted it twice (once as the source field, once inside the echoed
+// error), on a device whose logs are size-rotated files. Two malformed
+// inline items were enough to push six-figure byte counts through
+// controld.log. Sized to keep a real CDN URL — query string and all —
+// intact, since those are what an operator actually greps for.
+const maxLoggedSourceBytes = 256
+
+// truncateSourceForLog shortens an over-long source URL for logging,
+// cutting on a rune boundary so a multi-byte sequence is never split.
+// The marker matters: a silently shortened URL would send an operator
+// hunting for a source that never existed in that form.
+func truncateSourceForLog(source string) string {
+	if len(source) <= maxLoggedSourceBytes {
+		return source
+	}
+	return truncateUTF8(source, maxLoggedSourceBytes) +
+		fmt.Sprintf("…[+%d bytes]", len(source)-maxLoggedSourceBytes)
+}
 
 // classifyPlaylistItems classifies every eligible item concurrently and
 // returns those worth queuing, in playlist order, plus how many failed
@@ -1466,8 +1556,13 @@ const classifyConcurrency = 8
 // order is the artist's, not an implementation detail to be scrambled by
 // whichever probe happened to answer first.
 func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist.PlaylistItem) ([]queuedItem, int) {
-	ctx, cancel := context.WithTimeout(ctx, classifyPhaseTimeout)
-	defer cancel()
+	// Two nested bounds, doing different jobs — see classifyItemTimeout
+	// and classifyPhaseCeiling. This outer one exists so the command
+	// always answers; the per-item one below is what actually decides
+	// each item's outcome. Per-item contexts derive from this one, so
+	// the ceiling still truncates a pathological phase.
+	ctx, cancelPhase := context.WithTimeout(ctx, classifyPhaseCeiling)
+	defer cancelPhase()
 
 	results := make([]*queuedItem, len(items))
 	failed := make([]bool, len(items))
@@ -1501,19 +1596,31 @@ func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist
 			// concurrency does not change that contract: each item's
 			// epoch still brackets only its own classify.
 			epoch := s.currentEpoch(SourceKey(item.Source))
-			class, err := s.classifier.Classify(ctx, item.Source)
+			// Each item gets its OWN deadline, so one dead origin can
+			// no longer consume a budget the rest of the playlist
+			// shares — see classifyItemTimeout's doc for the drop this
+			// prevents. Scoped to a closure so the context is released
+			// as soon as this item's probe returns rather than at
+			// goroutine exit.
+			class, err := func() (MediaClass, error) {
+				itemCtx, cancel := context.WithTimeout(ctx, classifyItemTimeout)
+				defer cancel()
+				return s.classifier.Classify(itemCtx, item.Source)
+			}()
 			if err != nil {
 				failed[i] = true
 				s.logger.Warn("offline cache: classify failed while queuing playlist, skipping item",
-					zap.String("source", item.Source), zap.Error(err))
+					zap.String("source", truncateSourceForLog(item.Source)), zap.Error(err))
 				return
 			}
-			// ClassStreaming is the only excluded class — see
-			// ErrUnsupportedMediaClass's doc. Silently skipped here (not
-			// counted as a failure) since a live/streaming item is a
-			// legitimate, correctly-classified exclusion, not a
-			// classification failure.
-			if class == ClassStreaming {
+			// ClassStreaming and ClassInline are the excluded classes —
+			// see ErrUnsupportedMediaClass's and ClassInline's docs.
+			// Silently skipped here (not counted as failures) since
+			// both are legitimate, correctly-classified exclusions
+			// rather than classification failures: a live stream has no
+			// fixed byte sequence to cache, and an inline data: item is
+			// already carried by the playlist body itself.
+			if class == ClassStreaming || class == ClassInline {
 				return
 			}
 			results[i] = &queuedItem{item: item, epoch: epoch, class: class}
@@ -1947,6 +2054,17 @@ func (s *service) process(ctx context.Context, j captureJob) {
 // never reaches here at all: DownloadItem/DownloadPlaylist reject it
 // before ever enqueuing a job (see ErrUnsupportedMediaClass's doc).
 func (s *service) captureForClass(ctx context.Context, j captureJob) (*ItemRecord, error) {
+	// Defensive, and deliberately not reachable today: both enqueue
+	// paths skip ClassInline before a job is ever created. It is
+	// asserted here anyway because the failure it guards is silent — a
+	// future edit that forgot the skip would hand "data:image/png;..."
+	// to mediaCapturer, which would dutifully ask http.Client to dial a
+	// data: URI and record a confusing transport error against an item
+	// that was never meant to be fetched at all.
+	if j.class == ClassInline {
+		return nil, fmt.Errorf("offline cache: inline source must never be queued: %s",
+			truncateSourceForLog(j.item.Source))
+	}
 	if j.class == ClassSoftware {
 		return s.capturer.Capture(ctx, j.item, s.captureWindowMs)
 	}

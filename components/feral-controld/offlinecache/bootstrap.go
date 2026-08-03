@@ -2,6 +2,7 @@ package offlinecache
 
 import (
 	"fmt"
+	"net"
 	go_url "net/url"
 	"runtime"
 	"strconv"
@@ -411,7 +412,12 @@ func Bootstrap(
 		logger.Warn("offline cache: " + opts.ResourceGateWarning)
 	}
 	store := NewStore(opts.RootDir, osWrapper, jsonWrapper, logger)
-	classifier := NewClassifier(httpClient)
+	// net.DefaultResolver honors the system resolver configuration
+	// (systemd-resolved on this device), so the guard's view of a name
+	// matches what the capture paths will actually dial moments later —
+	// a private resolver here would make the check answer a different
+	// question than the one that matters. See ErrUnsafeSource.
+	classifier := NewClassifier(httpClient, net.DefaultResolver)
 	headlessDebugPort := safeHeadlessDebugPort(opts.HeadlessDebugPort, opts.KioskCDPEndpoint, logger)
 	downloader := NewDownloader(
 		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, headlessDebugPort,

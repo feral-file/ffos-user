@@ -3183,8 +3183,12 @@ func TestService_Stop_WithQueuedBacklogDoesNotNotifyPerJob(t *testing.T) {
 // context is done, which under the old serial code meant
 // (item count) x (client timeout) — hours for a full playlist, while the
 // LAN hub gave up on the response at 30s and the work carried on anyway.
-// The command must instead come back bounded by classifyPhaseTimeout no
-// matter how many items are involved.
+// The command must instead come back bounded by classifyPhaseCeiling no
+// matter how many items are involved. Every item here is genuinely dead,
+// which is the only case that ceiling is meant to truncate — see
+// TestService_DownloadPlaylist_ClassifyDeadlineIsPerItemNotPerPhase for
+// the complementary guarantee that a merely LARGE healthy playlist is
+// never truncated by it.
 func TestService_DownloadPlaylist_ClassificationIsBoundedAndConcurrent(t *testing.T) {
 	ts := setupService(t, 0, nil)
 	defer ts.ctrl.Finish()
@@ -3238,6 +3242,171 @@ func TestService_DownloadPlaylist_ClassificationIsBoundedAndConcurrent(t *testin
 		"the command must answer within its own classification bound, not (item count) x the client timeout")
 	assert.Greater(t, maxInFlight.Load(), int64(1),
 		"classification must run concurrently; serial probing is what made the wall clock scale with item count")
-	assert.LessOrEqual(t, maxInFlight.Load(), int64(8),
+	assert.LessOrEqual(t, maxInFlight.Load(), int64(16),
 		"...but bounded, so a playlist whose items share a host does not fan out a burst at it")
+}
+
+// TestService_DownloadPlaylist_ClassifyDeadlineIsPerItemNotPerPhase pins
+// the regression that lost 30 items off the back of a real 163-item
+// playlist.
+//
+// Classification used to share ONE 10s wall-clock budget across the
+// whole phase, so a playlist that was merely large — not broken, not
+// slow-origin — blew it and dropped whichever items were still in
+// flight, purely for being late in the queue. The fix scopes the
+// deadline to each item.
+//
+// The property is asserted structurally rather than by waiting out a
+// real timeout: with more items than classifyConcurrency, later items
+// start only once earlier ones free a slot, so under per-item deadlines
+// their deadlines are staggered by that wait. Under a shared phase
+// deadline every item sees the SAME instant, and the spread collapses to
+// zero — which is exactly what this asserts against.
+func TestService_DownloadPlaylist_ClassifyDeadlineIsPerItemNotPerPhase(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	// Comfortably more items than classifyConcurrency (16), so at least
+	// one full wave of slot hand-off happens — that hand-off is what
+	// staggers the deadlines this test reads.
+	const itemCount = 24
+	// Long enough to dominate scheduler jitter, short enough to keep the
+	// test fast. Every probe pays it, so wave 2 starts ~waveDelay after
+	// wave 1.
+	const waveDelay = 120 * time.Millisecond
+
+	items := make([]map[string]interface{}, 0, itemCount)
+	for i := range itemCount {
+		items = append(items, map[string]interface{}{
+			"id":     fmt.Sprintf("item-%d", i),
+			"source": fmt.Sprintf("https://example.com/art-%d.png", i),
+		})
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t", "items": items,
+	})
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	deadlines := make([]time.Time, 0, itemCount)
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ string) (offlinecache.MediaClass, error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "each classify must carry its own deadline")
+			mu.Lock()
+			deadlines = append(deadlines, deadline)
+			mu.Unlock()
+			time.Sleep(waveDelay)
+			return offlinecache.ClassMedia, nil
+		}).Times(itemCount)
+
+	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(itemCount)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+	assert.Equal(t, itemCount, queued, "no item may be dropped for being late in the queue")
+	assert.Equal(t, itemCount, total)
+
+	// Capture runs on the worker goroutine, so drain it before the
+	// deferred Stop/Finish: leaving it in flight would report as a
+	// missing mock call rather than as whatever this test is asserting.
+	for i := range itemCount {
+		waitForState(t, ts.service, fmt.Sprintf("https://example.com/art-%d.png", i),
+			offlinecache.StateReady)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, deadlines, itemCount)
+	earliest, latest := deadlines[0], deadlines[0]
+	for _, d := range deadlines {
+		if d.Before(earliest) {
+			earliest = d
+		}
+		if d.After(latest) {
+			latest = d
+		}
+	}
+	// Half a wave of slack absorbs scheduler jitter while staying far
+	// above the ~0 a shared phase deadline would produce.
+	assert.Greater(t, latest.Sub(earliest), waveDelay/2,
+		"later items must start their own deadline clock, not inherit one shared phase budget")
+}
+
+// TestService_DownloadPlaylist_InlineDataURIsAreSkippedNotFailed pins
+// that an inline data: item is a legitimate no-op rather than a
+// classification failure: its bytes already travel inside the playlist
+// body this service persists, so there is nothing to fetch. Previously
+// every such item failed with "unsupported protocol scheme", and a
+// playlist made ONLY of them failed the whole command.
+func TestService_DownloadPlaylist_InlineDataURIsAreSkippedNotFailed(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const inlineSource = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAWgAAAJq"
+	const fetchableSource = "https://example.com/art.png"
+
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "playlist-1", "title": "t",
+		"items": []map[string]interface{}{
+			{"id": "inline", "source": inlineSource},
+			{"id": "fetchable", "source": fetchableSource},
+		},
+	})
+	require.NoError(t, err)
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), inlineSource).
+		Return(offlinecache.ClassInline, nil).Times(1)
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), fetchableSource).
+		Return(offlinecache.ClassMedia, nil).Times(1)
+
+	// Times(1), not (2): the inline item must never reach a capturer.
+	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, item dp1playlist.PlaylistItem) (*offlinecache.ItemRecord, error) {
+			rec := &offlinecache.ItemRecord{Item: item, Coverage: offlinecache.Coverage{Complete: true}}
+			require.NoError(t, ts.store.SaveItem(rec))
+			return rec, nil
+		}).Times(1)
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err, "an inline item must not fail the command")
+	assert.Equal(t, 1, queued, "only the fetchable item is queued")
+	assert.Equal(t, 2, total)
+
+	waitForState(t, ts.service, fetchableSource, offlinecache.StateReady)
+}
+
+// TestService_DownloadItem_InlineDataURISucceedsWithoutQueuing mirrors
+// the playlist case for the single-item path: the caller asked for the
+// item to be available offline and it already is, so this reports
+// success with nothing queued rather than an error.
+func TestService_DownloadItem_InlineDataURISucceedsWithoutQueuing(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	const inlineSource = "data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEi"
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), inlineSource).
+		Return(offlinecache.ClassInline, nil).Times(1)
+	// No capturer expectation at all: gomock's strict controller fails
+	// this test if an inline item is ever handed to one.
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	err := ts.service.DownloadItem(context.Background(),
+		dp1playlist.PlaylistItem{ID: "inline", Source: inlineSource})
+	require.NoError(t, err)
 }

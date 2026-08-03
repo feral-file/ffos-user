@@ -63,6 +63,22 @@ classifies as `ClassStreaming` — the only class `DownloadItem`/
 byte-for-byte content a one-shot download or a static blob-store replay
 could faithfully serve (§3.3, §8).
 
+Two source shapes never reach a network probe at all:
+
+- An RFC 2397 **`data:` URI** is `ClassInline`. Its media type is parsed
+  straight out of the URI (a bounded scan for the metadata-terminating
+  comma — the payload is never decoded), and the item is then *skipped*
+  rather than queued: its bytes already travel inside the playlist body
+  that `SavePlaylist` persists, so the player reads them back offline
+  from the playlist record itself and there is nothing to fetch. This is
+  a legitimate exclusion, not a failure — it does not count toward
+  `classifyFailed` and does not fail the command. Handing one to
+  `http.Client` (which cannot dial `data:`) is what previously made every
+  inline cover image a permanent, unretryable classification failure.
+- A source that is **not safe to dial** is rejected with
+  `ErrUnsafeSource` before any probe, download, or `Page.navigate` — see
+  §9.
+
 ## 2. Pipeline overview
 
 ```
@@ -992,7 +1008,7 @@ holds:
   `downloading`**: that check and the `queue.push` are one critical
   section, so the loser returns `enqueueAlreadyQueued` and schedules
   nothing. That is the common case, since classification is bounded by
-  `classifyPhaseTimeout` while a capture holds the worker for far
+  `classifyItemTimeout` while a capture holds the worker for far
   longer. It is not an unconditional guarantee, and the boundary is worth
   naming: if the first capture *completes* before the second request's
   own classify returns, the second sees a terminal state and legitimately
@@ -2056,7 +2072,68 @@ identical cache state.
   needs the resource-fetch side effects of that rendering, not its visual
   accuracy — see `start-kiosk.sh`.
 
-## 9. See also
+## 9. Source safety: what a playlist is allowed to point at
+
+A playlist body is untrusted input. It arrives over the LAN hub — which
+binds `0.0.0.0:1111` and is **unauthenticated** — and over the relayer,
+and every `source` inside it is a URL this daemon will dial on the
+playlist's behalf from three separate places:
+
+- `classify.go`'s `HEAD` / ranged-`GET` probe,
+- `mediacapture.go`'s direct body download,
+- `capture.go`'s `Page.navigate` in the headless browser.
+
+The device runs privileged, unauthenticated services on loopback that
+those paths would otherwise reach: Chromium's DevTools endpoints on
+`127.0.0.1:9222` (kiosk) and `:9223` (capture), the hub itself on
+`:1111`, `feral-sys-monitord` on `:9001`, and the blob static server on
+`:8082`. Without a guard, a `source` of `file:///etc/shadow` is local
+file disclosure through the headless browser, and
+`http://127.0.0.1:9222/json/new?...` is full control of the kiosk
+browser — both reachable by anyone on the LAN.
+
+`sourceguard.go` closes that off inside `Classify`, which is the single
+function BOTH enqueue paths (`DownloadItem` and `DownloadPlaylist`) call
+before any I/O and before any job is queued. A rejected source is
+therefore never probed, never downloaded, and never navigated to. It
+rejects, with `ErrUnsafeSource`:
+
+- any scheme outside `http`/`https` — an allowlist, not a denylist, since
+  the set of schemes a browser or `http.Client` will act on (`file`,
+  `ftp`, `gopher`, `ws`, `chrome`, `devtools`, `about`, `blob`,
+  `javascript`, …) is long and grows;
+- a literal address in a reserved range: loopback, RFC 1918, IPv6 ULA,
+  link-local (including `169.254.169.254`), CGNAT, multicast, broadcast,
+  unspecified, and the IPv4-mapped / NAT64 / 6to4 forms that wrap one;
+- a hostname that RESOLVES to any of the above — checked across *every*
+  answer, not just the first, so a name returning one public and one
+  loopback address cannot be admitted here and then dialed round-robin
+  later.
+
+The userinfo trick (`http://cdn.feralfileassets.com@127.0.0.1:9222/…`)
+is handled by resolving the real host via `url.Hostname()` rather than
+matching on the visible prefix — the same hazard `replay.go` documents
+for its own origin checks.
+
+A DNS **resolution failure** is deliberately NOT tagged `ErrUnsafeSource`:
+it is a transient network fault, and reporting it as a security rejection
+would make an offline device look like it is under attack in its logs.
+
+**Residual gap, stated rather than hidden.** The capture paths re-resolve
+the hostname when they later fetch or navigate, so a name whose answer
+flips to a reserved address between the check and that fetch (classic DNS
+rebinding) is not closed by a resolve-time check alone. Closing it needs
+an address-level `Control` hook on the body client's dialer AND
+`--host-resolver-rules` on the headless browser. This guard shrinks the
+surface to that one race instead of leaving it wide open.
+
+**Operational consequence.** Playlist sources on private or loopback
+addresses are refused. Artwork origins are public CDNs, so this does not
+affect normal operation, but a developer pointing a test playlist at a
+LAN-hosted asset server will see `ErrUnsafeSource` — that is the guard
+working, and would need an explicit opt-in config knob to relax.
+
+## 10. See also
 
 - `components/feral-controld/offlinecache/` — the implementation;
   `classify.go` (routing), `capture.go` (software/headless path),
@@ -2069,3 +2146,5 @@ identical cache state.
 - `components/feral-controld/config/config.go` — `OfflineCacheConfig`
   (`offlineCache.*`) tuning knobs, and their defaults in
   `offlinecache/bootstrap.go`.
+- `components/feral-controld/offlinecache/sourceguard.go` — the source
+  allowlist and reserved-address checks described in §9.
