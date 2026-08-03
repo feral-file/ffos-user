@@ -41,7 +41,10 @@ if ! mountpoint -q /home/feralfile/.config/systemd/user/; then
 fi
 
 systemctl --user daemon-reload
-systemctl --user start system-ready.target
+# Best-effort for the same F-03 reason as the service starts below: a target
+# start failing (broken unit graph after a bad OTA) must degrade, not abort
+# the script before controld — the only recovery path — ever starts.
+systemctl --user start system-ready.target || echo "WARN: system-ready.target failed to start"
 
 # Start the recovery daemon FIRST, before any blocking service start. This
 # script runs under set -e, so a failed/timed-out blocking start (player,
@@ -58,25 +61,43 @@ systemctl --user start system-ready.target
 # must never hinge on it reaching READY.
 systemctl --user start --no-block "feral-controld.service"
 
-systemctl --user start "feral-sys-monitord.service"
-systemctl --user start "feral-vmagent.service"
-systemctl --user start "display-restore.service"
-systemctl --user start "feral-player.service"
-systemctl --user start "chromium-kiosk.service"
-systemctl --user start "ota-update-success-check.service"
+# Every blocking start/enable below is best-effort (|| echo WARN): this script
+# runs under set -euo pipefail, so without that ONE failed unit (e.g.
+# feral-player on a bad bundle) aborts the script here and nothing after it
+# starts — no kiosk, no watchdog, and none of the update timers that are the
+# device's only path to self-heal a bad version (F-03). Each unit has its own
+# recovery rail (Restart= policies, the watchdog, the nightly updaters); boot
+# must degrade, never stop. The WARN echoes are the field breadcrumb for
+# WHICH unit failed (same idiom as the pamixer line above). This invariant is
+# pinned by scripts/test-headless-startup-contract.sh.
+systemctl --user start "feral-sys-monitord.service" || echo "WARN: feral-sys-monitord.service failed to start"
+systemctl --user start "feral-vmagent.service" || echo "WARN: feral-vmagent.service failed to start"
+systemctl --user start "display-restore.service" || echo "WARN: display-restore.service failed to start"
+systemctl --user start "feral-player.service" || echo "WARN: feral-player.service failed to start"
+systemctl --user start "chromium-kiosk.service" || echo "WARN: chromium-kiosk.service failed to start"
+systemctl --user start "ota-update-success-check.service" || echo "WARN: ota-update-success-check.service failed to start"
 
+# The enable blocks are best-effort for the same F-03 reason: `enable --now`
+# also STARTS the unit and can fail (unit file missing after a full-image
+# rsync — exactly the post-OTA state in which these blocks run at all instead
+# of short-circuiting on is-enabled — or a sudo/polkit denial), and under
+# set -e that would abort before the remaining timers and the watchdog. The
+# system timers additionally ship as presets in the ffos image
+# (system-preset/90-default.preset), so a failure here is a warning, not a
+# lost safety net; feral-log-rotation.timer is user-scope and has ONLY this
+# rail.
 if ! systemctl --user is-enabled "feral-log-rotation.timer" >/dev/null 2>&1; then
-    systemctl --user enable --now "feral-log-rotation.timer"
+    systemctl --user enable --now "feral-log-rotation.timer" || echo "WARN: failed to enable feral-log-rotation.timer"
 fi
 
 if ! sudo systemctl is-enabled "feral-updater@03:00.timer" >/dev/null 2>&1; then
-    sudo systemctl enable --now "feral-updater@03:00.timer"
+    sudo systemctl enable --now "feral-updater@03:00.timer" || echo "WARN: failed to enable feral-updater@03:00.timer"
 fi
 
 if ! sudo systemctl is-enabled "feral-recovery-update@5:30.timer" >/dev/null 2>&1; then
-    sudo systemctl enable --now "feral-recovery-update@5:30.timer"
+    sudo systemctl enable --now "feral-recovery-update@5:30.timer" || echo "WARN: failed to enable feral-recovery-update@5:30.timer"
 fi
 
 sleep 5
 
-systemctl --user start "feral-watchdog.service"
+systemctl --user start "feral-watchdog.service" || echo "WARN: feral-watchdog.service failed to start"

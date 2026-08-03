@@ -425,7 +425,31 @@ else
   echo "test-headless-startup-contract: SKIPPED unreadable-directory cases (running as root)" >&2
 fi
 
-# --- 6. controld start-limit never latches -------------------------------------
+# --- 6. no blocking start/enable may abort boot (F-03) --------------------------
+
+# .start-services.sh runs under set -euo pipefail. Every blocking
+# `systemctl ... start` / `enable --now` line must be failure-tolerant
+# (`|| true`, or the preferred `|| echo WARN` breadcrumb): one broken unit
+# aborting the script kills kiosk + watchdog + the update timers, and a device
+# with a bad build then never self-heals (F-03). The `--no-block` controld
+# start is exempt here (it cannot block-fail) and is pinned by section 2;
+# `is-enabled`/`stop`/`disable` lines don't block boot and are out of scope.
+f03_lines=0
+while IFS= read -r line; do
+  f03_lines=$((f03_lines + 1))
+  case "$line" in
+    *--no-block*) continue ;;
+    *"|| true"*|*"|| echo"*) continue ;;
+    *) fail "F-03: blocking systemctl start/enable must be failure-tolerant: $line" ;;
+  esac
+done < <(grep -E '^[[:space:]]*(sudo )?systemctl ((--user|--global) )?(start |enable --now )' "$start_services")
+# The scan must actually see the boot-critical lines: six service starts, the
+# target start, three enable blocks, the watchdog, and the --no-block controld
+# start — a regex drift that matches nothing would pass vacuously.
+[ "$f03_lines" -ge 11 ] || \
+  fail "F-03 scan matched only $f03_lines systemctl start/enable lines (expected >= 11) — pattern drift?"
+
+# --- 7. controld start-limit never latches -------------------------------------
 
 # controld is the device's only provisioning path (SoftAP portal + LAN hub —
 # no BLE fallback), so a systemd start-limit latch ("start-limit-hit") would
