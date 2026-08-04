@@ -64,14 +64,14 @@ func (c *LinkChecker) HasLink(ctx context.Context) bool {
 	if c == nil || c.exec == nil {
 		return false
 	}
-	up, err := c.linkProbe(ctx, "")
+	res, err := c.linkProbe(ctx, "")
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Warn("Link-state probe failed, assuming no link", zap.Error(err))
 		}
 		return false
 	}
-	return up
+	return res.link
 }
 
 // ExternalLink reports whether the device has a usable local link on a
@@ -89,7 +89,36 @@ func (c *LinkChecker) ExternalLink(ctx context.Context, excludeProfile string) (
 	if c == nil || c.exec == nil {
 		return false, errors.New("link checker not initialized")
 	}
-	return c.linkProbe(ctx, excludeProfile)
+	res, err := c.linkProbe(ctx, excludeProfile)
+	return res.link, err
+}
+
+// WiredLink reports whether the device has a live ethernet link: an ethernet
+// device in NetworkManager's ACTIVATED state. It exists for callers that must
+// distinguish a wire from a Wi-Fi association — the `startWifiSetup` admission
+// gate and the wired-devices-never-auto-raise rule
+// (docs/app-triggered-wifi-setup.md; docs/network-recovery-ux.md constraint 6).
+// It must NOT be conflated with ExternalLink: that probe counts an associated
+// Wi-Fi station as a link, so using it as a wired guard would reject every
+// Wi-Fi target device the setup flow exists for.
+//
+// Verdict semantics, pinned by docs/network-recovery-ux.md constraint 6:
+//   - The survey is valid when the nmcli output contains at least one ethernet
+//     or Wi-Fi device row (the shared `surveyed` rule below) — corrupt or empty
+//     output proves nothing about wire state and surfaces as an error.
+//   - Given a valid survey, the wire verdict is computed from ethernet rows
+//     only; a valid survey with no ethernet row is confirmed-no-wire
+//     (false, nil).
+//
+// Errors surface rather than defaulting in either direction: the admission
+// caller fails closed (rejects the command), and the escape-policy window
+// treats an error as a pause, never as evidence.
+func (c *LinkChecker) WiredLink(ctx context.Context) (bool, error) {
+	if c == nil || c.exec == nil {
+		return false, errors.New("link checker not initialized")
+	}
+	res, err := c.linkProbe(ctx, "")
+	return res.wired, err
 }
 
 // nmDeviceStateActivated is NetworkManager's NM_DEVICE_STATE_ACTIVATED (100):
@@ -99,11 +128,24 @@ func (c *LinkChecker) ExternalLink(ctx context.Context, excludeProfile string) (
 // which NM ≥1.36 renders as "connected (externally)" but still numbers 100.
 const nmDeviceStateActivated = 100
 
+// linkResult carries one probe's verdicts. link is the combined uplink verdict
+// (any ACTIVATED ethernet or wifi device, minus the exclusion); wired is the
+// ethernet-only verdict. They are computed in one pass so WiredLink shares the
+// exact survey-validity rule of the other probes — two separate nmcli reads
+// could disagree about whether the output surveyed anything at all.
+type linkResult struct {
+	link  bool
+	wired bool
+}
+
 // linkProbe reports whether any ethernet or wifi device is in NetworkManager's
 // ACTIVATED state, skipping devices whose active connection is excludeProfile
-// (empty = no exclusion). Shared nmcli probe behind HasLink and ExternalLink;
-// error handling is the caller's, since the two have opposite failure biases.
-func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (bool, error) {
+// (empty = no exclusion). Shared nmcli probe behind HasLink, ExternalLink, and
+// WiredLink; error handling is the caller's, since they have different failure
+// biases. The exclusion applies only to the combined link verdict, not the
+// wired one — it exists to discount the device's own Wi-Fi hotspot, which can
+// never be an ethernet row.
+func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (linkResult, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, linkCheckTimeout)
 	defer cancel()
 
@@ -122,7 +164,7 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (boo
 		"GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.CONNECTION", "device", "show")
 	output, err := cmd.Output()
 	if err != nil {
-		return false, err
+		return linkResult{}, err
 	}
 
 	// A "no link" verdict counts as CONFIRMED only if the survey saw at least
@@ -138,7 +180,8 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (boo
 		hasState  bool
 	}
 	var cur record
-	surveyed, link := false, false
+	var res linkResult
+	surveyed := false
 	// flush evaluates the finished device block. GENERAL.DEVICE is relied on as
 	// the block delimiter below: it is what triggers flushing the previous
 	// record and resetting cur for the next device, so it MUST be the first
@@ -158,10 +201,16 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (boo
 		if cur.state != nmDeviceStateActivated {
 			return
 		}
+		// The wired verdict is recorded before the exclusion check on purpose:
+		// the exclusion discounts the device's own Wi-Fi hotspot, and an
+		// ethernet row must never be hidden by a profile-name collision with it.
+		if cur.typ == "ethernet" {
+			res.wired = true
+		}
 		if excludeProfile != "" && cur.conn == excludeProfile {
 			return
 		}
-		link = true
+		res.link = true
 	}
 	for _, line := range strings.Split(string(output), "\n") {
 		field, value, ok := strings.Cut(strings.TrimSpace(line), ":")
@@ -186,11 +235,8 @@ func (c *LinkChecker) linkProbe(ctx context.Context, excludeProfile string) (boo
 	}
 	flush()
 
-	if link {
-		return true, nil
-	}
 	if !surveyed {
-		return false, errors.New("no ethernet/wifi device rows in nmcli output")
+		return linkResult{}, errors.New("no ethernet/wifi device rows in nmcli output")
 	}
-	return false, nil
+	return res, nil
 }

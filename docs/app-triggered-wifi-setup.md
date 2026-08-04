@@ -109,7 +109,12 @@ Rejections `{ "ok": false, "code": "...", "message": "..." }`:
 **New seam — `status.LinkChecker.WiredLink(ctx) (bool, error)`**, beside `ExternalLink`
 (`status/linkcheck.go:88-93`), flushing only `typ == "ethernet"`. `linkProbe` already parses
 `GENERAL.TYPE` per device block, so this is a small addition with the same surface-errors contract.
-Constraint 5 is why it cannot reuse `ExternalLink`.
+Constraint 5 is why it cannot reuse `ExternalLink`. Survey semantics (pinned in
+`docs/network-recovery-ux.md` constraint 6, back-ported here): the survey is valid when the nmcli
+output contains at least one ethernet **or Wi-Fi** device row (the existing `surveyed` rule —
+corrupt or empty output proves nothing and surfaces as an error); given a valid survey, the wire
+verdict is computed from ethernet rows only, and a valid survey with no ethernet row is
+confirmed-no-wire (`false, nil`).
 
 **Entry sequence**, on the loop goroutine, mirroring every existing raise site (constraint 2):
 
@@ -196,7 +201,9 @@ already "send a command, then remove the device", including LAN/relayer fallback
 
 - `WiredLink`: an ACTIVATED `ethernet` row returns true; **a Wi-Fi-only station returns false** (this is
   the assertion that catches constraint 5 — a naive test written against `ExternalLink` would pass
-  while the feature was broken); a probe error surfaces rather than failing to false.
+  while the feature was broken); a probe error surfaces rather than failing to false; a valid survey
+  with **no ethernet row at all** is confirmed-no-wire (`false, nil`), not an error; **corrupt or
+  empty output** (the unsurveyed case) surfaces as an error, never as a confirmed verdict.
 - Admission: rejects on wired link; rejects on probe error; rejects `busy` from `joining`/`starting`;
   accepts from `online`, `offline_retrying`, `unprovisioned`.
 - Ordering: the reply is produced before the AP raise is requested.
