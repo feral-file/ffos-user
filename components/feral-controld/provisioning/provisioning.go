@@ -748,7 +748,7 @@ func New(cfg Config) *Machine {
 		wiredLink:        cfg.WiredLink,
 		claimed:          claimed,
 		initialClaimed:   cfg.InitialClaimed,
-		tuning:           cfg.Tuning.withDefaults(cfg.CheckInterval),
+		tuning:           cfg.Tuning.withDefaults(cfg.CheckInterval, logger),
 		// Latched HERE, not read at the offline assessment: New runs at
 		// wiring time (moments after process start), so this is the honest
 		// "did this process start at boot" answer regardless of how long the
@@ -1028,6 +1028,24 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 		m.mu.Unlock()
 		switch m.probeLink(ctx) {
 		case linkPresent:
+			// The out-of-box exemption, mirrored from the raised-AP wired exit
+			// (see wiredExitDue). This branch is only reachable with apUp
+			// FALSE — probeLink short-circuits to absent while our own hotspot
+			// holds the radio — so it is the FAILED-raise flavor: NM keeps
+			// refusing the AP while a link is present. For a provisioned frame
+			// that exit is right (the saved network can carry the device). For
+			// the out-of-box session there is nothing to fall back to: landing
+			// StateUnprovisioned hides the overlay and no window ever re-arms
+			// while the link holds, so an air-gapped cable would strand an
+			// unclaimed frame on a blank screen with the raise abandoned.
+			// Keep wanting the AP and let reconcile keep retrying instead.
+			// A confirmed ONLINE reading still exits above — WAN reachability
+			// is the correct end of an out-of-box session, and this guard is
+			// deliberately below it.
+			if cur == StateAPActive && m.sessionPolicy == sessionUnbounded {
+				m.reconcile(ctx)
+				return
+			}
 			m.clearOffline()
 			m.transition(ctx, StateUnprovisioned, Detail{
 				Reason:  "link-present",
@@ -1705,9 +1723,12 @@ func (m *Machine) onTick(ctx context.Context) {
 			// the probeLink short-circuit protects Wi-Fi against, the AP
 			// cannot fix a wired network, and a later online reading would
 			// tear it down anyway — so plugging a cable in ends the session,
-			// user-requested included. (2) The session policy's own phase
-			// expiry (recheck blink, episode station phase, user-session
-			// abandonment net).
+			// user-requested included. The out-of-box unbounded session is the
+			// one exemption (see wiredExitDue): there is no saved network for
+			// the AP to compete with, and lowering it would leave an
+			// unclaimed air-gapped frame on a blank screen. (2) The session
+			// policy's own phase expiry (recheck blink, episode station phase,
+			// user-session abandonment net).
 			if m.wiredExitDue(ctx) {
 				m.exitRaisedAPForWire(ctx)
 				return
@@ -2383,6 +2404,14 @@ func (m *Machine) clearOffline() {
 	// across resting states until they succeed, so its wedge genuinely spans
 	// these boundaries.
 	m.resetAPRaiseEscalation()
+	// The recheck blink's one-shot scan-skip belongs to the re-raise that
+	// immediately follows it and nothing else. Today every set IS consumed by
+	// that raise, but the flag is a bare bool with no expiry, so any future
+	// path that returns from ensureAPUp before consuming it (the
+	// pending-teardown deferral is the near miss) would hand a much later
+	// raise a stale portal picker. Clearing it here binds its lifetime to the
+	// AP-world boundary every clearOffline site already marks.
+	m.skipNextPreAPScan = false
 }
 
 // resetAPRaiseEscalation resets the raise-failure streak and dismisses a

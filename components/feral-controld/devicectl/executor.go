@@ -1444,11 +1444,24 @@ func (e *executor) SetNetworkHealth(fn func(ctx context.Context) *status.Network
 
 // startWifiSetup handles CMD_START_WIFI_SETUP
 // (docs/app-triggered-wifi-setup.md): admission runs synchronously in the
-// provisioning machine, but ACCEPTANCE only queues the raise — the reply
-// below is produced and sent before any radio work, because raising the AP
-// severs the station link that would carry it (constraint 1). A rejection is
-// a NORMAL reply ({ok:false, code, message}), not a transport error: the app
-// branches on the code.
+// provisioning machine, but ACCEPTANCE only queues the raise, so the reply
+// below is PRODUCED before the raise is even queued — raising the AP severs
+// the station link that would carry it (constraint 1).
+//
+// Deliberately not claimed: that the reply is FLUSHED first. Nothing here
+// synchronizes with the transport, and once the event is queued the machine's
+// loop goroutine may start the raise while the reply is still on the wire.
+// Two things make that acceptable rather than a gap to close with ordering
+// machinery. The margin is enormous — the raise is seconds of nmcli work
+// against microseconds of reply flush — and, decisively, the contract already
+// tolerates the loss: the app treats a timed-out send as success precisely
+// because a raise can sever the reply in flight on either transport (relayer
+// or LAN hub). See docs/controld-inbound-controller-messages.md.
+//
+// A rejection is a NORMAL reply ({ok:false, code, message}), not a transport
+// error: the app branches on the code. The message strings render VERBATIM in
+// the mobile app, so they carry the app's product voice ("Art Computer") — not
+// the captive portal's deliberately separate "frame" voice.
 func (e *executor) startWifiSetup(ctx context.Context) (interface{}, error) {
 	if e.wifiSetupStarter == nil {
 		return map[string]any{"ok": false, "code": "unavailable",
@@ -1456,10 +1469,10 @@ func (e *executor) startWifiSetup(ctx context.Context) (interface{}, error) {
 	}
 	if err := e.wifiSetupStarter(ctx); err != nil {
 		code := "busy"
-		msg := "The frame is busy joining a network. Try again in a moment."
+		msg := "The Art Computer is busy joining a network. Try again in a moment."
 		if errors.Is(err, provisioning.ErrWiredLinkActive) {
 			code = "wired_link_active"
-			msg = "The frame is connected by ethernet cable. Unplug the cable to set up Wi-Fi."
+			msg = "The Art Computer is connected by ethernet cable. Unplug the cable to set up Wi-Fi."
 		}
 		e.logger.Info("startWifiSetup rejected", zap.String("code", code), zap.Error(err))
 		return map[string]any{"ok": false, "code": code, "message": msg}, nil

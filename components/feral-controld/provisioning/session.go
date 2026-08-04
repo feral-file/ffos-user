@@ -36,6 +36,16 @@ const (
 	// sessionUnbounded: the out-of-box unprovisioned raise. No timer, no
 	// recheck — with no saved profile a station blink can learn nothing (the
 	// portal's own rescan serves the "a network appeared" case).
+	//
+	// Amendment hazard: this is the ZERO value, and it now doubles as the
+	// wired-exit / link-present exemption (wiredExitDue, onConnectivity's
+	// linkPresent branch) — so an UNLATCHED policy fails OPEN into the
+	// exemption. Harmless today because every first entry into StateAPActive
+	// carries an on-table raise reason, and only later off-table reasons
+	// (join failures, teardown-failure re-raises) inherit. A future raise
+	// whose FIRST reason is off-table would silently get out-of-box
+	// treatment: add it to latchSessionPolicy's table rather than relying on
+	// the inherit path.
 	sessionUnbounded sessionPolicy = iota
 	// sessionRecheck: the link-confirmed-absent raises (sustained-offline,
 	// relocated). AP-dominant cadence: AP up for a long phase, then a narrated
@@ -118,33 +128,81 @@ func defaultEpisodeStationLadder() []time.Duration {
 	return []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute}
 }
 
-// withDefaults resolves zero fields to the package defaults and derives the
-// tick-sample equivalents. Rounding errs upward (more evidence before a
-// one-way raise), minimum one sample.
-func (t Tuning) withDefaults(tick time.Duration) Tuning {
-	def := func(v *time.Duration, d time.Duration) {
-		if *v <= 0 {
+// usableLadder validates a configured station ladder, ALL-OR-NOTHING: one
+// out-of-range rung discards the whole override. Per-rung substitution is the
+// tempting alternative and is wrong — the rungs are not independent numbers
+// but one escalation shape (early cycles favor the user who is probably still
+// nearby, later ones favor observing WAN recovery), and splicing a default
+// into a custom ladder produces a cadence nobody designed.
+//
+// A non-positive rung is the failure that actually bites: withDefaults rounds
+// every phase up to at least ONE sample, so a zero or negative rung yields a
+// station phase one tick long. The episode then spends nearly all of every
+// cycle in AP mode — the exact inversion of §4.1's "AP ≤ 33% of every cycle",
+// whose whole point is that the primary escape (LAN pairing) only exists in
+// station mode.
+func usableLadder(ladder []time.Duration, logger *zap.Logger) []time.Duration {
+	if len(ladder) == 0 {
+		return defaultEpisodeStationLadder()
+	}
+	for _, d := range ladder {
+		if d <= 0 || d > maxTuningDuration {
+			logger.Warn("provisioning: episode station ladder has an out-of-range rung; using the built-in ladder",
+				zap.Duration("rung", d), zap.Durations("configured", ladder))
+			return defaultEpisodeStationLadder()
+		}
+	}
+	return ladder
+}
+
+// maxTuningDuration is the sanity ceiling every configured duration knob must
+// clear. Two shapes need it, and neither is caught by a "zero means default"
+// rule. A seconds value large enough to overflow provisioningTuningFromConfig's
+// seconds→Duration multiplication arrives here as garbage — possibly a small
+// positive that silently passes every other check. And an honestly-typed but
+// absurd value (a year-long AP phase, a week-long station rung) would disable
+// the escape policy this whole file exists to guarantee, with nothing on
+// screen or in the logs saying so. Past the ceiling the value is treated as a
+// typo, not as intent.
+const maxTuningDuration = 24 * time.Hour
+
+// withDefaults resolves unset/out-of-range fields to the package defaults and
+// derives the tick-sample equivalents. Rounding errs upward (more evidence
+// before a one-way raise), minimum one sample. The logger carries the
+// substitutions: config.ProvisioningTuning decodes permissively by design (a
+// bad block must never crash-loop the daemon), so this is the only place an
+// operator learns a knob was rejected.
+func (t Tuning) withDefaults(tick time.Duration, logger *zap.Logger) Tuning {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	def := func(field string, v *time.Duration, d time.Duration) {
+		switch {
+		case *v == 0:
+			// The documented "unset" path — not a rejection, so no warn.
+			*v = d
+		case *v < 0 || *v > maxTuningDuration:
+			logger.Warn("provisioning: tuning value out of range; using the built-in default",
+				zap.String("field", field), zap.Duration("configured", *v), zap.Duration("default", d))
 			*v = d
 		}
 	}
-	def(&t.EpisodeWindow, defaultEpisodeWindow)
-	def(&t.EpisodeApPhase, defaultEpisodeApPhase)
-	def(&t.HubContactFresh, defaultHubContactFresh)
-	def(&t.DeferralCycleBudget, defaultDeferralCycleBudget)
-	def(&t.DeferralEpisodeBudget, defaultDeferralEpisodeBudget)
-	def(&t.RecheckApPhase, defaultRecheckApPhase)
-	def(&t.RecheckBlinkCeiling, defaultRecheckBlinkCeiling)
-	def(&t.ActivationTimeout, defaultActivationTimeout)
-	def(&t.PortalActivityWindow, defaultPortalActivityWindow)
-	def(&t.PortalDeferralCeiling, defaultPortalDeferralCeiling)
-	def(&t.UserRequestedSession, defaultUserRequestedSession)
-	def(&t.SessionAbsoluteCap, defaultSessionAbsoluteCap)
+	def("episodeWindow", &t.EpisodeWindow, defaultEpisodeWindow)
+	def("episodeApPhase", &t.EpisodeApPhase, defaultEpisodeApPhase)
+	def("hubContactFresh", &t.HubContactFresh, defaultHubContactFresh)
+	def("deferralCycleBudget", &t.DeferralCycleBudget, defaultDeferralCycleBudget)
+	def("deferralEpisodeBudget", &t.DeferralEpisodeBudget, defaultDeferralEpisodeBudget)
+	def("recheckApPhase", &t.RecheckApPhase, defaultRecheckApPhase)
+	def("recheckBlinkCeiling", &t.RecheckBlinkCeiling, defaultRecheckBlinkCeiling)
+	def("activationTimeout", &t.ActivationTimeout, defaultActivationTimeout)
+	def("portalActivityWindow", &t.PortalActivityWindow, defaultPortalActivityWindow)
+	def("portalDeferralCeiling", &t.PortalDeferralCeiling, defaultPortalDeferralCeiling)
+	def("userRequestedSession", &t.UserRequestedSession, defaultUserRequestedSession)
+	def("sessionAbsoluteCap", &t.SessionAbsoluteCap, defaultSessionAbsoluteCap)
 	if t.EpisodeRaiseCycles <= 0 {
 		t.EpisodeRaiseCycles = defaultEpisodeRaiseCycles
 	}
-	if len(t.EpisodeStationLadder) == 0 {
-		t.EpisodeStationLadder = defaultEpisodeStationLadder()
-	}
+	t.EpisodeStationLadder = usableLadder(t.EpisodeStationLadder, logger)
 	samples := func(d time.Duration) int {
 		n := int((d + tick - 1) / tick)
 		if n < 1 {
@@ -481,6 +539,30 @@ func (m *Machine) expireSession(ctx context.Context) {
 	}
 }
 
+// releaseAPForLanding performs the teardown half of a constraint-4 session
+// landing: drop the AP and stop the phase clock. It deliberately DISCARDS
+// ensureAPDown's verdict, and that discard is load-bearing — every session
+// landing below depends on it.
+//
+// Why the landing must proceed even when softap.Down fails: ensureAPDown has
+// already stopped the portal and cleared apUp by the time it reports false
+// (only the NM profile deletion is outstanding, latched in apDownPending and
+// retried by every subsequent reconcile). Returning early therefore preserves
+// nothing except the on-screen softap_qr — a QR advertising an AP that is gone
+// with no portal behind it, which is exactly what constraint 4(a) forbids.
+// Worse, it is not self-correcting: the next tick takes the failed-raise
+// link-present exit, whose "link-present" reason the notifier deliberately
+// leaves un-repainted, and if the apDownPending retry then succeeds no repaint
+// is ever scheduled at all, so the stale QR survives indefinitely.
+//
+// The recheck blink is the ONE teardown that still aborts on failure
+// (runRecheckBlink) — it is not a landing but the prelude to a measurement,
+// and a still-held radio would fabricate its verdict.
+func (m *Machine) releaseAPForLanding(ctx context.Context) {
+	m.ensureAPDown(ctx)
+	m.cancelSessionTimer()
+}
+
 // endUserSession tears an expired user-requested session down and resumes
 // normal state handling: the saved profile is never touched, so NM
 // autoconnect restores the previous network on its own (bench-verified, §3 of
@@ -488,12 +570,8 @@ func (m *Machine) expireSession(ctx context.Context) {
 // taps startWifiSetup and changes their mind cannot strand the frame in setup
 // mode.
 func (m *Machine) endUserSession(ctx context.Context) {
-	if !m.ensureAPDown(ctx) {
-		// The hotspot may still hold the radio; retry at the next tick (the
-		// §4.6 release escalation narrates persistent failure).
-		return
-	}
-	m.cancelSessionTimer()
+	// Lands regardless of the teardown's verdict — see releaseAPForLanding.
+	m.releaseAPForLanding(ctx)
 	m.clearOffline()
 	m.transition(ctx, m.restingStateForProfile(ctx), m.teardownLandingDetail())
 }
@@ -531,7 +609,27 @@ func (m *Machine) teardownLandingDetail() Detail {
 // This also lowers a user-requested session when a cable is plugged in
 // mid-setup — intended. Costs one nmcli read per tick for the AP session's
 // duration; accepted. Errors defer (constraint 11).
+//
+// The out-of-box unbounded session is EXEMPT, and that exemption is the whole
+// reason this policy check lives here rather than at the call site. The wired
+// exit exists to stop an AP from competing with a network the frame could fall
+// back to; an unprovisioned frame has no saved network to fall back to, so the
+// exit would tear the setup AP down and land StateUnprovisioned, whose
+// notifier branch HIDES the overlay — a permanently blank screen on an
+// air-gapped wired frame that has never been claimed. Pre-PR the AP simply
+// stayed up, and a wired out-of-box device completes its claim over LAN /
+// relayer with the AP still broadcasting, so leaving it up costs nothing.
+//
+// Scope, precisely: this covers a RAISED out-of-box AP, and onConnectivity's
+// linkPresent branch covers the failed-raise flavor of the same session. It
+// does NOT cover a frame that boots with the cable already plugged in — that
+// path never enters StateAPActive at all (StateStarting sees linkPresent and
+// parks in StateUnprovisioned), so an air-gapped wired frame booted from cold
+// still shows nothing. That remains an open dead end, out of scope here.
 func (m *Machine) wiredExitDue(ctx context.Context) bool {
+	if m.sessionPolicy == sessionUnbounded {
+		return false
+	}
 	if m.wiredLink == nil {
 		return false
 	}
@@ -547,10 +645,8 @@ func (m *Machine) wiredExitDue(ctx context.Context) bool {
 // sighting and lands per constraint 4.
 func (m *Machine) exitRaisedAPForWire(ctx context.Context) {
 	m.logger.Info("provisioning: wired link sighted under a raised AP; ending the session")
-	if !m.ensureAPDown(ctx) {
-		return // retry next tick
-	}
-	m.cancelSessionTimer()
+	// Lands regardless of the teardown's verdict — see releaseAPForLanding.
+	m.releaseAPForLanding(ctx)
 	m.cancelEpisode(ctx, "wired link sighted")
 	m.clearOffline()
 	m.transition(ctx, m.restingStateForProfile(ctx), m.teardownLandingDetail())
@@ -573,9 +669,15 @@ func (m *Machine) exitRaisedAPForWire(ctx context.Context) {
 // race it.
 func (m *Machine) runRecheckBlink(ctx context.Context) {
 	if !m.ensureAPDown(ctx) {
-		// The hotspot may still hold the radio — a "still gone" verdict read
-		// through our own broadcasting AP would be false evidence. Abort the
-		// blink and retry next cycle; persistent teardown failure escalates
+		// The one teardown that still aborts on failure, and deliberately so:
+		// unlike the session LANDINGS (see releaseAPForLanding), the blink is
+		// the prelude to a MEASUREMENT, and the hotspot may still hold the
+		// radio — a "still gone" verdict read through our own broadcasting AP
+		// would be fabricated evidence, which is worse than a delay. The state
+		// stays StateAPActive with a re-armed phase clock, so the next tick's
+		// reconcile retries the deletion and re-raises, repainting softap_qr;
+		// the landings have no such re-raise coming, which is why they cannot
+		// afford the same early return. Persistent teardown failure escalates
 		// via the §4.6 release latch.
 		m.armSessionTimer()
 		return
@@ -821,10 +923,9 @@ func (m *Machine) episodePauseSample() {
 // IS the re-arm interval for cycles 2+ (one ladder, no second window): its
 // target is the ladder rung for the completed cycle count.
 func (m *Machine) endEpisodeAPPhase(ctx context.Context) {
-	if !m.ensureAPDown(ctx) {
-		return // retry next tick; §4.6 escalation covers persistence
-	}
-	m.cancelSessionTimer()
+	// Lands regardless of the teardown's verdict — see releaseAPForLanding.
+	// §4.6's release escalation still narrates a persistently failing deletion.
+	m.releaseAPForLanding(ctx)
 	if m.episodeCycle >= m.tuning.EpisodeRaiseCycles {
 		// Cycles exhausted: settle in STATION mode — the LAN escape (§1.3)
 		// lives there — with the terminal diagnosis. The recheck-style

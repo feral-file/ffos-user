@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/feral-file/ffos-user/components/feral-controld/portal"
 	"github.com/feral-file/ffos-user/components/feral-controld/wifictl"
@@ -412,6 +414,204 @@ func TestWiredExitLowersRaisedAP(t *testing.T) {
 	assert.Equal(t, 1, countReason(h, StateUnprovisioned, ReasonAPSessionEndedSilent))
 }
 
+// TestWiredExitScopeByPolicy pins WHICH sessions the wired exit may lower. Every
+// bounded policy ends on a confirmed cable; the out-of-box unbounded session is
+// exempt, because it has no saved network to fall back to and its landing state
+// (unprovisioned) hides the overlay — an air-gapped cable in an unclaimed frame
+// would otherwise trade the setup QR for a permanently blank screen.
+func TestWiredExitScopeByPolicy(t *testing.T) {
+	cases := []struct {
+		name        string
+		raiseReason string
+		wantExit    bool
+	}{
+		{"out-of-box unprovisioned keeps its AP", "unprovisioned", false},
+		{"user-requested ends", ReasonUserRequested, true},
+		{"setup-incomplete episode ends", ReasonSetupIncomplete, true},
+		{"sustained-offline recheck ends", "sustained-offline", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			h := newHarness(t)
+			h.wifi.setProfile(false)
+			h.m.transition(ctx, StateAPActive, Detail{Reason: tc.raiseReason})
+			require.Equal(t, StateAPActive, h.m.State())
+
+			h.m.wiredLink = func(context.Context) (bool, error) { return true, nil }
+			h.tick(ctx)
+
+			if tc.wantExit {
+				assert.Equal(t, StateUnprovisioned, h.m.State(),
+					"a cable must end a session that competes with a saved network")
+				assert.Equal(t, 1, h.rec.count("ap.Down"))
+				return
+			}
+			assert.Equal(t, StateAPActive, h.m.State(),
+				"the out-of-box AP must survive a cable — nothing else can finish setup on screen")
+			assert.Equal(t, 0, h.rec.count("ap.Down"))
+		})
+	}
+}
+
+// TestOutOfBoxAPSurvivesLinkPresentEmission pins the onConnectivity half of the
+// out-of-box exemption. That branch is only reachable with the AP NOT actually
+// up (probeLink short-circuits to absent while our own hotspot holds the
+// radio), so it is the FAILED-raise flavor: NM keeps refusing the raise while a
+// cable is present. sys-monitord re-emits its first probe unconditionally after
+// every restart, so without the guard an air-gapped cable plus a monitord
+// restart would abandon the retry and hide the overlay — the same blank screen
+// the raised-AP wired exemption exists to prevent. A confirmed ONLINE reading
+// must still exit: WAN reachability is the correct end of an out-of-box session.
+func TestOutOfBoxAPSurvivesLinkPresentEmission(t *testing.T) {
+	// raiseUnbounded parks the machine in StateAPActive under the given raise
+	// reason with the raise FAILING, which is the only state from which the
+	// linkPresent branch is reachable.
+	raiseUnbounded := func(t *testing.T, ctx context.Context, reason string) *harness {
+		t.Helper()
+		fl := &fakeLink{up: false}
+		h := newLinkHarness(t, fl)
+		h.wifi.setProfile(false)
+		h.ap.upErr = errors.New("nm refuses the hotspot")
+		h.m.transition(ctx, StateAPActive, Detail{Reason: reason})
+		require.Equal(t, StateAPActive, h.m.State())
+		h.m.mu.Lock()
+		up := h.m.apUp
+		h.m.mu.Unlock()
+		require.False(t, up, "the scenario needs a failed raise, not a live AP")
+		fl.up = true // the air-gapped cable appears
+		return h
+	}
+
+	t.Run("out-of-box session keeps wanting the AP", func(t *testing.T) {
+		ctx := context.Background()
+		h := raiseUnbounded(t, ctx, "unprovisioned")
+
+		h.m.onConnectivity(ctx, false, false) // monitord restart re-emits offline
+
+		assert.Equal(t, StateAPActive, h.m.State(),
+			"a cable must not abandon the out-of-box raise")
+		assert.Equal(t, 0, countReason(h, StateUnprovisioned, "link-present"),
+			"no link-present landing: that transition is what blanks the screen")
+	})
+
+	t.Run("a bounded session still exits on link-present", func(t *testing.T) {
+		ctx := context.Background()
+		h := raiseUnbounded(t, ctx, ReasonUserRequested)
+
+		h.m.onConnectivity(ctx, false, false)
+
+		assert.Equal(t, StateUnprovisioned, h.m.State(),
+			"a provisioned/bounded session has somewhere to fall back to")
+		assert.Equal(t, 1, countReason(h, StateUnprovisioned, "link-present"))
+	})
+
+	t.Run("confirmed online still ends the out-of-box session", func(t *testing.T) {
+		ctx := context.Background()
+		h := raiseUnbounded(t, ctx, "unprovisioned")
+
+		h.m.onConnectivity(ctx, true, false) // WAN confirmed
+
+		assert.Equal(t, StateUnprovisioned, h.m.State(),
+			"WAN reachability is the correct exit; the guard must sit below it")
+		assert.Equal(t, 1, countReason(h, StateUnprovisioned, ReasonUnprovisioned))
+	})
+}
+
+// TestTeardownLandingSurvivesFailedAPDown pins constraint 4(a) across the three
+// session-teardown landings when softap.Down FAILS. ensureAPDown has already
+// stopped the portal and cleared apUp by then, so bailing out would leave the
+// softap_qr advertising an AP that is gone — and, once the apDownPending retry
+// succeeds, with no repaint ever scheduled to correct it. Each landing must
+// therefore complete: the machine reaches its resting state, the notifier
+// receives the landing reason, and the outstanding profile deletion is still
+// retried by reconcile.
+func TestTeardownLandingSurvivesFailedAPDown(t *testing.T) {
+	downFails := func() error { return errors.New("nmcli connection delete timed out") }
+	cases := []struct {
+		name       string
+		setup      func(t *testing.T, ctx context.Context) *harness
+		wantState  State
+		wantReason string
+	}{
+		{
+			name: "user-requested session expiry",
+			setup: func(t *testing.T, ctx context.Context) *harness {
+				h := newHarness(t)
+				h.wifi.setProfile(false)
+				h.m.transition(ctx, StateAPActive, Detail{Reason: ReasonUserRequested})
+				require.Equal(t, StateAPActive, h.m.State())
+				h.ap.downErr = downFails()
+				h.tickN(ctx, 120) // the 30-minute user-requested bound
+				return h
+			},
+			wantState:  StateUnprovisioned,
+			wantReason: ReasonAPSessionEndedSilent,
+		},
+		{
+			name: "wired sighting under a raised AP",
+			setup: func(t *testing.T, ctx context.Context) *harness {
+				h := newHarness(t)
+				h.wifi.setProfile(false)
+				h.m.transition(ctx, StateAPActive, Detail{Reason: ReasonUserRequested})
+				require.Equal(t, StateAPActive, h.m.State())
+				h.ap.downErr = downFails()
+				h.m.wiredLink = func(context.Context) (bool, error) { return true, nil }
+				h.tick(ctx)
+				return h
+			},
+			wantState:  StateUnprovisioned,
+			wantReason: ReasonAPSessionEndedSilent,
+		},
+		{
+			name: "episode AP phase expiry",
+			setup: func(t *testing.T, ctx context.Context) *harness {
+				h := newEpisodeHarness(t, &fakeLink{up: true})
+				h.m.onConnectivity(ctx, false, false)
+				h.tickN(ctx, windowSamples) // the setup-incomplete raise
+				require.Equal(t, StateAPActive, h.m.State())
+				h.ap.downErr = downFails()
+				h.tickN(ctx, windowSamples) // the 5-minute AP phase
+				return h
+			},
+			wantState:  StateOfflineRetrying,
+			wantReason: ReasonAPSessionEnded,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			h := tc.setup(t, ctx)
+
+			assert.Equal(t, tc.wantState, h.m.State(),
+				"the landing must complete even though the profile deletion failed")
+			assert.Equal(t, 1, countReason(h, tc.wantState, tc.wantReason),
+				"the landing reason must reach the notifier — that repaint is what clears the QR")
+			last := h.notifier.calls[len(h.notifier.calls)-1]
+			assert.Equal(t, tc.wantReason, last.Detail.Reason,
+				"the setup QR must not be the last thing left on screen")
+
+			h.m.mu.Lock()
+			pending := h.m.apDownPending
+			h.m.mu.Unlock()
+			require.True(t, pending, "a failed deletion must stay latched for the reconcile retry")
+
+			// The landing does not abandon the deletion: the next reconcile
+			// retries it, and a success clears the latch.
+			downs := h.rec.count("ap.Down")
+			h.ap.downErr = nil
+			h.tick(ctx)
+			assert.Greater(t, h.rec.count("ap.Down"), downs,
+				"apDownPending must keep driving the retry after the landing")
+			h.m.mu.Lock()
+			pending = h.m.apDownPending
+			h.m.mu.Unlock()
+			assert.False(t, pending, "a successful retry clears the pending latch")
+		})
+	}
+}
+
 // --- §4.2 recheck cadence -----------------------------------------------------
 
 // driveSustainedRaise walks a link-absent provisioned harness into the
@@ -647,6 +847,12 @@ func TestTeardownInvariantGeneric(t *testing.T) {
 			if len(list[j]) > 7 && list[j][:7] == "notify:" {
 				assert.NotContains(t, list[j], ":scanning",
 					"a teardown landing must never leave scanning as the next paint")
+				// The QR paint is reason "ap-active" (it carries the SSID/PSK
+				// the notifier renders as softap_qr) — NOT the literal
+				// "softap", which never appears in a reason and would make
+				// this assertion vacuously true.
+				assert.NotContains(t, list[j], ":ap-active",
+					"a teardown landing must never leave the setup QR as the next paint")
 				break
 			}
 		}
@@ -902,4 +1108,85 @@ func TestSnapshotDeferredSubState(t *testing.T) {
 	// Freshness expires (12 ticks): counting resumes, the flag drops.
 	h.tickN(ctx, 13)
 	assert.False(t, h.m.Snapshot().Deferred)
+}
+
+// --- tuning sanitation --------------------------------------------------------
+
+// TestTuningSanitation pins withDefaults' rejection rules. config decodes the
+// on-device `provisioning` block permissively (a bad block must never
+// crash-loop the daemon), so this resolution is the only validation the knobs
+// get. The station ladder is the sharp case: withDefaults rounds every phase
+// up to at least one sample, so a zero or negative rung would silently produce
+// a one-tick station phase and invert §4.1's "AP ≤ 33% of every cycle".
+func TestTuningSanitation(t *testing.T) {
+	const tick = 15 * time.Second
+	defaults := defaultEpisodeStationLadder()
+
+	t.Run("ladder rejection is all-or-nothing", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			ladder []time.Duration
+			want   []time.Duration
+		}{
+			{"empty takes the default", nil, defaults},
+			{"zero rung discards the whole override",
+				[]time.Duration{2 * time.Minute, 0, 4 * time.Minute}, defaults},
+			{"negative rung discards the whole override",
+				[]time.Duration{2 * time.Minute, -1 * time.Minute}, defaults},
+			{"oversized rung discards the whole override",
+				[]time.Duration{2 * time.Minute, 48 * time.Hour}, defaults},
+			{"a valid custom ladder is kept verbatim",
+				[]time.Duration{time.Minute, 2 * time.Minute},
+				[]time.Duration{time.Minute, 2 * time.Minute}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := Tuning{EpisodeStationLadder: tc.ladder}.withDefaults(tick, zap.NewNop())
+				assert.Equal(t, tc.want, got.EpisodeStationLadder)
+				for i, s := range got.episodeLadderSamples {
+					assert.Greater(t, s, 1,
+						"rung %d must outlast a single tick, or the AP stops being the minority of the cycle", i)
+				}
+			})
+		}
+	})
+
+	t.Run("scalar durations", func(t *testing.T) {
+		cases := []struct {
+			name string
+			in   Tuning
+			want time.Duration
+			get  func(Tuning) time.Duration
+		}{
+			{"zero episode AP phase takes the default", Tuning{}, defaultEpisodeApPhase,
+				func(t Tuning) time.Duration { return t.EpisodeApPhase }},
+			{"negative episode AP phase takes the default",
+				Tuning{EpisodeApPhase: -5 * time.Minute}, defaultEpisodeApPhase,
+				func(t Tuning) time.Duration { return t.EpisodeApPhase }},
+			{"oversized recheck AP phase takes the default",
+				Tuning{RecheckApPhase: 30 * 24 * time.Hour}, defaultRecheckApPhase,
+				func(t Tuning) time.Duration { return t.RecheckApPhase }},
+			{"a valid override is kept",
+				Tuning{UserRequestedSession: 10 * time.Minute}, 10 * time.Minute,
+				func(t Tuning) time.Duration { return t.UserRequestedSession }},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				assert.Equal(t, tc.want, tc.get(tc.in.withDefaults(tick, zap.NewNop())))
+			})
+		}
+	})
+}
+
+// TestClearOfflineDropsPendingScanSkip pins the lifetime of the recheck
+// blink's one-shot scan-skip: it is only ever valid for the raise that
+// immediately follows the blink, so leaving the AP world must drop it. Without
+// this a flag set but not consumed would hand a much later raise a stale
+// portal picker.
+func TestClearOfflineDropsPendingScanSkip(t *testing.T) {
+	h := newHarness(t)
+	h.m.skipNextPreAPScan = true
+	h.m.clearOffline()
+	assert.False(t, h.m.skipNextPreAPScan,
+		"the scan-skip must not outlive the AP episode that set it")
 }

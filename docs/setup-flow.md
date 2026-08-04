@@ -103,7 +103,7 @@ stateDiagram-v2
   ap_active --> offline_retrying: episode AP phase over (ap-session-ended, station ladder)
   ap_active --> offline_retrying: recheck blink (ap-recheck, then re-raise or exit)
   offline_retrying --> offline_retrying: episode settled (setup-incomplete-settled)
-  ap_active --> offline_retrying: session expired / wired link sighted (silent landing)
+  ap_active --> offline_retrying: session expired / wired link sighted (silent landing; not out-of-box)
   online --> ap_active: startWifiSetup (user-requested, 30m session)
   offline_retrying --> ap_active: startWifiSetup (user-requested)
   unprovisioned --> ap_active: startWifiSetup (user-requested)
@@ -114,7 +114,7 @@ across join attempts):
 
 | Raise reason | Session policy |
 |---|---|
-| `unprovisioned` | Unbounded, no recheck (out-of-box behavior; a station blink can learn nothing with no saved profile). |
+| `unprovisioned` | Unbounded, no recheck, and exempt from the wired exit (out-of-box behavior; a station blink can learn nothing with no saved profile). |
 | `sustained-offline`, `relocated` | **Recheck cadence**: AP up 30 min, then a narrated blink (`ap-recheck`) — teardown, forced scan, explicit activation of in-range saved profiles (MRU order, hidden last, 90s per activation, 4-min blink ceiling; a listing error aborts the blink, never a blind activation) — then re-raise with the original reason if nothing associates. Unbounded cycles: the QR is the correct steady state for a gone network, and every cycle re-tests the world (D11). |
 | `setup-incomplete` | 5-min AP phase, then the §4.1 station ladder (5/10/20 min); AP ≤ 33% of every cycle. |
 | `user-requested` | 30 min, then teardown and resume normal state handling (the `startWifiSetup` abandonment net). |
@@ -124,7 +124,17 @@ Bounded rows carry a 2-hour absolute cap across `applyRescan` re-arms, and
 every teardown defers while the portal served a **human-caused** request
 (`/connect`, `/rescan` — never root fetches or OS captive probes) in the last
 2 minutes, up to +15 min. A confirmed **wired** sighting lowers any raised AP
-(the survey's ethernet rows carry none of the own-hotspot ambiguity). Every
+(the survey's ethernet rows carry none of the own-hotspot ambiguity) — with
+one exemption: the out-of-box `unprovisioned` session stays up, because there
+is no saved network for its AP to compete with and lowering it would leave an
+unclaimed, air-gapped wired frame on a blank screen; such a frame completes
+its claim over the LAN or the relayer with the AP still broadcasting. The same
+exemption applies to that session's *failed*-raise flavor, where a confirmed
+link-present reading would otherwise abandon the retry. It does **not** cover
+a frame that boots with the cable already attached: that path parks in
+`unprovisioned` from `starting` and never raises an AP to exempt, so an
+air-gapped wired frame booted from cold still shows nothing — a known
+remaining gap, not something this rule closes. Every
 teardown lands on a named reason: `ap-session-ended` (narrated, unclaimed),
 `ap-recheck` (narrated, both claim states, hide-downgrade on old manifests),
 or `ap-session-ended-silent` (claimed — the notifier's narrating-guarded hide,
@@ -229,7 +239,7 @@ Separately from provisioning, `feral-controld` runs a bounded recovery state mac
 
 ## Offline recovery
 
-A claimed, provisioned device that later loses internet does **not** immediately show the AP. It enters `offline_retrying`, where every 15s tick probes the local link: a sighting resets the sample count, and an inconclusive probe pauses it (bounded — see the AP-raise policy above). If internet returns, it goes back to `online` with no visible change. Only after a full window (5m) of **continuous, confirmed link absence** (no ethernet, no Wi-Fi association) does it raise the AP with reason `sustained-offline` — the same portal path as first-run provisioning — so the owner can re-enter Wi-Fi credentials. A device whose Wi-Fi association survives (WAN outage, air-gapped LAN) stays in `offline_retrying` indefinitely with the AP down: it keeps its station link, stays reachable on the LAN hub, and keeps advertising mDNS. Moving such a frame to a new Wi-Fi while the old network is still associated has no over-the-LAN credential path today (the hub's `connect` command is the claim/pairing step, not a Wi-Fi join; an over-the-hub Wi-Fi change is a possible follow-up) — the recovery is physical: power off or unplug the old router so the association drops, which raises the AP after a fresh sustained window. The LAN hub listener stays bound throughout (only mDNS discoverability is link-keyed; the listener itself is unconditional), so a LAN client can still reach the device on a working local link even with no internet.
+A claimed, provisioned device that later loses internet does **not** immediately show the AP. It enters `offline_retrying`, where every 15s tick probes the local link: a sighting resets the sample count, and an inconclusive probe pauses it (bounded — see the AP-raise policy above). If internet returns, it goes back to `online` with no visible change. Only after a full window (5m) of **continuous, confirmed link absence** (no ethernet, no Wi-Fi association) does it raise the AP with reason `sustained-offline` — the same portal path as first-run provisioning — so the owner can re-enter Wi-Fi credentials. A device whose Wi-Fi association survives (WAN outage, air-gapped LAN) stays in `offline_retrying` indefinitely with the AP down: it keeps its station link, stays reachable on the LAN hub, and keeps advertising mDNS. Moving such a frame to a new Wi-Fi while the old network is still associated is what `startWifiSetup` exists for (above): the app, reaching the frame over the LAN hub or the relayer, puts it back into setup mode on demand — a `user-requested` session, 30-minute bound — and the user re-enters credentials through the captive portal. Note the hub's `connect` command is *not* this path; it is the claim/pairing step. The physical recovery remains the fallback when no app is available (an unclaimed frame, or a user without the app): power off or unplug the old router so the association drops, which raises the AP after a fresh sustained window. The LAN hub listener stays bound throughout (only mDNS discoverability is link-keyed; the listener itself is unconditional), so a LAN client can still reach the device on a working local link even with no internet.
 
 ---
 

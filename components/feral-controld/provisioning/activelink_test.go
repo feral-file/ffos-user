@@ -29,12 +29,16 @@ func newLinkHarness(t *testing.T, fl *fakeLink) *harness {
 	t.Helper()
 	rec := &recorder{}
 	h := &harness{
-		rec:      rec,
-		ap:       &fakeAP{rec: rec, info: softap.Info{SSID: "FF1-abc", PSK: "abc12345"}},
-		wifi:     &fakeWifi{rec: rec},
-		conn:     &fakeConn{},
-		clk:      newFakeClock(),
-		notifier: &fakeNotifier{},
+		rec:  rec,
+		ap:   &fakeAP{rec: rec, info: softap.Info{SSID: "FF1-abc", PSK: "abc12345"}},
+		wifi: &fakeWifi{rec: rec},
+		conn: &fakeConn{},
+		clk:  newFakeClock(),
+		// Mirrored into the shared recorder like newHarness's notifier:
+		// TestTeardownInvariantGeneric walks the combined ap.Down/notify
+		// timeline, and without the wiring its inner scan finds no
+		// notifications to check at all.
+		notifier: &fakeNotifier{rec: rec},
 	}
 	h.m = New(Config{
 		AP:            h.ap,

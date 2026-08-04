@@ -290,9 +290,11 @@ Example:
 }
 ```
 
-Current success response example (sent BEFORE any radio work — raising the AP
-severs the station link that carries the reply, so the app must treat a send
-timeout as success):
+Current success response example (produced before the raise is queued, so it
+normally wins the race by a wide margin — the raise is seconds of `nmcli` work
+— but it is NOT synchronized against the transport, and raising the AP severs
+the station link that carries the reply, so the app must treat a send timeout
+as success):
 
 ```json
 {

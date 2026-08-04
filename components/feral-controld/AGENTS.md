@@ -4,6 +4,26 @@ Scope: `components/feral-controld/**`
 
 Repository-wide principles from the root `AGENTS.md` also apply here.
 
+## Reading the `§`-citations in this component
+
+Comments across the setup domain — `provisioning`, `devicectl`, `setupui`,
+`portal`, `wifictl`, `hub`, `status`, `commands`, `config` — cite sections of
+`docs/network-recovery-ux.md` and `docs/app-triggered-wifi-setup.md`, both by
+filename and by bare `§` number.
+Both documents were **retired on purpose** once their plans shipped (commit
+`d306a6a`); the citations were left in place because they name the *rationale*
+for a decision, and rewriting thirty comments to drop the reference would have
+destroyed that trail without replacing it. They are historical references, not
+dangling links — do not "fix" them by deleting the section numbers.
+
+- To read a cited section: `git show ca6a204:docs/network-recovery-ux.md`
+  (likewise `git show ca6a204:docs/app-triggered-wifi-setup.md`).
+- The DURABLE rules — the ones a change must still satisfy — live in
+  `docs/setup-flow.md` (session-policy table, episode, trigger rules),
+  `docs/api-design.md`, and `docs/controld-inbound-controller-messages.md`.
+  When those disagree with a `§`-citation, the durable docs win and the
+  citation is stale rationale.
+
 ## Purpose
 
 `feral-controld` is the connectivity and command orchestration daemon.
