@@ -1240,6 +1240,18 @@ func stripHeadProbeParams(rawURL string) string {
 // verbatim, in DP-1 source order) and break the exact-string
 // resourceKey match this function exists to restore. Returns rawURL
 // unchanged if none of params are present.
+//
+// Empty pairs are dropped along the way, but ONLY on a query string this
+// function is already rewriting. ff-player builds its iframe URL with
+// `url.search += "&display_mode=..."`, which on a query-less source (every
+// Art Blocks generator URL, and any bare item.Source) emits
+// "...?&display_mode=fit" — an empty leading pair. Keeping it would leave
+// a dangling "?" after the strip, and "https://host/path?" is not the
+// captured key "https://host/path", so a fully cached artwork missed and
+// fail-closed to Chromium's error page. ff-player has been fixed to emit
+// the right separator; this stays because fielded devices update the
+// player bundle and the daemon on separate cadences, and because emitting
+// a URL that can never match a captured key is wrong on its own terms.
 func stripQueryParams(rawURL string, params []string) string {
 	before, after, ok := strings.Cut(rawURL, "?")
 	if !ok {
@@ -1263,6 +1275,14 @@ func stripQueryParams(rawURL string, params []string) string {
 		}
 		if slices.Contains(params, key) {
 			changed = true
+			continue
+		}
+		// Deliberately does NOT set changed: an empty pair alone is not a
+		// reason to rewrite a URL whose params we are not stripping, so a
+		// query string we do not otherwise touch still returns verbatim
+		// below and can only ever miss, never be rewritten into a
+		// different resource's key.
+		if pair == "" {
 			continue
 		}
 		kept = append(kept, pair)

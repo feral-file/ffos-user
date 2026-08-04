@@ -79,21 +79,31 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		return errorResponse("not_found", "source not found in playlist", false), nil
 	}
 
-	// Only a playlistUrl-resolved download has a URL to index for the
-	// offline fallback; an inline dp1_call has none (same as
-	// DownloadPlaylist). When there IS one, sample the playlist's
-	// clear-generation BEFORE the download so a ClearPlaylist racing this
-	// whole download+index sequence is honored (the index write is
-	// skipped) rather than silently resurrecting the cleared playlist
-	// fallback record — see Service.CurrentPlaylistClearGeneration's doc.
+	// Only a playlistUrl-resolved download has a URL to index the playlist
+	// BY; an inline dp1_call has none (same as DownloadPlaylist, which
+	// passes "" here too). That is a statement about the URL index alone
+	// — the playlist BODY must be persisted either way, which is why the
+	// save below is unconditional while sourceURL may be empty.
+	//
+	// Persisting for an inline playlist is not about the
+	// displayPlaylist-by-URL fallback (there is no URL, so there is no
+	// fallback). It is what makes the download reversible: ClearPlaylist
+	// loads the playlist record BY ID to enumerate the member sources it
+	// has to clear, so with no record saved it fails ErrPlaylistNotFound
+	// and the cached items are orphaned — clearable only one-by-one by
+	// source. DownloadPlaylist has always saved unconditionally, so
+	// gating this one made whether a playlist could later be cleared
+	// depend on whether it was downloaded whole or item-by-item.
+	//
+	// Sample the playlist's clear-generation BEFORE the download so a
+	// ClearPlaylist racing this whole download+save sequence is honored
+	// (the write is skipped) rather than silently resurrecting the
+	// cleared record — see Service.CurrentPlaylistClearGeneration's doc.
 	// Sampled here (just after resolve, before DownloadItem) for the same
 	// reason DownloadPlaylist samples right after it has the playlist
 	// body: it is the earliest point the playlist ID is known.
-	sourceURL, indexByURL := stringArg(args["playlistUrl"])
-	var clearGen uint64
-	if indexByURL {
-		clearGen = h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
-	}
+	sourceURL, _ := stringArg(args["playlistUrl"])
+	clearGen := h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
 
 	// ErrItemInlineNotQueued is an OUTCOME, not a failure: the item's
 	// bytes are inline in the playlist body, so it is already offline and
@@ -111,17 +121,20 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	}
 
 	// Best-effort, and deliberately after the queue above already
-	// succeeded: index the resolved playlist by its playlistUrl for the
-	// SAME displayPlaylist-by-URL offline fallback DownloadPlaylist's
-	// sourceURL already provides — see
+	// succeeded: persist the resolved playlist, and — when the request
+	// carried a playlistUrl — index it by that URL for the SAME
+	// displayPlaylist-by-URL offline fallback DownloadPlaylist's
+	// sourceURL already provides; see
 	// Service.IndexPlaylistForOfflineDisplay's doc for why a single-item
 	// download would otherwise leave that URL with no offline fallback at
-	// all, even though this one item is now genuinely cached. A failure
-	// here must never turn an already-successful item queue into an error
-	// response, since the item itself is queued/cached either way.
-	if indexByURL {
-		h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen)
-	}
+	// all, even though this one item is now genuinely cached. Runs on the
+	// ErrItemInlineNotQueued path too: an inline item needs no download
+	// precisely BECAUSE its bytes live in this body, so dropping the body
+	// is the one case where skipping the save loses the actual content.
+	// A failure here must never turn an already-successful item queue
+	// into an error response, since the item itself is queued/cached
+	// either way.
+	h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen)
 
 	return map[string]any{"ok": true, "status": status, "source": source}, nil
 }

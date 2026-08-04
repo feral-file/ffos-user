@@ -1294,6 +1294,20 @@ func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSess
 	if _, err := child.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
 		// Deliberately NOT resumed: a child running without interception
 		// is exactly the bypass this closes.
+		//
+		// This is the NORMAL path for workers, not an error path. Chromium
+		// does not implement the Fetch domain on worker targets at all —
+		// measured on the FF1, a type:worker session answers
+		// "cdp error -32601: 'Fetch.enable' wasn't found". So a worker is
+		// contained by staying paused forever rather than by having its
+		// requests intercepted, which is safe but has a real functional
+		// cost worth knowing before anyone "fixes" this: artwork whose
+		// rendering depends on a worker is captured with that worker
+		// never running. Resuming it anyway to recover that rendering
+		// would hand every artwork worker an unguarded network — the
+		// exact trade this fail-closed branch refuses.
+		// TestCapturer_RealBrowser_LoopbackRequestsNeverLeaveTheBrowser
+		// pins it against a real browser.
 		c.logger.Warn("offline cache capture: Fetch.enable on child target failed; leaving it paused",
 			zap.String("session_id", evt.SessionID),
 			zap.String("type", evt.TargetInfo.Type), zap.Error(err))

@@ -2240,7 +2240,22 @@ more interception:
   UUID, and streams device notifications to anything that connects. That
   is the reachable target, and it is the same surface #3471 closes.
 
-Both intersect an exposure `docs/architecture.md` already accepts as
+- **Workers are contained by pausing, not by interception.** Chromium does
+  not implement the `Fetch` domain on worker targets at all: `Fetch.enable`
+  on a `type:worker` session answers `cdp error -32601: 'Fetch.enable'
+  wasn't found`. Measured on the FF1, not inferred. Because
+  `armCaptureChildTarget` fails closed — it never sends
+  `Runtime.runIfWaitingForDebugger` when it could not arm interception
+  first — the worker simply stays paused for the whole capture and issues
+  no requests. That IS containment, and it is why the loopback probe below
+  records zero hits. But it carries a functional cost that belongs in the
+  open list rather than the solved one: **artwork whose rendering depends
+  on a worker is captured with that worker never running.** Recovering
+  that rendering means resuming the target without interception, which
+  hands every artwork worker an unguarded network — so the fix is the same
+  filtering proxy, not a change to this branch.
+
+Both interception gaps intersect an exposure `docs/architecture.md` already accepts as
 release-scoped (the open, unauthenticated `:1111` surface, end state
 #3471), and are the reason a filtering proxy remains the eventual
 complete answer.

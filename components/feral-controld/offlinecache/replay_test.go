@@ -514,6 +514,52 @@ func TestReplayer_ProcessRequestPaused_StripsPlayerAppendedDisplayModeParam(t *t
 	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("software payload")), params["body"])
 }
 
+// TestReplayer_ProcessRequestPaused_StripsDisplayModeAfterEmptyLeadingPair
+// is the regression test for the second field reproduction of the same
+// bug, found on FF1-191TYKPB with a fully cached Art Blocks item
+// ("Trossets #65"): ff-player appended its hint with
+// `url.search += "&display_mode=fit"`, and on a source with NO query
+// string that emits "...147000065?&display_mode=fit" — an empty leading
+// pair. Stripping display_mode alone left "...147000065?", whose trailing
+// "?" does not match the captured key "...147000065", so the item missed
+// and fail-closed to Chromium's error page despite reporting ready/100%.
+// It hit every query-less source; the CDN previews that carry
+// "?edition_number=..." masked it because their "&" is legitimate there.
+// ff-player now emits the correct separator, but the daemon must survive
+// the old bundle too — the two ship on independent update cadences.
+func TestReplayer_ProcessRequestPaused_StripsDisplayModeAfterEmptyLeadingPair(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload") // res.URL has no query string
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
+
+	liveURL := res.URL + "?&display_mode=fit"
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", liveURL))
+	params := awaitSend(t, done)
+	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("software payload")), params["body"])
+}
+
+// TestReplayer_ProcessRequestPaused_EmptyPairAloneStillMisses pins the
+// narrowness of the empty-pair drop above: it is a normalization applied
+// only while already rewriting a URL to strip an allowlisted param, never
+// a standalone "?" tolerance. A request carrying an unrelated param must
+// still miss, so the empty-pair handling can never widen what matches a
+// cached resource.
+func TestReplayer_ProcessRequestPaused_EmptyPairAloneStillMisses(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	res := seedItem(t, ts.store, "item-1", "software payload")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), sourceFor("item-1")))
+
+	liveURL := res.URL + "?&some_other_param=1"
+	done := ts.expectSend("Fetch.failRequest")
+	ts.handler(requestPausedEvent(t, "req-1", liveURL))
+	awaitSend(t, done)
+}
+
 // TestReplayer_ProcessRequestPaused_StripsDisplayModeWithoutReorderingOtherParams
 // pins that stripping display_mode never routes through a
 // parse-then-net/url.Values.Encode() round trip: Values.Encode() sorts

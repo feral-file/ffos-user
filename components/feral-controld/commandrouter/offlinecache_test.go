@@ -111,13 +111,21 @@ func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 	assert.Equal(t, item.Source, resp["source"])
 }
 
-// TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing
-// pins that a dp1_call (inline) download has no source URL to index by
-// — mirroring TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL's
-// contract for downloadPlaylist. Deliberately no
-// IndexPlaylistForOfflineDisplay expectation: gomock's strict
-// controller fails this test if the handler calls it anyway.
-func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *testing.T) {
+// TestCommandHandler_DownloadPlaylistItem_InlinePlaylistPersistsBodyWithEmptySourceURL
+// pins the distinction an earlier version of this handler got wrong: a
+// dp1_call (inline) download has no source URL to index BY, but its
+// playlist body must still be persisted. The empty sourceURL argument is
+// the whole contract — Service skips only the URL index on "", never the
+// body save — and it mirrors
+// TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL's
+// contract for the bulk path, which has always saved unconditionally.
+//
+// What the earlier "skip the whole call for inline" behavior actually
+// broke was reversibility, not the offline fallback: ClearPlaylist loads
+// the record BY ID to enumerate member sources, so with nothing saved it
+// failed ErrPlaylistNotFound and left the cached items clearable only
+// one-by-one by source.
+func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistPersistsBodyWithEmptySourceURL(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
@@ -125,6 +133,7 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *test
 	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{map[string]interface{}{"id": "item-1", "source": item.Source}}}
 	playlistBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/index.html"}]}`)
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1","resolved":true}`)
 
 	ts.mockJSON.EXPECT().Marshal(playlistMap).Return(playlistBytes, nil).Times(1)
 	ts.mockJSON.EXPECT().Unmarshal(playlistBytes, gomock.Any()).DoAndReturn(func(_ []byte, v interface{}) error {
@@ -132,7 +141,13 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *test
 		*p = playlist
 		return nil
 	}).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(7)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	// Empty sourceURL, and the SAMPLED generation — not a fresh read —
+	// so a ClearPlaylist racing the download still wins.
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(7)).
+		Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
@@ -141,6 +156,45 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *test
 
 	require.NoError(t, err)
 	assertOkResponse(t, result)
+}
+
+// TestCommandHandler_DownloadPlaylistItem_InlineItemPersistsBody covers
+// the case the body matters MOST for: an item whose bytes are inline in
+// the playlist (a data: source), so DownloadItem queues nothing and
+// returns ErrItemInlineNotQueued. The item is already "offline" only in
+// the sense that this body holds it — dropping the body on the outcome
+// that reports success is what would make that claim false.
+func TestCommandHandler_DownloadPlaylistItem_InlineItemPersistsBody(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	source := "data:text/html;base64,PGh0bWw+"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: source}
+	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{map[string]interface{}{"id": "item-1", "source": source}}}
+	playlistBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"` + source + `"}]}`)
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockJSON.EXPECT().Marshal(playlistMap).Return(playlistBytes, nil).Times(1)
+	ts.mockJSON.EXPECT().Unmarshal(playlistBytes, gomock.Any()).DoAndReturn(func(_ []byte, v interface{}) error {
+		p := v.(**dp1.Playlist)
+		*p = playlist
+		return nil
+	}).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(0)).
+		Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"dp1_call": playlistMap, "source": source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	require.Equal(t, "not_queued_inline", resp["status"])
 }
 
 // TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess
