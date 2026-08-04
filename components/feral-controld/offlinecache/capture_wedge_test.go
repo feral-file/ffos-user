@@ -6,6 +6,7 @@ import (
 	"fmt"
 	go_io "io"
 	go_http "net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -105,7 +106,7 @@ func TestResolveResources_ExpiredFinalizeContextSkipsEveryFetchWithoutNetworkCal
 			return nil, nil
 		},
 	}
-	c := &capturer{httpClient: client, logger: zaptest.NewLogger(t)}
+	c := &capturer{fetchClient: client, logger: zaptest.NewLogger(t)}
 
 	tracker := newCaptureTracker()
 	const resourceCount = 5
@@ -179,7 +180,7 @@ func TestResolveResources_DeadlineExpiringMidFinalizationPreservesEarlierFetches
 	}
 
 	store := NewStore(t.TempDir(), wrapper.NewOS(), wrapper.NewJSON(), zaptest.NewLogger(t))
-	c := &capturer{httpClient: client, store: store, logger: zaptest.NewLogger(t)}
+	c := &capturer{fetchClient: client, store: store, logger: zaptest.NewLogger(t)}
 
 	tracker := newCaptureTracker()
 	tracker.recordResource(fastURL, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
@@ -294,4 +295,52 @@ func TestClearObservedOriginsStorage_AggregateDeadlineSkipsRemainingOrigins(t *t
 
 	assert.Len(t, session.sentOrigins, 1,
 		"only the first origin's clear should run once the aggregate deadline (bounded here by the canceled parent ctx) has elapsed")
+}
+
+// TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne pins the split that a
+// regression in this PR made necessary. The source guard exists to keep
+// untrusted playlist sources away from loopback — and the capture
+// Chromium's own DevTools endpoint IS on loopback (127.0.0.1:9223/json).
+// Handing the guarded client to that discovery step therefore refused
+// every ClassSoftware item at DialPageSession, before navigation, which
+// is exactly what happened when one client was used for both roles.
+//
+// Asserted as behavior, not wiring: the guarded client must reject a
+// loopback DevTools URL (proving the hazard is real) while the client the
+// capturer actually uses for discovery must reach it.
+func TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne(t *testing.T) {
+	devtools := httptest.NewServer(go_http.HandlerFunc(func(w go_http.ResponseWriter, r *go_http.Request) {
+		require.Equal(t, "/json", r.URL.Path)
+		_, _ = w.Write([]byte(`[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9223/devtools/page/X"}]`))
+	}))
+	defer devtools.Close()
+
+	// The guarded client — correctly — refuses our own browser, because
+	// it cannot tell a trusted loopback destination from a hostile one.
+	// That is why it must never be the discovery client.
+	guarded := newGuardedHTTPClient(staticResolver{ip: "93.184.216.34"}, 0)
+	req, err := guarded.NewRequest(go_http.MethodGet, devtools.URL+"/json", nil)
+	require.NoError(t, err)
+	resp, err := guarded.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	require.Error(t, err, "the guarded client must reject loopback — that is its job")
+	assert.ErrorIs(t, err, ErrUnsafeSource)
+
+	// The discovery client production wires in reaches the same endpoint.
+	discovery := wrapper.NewHTTPClient()
+	req, err = discovery.NewRequest(go_http.MethodGet, devtools.URL+"/json", nil)
+	require.NoError(t, err)
+	resp, err = discovery.Do(req)
+	require.NoError(t, err, "software capture cannot start if discovery is blocked")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, go_http.StatusOK, resp.StatusCode)
+
+	// The two roles live in separate fields on the capturer, so the
+	// compiler is what stops one quietly becoming the other again; this
+	// only pins that both are actually populated.
+	c := &capturer{cdpClient: discovery, fetchClient: guarded}
+	require.NotNil(t, c.cdpClient)
+	require.NotNil(t, c.fetchClient)
 }

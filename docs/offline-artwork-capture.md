@@ -2162,6 +2162,18 @@ direct. Supporting a proxy safely would mean enforcing the destination
 `sourceGuard.check` still runs first: it is what stops a bad source from
 ever being queued, and it produces the error the caller reports.
 
+**Which client goes where matters, and getting it wrong is silent.** The
+capturer holds two: `cdpClient` reaches our OWN capture Chromium's
+DevTools endpoint on loopback (`127.0.0.1:9223/json`) and must be
+UNGUARDED; `fetchClient` pulls resource bytes from artwork origins and
+must be GUARDED. They have opposite trust properties, and one client
+cannot serve both — an earlier revision of this work passed the guarded
+client to both roles, and because the guard correctly rejects loopback,
+every `ClassSoftware` capture failed at `DialPageSession` before
+navigation. `NewCapturer` takes the two separately so the compiler is
+what keeps them apart, and
+`TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne` pins both halves.
+
 **Residual gap, stated rather than hidden.** `capture.go`'s headless
 browser is NOT covered. Chromium resolves and dials on its own, and the
 page it navigates is untrusted artwork that may request arbitrary

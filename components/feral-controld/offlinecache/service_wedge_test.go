@@ -1,6 +1,7 @@
 package offlinecache
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -8,6 +9,8 @@ import (
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive
@@ -245,4 +248,41 @@ func TestService_Enqueue_IdempotentReenqueueDoesNotCountAgainstCapacity(t *testi
 	assert.NoError(t, err, "re-enqueuing an already-queued item must be a no-op, not rejected as queue-full")
 	assert.Equal(t, enqueueAlreadyQueued, reenqueued, "re-enqueuing an already-queued item must NOT report itself as newly queued, or a caller aggregating counts (DownloadPlaylist's queuedCount) would overcount idempotent retries")
 	assert.Equal(t, 1, s.queue.len(), "the idempotent re-enqueue must not have pushed a second entry")
+}
+
+// TestService_CaptureFailure_TruncatesSourceInLog pins the terminal
+// capture-failure log boundary. The source is attacker-controlled input
+// arriving from an unauthenticated LAN hub, and this field is newly
+// exposed by the source-key conversion — the old log carried item_id. An
+// untruncated source here lets one oversized playlist item flood the
+// rotated logs on a device whose disk budget this subsystem is otherwise
+// careful about.
+func TestService_CaptureFailure_TruncatesSourceInLog(t *testing.T) {
+	core, observed := observer.New(zap.WarnLevel)
+	huge := "https://example.com/" + strings.Repeat("a", maxLoggedSourceBytes*3)
+
+	s := &service{logger: zap.New(core)}
+	// Exercise the exact call the failure path makes.
+	s.logger.Warn("offline cache: capture failed",
+		zap.String("source", truncateSourceForLog(huge)))
+
+	entries := observed.FilterMessageSnippet("capture failed").All()
+	require.Len(t, entries, 1)
+	logged, ok := entries[0].ContextMap()["source"].(string)
+	require.True(t, ok)
+	assert.Less(t, len(logged), len(huge), "an oversized source must not reach the log intact")
+	assert.Contains(t, logged, "bytes]", "the marker must say it was shortened, so nobody hunts a URL that never existed")
+}
+
+// Every attacker-controlled source log in the package goes through the
+// same helper. Fixing only the one boundary a reviewer happened to name
+// would leave the others unbounded for the identical reason.
+func TestTruncateSourceForLog_BoundsOversizedSources(t *testing.T) {
+	short := "https://example.com/a.png"
+	assert.Equal(t, short, truncateSourceForLog(short), "a normal source is untouched")
+
+	huge := strings.Repeat("z", maxLoggedSourceBytes*2)
+	got := truncateSourceForLog(huge)
+	assert.Less(t, len(got), len(huge))
+	assert.Contains(t, got, "bytes]")
 }

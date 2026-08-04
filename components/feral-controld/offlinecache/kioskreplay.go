@@ -312,7 +312,7 @@ func (k *kioskReplay) scopeFor(sources []string) (cachedSources []string, mixed 
 			continue
 		} else if !errors.Is(err, ErrItemNotFound) {
 			k.logger.Warn("offline cache: failed to check cache state for playlist item, treating as uncached",
-				zap.String("source", source), zap.Error(err))
+				zap.String("source", truncateSourceForLog(source)), zap.Error(err))
 		}
 	}
 	// mixed is true whenever some (but not all) of the playlist's items

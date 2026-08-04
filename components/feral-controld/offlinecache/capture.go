@@ -117,9 +117,21 @@ type Capturer interface {
 type capturer struct {
 	downloader Downloader
 	dialer     wrapper.WebSocketDialer
-	httpClient wrapper.HTTPClient
-	store      Store
-	json       wrapper.JSON
+	// cdpClient talks to OUR OWN capture Chromium's DevTools endpoint on
+	// loopback (:9223/json). It must NOT be the guarded client: that
+	// guard exists to keep untrusted playlist sources away from loopback,
+	// and pointing it at our own browser refuses every software capture
+	// before navigation. Trusted destination, so it is the ordinary
+	// timeout-bounded client.
+	cdpClient wrapper.HTTPClient
+	// fetchClient pulls resource bytes from artwork origins — untrusted
+	// input, so this one IS guarded (reserved-address policy enforced in
+	// its DialContext, no proxy). Keeping the two apart is the whole
+	// point: they have opposite trust properties and one client cannot
+	// serve both.
+	fetchClient wrapper.HTTPClient
+	store       Store
+	json        wrapper.JSON
 	// io is used only for DialPageSession's small (/json targets list)
 	// HTTP body read — fetchAndStoreBody streams resource bodies
 	// straight into the store instead, see maxResourceBytes below.
@@ -259,10 +271,17 @@ func newDiskBudgetFromStore(store Store, maxDiskBytes int64, logger *zap.Logger)
 	return newCaptureDiskBudget(maxDiskBytes-used, false)
 }
 
+// NewCapturer takes TWO http clients on purpose. cdpClient reaches our
+// own capture Chromium on loopback and must be unguarded; fetchClient
+// reaches untrusted artwork origins and must be guarded. Passing one
+// client for both is the bug this signature exists to prevent — doing so
+// either blocks every software capture (guarded client on loopback) or
+// silently drops the SSRF protection on resource fetches.
 func NewCapturer(
 	downloader Downloader,
 	dialer wrapper.WebSocketDialer,
-	httpClient wrapper.HTTPClient,
+	cdpClient wrapper.HTTPClient,
+	fetchClient wrapper.HTTPClient,
 	store Store,
 	jsonWrapper wrapper.JSON,
 	ioWrapper wrapper.IO,
@@ -273,7 +292,8 @@ func NewCapturer(
 	return &capturer{
 		downloader:       downloader,
 		dialer:           dialer,
-		httpClient:       httpClient,
+		cdpClient:        cdpClient,
+		fetchClient:      fetchClient,
 		store:            store,
 		json:             jsonWrapper,
 		io:               ioWrapper,
@@ -301,7 +321,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	}
 	defer c.downloader.Release()
 
-	session, err := DialPageSession(ctx, endpoint, c.httpClient, c.dialer, c.json, c.io, c.logger)
+	session, err := DialPageSession(ctx, endpoint, c.cdpClient, c.dialer, c.json, c.io, c.logger)
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: dial capture session: %w", err)
 	}
@@ -421,7 +441,7 @@ func (c *capturer) resetTargetState(ctx context.Context, session CDPSession, sou
 		// rather than fail capture entirely just for this defense-in-
 		// depth step.
 		c.logger.Warn("offline cache: could not determine origin for storage reset, skipping",
-			zap.String("source", sourceURL), zap.Error(err))
+			zap.String("source", truncateSourceForLog(sourceURL)), zap.Error(err))
 		return nil
 	}
 	if _, err := session.Send(ctx, "Storage.clearDataForOrigin", map[string]interface{}{
@@ -676,7 +696,7 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 // for the real bytes written, not the (possibly much larger) reserved
 // cap.
 func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, capBytes int64) (string, int64, error) {
-	req, err := c.httpClient.NewRequest(method, url, nil)
+	req, err := c.fetchClient.NewRequest(method, url, nil)
 	if err != nil {
 		return "", 0, err
 	}
@@ -687,7 +707,7 @@ func (c *capturer) fetchAndStoreBody(ctx context.Context, url, method string, ca
 	transfer := beginResourceTransfer(ctx)
 	defer transfer.Close()
 
-	resp, err := c.httpClient.Do(req.WithContext(transfer.Context()))
+	resp, err := c.fetchClient.Do(req.WithContext(transfer.Context()))
 	if err != nil {
 		return "", 0, err
 	}

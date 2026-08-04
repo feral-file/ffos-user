@@ -454,7 +454,14 @@ func Bootstrap(
 	// whole-request timeout for the reason this comment block describes.
 	bodyClient := newGuardedHTTPClient(net.DefaultResolver, 0)
 
-	capturer := NewCapturer(downloader, dialer, bodyClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
+	// Two clients, opposite trust properties — see NewCapturer's doc.
+	// cdpDiscoveryClient reaches our OWN capture Chromium on loopback, so
+	// it must be the plain client: handing the guarded one to a loopback
+	// DevTools endpoint refuses every software capture before navigation.
+	// It keeps the 30s timeout, which suits a small /json targets list
+	// and bounds a wedged local browser.
+	cdpDiscoveryClient := wrapper.NewHTTPClient()
+	capturer := NewCapturer(downloader, dialer, cdpDiscoveryClient, bodyClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	// mediaCapturer needs no Downloader/dialer — it downloads a
 	// non-software item's single-file source directly over HTTP, never
 	// spinning up the headless Chromium capturer/downloader owns (see

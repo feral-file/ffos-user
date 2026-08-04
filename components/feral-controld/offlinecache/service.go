@@ -1119,7 +1119,7 @@ func (s *service) dequeueAdmitted() (captureJob, bool) {
 		if s.deferLogged[bucket] {
 			delete(s.deferLogged, bucket)
 			s.logger.Info("offline cache: admitting download after deferral",
-				zap.String("source", popped.item.Source),
+				zap.String("source", truncateSourceForLog(popped.item.Source)),
 				zap.String("bucket", name))
 		}
 		return popped, true
@@ -1139,7 +1139,7 @@ func (s *service) dequeueAdmitted() (captureJob, bool) {
 		s.deferLogged[bucket] = true
 		_, name := bucketForClass(sample.class)
 		s.logger.Info("offline cache: deferring download under system pressure; it waits for the device to recover rather than failing",
-			zap.String("source", sample.item.Source),
+			zap.String("source", truncateSourceForLog(sample.item.Source)),
 			zap.String("class", string(sample.class)),
 			zap.String("bucket", name),
 			zap.String("reason", decide(sample.class).Reason))
@@ -2035,7 +2035,8 @@ func (s *service) process(ctx context.Context, j captureJob) {
 	rec, err := s.captureForClass(ctx, j)
 	s.captureMu.Unlock()
 	if err != nil {
-		s.logger.Warn("offline cache: capture failed", zap.String("source", j.item.Source), zap.Error(err))
+		s.logger.Warn("offline cache: capture failed",
+			zap.String("source", truncateSourceForLog(j.item.Source)), zap.Error(err))
 		s.notify(j.item.Source, StateFailed, Coverage{Reason: err.Error()})
 		return
 	}
@@ -2200,7 +2201,7 @@ func (s *service) evictDownTo(targetBytes int64, protectedKey, protectedSource s
 			reason = "offline cache: evicted the just-captured item itself; it alone exceeds the disk budget with no older item left to evict"
 		}
 		if _, err := s.store.DeleteItem(victimKey); err != nil {
-			s.logger.Warn("offline cache: evict item failed", zap.String("source", victimSource), zap.Error(err))
+			s.logger.Warn("offline cache: evict item failed", zap.String("source", truncateSourceForLog(victimSource)), zap.Error(err))
 			return
 		}
 		s.notifyEvicted(victimSource, Coverage{Reason: reason})

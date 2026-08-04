@@ -302,7 +302,7 @@ func (n *Notifier) OnItemStateChanged(status ItemStatus) {
 	// client's reconciliation path is getOfflineCacheStatus.
 	if dropped, pending := n.queue.push(status); dropped {
 		n.logger.Warn("offline cache: dropped offline_cache_status notification, delivery queue full",
-			zap.String("source", status.Source), zap.String("state", string(status.State)),
+			zap.String("source", truncateSourceForLog(status.Source)), zap.String("state", string(status.State)),
 			zap.Int("pending_items", pending))
 	}
 }
@@ -331,7 +331,7 @@ func (n *Notifier) deliver(status ItemStatus) {
 		ctx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
 		if err := n.relayer.Send(ctx, envelope); err != nil {
 			n.logger.Warn("offline cache: failed to send offline_cache_status via relayer",
-				zap.String("source", status.Source), zap.String("state", string(status.State)), zap.Error(err))
+				zap.String("source", truncateSourceForLog(status.Source)), zap.String("state", string(status.State)), zap.Error(err))
 		}
 		cancel()
 	}
@@ -380,7 +380,7 @@ func (n *Notifier) runWSWorker() {
 func (n *Notifier) sendWS(envelope map[string]interface{}, status ItemStatus) {
 	if err := n.ws.SendAll(envelope); err != nil {
 		n.logger.Warn("offline cache: failed to send offline_cache_status via websocket",
-			zap.String("source", status.Source),
+			zap.String("source", truncateSourceForLog(status.Source)),
 			zap.String("state", string(status.State)), zap.Error(err))
 	}
 }
