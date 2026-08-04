@@ -93,6 +93,7 @@ type setupNarrationUI interface {
 	ShowScanning()
 	ShowSoftAPQR(ssid, psk string)
 	ShowJoinFailed(reason string)
+	ShowConnecting(message string)
 	ShowJoining()
 	Hide()
 }
@@ -350,12 +351,15 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			// (a moved frame booting offline; a join that associated to a
 			// network with no internet — F-01 / ux-must-fix M-0/M-1). The
 			// machine's Message says exactly what is happening and what will
-			// happen next; join_failed is the only existing player state that
-			// can carry that prose, so its body is used — the player-owned
-			// TITLE still reads as a Wi-Fi join failure, which is the
-			// recorded remaining gap (needs a new ff-player state).
+			// happen next, carried by the player's "connecting" state, whose
+			// title is deliberately neutral: on a NORMAL reboot this narration
+			// is painted in the ~1s between CDP connect and the first online
+			// confirmation, and the previously borrowed join_failed screen
+			// flashed a false "Couldn't connect" title on every boot.
+			// ShowConnecting downgrades itself to join_failed on player
+			// bundles that predate the state (see setupui.ShowConnecting).
 			n.narrating = true
-			n.ui.ShowJoinFailed(d.Message)
+			n.ui.ShowConnecting(d.Message)
 		default:
 			// Transient provisioned-device outage (the exhibition
 			// online→offline edge, redundant re-emissions): leave the screen

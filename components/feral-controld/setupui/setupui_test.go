@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,6 +32,28 @@ const validContract = `{
     }
   }
 }`
+
+// contractWithConnecting is the SHIPPING player manifest, loaded verbatim
+// from testdata/ffos-player-contract.json — a byte-for-byte copy of
+// ff-player `public/ffos-player-contract.json` on branch
+// feat/setup-display-connecting-state (PR feral-file/ff-player#275), kept in
+// lockstep by `cp`, the same convention as the DRM display-connected
+// predicate's mirrored copies (an inlined Go string cannot be byte-faithful:
+// the manifest's notes contain backticks). Deliberately the full file, not a
+// trimmed extract: the point is that the manifest these tests gate on is the
+// manifest the player actually ships, so cross-repo drift (e.g. the player
+// renaming a state) breaks these tests instead of leaving both repos green
+// while the state no-ops on screen. ff-player's own custom_event.test.ts
+// pins the other half (its enum ↔ that manifest). validContract above
+// deliberately predates the connecting state, so the pair exercises
+// ShowConnecting's downgrade gate.
+var contractWithConnecting = func() string {
+	raw, err := os.ReadFile(filepath.Join("testdata", "ffos-player-contract.json"))
+	if err != nil {
+		panic("shipping player manifest fixture missing: " + err.Error())
+	}
+	return string(raw)
+}()
 
 // contractWithoutSetupDisplay models an older player that predates the contract.
 const contractWithoutSetupDisplay = `{
@@ -348,6 +371,307 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 	}
 }
 
+// TestShowConnectingManifestGate: ShowConnecting emits the connecting state
+// when the player manifest lists it and downgrades to join_failed when the
+// manifest predates it — the downgrade (not a renders-nothing no-op) is what
+// keeps the M-0/M-1 offline narration visible on older fielded players.
+func TestShowConnectingManifestGate(t *testing.T) {
+	t.Run("manifest lists connecting", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		assert.Equal(t, "Checking the network connection…", req["reason"])
+	})
+
+	t.Run("blank message omits reason", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowConnecting(" ")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		_, present := req["reason"]
+		assert.False(t, present, "blank message must omit the reason field")
+	})
+
+	t.Run("older manifest downgrades to join_failed", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateJoinFailed, req["state"])
+		assert.Equal(t, "Checking the network connection…", req["reason"])
+	})
+
+	// The boot-race regression: the hedge fires seconds after daemon start,
+	// while the player bundle can be unreadable (boot ordering, OTA
+	// mid-replace). The push must defer UN-downgraded, so that once the
+	// manifest lands and CDP reconnects, the Resync replay delivers the
+	// neutral state — a Show-time downgrade frozen into the retained intent
+	// would replay the false join_failed flash this state exists to remove.
+	t.Run("unreadable manifest defers; replay delivers connecting once readable", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		svc := New(sender, path, nil) // manifest does not exist yet
+
+		svc.ShowConnecting("Looking for your Wi-Fi network…")
+		time.Sleep(50 * time.Millisecond)
+		assert.Zero(t, sender.callCount(), "no push while the contract is unreadable")
+
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		assert.Equal(t, "Looking for your Wi-Fi network…", req["reason"])
+	})
+
+	// The player bundle (and its manifest) is OTA-replaced without a controld
+	// restart, so the capability verdict must never latch for the process
+	// lifetime. Both staleness directions:
+	t.Run("bundle upgrade after a downgrade verdict delivers connecting on replay", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
+
+		// The bundle updates in place; a latched supportNo would keep
+		// downgrading on the upgraded player until a daemon restart.
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
+	})
+
+	t.Run("unreadable manifest after an old-player verdict keeps the downgrade", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
+
+		// narrationSupported's overall verdict latched supportYes on the push
+		// above, so the send path stays open when the manifest then goes
+		// unreadable (OTA mid-replace). The replay must fall back to the last
+		// verdict read from a real manifest — an un-downgraded connecting
+		// would be a renders-nothing no-op on the old player still on screen.
+		require.NoError(t, os.Remove(path))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
+	})
+
+	t.Run("malformed manifest after a supported verdict keeps connecting", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
+
+		// A torn mid-OTA write leaves partial JSON: readable but
+		// undecodable. That proves nothing about the player, so the replay
+		// must keep the last real verdict — treating it as "unsupported"
+		// would repaint the false join_failed title on a player that renders
+		// connecting fine.
+		require.NoError(t, os.WriteFile(path, []byte(`{"contracts": {"setupDis`), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
+	})
+
+	// The reviewer-named killer for latching decode failures at the MAIN
+	// gate: a torn write present at the very first push. narrationSupported
+	// used to latch supportNo off it, killing ALL narration for the daemon
+	// lifetime — connectingUnsupported's tolerant handling never ran because
+	// the earlier gate refused to send at all.
+	t.Run("malformed initial manifest defers; replay delivers connecting once valid", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(`{"contracts": {"setupDis`), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Looking for your Wi-Fi network…")
+		time.Sleep(50 * time.Millisecond)
+		assert.Zero(t, sender.callCount(), "no push while the manifest is undecodable")
+
+		// The valid bundle lands: narration must recover without a daemon
+		// restart, exactly like the unreadable case.
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+	})
+
+	t.Run("manifest without setupDisplay contract keeps the prior verdict", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
+
+		// Decodes fine, but is not a setupDisplay v1 contract: no more
+		// capability evidence than a torn write. The replay must keep the
+		// last real verdict rather than flipping to a downgrade off the
+		// missing contract's empty state list.
+		require.NoError(t, os.WriteFile(path, []byte(`{"contracts":{}}`), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
+	})
+}
+
+// TestShowCallersDoNotBlockOnInitialManifestRead is the un-latched
+// (supportUnknown) sibling of TestShowCallersDoNotBlockOnManifestRead: the
+// process's FIRST push — which on a real device is the boot narration — hits
+// narrationSupported's initial capability read. With that read stuck (FIFO
+// with no writer), Hide must still return immediately; under the old
+// read-under-mutex shape this is exactly the hung-first-read-at-boot case the
+// latch could never bound, because the latch only helps after a successful
+// read.
+func TestShowCallersDoNotBlockOnInitialManifestRead(t *testing.T) {
+	sender := newFakeCDP()
+	path := filepath.Join(t.TempDir(), "contract.json")
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
+	svc := New(sender, path, nil)
+
+	svc.ShowJoining()
+	// Give the worker time to enter the blocking read.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		svc.Hide()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Hide blocked behind the initial manifest read")
+	}
+
+	// Unblock the worker with a real manifest; the queued states then drain
+	// in order (joining, then hidden — no further manifest read once the
+	// verdict latches).
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // Test-owned FIFO under t.TempDir.
+	require.NoError(t, err)
+	_, err = writer.Write([]byte(validContract))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	sender.waitForCalls(t, 2)
+	assert.Equal(t, stateHidden, sender.lastRequest()["state"])
+}
+
+// TestShippingManifestDeclaresProsePayloads pins the controller-side payload
+// contract into the verbatim fixture: ShowConnecting and ShowJoinFailed send
+// their prose as the `reason` field, so the shipping manifest must keep
+// declaring that field for both states — a player change that keeps a state
+// but renames its prose field would otherwise leave this repo green while
+// the prose silently stops rendering. Decoded ad hoc here rather than in the
+// production manifest model on purpose: stateFields stays player-side
+// validation config, not a controld runtime input.
+func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
+	var manifest struct {
+		Contracts struct {
+			SetupDisplay struct {
+				States      []string `json:"states"`
+				StateFields map[string]struct {
+					Optional []string `json:"optional"`
+				} `json:"stateFields"`
+			} `json:"setupDisplay"`
+		} `json:"contracts"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(contractWithConnecting), &manifest))
+	assert.Contains(t, manifest.Contracts.SetupDisplay.States, stateConnecting)
+	for _, state := range []string{stateConnecting, stateJoinFailed} {
+		fields, ok := manifest.Contracts.SetupDisplay.StateFields[state]
+		require.True(t, ok, "shipping manifest missing stateFields for %q", state)
+		assert.Contains(t, fields.Optional, "reason",
+			"state %q must declare the reason payload ShowConnecting/ShowJoinFailed send", state)
+	}
+}
+
+// TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking
+// contract against the send-time capability read: with the narration worker
+// stuck inside a manifest read (a hung filesystem, modeled by a FIFO that has
+// no writer yet), every Show*/Hide call must still return immediately — the
+// read runs OUTSIDE the queue mutex, so a stalled resolution delays delivery,
+// never callers. The call that matters operationally is the online Hide that
+// ends the boot narration; under the old read-under-mutex shape it would have
+// waited on disk here.
+func TestShowCallersDoNotBlockOnManifestRead(t *testing.T) {
+	sender := newFakeCDP()
+	path := filepath.Join(t.TempDir(), "contract.json")
+	require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+	svc := New(sender, path, nil)
+
+	// Latch narrationSupported's overall verdict with a normal push so the
+	// next delivery reaches the connecting resolution at all.
+	svc.ShowJoining()
+	sender.waitForCalls(t, 1)
+
+	// Swap the manifest for a FIFO: the worker's next resolution blocks in
+	// os.ReadFile until a writer appears.
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
+
+	svc.ShowConnecting("Checking the network connection…")
+	// Give the worker time to enter the blocking read.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		svc.Hide()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Hide blocked behind the worker's manifest read")
+	}
+
+	// Unblock the worker with a real manifest so the test does not leak a
+	// stuck goroutine; the queued states then drain in order (connecting,
+	// then hidden).
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // Test-owned FIFO under t.TempDir.
+	require.NoError(t, err)
+	_, err = writer.Write([]byte(contractWithConnecting))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	sender.waitForCalls(t, 3)
+	assert.Equal(t, stateHidden, sender.lastRequest()["state"])
+}
+
 // TestDownCDPDoesNotBlockOrPanic verifies fire-and-forget semantics against a
 // player whose CDP send always fails: the caller returns immediately, nothing
 // panics, and the next state change still produces a fresh push (retry-on-next-
@@ -543,6 +867,14 @@ func TestValidatePlayerStatusContract(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
 	})
+	// Same unreadable classification for decode failures as the setupDisplay
+	// validator: devicectl's boot-recovery fuse re-checks unreadable instead
+	// of permanently latching conservative mode off a torn write.
+	t.Run("undecodable manifest classifies as unreadable", func(t *testing.T) {
+		err := ValidatePlayerStatusContract(writeContract(t, `{"contracts": {"playerSta`))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
+	})
 }
 
 func TestValidateSetupDisplayContract(t *testing.T) {
@@ -565,6 +897,14 @@ func TestValidateSetupDisplayContract(t *testing.T) {
 		err := validateSetupDisplayContract(writeContract(t, body))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "version must be 1")
+	})
+	// Decode failures classify as UNREADABLE (a torn mid-OTA write is
+	// byte-garbage, not evidence): every capability fuse keyed on
+	// ErrPlayerContractUnreadable must defer and re-check, never latch off.
+	t.Run("undecodable manifest classifies as unreadable", func(t *testing.T) {
+		err := validateSetupDisplayContract(writeContract(t, `{"contracts": {"setupDis`))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
 	})
 }
 

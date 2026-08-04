@@ -935,11 +935,15 @@ func bootOfflineDetail(probe linkProbe) Detail {
 		return Detail{Reason: ReasonBootLinkUnknown,
 			Message: "Checking the network connection…"}
 	default:
-		// Deliberately does not assert "network not found": this branch also
-		// covers "SSID in range but cannot associate" (changed password), and
-		// the narration is painted BEFORE any scan runs.
+		// Deliberately does not assert "network not found" (this branch also
+		// covers "SSID in range but cannot associate" — changed password —
+		// and the narration is painted BEFORE any scan runs) and does not
+		// assert "unable to connect" either: at boot this paints seconds
+		// after start, while NM's own autoconnect attempt is typically still
+		// in flight, so a confirmed-absent probe here only proves "no
+		// activated link right now", not that connecting failed.
 		return Detail{Reason: ReasonBootOffline,
-			Message: "Unable to connect to your Wi-Fi network. Setup mode will start in a few minutes if the connection does not return."}
+			Message: "Looking for your Wi-Fi network… Setup mode will start in a few minutes if the connection does not return."}
 	}
 }
 
