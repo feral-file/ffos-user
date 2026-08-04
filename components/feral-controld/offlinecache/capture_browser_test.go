@@ -2,6 +2,7 @@ package offlinecache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,8 +39,21 @@ import (
 // that leg remains covered only by the fake-session tests. It also does
 // not exercise the systemd scope, which is orthogonal to the guard.
 //
-// It skips when no Chromium is present, so it is a no-op on a machine
-// (or CI runner) without one rather than a failure. Set
+// WHERE THIS ACTUALLY RUNS, because the answer is not "everywhere" and
+// assuming otherwise makes the coverage look broader than it is: it needs
+// a Chromium that both exists AND launches. GitHub's ubuntu-latest has a
+// preinstalled Chrome that never comes up under the runner's AppArmor
+// restriction on unprivileged user namespaces, and the shipped argv
+// deliberately passes no --no-sandbox, so on CI this SKIPS. Today the
+// only place it really executes is the FF1 (and any dev machine with a
+// working Chromium). Do not read a green CI run as evidence this passed.
+//
+// Adding --no-sandbox to make CI run it would mean testing a spawn we do
+// not ship, which is worse than skipping.
+//
+// Two skips, for two different environments: no binary at all, and a
+// binary that cannot start (ErrHeadlessNotReady). The first version of
+// this file had only the former and turned CI red. Set
 // FFOS_CAPTURE_BROWSER_BIN to point at a specific binary.
 
 func findChromiumForTest() string {
@@ -220,7 +234,20 @@ new Worker(URL.createObjectURL(b));
 	// A capture error is not a failure condition here. This page has no
 	// capturable resources by construction, and the question under test
 	// is what escaped the browser, not what got stored.
-	if _, cerr := cap.Capture(ctx, dp1playlist.PlaylistItem{ID: "browser-guard", Source: page}, 8000); cerr != nil {
+	//
+	// ErrHeadlessNotReady is the one exception, and it must SKIP rather
+	// than fail: it means no usable browser in this environment (GitHub's
+	// runners have a chromium binary that never comes up — likely the
+	// sandbox), so every assertion below would be measuring nothing. That
+	// is precisely the vacuum the log assertion exists to catch, so
+	// letting it fail there would be the check working correctly on a
+	// question nobody asked. Note the binary-presence skip at the top
+	// cannot cover this: the binary IS present, it just cannot run.
+	_, cerr := cap.Capture(ctx, dp1playlist.PlaylistItem{ID: "browser-guard", Source: page}, 8000)
+	if errors.Is(cerr, ErrHeadlessNotReady) {
+		t.Skipf("chromium present but never became ready (%v); no browser to test against here", cerr)
+	}
+	if cerr != nil {
 		t.Logf("capture returned %v (not a failure for this test)", cerr)
 	}
 

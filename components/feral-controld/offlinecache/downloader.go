@@ -138,6 +138,16 @@ type HeadlessLimits struct {
 
 var ErrDownloaderClosed = errors.New("offline cache: downloader closed")
 
+// ErrHeadlessNotReady means the capture Chromium was spawned but never
+// answered its DevTools endpoint in time. It is distinct from any capture
+// failure because the cause is environmental — no usable browser here —
+// rather than anything about the item being captured: a missing or
+// unlaunchable binary, a sandbox the container forbids, no /dev/shm.
+// Callers that only make sense WITH a browser (the real-browser guard
+// test skips on it rather than reporting a false failure) need to tell
+// the two apart.
+var ErrHeadlessNotReady = errors.New("offline cache: headless chromium did not become ready")
+
 // Downloader owns the lifecycle of a separate headless Chromium process
 // used only for offline-artwork capture (default :9223, its own
 // user-data-dir). It is a distinct process from the kiosk Chromium the
@@ -887,7 +897,7 @@ func (d *downloader) waitForDebugEndpoint(ctx context.Context) error {
 			return nil
 		}
 		if d.clock.Now().After(deadline) {
-			return fmt.Errorf("offline cache: headless chromium did not become ready within %s", chromiumStartupTimeout)
+			return fmt.Errorf("%w within %s", ErrHeadlessNotReady, chromiumStartupTimeout)
 		}
 		if err := d.clock.SleepContext(ctx, chromiumPollInterval); err != nil {
 			return err

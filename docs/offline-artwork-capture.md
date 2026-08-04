@@ -2261,6 +2261,15 @@ more interception:
   UUID, and streams device notifications to anything that connects. That
   is the reachable target, and it is the same surface #3471 closes.
 
+> **Where the real-browser test runs.** The loopback probe
+> (`TestCapturer_RealBrowser_LoopbackRequestsNeverLeaveTheBrowser`) needs a
+> Chromium that both exists and launches. GitHub's runners have one that
+> never starts under their AppArmor user-namespace restriction, and the
+> shipped argv passes no `--no-sandbox`, so **CI skips it** — a green CI
+> run is not evidence it passed. It executes on the FF1. Verified there:
+> three blocks logged, zero connections to the victim, and with the guard
+> verdict stubbed out the victim takes three connections.
+
 - **Workers are contained by pausing, not by interception.** Chromium does
   not implement the `Fetch` domain on worker targets at all: `Fetch.enable`
   on a `type:worker` session answers `cdp error -32601: 'Fetch.enable'
