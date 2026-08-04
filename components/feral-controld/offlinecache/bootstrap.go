@@ -417,7 +417,13 @@ func Bootstrap(
 	// matches what the capture paths will actually dial moments later —
 	// a private resolver here would make the check answer a different
 	// question than the one that matters. See ErrUnsafeSource.
-	classifier := NewClassifier(httpClient, net.DefaultResolver)
+	// The probe client is GUARDED, not the daemon-wide httpClient: the
+	// URL it fetches is untrusted playlist input, and a pre-flight check
+	// on that URL alone is bypassed by a single 302 (see ErrUnsafeSource).
+	// The guard enforces the same reserved-address policy in DialContext,
+	// so every redirect hop and every re-resolution is checked too.
+	classifier := NewClassifier(
+		newGuardedHTTPClient(net.DefaultResolver, wrapper.HTTPClientTimeout), net.DefaultResolver)
 	headlessDebugPort := safeHeadlessDebugPort(opts.HeadlessDebugPort, opts.KioskCDPEndpoint, logger)
 	downloader := NewDownloader(
 		opts.HeadlessBinaryPath, opts.HeadlessUserDataDir, headlessDebugPort,
@@ -444,7 +450,9 @@ func Bootstrap(
 	// mediaDownloadTimeout and captureFinalizeWindowDefault — which is
 	// the contract NewHTTPClientWithoutTimeout's own doc requires of
 	// every caller.
-	bodyClient := wrapper.NewHTTPClientWithoutTimeout()
+	// Guarded for the same reason as the probe client above, and with no
+	// whole-request timeout for the reason this comment block describes.
+	bodyClient := newGuardedHTTPClient(net.DefaultResolver, 0)
 
 	capturer := NewCapturer(downloader, dialer, bodyClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	// mediaCapturer needs no Downloader/dialer — it downloads a

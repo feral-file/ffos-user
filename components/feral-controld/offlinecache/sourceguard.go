@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	go_http "net/http"
 	go_url "net/url"
 	"strings"
+	"time"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // ErrUnsafeSource is returned by Classify when a playlist item's source
@@ -39,14 +43,34 @@ import (
 // a rejected source is never probed, never downloaded, and never
 // navigated to.
 //
-// Residual gap, stated plainly rather than papered over: the capture
-// paths re-resolve the hostname when they later fetch or navigate, so a
-// DNS name whose answer flips to a reserved address between this check
-// and that fetch (classic DNS rebinding) is not closed by a
-// resolve-time check alone. Closing it needs an address-level hook on
-// the dialer for the body client AND host-resolver rules on the
-// headless browser; this guard shrinks the surface to that one race
-// instead of leaving it wide open.
+// A pre-flight check on the source URL is NOT sufficient on its own, for
+// two reasons that need no hostile DNS at all:
+//
+//   - Redirects. http.Client follows up to ten hops by default, and only
+//     the FIRST URL ever reached this check. A source that passes and
+//     then 302s to http://127.0.0.1:1111/ walked straight to the
+//     unauthenticated hub.
+//   - Rebinding. This check resolves a name and then throws the
+//     addresses away; the real dial resolves again, so an answer that
+//     flips to a reserved address in between was never re-examined.
+//
+// Both are closed by enforcing the SAME policy at the socket instead of
+// at the URL: newGuardedHTTPClient puts addrsFor in the transport's
+// DialContext, which every hop and every re-resolution must pass
+// through, and then dials the exact address it just validated so no
+// second lookup can substitute another. checkRedirect adds the one thing
+// a dialer cannot see — the scheme — plus a hop cap. This check remains
+// in front of all of it because it is what keeps a bad source from ever
+// being queued, and because it produces the error the caller reports.
+//
+// Residual gap, stated plainly rather than papered over: capture.go's
+// headless browser is NOT covered. Chromium resolves and dials on its
+// own, and the page it navigates is untrusted artwork that may request
+// arbitrary subresources, so an artwork can still reach a loopback
+// service from inside the browser. Closing that needs request-level
+// interception on the capture CDP session (the machinery cdpsession.go
+// already uses for replay), not a flag; it is deliberately a separate
+// change and is tracked in docs/offline-artwork-capture.md.
 var ErrUnsafeSource = errors.New("offline cache: source URL is not permitted")
 
 // AddrResolver is the DNS seam sourceGuard needs, owned here (rather
@@ -60,6 +84,21 @@ type AddrResolver interface {
 // sourceGuard decides whether an untrusted source URL may be dialed.
 type sourceGuard struct {
 	resolver AddrResolver
+	// isReserved overrides the address policy. It exists for ONE reason:
+	// a faithful public->private redirect test needs two httptest
+	// servers, and every httptest server is on loopback, which the real
+	// predicate rejects at both ends — so the scenario the guard exists
+	// to stop could not otherwise be exercised end to end. nil means
+	// isReservedAddr, and nothing outside tests ever sets it.
+	isReserved func(net.IP) bool
+}
+
+// reserved applies the address policy, honoring the test override.
+func (g sourceGuard) reserved(ip net.IP) bool {
+	if g.isReserved != nil {
+		return g.isReserved(ip)
+	}
+	return isReservedAddr(ip)
 }
 
 // check reports whether rawURL is safe for this daemon to dial.
@@ -94,13 +133,27 @@ func (g sourceGuard) check(ctx context.Context, rawURL string) error {
 		return fmt.Errorf("%w: URL has no host", ErrUnsafeSource)
 	}
 
+	_, err = g.addrsFor(ctx, host)
+	return err
+}
+
+// addrsFor resolves host and returns its addresses only if EVERY one of
+// them is outside the reserved ranges. Shared deliberately by check (URL
+// time) and dialContext (socket time) so the two can never drift into
+// disagreeing about what "reserved" means.
+//
+// Returning the addresses, rather than just a verdict, is what lets
+// dialContext connect to the exact ones it validated — the alternative,
+// handing the hostname back to the dialer, would re-resolve and reopen
+// the very window this closes.
+func (g sourceGuard) addrsFor(ctx context.Context, host string) ([]net.IP, error) {
 	// A literal address needs no DNS round trip — and must not get one,
 	// since LookupIPAddr on a literal simply echoes it back.
 	if ip := net.ParseIP(host); ip != nil {
-		if isReservedAddr(ip) {
-			return fmt.Errorf("%w: address %s is in a reserved range", ErrUnsafeSource, ip)
+		if g.reserved(ip) {
+			return nil, fmt.Errorf("%w: address %s is in a reserved range", ErrUnsafeSource, ip)
 		}
-		return nil
+		return []net.IP{ip}, nil
 	}
 
 	addrs, err := g.resolver.LookupIPAddr(ctx, host)
@@ -108,20 +161,102 @@ func (g sourceGuard) check(ctx context.Context, rawURL string) error {
 		// NOT tagged ErrUnsafeSource: a lookup failure is a transient
 		// network fault, and reporting it as a security rejection would
 		// make an offline device look like it is under attack.
-		return fmt.Errorf("offline cache: resolve source host %s: %w", host, err)
+		return nil, fmt.Errorf("offline cache: resolve source host %s: %w", host, err)
 	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("offline cache: source host %s resolved to no addresses", host)
+		return nil, fmt.Errorf("offline cache: source host %s resolved to no addresses", host)
 	}
 	// EVERY answer must be safe, not merely the first: a name that
 	// returns one public and one loopback address would otherwise be
 	// admitted here and then dialed round-robin at fetch time.
+	ips := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
-		if isReservedAddr(addr.IP) {
-			return fmt.Errorf("%w: host %s resolves to reserved address %s", ErrUnsafeSource, host, addr.IP)
+		if g.reserved(addr.IP) {
+			return nil, fmt.Errorf("%w: host %s resolves to reserved address %s", ErrUnsafeSource, host, addr.IP)
 		}
+		ips = append(ips, addr.IP)
 	}
-	return nil
+	return ips, nil
+}
+
+// maxSourceRedirects caps redirect hops on a source fetch. net/http's own
+// default is also ten; restating it makes the limit ours to reason about
+// and lets the refusal carry ErrUnsafeSource like every other one here.
+const maxSourceRedirects = 10
+
+// dialContext is the transport hook that makes this guard real. Every
+// connection the client opens — the first one, each redirect hop, and
+// each re-resolution of a name whose answer changed — arrives here, and
+// nothing is dialed until addrsFor has cleared it.
+func (g sourceGuard) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := g.addrsFor(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	// Dial the validated addresses themselves, never the hostname: TLS
+	// still verifies against the original host from the URL, so pinning
+	// the address costs nothing and removes the second lookup a hostile
+	// resolver would answer differently.
+	var dialer net.Dialer
+	var lastErr error
+	for _, ip := range ips {
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	return nil, lastErr
+}
+
+// checkRedirect covers the one thing dialContext cannot: by the time a
+// connection is dialed the URL is gone, so a redirect to a non-http(s)
+// scheme has to be refused here.
+func (g sourceGuard) checkRedirect(req *go_http.Request, via []*go_http.Request) error {
+	if len(via) >= maxSourceRedirects {
+		return fmt.Errorf("%w: stopped after %d redirects", ErrUnsafeSource, len(via))
+	}
+	switch strings.ToLower(req.URL.Scheme) {
+	case "http", "https":
+		return nil
+	default:
+		return fmt.Errorf("%w: redirect to scheme %q is not http or https", ErrUnsafeSource, req.URL.Scheme)
+	}
+}
+
+// newGuardedHTTPClient builds the client every untrusted-source fetch
+// must use — classify.go's probe and mediacapture.go's body download.
+// timeout <= 0 leaves http.Client.Timeout unset, which the body download
+// requires (see bootstrap.go's bodyClient comment: a whole-request
+// timeout kills large artwork transfers).
+//
+// The transport mirrors http.DefaultTransport apart from DialContext, so
+// the only behavior this changes is where connections are allowed to go.
+func newGuardedHTTPClient(resolver AddrResolver, timeout time.Duration) wrapper.HTTPClient {
+	return newGuardedHTTPClientFor(sourceGuard{resolver: resolver}, timeout)
+}
+
+// newGuardedHTTPClientFor is newGuardedHTTPClient with the guard supplied
+// directly, so a test can hand in one carrying the isReserved override
+// its own httptest servers need.
+func newGuardedHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPClient {
+	return wrapper.NewHTTPClientFrom(&go_http.Client{
+		Timeout:       timeout,
+		CheckRedirect: g.checkRedirect,
+		Transport: &go_http.Transport{
+			Proxy:                 go_http.ProxyFromEnvironment,
+			DialContext:           g.dialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	})
 }
 
 // isReservedAddr reports whether ip is somewhere a playlist source must

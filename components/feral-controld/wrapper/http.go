@@ -45,6 +45,17 @@ func NewHTTPClientWithoutTimeout() HTTPClient {
 	return httpClient{client: &go_http.Client{}}
 }
 
+// NewHTTPClientFrom adapts a caller-built *http.Client to this interface.
+// It exists so a caller that must control the Transport or the redirect
+// policy — offlinecache's source guard is the one today, which enforces
+// its reserved-address rules in DialContext so that every redirect hop
+// and every re-resolution is checked — can still be injected everywhere a
+// wrapper.HTTPClient is expected. The client is used as given: timeouts
+// and redirect behavior are entirely the caller's to set.
+func NewHTTPClientFrom(client *go_http.Client) HTTPClient {
+	return httpClient{client: client}
+}
+
 func (h httpClient) NewRequest(method string, url string, body go_io.Reader) (*go_http.Request, error) {
 	return go_http.NewRequest(method, url, body)
 }

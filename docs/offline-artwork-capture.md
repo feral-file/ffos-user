@@ -2119,13 +2119,41 @@ A DNS **resolution failure** is deliberately NOT tagged `ErrUnsafeSource`:
 it is a transient network fault, and reporting it as a security rejection
 would make an offline device look like it is under attack in its logs.
 
-**Residual gap, stated rather than hidden.** The capture paths re-resolve
-the hostname when they later fetch or navigate, so a name whose answer
-flips to a reserved address between the check and that fetch (classic DNS
-rebinding) is not closed by a resolve-time check alone. Closing it needs
-an address-level `Control` hook on the body client's dialer AND
-`--host-resolver-rules` on the headless browser. This guard shrinks the
-surface to that one race instead of leaving it wide open.
+**A URL check alone is not sufficient**, for two reasons that need no
+hostile DNS at all:
+
+- **Redirects.** `http.Client` follows up to ten hops by default, and only
+  the FIRST URL ever reaches the check. A source that passes and then
+  `302`s to `http://127.0.0.1:1111/` walked straight to the
+  unauthenticated hub. Demonstrated: with the enforcement removed, the
+  test client follows the hop and really does dial the private address
+  (`dial tcp 10.0.0.1:80: connect: operation timed out`).
+- **DNS rebinding.** The check resolves a name and discards the addresses;
+  the real dial resolves again, so an answer that flips to a reserved
+  address in between was never re-examined.
+
+Both are closed by applying the SAME policy **at the socket** rather than
+at the URL. `newGuardedHTTPClient` puts `addrsFor` in the transport's
+`DialContext`, which every hop and every re-resolution must pass through,
+and then dials the exact address it just validated so no second lookup can
+substitute another (TLS still verifies against the original hostname, so
+pinning the address costs nothing). `checkRedirect` adds the one thing a
+dialer cannot see — the scheme — plus an explicit hop cap. Both the
+classify probe and the media body client are built this way.
+
+`sourceGuard.check` still runs first: it is what stops a bad source from
+ever being queued, and it produces the error the caller reports.
+
+**Residual gap, stated rather than hidden.** `capture.go`'s headless
+browser is NOT covered. Chromium resolves and dials on its own, and the
+page it navigates is untrusted artwork that may request arbitrary
+subresources, so an artwork can still reach a loopback service from inside
+the browser. `--host-resolver-rules` cannot express "block all private
+space"; closing this needs request-level interception on the capture CDP
+session — the machinery `cdpsession.go` already uses for replay — and is
+deliberately a separate change, not a flag. Note this intersects an
+exposure `docs/architecture.md` already accepts as release-scoped (the
+open, unauthenticated `:1111` surface, end state #3471).
 
 **Operational consequence.** Playlist sources on private or loopback
 addresses are refused. Artwork origins are public CDNs, so this does not
