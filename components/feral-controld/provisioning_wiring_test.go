@@ -552,3 +552,35 @@ func TestSetupNotifierRendersSetupError(t *testing.T) {
 		t.Fatalf("unowned cleared edge produced calls %v; want none", spy2.calls)
 	}
 }
+
+// TestStatusProviderServesNetworkHealth pins the §4.7 hub surface: the
+// provider composes the machine snapshot with the cached internet verdict
+// into the additive network object, and leaves it nil (omitted) when no
+// snapshot source is wired.
+func TestStatusProviderServesNetworkHealth(t *testing.T) {
+	base := stubHubStatusBase{info: hub.StatusInfo{DeviceID: "FF1-TEST"}}
+	p := &provisioningStatusProvider{
+		base:     base,
+		internet: func(context.Context) bool { return false },
+		snapshot: func() provisioning.NetworkSnapshot {
+			return provisioning.NetworkSnapshot{
+				State: "offline_retrying", Reason: "joined-no-internet",
+				SSID: "Studio WiFi", Link: "wifi", Deferred: true,
+			}
+		},
+	}
+	info := p.Status(context.Background())
+	if info.Network == nil {
+		t.Fatal("network object missing")
+	}
+	want := status.NetworkHealth{State: "offline_retrying", Reason: "joined-no-internet",
+		SSID: "Studio WiFi", Link: "wifi", Internet: false, Deferred: true}
+	if *info.Network != want {
+		t.Fatalf("network = %+v, want %+v", *info.Network, want)
+	}
+
+	unwired := &provisioningStatusProvider{base: base}
+	if unwired.Status(context.Background()).Network != nil {
+		t.Fatal("an unwired snapshot must omit the additive field")
+	}
+}

@@ -357,6 +357,14 @@ type Config struct {
 	// (preserving the Connectivity-only behavior).
 	ActiveLink func(ctx context.Context) (bool, error)
 
+	// ActiveLinkDetail, when non-nil, is preferred over ActiveLink: the same
+	// probe with the ethernet-only verdict from the same nmcli read
+	// (status.LinkChecker.ExternalLinkDetail). It exists for the §4.7 health
+	// snapshot — the machine caches the link TYPE its tick probes saw, so
+	// status polls never spend a probe of their own. Identical failure bias
+	// to ActiveLink (an error is unknown and defers the AP).
+	ActiveLinkDetail func(ctx context.Context) (link, wired bool, err error)
+
 	// WiredLink, when non-nil, confirms or refutes a live ETHERNET link (the
 	// status.LinkChecker.WiredLink seam; constraint 6 semantics: verdict from
 	// ethernet rows only, errors surface). The escape policy consults it for
@@ -576,6 +584,26 @@ type Machine struct {
 	// commit 116a8ed removed elsewhere.
 	claimed bool
 
+	// activeLinkDetail is Config.ActiveLinkDetail (preferred over activeLink
+	// when set — see the Config field).
+	activeLinkDetail func(ctx context.Context) (link, wired bool, err error)
+
+	// §4.7 health-snapshot caches, in the mu-guarded block because Snapshot
+	// reads them from request goroutines. Written ONLY by real probes: the
+	// probeLink apUp short-circuit and the nil-guard fabrication never touch
+	// them, so a stale absent-with-no-type cannot persist past an AP phase
+	// (the stale-type pin) and a poll never spends a probe of its own.
+	// linkOutcomeKnown gates the outcome; wiredKnown gates the type (only the
+	// detail probe and explicit WiredLink runs learn it).
+	linkOutcomeKnown bool
+	linkOutcome      linkProbe
+	wiredKnown       bool
+	wiredLast        bool
+	// episodeDeferredShared mirrors "the episode is currently pausing on hub
+	// contact" for the snapshot's deferred sub-state (the app learns its own
+	// presence is holding the AP down). Written on the loop, read under mu.
+	episodeDeferredShared bool
+
 	// lastHubContact / lastPortalActivity live in the mu-guarded block: they
 	// are WRITTEN by request goroutines (the hub middleware's contact
 	// observer; the portal's action handlers) and read by the loop. Hub
@@ -709,17 +737,18 @@ func New(cfg Config) *Machine {
 	// Start seeds it from InitialClaimed once the persisted state is loaded.
 	claimed := true
 	return &Machine{
-		ap:             cfg.AP,
-		wifi:           cfg.Wifi,
-		conn:           cfg.Connectivity,
-		clock:          cfg.Clock,
-		logger:         logger,
-		notifier:       cfg.Notifier,
-		activeLink:     cfg.ActiveLink,
-		wiredLink:      cfg.WiredLink,
-		claimed:        claimed,
-		initialClaimed: cfg.InitialClaimed,
-		tuning:         cfg.Tuning.withDefaults(cfg.CheckInterval),
+		ap:               cfg.AP,
+		wifi:             cfg.Wifi,
+		conn:             cfg.Connectivity,
+		clock:            cfg.Clock,
+		logger:           logger,
+		notifier:         cfg.Notifier,
+		activeLink:       cfg.ActiveLink,
+		activeLinkDetail: cfg.ActiveLinkDetail,
+		wiredLink:        cfg.WiredLink,
+		claimed:          claimed,
+		initialClaimed:   cfg.InitialClaimed,
+		tuning:           cfg.Tuning.withDefaults(cfg.CheckInterval),
 		// Latched HERE, not read at the offline assessment: New runs at
 		// wiring time (moments after process start), so this is the honest
 		// "did this process start at boot" answer regardless of how long the
@@ -2190,16 +2219,46 @@ const (
 // down the AP mid-setup — with no further connectivity event to ever re-raise
 // it. The hotspot holds the radio; it is not an uplink.
 func (m *Machine) probeLink(ctx context.Context) linkProbe {
-	if m.activeLink == nil {
+	if m.activeLink == nil && m.activeLinkDetail == nil {
+		// Nil-guard fabrication: NOT a real probe, so the §4.7 caches stay
+		// untouched (they must only ever carry measured evidence).
 		return linkAbsent
 	}
 	m.mu.Lock()
 	apUp := m.apUp
 	m.mu.Unlock()
 	if apUp {
+		// Short-circuit while our own AP holds the radio: also not a real
+		// probe — writing it would persist a stale absent-with-no-type past
+		// the AP phase (the §4.7 stale-type pin).
 		return linkAbsent
 	}
-	up, err := m.activeLink(ctx)
+	var up, wired bool
+	var err error
+	wiredKnown := false
+	if m.activeLinkDetail != nil {
+		// Preferred: the same nmcli read also yields the ethernet-only
+		// verdict, so the health snapshot learns the link TYPE for free.
+		up, wired, err = m.activeLinkDetail(ctx)
+		wiredKnown = err == nil
+	} else {
+		up, err = m.activeLink(ctx)
+	}
+	outcome := linkUnknown
+	if err == nil {
+		if up {
+			outcome = linkPresent
+		} else {
+			outcome = linkAbsent
+		}
+	}
+	m.mu.Lock()
+	m.linkOutcomeKnown = err == nil
+	m.linkOutcome = outcome
+	if wiredKnown {
+		m.wiredKnown, m.wiredLast = true, wired
+	}
+	m.mu.Unlock()
 	if err != nil {
 		if m.linkProbeFailing {
 			m.logger.Debug("provisioning: link probe still failing; link state remains unknown", zap.Error(err))
@@ -2210,10 +2269,19 @@ func (m *Machine) probeLink(ctx context.Context) linkProbe {
 		return linkUnknown
 	}
 	m.linkProbeFailing = false
-	if up {
-		return linkPresent
+	return outcome
+}
+
+// probeWired wraps the WiredLink seam so every real wire verdict also feeds
+// the §4.7 type cache. All wiredLink consumers route through this.
+func (m *Machine) probeWired(ctx context.Context) (bool, error) {
+	wired, err := m.wiredLink(ctx)
+	if err == nil {
+		m.mu.Lock()
+		m.wiredKnown, m.wiredLast = true, wired
+		m.mu.Unlock()
 	}
-	return linkAbsent
+	return wired, err
 }
 
 // resetJoinStatus drops any prior join outcome before a FRESH AP raise

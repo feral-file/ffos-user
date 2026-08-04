@@ -238,6 +238,63 @@ func (m *Machine) hubContactFresh() bool {
 }
 
 // -----------------------------------------------------------------------------
+// §4.7 health snapshot
+// -----------------------------------------------------------------------------
+
+// NetworkSnapshot is the machine's contribution to the additive `network`
+// status object (network-recovery-ux §4.7): the app renders the same
+// diagnosis the screen shows. Everything here is CACHED evidence from the
+// machine's own probes — a status poll performs no nmcli work.
+type NetworkSnapshot struct {
+	// State is the machine state; Reason its last transition reason.
+	State  string
+	Reason string
+	// SSID is the current/last join target where one is known (the portal
+	// status's SSID); empty otherwise.
+	SSID string
+	// Link is "wifi" | "ethernet" | "none" | "unknown" — the last REAL probe's
+	// outcome plus, when a wire verdict accompanied it, the type. During AP
+	// phases the frame is off the LAN and this surface is dark anyway.
+	Link string
+	// Deferred reports the setup-incomplete episode is currently pausing its
+	// raise on this control channel's own contact.
+	Deferred bool
+}
+
+// Snapshot serves the §4.7 health object from the mu-guarded caches. Safe
+// from any goroutine; never probes.
+func (m *Machine) Snapshot() NetworkSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	link := "unknown"
+	if m.linkOutcomeKnown {
+		switch m.linkOutcome {
+		case linkAbsent:
+			link = "none"
+		case linkPresent:
+			switch {
+			case m.wiredKnown && m.wiredLast:
+				link = "ethernet"
+			case m.wiredKnown:
+				link = "wifi"
+			default:
+				// A confirmed link whose type was never measured (no detail
+				// probe wired and no WiredLink run yet): the honest answer is
+				// unknown, not a guess.
+				link = "unknown"
+			}
+		}
+	}
+	return NetworkSnapshot{
+		State:    string(m.state),
+		Reason:   m.lastReason,
+		SSID:     m.status.SSID,
+		Link:     link,
+		Deferred: m.episodeDeferredShared,
+	}
+}
+
+// -----------------------------------------------------------------------------
 // App-triggered setup (startWifiSetup — docs/app-triggered-wifi-setup.md)
 // -----------------------------------------------------------------------------
 
@@ -270,7 +327,7 @@ func (m *Machine) StartWifiSetup(ctx context.Context) error {
 	if m.wiredLink == nil {
 		return fmt.Errorf("%w: wired-link probe unavailable", ErrWiredLinkActive)
 	}
-	wired, err := m.wiredLink(ctx)
+	wired, err := m.probeWired(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: probe failed: %w", ErrWiredLinkActive, err)
 	}
@@ -478,7 +535,7 @@ func (m *Machine) wiredExitDue(ctx context.Context) bool {
 	if m.wiredLink == nil {
 		return false
 	}
-	wired, err := m.wiredLink(ctx)
+	wired, err := m.probeWired(ctx)
 	if err != nil {
 		m.logger.Debug("provisioning: wired-link probe failed during AP session; deferring", zap.Error(err))
 		return false
@@ -660,7 +717,7 @@ func (m *Machine) episodeSample(ctx context.Context) {
 		// settled (one nmcli read per tick on a settled frame; the raised-AP
 		// wired exit already accepted the same cost).
 		if m.wiredLink != nil {
-			if wired, err := m.wiredLink(ctx); err == nil && wired {
+			if wired, err := m.probeWired(ctx); err == nil && wired {
 				m.cancelEpisode(ctx, "wired link confirmed while settled")
 			}
 		}
@@ -677,7 +734,7 @@ func (m *Machine) episodeSample(ctx context.Context) {
 		// that predate the seam).
 		return
 	}
-	wired, err := m.wiredLink(ctx)
+	wired, err := m.probeWired(ctx)
 	if err != nil {
 		m.episodePauseSample()
 		return
@@ -695,9 +752,11 @@ func (m *Machine) episodeSample(ctx context.Context) {
 		m.episodeDeferredTotal < m.tuning.DeferralEpisodeBudget {
 		m.episodeDeferredCycle += m.checkInterval
 		m.episodeDeferredTotal += m.checkInterval
+		m.setEpisodeDeferred(true)
 		m.episodePauseSample()
 		return
 	}
+	m.setEpisodeDeferred(false)
 
 	if m.episodeTarget == 0 {
 		m.episodeTarget = m.tuning.episodeWindowSamples
@@ -825,4 +884,19 @@ func (m *Machine) cancelEpisode(ctx context.Context, why string) {
 	m.episodeSettled = false
 	m.episodeDeferredCycle = 0
 	m.episodeDeferredTotal = 0
+	m.setEpisodeDeferred(false)
+}
+
+// setEpisodeDeferred mirrors the contact-deferral state into the mu-guarded
+// block for the §4.7 snapshot's `deferred` sub-state — the app learns its own
+// presence is what is holding the AP down, and can surface the pairing /
+// startWifiSetup action instead of silently resetting the clock.
+// Known slack: during an INCONCLUSIVE run (failed WAN query / wire probe) the
+// sample flow early-returns before either edge below, so a true flag can
+// outlive contact freshness until the first conclusive tick or any cancel
+// edge corrects it — benign (the raise genuinely stays paused meanwhile).
+func (m *Machine) setEpisodeDeferred(v bool) {
+	m.mu.Lock()
+	m.episodeDeferredShared = v
+	m.mu.Unlock()
 }

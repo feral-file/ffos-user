@@ -93,6 +93,21 @@ func (c *LinkChecker) ExternalLink(ctx context.Context, excludeProfile string) (
 	return res.link, err
 }
 
+// ExternalLinkDetail is ExternalLink plus the ethernet-only verdict from the
+// SAME nmcli read: linkProbe already computes both in one pass, and the
+// provisioning machine's health snapshot (network-recovery-ux §4.7) needs the
+// link TYPE without spending a second probe — the polling path must never run
+// nmcli, so the machine caches what its own tick probes saw, and this is how
+// a tick probe learns the type for free. Same surface-errors bias as
+// ExternalLink.
+func (c *LinkChecker) ExternalLinkDetail(ctx context.Context, excludeProfile string) (link, wired bool, err error) {
+	if c == nil || c.exec == nil {
+		return false, false, errors.New("link checker not initialized")
+	}
+	res, err := c.linkProbe(ctx, excludeProfile)
+	return res.link, res.wired, err
+}
+
 // WiredLink reports whether the device has a live ethernet link: an ethernet
 // device in NetworkManager's ACTIVATED state. It exists for callers that must
 // distinguish a wire from a Wi-Fi association — the `startWifiSetup` admission

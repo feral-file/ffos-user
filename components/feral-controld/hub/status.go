@@ -9,6 +9,7 @@ import (
 
 	constants "github.com/feral-file/ffos-user/components/feral-controld/constant"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
+	"github.com/feral-file/ffos-user/components/feral-controld/status"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
@@ -63,6 +64,9 @@ type StatusInfo struct {
 	// multiple controlling phones, so a claimed device must stay pairable
 	// from any phone on the LAN (see handleStatus for the trust-model note).
 	TopicID string
+	// Network is the §4.7 health object (nil when no provisioning machine is
+	// wired — the additive field is then omitted).
+	Network *status.NetworkHealth
 }
 
 // statusResponse is the on-the-wire JSON shape of GET /api/status AND
@@ -83,6 +87,9 @@ type statusResponse struct {
 	SetupState   string `json:"setup_state"`
 	Connectivity string `json:"connectivity"`
 	TopicID      string `json:"topic_id"`
+	// network is the additive §4.7 health object (docs/network-recovery-ux.md);
+	// omitted when no provisioning machine is wired.
+	Network *status.NetworkHealth `json:"network,omitempty"`
 }
 
 // handleStatus serves GET /api/status — the legacy (contract "1") route, kept
@@ -129,6 +136,7 @@ func (h *hub) serveStatus(w http.ResponseWriter, r *http.Request, contract strin
 		SetupState:   info.SetupState,
 		Connectivity: info.Connectivity,
 		TopicID:      info.TopicID,
+		Network:      info.Network,
 	}
 
 	if err := h.respondJSON(w, http.StatusOK, resp); err != nil {

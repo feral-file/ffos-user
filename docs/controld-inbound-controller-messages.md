@@ -240,6 +240,27 @@ app identify a v2 frame over the relayer when mDNS is unavailable
 (`docs/app-triggered-wifi-setup.md` §4.2). Its PRESENCE is the capability
 signal — old firmware's reply simply lacks the key.
 
+The reply additionally carries the additive `network` health object
+(`docs/network-recovery-ux.md` §4.7) — the same diagnosis the on-screen
+narration shows, also served on the hub status routes:
+
+```json
+"network": {
+  "state": "offline_retrying",
+  "reason": "joined-no-internet",
+  "ssid": "Studio WiFi",
+  "link": "wifi",
+  "internet": false
+}
+```
+
+(`deferred` is `omitempty`: it appears only while true.)
+
+`link` ∈ `wifi`/`ethernet`/`none`/`unknown` from the machine's cached probe
+evidence (a status poll never runs a probe); `deferred` tells the app its own
+control-plane contact is holding a pending setup-mode raise down, so it should
+surface the pairing/`startWifiSetup` action instead of waiting.
+
 Current error cases:
 
 - Status collection dependencies may fail; unavailable fields are usually

@@ -839,3 +839,67 @@ func TestStartWifiSetupFromActiveAPRefreshesSession(t *testing.T) {
 	assert.Equal(t, 1, h.rec.count("ap.Down"),
 		"the re-latched user session must expire on ITS OWN fresh bound")
 }
+
+// --- §4.7 health snapshot -----------------------------------------------------
+
+// TestSnapshotServesCachedEvidence pins the health surface's sourcing
+// contract: values come from the machine's own probe caches — a Snapshot call
+// runs NO probe (the fake-clock/no-nmcli pin), the link type rides the detail
+// probe's wire verdict, and the apUp short-circuit never clobbers the cache
+// (the stale-type pin).
+func TestSnapshotServesCachedEvidence(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: true}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+
+	// Wire the detail probe so the type is learned from the same read.
+	var probeCalls int
+	h.m.activeLinkDetail = func(context.Context) (bool, bool, error) {
+		probeCalls++
+		return fl.up, false, fl.err // a Wi-Fi station: link yes, wire no
+	}
+
+	h.m.onConnectivity(ctx, false, false)
+	h.tick(ctx) // one real probe: present, not wired
+
+	before := probeCalls
+	snap := h.m.Snapshot()
+	assert.Equal(t, before, probeCalls, "a status poll must never run a probe")
+	assert.Equal(t, string(StateOfflineRetrying), snap.State)
+	assert.Equal(t, "wifi", snap.Link, "the detail probe's wire verdict types the link")
+
+	// The machine raises (link drops, window expires): while the AP holds the
+	// radio, probeLink short-circuits — the cache must keep the last REAL
+	// evidence rather than recording a fabricated absent-with-no-type.
+	fl.up = false
+	h.tickN(ctx, windowSamples)
+	require.Equal(t, StateAPActive, h.m.State())
+	h.tickN(ctx, 3) // short-circuited ticks under the raised AP
+	snap = h.m.Snapshot()
+	assert.Equal(t, "none", snap.Link,
+		"the last real probe (confirmed absent, pre-raise) is the evidence; the short-circuit writes nothing")
+	assert.Equal(t, string(StateAPActive), snap.State)
+}
+
+// TestSnapshotDeferredSubState pins the §4.7 deferred flag: while the episode
+// pauses on the app's own hub contact, the snapshot says so — the app can
+// surface the pairing/startWifiSetup action instead of silently resetting the
+// clock — and the flag drops when counting resumes.
+func TestSnapshotDeferredSubState(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: true}
+	h := newEpisodeHarness(t, fl)
+	h.m.onConnectivity(ctx, false, false)
+	h.tickN(ctx, 5)
+	assert.False(t, h.m.Snapshot().Deferred)
+
+	h.m.ObserveHubContact()
+	h.tick(ctx) // contact-deferred sample
+	assert.True(t, h.m.Snapshot().Deferred,
+		"the app must learn its own presence is holding the raise down")
+
+	// Freshness expires (12 ticks): counting resumes, the flag drops.
+	h.tickN(ctx, 13)
+	assert.False(t, h.m.Snapshot().Deferred)
+}

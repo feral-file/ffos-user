@@ -1089,13 +1089,14 @@ func initializeApp(
 		func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
 		func() bool { return uptimeWithin(startupOTAGateEntryWindow, go_os.ReadFile, logger) })
 	provMachine := provisioning.New(provisioning.Config{
-		AP:           softAP,
-		Wifi:         wifiCtl,
-		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
-		Clock:        clock,
-		Logger:       logger,
-		Notifier:     provisioningNotifier,
-		ActiveLink:   externalLinkProbe(linkChecker),
+		AP:               softAP,
+		Wifi:             wifiCtl,
+		Connectivity:     &dbusConnectivity{dbus: dbusClient, logger: logger},
+		Clock:            clock,
+		Logger:           logger,
+		Notifier:         provisioningNotifier,
+		ActiveLink:       externalLinkProbe(linkChecker),
+		ActiveLinkDetail: externalLinkDetailProbe(linkChecker),
 		// Ethernet-only verdict for the escape policy's wired guard and the
 		// wired exit from a raised AP (constraint 6 — NOT ExternalLink, which
 		// counts stations).
@@ -1131,6 +1132,7 @@ func initializeApp(
 		base:     baseStatusProvider,
 		machine:  provMachine,
 		internet: internetProbeFrom(dbusClient, logger),
+		snapshot: provMachine.Snapshot,
 	}
 	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
 	// Control-plane hub contact defers the escape policy's episode raise
@@ -1146,6 +1148,9 @@ func initializeApp(
 	// handler runs the machine's admission and queues the user-requested
 	// raise; the §4.2 session machinery bounds the session.
 	wireWifiSetupStarter(executor, provMachine)
+	// getDeviceStatus carries the same §4.7 health object the hub status
+	// routes serve (one diagnosis, every transport).
+	wireNetworkHealth(executor, provMachine, internetProbeFrom(dbusClient, logger))
 
 	return &app{
 		Ctx:                      context,

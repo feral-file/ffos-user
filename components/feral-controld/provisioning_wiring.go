@@ -471,6 +471,19 @@ func wireInternetProbe(ex any, dc dbus.DBus, logger *zap.Logger) {
 	}
 }
 
+// externalLinkDetailProbe is externalLinkProbe's detail flavor: the same
+// hotspot-excluding probe, plus the ethernet-only verdict from the same nmcli
+// read, so the machine's §4.7 health snapshot learns the link TYPE at zero
+// extra probe cost. Same nil and failure semantics.
+func externalLinkDetailProbe(lc *status.LinkChecker) func(context.Context) (bool, bool, error) {
+	if lc == nil {
+		return nil
+	}
+	return func(ctx context.Context) (bool, bool, error) {
+		return lc.ExternalLinkDetail(ctx, softap.ProfileName)
+	}
+}
+
 // wiredLinkProbe adapts the shared LinkChecker's ethernet-only verdict to the
 // provisioning WiredLink seam (constraint 6 — never ExternalLink, which
 // counts stations). File scope for the same `context`-shadowing reason as
@@ -508,6 +521,29 @@ func provisioningTuningFromConfig(t config.ProvisioningTuning) provisioning.Tuni
 		out.EpisodeStationLadder = append(out.EpisodeStationLadder, secs(s))
 	}
 	return out
+}
+
+// wireNetworkHealth attaches the executor's getDeviceStatus network-object
+// composer: the machine's cached snapshot plus the cached monitord internet
+// verdict — the relayer/cast reply then carries the same §4.7 diagnosis the
+// hub status routes serve. File scope for the `context`-shadowing reason;
+// type-asserted like the sibling seams.
+func wireNetworkHealth(ex any, m *provisioning.Machine, internet func(context.Context) bool) {
+	if sink, ok := ex.(interface {
+		SetNetworkHealth(func(context.Context) *status.NetworkHealth)
+	}); ok {
+		sink.SetNetworkHealth(func(ctx context.Context) *status.NetworkHealth {
+			snap := m.Snapshot()
+			return &status.NetworkHealth{
+				State:    snap.State,
+				Reason:   snap.Reason,
+				SSID:     snap.SSID,
+				Link:     snap.Link,
+				Internet: internet(ctx),
+				Deferred: snap.Deferred,
+			}
+		})
+	}
 }
 
 // wireWifiSetupStarter attaches the executor's startWifiSetup seam to the
@@ -565,6 +601,9 @@ type provisioningStatusProvider struct {
 	base     hub.StatusProvider
 	machine  setupStateSource
 	internet func(ctx context.Context) bool
+	// snapshot, when wired, serves the machine's cached §4.7 health object
+	// (provisioning.Machine.Snapshot — probe-free by contract).
+	snapshot func() provisioning.NetworkSnapshot
 }
 
 func (p *provisioningStatusProvider) Status(ctx context.Context) hub.StatusInfo {
@@ -574,6 +613,20 @@ func (p *provisioningStatusProvider) Status(ctx context.Context) hub.StatusInfo 
 	}
 	if p.internet != nil {
 		info.Internet = p.internet(ctx)
+	}
+	// The §4.7 health object: the machine's cached snapshot plus the same
+	// cached internet verdict the top-level field carries. No probe runs on
+	// this path — LAN clients poll while claiming.
+	if p.snapshot != nil {
+		snap := p.snapshot()
+		info.Network = &status.NetworkHealth{
+			State:    snap.State,
+			Reason:   snap.Reason,
+			SSID:     snap.SSID,
+			Link:     snap.Link,
+			Internet: info.Internet,
+			Deferred: snap.Deferred,
+		}
 	}
 	return info
 }

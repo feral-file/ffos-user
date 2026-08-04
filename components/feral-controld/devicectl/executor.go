@@ -260,6 +260,10 @@ type executor struct {
 	// nil (tests, doubles) means no expiry.
 	bootLifecycleProbe func() bool
 
+	// networkHealth, when wired (SetNetworkHealth), composes the additive
+	// §4.7 network object attached to getDeviceStatus replies.
+	networkHealth func(ctx context.Context) *status.NetworkHealth
+
 	// wifiSetupStarter, when wired (SetWifiSetupStarter), runs the
 	// provisioning machine's startWifiSetup admission and queues the
 	// user-requested raise (provisioning.Machine.StartWifiSetup). nil renders
@@ -1419,7 +1423,23 @@ func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, versi
 }
 
 func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
-	return e.deviceStatus.GetStatus(ctx)
+	resp, err := e.deviceStatus.GetStatus(ctx)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	// Attach the §4.7 health object (probe-free by the seam's contract);
+	// nil seam simply omits the additive field.
+	if e.networkHealth != nil {
+		resp.Network = e.networkHealth(ctx)
+	}
+	return resp, nil
+}
+
+// SetNetworkHealth injects the §4.7 network-health composer (the provisioning
+// snapshot plus the cached internet verdict — never a live probe). Same
+// wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetNetworkHealth(fn func(ctx context.Context) *status.NetworkHealth) {
+	e.networkHealth = fn
 }
 
 // startWifiSetup handles CMD_START_WIFI_SETUP

@@ -69,13 +69,37 @@ func NewDeviceStatus(
 // mdns `api` TXT key.
 const DeviceStatusContract = "2"
 
+// NetworkHealth is the additive `network` object on the hub status routes and
+// the relayer/cast getDeviceStatus reply (docs/network-recovery-ux.md §4.7):
+// the same diagnosis the on-screen narration shows, so the app can surface it
+// and offer "Change Wi-Fi" whenever the device is reachable. All values come
+// from the provisioning machine's mu-guarded snapshot plus the cached
+// monitord internet verdict — a status poll never runs a probe.
+type NetworkHealth struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	SSID   string `json:"ssid,omitempty"`
+	// Link is "wifi" | "ethernet" | "none" | "unknown" — the machine's last
+	// real probe evidence, never a fresh read.
+	Link     string `json:"link"`
+	Internet bool   `json:"internet"`
+	// Deferred tells the app its OWN presence (control-plane contact) is what
+	// is holding a pending setup-mode raise down, so it can surface the
+	// pairing/startWifiSetup action instead of silently resetting the clock.
+	Deferred bool `json:"deferred,omitempty"`
+}
+
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
 	// Contract is DeviceStatusContract on every reply — deliberately no
 	// omitempty: its PRESENCE is the capability signal (an old firmware's
 	// reply simply lacks the key, and the app fails closed to the legacy
 	// path).
-	Contract            string            `json:"contract"`
+	Contract string `json:"contract"`
+	// Network is attached by the devicectl executor from the provisioning
+	// machine's snapshot (see NetworkHealth); nil (omitted) only when that
+	// seam is unwired.
+	Network             *NetworkHealth    `json:"network,omitempty"`
 	ScreenRotation      string            `json:"screenRotation,omitempty"`
 	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
 	InstalledVersion    string            `json:"installedVersion,omitempty"`
