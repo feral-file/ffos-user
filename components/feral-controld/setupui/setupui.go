@@ -158,12 +158,21 @@ type Service struct {
 
 	mu      sync.Mutex
 	support support
-	// connectingSupport is the one-shot manifest verdict for stateConnecting
-	// (can the running player render it, or must the send downgrade to
-	// join_failed?). Resolved on the WORKER at send time, never at Show-time
-	// — see resolveConnectingState for why the retained intent must stay
-	// neutral. Same latching rules as support: a successfully READ manifest
-	// latches for the process lifetime, an unreadable one stays undecided.
+	// connectingSupport is the LAST manifest verdict for stateConnecting that
+	// was derived from a successfully read manifest (can the running player
+	// render it, or must the send downgrade to join_failed?). Resolved on the
+	// WORKER at send time, never at Show-time — see resolveConnectingState
+	// for why the retained intent must stay neutral. Unlike support, this is
+	// deliberately NOT a process-lifetime latch: the player bundle (and its
+	// manifest) is OTA-replaced without a controld restart, so a latched
+	// verdict goes stale in both directions — an old-manifest supportNo would
+	// keep downgrading on an upgraded player until restart, and an
+	// unreadable-manifest "undecided" after a bundle downgrade would send a
+	// renders-nothing connecting to an old player. Every resolution re-reads
+	// the manifest (connecting pushes are rare — boot hedge and offline
+	// episode edges — so one small file read each is nothing); this field
+	// only bridges unreadable windows (OTA mid-replace) with the last real
+	// evidence. supportUnknown until the first successful read.
 	connectingSupport support
 	// last is the most recently intended narration state. It is retained (not
 	// cleared after sending) so it can be re-pushed when CDP reconnects.
@@ -294,44 +303,56 @@ func (s *Service) resolveConnectingState(req map[string]any) map[string]any {
 
 // connectingUnsupported reports POSITIVE evidence that the running player
 // predates stateConnecting: a successfully read manifest whose state list
-// lacks it. Latched per process like narrationSupported; an unreadable
-// manifest stays undecided and reports false — keep the neutral state,
-// because downgrading on anything short of positive evidence would trade the
-// M-0/M-1 narration's truthful title for join_failed's false failure one.
-// The un-downgraded push is skipped by narrationSupported's own unreadable
-// branch anyway, and the next delivery (or Resync replay) re-resolves. A
-// readable-but-undecodable manifest latches unsupported without its own log
-// line: narrationSupported already fails the same manifest loudly and
-// suppresses all narration before this is ever consulted.
+// lacks it. Re-read on every resolution — never latched — because the bundle
+// and manifest are OTA-replaced under a running controld (see the
+// connectingSupport field for both staleness directions a latch causes). An
+// unreadable manifest (boot ordering, OTA mid-replace) falls back to the
+// last verdict read from a real manifest; before any successful read it
+// reports false — keep the neutral state, because downgrading on anything
+// short of positive evidence would trade the M-0/M-1 narration's truthful
+// title for join_failed's false failure one, and that un-downgraded push is
+// skipped by narrationSupported's own unreadable branch anyway (the next
+// delivery or Resync replay re-resolves). A readable-but-undecodable
+// manifest downgrades conservatively without updating the remembered
+// verdict and without its own log line: narrationSupported fails the same
+// manifest loudly and, unless its verdict was latched earlier, suppresses
+// all narration before this is ever consulted.
 func (s *Service) connectingUnsupported() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	switch s.connectingSupport {
-	case supportYes:
-		return false
-	case supportNo:
-		return true
-	}
 	manifest, err := readPlayerContractManifest(s.contractPath)
 	if err != nil {
 		if !errors.Is(err, errContractUnreadable) {
-			s.connectingSupport = supportNo
 			return true
 		}
-		return false
+		return s.connectingSupport == supportNo
 	}
+	supported := false
 	for _, state := range manifest.Contracts["setupDisplay"].States {
 		if state == stateConnecting {
-			s.connectingSupport = supportYes
-			return false
+			supported = true
+			break
 		}
 	}
-	s.connectingSupport = supportNo
-	// One-shot Info, not Warn: expected on fielded players until the bundle
-	// updates, and the downgrade keeps the narration functional.
-	s.logger.Info("Player manifest predates the connecting narration state; downgrading to join_failed",
-		zap.String("path", s.contractPath))
-	return true
+	verdict := supportYes
+	if !supported {
+		verdict = supportNo
+	}
+	if s.connectingSupport != verdict {
+		s.connectingSupport = verdict
+		// Logged on verdict CHANGES only (not per push): the flip is the
+		// bundle-swap trace an operator needs, and steady-state pushes stay
+		// quiet. Info, not Warn — expected on fielded players until the
+		// bundle updates, and the downgrade keeps the narration functional.
+		if supported {
+			s.logger.Info("Player manifest lists the connecting narration state; using it",
+				zap.String("path", s.contractPath))
+		} else {
+			s.logger.Info("Player manifest predates the connecting narration state; downgrading to join_failed",
+				zap.String("path", s.contractPath))
+		}
+	}
+	return !supported
 }
 
 // ShowUpdating narrates an in-progress OTA update. progress is a percent

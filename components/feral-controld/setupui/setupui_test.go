@@ -431,6 +431,48 @@ func TestShowConnectingManifestGate(t *testing.T) {
 		assert.Equal(t, stateConnecting, req["state"])
 		assert.Equal(t, "Looking for your Wi-Fi network…", req["reason"])
 	})
+
+	// The player bundle (and its manifest) is OTA-replaced without a controld
+	// restart, so the capability verdict must never latch for the process
+	// lifetime. Both staleness directions:
+	t.Run("bundle upgrade after a downgrade verdict delivers connecting on replay", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
+
+		// The bundle updates in place; a latched supportNo would keep
+		// downgrading on the upgraded player until a daemon restart.
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
+	})
+
+	t.Run("unreadable manifest after an old-player verdict keeps the downgrade", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(validContract), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
+
+		// narrationSupported's overall verdict latched supportYes on the push
+		// above, so the send path stays open when the manifest then goes
+		// unreadable (OTA mid-replace). The replay must fall back to the last
+		// verdict read from a real manifest — an un-downgraded connecting
+		// would be a renders-nothing no-op on the old player still on screen.
+		require.NoError(t, os.Remove(path))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
+	})
 }
 
 // TestDownCDPDoesNotBlockOrPanic verifies fire-and-forget semantics against a
