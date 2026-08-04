@@ -208,7 +208,10 @@ already "send a command, then remove the device", including LAN/relayer fallback
   with **no ethernet row at all** is confirmed-no-wire (`false, nil`), not an error; **corrupt or
   empty output** (the unsurveyed case) surfaces as an error, never as a confirmed verdict.
 - Admission: rejects on wired link; rejects on probe error; rejects `busy` from `joining`/`starting`;
-  accepts from `online`, `offline_retrying`, `unprovisioned`.
+  accepts from `online`, `offline_retrying`, `unprovisioned` — and from `ap_active` as an idempotent
+  refresh (implementation amendment: a cast can arrive over the hotspot's own subnet or during a
+  failed raise, and rejecting there would wedge the app's retry; the accept re-latches the
+  `user-requested` session policy and re-arms its fresh 30-minute clock).
 - Ordering: the reply is produced before the AP raise is requested.
 - Entry: `clearOffline` and `resetJoinStatus` both observed, `resetJoinStatus` before the transition;
   no second pre-AP scan issued.

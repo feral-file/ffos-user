@@ -59,8 +59,23 @@ func NewDeviceStatus(
 	}
 }
 
+// DeviceStatusContract is the API contract version this firmware speaks,
+// reported on every getDeviceStatus reply (relayer and LAN cast alike) so the
+// app can identify a v2 frame when mDNS is unavailable — multicast-filtering
+// APs, cross-VLAN (docs/app-triggered-wifi-setup.md §4.2; added in the v2
+// release itself because adding it later costs a full OTA convergence cycle
+// before the app can rely on it). MUST stay equal to hub.StatusContractV2; a
+// hub-side test pins the two constants together, the same technique as the
+// mdns `api` TXT key.
+const DeviceStatusContract = "2"
+
 // DeviceStatusResponse represents the structure of device status information
 type DeviceStatusResponse struct {
+	// Contract is DeviceStatusContract on every reply — deliberately no
+	// omitempty: its PRESENCE is the capability signal (an old firmware's
+	// reply simply lacks the key, and the app fails closed to the legacy
+	// path).
+	Contract            string            `json:"contract"`
 	ScreenRotation      string            `json:"screenRotation,omitempty"`
 	ConnectedWifi       string            `json:"connectedWifi,omitempty"`
 	InstalledVersion    string            `json:"installedVersion,omitempty"`
@@ -80,7 +95,7 @@ type DeviceStatusResponse struct {
 // GetStatus retrieves comprehensive device status information
 // This function can be used by both command handlers and status polling
 func (d deviceStatus) GetStatus(ctx context.Context) (*DeviceStatusResponse, error) {
-	response := &DeviceStatusResponse{}
+	response := &DeviceStatusResponse{Contract: DeviceStatusContract}
 
 	// Use errgroup for parallel execution
 	g, ctx := errgroup.WithContext(ctx)

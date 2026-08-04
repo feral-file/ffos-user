@@ -1142,6 +1142,10 @@ func initializeApp(
 	// The claim observer registered above fans out here (declared before the
 	// machine existed).
 	provMachineForClaim = provMachine
+	// App-triggered Wi-Fi setup (startWifiSetup): the executor's command
+	// handler runs the machine's admission and queues the user-requested
+	// raise; the §4.2 session machinery bounds the session.
+	wireWifiSetupStarter(executor, provMachine)
 
 	return &app{
 		Ctx:                      context,

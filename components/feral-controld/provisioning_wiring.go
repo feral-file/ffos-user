@@ -510,6 +510,18 @@ func provisioningTuningFromConfig(t config.ProvisioningTuning) provisioning.Tuni
 	return out
 }
 
+// wireWifiSetupStarter attaches the executor's startWifiSetup seam to the
+// provisioning machine's admission+queue entry point. File scope for the same
+// `context`-shadowing reason as externalLinkProbe; type-asserted so test
+// doubles without the method leave the command rejecting as unavailable.
+func wireWifiSetupStarter(ex any, m *provisioning.Machine) {
+	if sink, ok := ex.(interface {
+		SetWifiSetupStarter(func(context.Context) error)
+	}); ok {
+		sink.SetWifiSetupStarter(m.StartWifiSetup)
+	}
+}
+
 // setupStateSource is the read-only slice of the provisioning machine the hub
 // status provider needs. *provisioning.Machine satisfies it.
 type setupStateSource interface {

@@ -104,6 +104,9 @@ stateDiagram-v2
   ap_active --> offline_retrying: recheck blink (ap-recheck, then re-raise or exit)
   offline_retrying --> offline_retrying: episode settled (setup-incomplete-settled)
   ap_active --> offline_retrying: session expired / wired link sighted (silent landing)
+  online --> ap_active: startWifiSetup (user-requested, 30m session)
+  offline_retrying --> ap_active: startWifiSetup (user-requested)
+  unprovisioned --> ap_active: startWifiSetup (user-requested)
 ```
 
 **AP session policy** (`docs/network-recovery-ux.md` §4.2 — latched from the

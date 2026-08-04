@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -258,6 +259,13 @@ type executor struct {
 	//     broken until repaired.
 	// nil (tests, doubles) means no expiry.
 	bootLifecycleProbe func() bool
+
+	// wifiSetupStarter, when wired (SetWifiSetupStarter), runs the
+	// provisioning machine's startWifiSetup admission and queues the
+	// user-requested raise (provisioning.Machine.StartWifiSetup). nil renders
+	// the command unavailable — a wiring that predates the seam must reject,
+	// not pretend.
+	wifiSetupStarter func(ctx context.Context) error
 
 	// internetProbe, when wired (SetInternetProbe), reports cached internet
 	// reachability. The claim flow's topic-wait expiry consults it to tell
@@ -519,6 +527,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setBetaFeaturesToggle(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
+	case commands.CMD_START_WIFI_SETUP:
+		result, err = e.startWifiSetup(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
 	case commands.CMD_FACTORY_RESET:
@@ -1267,6 +1277,13 @@ func (e *executor) SetStartupOTAGateEntryProbe(probe func() bool) {
 	e.otaGateEntryProbe = probe
 }
 
+// SetWifiSetupStarter injects the provisioning machine's startWifiSetup
+// admission+queue entry point. Same wiring-before-run ordering contract as
+// SetBootLifecycleProbe.
+func (e *executor) SetWifiSetupStarter(starter func(ctx context.Context) error) {
+	e.wifiSetupStarter = starter
+}
+
 // SetInternetProbe injects a cached internet-reachability check (sys-monitord's
 // cached connectivity, never a live network probe) used by the claim flow's
 // topic-wait expiry narration (see internetProbe for the tri-state contract).
@@ -1403,6 +1420,38 @@ func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, versi
 
 func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
 	return e.deviceStatus.GetStatus(ctx)
+}
+
+// startWifiSetup handles CMD_START_WIFI_SETUP
+// (docs/app-triggered-wifi-setup.md): admission runs synchronously in the
+// provisioning machine, but ACCEPTANCE only queues the raise — the reply
+// below is produced and sent before any radio work, because raising the AP
+// severs the station link that would carry it (constraint 1). A rejection is
+// a NORMAL reply ({ok:false, code, message}), not a transport error: the app
+// branches on the code.
+func (e *executor) startWifiSetup(ctx context.Context) (interface{}, error) {
+	if e.wifiSetupStarter == nil {
+		return map[string]any{"ok": false, "code": "unavailable",
+			"message": "Wi-Fi setup is not available on this device"}, nil
+	}
+	if err := e.wifiSetupStarter(ctx); err != nil {
+		code := "busy"
+		msg := "The frame is busy joining a network. Try again in a moment."
+		if errors.Is(err, provisioning.ErrWiredLinkActive) {
+			code = "wired_link_active"
+			msg = "The frame is connected by ethernet cable. Unplug the cable to set up Wi-Fi."
+		}
+		e.logger.Info("startWifiSetup rejected", zap.String("code", code), zap.Error(err))
+		return map[string]any{"ok": false, "code": code, "message": msg}, nil
+	}
+	// The AP SSID is deterministic (softap: the FF1-prefixed device id), so
+	// the reply can carry it without waiting for the raise.
+	ssid := e.deviceID()
+	if !strings.HasPrefix(ssid, "FF1-") {
+		ssid = "FF1-" + ssid
+	}
+	e.logger.Info("startWifiSetup accepted; setup AP raise queued", zap.String("ssid", ssid))
+	return map[string]any{"ok": true, "ssid": ssid}, nil
 }
 
 func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (interface{}, error) {

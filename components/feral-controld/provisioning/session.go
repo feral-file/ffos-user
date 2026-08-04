@@ -15,6 +15,8 @@ package provisioning
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"time"
@@ -233,6 +235,85 @@ func (m *Machine) hubContactFresh() bool {
 	last := m.lastHubContact
 	m.mu.Unlock()
 	return !last.IsZero() && m.clock.Now().Sub(last) < m.tuning.HubContactFresh
+}
+
+// -----------------------------------------------------------------------------
+// App-triggered setup (startWifiSetup — docs/app-triggered-wifi-setup.md)
+// -----------------------------------------------------------------------------
+
+// Admission rejections for StartWifiSetup, matched by the command handler to
+// its wire codes ({ok:false, code}).
+var (
+	// ErrSetupBusy: the machine is mid-join or still starting — a raise now
+	// would tear the radio out from under an in-flight activation.
+	ErrSetupBusy = errors.New("provisioning is busy")
+	// ErrWiredLinkActive: a live ethernet link, an errored probe, or an
+	// unavailable probe — all fail CLOSED. Raising the AP on a wired frame
+	// would be torn down by the next online reading (the flow silently
+	// fails), and suppressing that exit would expose the unauthenticated
+	// portal on a routable wired address; see the sibling plan's §3 risk row.
+	ErrWiredLinkActive = errors.New("wired link active")
+)
+
+// StartWifiSetup validates admission for the app-triggered raise and QUEUES
+// it, returning before any radio work: the caller's reply must precede the
+// raise (constraint 1 of the sibling plan — the AP severs the station link
+// that carries the response). Accepts from online / offline_retrying /
+// unprovisioned / ap_active (idempotent refresh); rejects busy from
+// joining/starting; rejects wired (fail closed on probe errors). Safe from
+// any goroutine.
+func (m *Machine) StartWifiSetup(ctx context.Context) error {
+	switch m.State() {
+	case StateJoining, StateStarting:
+		return ErrSetupBusy
+	}
+	if m.wiredLink == nil {
+		return fmt.Errorf("%w: wired-link probe unavailable", ErrWiredLinkActive)
+	}
+	wired, err := m.wiredLink(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: probe failed: %w", ErrWiredLinkActive, err)
+	}
+	if wired {
+		return ErrWiredLinkActive
+	}
+	select {
+	case m.events <- event{kind: evUserSetup}:
+		return nil
+	default:
+		return ErrSetupBusy
+	}
+}
+
+// applyUserSetup performs the user-requested raise on the loop goroutine,
+// mirroring every existing raise site (constraint 3's triple; resetJoinStatus
+// runs before the transition because it is edge-gated on state !=
+// StateAPActive). The §4.2 session machinery then bounds the session at the
+// user-requested row's 30 minutes — the abandonment net.
+func (m *Machine) applyUserSetup(ctx context.Context) {
+	// Re-check on the loop: a portal join may have started since admission.
+	switch m.State() {
+	case StateJoining, StateStarting:
+		m.logger.Warn("provisioning: user-requested setup ignored; machine became busy after admission")
+		return
+	}
+	m.logger.Info("provisioning: user-requested setup; raising the AP")
+	m.clearOffline()
+	m.resetJoinStatus()
+	m.transition(ctx, StateAPActive, Detail{
+		Reason:  ReasonUserRequested,
+		Message: "Wi-Fi setup requested from the app",
+	})
+	// Arm AFTER the transition (the latch inside it is what sets the
+	// user-requested bound). On a fresh raise this double-arms harmlessly
+	// with ensureAPUp's own arm (same tick, same clock reading); on the
+	// ACCEPTED-FROM-ap_active flavor it is load-bearing — the AP is already
+	// up, so ensureAPUp early-returns and never arms, and without this the
+	// re-latched user session would inherit the PREVIOUS session's phase
+	// clock (stale by up to a full recheck phase) or, from the unbounded
+	// out-of-box session, no clock at all — violating §4.2's "30 min —
+	// always, including from StateUnprovisioned".
+	m.armSessionTimer()
 }
 
 // -----------------------------------------------------------------------------

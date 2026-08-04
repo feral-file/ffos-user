@@ -680,3 +680,162 @@ func TestEpisodePauseRepaintsFloorSafeCopy(t *testing.T) {
 	assert.Contains(t, last.Detail.Message, "will reopen if",
 		"the paused variant keeps the floor-safe promise")
 }
+
+// --- startWifiSetup admission (docs/app-triggered-wifi-setup.md §4.1) ---------
+
+// TestStartWifiSetupAdmission pins the admission table: rejects busy from
+// joining/starting, rejects wired (fail closed on probe error AND on an
+// unavailable probe), accepts from online / offline_retrying / unprovisioned —
+// and acceptance only QUEUES: the reply precedes any radio work (constraint 1
+// of the sibling plan).
+func TestStartWifiSetupAdmission(t *testing.T) {
+	ctx := context.Background()
+	notWired := func(context.Context) (bool, error) { return false, nil }
+
+	t.Run("accepts from resting states and the raise runs the entry triple", func(t *testing.T) {
+		for _, drive := range []struct {
+			name  string
+			setup func(h *harness)
+			state State
+		}{
+			{"online", func(h *harness) {
+				h.wifi.setProfile(true)
+				h.m.onConnectivity(ctx, true, false)
+			}, StateOnline},
+			{"offline_retrying", func(h *harness) {
+				h.wifi.setProfile(true)
+				h.m.onConnectivity(ctx, false, false)
+			}, StateOfflineRetrying},
+			{"unprovisioned", func(h *harness) {
+				h.wifi.setProfile(false)
+				h.m.onConnectivity(ctx, true, false)
+			}, StateUnprovisioned},
+		} {
+			t.Run(drive.name, func(t *testing.T) {
+				fl := &fakeLink{up: true}
+				h := newLinkHarness(t, fl)
+				h.m.wiredLink = notWired
+				drive.setup(h)
+				require.Equal(t, drive.state, h.m.State())
+				// Seed a stale join outcome so the resetJoinStatus pin is real:
+				// a fresh machine is already JoinIdle, and constraint 2's
+				// failure mode is precisely a WEEKS-old success/failure banner
+				// greeting the new session.
+				h.m.mu.Lock()
+				h.m.status = portal.Status{State: portal.JoinFailed, SSID: "OldNet", Reason: "auth-failure"}
+				h.m.mu.Unlock()
+
+				require.NoError(t, h.m.StartWifiSetup(ctx))
+				// Constraint 1: acceptance queued, no radio work yet.
+				assert.Equal(t, 0, h.rec.count("ap.Up"),
+					"the reply must precede any radio work")
+
+				// Drain the queued raise the way the loop would.
+				ev := <-h.m.events
+				require.Equal(t, evUserSetup, ev.kind)
+				h.m.applyUserSetup(ctx)
+				assert.Equal(t, StateAPActive, h.m.State())
+				assert.Equal(t, 1, h.rec.count("ap.Up"))
+				assert.Equal(t, 1, countReason(h, StateAPActive, ReasonUserRequested))
+				assert.Equal(t, portal.JoinIdle, h.m.Status().State,
+					"resetJoinStatus must clear a stale outcome before the fresh session")
+			})
+		}
+	})
+
+	t.Run("rejects busy while joining", func(t *testing.T) {
+		fl := &fakeLink{up: false}
+		h := newLinkHarness(t, fl)
+		h.m.wiredLink = notWired
+		h.wifi.setProfile(false)
+		h.m.onConnectivity(ctx, false, false) // AP up
+		require.Equal(t, StateAPActive, h.m.State())
+		h.m.mu.Lock()
+		h.m.state = StateJoining // a join is in flight
+		h.m.mu.Unlock()
+		assert.ErrorIs(t, h.m.StartWifiSetup(ctx), ErrSetupBusy)
+	})
+
+	t.Run("rejects wired, probe error, and missing probe as wired_link_active", func(t *testing.T) {
+		fl := &fakeLink{up: true}
+		h := newLinkHarness(t, fl)
+		h.wifi.setProfile(true)
+		h.m.onConnectivity(ctx, true, false)
+
+		h.m.wiredLink = func(context.Context) (bool, error) { return true, nil }
+		assert.ErrorIs(t, h.m.StartWifiSetup(ctx), ErrWiredLinkActive)
+
+		h.m.wiredLink = func(context.Context) (bool, error) { return false, errors.New("nmcli flake") }
+		assert.ErrorIs(t, h.m.StartWifiSetup(ctx), ErrWiredLinkActive,
+			"a probe error fails CLOSED — never a raise the next online reading tears down")
+
+		h.m.wiredLink = nil
+		assert.ErrorIs(t, h.m.StartWifiSetup(ctx), ErrWiredLinkActive)
+	})
+}
+
+// TestUserSessionAbandonmentNoImmediateReRaise pins the sibling plan's §5
+// regression: an abandoned user-requested session must not produce an
+// immediate sustained-offline re-raise — the expiry teardown resets the
+// offline window (the clearOffline pairing), so a fresh full window of
+// confirmed absence is required before any automatic raise.
+func TestUserSessionAbandonmentNoImmediateReRaise(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	h.m.onConnectivity(ctx, true, false)
+	require.Equal(t, StateOnline, h.m.State())
+
+	require.NoError(t, func() error {
+		h.m.wiredLink = func(context.Context) (bool, error) { return false, nil }
+		return h.m.StartWifiSetup(ctx)
+	}())
+	<-h.m.events
+	h.m.applyUserSetup(ctx)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.tickN(ctx, 120) // the 30-minute session expires; teardown lands
+	require.Equal(t, StateOfflineRetrying, h.m.State())
+	require.Equal(t, 1, h.rec.count("ap.Down"))
+
+	h.tickN(ctx, windowSamples-1)
+	assert.Equal(t, 1, h.rec.count("ap.Up"),
+		"no re-raise inside the fresh window — the abandoned session must not chain")
+	h.tick(ctx)
+	assert.Equal(t, 2, h.rec.count("ap.Up"),
+		"a genuine full window of confirmed absence still raises normally")
+}
+
+// TestStartWifiSetupFromActiveAPRefreshesSession pins the ap_active accept's
+// amended semantics (the sibling plan's admission amendment): the re-latched
+// user-requested session gets a FRESH 30-minute clock even though ensureAPUp
+// early-returns (the AP is already up and never re-arms the timer) — from the
+// out-of-box UNBOUNDED session this is what makes §4.2's "30 min — always,
+// including from StateUnprovisioned" true.
+func TestStartWifiSetupFromActiveAPRefreshesSession(t *testing.T) {
+	ctx := context.Background()
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.m.wiredLink = func(context.Context) (bool, error) { return false, nil }
+	h.wifi.setProfile(false)
+	h.m.onConnectivity(ctx, false, false) // out-of-box raise: UNBOUNDED session
+	require.Equal(t, StateAPActive, h.m.State())
+	h.tickN(ctx, 130) // well past 30 minutes: the unbounded session holds
+	require.Equal(t, StateAPActive, h.m.State())
+	require.Equal(t, 0, h.rec.count("ap.Down"))
+
+	// The app asks for setup while the AP is already up.
+	require.NoError(t, h.m.StartWifiSetup(ctx))
+	ev := <-h.m.events
+	require.Equal(t, evUserSetup, ev.kind)
+	h.m.applyUserSetup(ctx)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	// The refreshed session is BOUNDED with a fresh clock.
+	h.tickN(ctx, 119)
+	assert.Equal(t, 0, h.rec.count("ap.Down"), "the fresh 30-minute clock holds")
+	h.tick(ctx)
+	assert.Equal(t, 1, h.rec.count("ap.Down"),
+		"the re-latched user session must expire on ITS OWN fresh bound")
+}

@@ -663,6 +663,7 @@ const (
 	evJoin
 	evRescan
 	evClaim
+	evUserSetup
 )
 
 type event struct {
@@ -876,6 +877,8 @@ func (m *Machine) loop(ctx context.Context) {
 				m.applyRescan(ctx)
 			case evClaim:
 				m.applyClaim(ctx, ev.claimed)
+			case evUserSetup:
+				m.applyUserSetup(ctx)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)

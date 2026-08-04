@@ -23,6 +23,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
 	"github.com/feral-file/ffos-user/components/feral-controld/playlistschedule"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
 	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
@@ -1212,4 +1213,58 @@ func TestMaybeShowClaimQROnOnline_NoTopicProbeErrorKeepsSilentHide(t *testing.T)
 
 	assert.Equal(t, []string{"finalizing", "hide"}, spy.calls,
 		"an unknown verdict must keep the silent hide, never the no-WAN narration")
+}
+
+// TestStartWifiSetupCommand pins the command handler's reply mapping
+// (docs/app-triggered-wifi-setup.md §4.1): acceptance replies {ok, ssid} with
+// the FF1-prefixed device id BEFORE any radio work (the starter only queues);
+// rejections are NORMAL replies carrying the wire code the app branches on;
+// an unwired starter rejects as unavailable.
+func TestStartWifiSetupCommand(t *testing.T) {
+	newExec := func(t *testing.T, starter func(context.Context) error) *executor {
+		t.Helper()
+		ctrl := gomock.NewController(t)
+		t.Cleanup(ctrl.Finish)
+		mockOS := mocks.NewMockOS(ctrl)
+		mockOS.EXPECT().ReadFile(gomock.Any()).Return([]byte("FF1-TEST\n"), nil).AnyTimes()
+		e := &executor{logger: zap.NewNop(), os: mockOS}
+		if starter != nil {
+			e.SetWifiSetupStarter(starter)
+		}
+		return e
+	}
+
+	t.Run("acceptance replies ok with the AP SSID", func(t *testing.T) {
+		e := newExec(t, func(context.Context) error { return nil })
+		res, err := e.startWifiSetup(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, map[string]any{"ok": true, "ssid": "FF1-TEST"}, res)
+	})
+
+	t.Run("wired rejection carries wired_link_active", func(t *testing.T) {
+		e := newExec(t, func(context.Context) error { return provisioning.ErrWiredLinkActive })
+		res, err := e.startWifiSetup(context.Background())
+		require.NoError(t, err, "a rejection is a reply, not a transport error")
+		m := res.(map[string]any)
+		assert.Equal(t, false, m["ok"])
+		assert.Equal(t, "wired_link_active", m["code"])
+	})
+
+	t.Run("busy rejection carries busy", func(t *testing.T) {
+		e := newExec(t, func(context.Context) error { return provisioning.ErrSetupBusy })
+		res, err := e.startWifiSetup(context.Background())
+		require.NoError(t, err)
+		m := res.(map[string]any)
+		assert.Equal(t, false, m["ok"])
+		assert.Equal(t, "busy", m["code"])
+	})
+
+	t.Run("unwired starter rejects as unavailable", func(t *testing.T) {
+		e := newExec(t, nil)
+		res, err := e.startWifiSetup(context.Background())
+		require.NoError(t, err)
+		m := res.(map[string]any)
+		assert.Equal(t, false, m["ok"])
+		assert.Equal(t, "unavailable", m["code"])
+	})
 }
