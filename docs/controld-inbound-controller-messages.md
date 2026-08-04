@@ -236,12 +236,12 @@ Current success response example:
 
 `contract` is always `"2"` on this firmware (equal to the hub's
 `/api/v2/status` contract — one firmware gate, two transports): it lets the
-app identify a v2 frame over the relayer when mDNS is unavailable
-(`docs/app-triggered-wifi-setup.md` §4.2). Its PRESENCE is the capability
+app identify a v2 frame over the relayer when mDNS is unavailable. Its
+PRESENCE is the capability
 signal — old firmware's reply simply lacks the key.
 
-The reply additionally carries the additive `network` health object
-(`docs/network-recovery-ux.md` §4.7) — the same diagnosis the on-screen
+The reply additionally carries the additive `network` health object — the
+same diagnosis the on-screen
 narration shows, also served on the hub status routes:
 
 ```json
@@ -272,7 +272,7 @@ Current relayer error response: none standardized; command failure is logged.
 ### startWifiSetup
 
 Purpose: put the frame into its existing SoftAP setup mode on the app's
-request, so a user can re-configure Wi-Fi (`docs/app-triggered-wifi-setup.md`).
+request, so a user can re-configure Wi-Fi.
 Reachable over the relayer and the LAN hub `POST /api/cast` like every
 device-control command. Ships with the initial v2 release, so the v2 gate
 (mDNS TXT `api=2` + `/api/v2/status` → `contract:"2"`, or the relayer
