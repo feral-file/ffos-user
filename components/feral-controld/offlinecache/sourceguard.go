@@ -61,19 +61,33 @@ import (
 // second lookup can substitute another. That guarantee also requires the
 // transport to have NO proxy — see transport() — because a proxied
 // request dials the proxy and lets IT reach the origin, which would put
-// the destination back out of reach of the check. checkRedirect adds the one thing
-// a dialer cannot see — the scheme — plus a hop cap. This check remains
-// in front of all of it because it is what keeps a bad source from ever
-// being queued, and because it produces the error the caller reports.
+// the destination back out of reach of the check. checkRedirect adds the
+// one thing a dialer cannot see — the scheme — plus a hop cap. This check
+// remains in front of all of it because it is what keeps a bad source
+// from ever being queued, and because it produces the error the caller
+// reports.
 //
-// Residual gap, stated plainly rather than papered over: capture.go's
-// headless browser is NOT covered. Chromium resolves and dials on its
-// own, and the page it navigates is untrusted artwork that may request
-// arbitrary subresources, so an artwork can still reach a loopback
-// service from inside the browser. Closing that needs request-level
-// interception on the capture CDP session (the machinery cdpsession.go
-// already uses for replay), not a flag; it is deliberately a separate
-// change and is tracked in docs/offline-artwork-capture.md.
+// capture.go's headless browser IS covered, by a different mechanism:
+// Chromium resolves and dials on its own, so no Go transport can reach
+// it. Instead the capture CDP session enables Fetch and answers every
+// paused request against this same address policy, extended to
+// auto-attached child targets (OOPIFs and workers) because those run in
+// their own targets whose requests never reach the root handler. See
+// capturer.attachSourceGuard and enableGuardedAutoAttach.
+//
+// Two residuals remain there, and they are an ACCEPTED, recorded decision
+// rather than an oversight — see the accepted-risk record in
+// docs/offline-artwork-capture.md §9 before re-reporting either:
+//
+//   - DNS rebinding. The capture-side check is URL-time; Chromium
+//     resolves the host itself after the request is continued and may get
+//     a different answer than we did.
+//   - WebSocket. CDP Fetch does not intercept ws:// handshakes at all.
+//
+// Both need Chromium's egress removed entirely (a loopback filtering
+// proxy it must dial through) rather than more interception, and both
+// are sequenced with #3471, which closes the unauthenticated :1111
+// surface these paths lead to.
 var ErrUnsafeSource = errors.New("offline cache: source URL is not permitted")
 
 // AddrResolver is the DNS seam sourceGuard needs, owned here (rather

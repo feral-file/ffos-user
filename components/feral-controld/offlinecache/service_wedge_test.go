@@ -1,6 +1,8 @@
 package offlinecache
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // TestService_DequeueForProcessingAndReserveForClear_AreMutuallyExclusive
@@ -261,10 +265,24 @@ func TestService_CaptureFailure_TruncatesSourceInLog(t *testing.T) {
 	core, observed := observer.New(zap.WarnLevel)
 	huge := "https://example.com/" + strings.Repeat("a", maxLoggedSourceBytes*3)
 
-	s := &service{logger: zap.New(core)}
-	// Exercise the exact call the failure path makes.
-	s.logger.Warn("offline cache: capture failed",
-		zap.String("source", truncateSourceForLog(huge)))
+	// Drive the REAL failure path rather than re-typing its log call.
+	// An earlier version of this test built the zap.String itself, which
+	// meant it passed just as well with service.go's call site reverted
+	// to the untruncated form — it asserted that the helper works, which
+	// TestTruncateSourceForLog_BoundsOversizedSources already covers,
+	// and nothing about the call site it claims to pin.
+	s := &service{
+		logger:      zap.New(core),
+		state:       map[string]ItemState{},
+		sourceByKey: map[string]string{},
+		clock:       wrapper.NewClock(),
+		capturer:    failingCapturer{},
+	}
+	s.process(context.Background(), captureJob{
+		sourceKey: SourceKey(huge),
+		item:      dp1playlist.PlaylistItem{Source: huge},
+		class:     ClassSoftware,
+	})
 
 	entries := observed.FilterMessageSnippet("capture failed").All()
 	require.Len(t, entries, 1)
@@ -286,3 +304,12 @@ func TestTruncateSourceForLog_BoundsOversizedSources(t *testing.T) {
 	assert.Less(t, len(got), len(huge))
 	assert.Contains(t, got, "bytes]")
 }
+
+// failingCapturer makes the software capture path fail, so the terminal
+// capture-failure log this file pins is actually reached.
+type failingCapturer struct{}
+
+func (failingCapturer) Capture(context.Context, dp1playlist.PlaylistItem, int) (*ItemRecord, error) {
+	return nil, errors.New("simulated capture failure")
+}
+func (failingCapturer) Close() error { return nil }

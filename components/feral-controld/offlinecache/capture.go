@@ -333,7 +333,19 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	if err != nil {
 		return nil, fmt.Errorf("offline cache: dial capture session: %w", err)
 	}
-	defer func() { _ = session.Close() }()
+	// Stop the page BEFORE dropping the session. Closing the session
+	// tears down Fetch interception with it, but nothing else tears down
+	// the PAGE: downloader.Release only schedules an idle teardown of the
+	// whole browser (DefaultHeadlessIdleTeardown, 30s), so without this
+	// the untrusted artwork keeps executing unguarded for that entire
+	// window. A timer is all it takes —
+	// setTimeout(() => fetch('http://127.0.0.1:1111/...'), 25000) — and
+	// no DNS control or other infrastructure is needed, which is why this
+	// is NOT covered by the accepted rebinding residual.
+	defer func() {
+		c.stopPageBeforeDetach(session)
+		_ = session.Close()
+	}()
 
 	tracker := newCaptureTracker()
 	c.attachHandlers(session, tracker)
@@ -1125,10 +1137,15 @@ func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, 
 	if err := c.pausedRequestAllowed(decideCtx, rawURL); err != nil {
 		c.logger.Warn("offline cache capture: blocked page request",
 			zap.String("url", truncateSourceForLog(rawURL)), zap.Error(err))
-		// Failed, never fulfilled: the page must be able to tell this
-		// request did not happen, and a synthesized empty 200 would make
-		// a blocked probe look like a real (empty) resource.
-		if _, err := session.Send(decideCtx, "Fetch.failRequest", map[string]interface{}{
+		// Answered on its OWN context, not decideCtx. The dominant reason
+		// the check above fails is decideCtx expiring inside addrsFor (a
+		// hanging resolver — the case its 5s bound exists for), and
+		// sending the verdict on that same expired context would return
+		// immediately without ever failing the request, leaking the pause
+		// instead of closing it.
+		verdictCtx, cancelVerdict := context.WithTimeout(ctx, captureGuardDecisionTimeout)
+		defer cancelVerdict()
+		if _, err := session.Send(verdictCtx, "Fetch.failRequest", map[string]interface{}{
 			"requestId":   requestID,
 			"errorReason": "AccessDenied",
 		}); err != nil {
@@ -1163,7 +1180,11 @@ func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) erro
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
 		// Checked against the address policy below.
-	case "data", "blob":
+	case "data", "blob", "about":
+		// Non-dialing: these carry their own bytes or name no resource at
+		// all, so they open no socket. "about" is also what the
+		// post-capture teardown navigates to, and refusing it here would
+		// block the very thing that stops the page.
 		return nil
 	default:
 		return fmt.Errorf("%w: request scheme %q is not permitted", ErrUnsafeSource, u.Scheme)
@@ -1299,5 +1320,44 @@ func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSess
 	if _, err := child.Send(ctx, "Runtime.runIfWaitingForDebugger", map[string]interface{}{}); err != nil {
 		c.logger.Debug("offline cache capture: resuming child target failed",
 			zap.String("session_id", evt.SessionID), zap.Error(err))
+	}
+}
+
+// captureTeardownWindow bounds the post-capture navigation that stops the
+// page. Short: it is one CDP round trip, and a browser too wedged to
+// answer it is about to be torn down by the idle teardown anyway.
+const captureTeardownWindow = 5 * time.Second
+
+// stopPageBeforeDetach navigates the capture target to about:blank while
+// interception is STILL armed, which is the only moment it can be done
+// safely.
+//
+// Why it is required: Capture's session close removes Fetch interception,
+// but nothing removes the page. downloader.Release schedules an idle
+// teardown of the browser (30s by default), so between those two events
+// the untrusted artwork runs with no guard at all — its timers still
+// fire, its pending requests still complete, and any target left paused
+// by a saturated guard is released when the Fetch domain goes away with
+// the client. Navigating away discards all three in one step.
+//
+// Uses its own context rather than the capture's: the page must be
+// stopped whether capture succeeded, timed out, or was canceled, and the
+// capture context is expired in exactly the cases that leave the most
+// dangerous page running.
+//
+// about:blank commits without a network load, so this navigation is never
+// itself paused by our Fetch handler. If anyone widens this teardown to a
+// real URL, that stops being true — and the decision would then run on
+// decideCtx, derived from the possibly-expired capture context, which is
+// the asymmetry this function exists to avoid for its own Send.
+func (c *capturer) stopPageBeforeDetach(session CDPSession) {
+	ctx, cancel := context.WithTimeout(context.Background(), captureTeardownWindow)
+	defer cancel()
+	if _, err := session.Send(ctx, "Page.navigate", map[string]interface{}{"url": "about:blank"}); err != nil {
+		// Not fatal to the capture, whose bytes are already saved — but
+		// it does mean an untrusted page may keep running until the idle
+		// teardown, so it is a Warn rather than a Debug.
+		c.logger.Warn("offline cache capture: could not stop the captured page before detaching; it may keep running until idle teardown",
+			zap.Error(err))
 	}
 }

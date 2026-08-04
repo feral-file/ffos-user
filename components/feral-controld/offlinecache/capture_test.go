@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -416,6 +417,11 @@ func TestCapturer_Capture_PostCaptureOriginStorageClearFailureIsBestEffort(t *te
 		})
 		require.NoError(t, err)
 		h.conn.pushReply(reply)
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
@@ -483,6 +489,11 @@ func TestCapturer_Capture_ClearsBrowserCacheAndOriginStorageBeforeNavigate(t *te
 			}
 			h.ackEmpty(t, msg)
 		}
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	_, err := h.capturer.Capture(context.Background(), item, 50)
@@ -530,6 +541,11 @@ func TestCapturer_Capture_UnparsableSourceSkipsOriginClearButStillClearsCache(t 
 		msg = h.conn.nextOutbound(t)
 		assert.Equal(t, "Page.navigate", msg["method"])
 		h.ackEmpty(t, msg)
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	_, err := h.capturer.Capture(context.Background(), item, 50)
@@ -935,6 +951,11 @@ func TestCapturer_Capture_LoadingFailedMarksIncomplete(t *testing.T) {
 			"requestId": "req-1",
 			"errorText": "net::ERR_CONNECTION_RESET",
 		})
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-broken", Source: "https://example.com/broken.js"}
@@ -964,6 +985,11 @@ func TestCapturer_Capture_UnresolvedRequestAtDeadlineMarksIncomplete(t *testing.
 		// Deliberately never send responseReceived/loadingFailed for
 		// req-1: this reproduces a resource whose outcome the page
 		// never observed before the capture window closed.
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-hang", Source: "https://example.com/index.html"}
@@ -1030,6 +1056,11 @@ func TestCapturer_Capture_CSPBlockedReason(t *testing.T) {
 			"errorText":     "net::ERR_BLOCKED_BY_CSP",
 			"blockedReason": "csp",
 		})
+		// Capture now navigates the page to about:blank before
+		// detaching (see stopPageBeforeDetach), so the peer must
+		// keep answering after this scenario's scripted calls —
+		// a real browser would.
+		h.conn.drainAndAckRemaining(t)
 	}()
 
 	item := dp1playlist.PlaylistItem{ID: "item-csp", Source: "https://example.com/index.html"}
@@ -1150,6 +1181,11 @@ func TestCapturer_Capture_ParentCancellationAfterNavigateAbortsWithoutSaving(t *
 			// win deterministically and defeat the point of this
 			// test — see the racecheck this was validated against).
 			cancel()
+			// Capture now navigates the page to about:blank before
+			// detaching (see stopPageBeforeDetach), so the peer must
+			// keep answering after this scenario's scripted calls —
+			// a real browser would.
+			h.conn.drainAndAckRemaining(t)
 		}()
 
 		// A large window ensures navCtx's own deadline is never what
@@ -1199,4 +1235,57 @@ func TestCapturer_Capture_UsesDefaultWindowWhenUnset(t *testing.T) {
 	// return the context's deadline error rather than a default-window
 	// completion — this proves 0 did not silently become "no window".
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// TestCapturer_Capture_StopsThePageBeforeDetaching pins the fix for a
+// hole that made the whole capture-side guard time-limited rather than
+// absolute.
+//
+// Closing the CDP session removes Fetch interception, but nothing removed
+// the PAGE: downloader.Release only schedules an idle teardown of the
+// browser (30s by default). So between session close and that teardown,
+// the untrusted artwork kept executing with no guard at all — and reaching
+// loopback from there needed nothing but a timer:
+//
+//	setTimeout(() => fetch('http://127.0.0.1:1111/api/cast'), 25000)
+//
+// No DNS control, no infrastructure, so this was never covered by the
+// accepted rebinding residual. Capture must therefore navigate the target
+// away while interception is still armed, which discards the page's
+// timers and its pending requests together.
+func TestCapturer_Capture_StopsThePageBeforeDetaching(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	var navigations []string
+	var mu sync.Mutex
+	go func() {
+		for {
+			msg, ok := h.conn.nextOutboundOK()
+			if !ok {
+				return
+			}
+			if msg["method"] == "Page.navigate" {
+				params, _ := msg["params"].(map[string]interface{})
+				url, _ := params["url"].(string)
+				mu.Lock()
+				navigations = append(navigations, url)
+				mu.Unlock()
+			}
+			h.ackEmpty(t, msg)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	_, _ = h.capturer.Capture(ctx, item, 50)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, navigations, "capture never navigated at all")
+	assert.Equal(t, item.Source, navigations[0], "the artwork is loaded first")
+	assert.Equal(t, "about:blank", navigations[len(navigations)-1],
+		"the page must be navigated away BEFORE the session (and its Fetch interception) is dropped, "+
+			"or the artwork keeps running unguarded until the idle teardown")
 }

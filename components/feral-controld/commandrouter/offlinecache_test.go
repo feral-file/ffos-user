@@ -1195,3 +1195,44 @@ func TestCommandHandler_DownloadPlaylistItem_ClearWonIsReportedNotAcked(t *testi
 	require.True(t, ok)
 	assert.Equal(t, true, errBody["retryable"], "the clear has settled by the time the client retries, so this must be retryable")
 }
+
+// TestCommandHandler_DownloadPlaylistItem_InlineItemIsNotReportedQueued
+// pins the distinction between "accepted" and "queued". A data: item's
+// bytes travel inside the playlist body, so DownloadItem does no work and
+// no progress notification will ever be emitted for it. Reporting
+// status:"queued" for that told the client to wait for something that
+// never comes.
+//
+// The index step must still run: indexing is what persists the playlist
+// body those inline bytes live in, so it matters MORE for an inline item
+// than for a downloaded one.
+func TestCommandHandler_DownloadPlaylistItem_InlineItemIsNotReportedQueued(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "data:image/png;base64,iVBORw0KGgo="}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	const sampledGen = uint64(3)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(sampledGen).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
+		Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen).
+		Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "not_queued_inline", resp["status"],
+		"an inline item is accepted but nothing is queued; saying otherwise promises a notification that never arrives")
+	assert.Equal(t, item.Source, resp["source"])
+}

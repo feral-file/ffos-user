@@ -125,6 +125,21 @@ const defaultMaxQueueLen = 4 * dp1MaxPlaylistItems
 // joins for exactly that reason.
 var ErrClearedDuringDownload = errors.New("offline cache: a clear for this item landed while the download was being queued, so nothing was queued")
 
+// ErrItemInlineNotQueued reports that an item needed no download because
+// its bytes are already inline in the playlist body (a data: URI — see
+// ClassInline). It is NOT a failure: the caller asked for the item to be
+// available offline and it already is.
+//
+// It exists because "success" and "queued" are different facts and the
+// caller can act on the difference. DownloadItem previously returned a
+// bare nil here, so the command router reported status:"queued" for work
+// that was never queued and for which no progress notification would
+// ever arrive — a client waiting on one would wait forever.
+//
+// Callers that only care whether the request was accepted should treat
+// this as success; callers that report progress must not promise any.
+var ErrItemInlineNotQueued = errors.New("offline cache: item bytes are inline in the playlist body, so nothing was queued")
+
 // enqueueOutcome distinguishes the three ways enqueue can return without
 // an error. It replaces a bool, which conflated two of them: "already
 // queued by an earlier call" and "a clear won the race" both meant
@@ -1411,15 +1426,18 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	// enqueued and routed by captureForClass once the worker dequeues
 	// it.
 	//
-	// ClassInline reports success with nothing queued rather than an
-	// error: the caller asked for the item to be available offline, and
-	// it already is — its bytes travel inside the playlist body this
-	// service persists, so there is genuinely nothing left to do.
+	// ClassInline is success with nothing queued rather than an error: the
+	// caller asked for the item to be available offline, and it already
+	// is — its bytes travel inside the playlist body. It is reported as a
+	// DISTINCT outcome (ErrItemInlineNotQueued) rather than a bare nil,
+	// because a bare nil is indistinguishable from "queued" at the
+	// caller, and the caller then promises a progress notification that
+	// nothing will ever send.
 	if class == ClassStreaming {
 		return ErrUnsupportedMediaClass
 	}
 	if class == ClassInline {
-		return nil
+		return ErrItemInlineNotQueued
 	}
 
 	// Classify above can be slow (network I/O), so the started.Load()

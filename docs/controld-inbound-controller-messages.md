@@ -1571,6 +1571,16 @@ the clear has settled and it queues normally. No `offline_cache_status`
 notification is emitted for an item in this case, so a client must not
 wait on one.
 
+`status: "not_queued_inline"` (with `ok: true`) is the same principle for
+a different cause: the item's `source` is a `data:` URI, so its bytes
+already travel inside the playlist body and there is nothing to download.
+The request is accepted and the item IS available offline — but no work
+was queued, and **no `offline_cache_status` notification will ever be
+emitted for it**, so a client must not wait on one. This is reported
+distinctly rather than as `"queued"` precisely because a client cannot
+otherwise tell the difference between "in progress" and "already done,
+nothing coming".
+
 When the request was resolved via `playlistUrl` (not `dp1_call`) and the
 item is queued successfully, `feral-controld` also best-effort indexes the
 resolved playlist body under that same `playlistUrl` so a later offline

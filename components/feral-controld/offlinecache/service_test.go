@@ -3408,5 +3408,9 @@ func TestService_DownloadItem_InlineDataURISucceedsWithoutQueuing(t *testing.T) 
 
 	err := ts.service.DownloadItem(context.Background(),
 		dp1playlist.PlaylistItem{ID: "inline", Source: inlineSource})
-	require.NoError(t, err)
+	// Success, but reported as a DISTINCT outcome rather than a bare nil.
+	// A bare nil is indistinguishable from "queued" at the caller, which
+	// then promises an offline_cache_status notification that nothing
+	// will ever send — see ErrItemInlineNotQueued.
+	require.ErrorIs(t, err, offlinecache.ErrItemInlineNotQueued)
 }

@@ -95,8 +95,19 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		clearGen = h.offlineCache.CurrentPlaylistClearGeneration(playlist.ID)
 	}
 
+	// ErrItemInlineNotQueued is an OUTCOME, not a failure: the item's
+	// bytes are inline in the playlist body, so it is already offline and
+	// nothing was queued. It must still fall through to the index step
+	// below — indexing is what persists that body, so it matters MORE for
+	// an inline item than for a downloaded one, not less.
+	status := "queued"
 	if err := h.offlineCache.DownloadItem(ctx, item); err != nil {
-		return offlineCacheErrorResponse(err), nil
+		if !errors.Is(err, offlinecache.ErrItemInlineNotQueued) {
+			return offlineCacheErrorResponse(err), nil
+		}
+		// Reported distinctly so a client does not wait for a progress
+		// notification that will never arrive.
+		status = "not_queued_inline"
 	}
 
 	// Best-effort, and deliberately after the queue above already
@@ -112,7 +123,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen)
 	}
 
-	return map[string]any{"ok": true, "status": "queued", "source": source}, nil
+	return map[string]any{"ok": true, "status": status, "source": source}, nil
 }
 
 func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) {

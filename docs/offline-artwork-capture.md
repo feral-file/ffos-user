@@ -654,9 +654,15 @@ answer the second time around.
 - **One fetch, one resource.** Unlike `capture.go`'s open-ended
   dependency discovery, a `ClassMedia`/`ClassUnknown` item has exactly
   one thing to cache: `item.Source` itself. `MediaCapturer.Capture` issues
-  a single `GET` via the shared `httpClient` (redirects followed
-  transparently — `http.Client`'s default behavior, never handled
-  manually here) and streams the response body straight into
+  a single `GET` via `bodyClient` — NOT the shared daemon `httpClient`.
+  Two boundaries ride on that distinction: `bodyClient` is **guarded**
+  (§9 — the reserved-address policy is enforced in its `DialContext`, so
+  every redirect hop and re-resolution is checked, and it carries no
+  proxy), and it has **no whole-request timeout**, because the 30s one on
+  the shared client would kill any artwork transfer slower than that.
+  Redirects are still followed transparently, but each hop is now
+  policed rather than merely followed. The response body streams straight
+  into
   `store.WriteBlob`, exactly like `capture.go`'s `fetchAndStoreBody` does,
   so a gigabyte-scale video is never buffered whole in memory here
   either.
@@ -711,10 +717,10 @@ answer the second time around.
   multi-resource case), and `service.process`'s post-capture
   `enforceDiskLimit` eviction runs unchanged afterward for both paths.
 - **Needs no `Downloader`/dialer at all** — `bootstrap.go` wires
-  `NewMediaCapturer` with just the shared `httpClient`, `store`, clock,
-  and `maxDiskBytes`; there is no second Chromium process, no CDP
-  session, and no `downloader.go` single-job-slot contention for this
-  path.
+  `NewMediaCapturer` with the guarded, untimed `bodyClient` (see above and
+  §9), `store`, clock, and `maxDiskBytes`; there is no second Chromium
+  process, no CDP session, and no `downloader.go` single-job-slot
+  contention for this path.
 
 ## 4. Validated edge cases
 
@@ -1968,12 +1974,17 @@ identical cache state.
   window, not manifest-based; no capture is a formal guarantee. Coverage
   (`Coverage.Complete`/`Reason`) is the best-effort signal surfaced to the
   mobile app, not a certification.
-- **Nested targets are not separately attached on the CAPTURE side.**
-  Capture (`capture.go`) only observes the top-level page target's
-  `Network` events; it does not attach `Target.setAutoAttach` for Web
-  Workers or nested iframes, so requests issued purely from within a
-  worker or a nested iframe (rather than proxied through the top-level
-  page) can be invisible to capture. Service Workers registered by the
+- **Nested targets are attached, but not OBSERVED, on the CAPTURE side.**
+  These are two different things and the distinction matters. Capture
+  *does* now attach child targets — `enableGuardedAutoAttach` issues
+  `Target.setAutoAttach` recursively — but it arms only `Fetch` on them,
+  for the security guard (§9). It does **not** enable `Network` on a
+  child, so requests issued purely from within a worker or a nested
+  iframe (rather than proxied through the top-level page) are still
+  invisible to *discovery* and their bytes are not cached. Removing the
+  auto-attach to "simplify" this bullet would therefore reopen the
+  loopback bypass in §9 while changing nothing about coverage. Service
+  Workers registered by the
   artwork itself compound this: they can intercept and serve their own
   responses, further hiding requests from top-level `Network` domain
   capture. Note this is a capture-side statement: capture navigates the
@@ -2194,14 +2205,21 @@ Three details that are easy to get wrong:
   read pump, and the reply a `Send` waits for can only arrive on that same
   pump — so every decision is handed to a goroutine, exactly as
   `replay.go` does.
-- **Saturation fails closed.** Concurrent decisions are bounded
-  (`captureGuardConcurrency`); beyond that a request is left unanswered
-  rather than admitted, so flooding cannot push an unchecked request
-  through. The cost is that request stalling until the bounded capture
-  window ends.
-- **Only http(s) is checked.** `data:`/`blob:` carry their own bytes and
-  open no socket, so blocking them would break ordinary artwork for no
-  security gain.
+- **Saturation fails closed, for the life of the session.** Concurrent
+  decisions are bounded (`captureGuardConcurrency`); beyond that a request
+  is left unanswered rather than admitted, so flooding cannot push an
+  unchecked request through *while the guard is armed*. Be precise about
+  the end of that window: DevTools releases pending interceptions when the
+  `Fetch` domain goes away with its client, so an unanswered pause is a
+  stall, not a permanent kill. That is why capture navigates the page to
+  `about:blank` **before** dropping the session (`stopPageBeforeDetach`) —
+  it discards the page, its timers and its stalled requests together,
+  instead of handing them back to the network on detach.
+- **Only http(s) is checked.** `data:`, `blob:` and `about:` carry their
+  own bytes or name no resource at all, so they open no socket and
+  blocking them would break ordinary artwork for no security gain.
+  `about:` is also what the post-capture teardown navigates to, so
+  refusing it would block the very thing that stops the page.
 
 **Residual gaps, stated rather than hidden.** This is a URL-time check, so
 two things remain open, and both need Chromium's egress taken away
@@ -2215,14 +2233,24 @@ more interception:
   insufficient for the Go paths — closed there by moving to `DialContext`,
   which has no equivalent here.
 - **WebSocket.** CDP `Fetch` does not intercept WebSocket handshakes, so
-  `ws://` egress from the page is uncovered. Mitigated in practice because
-  reaching a DevTools socket requires its target UUID, which is read over
-  HTTP (`/json`) and therefore blocked — but not closed.
+  `ws://` egress from the page is uncovered. The DevTools sockets are
+  awkward to reach (they need a target UUID, read over HTTP `/json`, which
+  IS blocked) — but do not let that understate it: the hub's own
+  `GET → WS /api/notification` on `:1111` is unauthenticated, needs no
+  UUID, and streams device notifications to anything that connects. That
+  is the reachable target, and it is the same surface #3471 closes.
 
 Both intersect an exposure `docs/architecture.md` already accepts as
 release-scoped (the open, unauthenticated `:1111` surface, end state
 #3471), and are the reason a filtering proxy remains the eventual
 complete answer.
+
+> **Scope note.** This section covers what a *playlist item's source* is
+> allowed to point at. It does NOT cover the playlist URL itself:
+> `displayPlaylist` fetches that through `dp1` on the plain daemon client,
+> with no guard. Same untrusted origin, same threat model, different code
+> path — out of scope for this work, and called out here so nobody reads
+> §9 as covering the whole surface.
 
 #### Accepted-risk record: rebinding and WebSocket
 
@@ -2241,6 +2269,14 @@ resolve and Chromium's. A loopback filtering proxy (`--proxy-server` plus
 close all five *and* WebSocket, because Chromium would have no direct
 egress at all — but it is a new component with its own lifecycle, and it
 would land in the Chromium launch path.
+
+*Correction from review.* An earlier version of this record claimed the
+shipped guard "closes four of the five exploit classes". That was not true
+while the captured page kept running unguarded until the browser's idle
+teardown — deferred egress via `setTimeout` needs no DNS and no
+infrastructure at all, so it belonged in the OPEN column. That hole is now
+closed (`stopPageBeforeDetach`), which is what makes the claim below
+accurate rather than aspirational.
 
 *The judgement.* Residual risk was estimated at roughly 10–15% of the
 practical attack surface: low likelihood, since rebinding needs
