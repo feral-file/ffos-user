@@ -769,6 +769,25 @@ func (d *downloader) probeCaptureShape(ctx context.Context, scopeArgs, wrapperAr
 // prone (a future Chromium whose unit name missed the glob would slip
 // through, in precisely the case the check exists for).
 //
+// The exec-in-place claim above is the one thing here a reader is likely
+// to "correct" back to the wrong model, because the intuitive reading of
+// `systemd-run cmd` is that systemd-run stays as cmd's parent. It does
+// not: it registers the transient scope with its OWN pid, waits for the
+// job, then execvp()s. Reviewers have now proposed resolving "the real
+// Chromium child PID" more than once; doing that would make this check
+// permanently inert, since there is no surviving systemd-run process to
+// descend from — a silent regression, because an inert check logs
+// nothing. Measured on FF1, systemd 261, running the daemon's exact argv
+// chain and inspecting the pid Start() returned:
+//
+//	held pid=834442 comm=chromium
+//	cgroup=0::/user.slice/.../app.slice/probe-chrome.scope
+//	cmdline=/usr/lib/chromium/chromium --headless=new ...
+//	$ pgrep systemd-run   ->   (no processes)
+//
+// env(1) and taskset(1) exec in place for the same reason, so the pid
+// survives the whole wrapper chain. Re-measure before changing this.
+//
 // Never fails a spawn: capture with a pin but no ceiling still beats no
 // capture. The loud log is the point — this went unnoticed in the field
 // precisely because nothing ever said the limits had stopped applying.
