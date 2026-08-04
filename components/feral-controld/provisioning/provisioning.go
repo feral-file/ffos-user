@@ -2417,7 +2417,7 @@ func (m *Machine) noteAPRaiseFailure() {
 		zap.Int("failures", m.apRaiseFails))
 	m.notify(m.State(), Detail{
 		Reason: ReasonSetupError,
-		Message: "The frame could not start setup mode. It will keep trying automatically. " +
+		Message: "The Art Computer could not start setup mode. It will keep trying automatically. " +
 			"If this persists, disconnect power for ten seconds and restart.",
 	})
 }
@@ -2447,7 +2447,7 @@ func (m *Machine) noteAPReleaseFailure() {
 		zap.Int("failures", m.apReleaseFails))
 	m.notify(m.State(), Detail{
 		Reason: ReasonSetupError,
-		Message: "The frame could not release its setup hotspot. It will keep trying automatically. " +
+		Message: "The Art Computer could not release its setup hotspot. It will keep trying automatically. " +
 			"If this persists, disconnect power for ten seconds and restart.",
 	})
 }

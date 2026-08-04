@@ -520,7 +520,7 @@ func (m *Machine) teardownLandingDetail() Detail {
 	return Detail{
 		Reason: ReasonAPSessionEnded,
 		Message: "Reconnecting to your Wi-Fi network… To finish setup, connect your phone " +
-			"to the same network as the frame and open the Feral File app.",
+			"to the same network as the Art Computer and open the Feral File app.",
 	}
 }
 
@@ -811,7 +811,7 @@ func (m *Machine) episodePauseSample() {
 			Reason: ReasonAPSessionEnded,
 			Message: "Retrying your Wi-Fi network — setup mode will reopen if this network " +
 				"still has no internet. Or connect your phone to the same network as the " +
-				"frame and open the Feral File app.",
+				"Art Computer and open the Feral File app.",
 		})
 	}
 }
@@ -836,8 +836,8 @@ func (m *Machine) endEpisodeAPPhase(ctx context.Context) {
 		m.transition(ctx, StateOfflineRetrying, Detail{
 			Reason: ReasonSetupIncompleteSettled,
 			Message: "This network has no internet access. Connect your phone to the same " +
-				"network as the frame and open the Feral File app to finish setup, or " +
-				"restart the frame to try again.",
+				"network as the Art Computer and open the Feral File app to finish setup, " +
+				"or restart the Art Computer to try again.",
 		})
 		return
 	}
@@ -858,7 +858,7 @@ func (m *Machine) endEpisodeAPPhase(ctx context.Context) {
 		Reason: ReasonAPSessionEnded,
 		Message: "Retrying your Wi-Fi network — setup mode will reopen in about " +
 			strconv.Itoa(minutes) + " minutes if this network still has no internet. Or connect " +
-			"your phone to the same network as the frame and open the Feral File app.",
+			"your phone to the same network as the Art Computer and open the Feral File app.",
 	})
 }
 

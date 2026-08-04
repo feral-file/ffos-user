@@ -41,6 +41,9 @@
         "connecting": {
           "optional": ["reason"]
         },
+        "setup_error": {
+          "optional": ["reason"]
+        },
         "updating": {
           "optional": ["progress"]
         },
