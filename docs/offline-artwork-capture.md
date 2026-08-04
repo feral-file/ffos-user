@@ -1554,6 +1554,27 @@ so a genuinely different URL can never be silently served the wrong
 cached bytes. If a future `ff-player` version starts appending another
 UI-only param, add it to `playerAppendedQueryParams` in `replay.go`.
 
+A second field reproduction (FF1-191TYKPB, a fully cached Art Blocks item
+reporting `ready`/100% yet showing Chromium's error page) narrowed how
+that append interacts with a **query-less** source. `ArtworkPlayer.tsx`
+appended the hint with `url.search += '&display_mode=…'`, and when
+`search` is empty the `URL` setter emits `…/147000065?&display_mode=fit`
+— an empty leading pair. Stripping `display_mode` alone then left a
+dangling `…/147000065?`, which is not the captured key
+`…/147000065`, so the item missed and failed closed exactly as before.
+This hit **every** source without a query string (all
+`generator.artblocks.io` URLs, and any bare `item.Source`); the CDN
+previews that carry `?edition_number=…` masked it, because for them the
+appended `&` is a legitimate separator. Fixed on both sides: `ff-player`
+now selects the separator from `search` (`?` vs `&`), and
+`stripQueryParams` drops empty pairs while rebuilding. The daemon-side
+half is not redundant — the player bundle and the daemon update on
+independent cadences, so a fielded device can run a new daemon against an
+old bundle. The drop is deliberately scoped to a query string already
+being rewritten to strip an allowlisted param: an empty pair on its own
+never triggers a rewrite, so it cannot widen what matches a cached
+resource.
+
 **The player's `HEAD` content-type probe is answered from the matching
 `GET` resource, not a separately-captured `HEAD` entry.** Before
 rendering a media item, `ff-player`'s `getContentTypeFromURL` issues a
