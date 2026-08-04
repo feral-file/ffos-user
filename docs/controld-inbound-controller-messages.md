@@ -1626,10 +1626,26 @@ Success response:
 distinct sources were actually queued for offline capture — duplicate
 sources within one playlist are one cache entry and count once — every class except HLS/DASH manifest
 streaming (software via headless Chromium, media/unknown via direct HTTP
-download; see `docs/offline-artwork-capture.md` §3.3). An item classified as
-HLS/DASH manifest streaming (or missing a `source`) is simply excluded from
-`queuedCount` with `ok: true` — that is the normal, successful shape for
-a playlist with few or no cacheable items. If classification itself fails
+download; see `docs/offline-artwork-capture.md` §3.3).
+
+Four kinds of item are excluded from `queuedCount` **successfully** —
+`ok: true`, no error, nothing wrong. This is the normal shape for a
+playlist with few or no cacheable items, and none of them should be
+treated by a controller as a failure to retry:
+
+- an item classified as HLS/DASH manifest **streaming**;
+- an item **missing a `source`**;
+- an **inline `data:` item** (`ClassInline`). Its bytes are already in
+  the playlist body, so there is nothing to fetch and nothing is queued.
+  It is already available offline — excluded because the work is
+  unnecessary, not because it was refused. The single-item command
+  reports this case distinctly as `status: "not_queued_inline"`;
+- an item whose `source` **exceeds the 2048-byte limit**
+  (`MaxSourceURLBytes`). A source is retained as the cache key and
+  re-emitted in status and notifications, so it is bounded at admission;
+  see `docs/offline-artwork-capture.md` §9. Such an item is skipped
+  rather than counted as a classification failure, so one oversized
+  source cannot make a whole playlist look like classification is down. If classification itself fails
 (e.g. a transient network error reaching the classify target) for every
 eligible item so nothing could be queued at all, this command instead
 fails with `offline_cache_error` rather than returning that same
@@ -1640,14 +1656,23 @@ controller. A classify failure for only *some* items still returns
 successfully; the skipped item(s) are logged server-side but not
 individually reported here.
 
-Classification of the playlist's items is **time-bounded** (10s total,
-run concurrently) so this command acknowledges promptly regardless of
-item count. Each item needs a network probe to classify, so an
-unbounded serial pass over a large playlist of unreachable sources could
-otherwise hold the command far past the LAN hub's own 30s response
-deadline. An item not classified before that bound is treated exactly
-like a classification failure: logged, skipped, and absent from
-`queuedCount`. Re-issuing the command retries those items.
+Classification of the playlist's items is **time-bounded**, and by TWO
+nested bounds doing different jobs — a single shared budget would either
+starve a large playlist or let one dead host hold the whole command:
+
+- **10s per item** (`classifyItemTimeout`). This is what actually decides
+  each item's outcome: one unreachable source costs that item and nothing
+  else. Items are classified concurrently, so this is not a serial sum.
+- **25s for the whole phase** (`classifyPhaseCeiling`). A backstop, not
+  the normal limit — it exists so that a pathological playlist still
+  acknowledges inside the LAN hub's 30s response deadline. Reaching it
+  truncates the phase.
+
+An item not classified before whichever bound it meets first is treated
+exactly like a classification failure: logged, skipped, and absent from
+`queuedCount`. Re-issuing the command retries those items — and because
+the per-item bound is independent, a retry after a transient failure at
+one host is not penalized by how slow the rest of the playlist was.
 
 An item excluded because a concurrent clear won the race (see
 `downloadPlaylistItem`'s `busy` case) is likewise absent from

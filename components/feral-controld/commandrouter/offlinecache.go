@@ -143,6 +143,16 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// ok:true after the save failed would tell a client the item is
 	// cached offline when in fact nothing was written anywhere.
 	if err := h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen); err != nil && inline {
+		// ErrPlaylistSaveClearedRace is a skipped write, not a broken
+		// one: a ClearPlaylist landed inside the sample->save window and
+		// won. Reported as retryable "busy" to match how the QUEUED path
+		// already surfaces the identical race (ErrClearedDuringDownload),
+		// because the inline path never reaches enqueue and so has no
+		// other clear detection at all. Answering ok:true here would
+		// claim an offline copy that was deliberately not written.
+		if errors.Is(err, offlinecache.ErrPlaylistSaveClearedRace) {
+			return errorResponse("busy", err.Error(), true), nil
+		}
 		return errorResponse("internal", "inline item not persisted: "+err.Error(), true), nil
 	}
 
@@ -223,6 +233,15 @@ func (h *handler) handleClearPlaylistCache(ctx context.Context, args map[string]
 	playlistID, ok := stringArg(args["playlistId"])
 	if !ok {
 		return errorResponse("invalid_request", "playlistId is required", false), nil
+	}
+	// Same reflection shape as the source key next door, and bounded for
+	// the same reason: this id is echoed in the ok body and embedded in
+	// every error along ClearPlaylist -> LoadPlaylist -> safeID. An
+	// oversized one fails ReadFile with ENAMETOOLONG rather than
+	// IsNotExist, so without this the whole submitted string comes back
+	// in the error message.
+	if err := offlinecache.CheckSourceKeyLength(playlistID); err != nil {
+		return errorResponse("invalid_request", err.Error(), false), nil
 	}
 	if err := h.offlineCache.ClearPlaylist(playlistID); err != nil {
 		return offlineCacheErrorResponse(err), nil
@@ -675,6 +694,20 @@ func offlineCacheErrorResponse(err error) map[string]any {
 	}
 	if errors.Is(err, offlinecache.ErrUnsupportedMediaClass) {
 		return errorResponse("unsupported_media", err.Error(), false)
+	}
+	// Both are PERMANENT properties of the request, not of the daemon:
+	// resending the same oversized URL, or the same source pointing at a
+	// reserved address, can never succeed. Falling through to the
+	// retryable offline_cache_error default below would have a
+	// conforming controller retry forever — and would contradict both
+	// the wire doc's definition of offline_cache_error (a store, disk or
+	// network failure) and the non-retryable invalid_request the clear
+	// and status handlers already return for the identical condition.
+	if errors.Is(err, offlinecache.ErrSourceTooLong) {
+		return errorResponse("invalid_request", err.Error(), false)
+	}
+	if errors.Is(err, offlinecache.ErrUnsafeSource) {
+		return errorResponse("invalid_request", err.Error(), false)
 	}
 	if errors.Is(err, offlinecache.ErrItemNotFound) || errors.Is(err, offlinecache.ErrPlaylistNotFound) {
 		return errorResponse("not_found", err.Error(), false)

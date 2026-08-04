@@ -228,10 +228,19 @@ const maxSourceRedirects = 10
 // predate this and for sources already on disk.
 //
 // 2048 is the de-facto ceiling browsers, proxies and servers converged
-// on. It is not applied to data: URIs — an inline item's bytes ARE its
-// source, legitimately large, and it is never dialed — and it is not
-// applied to subresource URLs during capture, where signed CDN links
-// routinely run long and are transient rather than retained.
+// on. Two things are exempt:
+//
+//   - data: URIs. An inline item's bytes ARE its source, legitimately
+//     large, and it is never dialed.
+//   - subresource URLs during capture. Signed CDN links routinely run
+//     long, and capping them would fail real artwork rather than protect
+//     anything. Note this is NOT because they are transient — an earlier
+//     version of this comment claimed that and was wrong: captured
+//     subresource URLs are persisted in ItemRecord.Resources and logged
+//     at replay. The actual reason is narrower: they are a hostile
+//     artwork's own subresources, practically bounded by what a real
+//     origin will serve, and they are never a lookup key a client can
+//     reflect through an RPC.
 const MaxSourceURLBytes = 2048
 
 // ErrSourceTooLong is returned for an item source past MaxSourceURLBytes.
@@ -247,9 +256,9 @@ func isInlineSource(source string) bool {
 	return strings.HasPrefix(strings.ToLower(source), "data:")
 }
 
-// CheckSourceKeyLength enforces MaxSourceURLBytes on a source used as a
-// LOOKUP KEY — the clear and status RPCs — rather than as something to
-// dial and store.
+// CheckSourceKeyLength enforces MaxSourceURLBytes on a caller-supplied
+// LOOKUP KEY — a source at the clear and status RPCs, or a playlistId at
+// clearPlaylistCache — rather than on something to dial and store.
 //
 // Unlike checkSourceLength this has NO data: exemption, and the reason is
 // specific rather than stylistic: an inline source can never be a cached
@@ -260,11 +269,14 @@ func isInlineSource(source string) bool {
 // while closing the same reflection hole.
 //
 // This exists because the admission bound alone does not cover these
-// paths: clear and status accept a source from the same unauthenticated
-// hub without it ever passing through DownloadItem, and both echo it back
-// — the clear handler in its ok response, status as a not_cached entry —
-// so an unbounded value is reflected into a daemon response and, for
-// status, up to MaxStatusSources times in one request.
+// paths: clear and status accept a key from the same unauthenticated hub
+// without it ever passing through DownloadItem, and every one of them
+// echoes it back — the clear handlers in their ok responses, status as a
+// not_cached entry — so an unbounded value is reflected into a daemon
+// response and, for status, up to MaxStatusSources times in one request.
+// A playlistId additionally reaches the filesystem: an oversized one
+// fails ReadFile with ENAMETOOLONG rather than IsNotExist, so the full
+// submitted string comes back inside the error text.
 func CheckSourceKeyLength(source string) error {
 	if len(source) <= MaxSourceURLBytes {
 		return nil

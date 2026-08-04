@@ -123,6 +123,22 @@ const defaultMaxQueueLen = 4 * dp1MaxPlaylistItems
 // Retryable: re-issuing the download after the clear has landed queues
 // normally — see offlineCacheErrorResponse's "busy" mapping, which this
 // joins for exactly that reason.
+// ErrPlaylistSaveClearedRace means a ClearPlaylist for this exact
+// playlist landed between the caller sampling the clear-generation and
+// the save, so the playlist record was deliberately NOT written.
+//
+// It has to be distinguishable rather than folded into a nil return,
+// because the two callers need opposite things from it. For the by-URL
+// index it is a benign no-op — the clear is newer than the download, and
+// honoring it is the entire point of threading the generation through.
+// For downloadPlaylistItem's INLINE outcome it is the difference between
+// truth and a lie: an inline item's bytes live only in that playlist
+// body, so a skipped write means nothing was persisted anywhere, and
+// answering ok:true would claim an offline copy that does not exist.
+// That caller maps this to the same retryable "busy" the queued path
+// already reports via ErrClearedDuringDownload.
+var ErrPlaylistSaveClearedRace = errors.New("offline cache: a clear for this playlist landed while it was being saved, so nothing was persisted")
+
 var ErrClearedDuringDownload = errors.New("offline cache: a clear for this item landed while the download was being queued, so nothing was queued")
 
 // ErrItemInlineNotQueued reports that an item needed no download because
@@ -1608,7 +1624,13 @@ func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist
 		// is refused. Counting it would let a single oversized item make
 		// a whole playlist look like "classification itself is down".
 		if err := checkSourceLength(item.Source); err != nil {
+			// Truncated, not omitted: the client is told only that
+			// queuedCount < total, so this log is the ONLY way an
+			// operator can tell which item was dropped and why. A
+			// length with no identity turns a five-minute diagnosis
+			// into an unexplained missing artwork.
 			s.logger.Warn("offline cache: skipping playlist item with an oversized source",
+				zap.String("source", truncateSourceForLog(item.Source)),
 				zap.Int("source_bytes", len(item.Source)),
 				zap.Int("limit", MaxSourceURLBytes))
 			continue
@@ -1859,10 +1881,22 @@ func (s *service) IndexPlaylistForOfflineDisplay(playlistRaw json.RawMessage, so
 	if playlist.ID == "" {
 		return errors.New("offline cache: playlist has no id")
 	}
-	// saved==false (a ClearPlaylist won the race) is not an error for this
-	// best-effort index path — the caller only logs failures.
-	_, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, sampledEpoch)
-	return err
+	// saved==false means a ClearPlaylist won the race and the write was
+	// skipped. That is reported as ErrPlaylistSaveClearedRace rather than
+	// swallowed: a caller for whom this save is the ONLY durable write —
+	// downloadPlaylistItem's inline outcome — cannot tell "persisted" from
+	// "deliberately skipped" otherwise, and would report success for a
+	// playlist body that was never written. Callers using this purely for
+	// the best-effort by-URL index treat the sentinel as the benign no-op
+	// it is for them.
+	saved, err := s.savePlaylistAndURLIndex(playlist.ID, playlistRaw, sourceURL, sampledEpoch)
+	if err != nil {
+		return err
+	}
+	if !saved {
+		return ErrPlaylistSaveClearedRace
+	}
+	return nil
 }
 
 // enqueue is idempotent: an item already queued or downloading is left
@@ -2383,7 +2417,7 @@ func (s *service) ClearItem(source string) error {
 		return nil
 	}
 	if _, _, err := s.gc(); err != nil {
-		return fmt.Errorf("offline cache: GC after clearing item %s: %w", source, err)
+		return fmt.Errorf("offline cache: GC after clearing item %s: %w", truncateSourceForLog(source), err)
 	}
 	return nil
 }

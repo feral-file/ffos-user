@@ -1418,3 +1418,96 @@ func TestCommandHandler_GetOfflineCacheStatus_RejectsOversizedSource(t *testing.
 	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("z", 64),
 		"the rejection must not echo the submitted source")
 }
+
+// TestCommandHandler_DownloadPlaylistItem_InlineClearRaceIsRetryableBusy
+// covers the branch the earlier inline fix left open. A ClearPlaylist
+// landing inside the sample->save window makes the save a deliberate
+// no-op, which used to surface as a nil error and therefore as
+// ok:true/not_queued_inline — the exact "cached offline when nothing was
+// written" claim that fix set out to stop, arrived at by the other route.
+//
+// Reported as retryable busy rather than as an internal error: nothing is
+// broken, the clear simply won, and this is how the QUEUED path already
+// surfaces the identical race via ErrClearedDuringDownload.
+func TestCommandHandler_DownloadPlaylistItem_InlineClearRaceIsRetryableBusy(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	source := "data:text/html;base64,PGh0bWw+"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: source}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	playlistURL := "https://example.com/playlist.json"
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(3)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(3)).
+		Return(offlinecache.ErrPlaylistSaveClearedRace).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": source},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "busy")
+	require.Equal(t, true, resp["error"].(map[string]any)["retryable"],
+		"the clear won; a retry after it settles can legitimately succeed")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_OversizedSourceIsNotRetryable
+// pins the CLASSIFICATION of the download-side rejection, not merely that
+// it is rejected. ErrSourceTooLong reaching the generic offline_cache_error
+// default would advertise retryable:true, and a conforming controller
+// would then retry an oversized URL forever — while the clear and status
+// handlers return non-retryable for the identical condition.
+func TestCommandHandler_DownloadPlaylistItem_OversizedSourceIsNotRetryable(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	oversized := "https://example.com/" + strings.Repeat("q", offlinecache.MaxSourceURLBytes)
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: oversized}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	playlistURL := "https://example.com/playlist.json"
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
+		Return(fmt.Errorf("offline cache: %w: too big", offlinecache.ErrSourceTooLong)).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": oversized},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	require.Equal(t, false, resp["error"].(map[string]any)["retryable"],
+		"resending the same oversized URL can never succeed")
+}
+
+// TestCommandHandler_ClearPlaylistCache_RejectsOversizedPlaylistId is the
+// sibling of the source-key bound. This id is echoed in the ok body and
+// embedded in every error along ClearPlaylist -> LoadPlaylist -> safeID;
+// an oversized one fails ReadFile with ENAMETOOLONG rather than
+// IsNotExist, so the whole submitted string came back in the message.
+func TestCommandHandler_ClearPlaylistCache_RejectsOversizedPlaylistId(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	_ = mockOfflineCache // no ClearPlaylist expectation: reaching the service fails the test
+
+	oversized := strings.Repeat("p", offlinecache.MaxSourceURLBytes+1)
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_CACHE,
+		Arguments: map[string]any{"playlistId": oversized},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	require.Equal(t, false, resp["error"].(map[string]any)["retryable"])
+	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("p", 64),
+		"the rejection must not echo the submitted id")
+}

@@ -1030,9 +1030,14 @@ func TestService_IndexPlaylistForOfflineDisplay_StaleEpochDoesNotResurrect(t *te
 	require.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound, "sanity: the clear must have removed the record")
 
 	// A late index write still carrying the pre-clear generation must be
-	// refused (no error — a clear winning is not a failure), leaving the
-	// record deleted.
-	require.NoError(t, ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen))
+	// refused, leaving the record deleted — and must SAY so. The refusal
+	// used to return nil, which is indistinguishable from "persisted" to
+	// a caller for whom this write is the only durable one (see
+	// ErrPlaylistSaveClearedRace): downloadPlaylistItem's inline outcome
+	// reported ok:true for a body that was deliberately never written.
+	require.ErrorIs(t,
+		ts.service.IndexPlaylistForOfflineDisplay(raw, sourceURL, staleGen),
+		offlinecache.ErrPlaylistSaveClearedRace)
 	_, err = ts.service.CachedPlaylistForURL(sourceURL)
 	assert.ErrorIs(t, err, offlinecache.ErrPlaylistNotFound,
 		"an index write carrying a pre-clear generation must not resurrect the cleared playlist record")
