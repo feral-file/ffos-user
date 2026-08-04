@@ -58,7 +58,10 @@ import (
 // at the URL: newGuardedHTTPClient puts addrsFor in the transport's
 // DialContext, which every hop and every re-resolution must pass
 // through, and then dials the exact address it just validated so no
-// second lookup can substitute another. checkRedirect adds the one thing
+// second lookup can substitute another. That guarantee also requires the
+// transport to have NO proxy — see transport() — because a proxied
+// request dials the proxy and lets IT reach the origin, which would put
+// the destination back out of reach of the check. checkRedirect adds the one thing
 // a dialer cannot see — the scheme — plus a hop cap. This check remains
 // in front of all of it because it is what keeps a bad source from ever
 // being queued, and because it produces the error the caller reports.
@@ -247,16 +250,43 @@ func newGuardedHTTPClientFor(g sourceGuard, timeout time.Duration) wrapper.HTTPC
 	return wrapper.NewHTTPClientFrom(&go_http.Client{
 		Timeout:       timeout,
 		CheckRedirect: g.checkRedirect,
-		Transport: &go_http.Transport{
-			Proxy:                 go_http.ProxyFromEnvironment,
-			DialContext:           g.dialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+		Transport:     g.transport(),
 	})
+}
+
+// transport builds the guarded transport. Factored out so a test can
+// assert the Proxy field directly: http.ProxyFromEnvironment caches the
+// environment behind a sync.Once, which makes an env-driven test
+// order-dependent, and this property is too load-bearing to pin only
+// indirectly.
+//
+// Proxy is deliberately nil, NOT http.ProxyFromEnvironment (which
+// http.DefaultTransport uses, and which an earlier version of this
+// function copied along with the rest of the defaults). With a proxy
+// configured, Transport dials the PROXY and hands it the origin host —
+// so DialContext would validate the proxy's address while the proxy
+// resolved and connected to whatever the URL named, and every guarantee
+// below it would be worth nothing. The one thing this transport exists
+// to guarantee is that the destination is checked, so it must reach the
+// destination itself.
+//
+// Trade-off, accepted deliberately: a deployment that can only egress
+// through a proxy cannot fetch artwork on these two paths. That is the
+// right way round — artwork origins are public CDNs reached directly on
+// this device, and the daemon-wide client (relayer, indexer, OTA) still
+// honors proxy environment variables, so only untrusted playlist-source
+// fetches go direct. Supporting a proxy safely would mean enforcing the
+// destination through it (CONNECT-aware checking), not re-enabling this.
+func (g sourceGuard) transport() *go_http.Transport {
+	return &go_http.Transport{
+		Proxy:                 nil,
+		DialContext:           g.dialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 }
 
 // isReservedAddr reports whether ip is somewhere a playlist source must

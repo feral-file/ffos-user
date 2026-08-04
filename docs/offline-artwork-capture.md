@@ -2141,6 +2141,24 @@ pinning the address costs nothing). `checkRedirect` adds the one thing a
 dialer cannot see — the scheme — plus an explicit hop cap. Both the
 classify probe and the media body client are built this way.
 
+**The transport carries no proxy**, deliberately. With one configured,
+`Transport` dials the *proxy* and hands it the origin host, so
+`DialContext` would validate the proxy's address while the proxy resolved
+and connected to whatever the URL named — the destination would never be
+examined, and everything above would be worth nothing. An earlier revision
+copied `http.DefaultTransport`'s settings wholesale and inherited
+`ProxyFromEnvironment` with them; a regression test now asserts
+`transport().Proxy` is nil, on the field rather than through the
+environment because `ProxyFromEnvironment` caches behind a `sync.Once`.
+
+The trade-off is accepted knowingly: a deployment that can only egress
+through a proxy cannot fetch artwork on these two paths. That is the right
+way round here — artwork origins are public CDNs reached directly on this
+device, and the daemon-wide client (relayer, indexer, OTA) still honors
+proxy environment variables, so only untrusted playlist-source fetches go
+direct. Supporting a proxy safely would mean enforcing the destination
+*through* it (CONNECT-aware checking), not re-enabling the field.
+
 `sourceGuard.check` still runs first: it is what stops a bad source from
 ever being queued, and it produces the error the caller reports.
 
