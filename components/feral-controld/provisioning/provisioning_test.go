@@ -2053,3 +2053,136 @@ func TestBootRelocationSurvivesToleratedUnknownsAndRaises(t *testing.T) {
 		"tolerated unknowns must not cost the relocation raise")
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
+
+// --- §4.6 escalation latches (D5/D6) ------------------------------------------
+
+// TestAPRaiseFailureEscalatesToSetupError pins the D6 fix: a persistently
+// failing AP raise (rfkill, :80 bound, empty hostname) latches a single
+// setup_error notification at the streak threshold, suppresses the per-retry
+// "scanning" push while latched (the flap pin — scanning/setup_error
+// alternating at tick cadence is the failure mode the latch exists to
+// prevent), keeps retrying underneath, and repaints via the successful
+// raise's own softap_qr announcement when NM recovers.
+func TestAPRaiseFailureEscalatesToSetupError(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.ap.upErr = errors.New("nm busy")
+	h.m.onConnectivity(ctx, false, false) // unprovisioned + link-less: raise attempt 1 fails
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.tickN(ctx, 6) // failures 2..7: below the streak, no escalation
+	assert.Equal(t, 0, h.rec.count("notify:ap_active:setup-error"))
+	assert.Equal(t, 7, h.rec.count("notify:ap_active:scanning"),
+		"every pre-latch retry narrates its scan")
+
+	h.tick(ctx) // 8th consecutive failure: latch + notify once
+	assert.Equal(t, 1, h.rec.count("notify:ap_active:setup-error"))
+	// The 8th attempt's own scanning push preceded its failure (the latch
+	// lands after ap.Up fails); everything AFTER the latch must stay silent.
+	scansBeforeLatch := h.rec.count("notify:ap_active:scanning")
+
+	h.tickN(ctx, 5) // retries continue underneath, silently
+	assert.Equal(t, 1, h.rec.count("notify:ap_active:setup-error"),
+		"the latch notification fires once, never per retry")
+	assert.Equal(t, scansBeforeLatch, h.rec.count("notify:ap_active:scanning"),
+		"no scanning push may flap against the latched error panel")
+
+	h.ap.upErr = nil // NM recovers
+	h.tick(ctx)
+	assert.Equal(t, 1, h.rec.count("notify:ap_active:ap-active"),
+		"the successful raise's softap_qr announcement is the repaint")
+	// The recovery attempt itself still ran latched (the latch clears only
+	// once ap.Up succeeds), so its scanning push stays suppressed — the
+	// softap_qr announcement above is the designed repaint path.
+	assert.Equal(t, scansBeforeLatch, h.rec.count("notify:ap_active:scanning"))
+
+	// The cleared latch releases the suppression: a later raise cycle (portal
+	// rescan bounce) narrates its scan again.
+	h.m.applyRescan(ctx)
+	assert.Greater(t, h.rec.count("notify:ap_active:scanning"), scansBeforeLatch,
+		"post-recovery raises must narrate scanning again — the latch is cleared")
+}
+
+// TestAPReleaseFailureEscalatesAndClears pins the D5 twin: NM refusing to
+// delete the hotspot profile (apDownPending wedge) latches
+// setup_error(ap_release_failed) at the streak threshold, and — because no
+// later narration necessarily follows in a resting state — the recovery
+// emits the explicit cleared notification so the panel cannot strand over
+// artwork.
+func TestAPReleaseFailureEscalatesAndClears(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // AP up
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.ap.downErr = errors.New("nm refuses the delete")
+	h.wifi.setProfile(true)              // a join persisted credentials meanwhile
+	h.m.onConnectivity(ctx, true, false) // online: teardown attempt 1 fails
+	require.Equal(t, StateOnline, h.m.State())
+
+	h.tickN(ctx, 6) // failures 2..7
+	assert.Equal(t, 0, h.rec.count("notify:online:setup-error"))
+	h.tick(ctx) // 8th: latch
+	assert.Equal(t, 1, h.rec.count("notify:online:setup-error"))
+	h.tickN(ctx, 3)
+	assert.Equal(t, 1, h.rec.count("notify:online:setup-error"), "one notification per latch")
+
+	h.ap.downErr = nil // NM recovers; the wedge resolves
+	h.tick(ctx)
+	assert.Equal(t, 1, h.rec.count("notify:online:setup-error-cleared"),
+		"a resting-state recovery must dismiss the panel explicitly")
+}
+
+// TestAPRaiseEscalationResetsAcrossEpisodeExit pins the streak's episode
+// scoping: a failed-raise episode that exits through link recovery (without
+// ever succeeding) must dismiss a latched panel explicitly — the link-present
+// exit legs are deliberately un-narrated, so nothing else would ever clear
+// it — and must reset the streak, so a LATER wedge both re-latches (with its
+// notification) and narrates its pre-latch scans. A streak surviving the exit
+// would stop measuring consecutive failures and leave the second wedge
+// entirely silent.
+func TestAPRaiseEscalationResetsAcrossEpisodeExit(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.ap.upErr = errors.New("nm busy")
+	h.m.onConnectivity(ctx, false, false) // raise attempt 1 fails
+	require.Equal(t, StateAPActive, h.m.State())
+	h.tickN(ctx, 7) // attempts 2..8: latch fires
+	setupErrors := func() (n int) {
+		for _, c := range h.notifier.calls {
+			if c.Detail.Reason == ReasonSetupError {
+				n++
+			}
+		}
+		return
+	}
+	cleared := func() (n int) {
+		for _, c := range h.notifier.calls {
+			if c.Detail.Reason == ReasonSetupErrorCleared {
+				n++
+			}
+		}
+		return
+	}
+	require.Equal(t, 1, setupErrors())
+
+	fl.up = true // link recovers while NM still refuses the raise
+	h.tick(ctx)  // failed-raise exit: episode over, no raise ever succeeded
+	require.Equal(t, StateUnprovisioned, h.m.State())
+	assert.Equal(t, 1, cleared(),
+		"the exit must dismiss the latched panel explicitly — nothing else repaints the exit legs")
+
+	// A later, fresh wedge: the second episode must escalate again.
+	fl.up = false
+	h.tickN(ctx, windowSamples) // window re-expires: raise attempts resume and fail
+	h.tickN(ctx, 8)
+	assert.Equal(t, 2, setupErrors(),
+		"a second wedge must re-latch and re-notify — the streak resets at the episode boundary")
+}

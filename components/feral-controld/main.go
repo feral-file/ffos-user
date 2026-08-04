@@ -1024,7 +1024,15 @@ func initializeApp(
 	wifiCtl := wifictl.New(exec, clock, logger, "")
 	// The claim QR auto-paints when an unclaimed device comes online — the
 	// launcher-ui replacement (see MaybeShowClaimQROnOnline).
-	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context}
+	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context,
+		// The same identity mDNS advertises; §4.6 trouble-state copy carries it
+		// so a user reporting a stuck frame can say which one.
+		deviceName: resolveMDNSDeviceInfo(os, state.ClaimSnapshot(), logger).Name}
+	// The claim flow's topic-wait expiry narration needs a cached internet
+	// verdict to tell "no WAN — the topic can never arrive" from "relayer
+	// slow" (§4.6, the unclaimed wired no-WAN black screen). Same cached
+	// monitord read the hub status provider serves; never a live probe.
+	wireInternetProbe(executor, dbusClient, logger)
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
 		// Topic assignment re-triggers the claim flow: a factory-fresh device

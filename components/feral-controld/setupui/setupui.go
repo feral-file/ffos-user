@@ -83,8 +83,19 @@ const (
 	// validation set; but unlike them this narration does not accept the
 	// renders-nothing no-op on older manifests — it is the only thing between
 	// a relocated (offline-forever) device and a silent black screen, so the
-	// send downgrades it to join_failed instead (see resolveConnectingState).
+	// send downgrades it to join_failed instead (see resolveExtensionState).
 	stateConnecting = "connecting"
+
+	// stateSetupError is an extension state narrating a PERSISTENT provisioning
+	// failure the machine cannot resolve on its own (the §4.6 escalation
+	// latches: the setup AP repeatedly failing to raise, or its teardown
+	// repeatedly failing). `reason` carries the prose, matching the connecting
+	// convention. Like connecting it must not silently no-op on an older
+	// manifest — it exists precisely so a stuck device stops showing a lying
+	// "scanning" screen forever — so the send downgrades it to join_failed via
+	// the shared fallback table (see sendFallbacks): degraded title, never a
+	// dark or lying screen.
+	stateSetupError = "setup_error"
 )
 
 // defaultNavigationParkPollInterval / defaultNavigationParkTimeout bound the
@@ -158,23 +169,23 @@ type Service struct {
 
 	mu      sync.Mutex
 	support support
-	// connectingSupport is the LAST manifest verdict for stateConnecting that
-	// was derived from a successfully read manifest (can the running player
-	// render it, or must the send downgrade to join_failed?). Resolved on the
-	// WORKER at send time, never at Show-time — see resolveConnectingState
-	// for why the retained intent must stay neutral. Unlike support, this is
-	// deliberately NOT a process-lifetime latch: the player bundle (and its
-	// manifest) is OTA-replaced without a controld restart, so a latched
-	// verdict goes stale in both directions — an old-manifest supportNo would
-	// keep downgrading on an upgraded player until restart, and an
-	// unreadable-manifest "undecided" after a bundle downgrade would send a
-	// renders-nothing connecting to an old player. Every resolution re-reads
-	// the manifest (connecting pushes are rare — boot hedge and offline
-	// episode edges — so one small file read each is nothing); this field
-	// only bridges read/decode-failure windows (boot ordering, OTA
-	// mid-replace, a torn write) with the last real evidence. supportUnknown
-	// until the first successful read.
-	connectingSupport support
+	// extSupport holds, per downgradeable extension state (the sendFallbacks
+	// keys), the LAST manifest verdict derived from a successfully read
+	// manifest (can the running player render it, or must the send apply the
+	// state's fallback?). Resolved on the WORKER at send time, never at
+	// Show-time — see resolveExtensionState for why the retained intent must
+	// stay neutral. Unlike support, these are deliberately NOT process-lifetime
+	// latches: the player bundle (and its manifest) is OTA-replaced without a
+	// controld restart, so a latched verdict goes stale in both directions —
+	// an old-manifest supportNo would keep downgrading on an upgraded player
+	// until restart, and an unreadable-manifest "undecided" after a bundle
+	// downgrade would send a renders-nothing state to an old player. Every
+	// resolution re-reads the manifest (these pushes are rare — boot hedge,
+	// offline episode edges, escalation latches — so one small file read each
+	// is nothing); this map only bridges read/decode-failure windows (boot
+	// ordering, OTA mid-replace, a torn write) with the last real evidence.
+	// Absent key = supportUnknown = no successful read yet.
+	extSupport map[string]support
 	// last is the most recently intended narration state. It is retained (not
 	// cleared after sending) so it can be re-pushed when CDP reconnects.
 	last map[string]any
@@ -192,12 +203,12 @@ type Service struct {
 	running bool
 }
 
-// maxPendingStates bounds the pending queue. Setup narration has 11 distinct
-// states total (including the scanning/finalizing/factory_reset/connecting
-// extensions),
-// so a deeper queue only ever means a stalled CDP send; dropping the oldest
-// intent is the correct staleness policy for a courtesy overlay.
-const maxPendingStates = 12
+// maxPendingStates bounds the pending queue. Setup narration has 12 distinct
+// states total (including the scanning/finalizing/factory_reset/connecting/
+// setup_error extensions), so a deeper queue only ever means a stalled CDP
+// send; dropping the oldest intent is the correct staleness policy for a
+// courtesy overlay.
+const maxPendingStates = 13
 
 // New builds a narration Service. A blank contractPath falls back to
 // DefaultContractPath. logger may be nil (narration then stays silent about its
@@ -267,7 +278,7 @@ func (s *Service) ShowJoinFailed(reason string) {
 // message is the provisioning machine's evidence-scoped prose and is omitted
 // from the payload when blank. The pushed intent always carries the neutral
 // stateConnecting; on a player manifest that provably predates the state the
-// SEND downgrades it to join_failed (see resolveConnectingState) — a
+// SEND downgrades it to join_failed (see resolveExtensionState) — a
 // failure-asserting title beats no narration, because these edges exist
 // precisely so a watching user is never left with an unexplained black
 // screen. Resolving at send time, not here, keeps manifest disk I/O off the
@@ -281,7 +292,30 @@ func (s *Service) ShowConnecting(message string) {
 	s.push(req)
 }
 
-// resolveConnectingState maps a queued connecting intent to the state the
+// sendFallback describes the send-time downgrade for one extension state on a
+// manifest that provably lacks it. The value is a UNION by design
+// (docs/network-recovery-ux.md §4.6): most entries substitute a fallback
+// STATE, but an entry may instead fall back to the hide OPERATION
+// (state=hidden) — for pushes whose false-title downgrade would be worse than
+// clearing the screen. The hide member exists now so the table shape admits
+// both; its first consumer is the recurring ap-recheck push (stage 3), whose
+// per-cycle cadence on claimed frames must never flash a false "Couldn't
+// connect" title over exhibition artwork.
+type sendFallback struct {
+	state string
+	hide  bool
+}
+
+// sendFallbacks names the extension states that must NOT silently no-op on an
+// older manifest, and what each degrades to. States absent from this table
+// (scanning, finalizing, factory_reset) accept the renders-nothing no-op and
+// need no fallback.
+var sendFallbacks = map[string]sendFallback{
+	stateConnecting: {state: stateJoinFailed},
+	stateSetupError: {state: stateJoinFailed},
+}
+
+// resolveExtensionState maps a queued extension-state intent to what the
 // RUNNING player can render, at send time rather than Show-time. The stored
 // intent (last / the pending queue) always keeps the neutral state: resolving
 // any earlier would freeze a downgrade verdict taken while the manifest was
@@ -289,35 +323,41 @@ func (s *Service) ShowConnecting(message string) {
 // the exact flash stateConnecting exists to remove. Copy-on-write so the
 // retained maps are never mutated. Runs on the worker goroutine (trySend),
 // which also keeps the manifest read off the provisioning state machine's
-// goroutine. Returns req unchanged for every other state.
-func (s *Service) resolveConnectingState(req map[string]any) map[string]any {
-	if stringField(req, "state") != stateConnecting || !s.connectingUnsupported() {
+// goroutine. Returns req unchanged for every state outside the fallback
+// table.
+func (s *Service) resolveExtensionState(req map[string]any) map[string]any {
+	state := stringField(req, "state")
+	fb, ok := sendFallbacks[state]
+	if !ok || !s.stateUnsupported(state) {
 		return req
+	}
+	if fb.hide {
+		return map[string]any{"state": stateHidden}
 	}
 	out := make(map[string]any, len(req))
 	for k, v := range req {
 		out[k] = v
 	}
-	out["state"] = stateJoinFailed
+	out["state"] = fb.state
 	return out
 }
 
-// connectingUnsupported reports POSITIVE evidence that the running player
-// predates stateConnecting: a successfully DECODED manifest whose state list
+// stateUnsupported reports POSITIVE evidence that the running player predates
+// the given extension state: a successfully DECODED manifest whose state list
 // lacks it. Re-read on every resolution — never latched — because the bundle
-// and manifest are OTA-replaced under a running controld (see the
-// connectingSupport field for both staleness directions a latch causes).
-// Only a decoded manifest ever updates the verdict; EVERY read/decode
-// failure (boot ordering, OTA mid-replace, a partially written file) falls
-// back to the last verdict derived from a real manifest, because a failure
-// proves nothing about the player — treating a torn mid-OTA write as
-// "unsupported" would repaint the false join_failed title on a player that
-// renders connecting fine, the exact flash this state removes. Before any
+// and manifest are OTA-replaced under a running controld (see the extSupport
+// field for both staleness directions a latch causes). Only a decoded
+// manifest ever updates the verdict; EVERY read/decode failure (boot
+// ordering, OTA mid-replace, a partially written file) falls back to the last
+// verdict derived from a real manifest, because a failure proves nothing
+// about the player — treating a torn mid-OTA write as "unsupported" would
+// repaint the false join_failed title on a player that renders the state
+// fine, the exact flash the fallback machinery exists to remove. Before any
 // successful read the fallback reports false — keep the neutral state, since
-// downgrading on anything short of positive evidence would trade the M-0/M-1
-// narration's truthful title for join_failed's false failure one, and that
-// un-downgraded push is skipped by narrationSupported's own unreadable
-// branch anyway (the next delivery or Resync replay re-resolves).
+// downgrading on anything short of positive evidence would trade a truthful
+// title for a false one, and that un-downgraded push is skipped by
+// narrationSupported's own unreadable branch anyway (the next delivery or
+// Resync replay re-resolves).
 //
 // LOCKING: the manifest read and decode run OUTSIDE s.mu — every Show*/Hide
 // caller (the provisioning notifier's OnStateChange path) takes that mutex
@@ -325,26 +365,26 @@ func (s *Service) resolveConnectingState(req map[string]any) map[string]any {
 // degraded filesystem would otherwise stall the online Hide that ends the
 // narration). Safe without the lock because resolution only ever runs on the
 // single narration worker goroutine (the `running` guard); s.mu is taken
-// only around the cached-verdict field so it stays consistently guarded
+// only around the cached-verdict map so it stays consistently guarded
 // alongside the Service's other mutable state.
-func (s *Service) connectingUnsupported() bool {
+func (s *Service) stateUnsupported(target string) bool {
 	manifest, err := readPlayerContractManifest(s.contractPath)
 	if err == nil {
 		// A manifest that decodes but is not a real setupDisplay v1 contract
 		// (e.g. `{"contracts":{}}` from a transitional or foreign bundle) is
 		// no more capability evidence than a torn write — scanning its empty
-		// state list would flip the verdict to "unsupported" and repaint the
-		// false join_failed title on a player that renders connecting fine.
+		// state list would flip the verdict to "unsupported" and repaint a
+		// false failure title on a player that renders the state fine.
 		err = validateSetupDisplayManifest(manifest)
 	}
 	if err != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.connectingSupport == supportNo
+		return s.extSupport[target] == supportNo
 	}
 	supported := false
 	for _, state := range manifest.Contracts["setupDisplay"].States {
-		if state == stateConnecting {
+		if state == target {
 			supported = true
 			break
 		}
@@ -354,8 +394,11 @@ func (s *Service) connectingUnsupported() bool {
 		verdict = supportNo
 	}
 	s.mu.Lock()
-	changed := s.connectingSupport != verdict
-	s.connectingSupport = verdict
+	if s.extSupport == nil {
+		s.extSupport = make(map[string]support, len(sendFallbacks))
+	}
+	changed := s.extSupport[target] != verdict
+	s.extSupport[target] = verdict
 	s.mu.Unlock()
 	if changed {
 		// Logged on verdict CHANGES only (not per push): the flip is the
@@ -363,14 +406,54 @@ func (s *Service) connectingUnsupported() bool {
 		// quiet. Info, not Warn — expected on fielded players until the
 		// bundle updates, and the downgrade keeps the narration functional.
 		if supported {
-			s.logger.Info("Player manifest lists the connecting narration state; using it",
-				zap.String("path", s.contractPath))
+			s.logger.Info("Player manifest lists the narration state; using it",
+				zap.String("state", target), zap.String("path", s.contractPath))
 		} else {
-			s.logger.Info("Player manifest predates the connecting narration state; downgrading to join_failed",
-				zap.String("path", s.contractPath))
+			s.logger.Info("Player manifest predates the narration state; downgrading at send time",
+				zap.String("state", target), zap.String("path", s.contractPath))
 		}
 	}
 	return !supported
+}
+
+// ShowConnectingIfShowing pushes the connecting narration ONLY when the
+// current narration intent is one of states — the conditional sibling of
+// HideIfShowing, on the same pushIf critical section, so a flow can replace
+// the narration IT painted without overwriting a concurrent narrator's. The
+// canonical caller is the executor's claim flow at topic-wait expiry: its 60s
+// wait is the longest window for another narrator to take the screen (a link
+// drop raises the setup AP and paints softap_qr, which must not be
+// overwritten), so an unconditional paint there loses exactly the race the
+// call site's comment documents. Same send-time downgrade semantics as
+// ShowConnecting.
+func (s *Service) ShowConnectingIfShowing(message string, states ...string) {
+	req := map[string]any{"state": stateConnecting}
+	if strings.TrimSpace(message) != "" {
+		req["reason"] = message
+	}
+	s.pushIf(req, func(last map[string]any) bool {
+		current := stringField(last, "state")
+		for _, st := range states {
+			if current == st {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// ShowSetupError narrates a persistent provisioning failure the machine cannot
+// resolve on its own (the escalation latches: repeated setup-AP raise or
+// teardown failures). reason carries the full user-facing prose, matching the
+// connecting convention. Send-time downgrade to join_failed on manifests that
+// predate the state (see sendFallbacks) — degraded title, never a dark or
+// lying screen.
+func (s *Service) ShowSetupError(reason string) {
+	req := map[string]any{"state": stateSetupError}
+	if strings.TrimSpace(reason) != "" {
+		req["reason"] = reason
+	}
+	s.push(req)
 }
 
 // ShowUpdating narrates an in-progress OTA update. progress is a percent
@@ -669,10 +752,10 @@ func (s *Service) trySend(req map[string]any) {
 	if !s.narrationSupported() {
 		return
 	}
-	// Send-time capability resolution for the connecting extension state (a
-	// no-op for every other state) — must stay AFTER narrationSupported, so
+	// Send-time capability resolution for the downgradeable extension states
+	// (a no-op for every other state) — must stay AFTER narrationSupported, so
 	// the downgrade decision only ever runs when a manifest is present.
-	req = s.resolveConnectingState(req)
+	req = s.resolveExtensionState(req)
 
 	payload, err := json.Marshal(map[string]any{
 		"command": setupDisplayCommand,
@@ -717,7 +800,7 @@ func (s *Service) trySend(req map[string]any) {
 // indistinguishable from narration-working from the state machine's side.
 //
 // LOCKING: the manifest read runs OUTSIDE s.mu, mirroring
-// connectingUnsupported — every Show*/Hide caller takes that mutex in
+// stateUnsupported — every Show*/Hide caller takes that mutex in
 // pushIf, and the UN-latched first read fires exactly on the boot narration
 // path (the process's first push), so a hung read on a degraded filesystem
 // under the mutex would stall the online Hide that ends the boot narration.

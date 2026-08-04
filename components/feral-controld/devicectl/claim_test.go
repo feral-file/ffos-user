@@ -81,6 +81,23 @@ func (s *narratorSpy) HideIfShowing(states ...string) {
 	}
 }
 
+// ShowConnectingIfShowing mirrors setupui.Service: the connecting paint lands
+// only when the current intent is one of states (the topic-wait expiry's
+// race-safe conditional paint).
+func (s *narratorSpy) ShowConnectingIfShowing(message string, states ...string) {
+	if len(s.calls) == 0 {
+		return
+	}
+	current := s.calls[len(s.calls)-1]
+	for _, st := range states {
+		if current == st {
+			s.calls = append(s.calls, "connecting")
+			s.lastURL = message
+			return
+		}
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 // claimSnapshotFromState derives the state.ClaimInfo view of a *state.State
@@ -1120,4 +1137,79 @@ func TestMaybeShowClaimQROnOnline_WakeDuringLadderDoesNotSkipPark(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("claim flow did not exit after ctx cancel")
 	}
+}
+
+// TestMaybeShowClaimQROnOnline_NoTopicNoInternetNarrates pins the §4.6 fix for
+// the unclaimed wired no-WAN black screen: with the internet probe wired and
+// reporting offline, the topic-wait expiry paints the connecting explanation
+// (conditionally, over its own finalizing overlay) instead of the silent hide
+// — the device is reachable and claimable over the LAN, and the panel must
+// say so rather than going dark.
+func TestMaybeShowClaimQROnOnline_NoTopicNoInternetNarrates(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+
+	mockOS := mocks.NewMockOS(ctrl)
+	mockOS.EXPECT().ReadFile(gomock.Any()).Return([]byte("FF1-TEST\n"), nil).AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}, os: mockOS}
+	e.SetInternetProbe(func(context.Context) (bool, error) { return false, nil })
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Equal(t, []string{"finalizing", "connecting"}, spy.calls,
+		"a confirmed-offline topic-wait expiry must narrate, not hide")
+	assert.Contains(t, spy.lastURL, "no internet access",
+		"the narration must carry the no-WAN explanation")
+	assert.Contains(t, spy.lastURL, "FF1-TEST",
+		"the narration must carry the device identity")
+}
+
+// TestMaybeShowClaimQROnOnline_NoTopicOnlineKeepsSilentHide: with the probe
+// reporting ONLINE, asserting "no internet access" would smear a healthy
+// network (the topic is merely late) — today's silent hide stays.
+func TestMaybeShowClaimQROnOnline_NoTopicOnlineKeepsSilentHide(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
+	e.SetInternetProbe(func(context.Context) (bool, error) { return true, nil })
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Equal(t, []string{"finalizing", "hide"}, spy.calls)
+}
+
+// TestMaybeShowClaimQROnOnline_NoTopicProbeErrorKeepsSilentHide pins the
+// probe's tri-state contract: a monitord restart or D-Bus timeout at
+// topic-wait expiry proves nothing, and painting "no internet access" off it
+// would smear a healthy network — only a REAL offline verdict narrates.
+func TestMaybeShowClaimQROnOnline_NoTopicProbeErrorKeepsSilentHide(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	sm.EXPECT().GetState().Return(&state.State{}).AnyTimes()
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+
+	spy := &narratorSpy{}
+	e := &executor{logger: zap.NewNop(), setupNarrator: spy, clock: &autoClaimClock{}}
+	e.SetInternetProbe(func(context.Context) (bool, error) {
+		return false, errors.New("monitord unavailable")
+	})
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Equal(t, []string{"finalizing", "hide"}, spy.calls,
+		"an unknown verdict must keep the silent hide, never the no-WAN narration")
 }

@@ -259,6 +259,18 @@ type executor struct {
 	// nil (tests, doubles) means no expiry.
 	bootLifecycleProbe func() bool
 
+	// internetProbe, when wired (SetInternetProbe), reports cached internet
+	// reachability. The claim flow's topic-wait expiry consults it to tell
+	// "reachable LAN but no WAN — the topic can never arrive" (narrate it:
+	// the unclaimed wired no-WAN device otherwise ends at a black screen,
+	// docs/network-recovery-ux.md §4.6) from "online but the relayer is slow"
+	// (keep today's silent hide). Deliberately TRI-STATE (value, error), not a
+	// bool: only a real "offline" verdict may narrate — a monitord restart or
+	// D-Bus timeout at expiry proves nothing, and degrading it to false would
+	// paint "no internet access" over a healthy network. nil, like an error,
+	// keeps the silent hide unconditionally.
+	internetProbe func(ctx context.Context) (bool, error)
+
 	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
 	// (main wires it to re-read /proc/uptime against the wider
 	// startupOTAGateEntryWindow). Split from bootLifecycleProbe because the
@@ -823,6 +835,7 @@ type setupNarrator interface {
 	Hide()
 	SweepStaleOverlay()
 	HideIfShowing(states ...string)
+	ShowConnectingIfShowing(message string, states ...string)
 }
 
 // setupUI lazily builds the setup-narration surface from the executor's CDP
@@ -931,12 +944,35 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 
 	if !e.waitForRelayerTopic(ctx) {
 		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
-		// Clear only our own finalizing narration; nothing is coming. The
-		// topic wait is 60s — the longest window in this flow for another
-		// narrator to take the screen (a link drop re-raises the setup AP
-		// and paints softap_qr), so an unconditional Hide here would blank
-		// an active setup surface. See runPreClaimGateAndPaint's settled
-		// branch for the shared rationale.
+		// The topic wait is 60s — the longest window in this flow for another
+		// narrator to take the screen (a link drop re-raises the setup AP and
+		// paints softap_qr), so BOTH branches below are conditional on the
+		// finalizing overlay this flow painted still being up; an
+		// unconditional paint or hide here would clobber an active setup
+		// surface. See runPreClaimGateAndPaint's settled branch for the shared
+		// rationale.
+		//
+		// With CONFIRMED no internet (cached verdict, unclaimed device) the
+		// topic can never arrive — the old silent hide here was the unclaimed
+		// wired no-WAN black screen (docs/network-recovery-ux.md §4.6):
+		// reachable over the LAN, claimable over the LAN, and nothing on the
+		// panel saying so. Narrate it instead; the overlay is cleared by this
+		// flow's own later narrations or any provisioning transition, the same
+		// ownership it has today.
+		if e.internetProbe != nil {
+			if online, perr := e.internetProbe(ctx); perr == nil && !online {
+				msg := "Connected by cable, but there is no internet access. " +
+					"Setup will continue when the connection is restored."
+				if name := e.deviceID(); name != "" {
+					msg += " (" + name + ")"
+				}
+				e.setupUI().ShowConnectingIfShowing(msg, setupui.StateFinalizing)
+				return
+			}
+		}
+		// Online, probe error, or no probe wired: nothing is coming this
+		// pass, but asserting "no internet" without a real offline verdict
+		// would smear a healthy network — keep the silent hide.
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return
 	}
@@ -1229,6 +1265,14 @@ func (e *executor) SetBootLifecycleProbe(probe func() bool) {
 // probe). Same wiring-before-run ordering contract as SetBootLifecycleProbe.
 func (e *executor) SetStartupOTAGateEntryProbe(probe func() bool) {
 	e.otaGateEntryProbe = probe
+}
+
+// SetInternetProbe injects a cached internet-reachability check (sys-monitord's
+// cached connectivity, never a live network probe) used by the claim flow's
+// topic-wait expiry narration (see internetProbe for the tri-state contract).
+// Same wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetInternetProbe(probe func(ctx context.Context) (bool, error)) {
+	e.internetProbe = probe
 }
 
 // Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the

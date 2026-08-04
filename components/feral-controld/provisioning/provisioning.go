@@ -113,6 +113,19 @@ const (
 	// the sustained-offline window cannot self-heal that, so the AP rises
 	// immediately, mirroring the unprovisioned boot raise.
 	ReasonRelocated = "relocated"
+	// ReasonSetupError marks the escalation-latch notification (§4.6): a
+	// persistent AP raise or teardown failure the machine cannot resolve on
+	// its own. Detail.Message carries the user-facing prose; the notifier
+	// renders it via the player's setup_error extension state. Emitted once at
+	// the latch edge, never per retry tick.
+	ReasonSetupError = "setup-error"
+	// ReasonSetupErrorCleared marks a latched setup_error ending WITHOUT its
+	// own repaint: a resolved teardown wedge in a resting state, or a raise
+	// episode exiting through link recovery before any raise succeeded (a
+	// successful raise repaints softap_qr by itself and never emits this).
+	// The notifier answers it with a narrating-guarded hide, so the error
+	// panel cannot strand over artwork.
+	ReasonSetupErrorCleared = "setup-error-cleared"
 )
 
 // Detail is the side-channel context published alongside a State change: enough
@@ -212,6 +225,15 @@ const (
 	// existed to prevent. Two consecutive fresh samples keep the raise
 	// grounded in current evidence at one tick of extra cost.
 	offlineFreshSamplesAfterPause = 2
+
+	// setupErrorFailStreak is how many CONSECUTIVE AP-raise (or AP-teardown)
+	// failures latch the on-screen setup_error narration: ~2 minutes at tick
+	// cadence — above transient NetworkManager restarts, an order of magnitude
+	// below "the user walks away". Below the threshold the screen keeps
+	// whatever the flow last painted (usually "scanning"), which is honest for
+	// a transient; past it, "scanning" forever is the D5/D6 lying screen the
+	// latch exists to replace.
+	setupErrorFailStreak = 8
 
 	// relocUnknownTolerance is how many inconclusive LINK PROBE samples the
 	// boot relocation ladder absorbs before forfeiting for the boot. The old
@@ -472,7 +494,31 @@ type Machine struct {
 	offlineAbsent      int
 	offlinePause       int
 	offlineFreshNeeded int
+
+	// Escalation latches (§4.6, fixes D5/D6). apRaiseFails / apReleaseFails
+	// count CONSECUTIVE ensureAPUp / ensureAPDown failures; at
+	// setupErrorFailStreak the machine notifies ReasonSetupError once and
+	// records which flavor in setupErrorLatch. While latched, ensureAPUp
+	// suppresses its "scanning" push so the error panel does not flap at tick
+	// cadence against the retry loop (which continues underneath throughout).
+	// The raise flavor clears on the first successful ap.Up (whose own
+	// softap_qr narration repaints) AND at every episode boundary via
+	// clearOffline (a failed-raise episode can exit through link recovery
+	// without ever succeeding — see resetAPRaiseEscalation); the release
+	// flavor clears on the first successful teardown, emitting
+	// ReasonSetupErrorCleared where no repaint would otherwise follow.
+	// Loop-goroutine-only, like connUnknown.
+	apRaiseFails    int
+	apReleaseFails  int
+	setupErrorLatch string
 }
+
+// Setup-error latch flavors, carried in setupErrorLatch and logged; the
+// user-facing prose lives at the notify sites.
+const (
+	setupErrorAPStart   = "ap_start_failed"
+	setupErrorAPRelease = "ap_release_failed"
+)
 
 // relocConfirmScans is how many consecutive positive "no saved SSID in a full
 // live scan" results (one 15s tick apart once armed) the relocation shortcut
@@ -1649,11 +1695,17 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	// Announce the scan before it starts so the narration surface can show a
 	// "looking for networks" state for however long the scan takes. Reason
 	// "scanning" is the discriminator (see setupNotifier.OnStateChange); the
-	// AP only comes up after the scan pass below completes.
-	m.notify(StateAPActive, Detail{
-		Reason:  "scanning",
-		Message: "Looking for nearby Wi-Fi networks",
-	})
+	// AP only comes up after the scan pass below completes. Suppressed while a
+	// setup_error is latched: this push runs on every retry tick, and
+	// alternating scanning/setup_error at 15s cadence would flap the very
+	// panel the latch exists to hold steady (§4.6); the latch clears on the
+	// first successful raise, whose softap_qr announcement repaints.
+	if m.setupErrorLatch == "" {
+		m.notify(StateAPActive, Detail{
+			Reason:  "scanning",
+			Message: "Looking for nearby Wi-Fi networks",
+		})
+	}
 
 	var scanErr error
 	var ssids []string
@@ -1682,6 +1734,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 
 	info, err := m.ap.Up(ctx)
 	if err != nil {
+		m.noteAPRaiseFailure()
 		return err
 	}
 
@@ -1709,6 +1762,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 			m.apDownPending = true
 			m.mu.Unlock()
 		}
+		m.noteAPRaiseFailure()
 		return err
 	}
 
@@ -1717,6 +1771,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	m.apInfo = info
 	m.portalSrv = srv
 	m.mu.Unlock()
+	m.clearAPRaiseFailures()
 	m.logger.Info("provisioning: setup AP raised", zap.String("ssid", info.SSID))
 
 	// Re-announce StateAPActive now that the AP is actually up, carrying the live
@@ -1754,11 +1809,13 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 		// profile deletion is outstanding. Retry just that.
 		if err := m.ap.Down(ctx); err != nil {
 			m.logger.Warn("provisioning: retry of setup AP profile deletion failed", zap.Error(err))
+			m.noteAPReleaseFailure()
 			return false
 		}
 		m.mu.Lock()
 		m.apDownPending = false
 		m.mu.Unlock()
+		m.clearAPReleaseFailures()
 		m.logger.Info("provisioning: leftover setup AP profile deleted on retry")
 		return true
 	}
@@ -1783,7 +1840,10 @@ func (m *Machine) ensureAPDown(ctx context.Context) bool {
 	m.apDownPending = !downOK
 	m.mu.Unlock()
 	if downOK {
+		m.clearAPReleaseFailures()
 		m.logger.Info("provisioning: setup AP torn down")
+	} else {
+		m.noteAPReleaseFailure()
 	}
 	return downOK
 }
@@ -1951,6 +2011,100 @@ func (m *Machine) resetOfflineWindow() {
 func (m *Machine) clearOffline() {
 	m.resetOfflineWindow()
 	m.disarmRelocation("offline state cleared (online, link sighted, or AP raised)")
+	// Every clearOffline site is an EPISODE boundary (going online, a link
+	// sighting — including the failed-raise exits — or a fresh AP raise), so
+	// the raise-escalation streak resets here too: a raise episode can exit
+	// through link recovery WITHOUT ever succeeding, and a streak surviving
+	// that exit would (a) stop measuring CONSECUTIVE failures and (b) leave a
+	// stale latch that suppresses both the next wedge's notification and its
+	// scanning narration — the second wedge would show nothing at all. The
+	// RELEASE streak is deliberately NOT reset: teardown retries continue
+	// across resting states until they succeed, so its wedge genuinely spans
+	// these boundaries.
+	m.resetAPRaiseEscalation()
+}
+
+// resetAPRaiseEscalation resets the raise-failure streak and dismisses a
+// latched ap_start_failed panel when its episode ends WITHOUT a successful
+// raise (see clearOffline). The dismissal is an explicit cleared notify —
+// unlike the success path (clearAPRaiseFailures), no softap_qr repaint is
+// coming, and the failed-raise exits land in states whose entry reasons the
+// notifier deliberately leaves un-repainted (the link-present legs), which
+// would strand the error panel as a permanent lie over a recovered device.
+func (m *Machine) resetAPRaiseEscalation() {
+	m.apRaiseFails = 0
+	if m.setupErrorLatch != setupErrorAPStart {
+		return
+	}
+	m.setupErrorLatch = ""
+	m.notify(m.State(), Detail{Reason: ReasonSetupErrorCleared})
+}
+
+// noteAPRaiseFailure counts one failed AP raise toward the setup_error latch
+// (§4.6, D6): a raise that fails persistently (rfkill, an empty
+// /etc/hostname, :80 already bound) otherwise shows "scanning" forever while
+// reconcile retries at tick cadence with no counter and no escalation. Fires
+// the notification exactly once at the streak threshold; retries continue
+// underneath throughout.
+func (m *Machine) noteAPRaiseFailure() {
+	m.apRaiseFails++
+	if m.apRaiseFails != setupErrorFailStreak || m.setupErrorLatch != "" {
+		return
+	}
+	m.setupErrorLatch = setupErrorAPStart
+	m.logger.Error("provisioning: setup AP raise failing persistently; escalating on screen",
+		zap.Int("failures", m.apRaiseFails))
+	m.notify(m.State(), Detail{
+		Reason: ReasonSetupError,
+		Message: "The frame could not start setup mode. It will keep trying automatically. " +
+			"If this persists, disconnect power for ten seconds and restart.",
+	})
+}
+
+// clearAPRaiseFailures resets the raise streak on a successful ap.Up. No
+// explicit repaint: the successful raise's own softap_qr announcement (which
+// follows in ensureAPUp) is the repaint, so the latch just releases the
+// "scanning" suppression.
+func (m *Machine) clearAPRaiseFailures() {
+	m.apRaiseFails = 0
+	if m.setupErrorLatch == setupErrorAPStart {
+		m.setupErrorLatch = ""
+	}
+}
+
+// noteAPReleaseFailure is the teardown twin (§4.6, D5): NM refusing to delete
+// the hotspot profile wedges apDownPending forever — the hotspot may still
+// broadcast with nothing listening — and the screen shows whatever was last
+// painted, indefinitely.
+func (m *Machine) noteAPReleaseFailure() {
+	m.apReleaseFails++
+	if m.apReleaseFails != setupErrorFailStreak || m.setupErrorLatch != "" {
+		return
+	}
+	m.setupErrorLatch = setupErrorAPRelease
+	m.logger.Error("provisioning: setup AP teardown failing persistently; escalating on screen",
+		zap.Int("failures", m.apReleaseFails))
+	m.notify(m.State(), Detail{
+		Reason: ReasonSetupError,
+		Message: "The frame could not release its setup hotspot. It will keep trying automatically. " +
+			"If this persists, disconnect power for ten seconds and restart.",
+	})
+}
+
+// clearAPReleaseFailures resets the teardown streak on a successful teardown.
+// Unlike the raise flavor, no later narration necessarily follows (the machine
+// may be sitting in Online/OfflineRetrying, whose own transitions are deduped),
+// so a latched panel is dismissed explicitly via ReasonSetupErrorCleared —
+// except from StateAPActive, where the imminent raise repaints on its own.
+func (m *Machine) clearAPReleaseFailures() {
+	m.apReleaseFails = 0
+	if m.setupErrorLatch != setupErrorAPRelease {
+		return
+	}
+	m.setupErrorLatch = ""
+	if st := m.State(); st != StateAPActive {
+		m.notify(st, Detail{Reason: ReasonSetupErrorCleared})
+	}
 }
 
 // relocationUnknownSample charges one inconclusive link-probe sample against

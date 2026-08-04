@@ -26,6 +26,15 @@ type spyNarrationUI struct {
 	// must assert the machine's prose (not a reason code) is what reaches
 	// the player.
 	connectingMessages []string
+	// setupErrorReasons records ShowSetupError bodies (the §4.6 escalation
+	// latches) so tests can assert the prose — including the appended device
+	// identity — reaches the player.
+	setupErrorReasons []string
+}
+
+func (s *spyNarrationUI) ShowSetupError(reason string) {
+	s.calls = append(s.calls, "setup_error")
+	s.setupErrorReasons = append(s.setupErrorReasons, reason)
 }
 
 func (s *spyNarrationUI) ShowScanning()                 { s.calls = append(s.calls, "scanning") }
@@ -500,5 +509,42 @@ func TestSetupNotifierNarratesOfflineEntryEdges(t *testing.T) {
 	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
 	if spy.calls[len(spy.calls)-1] != "hide" {
 		t.Fatalf("expected Online to hide the owned narration; calls = %v", spy.calls)
+	}
+}
+
+// TestSetupNotifierRendersSetupError pins the §4.6 escalation-latch routing:
+// the reason-keyed dispatch renders ShowSetupError with the device identity
+// appended (whatever state the machine emitted it from), and the cleared
+// notification hides — narrating-guarded, like every hide on this surface.
+func TestSetupNotifierRendersSetupError(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy, deviceName: "FF1-TEST"}
+
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{
+		Reason:  provisioning.ReasonSetupError,
+		Message: "The frame could not start setup mode.",
+	})
+	if len(spy.setupErrorReasons) != 1 ||
+		spy.setupErrorReasons[0] != "The frame could not start setup mode. (FF1-TEST)" {
+		t.Fatalf("setup-error prose = %v; want identity-suffixed message", spy.setupErrorReasons)
+	}
+
+	// The cleared edge dismisses the panel this surface painted.
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{
+		Reason: provisioning.ReasonSetupErrorCleared,
+	})
+	if got := spy.calls[len(spy.calls)-1]; got != "hide" {
+		t.Fatalf("cleared edge painted %q; want hide", got)
+	}
+
+	// A cleared edge with nothing narrated (another surface owns the screen)
+	// must not hide anything.
+	spy2 := &spyNarrationUI{}
+	n2 := &setupNotifier{ui: spy2}
+	n2.OnStateChange(provisioning.StateOnline, provisioning.Detail{
+		Reason: provisioning.ReasonSetupErrorCleared,
+	})
+	if len(spy2.calls) != 0 {
+		t.Fatalf("unowned cleared edge produced calls %v; want none", spy2.calls)
 	}
 }

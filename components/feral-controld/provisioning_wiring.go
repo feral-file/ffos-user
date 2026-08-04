@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -94,6 +95,7 @@ type setupNarrationUI interface {
 	ShowSoftAPQR(ssid, psk string)
 	ShowJoinFailed(reason string)
 	ShowConnecting(message string)
+	ShowSetupError(reason string)
 	ShowJoining()
 	Hide()
 }
@@ -223,6 +225,11 @@ type setupNotifier struct {
 	ui     setupNarrationUI
 	logger *zap.Logger
 
+	// deviceName, when non-blank, is the mDNS-advertised identity
+	// ("FF1-XXXX") appended to trouble-state prose per the §4.6 copy formula —
+	// a user reporting a stuck frame over the phone needs to say WHICH frame.
+	deviceName string
+
 	// narrating tracks whether THIS surface currently owns the overlay (it has
 	// painted softap/joining/join-failed narration that is still up). The
 	// Online/Unprovisioned branches hide only when it is set: the shared
@@ -273,6 +280,31 @@ type setupNotifier struct {
 //     re-renders the QR).
 //   - neither -> the AP-not-yet-up entry; nothing to render until it comes up.
 func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detail) {
+	// The escalation-latch narration (§4.6) is REASON-keyed, not state-keyed:
+	// the machine emits it from whatever state the failing retry loop happens
+	// to run in (a raise wedge lives in ap_active; a teardown wedge can sit in
+	// any resting state), so it is dispatched before the state switch. Both
+	// legs return: these notifications are edges of the latch, not state
+	// transitions, and must not trigger the transition hooks below.
+	switch d.Reason {
+	case provisioning.ReasonSetupError:
+		n.narrating = true
+		msg := d.Message
+		if n.deviceName != "" {
+			msg += " (" + n.deviceName + ")"
+		}
+		n.ui.ShowSetupError(msg)
+		return
+	case provisioning.ReasonSetupErrorCleared:
+		// The wedge resolved in a state whose own narration will not repaint;
+		// dismiss the panel — but only if this surface still owns the overlay
+		// (the same narrating guard every hide here takes).
+		if n.narrating {
+			n.narrating = false
+			n.ui.Hide()
+		}
+		return
+	}
 	switch s {
 	case provisioning.StateAPActive:
 		switch {
@@ -367,6 +399,49 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			// default is load-bearing — narrating here would put a "join
 			// failed" screen over playing artwork on every WAN blip.
 		}
+	}
+}
+
+// wireInternetProbe attaches the executor's cached internet-reachability seam
+// (SetInternetProbe) to sys-monitord's cached connectivity read. Defined here
+// at file scope — like externalLinkProbe — because initializeApp's
+// daemon-lifetime variable named `context` shadows the context package inside
+// that function, and the seam's signature names context.Context. Type-asserted
+// so test doubles without the method stay harmlessly unwired (nil probe keeps
+// the pre-§4.6 silent hide).
+//
+// Deliberately NOT internetProbeFrom: that helper degrades errors to false
+// for the hub status field, but this consumer narrates "no internet access"
+// off a false — a monitord restart or D-Bus timeout must surface as an error
+// (the executor then keeps the silent hide), never as a confirmed-offline
+// verdict.
+func wireInternetProbe(ex any, dc dbus.DBus, logger *zap.Logger) {
+	if sink, ok := ex.(interface {
+		SetInternetProbe(func(context.Context) (bool, error))
+	}); ok {
+		sink.SetInternetProbe(func(ctx context.Context) (bool, error) {
+			deadlineCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			resp, err := dc.Call(
+				deadlineCtx,
+				dbus.MONITORD_NAME,
+				dbus.MONITORD_PATH,
+				dbus.MONITORD_INTERFACE,
+				dbus.MONITORD_METHOD_GET_CONNECTIVITY_STATUS,
+				false,
+			)
+			if err != nil {
+				return false, err
+			}
+			if len(resp) != 1 {
+				return false, fmt.Errorf("connectivity status: unexpected reply shape (%d values)", len(resp))
+			}
+			connected, ok := resp[0].(bool)
+			if !ok {
+				return false, fmt.Errorf("connectivity status: non-bool reply %T", resp[0])
+			}
+			return connected, nil
+		})
 	}
 }
 
