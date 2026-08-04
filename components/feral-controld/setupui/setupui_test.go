@@ -504,6 +504,32 @@ func TestShowConnectingManifestGate(t *testing.T) {
 		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
 	})
 
+	// The reviewer-named killer for latching decode failures at the MAIN
+	// gate: a torn write present at the very first push. narrationSupported
+	// used to latch supportNo off it, killing ALL narration for the daemon
+	// lifetime — connectingUnsupported's tolerant handling never ran because
+	// the earlier gate refused to send at all.
+	t.Run("malformed initial manifest defers; replay delivers connecting once valid", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(`{"contracts": {"setupDis`), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Looking for your Wi-Fi network…")
+		time.Sleep(50 * time.Millisecond)
+		assert.Zero(t, sender.callCount(), "no push while the manifest is undecodable")
+
+		// The valid bundle lands: narration must recover without a daemon
+		// restart, exactly like the unreadable case.
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+	})
+
 	t.Run("manifest without setupDisplay contract keeps the prior verdict", func(t *testing.T) {
 		sender := newFakeCDP()
 		path := filepath.Join(t.TempDir(), "contract.json")
@@ -841,6 +867,14 @@ func TestValidatePlayerStatusContract(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
 	})
+	// Same unreadable classification for decode failures as the setupDisplay
+	// validator: devicectl's boot-recovery fuse re-checks unreadable instead
+	// of permanently latching conservative mode off a torn write.
+	t.Run("undecodable manifest classifies as unreadable", func(t *testing.T) {
+		err := ValidatePlayerStatusContract(writeContract(t, `{"contracts": {"playerSta`))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
+	})
 }
 
 func TestValidateSetupDisplayContract(t *testing.T) {
@@ -863,6 +897,14 @@ func TestValidateSetupDisplayContract(t *testing.T) {
 		err := validateSetupDisplayContract(writeContract(t, body))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "version must be 1")
+	})
+	// Decode failures classify as UNREADABLE (a torn mid-OTA write is
+	// byte-garbage, not evidence): every capability fuse keyed on
+	// ErrPlayerContractUnreadable must defer and re-check, never latch off.
+	t.Run("undecodable manifest classifies as unreadable", func(t *testing.T) {
+		err := validateSetupDisplayContract(writeContract(t, `{"contracts": {"setupDis`))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPlayerContractUnreadable)
 	})
 }
 

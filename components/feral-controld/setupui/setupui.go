@@ -851,12 +851,13 @@ type playerContractAcceptedResponse struct {
 }
 
 // ErrPlayerContractUnreadable marks a validation failure caused by failing to
-// READ the player contract manifest, as opposed to a successfully-read
-// manifest that lacks the contract being checked. The two must not be
+// READ or DECODE the player contract manifest, as opposed to a successfully
+// decoded manifest that lacks the contract being checked. The two must not be
 // conflated: unreadable may be transient (boot ordering, an OTA mid-replace
-// of the player bundle) and must be re-checked on the next attempt, never
-// latched; a manifest that WAS read but lacks the contract means the
-// connected player's build genuinely does not support it. Exported so
+// of the player bundle — a torn write is byte-garbage, not evidence) and
+// must be re-checked on the next attempt, never latched; a manifest that
+// DECODED but lacks the contract means the connected player's build
+// genuinely does not support it. Exported so
 // other packages' capability fuses can apply the identical distinction —
 // devicectl's boot-recovery classification (design doc §5) checks
 // errors.Is(err, setupui.ErrPlayerContractUnreadable) against
@@ -870,8 +871,15 @@ var ErrPlayerContractUnreadable = errors.New("player contract unreadable")
 var errContractUnreadable = ErrPlayerContractUnreadable
 
 // readPlayerContractManifest reads and decodes the player contract manifest
-// at path, wrapping a read failure in ErrPlayerContractUnreadable. Shared by
-// every contract-specific validator in this file (validateSetupDisplayContract,
+// at path, wrapping BOTH read and decode failures in
+// ErrPlayerContractUnreadable: undecodable bytes are a torn or partial write
+// (an OTA mid-replace of the bundle), which proves nothing about the player
+// — no shipped build has ever carried invalid JSON, so treating it as
+// "genuinely lacks the contract" would latch capability fuses off a
+// transient state (narrationSupported once killed ALL narration for the
+// process lifetime this way). Genuine absence requires a manifest that
+// DECODED and lacks the contract key. Shared by every contract-specific
+// validator in this file (validateSetupDisplayContract,
 // ValidatePlayerStatusContract) so the unreadable-vs-absent distinction is
 // defined exactly once.
 func readPlayerContractManifest(path string) (playerContractManifest, error) {
@@ -885,7 +893,7 @@ func readPlayerContractManifest(path string) (playerContractManifest, error) {
 	}
 	var manifest playerContractManifest
 	if err := json.Unmarshal(raw, &manifest); err != nil {
-		return playerContractManifest{}, fmt.Errorf("decode player contract: %w", err)
+		return playerContractManifest{}, fmt.Errorf("%w: decode player contract: %w", ErrPlayerContractUnreadable, err)
 	}
 	return manifest, nil
 }
