@@ -136,8 +136,7 @@ func TestActiveLinkGuardWindowMeasuresLinkLoss(t *testing.T) {
 		"a link lost moments before the internet-loss deadline must not raise the AP")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
 
-	h.clk.advance(5 * time.Minute)
-	h.m.onTick(ctx) // 10m00: a full window of confirmed absence
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
@@ -154,8 +153,7 @@ func TestActiveLinkGuardSustainedLinkPresence(t *testing.T) {
 
 	h.m.onConnectivity(ctx, false, false)
 	for i := 0; i < 6; i++ { // 36+ minutes of link-up-but-offline
-		h.clk.advance(6 * time.Minute)
-		h.m.onTick(ctx)
+		h.tickN(ctx, windowSamples)
 	}
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
 		"a live link must ride out any number of window expiries without the AP")
@@ -176,8 +174,7 @@ func TestActiveLinkGuardProbeErrorNeverRaises(t *testing.T) {
 
 	h.m.onConnectivity(ctx, false, false)
 	for i := 0; i < 4; i++ { // 24 minutes of failing probes past the window
-		h.clk.advance(6 * time.Minute)
-		h.m.onTick(ctx)
+		h.tickN(ctx, windowSamples)
 	}
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
 		"probe errors must defer the AP, never authorize it")
@@ -188,8 +185,7 @@ func TestActiveLinkGuardProbeErrorNeverRaises(t *testing.T) {
 	assert.Equal(t, 0, h.rec.count("ap.Up"),
 		"first confirmed-absent reading starts the sustained window, not the AP")
 
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
@@ -223,8 +219,7 @@ func TestActiveLinkGuardUnprovisionedCableUnplug(t *testing.T) {
 		"one absent sample must not raise — a transient switch reboot is not a lost link")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
 
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx) // a full window of confirmed absence
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State(),
 		"sustained link loss on a parked unprovisioned device must raise the AP via the tick")
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
@@ -277,8 +272,7 @@ func TestActiveLinkGuardUnprovisionedTickRechecksProfile(t *testing.T) {
 	fl.up = false           // link lost
 	h.wifi.setProfile(true) // profile appears out-of-band while parked
 	h.m.onTick(ctx)         // starts the absence window
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx) // window expires: must re-check the profile
+	h.tickN(ctx, windowSamples)
 
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
 		"a profile acquired while parked must route to the provisioned resting state")
@@ -328,8 +322,7 @@ func TestActiveLinkGuardOnlineUnprovisionedSkipsProbe(t *testing.T) {
 	h.m.onConnectivity(ctx, true, false) // online via ethernet, no wifi profile
 	assert.Equal(t, StateUnprovisioned, h.m.State())
 
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateUnprovisioned, h.m.State(),
 		"an online unprovisioned device must never raise the AP from a tick probe")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
@@ -385,8 +378,7 @@ func TestActiveLinkGuardRedundantOfflineKeepsProvisionedAP(t *testing.T) {
 
 	h.m.onConnectivity(ctx, false, false) // WAN and link both gone
 	h.m.onTick(ctx)                       // first confirmed absence arms the window
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx) // sustained absence: AP up
+	h.tickN(ctx, windowSamples)
 	require.Equal(t, StateAPActive, h.m.State())
 	require.Equal(t, 1, h.rec.count("ap.Up"))
 
@@ -411,20 +403,18 @@ func TestActiveLinkGuardWindowStartsAtFirstConfirmedAbsence(t *testing.T) {
 	h.wifi.setProfile(true)
 	ctx := context.Background()
 
-	h.m.onConnectivity(ctx, false, false) // t0: no probe has run yet
+	h.m.onConnectivity(ctx, false, false) // t0: no probe has run yet, nothing armed
 	require.Equal(t, StateOfflineRetrying, h.m.State())
 
-	h.clk.advance(15 * time.Second)
-	h.m.onTick(ctx) // t0+15s: FIRST confirmed absence — the clock starts here
-
-	h.clk.advance(4*time.Minute + 45*time.Second)
-	h.m.onTick(ctx) // t0+5m, but only 4m45s of confirmed absence
+	// The event itself must not count as a sample (the guard-wired entry path
+	// deliberately does not arm): only the ticks' confirmed-absent probes
+	// accumulate, so the raise needs a full windowSamples of them.
+	h.tickN(ctx, windowSamples-1)
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
-		"the window must measure confirmed absence, not time since the internet reading")
+		"the window must count confirmed samples, not time since the internet reading")
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
 
-	h.clk.advance(15 * time.Second)
-	h.m.onTick(ctx) // t0+5m15s: a full window since the first confirmed absence
+	h.tick(ctx) // the windowSamples-th confirmed absence
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
@@ -467,8 +457,7 @@ func TestActiveLinkGuardRedundantOfflineRespectsUnprovisionedWindow(t *testing.T
 	h.m.onConnectivity(ctx, false, false)
 	assert.Equal(t, 0, h.rec.count("ap.Up"),
 		"the re-emission arms the window; it must not raise by itself")
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx) // a full window of confirmed absence: NOW the AP raises
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
@@ -502,8 +491,7 @@ func TestActiveLinkGuardOnlineWiredEdgeGetsWindow(t *testing.T) {
 	fl.up = false // the wire is now REALLY gone; only ticks will notice
 	h.clk.advance(15 * time.Second)
 	h.m.onTick(ctx) // first confirmed absence arms a fresh window
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State(),
 		"a full window of confirmed absence must still raise the AP")
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
@@ -524,20 +512,18 @@ func TestActiveLinkGuardRedundantOfflinePreservesProvisionedWindow(t *testing.T)
 	ctx := context.Background()
 
 	h.m.onConnectivity(ctx, false, false) // offline reading; nothing armed yet
-	h.clk.advance(15 * time.Second)
-	h.m.onTick(ctx) // first confirmed absence arms the window
+	h.tickN(ctx, 10)                      // half a window of confirmed samples
 
-	h.clk.advance(4 * time.Minute)
 	h.m.onConnectivity(ctx, false, false) // monitord restart re-emits offline mid-window
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
 	assert.Equal(t, 0, h.rec.count("ap.Up"))
 
-	// 5m10s since arming: if the re-emission had reset (or re-armed) the
-	// window, this tick would still be minutes short and the assert fails.
-	h.clk.advance(70 * time.Second)
-	h.m.onTick(ctx)
+	// The remaining samples complete the window: if the re-emission had reset
+	// (or re-armed) the count, these ticks would still be half a window short
+	// and the assert fails.
+	h.tickN(ctx, windowSamples-10)
 	assert.Equal(t, StateAPActive, h.m.State(),
-		"the re-emission must not have reset the confirmed-absence clock")
+		"the re-emission must not have reset the confirmed-absence count")
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }
 
@@ -561,7 +547,7 @@ func TestActiveLinkGuardJoinWithoutInternetKeepsAPDown(t *testing.T) {
 
 	h.wifi.setProfile(true) // the join saves a profile...
 	fl.up = true            // ...and brings the association up
-	h.m.applyJoin(ctx, "Net", "pw")
+	h.m.applyJoin(ctx, "Net", "pw", false)
 
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
 		"associated-but-offline must park provisioned with the AP down")
@@ -569,8 +555,7 @@ func TestActiveLinkGuardJoinWithoutInternetKeepsAPDown(t *testing.T) {
 		"the association DID succeed; that is the portal's contract")
 
 	for i := 0; i < 4; i++ { // 24+ minutes of ticks, well past the window
-		h.clk.advance(6 * time.Minute)
-		h.m.onTick(ctx)
+		h.tickN(ctx, windowSamples)
 	}
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"),
@@ -593,8 +578,7 @@ func TestActiveLinkGuardRecoveredLinkExitsFailedRaise(t *testing.T) {
 	h.ap.upErr = errors.New("nm busy") // every raise attempt fails
 	h.m.onConnectivity(ctx, false, false)
 	h.m.onTick(ctx) // first confirmed absence arms the window
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx) // window expires: the raise is attempted and FAILS
+	h.tickN(ctx, windowSamples)
 	require.Equal(t, StateAPActive, h.m.State())
 	require.Equal(t, 0, h.rec.count("portal.Start"), "raise failed: no portal")
 
@@ -606,8 +590,7 @@ func TestActiveLinkGuardRecoveredLinkExitsFailedRaise(t *testing.T) {
 
 	h.ap.upErr = nil         // NM recovers — the retry must never fire now
 	for i := 0; i < 4; i++ { // 24+ minutes of link-up-but-offline ticks
-		h.clk.advance(6 * time.Minute)
-		h.m.onTick(ctx)
+		h.tickN(ctx, windowSamples)
 	}
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
 	assert.Equal(t, 0, h.rec.count("portal.Start"),
@@ -629,8 +612,7 @@ func TestActiveLinkGuardRecoveredLinkExitsFailedRaiseOnRedundantReading(t *testi
 	h.ap.upErr = errors.New("nm busy")
 	h.m.onConnectivity(ctx, false, false)
 	h.m.onTick(ctx)
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx) // raise attempted and failed
+	h.tickN(ctx, windowSamples)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	fl.up = true                          // link recovers between retry ticks
@@ -711,4 +693,224 @@ func TestWiredOfflineBootNotifiesWhenWANArrives(t *testing.T) {
 	h.m.onConnectivity(ctx, true, false)
 	require.Equal(t, notified, len(h.notifier.calls),
 		"same-state same-reason re-emission must not re-notify")
+}
+
+// --- §4.3 window semantics: pause-not-reset with its bounds -------------------
+
+// TestOfflineWindowUnknownPausesAndResumes pins the D7 fix: inconclusive
+// probes PAUSE the sample count instead of resetting it, so accumulated
+// confirmed absence survives a probe flake and the raise fires once the count
+// completes (plus the post-pause freshness debt). Under the old
+// reset-on-unknown behavior this scenario required a full fresh window after
+// the flake and the final assert would fail.
+func TestOfflineWindowUnknownPausesAndResumes(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	h.tickN(ctx, 10) // half a window of confirmed samples
+
+	fl.err = errors.New("nmcli flake")
+	h.tickN(ctx, 5) // a bounded pause: nothing counted, nothing discarded
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+
+	fl.err = nil
+	h.tickN(ctx, windowSamples-10-1) // 9 more samples: count 19, debt paid
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	h.tick(ctx) // the 20th sample completes the paused window
+	assert.Equal(t, StateAPActive, h.m.State(),
+		"a paused window must resume, not restart")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestOfflineWindowLongPauseDiscardsAccumulation pins the staleness bound: a
+// pause longer than one full window discards the accumulated evidence — it is
+// older than a window-length of silence, and the one-way raise must not fire
+// off it.
+func TestOfflineWindowLongPauseDiscardsAccumulation(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	h.tickN(ctx, windowSamples-1) // one sample short of expiry
+
+	fl.err = errors.New("nmcli flake")
+	h.tickN(ctx, windowSamples+1) // pause exceeds a full window: discard
+
+	fl.err = nil
+	h.tickN(ctx, windowSamples-1) // a fresh accumulation, still one short
+	assert.Equal(t, 0, h.rec.count("ap.Up"),
+		"the pre-pause accumulation must have been discarded as stale")
+	h.tick(ctx)
+	assert.Equal(t, StateAPActive, h.m.State(),
+		"a fresh full window after the discard must still raise")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestOfflineWindowPostPauseNeedsFreshSamples pins the freshness debt: after
+// ANY pause, expiry demands two fresh consecutive confirmed samples — a
+// single absent sample landing on a full-but-stale count must never fire the
+// raise by itself.
+func TestOfflineWindowPostPauseNeedsFreshSamples(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	h.tickN(ctx, windowSamples-1) // one short of expiry
+
+	fl.err = errors.New("nmcli flake")
+	h.tick(ctx) // one inconclusive sample: pause + freshness debt
+
+	fl.err = nil
+	h.tick(ctx) // count reaches windowSamples, but only ONE fresh sample
+	assert.Equal(t, 0, h.rec.count("ap.Up"),
+		"one fresh sample after a pause must not fire the raise")
+	h.tick(ctx) // the second fresh sample pays the debt
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
+}
+
+// TestLinkPresentResetsWindowAndRelocationTogether pins the §4.3 single-truth
+// rule replacing clearOffline's old dual duty: one linkPresent sighting resets
+// the offline window AND terminally disarms the boot relocation ladder in the
+// same call, so a stale armed ladder can never survive into a later offline
+// episode and bypass the sustained window.
+func TestLinkPresentResetsWindowAndRelocationTogether(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"} // saved SSID absent: ladder confirms
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // boot: ladder armed (confirm 1)
+	h.tickN(ctx, 1)                       // confirm 2 + window sample
+
+	fl.up = true
+	h.tick(ctx) // ONE sighting: both mechanisms must reset
+
+	fl.up = false
+	h.tick(ctx) // confirmed absence again
+	assert.Equal(t, 2, h.rec.count("wifi.ScanAllSSIDs"),
+		"the ladder must stay disarmed after a sighting — no fresh scans")
+
+	h.tickN(ctx, windowSamples-1) // a fresh full window (1 sample above + these)
+	assert.Equal(t, StateAPActive, h.m.State())
+	// The raise must come from the windowed path, not a relocated shortcut
+	// (the link harness notifier is not recorder-wired, so inspect its calls).
+	var sustained, relocated int
+	for _, c := range h.notifier.calls {
+		if c.State == StateAPActive && c.Detail.Reason == "sustained-offline" {
+			sustained++
+		}
+		if c.State == StateAPActive && c.Detail.Reason == ReasonRelocated {
+			relocated++
+		}
+	}
+	assert.Equal(t, 1, sustained,
+		"the raise must come from the windowed path, not a relocated shortcut")
+	assert.Equal(t, 0, relocated)
+}
+
+// --- §4.3 join timeout (D10) --------------------------------------------------
+
+// TestJoinTimeoutSurfacesAndReRaises pins the join deadline: a wedged NM
+// activation (a Join that never returns) must surface as the standard timeout
+// failure at the deadline and re-raise the AP — before the deadline existed it
+// blocked the single loop goroutine forever with the AP down and the portal
+// stopped.
+func TestJoinTimeoutSurfacesAndReRaises(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // unprovisioned + link-less: AP up
+	require.Equal(t, StateAPActive, h.m.State())
+
+	// The deadline is a real-time context bound (the fake clock cannot drive
+	// it), so the test compresses it instead.
+	h.m.joinTimeout = 30 * time.Millisecond
+	h.wifi.mu.Lock()
+	h.wifi.joinHang = true
+	h.wifi.mu.Unlock()
+
+	h.m.applyJoin(ctx, "WedgedNet", "pw", false)
+
+	st := h.m.Status()
+	assert.Equal(t, portal.JoinFailed, st.State)
+	assert.Equal(t, "timeout", st.Reason,
+		"a deadline expiry must classify as the standard timeout failure")
+	assert.Equal(t, StateAPActive, h.m.State(), "the failure path must re-raise the AP")
+	assert.Equal(t, 2, h.rec.count("ap.Up"))
+}
+
+// --- §4.8 manual-entry trim and hidden flag through the machine ---------------
+
+// TestRequestJoinManualTrimAndHidden pins the trim scoping: a manual-entry
+// SSID is trimmed (phone keyboards autocomplete trailing spaces), a picker
+// value passes through VERBATIM (leading/trailing bytes are valid SSID
+// content), whitespace-only submissions are rejected on both branches, and the
+// hidden flag rides the event to the join.
+func TestRequestJoinManualTrimAndHidden(t *testing.T) {
+	h := newHarness(t)
+
+	require.NoError(t, h.m.RequestJoin(portal.JoinRequest{
+		SSID: "  Typed  ", Password: "pw", Manual: true, Hidden: true}))
+	ev := <-h.m.events
+	assert.Equal(t, "Typed", ev.ssid, "manual entries are trimmed")
+	assert.True(t, ev.hidden, "the hidden flag must reach the join event")
+
+	require.NoError(t, h.m.RequestJoin(portal.JoinRequest{SSID: " Padded ", Password: "pw"}))
+	ev = <-h.m.events
+	assert.Equal(t, " Padded ", ev.ssid, "picker values pass through verbatim")
+	assert.False(t, ev.hidden)
+
+	assert.Error(t, h.m.RequestJoin(portal.JoinRequest{SSID: "   ", Manual: true}),
+		"a whitespace-only manual entry is no submission")
+	assert.Error(t, h.m.RequestJoin(portal.JoinRequest{SSID: "   "}),
+		"a whitespace-only picker value is no submission either")
+}
+
+// TestApplyJoinPassesHiddenToController pins the end of the hidden plumbing:
+// the flag submitted at the portal reaches the wifictl Join call.
+func TestApplyJoinPassesHiddenToController(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false)
+	require.Equal(t, StateAPActive, h.m.State())
+
+	h.m.applyJoin(ctx, "GhostNet", "pw", true)
+	assert.Equal(t, 1, h.rec.count("wifi.Join(hidden):GhostNet"))
+}
+
+// TestOfflineWindowEventBurstsDoNotAccumulate pins armOfflineWindow's
+// first-sample-only rule on the nil-guard baseline, where the EVENT path arms
+// the window itself: redundant offline re-emissions (a monitord restart
+// re-emits its first probe unconditionally) can arrive in bursts, and letting
+// each one append a sample would let event cadence outrun tick cadence and
+// shorten the continuous-absence guarantee behind the one-way raise.
+func TestOfflineWindowEventBurstsDoNotAccumulate(t *testing.T) {
+	h := newHarness(t) // nil guard
+	h.wifi.setProfile(true)
+	ctx := context.Background()
+
+	h.m.onConnectivity(ctx, false, false) // arms: sample 1
+	h.m.onConnectivity(ctx, false, false) // burst re-emissions: no extra samples
+	h.m.onConnectivity(ctx, false, false)
+
+	h.tickN(ctx, windowSamples-2) // samples 2..19
+	assert.Equal(t, 0, h.rec.count("ap.Up"),
+		"event re-emissions must not have accelerated the window")
+	h.tick(ctx) // sample 20 completes the window
+	assert.Equal(t, StateAPActive, h.m.State())
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }

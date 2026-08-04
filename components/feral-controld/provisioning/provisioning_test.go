@@ -85,6 +85,8 @@ type fakeWifi struct {
 	hasProfile bool
 	profileErr error
 	joinErr    error // returned by Join
+	// joinHang makes Join block until its ctx dies (a wedged NM activation).
+	joinHang bool
 	// scanErrs is consumed one per RefreshScanCache call; nil entries and calls
 	// beyond the script succeed.
 	scanErrs []error
@@ -194,8 +196,21 @@ func (w *fakeWifi) ScanAllSSIDs(context.Context) ([]string, error) {
 	}
 	return []string{"Net"}, nil
 }
-func (w *fakeWifi) Join(_ context.Context, ssid, _ string) error {
-	w.rec.add("wifi.Join:" + ssid)
+func (w *fakeWifi) Join(ctx context.Context, ssid, _ string, hidden bool) error {
+	if hidden {
+		w.rec.add("wifi.Join(hidden):" + ssid)
+	} else {
+		w.rec.add("wifi.Join:" + ssid)
+	}
+	w.mu.Lock()
+	hang := w.joinHang
+	w.mu.Unlock()
+	if hang {
+		// Model a wedged NM activation: block until the caller's deadline
+		// kills the attempt (the D10 join-timeout tests key on this).
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return w.joinErr
 }
 func (w *fakeWifi) setProfile(v bool) {
@@ -334,6 +349,26 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
+// tick advances the fake clock by one check interval and runs one tick — one
+// SAMPLE, in the window's terms.
+func (h *harness) tick(ctx context.Context) {
+	h.clk.advance(15 * time.Second)
+	h.m.onTick(ctx)
+}
+
+// tickN runs n samples. The offline window is sample-counted (constraint 7),
+// so tests accumulate evidence by ticking at cadence rather than jumping the
+// clock — a single tick after a big clock jump is exactly the one-sample raise
+// the sample contract exists to forbid.
+func (h *harness) tickN(ctx context.Context, n int) {
+	for i := 0; i < n; i++ {
+		h.tick(ctx)
+	}
+}
+
+// windowSamples is the harness's expiry threshold (5m / 15s).
+const windowSamples = 20
+
 // --- transition-table tests --------------------------------------------------
 
 func TestTransientOutageBelowWindowDoesNotRaiseAP(t *testing.T) {
@@ -358,8 +393,7 @@ func TestSustainedOfflineRaisesAP(t *testing.T) {
 	ctx := context.Background()
 
 	h.m.onConnectivity(ctx, false, false)
-	h.clk.advance(6 * time.Minute) // past the 5-minute window
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 1, h.rec.count("ap.Up"))
@@ -376,8 +410,7 @@ func TestRecoveryTakesAPDown(t *testing.T) {
 
 	// Drive it up first.
 	h.m.onConnectivity(ctx, false, false)
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// Known network returns.
@@ -420,7 +453,7 @@ func TestAuthFailureReRaisesAPAndRecordsOutcome(t *testing.T) {
 
 	// User submits a wrong password.
 	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
-	h.m.applyJoin(ctx, "HomeNet", "wrong-pw")
+	h.m.applyJoin(ctx, "HomeNet", "wrong-pw", false)
 
 	// Back in APActive so the user can retry.
 	assert.Equal(t, StateAPActive, h.m.State())
@@ -454,7 +487,7 @@ func TestSuccessfulJoinGoesOnlineAndLeavesAPDown(t *testing.T) {
 	// The join brings real reachability: the post-join assessment sees online.
 	h.conn.online = true
 	h.wifi.setProfile(true)
-	h.m.applyJoin(ctx, "HomeNet", "correct-pw")
+	h.m.applyJoin(ctx, "HomeNet", "correct-pw", false)
 
 	assert.Equal(t, StateOnline, h.m.State())
 	st := h.m.Status()
@@ -483,7 +516,7 @@ func TestJoinAbortsWhenAPTeardownFails(t *testing.T) {
 
 	h.ap.downErr = errors.New("nmcli connection delete timed out")
 	scansBefore := h.rec.count("wifi.RefreshScanCache")
-	h.m.applyJoin(ctx, "HomeNet", "pw")
+	h.m.applyJoin(ctx, "HomeNet", "pw", false)
 
 	assert.Equal(t, 0, h.rec.count("wifi.Join:HomeNet"), "join must not run while the AP teardown failed")
 	assert.Equal(t, StateAPActive, h.m.State(), "machine re-enters APActive for retry")
@@ -520,7 +553,7 @@ func TestJoinAbortsWhenAPTeardownFails(t *testing.T) {
 	// And the user's retry now joins normally.
 	h.conn.online = true
 	h.wifi.setProfile(true)
-	h.m.applyJoin(ctx, "HomeNet", "pw")
+	h.m.applyJoin(ctx, "HomeNet", "pw", false)
 	assert.Equal(t, 1, h.rec.count("wifi.Join:HomeNet"))
 	assert.Equal(t, StateOnline, h.m.State())
 }
@@ -570,7 +603,7 @@ func TestJoinSucceedsButStillOfflineArmsRecovery(t *testing.T) {
 	h.wifi.joinErr = nil
 	h.conn.online = false
 	h.wifi.setProfile(true)
-	h.m.applyJoin(ctx, "DeadUplink", "pw")
+	h.m.applyJoin(ctx, "DeadUplink", "pw", false)
 
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
 		"association without reachability must land in provisioned-offline, not Online")
@@ -580,8 +613,7 @@ func TestJoinSucceedsButStillOfflineArmsRecovery(t *testing.T) {
 
 	// The network stays dark past the sustained-offline window: the setup AP
 	// must come back.
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State())
 	assert.Equal(t, 2, h.rec.count("ap.Up"), "recovery AP re-raised after the window")
 
@@ -630,7 +662,7 @@ func TestJoinIgnoredWhenNotAPActive(t *testing.T) {
 	h.m.onConnectivity(ctx, true, false) // Online, AP down
 	require.Equal(t, StateOnline, h.m.State())
 
-	h.m.applyJoin(ctx, "HomeNet", "pw") // stray submission
+	h.m.applyJoin(ctx, "HomeNet", "pw", false) // stray submission
 	assert.Equal(t, StateOnline, h.m.State())
 	assert.Equal(t, 0, h.rec.count("wifi.Join:HomeNet"))
 }
@@ -654,9 +686,9 @@ func TestPortalSeamsWireToMachine(t *testing.T) {
 	assert.Equal(t, portal.JoinIdle, cfg.Status().State)
 
 	// JoinFunc validates empty SSID.
-	assert.Error(t, cfg.Join("", "pw"))
+	assert.Error(t, cfg.Join(portal.JoinRequest{Password: "pw"}))
 	// A valid submission is accepted (enqueued) without blocking.
-	assert.NoError(t, cfg.Join("HomeNet", "pw"))
+	assert.NoError(t, cfg.Join(portal.JoinRequest{SSID: "HomeNet", Password: "pw"}))
 }
 
 func TestNotifierReceivesStateChanges(t *testing.T) {
@@ -665,9 +697,8 @@ func TestNotifierReceivesStateChanges(t *testing.T) {
 	ctx := context.Background()
 
 	h.m.onConnectivity(ctx, false, false) // OfflineRetrying
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)                      // APActive
-	h.m.onConnectivity(ctx, true, false) // Online
+	h.tickN(ctx, windowSamples)           // APActive
+	h.m.onConnectivity(ctx, true, false)  // Online
 
 	states := h.notifier.states()
 	assert.Contains(t, states, StateOfflineRetrying)
@@ -737,7 +768,7 @@ func TestJoinWithFailedPostJoinQueryRecoversOnTick(t *testing.T) {
 	h.conn.online = true
 	h.conn.setErr(errors.New("monitord momentarily unavailable"))
 	h.wifi.setProfile(true)
-	h.m.applyJoin(ctx, "HomeNet", "pw")
+	h.m.applyJoin(ctx, "HomeNet", "pw", false)
 
 	require.Equal(t, StateOfflineRetrying, h.m.State(), "failed query is assumed offline for now")
 	require.Equal(t, portal.JoinSucceeded, h.m.Status().State)
@@ -872,15 +903,14 @@ func TestFreshAPRaiseResetsStaleJoinStatus(t *testing.T) {
 	require.Equal(t, StateAPActive, h.m.State())
 	h.conn.online = true
 	h.wifi.setProfile(true)
-	h.m.applyJoin(ctx, "HomeNet", "pw")
+	h.m.applyJoin(ctx, "HomeNet", "pw", false)
 	require.Equal(t, StateOnline, h.m.State())
 	require.Equal(t, portal.JoinSucceeded, h.m.Status().State)
 
 	// Weeks later: provisioned but sustained-offline past the window.
 	h.conn.online = false
 	h.m.onConnectivity(ctx, false, false)
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	require.Equal(t, StateAPActive, h.m.State())
 
 	// The re-raised portal must greet the user fresh, not with the old outcome.
@@ -901,7 +931,7 @@ func TestRedundantOfflineKeepsJoinFailureStatus(t *testing.T) {
 
 	// User submits a wrong password; the failure outcome must be recorded.
 	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
-	h.m.applyJoin(ctx, "HomeNet", "wrong-pw")
+	h.m.applyJoin(ctx, "HomeNet", "wrong-pw", false)
 	require.Equal(t, StateAPActive, h.m.State())
 	require.Equal(t, portal.JoinFailed, h.m.Status().State)
 
@@ -1085,7 +1115,7 @@ func TestRescanClearsStaleJoinOutcome(t *testing.T) {
 	h.m.onConnectivity(ctx, false, false)
 	require.Equal(t, StateAPActive, h.m.State())
 	h.wifi.joinErr = &wifictl.JoinError{Kind: wifictl.JoinErrAuth, Output: "secrets were required"}
-	h.m.applyJoin(ctx, "HomeNet", "wrong-pw")
+	h.m.applyJoin(ctx, "HomeNet", "wrong-pw", false)
 	require.Equal(t, portal.JoinFailed, h.m.Status().State)
 
 	h.m.applyRescan(ctx)
@@ -1250,8 +1280,7 @@ func TestBootOfflineEntryNarratesAndKeepsWindow(t *testing.T) {
 	assert.Equal(t, 0, h.rec.count("ap.Up"), "narration alone must not shortcut the window")
 
 	// The window is untouched: the AP still rises only after it elapses.
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State())
 }
 
@@ -1418,8 +1447,7 @@ func TestSustainedRaiseReprobesAfterStalledRelocationScan(t *testing.T) {
 
 	h.m.onConnectivity(ctx, false, false) // scan 1 (inconclusive), narration painted
 	h.m.onTick(ctx)                       // scan 2 (inconclusive), window arms
-	h.clk.advance(6 * time.Minute)        // past the 5m window
-	h.m.onTick(ctx)                       // scan 3 stalls past expiry; link recovers mid-scan
+	h.tickN(ctx, windowSamples)           // scan 3 stalls past expiry; link recovers mid-scan
 
 	assert.Equal(t, StateOfflineRetrying, h.m.State(),
 		"the expiry raise must re-probe after the scan and defer on a sighting")
@@ -1716,8 +1744,7 @@ func TestBootRelocationDisconfirmedMidwayFallsBackToWindow(t *testing.T) {
 	assert.Equal(t, StateOfflineRetrying, h.m.State())
 
 	// The plain window still recovers the device.
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State())
 }
 
@@ -1794,7 +1821,7 @@ func TestJoinOfflineEdgeNarratesNoInternet(t *testing.T) {
 
 	h.conn.online = false
 	h.wifi.setProfile(true) // the join persisted a profile
-	h.m.applyJoin(ctx, "DeadUplink", "pw")
+	h.m.applyJoin(ctx, "DeadUplink", "pw", false)
 
 	require.Equal(t, StateOfflineRetrying, h.m.State())
 	_, d := h.notifier.lastDetail(t)
@@ -1822,7 +1849,7 @@ func TestJoinOfflineQueryFailureHedges(t *testing.T) {
 
 	h.conn.setErr(errors.New("monitord unavailable"))
 	h.wifi.setProfile(true)
-	h.m.applyJoin(ctx, "MaybeFineNet", "pw")
+	h.m.applyJoin(ctx, "MaybeFineNet", "pw", false)
 
 	require.Equal(t, StateOfflineRetrying, h.m.State())
 	_, d := h.notifier.lastDetail(t)
@@ -1916,8 +1943,7 @@ func TestBootRelocationArmingBudgetExhausts(t *testing.T) {
 	require.Equal(t, StateOfflineRetrying, h.m.State())
 
 	// The plain window still recovers the device.
-	h.clk.advance(6 * time.Minute)
-	h.m.onTick(ctx)
+	h.tickN(ctx, windowSamples)
 	assert.Equal(t, StateAPActive, h.m.State())
 }
 
@@ -1970,20 +1996,60 @@ func TestBootRelocationLinkUnknownMidConfirmationForfeits(t *testing.T) {
 	h.wifi.scanAll = []string{"CafeNet"}
 	ctx := context.Background()
 
+	h.m.onConnectivity(ctx, false, false) // boot: armed (confirm 1, scan 1)
+
+	// Two interleaved probe flakes are TOLERATED (§4.3 — the old behavior
+	// forfeited on the first, so one 3s nmcli timeout killed the boot-scoped
+	// shortcut, D7): the ladder neither scans on unknown ticks nor forfeits.
+	fl.err = errors.New("nmcli probe flake")
+	h.tickN(ctx, 2)
+
+	fl.err = nil // link reads absent again; the ladder resumes and scans
+	h.tick(ctx)  // confirm 2, scan 2
+	require.Equal(t, 2, h.rec.count("wifi.ScanAllSSIDs"),
+		"two tolerated unknowns must not forfeit the ladder")
+
+	// The THIRD unknown crosses the tolerance and forfeits for this boot.
+	fl.err = errors.New("nmcli probe flake")
+	h.tick(ctx)
+
+	fl.err = nil
+	h.tickN(ctx, 2)
+	assert.Equal(t, 2, h.rec.count("wifi.ScanAllSSIDs"),
+		"the third probe flake must forfeit the check for this boot")
+	assert.Equal(t, StateOfflineRetrying, h.m.State())
+	assert.Equal(t, 0, h.rec.count("ap.Up"))
+}
+
+// TestBootRelocationSurvivesToleratedUnknownsAndRaises is the positive half of
+// the tolerance: with unknowns interleaved below the forfeit threshold, the
+// ladder still completes its consecutive positive scans and takes the
+// relocated raise — the D7 fix must actually deliver the shortcut, not merely
+// delay the forfeit.
+func TestBootRelocationSurvivesToleratedUnknownsAndRaises(t *testing.T) {
+	fl := &fakeLink{up: false}
+	h := newLinkHarness(t, fl)
+	markBoot(h)
+	h.wifi.setProfile(true)
+	h.wifi.savedSSIDs = []string{"HomeNet"}
+	h.wifi.scanAll = []string{"CafeNet"}
+	ctx := context.Background()
+
 	h.m.onConnectivity(ctx, false, false) // boot: armed (confirm 1)
 
 	fl.err = errors.New("nmcli probe flake")
-	h.clk.advance(15 * time.Second)
-	h.m.onTick(ctx) // linkUnknown → clearOffline → disarm
+	h.tick(ctx) // tolerated unknown #1
 
-	fl.err = nil // link reads absent again; scans stay positive
-	h.clk.advance(15 * time.Second)
-	h.m.onTick(ctx)
-	h.clk.advance(15 * time.Second)
-	h.m.onTick(ctx)
+	fl.err = nil
+	h.tick(ctx) // confirm 2
 
-	assert.Equal(t, 1, h.rec.count("wifi.ScanAllSSIDs"),
-		"a probe flake mid-confirmation must forfeit the check for this boot")
-	assert.Equal(t, StateOfflineRetrying, h.m.State())
-	assert.Equal(t, 0, h.rec.count("ap.Up"))
+	fl.err = errors.New("nmcli probe flake")
+	h.tick(ctx) // tolerated unknown #2
+
+	fl.err = nil
+	h.tick(ctx) // confirm 3: the ladder completes
+
+	assert.Equal(t, StateAPActive, h.m.State(),
+		"tolerated unknowns must not cost the relocation raise")
+	assert.Equal(t, 1, h.rec.count("ap.Up"))
 }

@@ -161,7 +161,12 @@ type WifiController interface {
 	ScanAllSSIDs(ctx context.Context) ([]string, error)
 	RefreshScanCache(ctx context.Context) ([]string, error)
 	CachedScan(ctx context.Context) ([]string, error)
-	Join(ctx context.Context, ssid, psk string) error
+	// Join must honor ctx cancellation: applyJoin bounds it with a deadline
+	// (Config.JoinTimeout) because it is the one long blocking call on the
+	// loop goroutine — an implementation that ignores ctx wedges the machine
+	// with the AP down and the portal stopped (D10). hidden requests directed
+	// probing for a non-broadcasting SSID.
+	Join(ctx context.Context, ssid, psk string, hidden bool) error
 }
 
 // Connectivity reports the device's network reachability as sys-monitord sees
@@ -189,8 +194,33 @@ const (
 	defaultPortalAddr    = ":80"
 	defaultOfflineWindow = 5 * time.Minute
 	defaultCheckInterval = 15 * time.Second
-	portalStopTimeout    = 3 * time.Second
-	eventBuffer          = 16
+	// defaultJoinTimeout bounds wifi.Join, the one long blocking call on the
+	// loop goroutine: nmcli's own `--wait` default is 90s, and the margin
+	// covers the pre-connect visibility wait plus profile cleanup. Without it
+	// a wedged NM activation blocks the machine forever with the AP down and
+	// the portal stopped (D10).
+	defaultJoinTimeout = 120 * time.Second
+	portalStopTimeout  = 3 * time.Second
+	eventBuffer        = 16
+
+	// offlineFreshSamplesAfterPause is how many fresh confirmed-absent link
+	// samples the offline window demands after ANY inconclusive pause before
+	// its expiry may fire. The window pauses (rather than resets) on
+	// inconclusive probes, so its accumulated evidence can be arbitrarily old
+	// when probing recovers — and a ONE-sample raise off that stale
+	// accumulation is exactly the hazard the old reset-on-unknown behavior
+	// existed to prevent. Two consecutive fresh samples keep the raise
+	// grounded in current evidence at one tick of extra cost.
+	offlineFreshSamplesAfterPause = 2
+
+	// relocUnknownTolerance is how many inconclusive LINK PROBE samples the
+	// boot relocation ladder absorbs before forfeiting for the boot. The old
+	// behavior forfeited on the FIRST linkUnknown (one 3s nmcli timeout killed
+	// the feature for the whole boot — D7); tolerating two keeps a flaky probe
+	// from starving it while still forfeiting quickly when the probe is
+	// genuinely broken, because the ladder's scan evidence is only as fresh as
+	// the link probes interleaved with it.
+	relocUnknownTolerance = 2
 
 	// preAPScanAttempts / preAPScanRetryDelay bound the pre-raise scan. The
 	// portal picker can only ever offer what this scan saw (the radio cannot
@@ -273,17 +303,25 @@ type Config struct {
 
 	// PortalAddr is the portal bind address (default ":80").
 	PortalAddr string
-	// OfflineWindow is how long an offline device must go WITHOUT a confirmed
-	// local link before the AP raises (default 5m). It arms at the offline
-	// assessment; from then on any tick that sees a link (or gets an
-	// inconclusive probe) disarms it and the clock restarts at the first
-	// confirmed absence, so past the first tick the window measures
-	// continuous confirmed link absence — not time since the internet was
-	// lost, and not time since the probe last ran.
+	// OfflineWindow is how much confirmed link absence an offline device must
+	// accumulate before the AP raises (default 5m). The window is
+	// SAMPLE-COUNTED, not wall-clock (docs/network-recovery-ux.md constraint
+	// 7): the raise requires OfflineWindow/CheckInterval confirmed-absent
+	// probe samples (one per tick) with no linkPresent sighting since arming —
+	// a sighting fully resets it. Inconclusive probes PAUSE the count (bounded
+	// — see pauseOfflineWindow) rather than resetting it, so a flaky probe can
+	// no longer starve the raise forever (D7). Counting samples rather than
+	// elapsed time also means a stalled loop (multi-second radio scans on the
+	// tick goroutine) extends the window in real time instead of shrinking the
+	// evidence behind a one-way raise.
 	OfflineWindow time.Duration
 	// CheckInterval is how often the machine re-evaluates the offline window and
 	// retries a deferred AP operation (default 15s).
 	CheckInterval time.Duration
+	// JoinTimeout bounds a portal join attempt (default 120s); expiry surfaces
+	// as the standard timeout failure and re-raises the AP. See
+	// defaultJoinTimeout for why it exists.
+	JoinTimeout time.Duration
 
 	// NewPortal builds a PortalServer from a portal.Config. Defaults to
 	// portal.NewServer; overridden in tests.
@@ -310,6 +348,10 @@ type Machine struct {
 	portalAddr    string
 	offlineWindow time.Duration
 	checkInterval time.Duration
+	joinTimeout   time.Duration
+	// offlineWindowSamples is OfflineWindow expressed in tick samples (derived
+	// once in New) — the expiry threshold for offlineAbsent below.
+	offlineWindowSamples int
 
 	sup    *supervisor
 	events chan event
@@ -328,12 +370,11 @@ type Machine struct {
 	// within StateUnprovisioned — whose legs encode WAN reachability — and
 	// notify on it; see transition for why a state-change-only notify loses
 	// the wired-boot online edge.
-	lastReason   string
-	status       portal.Status
-	apUp         bool
-	apInfo       softap.Info
-	portalSrv    PortalServer
-	offlineSince time.Time
+	lastReason string
+	status     portal.Status
+	apUp       bool
+	apInfo     softap.Info
+	portalSrv  PortalServer
 	// apDownPending records a failed softap.Down: the persisted hotspot profile
 	// may still exist (possibly still broadcasting) even though apUp is false.
 	// ensureAPDown retries the deletion on every reconcile until it succeeds,
@@ -402,11 +443,35 @@ type Machine struct {
 	// saved-SSID sighting (or a hidden-network profile) cancels the check
 	// terminally for this boot; an inconclusive scan mid-confirmation
 	// cancels too (the ladder is consecutive-positives by design); a link
-	// sighting or any clearOffline cancels everything. The plain
-	// sustained-offline window keeps running throughout, untouched.
+	// sighting or any clearOffline cancels everything. Inconclusive LINK
+	// probes are tolerated up to relocUnknownTolerance before forfeiting
+	// (relocationUnknownSample) — the old first-unknown forfeit was D7. The
+	// plain sustained-offline window keeps running throughout, untouched.
 	// Loop-goroutine-only, like connUnknown.
 	relocConfirms     int
 	relocArmTriesLeft int
+	// relocUnknowns counts inconclusive link-probe samples charged against the
+	// ladder's tolerance (relocUnknownTolerance); disarmRelocation resets it.
+	// Loop-goroutine-only, like relocConfirms.
+	relocUnknowns int
+
+	// Offline-window sample counters (docs/network-recovery-ux.md §4.3,
+	// constraint 7). Loop-goroutine-only, like connUnknown: written by
+	// onConnectivity/onTick and the clear/pause helpers, all of which run on
+	// the loop goroutine (or directly in single-threaded tests).
+	//
+	// offlineAbsent is the confirmed-absent samples accumulated since arming
+	// (0 = disarmed); the AP raise requires offlineAbsent >=
+	// offlineWindowSamples AND offlineFreshNeeded == 0. offlinePause is the
+	// length of the CURRENT run of inconclusive samples — a pause longer than
+	// one full window discards the accumulation as stale. offlineFreshNeeded
+	// is how many fresh confirmed samples expiry still demands after a pause
+	// (set to offlineFreshSamplesAfterPause by every inconclusive sample), so
+	// a single absent sample after a long unknown run can never fire the
+	// one-way raise off stale evidence.
+	offlineAbsent      int
+	offlinePause       int
+	offlineFreshNeeded int
 }
 
 // relocConfirmScans is how many consecutive positive "no saved SSID in a full
@@ -436,6 +501,7 @@ type event struct {
 	online bool
 	ssid   string
 	psk    string
+	hidden bool
 }
 
 // New builds a Machine, applying defaults.
@@ -453,8 +519,19 @@ func New(cfg Config) *Machine {
 	if cfg.CheckInterval <= 0 {
 		cfg.CheckInterval = defaultCheckInterval
 	}
+	if cfg.JoinTimeout <= 0 {
+		cfg.JoinTimeout = defaultJoinTimeout
+	}
 	if cfg.NewPortal == nil {
 		cfg.NewPortal = func(pc portal.Config) PortalServer { return portal.NewServer(pc) }
+	}
+	// The sample threshold rounds up: a window that is not a whole multiple of
+	// the tick must err toward MORE confirmed evidence before the one-way
+	// raise, never less. Minimum 1 so a degenerate config still requires one
+	// confirmed sample.
+	windowSamples := int((cfg.OfflineWindow + cfg.CheckInterval - 1) / cfg.CheckInterval)
+	if windowSamples < 1 {
+		windowSamples = 1
 	}
 	return &Machine{
 		ap:         cfg.AP,
@@ -468,15 +545,17 @@ func New(cfg Config) *Machine {
 		// wiring time (moments after process start), so this is the honest
 		// "did this process start at boot" answer regardless of how long the
 		// boot AP sweep or the initial connectivity query later takes.
-		startedAtBoot: cfg.BootAssessment != nil && cfg.BootAssessment(),
-		newPortal:     cfg.NewPortal,
-		portalAddr:    cfg.PortalAddr,
-		offlineWindow: cfg.OfflineWindow,
-		checkInterval: cfg.CheckInterval,
-		sup:           newSupervisor(cfg.Clock, logger),
-		events:        make(chan event, eventBuffer),
-		state:         StateStarting,
-		status:        portal.Status{State: portal.JoinIdle},
+		startedAtBoot:        cfg.BootAssessment != nil && cfg.BootAssessment(),
+		newPortal:            cfg.NewPortal,
+		portalAddr:           cfg.PortalAddr,
+		offlineWindow:        cfg.OfflineWindow,
+		checkInterval:        cfg.CheckInterval,
+		joinTimeout:          cfg.JoinTimeout,
+		offlineWindowSamples: windowSamples,
+		sup:                  newSupervisor(cfg.Clock, logger),
+		events:               make(chan event, eventBuffer),
+		state:                StateStarting,
+		status:               portal.Status{State: portal.JoinIdle},
 	}
 }
 
@@ -599,7 +678,7 @@ func (m *Machine) loop(ctx context.Context) {
 			case evConnectivity:
 				m.onConnectivity(ctx, ev.online, false)
 			case evJoin:
-				m.applyJoin(ctx, ev.ssid, ev.psk)
+				m.applyJoin(ctx, ev.ssid, ev.psk, ev.hidden)
 			case evRescan:
 				m.applyRescan(ctx)
 			}
@@ -617,12 +696,25 @@ func (m *Machine) loop(ctx context.Context) {
 // to the loop, returning immediately. The AP-bounce + join run asynchronously on
 // the loop goroutine because taking the AP down drops the phone that submitted
 // the form; the phone re-associates and polls /status (Status) for the outcome.
-func (m *Machine) RequestJoin(ssid, password string) error {
+func (m *Machine) RequestJoin(req portal.JoinRequest) error {
+	ssid := req.SSID
+	if req.Manual {
+		// Trim ONLY the manual-entry branch: phone keyboards autocomplete a
+		// trailing space onto typed names, and the resulting join fails "not
+		// found" against advice ("move closer") that cannot help. Picker
+		// values pass through VERBATIM — leading/trailing bytes are valid SSID
+		// content, and the scan side deliberately preserves them
+		// (wifictl.SavedWifiSSIDs documents the equality hazard).
+		ssid = strings.TrimSpace(ssid)
+	}
+	// Emptiness is judged on the trimmed value for BOTH branches (a
+	// whitespace-only submission is no submission), but only the manual branch
+	// above actually mutates what gets joined.
 	if strings.TrimSpace(ssid) == "" {
 		return errors.New("please choose a Wi-Fi network")
 	}
 	select {
-	case m.events <- event{kind: evJoin, ssid: ssid, psk: password}:
+	case m.events <- event{kind: evJoin, ssid: ssid, psk: req.Password, hidden: req.Hidden}:
 		return nil
 	default:
 		m.logger.Warn("provisioning: join queue full, dropping submission", zap.String("ssid", ssid))
@@ -724,7 +816,10 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 				m.reconcile(ctx)
 				return
 			}
-			m.clearOffline()
+			// Inconclusive: pause the window rather than resetting it (§4.3 —
+			// an unknown is not counter-evidence, and resetting here let one
+			// probe hiccup restart the whole wait).
+			m.pauseOfflineWindow()
 			m.transition(ctx, StateUnprovisioned, Detail{
 				Reason:  "link-unknown",
 				Message: "Checking the network link",
@@ -749,7 +844,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 			// fabricates the absence), so the nil-guard baseline keeps the
 			// original immediate raise.
 			if m.activeLink != nil && cur != StateStarting && cur != StateAPActive {
-				m.startOfflineWindow()
+				m.armOfflineWindow()
 				// From StateUnprovisioned (the common case) this notifies only
 				// on the LEG change into link-lost; the redundant confirmed-
 				// absent re-emissions that merely re-feed the running window
@@ -841,7 +936,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 		} else {
 			probe := m.probeLink(ctx)
 			if m.activeLink == nil {
-				m.startOfflineWindow()
+				m.armOfflineWindow()
 			}
 			d := bootOfflineDetail(probe)
 			m.transition(ctx, StateOfflineRetrying, d)
@@ -889,7 +984,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 	// probe runs a tick after this reading) — the contract is continuous
 	// confirmed absence, so onTick arms it on the first linkAbsent result.
 	if m.activeLink == nil {
-		m.startOfflineWindow()
+		m.armOfflineWindow()
 	}
 	// The Joining entry edge is F-01's silent-forever screen: the join
 	// ASSOCIATED (the portal already reported JoinSucceeded) but the upstream
@@ -1073,6 +1168,7 @@ func (m *Machine) disarmRelocation(reason string) {
 	}
 	m.relocConfirms = 0
 	m.relocArmTriesLeft = 0
+	m.relocUnknowns = 0
 }
 
 // onTick fires the sustained-offline window and retries any deferred AP op.
@@ -1093,7 +1189,6 @@ func (m *Machine) onTick(ctx context.Context) {
 
 	m.mu.Lock()
 	st := m.state
-	since := m.offlineSince
 	m.mu.Unlock()
 
 	switch st {
@@ -1105,39 +1200,42 @@ func (m *Machine) onTick(ctx context.Context) {
 		// stays reachable on its LAN; raising the AP would drop that link on
 		// single-radio hardware and cannot fix an upstream outage anyway.
 		//
-		// The probe runs EVERY tick, not just at expiry; a sighting of a link
-		// (or an inconclusive probe) disarms the window and the clock
-		// restarts at the next confirmed absence. That is what makes
-		// OfflineWindow measure continuous LINK absence: sampling only at
-		// expiry would let an association lost moments before the deadline
-		// raise the AP after seconds of link loss — and on Wi-Fi that raise
-		// is unrecoverable without a human (the hotspot takes the radio, so
-		// reachability can never return on its own to tear it down).
+		// The probe runs EVERY tick, not just at expiry; a link sighting fully
+		// resets the window, and an inconclusive probe pauses it (bounded —
+		// see pauseOfflineWindow). That is what makes OfflineWindow measure
+		// confirmed LINK absence: sampling only at expiry would let an
+		// association lost moments before the deadline raise the AP after
+		// seconds of link loss — and on Wi-Fi that raise is unrecoverable
+		// without a human (the hotspot takes the radio, so reachability can
+		// never return on its own to tear it down).
 		probe := m.probeLink(ctx)
 		switch probe {
-		case linkPresent, linkUnknown:
-			// A sighting DISARMS the window entirely; the next confirmed
-			// absence arms a fresh one below. Disarm-then-rearm (rather than
-			// re-arming to "now" here) matters twice over: a stale armed
-			// window would raise the AP instantly the moment the link
-			// disappears, and re-arming to the sighting time would let a tick
-			// gap (a stalled loop, coarse test clocks) satisfy the expiry off
-			// a SINGLE absent sample — the window must measure confirmed
-			// absence, not time since the probe last ran. Fall through to
-			// reconcile rather than returning: a pending AP-profile teardown
-			// (apDownPending) must keep retrying on guarded ticks too. A
-			// sighting also cancels any pending boot relocation confirmation
-			// (via clearOffline) — the link's existence is direct
-			// counter-evidence.
+		case linkPresent:
+			// A sighting fully resets the window AND the relocation ladder
+			// (the §4.3 single-truth rule): the link's existence is direct
+			// counter-evidence against both, and a stale armed window would
+			// raise the AP instantly the moment the link later disappears —
+			// the window must measure confirmed absence since the LAST
+			// sighting. Fall through to reconcile rather than returning: a
+			// pending AP-profile teardown (apDownPending) must keep retrying
+			// on guarded ticks too.
 			m.clearOffline()
-			// The clearOffline above just changed what is TRUE (a present
-			// link suppresses the AP outright; an unknown probe disarms the
-			// window, deferring setup to a future confirmed absence), so the
-			// boot prose must follow — the same-state transition dedupe
-			// repaints nothing on its own, and a stale "setup will start in
-			// a few minutes" would sit on screen forever on an air-gapped
-			// LAN (linkPresent) or under a persistently failing probe
-			// (linkUnknown).
+			// The reset above just changed what is TRUE (a present link
+			// suppresses the AP outright), so the boot prose must follow —
+			// the same-state transition dedupe repaints nothing on its own,
+			// and a stale "setup will start in a few minutes" would sit on
+			// screen forever on an air-gapped LAN.
+			m.repaintBootNarration(probe)
+		case linkUnknown:
+			// Inconclusive: PAUSE, never reset (§4.3). The old reset-on-unknown
+			// let one 3s nmcli timeout restart the whole window forever (D7);
+			// the pause keeps the accumulated evidence, bounded by the discard
+			// and freshness rules in pauseOfflineWindow. The relocation ladder
+			// charges its own bounded tolerance instead of forfeiting on the
+			// first unknown. Same fall-through-to-reconcile as the sighting
+			// branch.
+			m.pauseOfflineWindow()
+			m.relocationUnknownSample()
 			m.repaintBootNarration(probe)
 		case linkAbsent:
 			// Boot relocation confirmation (M-0b): may only START at a boot
@@ -1172,7 +1270,17 @@ func (m *Machine) onTick(ctx context.Context) {
 				// human.
 				if g := m.probeLink(ctx); g != linkAbsent {
 					m.logger.Info("provisioning: link sighted during the final relocation scan; deferring to the offline window")
-					m.clearOffline()
+					// Sighting semantics per outcome: a confirmed sighting
+					// resets both mechanisms (single-truth), while an
+					// inconclusive re-probe only pauses the window and charges
+					// the ladder's tolerance — the raise stays deferred either
+					// way, which is all the veto requires.
+					if g == linkPresent {
+						m.clearOffline()
+					} else {
+						m.pauseOfflineWindow()
+						m.relocationUnknownSample()
+					}
 					// The veto acts on this fresh probe, so the narration
 					// must too — waiting for the next tick's repaint would
 					// leave the setup promise up for 15s after setup was
@@ -1201,27 +1309,27 @@ func (m *Machine) onTick(ctx context.Context) {
 			// the entry probe was necessarily linkAbsent — marker already
 			// the promise — and the re-probe can never veto.)
 			m.repaintBootNarration(linkAbsent)
-			switch {
-			case since.IsZero():
-				// First confirmed absence since the last sighting (or since
-				// entry): start the clock. The raise below needs the window
-				// to elapse between this arming and a later absent tick, so
-				// the AP only ever rises off repeated confirmations.
-				m.startOfflineWindow()
-			case m.clock.Now().Sub(since) >= m.offlineWindow:
+			// One confirmed-absent sample per tick; the raise fires only once
+			// a full window of samples has accumulated with no sighting and no
+			// outstanding post-pause freshness debt (constraint 7 / §4.3).
+			m.recordOfflineAbsent()
+			if m.offlineWindowExpired() {
 				// Re-probe before THIS one-way door too: the relocation scan
 				// above runs multi-second radio work after the top-of-tick
-				// probe, and its stall time counts toward this expiry check
-				// (Now() is read here, not at the probe). A link that came
-				// back during a non-confirming scan would otherwise be
-				// dropped by a raise justified only by the pre-scan probe.
-				// Anything short of confirmed absence is a sighting: disarm
-				// and let the next confirmed absence arm a fresh window. On
-				// scan-free ticks the two probes are milliseconds apart, so
-				// this is effectively free.
+				// probe. A link that came back during a non-confirming scan
+				// would otherwise be dropped by a raise justified only by the
+				// pre-scan probe. A confirmed sighting resets everything; an
+				// inconclusive re-probe pauses, so the raise waits for the
+				// freshness debt to clear. On scan-free ticks the two probes
+				// are milliseconds apart, so this is effectively free.
 				if g := m.probeLink(ctx); g != linkAbsent {
 					m.logger.Info("provisioning: link sighted at the expiry re-check; deferring the sustained-offline raise")
-					m.clearOffline()
+					if g == linkPresent {
+						m.clearOffline()
+					} else {
+						m.pauseOfflineWindow()
+						m.relocationUnknownSample()
+					}
 					m.repaintBootNarration(g)
 					break
 				}
@@ -1261,18 +1369,17 @@ func (m *Machine) onTick(ctx context.Context) {
 			break
 		}
 		switch m.probeLink(ctx) {
-		case linkPresent, linkUnknown:
-			// Same disarm-on-sighting as above: the next confirmed absence
-			// starts a fresh clock.
+		case linkPresent:
+			// Same single-truth reset as the provisioned flavor: the next
+			// confirmed absence starts a fresh count.
 			m.clearOffline()
+		case linkUnknown:
+			// Inconclusive: pause, never reset (§4.3). No relocation charge —
+			// the ladder never runs in this state.
+			m.pauseOfflineWindow()
 		case linkAbsent:
-			switch {
-			case since.IsZero():
-				// First confirmed absence after being parked (entry paths
-				// clear the window): start the clock; the raise needs a full
-				// window of absence, at tick granularity.
-				m.startOfflineWindow()
-			case m.clock.Now().Sub(since) >= m.offlineWindow:
+			m.recordOfflineAbsent()
+			if m.offlineWindowExpired() {
 				// Re-check the profile at the raise boundary: a profile
 				// acquired out-of-band while parked (e.g. a hub-driven join
 				// attempt) makes this the PROVISIONED flavor — NM can retry
@@ -1280,7 +1387,6 @@ func (m *Machine) onTick(ctx context.Context) {
 				// fresh window rather than an unprovisioned-style raise.
 				if m.hasProfile(ctx) {
 					m.clearOffline()
-					m.startOfflineWindow()
 					m.transition(ctx, StateOfflineRetrying, Detail{
 						Reason:  "offline",
 						Message: "Reconnecting to Wi-Fi",
@@ -1333,7 +1439,7 @@ func (m *Machine) onTick(ctx context.Context) {
 
 // applyJoin runs the AP-bounce join for a portal submission. Only valid from
 // StateAPActive; duplicate/late submissions are ignored.
-func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
+func (m *Machine) applyJoin(ctx context.Context, ssid, psk string, hidden bool) {
 	m.mu.Lock()
 	if m.state != StateAPActive {
 		st := m.state
@@ -1367,7 +1473,24 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string) {
 		return
 	}
 
-	err := m.wifi.Join(ctx, ssid, psk)
+	// Deadline on the one long blocking call the loop goroutine makes (D10):
+	// a wedged NM activation would otherwise block the machine forever with
+	// the AP down and the portal stopped — no tick, no event, no recovery. A
+	// deadline expiry is reported as the existing timeout failure, so the
+	// standard failure path below re-raises the AP. The wifictl cleanup path
+	// already detaches from this ctx, so the half-created profile still gets
+	// deleted after a timeout kill.
+	joinCtx, cancel := context.WithTimeout(ctx, m.joinTimeout)
+	err := m.wifi.Join(joinCtx, ssid, psk, hidden)
+	cancel()
+	if err != nil && errors.Is(joinCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		// The deadline killed the join mid-flight; nmcli's own error for a
+		// killed process classifies as unknown, so name the real cause. Parent
+		// cancellation (daemon shutdown) is deliberately excluded — that is
+		// not a network timeout and the machine is exiting anyway.
+		err = &wifictl.JoinError{Kind: wifictl.JoinErrTimeout,
+			Output: "join did not complete within " + m.joinTimeout.String()}
+	}
 	if err == nil {
 		m.mu.Lock()
 		m.status = portal.Status{State: portal.JoinSucceeded, SSID: ssid, Message: "Connected to " + ssid}
@@ -1757,24 +1880,93 @@ func (m *Machine) resetJoinStatus() {
 	m.mu.Unlock()
 }
 
-func (m *Machine) startOfflineWindow() {
-	m.mu.Lock()
-	if m.offlineSince.IsZero() {
-		m.offlineSince = m.clock.Now()
+// recordOfflineAbsent counts one confirmed-absent TICK sample toward the
+// offline window, arming it on the first. It also works off any post-pause
+// freshness debt, so expiry (offlineWindowExpired) is always gated on current
+// evidence.
+func (m *Machine) recordOfflineAbsent() {
+	m.offlinePause = 0
+	m.offlineAbsent++
+	if m.offlineFreshNeeded > 0 {
+		m.offlineFreshNeeded--
 	}
-	m.mu.Unlock()
 }
 
+// armOfflineWindow counts the confirmed absence behind an EVENT-path reading,
+// but only ever as the window's FIRST sample. Events can arrive in bursts (a
+// sys-monitord restart re-emits its first probe unconditionally; the
+// connUnknown re-query feeds one in), and letting each one append a sample
+// would let event cadence outrun tick cadence and silently shorten the
+// continuous-absence guarantee behind the one-way raise. Tick samples
+// (recordOfflineAbsent) are the only ones that accumulate.
+func (m *Machine) armOfflineWindow() {
+	if m.offlineAbsent == 0 {
+		m.recordOfflineAbsent()
+	}
+}
+
+// offlineWindowExpired reports whether the accumulated confirmed absence
+// authorizes the sustained raise: a full window of samples AND no outstanding
+// post-pause freshness debt.
+func (m *Machine) offlineWindowExpired() bool {
+	return m.offlineAbsent >= m.offlineWindowSamples && m.offlineFreshNeeded == 0
+}
+
+// pauseOfflineWindow absorbs one INCONCLUSIVE sample (failed link probe): the
+// count neither advances nor resets (§4.3's pause-not-reset — the old
+// reset-on-unknown let one 3s nmcli timeout restart the whole 5-minute wait
+// forever, D7). Two bounds keep the retained accumulation honest, because its
+// evidence ages while probing is dark and the raise it feeds is one-way:
+//   - a pause longer than one full window discards the accumulation outright
+//     (evidence older than a window-length of silence is stale), and
+//   - any pause leaves a freshness debt (offlineFreshSamplesAfterPause) that
+//     expiry must work off with consecutive fresh confirmed samples.
+//
+// No-op while disarmed: with nothing accumulated there is nothing to protect.
+func (m *Machine) pauseOfflineWindow() {
+	if m.offlineAbsent == 0 {
+		return
+	}
+	m.offlinePause++
+	if m.offlinePause > m.offlineWindowSamples {
+		m.resetOfflineWindow()
+		return
+	}
+	m.offlineFreshNeeded = offlineFreshSamplesAfterPause
+}
+
+func (m *Machine) resetOfflineWindow() {
+	m.offlineAbsent, m.offlinePause, m.offlineFreshNeeded = 0, 0, 0
+}
+
+// clearOffline fully resets the offline window AND disarms the boot relocation
+// ladder. It is the single-truth helper for every reading that falsifies the
+// premise of both mechanisms at once — going online, a linkPresent sighting,
+// an AP raise (docs/network-recovery-ux.md §4.3: "any linkPresent sighting
+// resets both mechanisms at once"). Disarming here guarantees a stale armed
+// relocation can never survive into a LATER offline episode and bypass the
+// sustained-offline window mid-exhibition. Inconclusive readings must NOT come
+// here: they pause (pauseOfflineWindow) and charge the ladder's bounded
+// tolerance (relocationUnknownSample) instead.
 func (m *Machine) clearOffline() {
-	m.mu.Lock()
-	m.offlineSince = time.Time{}
-	m.mu.Unlock()
-	// Every path that clears the offline window — going online, a link
-	// sighting, an AP raise — is also direct counter-evidence against (or the
-	// resolution of) a pending boot relocation confirmation. Disarming here
-	// guarantees a stale armed check can never survive into a LATER offline
-	// episode and bypass the sustained-offline window mid-exhibition.
+	m.resetOfflineWindow()
 	m.disarmRelocation("offline state cleared (online, link sighted, or AP raised)")
+}
+
+// relocationUnknownSample charges one inconclusive link-probe sample against
+// the boot relocation ladder's tolerance. The ladder's scan evidence is only
+// as trustworthy as the link probes interleaved with it, so persistent
+// unknowns forfeit — but only past relocUnknownTolerance, where the old
+// behavior forfeited on the very first one (D7's second half: a single 3s
+// nmcli timeout killed the boot-scoped feature for the whole boot).
+func (m *Machine) relocationUnknownSample() {
+	if m.relocConfirms == 0 && m.relocArmTriesLeft == 0 {
+		return
+	}
+	m.relocUnknowns++
+	if m.relocUnknowns > relocUnknownTolerance {
+		m.disarmRelocation("forfeited after repeated inconclusive link probes")
+	}
 }
 
 // notify publishes a state change to the Notifier, guarded against panics. See

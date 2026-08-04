@@ -483,29 +483,47 @@ func (e *JoinError) Error() string {
 
 func (e *JoinError) Unwrap() error { return e.err }
 
-// Join connects to ssid using psk (WPA2-PSK). On failure it returns a
-// *JoinError with a classified Kind.
+// Join connects to ssid using psk (WPA2-PSK; empty for an open network). On
+// failure it returns a *JoinError with a classified Kind. hidden marks the
+// target as a non-broadcasting network: nmcli gets `hidden yes` (directed
+// probing — without it NM only consults broadcast scan results and the join
+// fails "not found" for a network that is right there), and the pre-connect
+// visibility wait is skipped because a hidden SSID never appears in scan
+// output, so waiting for it can only burn the whole window.
 //
 // nmcli's `device wifi connect` creates a saved connection profile named after
 // the SSID as a side effect. Two cleanup steps mirror feral-setupd's wifi_utils
 // semantics:
-//   - Pre-delete any same-named profile before connecting. A stale profile can
-//     make nmcli reuse dead credentials instead of the new ones
-//     (https://bbs.archlinux.org/viewtopic.php?id=300321&p=2).
+//   - Pre-delete any stale profile targeting this SSID before connecting. A
+//     stale profile can make nmcli reuse dead credentials instead of the new
+//     ones (https://bbs.archlinux.org/viewtopic.php?id=300321&p=2).
 //   - On a failed join, delete the half-created profile so a later scan/list
 //     never surfaces a broken saved network the device can't actually use.
-func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
+func (c *Controller) Join(ctx context.Context, ssid, psk string, hidden bool) error {
 	// Pre-delete: best-effort, a missing profile is the normal case.
 	c.deleteWifiProfiles(ctx, ssid)
 
-	// The AP-bounce join reaches here moments after the hotspot went down, with
-	// the radio freshly flipped from AP back to station mode and NM's BSS list
-	// empty or stale. `device wifi connect` consults that list WITHOUT
-	// rescanning, so connecting immediately fails "no network with SSID" even
-	// though the network exists. Wait for the target to become visible first.
-	c.waitForSSID(ctx, ssid)
+	if !hidden {
+		// The AP-bounce join reaches here moments after the hotspot went down,
+		// with the radio freshly flipped from AP back to station mode and NM's
+		// BSS list empty or stale. `device wifi connect` consults that list
+		// WITHOUT rescanning, so connecting immediately fails "no network with
+		// SSID" even though the network exists. Wait for the target to become
+		// visible first. (Hidden targets skip this: they are invisible to scans
+		// by definition, and `hidden yes` makes NM probe for them directly.)
+		c.waitForSSID(ctx, ssid)
+	}
 
-	args := []string{"device", "wifi", "connect", ssid, "password", psk}
+	args := []string{"device", "wifi", "connect", ssid}
+	// An OPEN network takes no password argument at all: sending `password ""`
+	// makes NM build a WPA-PSK security block around the empty key, which the
+	// AP then rejects — the open network reads as "wrong password" forever.
+	if psk != "" {
+		args = append(args, "password", psk)
+	}
+	if hidden {
+		args = append(args, "hidden", "yes")
+	}
 	if c.iface != "" {
 		args = append(args, "ifname", c.iface)
 	}
@@ -531,20 +549,43 @@ func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
 	return joinErr
 }
 
-// deleteWifiProfiles removes saved profiles named ssid, and ONLY Wi-Fi ones.
-// `nmcli connection delete <name>` matches ANY profile type by ID, and ssid is
-// user input from the captive portal — a submission equal to an unrelated
-// ethernet/VPN profile's name must never delete that profile. So: resolve the
-// name to UUIDs, filter to 802-11-wireless, delete by UUID. Best-effort like
-// the two call sites (pre-join stale-credential purge, post-failure cleanup of
-// the half-created profile): a listing failure just means no cleanup.
-func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
+// wifiProfile is one saved 802-11-wireless profile's identity fields, read
+// from the profile itself. SSID comes from 802-11-wireless.ssid (NOT the
+// profile name — out-of-band profiles need not be SSID-named, which is exactly
+// the D9 stale-credential dead end: a name-keyed delete misses the profile
+// whose stale PSK NM then reuses). KeyMgmt is
+// 802-11-wireless-security.key-mgmt; empty means the profile has no security
+// section (an open network).
+type wifiProfile struct {
+	uuid    string
+	name    string
+	ssid    string
+	keyMgmt string
+	// readErr records a failed per-profile field read; ssid/keyMgmt are
+	// unreliable when set. See wifiProfileList's failure-bias note.
+	readErr error
+}
+
+// wifiProfileList reads every saved Wi-Fi profile's (uuid, ssid, key-mgmt).
+// This is the single nmcli read path the SSID-scoped deletion below keys on;
+// the escape-policy recheck (docs/network-recovery-ux.md §4.2) extends the
+// same read with more field sets later. Per-profile field reads are separate
+// -g calls because multi-field -g output layout differs across nmcli versions
+// (same rationale as SavedWifiSSIDs). Profiles are resolved by UUID so a `-g`
+// against a same-named non-Wi-Fi profile can never be misattributed.
+//
+// Failure bias: an unreadable PROFILE is returned with readErr set rather than
+// dropped or failing the listing — the two consumers want opposite treatments
+// (deletion skips it: "cannot confirm PSK" must never delete; the future
+// recheck aborts on it: a blind activation off an unreadable list is worse
+// than a retry), so the helper reports and lets each caller apply its own
+// bias. Only the top-level listing failing is an error.
+func (c *Controller) wifiProfileList(ctx context.Context) ([]wifiProfile, error) {
 	out, _, err := c.run(ctx, "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
 	if err != nil {
-		c.logger.Debug("wifictl: profile listing for cleanup failed",
-			zap.String("ssid", ssid), zap.Error(err))
-		return
+		return nil, err
 	}
+	var profiles []wifiProfile
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		// UUID and TYPE never contain colons, so the third field is NAME with
 		// terse-mode escaping intact.
@@ -553,12 +594,82 @@ func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
 			continue
 		}
 		uuid, typ, name := parts[0], parts[1], unescapeTerse(parts[2])
-		if typ != "802-11-wireless" || name != ssid {
+		if typ != "802-11-wireless" {
 			continue
 		}
-		if _, _, delErr := c.run(ctx, "connection", "delete", "uuid", uuid); delErr != nil {
+		p := wifiProfile{uuid: uuid, name: name}
+		ssidOut, _, ssidErr := c.run(ctx, "-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid)
+		if ssidErr != nil {
+			p.readErr = ssidErr
+			profiles = append(profiles, p)
+			continue
+		}
+		// Strip ONLY nmcli's record terminator: leading/trailing spaces are
+		// valid SSID bytes (same rule as SavedWifiSSIDs).
+		p.ssid = unescapeTerse(strings.TrimSuffix(string(ssidOut), "\n"))
+		kmOut, _, kmErr := c.run(ctx, "-g", "802-11-wireless-security.key-mgmt", "connection", "show", "uuid", uuid)
+		if kmErr != nil {
+			p.readErr = kmErr
+			profiles = append(profiles, p)
+			continue
+		}
+		p.keyMgmt = strings.TrimSpace(string(kmOut))
+		profiles = append(profiles, p)
+	}
+	return profiles, nil
+}
+
+// deletableKeyMgmt reports whether a profile's key management is in the
+// PSK/open family the portal join flow is allowed to replace. A portal PSK
+// join must never destroy an enterprise (802.1X/EAP) profile for the same
+// SSID — those credentials cannot be re-entered through the portal, so the
+// allow-list fails safe: anything unrecognized is kept.
+func deletableKeyMgmt(keyMgmt string) bool {
+	switch keyMgmt {
+	case "", "none", "wpa-psk", "sae":
+		// "" = no security section (open); "none" = WEP/static; "wpa-psk" =
+		// WPA2-Personal; "sae" = WPA3-Personal. All re-creatable from the
+		// portal form.
+		return true
+	default:
+		return false
+	}
+}
+
+// deleteWifiProfiles removes saved Wi-Fi profiles whose TARGET SSID is ssid
+// and whose key management is PSK/open — never by profile name, and never
+// enterprise profiles:
+//   - Name matching misses the stale profile NM actually reuses when a profile
+//     is not named after its SSID (the D9 dead end: the user types the correct
+//     new password forever while NM re-offers the old PSK), and ssid is user
+//     input from the captive portal — a submission equal to an unrelated
+//     ethernet/VPN profile's name must never delete that profile.
+//   - The key-mgmt scope keeps a portal PSK join from destroying an 802.1X
+//     profile for the same SSID (see deletableKeyMgmt).
+//
+// Best-effort like the two call sites (pre-join stale-credential purge,
+// post-failure cleanup of the half-created profile): a listing failure means
+// no cleanup, and an unreadable profile is skipped — it cannot be CONFIRMED
+// PSK, and the fail-safe direction for deletion is to keep it.
+func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
+	profiles, err := c.wifiProfileList(ctx)
+	if err != nil {
+		c.logger.Debug("wifictl: profile listing for cleanup failed",
+			zap.String("ssid", ssid), zap.Error(err))
+		return
+	}
+	for _, p := range profiles {
+		if p.readErr != nil {
+			c.logger.Debug("wifictl: profile unreadable, keeping it",
+				zap.String("name", p.name), zap.String("uuid", p.uuid), zap.Error(p.readErr))
+			continue
+		}
+		if p.ssid != ssid || !deletableKeyMgmt(p.keyMgmt) {
+			continue
+		}
+		if _, _, delErr := c.run(ctx, "connection", "delete", "uuid", p.uuid); delErr != nil {
 			c.logger.Debug("wifictl: wifi profile delete failed",
-				zap.String("ssid", ssid), zap.String("uuid", uuid), zap.Error(delErr))
+				zap.String("ssid", ssid), zap.String("uuid", p.uuid), zap.Error(delErr))
 		}
 	}
 }
