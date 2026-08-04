@@ -1175,7 +1175,7 @@ func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, 
 func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) error {
 	u, err := go_url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("%w: unparseable request URL: %w", ErrUnsafeSource, err)
+		return fmt.Errorf("%w: unparseable request URL: %s", ErrUnsafeSource, truncateSourceForLog(err.Error()))
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
@@ -1187,7 +1187,7 @@ func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) erro
 		// block the very thing that stops the page.
 		return nil
 	default:
-		return fmt.Errorf("%w: request scheme %q is not permitted", ErrUnsafeSource, u.Scheme)
+		return fmt.Errorf("%w: request scheme %q is not permitted", ErrUnsafeSource, truncateSourceForLog(u.Scheme))
 	}
 	host := u.Hostname()
 	if host == "" {

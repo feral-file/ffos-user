@@ -88,6 +88,13 @@ import (
 // proxy it must dial through) rather than more interception, and both
 // are sequenced with #3471, which closes the unauthenticated :1111
 // surface these paths lead to.
+// NOTE FOR ANY NEW ERROR ON THIS PATH: every untrusted string embedded in
+// a guard error MUST go through truncateSourceForLog. These errors are
+// logged — by Classify's caller and by the capture-side blocker, both
+// alongside an already-truncated URL — so an untruncated host, scheme or
+// wrapped parse error re-opens exactly the unbounded-log hole that
+// truncation closes. url.Parse accepts a 100,000-character hostname
+// without complaint, so "a hostname is short" is not a bound.
 var ErrUnsafeSource = errors.New("offline cache: source URL is not permitted")
 
 // AddrResolver is the DNS seam sourceGuard needs, owned here (rather
@@ -129,7 +136,7 @@ func (g sourceGuard) check(ctx context.Context, rawURL string) error {
 	if err != nil {
 		// Both wrapped: callers branch on ErrUnsafeSource, and the parse
 		// error still carries why the URL was rejected.
-		return fmt.Errorf("%w: unparseable URL: %w", ErrUnsafeSource, err)
+		return fmt.Errorf("%w: unparseable URL: %s", ErrUnsafeSource, truncateSourceForLog(err.Error()))
 	}
 
 	// Scheme allowlist, not a denylist: the set of schemes a browser or
@@ -139,7 +146,7 @@ func (g sourceGuard) check(ctx context.Context, rawURL string) error {
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
 	default:
-		return fmt.Errorf("%w: scheme %q is not http or https", ErrUnsafeSource, u.Scheme)
+		return fmt.Errorf("%w: scheme %q is not http or https", ErrUnsafeSource, truncateSourceForLog(u.Scheme))
 	}
 
 	// Hostname() strips any userinfo and port, so the credential-prefix
@@ -178,10 +185,10 @@ func (g sourceGuard) addrsFor(ctx context.Context, host string) ([]net.IP, error
 		// NOT tagged ErrUnsafeSource: a lookup failure is a transient
 		// network fault, and reporting it as a security rejection would
 		// make an offline device look like it is under attack.
-		return nil, fmt.Errorf("offline cache: resolve source host %s: %w", host, err)
+		return nil, fmt.Errorf("offline cache: resolve source host %s: %w", truncateSourceForLog(host), err)
 	}
 	if len(addrs) == 0 {
-		return nil, fmt.Errorf("offline cache: source host %s resolved to no addresses", host)
+		return nil, fmt.Errorf("offline cache: source host %s resolved to no addresses", truncateSourceForLog(host))
 	}
 	// EVERY answer must be safe, not merely the first: a name that
 	// returns one public and one loopback address would otherwise be
@@ -189,7 +196,7 @@ func (g sourceGuard) addrsFor(ctx context.Context, host string) ([]net.IP, error
 	ips := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
 		if g.reserved(addr.IP) {
-			return nil, fmt.Errorf("%w: host %s resolves to reserved address %s", ErrUnsafeSource, host, addr.IP)
+			return nil, fmt.Errorf("%w: host %s resolves to reserved address %s", ErrUnsafeSource, truncateSourceForLog(host), addr.IP)
 		}
 		ips = append(ips, addr.IP)
 	}
@@ -241,7 +248,7 @@ func (g sourceGuard) checkRedirect(req *go_http.Request, via []*go_http.Request)
 	case "http", "https":
 		return nil
 	default:
-		return fmt.Errorf("%w: redirect to scheme %q is not http or https", ErrUnsafeSource, req.URL.Scheme)
+		return fmt.Errorf("%w: redirect to scheme %q is not http or https", ErrUnsafeSource, truncateSourceForLog(req.URL.Scheme))
 	}
 }
 

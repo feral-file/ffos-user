@@ -17,11 +17,15 @@ import (
 	"net"
 	go_http "net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+
+	"github.com/feral-file/ffos-user/components/feral-controld/wrapper"
 )
 
 // loopbackIsPublic is the isReserved override these tests inject. Every
@@ -240,4 +244,68 @@ func TestSourceGuard_ProxyEnvIsIgnored(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrUnsafeSource)
 	assert.Zero(t, proxied.Load(), "the proxy must never be handed an unsafe destination")
+}
+
+// TestSourceGuard_ErrorsAreBoundedForLogging closes a bypass of the
+// source-log cap. The guard's errors are LOGGED — by Classify's caller
+// and by the capture-side blocker, both next to an already-truncated URL
+// — so any untrusted string they embed raw defeats that truncation
+// entirely. url.Parse accepts a 100,000-character hostname without
+// complaint, so an unauthenticated LAN client could force multi-megabyte
+// entries into controld.log through the error text alone.
+func TestSourceGuard_ErrorsAreBoundedForLogging(t *testing.T) {
+	huge := strings.Repeat("a", maxLoggedSourceBytes*40)
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "hostname that fails to resolve",
+			err: sourceGuard{resolver: erroringResolver{}}.
+				check(context.Background(), "https://"+huge+"/x"),
+		},
+		{
+			name: "hostname resolving to a reserved address",
+			err: sourceGuard{resolver: staticResolver{ip: "127.0.0.1"}}.
+				check(context.Background(), "https://"+huge+"/x"),
+		},
+		{
+			name: "unsupported scheme",
+			err: sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}}.
+				check(context.Background(), huge+"://example.com/x"),
+		},
+		{
+			name: "unparseable URL",
+			err: sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}}.
+				check(context.Background(), "http://["+huge),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Error(t, tc.err)
+			assert.Less(t, len(tc.err.Error()), len(huge),
+				"a guard error must not carry the untrusted input at full length — it is logged")
+		})
+	}
+}
+
+// The capture-side blocker builds its own errors and is logged the same
+// way, so it needs the same bound.
+func TestCapturer_SourceGuard_BlockErrorsAreBoundedForLogging(t *testing.T) {
+	huge := strings.Repeat("b", maxLoggedSourceBytes*40)
+	c := &capturer{
+		json:   wrapper.NewJSON(),
+		logger: zaptest.NewLogger(t),
+		guard:  sourceGuard{resolver: staticResolver{ip: "127.0.0.1"}},
+	}
+	for _, raw := range []string{
+		"https://" + huge + "/x",
+		huge + "://example.com/x",
+		"http://[" + huge,
+	} {
+		err := c.pausedRequestAllowed(context.Background(), raw)
+		require.Error(t, err, raw[:40])
+		assert.Less(t, len(err.Error()), len(huge),
+			"a blocked-request error must not carry the untrusted URL at full length")
+	}
 }
