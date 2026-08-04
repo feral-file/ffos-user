@@ -2174,16 +2174,50 @@ navigation. `NewCapturer` takes the two separately so the compiler is
 what keeps them apart, and
 `TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne` pins both halves.
 
-**Residual gap, stated rather than hidden.** `capture.go`'s headless
-browser is NOT covered. Chromium resolves and dials on its own, and the
-page it navigates is untrusted artwork that may request arbitrary
-subresources, so an artwork can still reach a loopback service from inside
-the browser. `--host-resolver-rules` cannot express "block all private
-space"; closing this needs request-level interception on the capture CDP
-session — the machinery `cdpsession.go` already uses for replay — and is
-deliberately a separate change, not a flag. Note this intersects an
-exposure `docs/architecture.md` already accepts as release-scoped (the
-open, unauthenticated `:1111` surface, end state #3471).
+**The capture browser is guarded too, at the request level.** The Go
+transport cannot cover Chromium: `capture.go` hands the artwork to
+`Page.navigate`, and the page then issues its own requests, which never
+pass through a Go client. So the capture CDP session enables `Fetch` with
+pattern `*` (the same machinery `replay.go` uses on the kiosk) and answers
+every `Fetch.requestPaused` with `continueRequest` or `failRequest` after
+running the URL's host through the same `addrsFor` policy. Armed before
+`Page.navigate`, so the page's very first request is already covered.
+
+Three details that are easy to get wrong:
+
+- **Handlers must not `Send` inline.** `CDPSession.On` runs handlers on the
+  read pump, and the reply a `Send` waits for can only arrive on that same
+  pump — so every decision is handed to a goroutine, exactly as
+  `replay.go` does.
+- **Saturation fails closed.** Concurrent decisions are bounded
+  (`captureGuardConcurrency`); beyond that a request is left unanswered
+  rather than admitted, so flooding cannot push an unchecked request
+  through. The cost is that request stalling until the bounded capture
+  window ends.
+- **Only http(s) is checked.** `data:`/`blob:` carry their own bytes and
+  open no socket, so blocking them would break ordinary artwork for no
+  security gain.
+
+**Residual gaps, stated rather than hidden.** This is a URL-time check, so
+two things remain open, and both need Chromium's egress taken away
+entirely (a loopback filtering proxy it must dial through) rather than
+more interception:
+
+- **DNS rebinding.** Chromium resolves the host itself *after* we continue
+  the request, and can get a different answer than we did. A name that
+  answers public to us and loopback to Chromium still lands. This is the
+  same class of gap that made the original pre-flight URL check
+  insufficient for the Go paths — closed there by moving to `DialContext`,
+  which has no equivalent here.
+- **WebSocket.** CDP `Fetch` does not intercept WebSocket handshakes, so
+  `ws://` egress from the page is uncovered. Mitigated in practice because
+  reaching a DevTools socket requires its target UUID, which is read over
+  HTTP (`/json`) and therefore blocked — but not closed.
+
+Both intersect an exposure `docs/architecture.md` already accepts as
+release-scoped (the open, unauthenticated `:1111` surface, end state
+#3471), and are the reason a filtering proxy remains the eventual
+complete answer.
 
 **Operational consequence.** Playlist sources on private or loopback
 addresses are refused. Artwork origins are public CDNs, so this does not

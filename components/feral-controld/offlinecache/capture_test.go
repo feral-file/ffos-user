@@ -74,7 +74,7 @@ func setupCaptureWithMaxDiskBytes(t *testing.T, maxDiskBytes int64) *captureTest
 	// production is not what they are exercising. The wiring itself is
 	// pinned by TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne.
 	capturer := offlinecache.NewCapturer(
-		mockDownloader, mockDialer, mockHTTP, mockHTTP, store,
+		mockDownloader, mockDialer, mockHTTP, mockHTTP, publicResolver{}, store,
 		wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), maxDiskBytes, logger,
 	)
 
@@ -87,8 +87,9 @@ func setupCaptureWithMaxDiskBytes(t *testing.T, maxDiskBytes int64) *captureTest
 // domainEnableCallCount is how many outbound CDP calls capture.go always
 // issues, in order, before the observation window begins: Network.enable,
 // Page.enable, resetTargetState's Network.clearBrowserCache and
-// Storage.clearDataForOrigin, then Page.navigate.
-const domainEnableCallCount = 5
+// Storage.clearDataForOrigin, then Fetch.enable (the capture-side source
+// guard — see attachSourceGuard), then Page.navigate.
+const domainEnableCallCount = 6
 
 // answerDomainEnables drains and acks every call capture.go always
 // issues before the observation window begins (see
@@ -464,6 +465,9 @@ func TestCapturer_Capture_ClearsBrowserCacheAndOriginStorageBeforeNavigate(t *te
 					"must scope the clear to the item's own origin, not the whole host or a bare domain")
 				assert.Equal(t, "all", params["storageTypes"])
 			case 4:
+				assert.Equal(t, "Fetch.enable", msg["method"],
+					"the source guard must be armed before navigation, or the page's first request is unchecked")
+			case 5:
 				assert.Equal(t, "Page.navigate", msg["method"],
 					"the cache/storage reset must complete before navigation starts")
 			}
@@ -503,8 +507,12 @@ func TestCapturer_Capture_UnparsableSourceSkipsOriginClearButStillClearsCache(t 
 
 		// No Storage.clearDataForOrigin call: "not-a-valid-origin-url"
 		// has no scheme/host, so requestOrigin fails and resetTargetState
-		// skips straight to letting Page.navigate itself surface the bad
-		// URL.
+		// skips straight to arming the guard and letting Page.navigate
+		// itself surface the bad URL.
+		msg = h.conn.nextOutbound(t)
+		assert.Equal(t, "Fetch.enable", msg["method"])
+		h.ackEmpty(t, msg)
+
 		msg = h.conn.nextOutbound(t)
 		assert.Equal(t, "Page.navigate", msg["method"])
 		h.ackEmpty(t, msg)
@@ -1067,7 +1075,7 @@ func TestCapturer_Capture_IgnoresBlobAndDataURLs(t *testing.T) {
 
 func TestCapturer_Capture_RequiresIDAndSource(t *testing.T) {
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(nil, nil, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(nil, nil, nil, nil, publicResolver{}, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	_, err := capturer.Capture(context.Background(), dp1playlist.PlaylistItem{}, 0)
 	assert.Error(t, err)
@@ -1081,7 +1089,7 @@ func TestCapturer_Capture_AcquireFails(t *testing.T) {
 	mockDownloader.EXPECT().Acquire(gomock.Any()).Return("", assertError("busy")).Times(1)
 
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, nil, publicResolver{}, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
 	_, err := capturer.Capture(context.Background(), item, 0)
@@ -1154,7 +1162,7 @@ func TestCapturer_Close_DelegatesToDownloader(t *testing.T) {
 	mockDownloader.EXPECT().Close().Return(nil).Times(1)
 
 	store, _ := newTestStore(t)
-	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, nil, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
+	capturer := offlinecache.NewCapturer(mockDownloader, nil, nil, nil, publicResolver{}, store, wrapper.NewJSON(), wrapper.NewIO(), wrapper.NewClock(), 0, zaptest.NewLogger(t))
 
 	assert.NoError(t, capturer.Close())
 }

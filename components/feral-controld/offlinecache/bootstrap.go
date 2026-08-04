@@ -461,7 +461,7 @@ func Bootstrap(
 	// It keeps the 30s timeout, which suits a small /json targets list
 	// and bounds a wedged local browser.
 	cdpDiscoveryClient := wrapper.NewHTTPClient()
-	capturer := NewCapturer(downloader, dialer, cdpDiscoveryClient, bodyClient, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
+	capturer := NewCapturer(downloader, dialer, cdpDiscoveryClient, bodyClient, net.DefaultResolver, store, jsonWrapper, ioWrapper, clockWrapper, opts.MaxDiskBytes, logger)
 	// mediaCapturer needs no Downloader/dialer — it downloads a
 	// non-software item's single-file source directly over HTTP, never
 	// spinning up the headless Chromium capturer/downloader owns (see

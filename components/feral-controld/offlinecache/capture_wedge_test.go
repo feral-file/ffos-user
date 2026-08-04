@@ -8,7 +8,9 @@ import (
 	go_http "net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -343,4 +345,111 @@ func TestCapturer_CDPDiscoveryClientIsNotTheGuardedOne(t *testing.T) {
 	c := &capturer{cdpClient: discovery, fetchClient: guarded}
 	require.NotNil(t, c.cdpClient)
 	require.NotNil(t, c.fetchClient)
+}
+
+// fakePausedSession records Fetch verdicts so the capture-side guard can
+// be exercised without a browser. Send is what decidePausedRequest calls
+// to answer a paused request.
+type fakePausedSession struct {
+	mu       sync.Mutex
+	sent     []string
+	handlers map[string]func(json.RawMessage)
+}
+
+func newFakePausedSession() *fakePausedSession {
+	return &fakePausedSession{handlers: map[string]func(json.RawMessage){}}
+}
+
+func (f *fakePausedSession) Send(_ context.Context, method string, _ map[string]interface{}) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, method)
+	return json.RawMessage(`{}`), nil
+}
+func (f *fakePausedSession) On(method string, h func(json.RawMessage)) { f.handlers[method] = h }
+func (f *fakePausedSession) ForSession(string) CDPSession              { return f }
+func (f *fakePausedSession) Close() error                              { return nil }
+
+func (f *fakePausedSession) verdicts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sent...)
+}
+
+// pause drives one Fetch.requestPaused event through the registered
+// handler and waits for the asynchronous decision to land. The handler
+// hands work to a goroutine by design (CDPSession.On forbids Send on the
+// read pump), so the wait is what makes the assertion deterministic.
+func (f *fakePausedSession) pause(t *testing.T, url string) string {
+	t.Helper()
+	h := f.handlers["Fetch.requestPaused"]
+	require.NotNil(t, h, "attachSourceGuard must register a Fetch.requestPaused handler")
+	before := len(f.verdicts())
+	h(json.RawMessage(`{"requestId":"r1","request":{"url":"` + url + `"}}`))
+	require.Eventually(t, func() bool { return len(f.verdicts()) > before },
+		2*time.Second, 5*time.Millisecond, "the paused request was never answered")
+	v := f.verdicts()
+	return v[len(v)-1]
+}
+
+// TestCapturer_SourceGuard_BlocksPageRequestsToReservedAddresses is the
+// point of the capture-side guard. fetchClient only covers bytes THIS
+// daemon pulls; the page is untrusted code issuing its own requests,
+// which never touch a Go client. Without interception an artwork can
+// simply fetch the unauthenticated hub on :1111 or the kiosk's DevTools
+// on :9222 from inside the capture browser.
+func TestCapturer_SourceGuard_BlocksPageRequestsToReservedAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name, url, want string
+	}{
+		{"the unauthenticated hub", "http://127.0.0.1:1111/api/cast", "Fetch.failRequest"},
+		{"the kiosk devtools", "http://127.0.0.1:9222/json/new", "Fetch.failRequest"},
+		{"our own capture devtools", "http://127.0.0.1:9223/json", "Fetch.failRequest"},
+		{"monitord", "http://127.0.0.1:9001/metrics", "Fetch.failRequest"},
+		{"a LAN host", "http://192.168.1.5/admin", "Fetch.failRequest"},
+		{"link-local metadata", "http://169.254.169.254/latest/meta-data", "Fetch.failRequest"},
+		{"a public origin", "https://cdn.example.com/art.js", "Fetch.continueRequest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &capturer{
+				json:   wrapper.NewJSON(),
+				logger: zaptest.NewLogger(t),
+				guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
+			}
+			session := newFakePausedSession()
+			c.attachSourceGuard(context.Background(), session)
+			assert.Equal(t, tc.want, session.pause(t, tc.url))
+		})
+	}
+}
+
+// A non-http scheme carries its own bytes and opens no socket, so
+// blocking it would break ordinary artwork (data: images, blob: workers)
+// for no security gain. The schemes that actually dial are the ones the
+// guard covers.
+func TestCapturer_SourceGuard_AllowsNonDialingSchemes(t *testing.T) {
+	c := &capturer{
+		json:   wrapper.NewJSON(),
+		logger: zaptest.NewLogger(t),
+		guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
+	}
+	session := newFakePausedSession()
+	c.attachSourceGuard(context.Background(), session)
+	for _, url := range []string{"data:text/plain;base64,aGk=", "blob:https://cdn.example.com/abc"} {
+		assert.Equal(t, "Fetch.continueRequest", session.pause(t, url), url)
+	}
+}
+
+// A hostname that resolves into reserved space is blocked too — the check
+// is on the resolved address, not on the literal text, so a name pointed
+// at loopback does not get through by not looking like an IP.
+func TestCapturer_SourceGuard_BlocksHostnameResolvingToReserved(t *testing.T) {
+	c := &capturer{
+		json:   wrapper.NewJSON(),
+		logger: zaptest.NewLogger(t),
+		guard:  sourceGuard{resolver: staticResolver{ip: "127.0.0.1"}},
+	}
+	session := newFakePausedSession()
+	c.attachSourceGuard(context.Background(), session)
+	assert.Equal(t, "Fetch.failRequest", session.pause(t, "http://art.evil.example/x.js"))
 }

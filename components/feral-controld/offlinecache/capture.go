@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	go_http "net/http"
+	go_url "net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -130,8 +131,13 @@ type capturer struct {
 	// point: they have opposite trust properties and one client cannot
 	// serve both.
 	fetchClient wrapper.HTTPClient
-	store       Store
-	json        wrapper.JSON
+	// guard applies the same reserved-address policy to requests CHROMIUM
+	// makes. fetchClient only covers bytes this daemon pulls itself; the
+	// page is untrusted code that issues its own requests, and those
+	// never touch a Go client at all. See attachSourceGuard.
+	guard sourceGuard
+	store Store
+	json  wrapper.JSON
 	// io is used only for DialPageSession's small (/json targets list)
 	// HTTP body read — fetchAndStoreBody streams resource bodies
 	// straight into the store instead, see maxResourceBytes below.
@@ -282,6 +288,7 @@ func NewCapturer(
 	dialer wrapper.WebSocketDialer,
 	cdpClient wrapper.HTTPClient,
 	fetchClient wrapper.HTTPClient,
+	resolver AddrResolver,
 	store Store,
 	jsonWrapper wrapper.JSON,
 	ioWrapper wrapper.IO,
@@ -294,6 +301,7 @@ func NewCapturer(
 		dialer:           dialer,
 		cdpClient:        cdpClient,
 		fetchClient:      fetchClient,
+		guard:            sourceGuard{resolver: resolver},
 		store:            store,
 		json:             jsonWrapper,
 		io:               ioWrapper,
@@ -329,6 +337,10 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 
 	tracker := newCaptureTracker()
 	c.attachHandlers(session, tracker)
+	// Registered BEFORE Fetch.enable below so no paused request can be
+	// delivered with no handler to answer it — an unanswered pause hangs
+	// that request until the capture window closes.
+	c.attachSourceGuard(ctx, session)
 
 	if _, err := session.Send(ctx, "Network.enable", map[string]interface{}{}); err != nil {
 		return nil, fmt.Errorf("offline cache: Network.enable: %w", err)
@@ -338,6 +350,13 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	}
 	if err := c.resetTargetState(ctx, session, item.Source); err != nil {
 		return nil, fmt.Errorf("offline cache: reset chromium state before capture: %w", err)
+	}
+
+	// Enabled AFTER resetTargetState so the cache/storage clears above
+	// cannot be paused by our own handler, and BEFORE navigate so the
+	// very first request of the page is already covered.
+	if _, err := session.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
+		return nil, fmt.Errorf("offline cache: Fetch.enable on capture session: %w", err)
 	}
 
 	navCtx, navCancel := context.WithTimeout(ctx, window)
@@ -981,4 +1000,129 @@ func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]s
 	}
 	sort.Strings(pendingURLs)
 	return resourceKeys, resources, failures, pendingURLs
+}
+
+// Capture-side source guarding. fetchClient covers the bytes THIS daemon
+// pulls; it cannot cover the requests the page itself makes, because
+// those never pass through a Go client. capture.go hands an untrusted
+// artwork to Chromium via Page.navigate, and Chromium then follows
+// redirects and loads subresources on its own — so without interception
+// a page can simply fetch http://127.0.0.1:1111/api/cast and drive the
+// unauthenticated hub, or read the kiosk's DevTools on :9222.
+const (
+	// captureGuardConcurrency bounds how many paused requests are being
+	// decided at once. Each decision may perform a DNS lookup, and the
+	// page is hostile-by-assumption, so this is what stops a page that
+	// issues thousands of requests from spawning thousands of resolving
+	// goroutines.
+	captureGuardConcurrency = 16
+	// captureGuardDecisionTimeout bounds one decision, so a resolver that
+	// hangs cannot pin a slot for the whole capture window.
+	captureGuardDecisionTimeout = 5 * time.Second
+)
+
+// attachSourceGuard arms Fetch interception on the capture session and
+// answers every paused request with continue or fail.
+//
+// Handler discipline: CDPSession.On runs handlers on the read pump, and a
+// handler must never Send inline (see that interface's doc) — the reply it
+// waits for can only arrive on the pump it is blocking. Every decision is
+// therefore handed to a goroutine, exactly as replay.go does for the kiosk.
+//
+// Saturation fails CLOSED: when every slot is busy the request is left
+// unanswered rather than admitted, so a page cannot get an unchecked
+// request through by flooding. The cost is that request stalling until the
+// bounded capture window ends, which degrades one capture's fidelity — the
+// right trade against admitting an unchecked request to loopback.
+//
+// KNOWN LIMITATION, deliberately not papered over: this is a URL-time
+// check, so DNS rebinding is NOT closed — Chromium resolves the host
+// itself after we continue the request, and may get a different answer
+// than we did. Closing that requires taking Chromium's egress away
+// entirely (a loopback filtering proxy it must dial through). CDP Fetch
+// also does not intercept WebSocket handshakes, so ws:// egress is
+// likewise uncovered. Both are recorded in
+// docs/offline-artwork-capture.md §9.
+func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) {
+	slots := make(chan struct{}, captureGuardConcurrency)
+	var saturatedOnce sync.Once
+
+	session.On("Fetch.requestPaused", func(params json.RawMessage) {
+		var evt struct {
+			RequestID string `json:"requestId"`
+			Request   struct {
+				URL string `json:"url"`
+			} `json:"request"`
+		}
+		if err := c.json.Unmarshal(params, &evt); err != nil {
+			// No requestId means no way to answer this pause at all.
+			c.logger.Warn("offline cache capture: unparseable Fetch.requestPaused; request left blocked",
+				zap.Error(err))
+			return
+		}
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				c.decidePausedRequest(ctx, session, evt.RequestID, evt.Request.URL)
+			}()
+		default:
+			saturatedOnce.Do(func() {
+				c.logger.Warn("offline cache capture: source-guard slots saturated; further requests blocked for this capture",
+					zap.Int("concurrency", captureGuardConcurrency))
+			})
+		}
+	})
+}
+
+// decidePausedRequest allows or blocks one paused request.
+func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, requestID, rawURL string) {
+	decideCtx, cancel := context.WithTimeout(ctx, captureGuardDecisionTimeout)
+	defer cancel()
+
+	if err := c.pausedRequestAllowed(decideCtx, rawURL); err != nil {
+		c.logger.Warn("offline cache capture: blocked page request",
+			zap.String("url", truncateSourceForLog(rawURL)), zap.Error(err))
+		// Failed, never fulfilled: the page must be able to tell this
+		// request did not happen, and a synthesized empty 200 would make
+		// a blocked probe look like a real (empty) resource.
+		if _, err := session.Send(decideCtx, "Fetch.failRequest", map[string]interface{}{
+			"requestId":   requestID,
+			"errorReason": "AccessDenied",
+		}); err != nil {
+			c.logger.Warn("offline cache capture: Fetch.failRequest failed",
+				zap.String("request_id", requestID), zap.Error(err))
+		}
+		return
+	}
+	if _, err := session.Send(decideCtx, "Fetch.continueRequest", map[string]interface{}{
+		"requestId": requestID,
+	}); err != nil {
+		c.logger.Warn("offline cache capture: Fetch.continueRequest failed",
+			zap.String("request_id", requestID), zap.Error(err))
+	}
+}
+
+// pausedRequestAllowed applies the source policy to one page request.
+//
+// Only http(s) is checked. A non-http scheme reaching here (data:, blob:)
+// carries its own bytes and opens no socket, so blocking it would break
+// ordinary artwork for no security gain — the schemes that DO dial are
+// exactly the ones this covers.
+func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) error {
+	u, err := go_url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: unparseable request URL: %w", ErrUnsafeSource, err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return nil
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("%w: request URL has no host", ErrUnsafeSource)
+	}
+	_, err = c.guard.addrsFor(ctx, host)
+	return err
 }
