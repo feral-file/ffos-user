@@ -2224,6 +2224,41 @@ release-scoped (the open, unauthenticated `:1111` surface, end state
 #3471), and are the reason a filtering proxy remains the eventual
 complete answer.
 
+#### Accepted-risk record: rebinding and WebSocket
+
+These two are an **explicit owner decision**, not an oversight, and are
+recorded here so they are not re-litigated as findings on every pass.
+
+*What was weighed.* Two shapes were costed. Request-level interception
+(what shipped) reuses proven machinery, touches no launch path, and closes
+four of the five exploit classes: a literal reserved URL, a hostname
+resolving reserved at check time, a `302` to a private address, and a page
+subresource aimed at loopback. Each of those costs an attacker nothing but
+a URL. The fifth — rebinding — additionally requires owning a domain,
+running authoritative DNS with a low TTL, and winning a race between our
+resolve and Chromium's. A loopback filtering proxy (`--proxy-server` plus
+`--proxy-bypass-list=<-loopback>`, egress validated by `addrsFor`) would
+close all five *and* WebSocket, because Chromium would have no direct
+egress at all — but it is a new component with its own lifecycle, and it
+would land in the Chromium launch path.
+
+*The judgement.* Residual risk was estimated at roughly 10–15% of the
+practical attack surface: low likelihood, since rebinding needs
+infrastructure, but high impact, since what it reaches is the
+unauthenticated hub. Two facts decided it. The exposure **predates this
+work** — `Page.navigate` on an untrusted source was entirely unguarded
+before, so shipping this strictly improves the device rather than
+introducing anything. And the complete fix belongs with #3471, which is
+already chartered to close the `:1111` surface these paths lead to;
+building a second, overlapping mitigation first would likely be thrown
+away.
+
+*What this is not.* It is not a claim that the capture browser is fully
+guarded. It is guarded against everything that costs an attacker only a
+URL, and knowingly not against an attacker who runs DNS. Anyone reopening
+this should argue about the estimate or the sequencing with #3471, not
+re-report the gap — it is known.
+
 **Operational consequence.** Playlist sources on private or loopback
 addresses are refused. Artwork origins are public CDNs, so this does not
 affect normal operation, but a developer pointing a test playlist at a
