@@ -674,6 +674,91 @@ func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
 	}
 }
 
+// ActivationProfile is one saved Wi-Fi profile's activation identity for the
+// provisioning recheck blink (docs/network-recovery-ux.md §4.2): UUID to
+// activate, target SSID for the in-range filter, Hidden because a hidden SSID
+// never appears in scans (it gets one attempt last, if budget remains), and
+// LastUsed (connection.timestamp, Unix seconds, 0 = never activated) for
+// most-recently-used ordering among in-range candidates.
+type ActivationProfile struct {
+	UUID     string
+	SSID     string
+	Hidden   bool
+	LastUsed int64
+}
+
+// ActivationProfiles returns every saved Wi-Fi profile's activation identity,
+// extending the wifiProfileList nmcli read path with the recheck's field set
+// (one read path, two field sets — see wifiProfileList). Unlike the deletion
+// consumer this is FAIL-CLOSED: any per-profile read failure fails the whole
+// listing, because the caller ACTIVATES off this list and a blind
+// `connection up` on a misread profile blocks up to its full activation
+// deadline — half a bounded blink budget — starving the profile that would
+// have worked (the §4.2 fail-bias: a listing error aborts the blink and
+// re-raises, never a blind activation).
+func (c *Controller) ActivationProfiles(ctx context.Context) ([]ActivationProfile, error) {
+	out, _, err := c.run(ctx, "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
+	if err != nil {
+		return nil, err
+	}
+	var profiles []ActivationProfile
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		uuid, typ, name := parts[0], parts[1], unescapeTerse(parts[2])
+		if typ != "802-11-wireless" {
+			continue
+		}
+		p := ActivationProfile{UUID: uuid}
+		ssidOut, _, err := c.run(ctx, "-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, fmt.Errorf("reading ssid of profile %q (%s): %w", name, uuid, err)
+		}
+		// Record-terminator strip only; padding bytes are valid SSID content
+		// (same rule as SavedWifiSSIDs).
+		p.SSID = unescapeTerse(strings.TrimSuffix(string(ssidOut), "\n"))
+		hiddenOut, _, err := c.run(ctx, "-g", "802-11-wireless.hidden", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, fmt.Errorf("reading hidden flag of profile %q (%s): %w", name, uuid, err)
+		}
+		p.Hidden = strings.TrimSpace(string(hiddenOut)) == "yes"
+		tsOut, _, err := c.run(ctx, "-g", "connection.timestamp", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, fmt.Errorf("reading timestamp of profile %q (%s): %w", name, uuid, err)
+		}
+		// A missing/blank timestamp (never activated) is 0, not an error: the
+		// field is only an ORDERING hint, and a fresh profile is legitimately
+		// timestamp-less. An unparseable non-blank value still fails closed.
+		ts := strings.TrimSpace(string(tsOut))
+		if ts != "" {
+			n, convErr := strconv.ParseInt(ts, 10, 64)
+			if convErr != nil {
+				return nil, fmt.Errorf("unparseable timestamp %q of profile %q (%s)", ts, name, uuid)
+			}
+			p.LastUsed = n
+		}
+		profiles = append(profiles, p)
+	}
+	return profiles, nil
+}
+
+// ActivateProfile runs an EXPLICIT activation of the saved profile (`nmcli
+// connection up uuid <uuid>`), honoring ctx via the exec seam. The recheck
+// blink uses this rather than waiting for autoconnect because the repo's own
+// evidence says passive autoconnect after an AP→station flip is unreliable
+// (empty/stale BSS list; see waitForScanReady), and bench evidence
+// (docs/network-recovery-ux.md §3) shows explicit activation is not gated by
+// NM's autoconnect backoff on repeatedly failed profiles.
+func (c *Controller) ActivateProfile(ctx context.Context, uuid string) error {
+	out, _, err := c.run(ctx, "connection", "up", "uuid", uuid)
+	if err != nil {
+		return fmt.Errorf("activating profile %s: %w (%s)", uuid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // waitForSSID blocks until ssid appears in a forced rescan or the wait window
 // closes. Scan errors are retried, not fatal: right after the mode flip the
 // device can transiently report busy/unavailable. On timeout it returns

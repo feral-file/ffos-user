@@ -10,6 +10,7 @@ import (
 	"github.com/feral-file/godbus"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/dbus"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -95,6 +96,11 @@ type setupNarrationUI interface {
 	ShowSoftAPQR(ssid, psk string)
 	ShowJoinFailed(reason string)
 	ShowConnecting(message string)
+	// ShowConnectingOrHide is the ap-recheck flavor: its manifest downgrade is
+	// a HIDE, never join_failed — the blink recurs unboundedly on claimed
+	// frames and a false failure title over exhibition artwork is the one
+	// downgrade worse than a blank overlay (the delivery-skew posture).
+	ShowConnectingOrHide(message string)
 	ShowSetupError(reason string)
 	ShowJoining()
 	Hide()
@@ -269,6 +275,15 @@ type setupNotifier struct {
 	playerRecovery func(context.Context)
 }
 
+// withIdentity appends the device identity to trouble-state prose (the §4.6
+// copy formula: a user reporting a stuck frame needs to say WHICH frame).
+func (n *setupNotifier) withIdentity(msg string) string {
+	if n.deviceName == "" || msg == "" {
+		return msg
+	}
+	return msg + " (" + n.deviceName + ")"
+}
+
 // OnStateChange renders the least-surprising narration for each provisioning
 // state. The StateAPActive branch is disambiguated by the Detail the machine
 // sends (see provisioning.Detail.PSK):
@@ -289,11 +304,7 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 	switch d.Reason {
 	case provisioning.ReasonSetupError:
 		n.narrating = true
-		msg := d.Message
-		if n.deviceName != "" {
-			msg += " (" + n.deviceName + ")"
-		}
-		n.ui.ShowSetupError(msg)
+		n.ui.ShowSetupError(n.withIdentity(d.Message))
 		return
 	case provisioning.ReasonSetupErrorCleared:
 		// The wedge resolved in a state whose own narration will not repaint;
@@ -373,11 +384,26 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 		}
 	case provisioning.StateOfflineRetrying:
 		switch d.Reason {
+		case provisioning.ReasonAPSessionEndedSilent:
+			// A teardown (or a narrated→silent shape change, constraint 4(b))
+			// on a frame whose screen must return to artwork: hide, guarded
+			// like every hide on this surface.
+			if n.narrating {
+				n.narrating = false
+				n.ui.Hide()
+			}
+		case provisioning.ReasonAPRecheck:
+			// The recheck blink narrates on BOTH claim states, with the hide
+			// downgrade (see setupNarrationUI.ShowConnectingOrHide).
+			n.narrating = true
+			n.ui.ShowConnectingOrHide(n.withIdentity(d.Message))
 		case provisioning.ReasonBootOffline,
 			provisioning.ReasonBootNoInternet,
 			provisioning.ReasonBootLinkUnknown,
 			provisioning.ReasonJoinedNoInternet,
-			provisioning.ReasonJoinedConnUnknown:
+			provisioning.ReasonJoinedConnUnknown,
+			provisioning.ReasonAPSessionEnded,
+			provisioning.ReasonSetupIncompleteSettled:
 			// Entry edges that would otherwise be a silent black screen for
 			// minutes or forever, in front of a user who is actively watching
 			// (a moved frame booting offline; a join that associated to a
@@ -391,7 +417,7 @@ func (n *setupNotifier) OnStateChange(s provisioning.State, d provisioning.Detai
 			// ShowConnecting downgrades itself to join_failed on player
 			// bundles that predate the state (see setupui.ShowConnecting).
 			n.narrating = true
-			n.ui.ShowConnecting(d.Message)
+			n.ui.ShowConnecting(n.withIdentity(d.Message))
 		default:
 			// Transient provisioned-device outage (the exhibition
 			// online→offline edge, redundant re-emissions): leave the screen
@@ -443,6 +469,45 @@ func wireInternetProbe(ex any, dc dbus.DBus, logger *zap.Logger) {
 			return connected, nil
 		})
 	}
+}
+
+// wiredLinkProbe adapts the shared LinkChecker's ethernet-only verdict to the
+// provisioning WiredLink seam (constraint 6 — never ExternalLink, which
+// counts stations). File scope for the same `context`-shadowing reason as
+// externalLinkProbe. nil checker → nil probe: the machine then never confirms
+// a wire, its documented fail-safe.
+func wiredLinkProbe(lc *status.LinkChecker) func(context.Context) (bool, error) {
+	if lc == nil {
+		return nil
+	}
+	return lc.WiredLink
+}
+
+// provisioningTuningFromConfig maps the config file's permissive provisioning
+// block onto the machine's typed knobs (integer-with-unit fields → durations;
+// zeros pass through so the machine's defaults apply).
+func provisioningTuningFromConfig(t config.ProvisioningTuning) provisioning.Tuning {
+	secs := func(n int) time.Duration { return time.Duration(n) * time.Second }
+	out := provisioning.Tuning{
+		SetupIncompleteDisabled: t.SetupIncompleteDisabled,
+		EpisodeWindow:           secs(t.EpisodeWindowSeconds),
+		EpisodeApPhase:          secs(t.EpisodeApPhaseSeconds),
+		EpisodeRaiseCycles:      t.EpisodeRaiseCycles,
+		HubContactFresh:         secs(t.HubContactFreshSeconds),
+		DeferralCycleBudget:     secs(t.DeferralCycleBudgetSeconds),
+		DeferralEpisodeBudget:   secs(t.DeferralEpisodeBudgetSeconds),
+		RecheckApPhase:          secs(t.RecheckApPhaseSeconds),
+		RecheckBlinkCeiling:     secs(t.RecheckBlinkCeilingSeconds),
+		ActivationTimeout:       secs(t.ActivationTimeoutSeconds),
+		PortalActivityWindow:    secs(t.PortalActivityWindowSeconds),
+		PortalDeferralCeiling:   secs(t.PortalDeferralCeilingSeconds),
+		UserRequestedSession:    secs(t.UserRequestedSessionSeconds),
+		SessionAbsoluteCap:      secs(t.SessionAbsoluteCapSeconds),
+	}
+	for _, s := range t.EpisodeStationLadderSeconds {
+		out.EpisodeStationLadder = append(out.EpisodeStationLadder, secs(s))
+	}
+	return out
 }
 
 // setupStateSource is the read-only slice of the provisioning machine the hub

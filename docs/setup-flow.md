@@ -98,7 +98,50 @@ stateDiagram-v2
   ap_active --> online: internet returned on its own
   ap_active --> unprovisioned: went online (no saved profile)
   ap_active --> offline_retrying: link recovered while the raise was still failing
+
+  offline_retrying --> ap_active: setup-incomplete window (unclaimed, link up, no WAN, no wire)
+  ap_active --> offline_retrying: episode AP phase over (ap-session-ended, station ladder)
+  ap_active --> offline_retrying: recheck blink (ap-recheck, then re-raise or exit)
+  offline_retrying --> offline_retrying: episode settled (setup-incomplete-settled)
+  ap_active --> offline_retrying: session expired / wired link sighted (silent landing)
 ```
+
+**AP session policy** (`docs/network-recovery-ux.md` §4.2 — latched from the
+raise reason at raise time, retained across join attempts):
+
+| Raise reason | Session policy |
+|---|---|
+| `unprovisioned` | Unbounded, no recheck (out-of-box behavior; a station blink can learn nothing with no saved profile). |
+| `sustained-offline`, `relocated` | **Recheck cadence**: AP up 30 min, then a narrated blink (`ap-recheck`) — teardown, forced scan, explicit activation of in-range saved profiles (MRU order, hidden last, 90s per activation, 4-min blink ceiling; a listing error aborts the blink, never a blind activation) — then re-raise with the original reason if nothing associates. Unbounded cycles: the QR is the correct steady state for a gone network, and every cycle re-tests the world (D11). |
+| `setup-incomplete` | 5-min AP phase, then the §4.1 station ladder (5/10/20 min); AP ≤ 33% of every cycle. |
+| `user-requested` | 30 min, then teardown and resume normal state handling (the `startWifiSetup` abandonment net). |
+| join-failure re-raise | Inherits the originating session's policy and resets its clock; never `resetJoinStatus` (the phone polls `/status` for that outcome). |
+
+Bounded rows carry a 2-hour absolute cap across `applyRescan` re-arms, and
+every teardown defers while the portal served a **human-caused** request
+(`/connect`, `/rescan` — never root fetches or OS captive probes) in the last
+2 minutes, up to +15 min. A confirmed **wired** sighting lowers any raised AP
+(the survey's ethernet rows carry none of the own-hotspot ambiguity). Every
+teardown lands on a named reason: `ap-session-ended` (narrated, unclaimed),
+`ap-recheck` (narrated, both claim states, hide-downgrade on old manifests),
+or `ap-session-ended-silent` (claimed — the notifier's narrating-guarded hide,
+also emitted on any narrated→silent reason change so a stale panel can never
+strand over artwork). All §4.1/§4.2 durations, budgets, and the cycle cap ride
+the on-device JSON config's permissive `provisioning` block (a wrong-typed
+block falls back to defaults without failing the load; the `setup-incomplete`
+fallback additionally has a `setupIncompleteDisabled` kill-switch).
+
+**The setup-incomplete episode** (`docs/network-recovery-ux.md` §4.1): an
+UNCLAIMED device confirmed link-present + WAN-offline + not wired for a full
+5-minute sample-counted window — with fresh LAN-app contact pausing the count
+(budgeted: 5 min/cycle, 15 min/episode, charged per paused tick) — reopens
+setup with reason `setup-incomplete`. Four raise cycles, then it settles in
+station mode (`setup-incomplete-settled`) where the LAN escape lives. Canceled
+by WAN confirmation, a claim, a wired sighting, confirmed link loss (handing
+the device to the untouched link-absent machinery), or a completed portal
+join. Claimed devices are untouched (#233); the primary escape is always
+LAN pairing + `startWifiSetup`, and the episode exists only for the app-less
+user.
 
 **Trigger rules:**
 

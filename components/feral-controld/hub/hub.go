@@ -41,6 +41,26 @@ type hub struct {
 	statusProvider StatusProvider
 	json           wrapper.JSON
 	reqSlots       chan struct{}
+
+	// contactObserver, when set, is invoked once per request on the counted
+	// control-plane routes (cast, status, status_v2) from a NON-loopback
+	// source. It feeds the provisioning escape policy's "a human's app is
+	// talking to this device" deferral signal (docs/network-recovery-ux.md
+	// §4.1). The exclusions are load-bearing, not hygiene: /metrics is scraped
+	// by local feral-vmagent every 60s over loopback and any loopback poller
+	// of a counted endpoint would otherwise pin the deferral permanently; the
+	// long-lived /api/notification WebSocket's persistence is not fresh
+	// evidence of a human; the catch-all is anything's stray traffic. Set at
+	// wiring time before Start (same plain-field ordering contract as the
+	// executor's probes); invoked on request goroutines, so the observer must
+	// be internally synchronized and non-blocking.
+	contactObserver func()
+}
+
+// SetContactObserver wires the control-plane contact signal (see
+// contactObserver). Call before Start.
+func (h *hub) SetContactObserver(fn func()) {
+	h.contactObserver = fn
 }
 
 func New(

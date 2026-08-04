@@ -327,18 +327,33 @@ var sendFallbacks = map[string]sendFallback{
 // table.
 func (s *Service) resolveExtensionState(req map[string]any) map[string]any {
 	state := stringField(req, "state")
-	fb, ok := sendFallbacks[state]
-	if !ok || !s.stateUnsupported(state) {
+	hideMarked, marked := req[fallbackHideKey].(bool)
+	fb, inTable := sendFallbacks[state]
+	if !inTable && !marked {
 		return req
 	}
-	if fb.hide {
+	unsupported := s.stateUnsupported(state)
+	if unsupported && marked && hideMarked {
+		// The per-push hide override (see fallbackHideKey) wins over the
+		// state table's fallback.
 		return map[string]any{"state": stateHidden}
 	}
+	// Copy-on-write: the retained intent keeps the neutral state AND the
+	// marker (a later Resync re-resolves); the wire copy carries neither the
+	// marker nor, when unsupported, the original state.
 	out := make(map[string]any, len(req))
 	for k, v := range req {
+		if k == fallbackHideKey {
+			continue
+		}
 		out[k] = v
 	}
-	out["state"] = fb.state
+	if unsupported && inTable {
+		if fb.hide {
+			return map[string]any{"state": stateHidden}
+		}
+		out["state"] = fb.state
+	}
 	return out
 }
 
@@ -440,6 +455,28 @@ func (s *Service) ShowConnectingIfShowing(message string, states ...string) {
 		}
 		return false
 	})
+}
+
+// fallbackHideKey marks a queued connecting push whose manifest downgrade is a
+// HIDE rather than the state table's join_failed fallback. It is an internal
+// queue annotation, never wire payload: resolveExtensionState strips it from
+// every send. It exists for RECURRING pushes — the provisioning recheck
+// blink's ap-recheck narration, whose unbounded cadence on claimed frames
+// would otherwise flash a false "Couldn't connect" title over exhibition
+// artwork dozens of times a day for a whole delivery-skew window. The hide
+// clears the stale QR (constraint 4(a)), asserts nothing false, and the
+// re-raise repaints softap_qr minutes later.
+const fallbackHideKey = "_fallback_hide"
+
+// ShowConnectingOrHide is ShowConnecting with the hide downgrade: on a
+// manifest that provably lacks `connecting`, the send becomes a Hide instead
+// of the one-shot pushes' join_failed fallback (see fallbackHideKey).
+func (s *Service) ShowConnectingOrHide(message string) {
+	req := map[string]any{"state": stateConnecting, fallbackHideKey: true}
+	if strings.TrimSpace(message) != "" {
+		req["reason"] = message
+	}
+	s.push(req)
 }
 
 // ShowSetupError narrates a persistent provisioning failure the machine cannot

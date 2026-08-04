@@ -1073,3 +1073,93 @@ func TestScanAllSSIDsIsUncapped(t *testing.T) {
 		t.Fatalf("ScanAllSSIDs must force a rescan; argv = %v", last)
 	}
 }
+
+// --- ActivationProfiles / ActivateProfile (recheck blink, §4.2) ---------------
+
+// TestActivationProfilesReadsFieldsFailClosed pins the blink helper's
+// contract: per-profile fields are read by UUID (type-filtered before any
+// field read), a blank timestamp is a legitimate 0 (never-activated profile),
+// and ANY per-profile read failure — or an unparseable non-blank timestamp —
+// fails the whole listing, because the caller ACTIVATES off this list and the
+// §4.2 fail-bias is "a listing error aborts the blink, never a blind
+// activation".
+func TestActivationProfilesReadsFieldsFailClosed(t *testing.T) {
+	t.Run("happy path with MRU fields", func(t *testing.T) {
+		ssids := map[string]string{"u1": "Home", "u2": "Studio"}
+		hiddens := map[string]string{"u1": "no", "u2": "yes"}
+		stamps := map[string]string{"u1": "1722400000", "u2": ""}
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			if profileListReply(argv) {
+				return []byte("u1:802-11-wireless:Home\nu2:802-11-wireless:StudioProfile\n" +
+					"e1:802-3-ethernet:Wired\n"), nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.ssid", ssids); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.hidden", hiddens); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "connection.timestamp", stamps); ok {
+				return out, nil
+			}
+			return nil, nil
+		})
+		got, err := c.ActivationProfiles(context.Background())
+		require.NoError(t, err)
+		require.Len(t, got, 2, "non-Wi-Fi profiles are filtered before any field read")
+		assert.Equal(t, ActivationProfile{UUID: "u1", SSID: "Home", Hidden: false, LastUsed: 1722400000}, got[0])
+		assert.Equal(t, ActivationProfile{UUID: "u2", SSID: "Studio", Hidden: true, LastUsed: 0}, got[1],
+			"a blank timestamp is a never-activated 0, not an error")
+	})
+
+	t.Run("per-profile read failure fails the listing", func(t *testing.T) {
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			if profileListReply(argv) {
+				return []byte("u1:802-11-wireless:Home\n"), nil
+			}
+			return nil, fakeExitError{code: 10, msg: "exit status 10"}
+		})
+		_, err := c.ActivationProfiles(context.Background())
+		assert.Error(t, err, "an unreadable profile must fail closed — never a partial list")
+	})
+
+	t.Run("unparseable timestamp fails the listing", func(t *testing.T) {
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			if profileListReply(argv) {
+				return []byte("u1:802-11-wireless:Home\n"), nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.ssid", map[string]string{"u1": "Home"}); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.hidden", map[string]string{"u1": "no"}); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "connection.timestamp", map[string]string{"u1": "garbage"}); ok {
+				return out, nil
+			}
+			return nil, nil
+		})
+		_, err := c.ActivationProfiles(context.Background())
+		assert.Error(t, err)
+	})
+}
+
+// TestActivateProfile pins the explicit-activation argv and its error
+// wrapping (the blink logs and moves to the next candidate on failure).
+func TestActivateProfile(t *testing.T) {
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		if len(argv) == 5 && argv[1] == "connection" && argv[2] == "up" && argv[3] == "uuid" {
+			if argv[4] == "bad" {
+				return []byte("Error: network could not be found"), fakeExitError{code: 4, msg: "exit status 4"}
+			}
+			return []byte("Connection successfully activated"), nil
+		}
+		return nil, nil
+	})
+	require.NoError(t, c.ActivateProfile(context.Background(), "good"))
+	err := c.ActivateProfile(context.Background(), "bad")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "network could not be found",
+		"the nmcli output must surface for the blink's candidate log")
+	assert.Equal(t, []string{"nmcli", "connection", "up", "uuid", "good"}, exec.recorded()[0])
+}

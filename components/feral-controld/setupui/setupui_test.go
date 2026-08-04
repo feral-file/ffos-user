@@ -1498,3 +1498,39 @@ func TestShowConnectingIfShowing(t *testing.T) {
 		assert.Equal(t, stateSoftAPQR, sender.lastRequest()["state"])
 	})
 }
+
+// TestShowConnectingOrHideDowngradesToHide pins the delivery-skew hide-blink
+// rule: the recurring ap-recheck push downgrades to a HIDE — never
+// join_failed, and never a skipped push that strands the stale QR — on a
+// manifest that provably lacks `connecting`, while a manifest that lists it
+// renders the neutral state as usual (with the internal marker never reaching
+// the wire).
+func TestShowConnectingOrHideDowngradesToHide(t *testing.T) {
+	t.Run("older manifest downgrades to hide, not join_failed", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateHidden, req["state"],
+			"the recurring blink must clear the screen, never flash a false failure")
+	})
+
+	t.Run("supporting manifest renders connecting without the marker", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		assert.Equal(t, "Checking for your Wi-Fi network…", req["reason"])
+		_, leaked := req[fallbackHideKey]
+		assert.False(t, leaked, "the queue marker must never reach the wire")
+	})
+}

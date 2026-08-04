@@ -129,7 +129,7 @@ type StatusFunc func() Status
 // request was rejected (e.g. the machine is busy) and the form is re-rendered.
 type RescanFunc func() error
 
-// Config wires the portal's listener and its three seams.
+// Config wires the portal's listener and its seams.
 type Config struct {
 	// Addr is the bind address. Production binds ":80" (a sysctl lowers the
 	// unprivileged port floor; the portal adds no capabilities logic). Tests
@@ -142,7 +142,19 @@ type Config struct {
 	Join   JoinFunc
 	Status StatusFunc
 	Rescan RescanFunc
-	Logger *zap.Logger
+	// ActivityObserved, when set, is invoked once per HUMAN-CAUSED portal
+	// request — the /connect and /rescan action handlers only, classified by
+	// handler, not method (the rescan form submits as GET). It feeds the
+	// provisioning session policy's mid-portal teardown deferral
+	// (docs/network-recovery-ux.md §4.2). GET / is deliberately NOT counted:
+	// in net/http.ServeMux the "/" pattern is the catch-all, and the OS
+	// captive-probe routes exist precisely to redirect an idle phone's
+	// automatic probes to it — counting root fetches would let an idle
+	// associated phone pin every teardown to its ceiling. Invoked on request
+	// goroutines; the observer must be internally synchronized and
+	// non-blocking.
+	ActivityObserved func()
+	Logger           *zap.Logger
 }
 
 // Server is the captive-portal HTTP server.
@@ -323,6 +335,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	s.noteActivity()
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
@@ -373,6 +386,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 // BEFORE the bounce lands) tells the user to scan the QR code on the frame
 // again to reconnect.
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
+	s.noteActivity()
 	switch r.Method {
 	case http.MethodGet:
 		s.render(w, "rescan_confirm.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
@@ -410,6 +424,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) redirectToPortal(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// noteActivity reports one human-caused request (see Config.ActivityObserved).
+func (s *Server) noteActivity() {
+	if s.cfg.ActivityObserved != nil {
+		s.cfg.ActivityObserved()
+	}
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {

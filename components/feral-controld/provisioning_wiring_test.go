@@ -47,6 +47,10 @@ func (s *spyNarrationUI) ShowConnecting(message string) {
 	s.calls = append(s.calls, "connecting")
 	s.connectingMessages = append(s.connectingMessages, message)
 }
+func (s *spyNarrationUI) ShowConnectingOrHide(message string) {
+	s.calls = append(s.calls, "connecting_or_hide")
+	s.connectingMessages = append(s.connectingMessages, message)
+}
 func (s *spyNarrationUI) ShowJoining() { s.calls = append(s.calls, "joining") }
 func (s *spyNarrationUI) Hide()        { s.calls = append(s.calls, "hide") }
 

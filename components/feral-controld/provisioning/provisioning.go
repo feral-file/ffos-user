@@ -119,6 +119,34 @@ const (
 	// renders it via the player's setup_error extension state. Emitted once at
 	// the latch edge, never per retry tick.
 	ReasonSetupError = "setup-error"
+	// ReasonSetupIncomplete marks the §4.1 setup-incomplete raise: an
+	// unclaimed device confirmed link-present + WAN-offline + not wired for a
+	// full episode window, with no app contact. The AP returns so an app-less
+	// user can re-enter setup.
+	ReasonSetupIncomplete = "setup-incomplete"
+	// ReasonUserRequested marks an app-triggered raise (startWifiSetup —
+	// docs/app-triggered-wifi-setup.md). Named here because the §4.2 session
+	// policy table keys on it; the command lands in a later stage.
+	ReasonUserRequested = "user-requested"
+	// ReasonAPSessionEnded is the narrated teardown landing for an unclaimed
+	// frame's bounded AP session (episode AP phases, abandoned user-requested
+	// sessions): constraint 4 — every teardown repaints, and this one carries
+	// the station-phase prose.
+	ReasonAPSessionEnded = "ap-session-ended"
+	// ReasonAPSessionEndedSilent is the claimed-frame teardown landing and the
+	// narrated→silent rewrite reason (constraint 4(b)): the notifier answers
+	// it with a narrating-guarded hide so artwork returns instead of a stale
+	// setup panel stranding over an exhibition.
+	ReasonAPSessionEndedSilent = "ap-session-ended-silent"
+	// ReasonAPRecheck narrates the recheck-cadence blink (both claim states):
+	// the AP is briefly down while saved profiles are force-reactivated
+	// against a fresh scan; the QR returns within minutes if the network is
+	// still gone.
+	ReasonAPRecheck = "ap-recheck"
+	// ReasonSetupIncompleteSettled is the episode's terminal narration after
+	// its raise cycles exhaust: the machine settles in STATION mode (the LAN
+	// escape lives there) with a standing diagnosis.
+	ReasonSetupIncompleteSettled = "setup-incomplete-settled"
 	// ReasonSetupErrorCleared marks a latched setup_error ending WITHOUT its
 	// own repaint: a resolved teardown wedge in a resting state, or a raise
 	// episode exiting through link recovery before any raise succeeded (a
@@ -180,6 +208,12 @@ type WifiController interface {
 	// with the AP down and the portal stopped (D10). hidden requests directed
 	// probing for a non-broadcasting SSID.
 	Join(ctx context.Context, ssid, psk string, hidden bool) error
+	// ActivationProfiles / ActivateProfile serve the recheck blink's forced
+	// reactivation (§4.2): passive autoconnect after an AP→station flip is
+	// unreliable, so the blink activates in-range saved profiles explicitly.
+	// Both must honor ctx (the blink runs under a hard ceiling).
+	ActivationProfiles(ctx context.Context) ([]wifictl.ActivationProfile, error)
+	ActivateProfile(ctx context.Context, uuid string) error
 }
 
 // Connectivity reports the device's network reachability as sys-monitord sees
@@ -323,6 +357,27 @@ type Config struct {
 	// (preserving the Connectivity-only behavior).
 	ActiveLink func(ctx context.Context) (bool, error)
 
+	// WiredLink, when non-nil, confirms or refutes a live ETHERNET link (the
+	// status.LinkChecker.WiredLink seam; constraint 6 semantics: verdict from
+	// ethernet rows only, errors surface). The escape policy consults it for
+	// episode arming (a wired frame never runs the setup-incomplete episode)
+	// and for the wired exit from a raised AP. nil means "never confirmable":
+	// the episode then never arms and the wired exit never fires — the
+	// fail-safe default for wirings that predate the seam.
+	WiredLink func(ctx context.Context) (bool, error)
+
+	// InitialClaimed supplies the boot-time claim reading for the machine's
+	// loop-visible claim snapshot (constraint 8). known=false (state file
+	// unreadable) is treated as CLAIMED — the fail-safe direction, since the
+	// worst mistake is auto-raising the AP over a claimed exhibition frame.
+	// Later flips arrive via SetClaimed (the executor's claim observer). nil
+	// = unknown = claimed.
+	InitialClaimed func() (claimed, known bool)
+
+	// Tuning carries the §4.1/§4.2 cadence knobs; zero fields take the
+	// package defaults (see the session defaults block in session.go).
+	Tuning Tuning
+
 	// PortalAddr is the portal bind address (default ":80").
 	PortalAddr string
 	// OfflineWindow is how much confirmed link absence an offline device must
@@ -371,6 +426,8 @@ type Machine struct {
 	offlineWindow time.Duration
 	checkInterval time.Duration
 	joinTimeout   time.Duration
+	// tuning is the resolved §4.1/§4.2 cadence set (defaults applied in New).
+	tuning Tuning
 	// offlineWindowSamples is OfflineWindow expressed in tick samples (derived
 	// once in New) — the expiry threshold for offlineAbsent below.
 	offlineWindowSamples int
@@ -433,8 +490,14 @@ type Machine struct {
 	// Loop-goroutine-only, like connUnknown.
 	linkProbeFailing bool
 
-	// bootNarration is the Reason of the boot-entry narration currently on
-	// screen ("" when none). The tick uses it to keep that prose truthful as
+	// episodeNarration is the Reason of the narrated StateOfflineRetrying
+	// panel currently on screen ("" when none) — the generalized §4.4 episode
+	// marker: set by transition at every NARRATED OfflineRetrying entry (the
+	// narratedOfflineReason set) and cleared by every transition that leaves
+	// the state. A device that never leaves the state keeps its marker and
+	// stays governed by the repaint machinery — DELIBERATE: that is the
+	// repaint path, not a leak, and restoring a one-boot scoping here would
+	// re-break the very repaints §4.4 exists for. The tick uses it to keep that prose truthful as
 	// the link comes and goes: a sighted link falsifies "setup will start in
 	// a few minutes" (the AP is correctly suppressed while a link holds, so
 	// the promise would sit on an air-gapped LAN forever), and a lost link
@@ -447,7 +510,7 @@ type Machine struct {
 	// StateOfflineRetrying, so the deliberately silent exhibition outage path
 	// (which never sets it) can never inherit a stale marker from an earlier
 	// boot episode. Loop-goroutine-only, like connUnknown.
-	bootNarration string
+	episodeNarration string
 
 	// relocConfirms/relocArmTriesLeft drive the boot relocation confirmation
 	// (M-0b). The check may only START at a boot assessment (BootAssessment
@@ -495,6 +558,65 @@ type Machine struct {
 	offlinePause       int
 	offlineFreshNeeded int
 
+	// wiredLink is Config.WiredLink (nil = never confirmable; see the Config
+	// field for the fail-safe consequences).
+	wiredLink func(ctx context.Context) (bool, error)
+
+	// initialClaimed is Config.InitialClaimed, read once by Start (after the
+	// persisted state loads — see Start's ordering note).
+	initialClaimed func() (claimed, known bool)
+
+	// claimed is the claim snapshot (constraint 8): seeded once at Start by
+	// initialClaimed (unknown = claimed), written SYNCHRONOUSLY by SetClaimed
+	// from executor goroutines — never queued, because a dropped claim would
+	// be permanent and an armed episode would raise over a just-claimed frame
+	// (see SetClaimed). mu-GUARDED for that reason; loop code reads it via
+	// isClaimed. The machine never calls into the state package from the loop
+	// goroutine — that would take the state lock mid-loop, the coupling class
+	// commit 116a8ed removed elsewhere.
+	claimed bool
+
+	// lastHubContact / lastPortalActivity live in the mu-guarded block: they
+	// are WRITTEN by request goroutines (the hub middleware's contact
+	// observer; the portal's action handlers) and read by the loop. Hub
+	// contact feeds the §4.1 episode's deferral; portal activity feeds the
+	// §4.2 mid-portal teardown deferral.
+	lastHubContact     time.Time
+	lastPortalActivity time.Time
+
+	// Session-policy state (§4.2) — all loop-goroutine-only. sessionPolicy is
+	// LATCHED from the raise reason at raise time and RETAINED across join
+	// attempts (applyJoin cancels the phase timer, never the policy field, so
+	// a join-failure re-raise re-arms a fresh timer under the retained policy
+	// — one typo must not escalate a bounded session into an unbounded
+	// cadence). sessionReason is the latched raise reason, re-used verbatim by
+	// the recheck blink's re-raise. sessionPhaseStart is the current AP
+	// phase's start (zero = no timer; armed on ensureAPUp success);
+	// sessionFirstRaise anchors the absolute session cap across applyRescan
+	// re-arms. skipNextPreAPScan lets a blink's fresh successful scan stand in
+	// for ensureAPUp's own pre-raise pass (one radio pass instead of two).
+	sessionPolicy     sessionPolicy
+	sessionReason     string
+	sessionPhaseStart time.Time
+	sessionFirstRaise time.Time
+	skipNextPreAPScan bool
+
+	// Setup-incomplete episode state (§4.1) — loop-goroutine-only. The
+	// episode window is sample-counted like the offline window but with the
+	// OPPOSITE polarity (it counts confirmed link-PRESENT samples whose full
+	// predicate holds) and its own pause/deferral rules — see episodeSample.
+	// episodeTarget is the samples required before the next raise (the first
+	// window, then the station-ladder rungs). episodeDeferred* track the
+	// hub-contact deferral budgets, charged per paused tick.
+	episodeSamples       int
+	episodePause         int
+	episodeFreshNeeded   int
+	episodeTarget        int
+	episodeCycle         int
+	episodeSettled       bool
+	episodeDeferredCycle time.Duration
+	episodeDeferredTotal time.Duration
+
 	// Escalation latches (§4.6, fixes D5/D6). apRaiseFails / apReleaseFails
 	// count CONSECUTIVE ensureAPUp / ensureAPDown failures; at
 	// setupErrorFailStreak the machine notifies ReasonSetupError once and
@@ -540,14 +662,16 @@ const (
 	evConnectivity eventKind = iota
 	evJoin
 	evRescan
+	evClaim
 )
 
 type event struct {
-	kind   eventKind
-	online bool
-	ssid   string
-	psk    string
-	hidden bool
+	kind    eventKind
+	online  bool
+	ssid    string
+	psk     string
+	hidden  bool
+	claimed bool
 }
 
 // New builds a Machine, applying defaults.
@@ -579,14 +703,22 @@ func New(cfg Config) *Machine {
 	if windowSamples < 1 {
 		windowSamples = 1
 	}
+	// The claim snapshot defaults to CLAIMED (constraint 8's fail-safe
+	// direction — never auto-raise over a possibly claimed exhibition frame);
+	// Start seeds it from InitialClaimed once the persisted state is loaded.
+	claimed := true
 	return &Machine{
-		ap:         cfg.AP,
-		wifi:       cfg.Wifi,
-		conn:       cfg.Connectivity,
-		clock:      cfg.Clock,
-		logger:     logger,
-		notifier:   cfg.Notifier,
-		activeLink: cfg.ActiveLink,
+		ap:             cfg.AP,
+		wifi:           cfg.Wifi,
+		conn:           cfg.Connectivity,
+		clock:          cfg.Clock,
+		logger:         logger,
+		notifier:       cfg.Notifier,
+		activeLink:     cfg.ActiveLink,
+		wiredLink:      cfg.WiredLink,
+		claimed:        claimed,
+		initialClaimed: cfg.InitialClaimed,
+		tuning:         cfg.Tuning.withDefaults(cfg.CheckInterval),
 		// Latched HERE, not read at the offline assessment: New runs at
 		// wiring time (moments after process start), so this is the honest
 		// "did this process start at boot" answer regardless of how long the
@@ -618,6 +750,21 @@ func (m *Machine) Start(ctx context.Context) {
 	defer m.runMu.Unlock()
 	if m.cancel != nil {
 		return // already started
+	}
+	// The boot claim snapshot is read at START, not construction: New runs in
+	// initializeApp, BEFORE run() has loaded the persisted state, so a
+	// construction-time read would always see the pre-load empty state as
+	// "unclaimed" — exactly the unsafe direction constraint 8 forbids. Start
+	// runs after the state load; the loop goroutine has not spawned yet, so
+	// the write takes m.mu only for uniformity with SetClaimed's writer.
+	// Unknown (nil probe or known=false) keeps the
+	// fail-safe claimed default from New.
+	if m.initialClaimed != nil {
+		if c, known := m.initialClaimed(); known {
+			m.mu.Lock()
+			m.claimed = c
+			m.mu.Unlock()
+		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
@@ -727,6 +874,8 @@ func (m *Machine) loop(ctx context.Context) {
 				m.applyJoin(ctx, ev.ssid, ev.psk, ev.hidden)
 			case evRescan:
 				m.applyRescan(ctx)
+			case evClaim:
+				m.applyClaim(ctx, ev.claimed)
 			}
 		case <-ticker.C():
 			m.onTick(ctx)
@@ -816,6 +965,9 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 	m.online = online
 	if online {
 		m.clearOffline()
+		// WAN confirmation cancels the setup-incomplete episode outright
+		// (§4.1's cancel edge) — the world the episode escapes from is gone.
+		m.cancelEpisode(ctx, "online confirmed")
 		if m.hasProfile(ctx) {
 			m.transition(ctx, StateOnline, Detail{Message: "Connected to the network"})
 		} else {
@@ -989,7 +1141,7 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 			// Set AFTER the transition (which clears the marker only for
 			// non-OfflineRetrying targets): the marker must describe what the
 			// paint above actually put on screen.
-			m.bootNarration = d.Reason
+			m.episodeNarration = d.Reason
 			// Relocation check, first scan attempt (the radio is back in station
 			// mode — the boot AP sweep precedes this assessment — so a live scan
 			// is possible). ORDERING IS LOAD-BEARING: the fields are set AFTER
@@ -1039,6 +1191,20 @@ func (m *Machine) onConnectivity(ctx context.Context, online bool, assumed bool)
 	// exhibition device, redundant re-emissions) keeps the generic reason,
 	// which the notifier deliberately does not paint.
 	detail := Detail{Reason: "offline", Message: "Reconnecting to Wi-Fi"}
+	// The D4 verdict repaint: while the joined-conn-unknown hedge is the
+	// panel on screen ("Checking internet access…"), a CONFIRMED offline
+	// reading is a verdict change the screen must follow — the generic tail
+	// reason below is deliberately un-narrated, and before this the hedge was
+	// the terminal narration forever. The dedupe extension in transition (a
+	// reason change INTO the narrated set notifies) is what makes this
+	// repaint deliverable at all.
+	if cur == StateOfflineRetrying && m.episodeNarration == ReasonJoinedConnUnknown && !assumed {
+		m.mu.Lock()
+		ssid := m.status.SSID
+		m.mu.Unlock()
+		detail = Detail{SSID: ssid, Reason: ReasonJoinedNoInternet,
+			Message: "Connected to " + ssid + ", but this network has no internet access"}
+	}
 	if cur == StateJoining {
 		m.mu.Lock()
 		ssid := m.status.SSID
@@ -1097,13 +1263,43 @@ func bootOfflineDetail(probe linkProbe) Detail {
 // boot-narrated episode (the marker is set only at the narrated boot entry),
 // which is what keeps the deliberately silent exhibition path silent.
 func (m *Machine) repaintBootNarration(probe linkProbe) {
-	if m.bootNarration == "" {
+	// Only the PROBE-DRIVEN boot reasons repaint from a link probe; the other
+	// narrated reasons (joined-*, ap-session-ended, ap-recheck, settled) are
+	// verdict- or session-driven and repaint via their own events — letting a
+	// probe overwrite a station-phase or settled panel with boot prose would
+	// clobber the §4.1/§4.2 narration on every tick.
+	switch m.episodeNarration {
+	case ReasonBootOffline, ReasonBootNoInternet, ReasonBootLinkUnknown:
+	default:
 		return
 	}
-	if d := bootOfflineDetail(probe); m.bootNarration != d.Reason {
-		m.bootNarration = d.Reason
+	if d := bootOfflineDetail(probe); m.episodeNarration != d.Reason {
+		m.episodeNarration = d.Reason
 		m.notify(StateOfflineRetrying, d)
 	}
+}
+
+// narratedOfflineReason names the StateOfflineRetrying entry reasons that
+// paint a panel (the §4.4 whitelist for the dedupe extension and the episode
+// marker). Everything else in that state is deliberately silent — the
+// exhibition path.
+func narratedOfflineReason(r string) bool {
+	switch r {
+	case ReasonBootOffline, ReasonBootNoInternet, ReasonBootLinkUnknown,
+		ReasonJoinedNoInternet, ReasonJoinedConnUnknown,
+		ReasonAPSessionEnded, ReasonAPRecheck, ReasonSetupIncompleteSettled:
+		return true
+	default:
+		return false
+	}
+}
+
+// silentOfflineReason names the deliberately un-narrated OfflineRetrying
+// legs. Transitions from a narrated reason into one of these emit the
+// explicit silent hide (constraint 4(b)) — the notifier's leave-the-screen
+// default there would strand the last narrated panel as a permanent lie.
+func silentOfflineReason(r string) bool {
+	return r == "offline" || r == "link-present"
 }
 
 // relocScanOutcome is the tri-state result of one relocation scan attempt.
@@ -1266,6 +1462,17 @@ func (m *Machine) onTick(ctx context.Context) {
 			// pending AP-profile teardown (apDownPending) must keep retrying
 			// on guarded ticks too.
 			m.clearOffline()
+			// The link-PRESENT shape's escape (§4.1): each confirmed-present
+			// tick is one sample for the setup-incomplete episode, which may
+			// raise the AP for an unclaimed no-WAN device. Runs before the
+			// repaint so a raise's own narration wins the tick.
+			m.episodeSample(ctx)
+			m.mu.Lock()
+			raised := m.state == StateAPActive
+			m.mu.Unlock()
+			if raised {
+				return
+			}
 			// The reset above just changed what is TRUE (a present link
 			// suppresses the AP outright), so the boot prose must follow —
 			// the same-state transition dedupe repaints nothing on its own,
@@ -1284,6 +1491,12 @@ func (m *Machine) onTick(ctx context.Context) {
 			m.relocationUnknownSample()
 			m.repaintBootNarration(probe)
 		case linkAbsent:
+			// Confirmed link loss hands the device to the untouched
+			// link-absent machinery (constraint 12): the two evidence shapes
+			// never share an episode, and this cancel is what keeps the
+			// settled state from suppressing a sustained-offline raise for a
+			// device whose link is genuinely gone.
+			m.cancelEpisode(ctx, "link loss confirmed")
 			// Boot relocation confirmation (M-0b): may only START at a boot
 			// assessment with a confirmed-absent link; each still-link-less
 			// tick runs one scan step (arming within the bounded budget, or
@@ -1450,18 +1663,39 @@ func (m *Machine) onTick(ctx context.Context) {
 		}
 
 	case StateAPActive:
+		m.mu.Lock()
+		apUp := m.apUp
+		m.mu.Unlock()
+		if apUp {
+			// A RAISED AP has two — and only two — automatic exits beyond
+			// online/portal-join. (1) The wired sighting (§4.2): an ethernet
+			// row in the device survey has none of the own-hotspot ambiguity
+			// the probeLink short-circuit protects Wi-Fi against, the AP
+			// cannot fix a wired network, and a later online reading would
+			// tear it down anyway — so plugging a cable in ends the session,
+			// user-requested included. (2) The session policy's own phase
+			// expiry (recheck blink, episode station phase, user-session
+			// abandonment net).
+			if m.wiredExitDue(ctx) {
+				m.exitRaisedAPForWire(ctx)
+				return
+			}
+			if m.sessionExpiryDue() {
+				m.expireSession(ctx)
+				return
+			}
+			break
+		}
 		// A FAILED/PENDING raise (apUp false) is the one APActive flavor a
-		// link reading may exit: no hotspot is up for the probe to mistake
+		// LINK reading may exit: no hotspot is up for the probe to mistake
 		// for an uplink, and the link can genuinely recover while NM keeps
 		// refusing the raise — on an air-gapped LAN no connectivity event
 		// will ever arrive, so without this probe the eventual retry would
 		// SUCCEED and drop the recovered link, the exact harm the guard
-		// exists to prevent. probeLink short-circuits to linkAbsent while
-		// the AP is actually up (no nmcli spend, and the no-link-based-exit
-		// rule for a RAISED AP is preserved); absent/unknown fall through to
-		// reconcile, which keeps retrying the raise. The saved-profile check
-		// routes the exit to the matching resting state, whose tick probes
-		// re-arm the sustained window before any fresh raise.
+		// exists to prevent. Absent/unknown fall through to reconcile, which
+		// keeps retrying the raise. The saved-profile check routes the exit
+		// to the matching resting state, whose tick probes re-arm the
+		// sustained window before any fresh raise.
 		if m.probeLink(ctx) == linkPresent {
 			m.clearOffline()
 			if m.hasProfile(ctx) {
@@ -1496,6 +1730,10 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string, hidden bool) 
 	m.state = StateJoining
 	m.status = portal.Status{State: portal.JoinInProgress, SSID: ssid, Message: "Connecting to " + ssid}
 	m.mu.Unlock()
+	// The join cancels the session TIMER, never the policy latch (§4.2): a
+	// failure re-raise re-arms a fresh timer under the retained policy, so a
+	// typo inside a bounded session keeps that session's own bound.
+	m.cancelSessionTimer()
 	m.notify(StateJoining, Detail{SSID: ssid, Message: "Connecting to " + ssid})
 
 	// Constraint 2: AP (and its portal) down before the station-mode join. A
@@ -1542,6 +1780,11 @@ func (m *Machine) applyJoin(ctx context.Context, ssid, psk string, hidden bool) 
 		m.status = portal.Status{State: portal.JoinSucceeded, SSID: ssid, Message: "Connected to " + ssid}
 		m.mu.Unlock()
 		m.logger.Info("provisioning: wifi join succeeded", zap.String("ssid", ssid))
+		// A completed portal join is the strongest world-changed signal there
+		// is (§4.1): the episode resets fully, so a user who picked a
+		// wrong-but-live SSID first gets a full-length episode on the network
+		// they actually meant, not a shortened runway.
+		m.cancelEpisode(ctx, "portal join completed")
 		// Association is NOT reachability: joining a network with a dead
 		// upstream must not park the machine in StateOnline — the device was
 		// offline before the join and stays offline after it, so sys-monitord
@@ -1600,6 +1843,11 @@ func (m *Machine) applyRescan(ctx context.Context) {
 	m.mu.Unlock()
 
 	m.logger.Info("provisioning: rescan requested; bouncing setup AP")
+	// An actively rescanning user is present: re-arm the session's current
+	// phase (§4.2 — intended, bounded by the absolute cap in
+	// sessionExpiryDue; on a recheck session this resets only the current AP
+	// phase, whose cadence is unbounded by design).
+	m.armSessionTimer()
 	// Flip the screen to "scanning" IMMEDIATELY: the AP teardown below takes
 	// seconds, and leaving the join QR up through it reads as a stalled button
 	// press. ensureAPUp re-announces the same state when the fresh scan
@@ -1630,22 +1878,49 @@ func (m *Machine) applyRescan(ctx context.Context) {
 // (sys-monitord restarts re-emit their first probe; the tick re-probes while
 // offline) stay suppressed, which is what the link-lost window path relies on.
 func (m *Machine) transition(ctx context.Context, target State, d Detail) {
-	// Leaving StateOfflineRetrying ends the boot narration's on-screen life —
+	// Session policy is latched from the raise reason at raise time (§4.2's
+	// table); reasons outside the table inherit (see latchSessionPolicy).
+	if target == StateAPActive {
+		m.latchSessionPolicy(d.Reason)
+	}
+	// Leaving StateOfflineRetrying ends the narrated panel's on-screen life —
 	// whatever paints next owns the screen. Without this clear, a narrated
 	// boot outage followed by online and a LATER mid-exhibition outage would
 	// let the tick repaint boot prose over the deliberately silent exhibition
 	// path. Loop-goroutine-only field, deliberately outside the lock.
 	if target != StateOfflineRetrying {
-		m.bootNarration = ""
+		m.episodeNarration = ""
 	}
 	m.mu.Lock()
+	prevState, prevReason := m.state, m.lastReason
 	changed := m.state != target ||
-		(target == StateUnprovisioned && m.lastReason != d.Reason)
+		(target == StateUnprovisioned && m.lastReason != d.Reason) ||
+		// Constraint 10's extension: reason changes INTO the narrated
+		// OfflineRetrying set notify (the §4.4 repaints depend on it);
+		// transitions into the silent legs keep today's dedupe — that is
+		// what keeps the exhibition path silent.
+		(target == StateOfflineRetrying && narratedOfflineReason(d.Reason) && m.lastReason != d.Reason)
 	m.state = target
 	m.lastReason = d.Reason
 	m.mu.Unlock()
 
+	// Constraint 4(b): a narrated OfflineRetrying panel followed by a SILENT
+	// reason in the same state would strand as a permanent lie (the
+	// notifier's default deliberately leaves the screen as-is there) — e.g.
+	// the ap-recheck blink's "returns in a moment" surviving forever over a
+	// claimed frame whose link came back without WAN. Emit the explicit
+	// silent-hide reason instead; the notifier's handling is
+	// narrating-guarded like every other hide.
+	if target == StateOfflineRetrying && prevState == StateOfflineRetrying &&
+		narratedOfflineReason(prevReason) && silentOfflineReason(d.Reason) {
+		m.episodeNarration = ""
+		m.notify(target, Detail{Reason: ReasonAPSessionEndedSilent})
+	}
+
 	if changed {
+		if target == StateOfflineRetrying && narratedOfflineReason(d.Reason) {
+			m.episodeNarration = d.Reason
+		}
 		m.notify(target, d)
 	}
 	m.reconcile(ctx)
@@ -1707,9 +1982,17 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		})
 	}
 
+	// A recheck blink's own successful scan moments ago stands in for this
+	// pass (one radio pass instead of two, and a fresher portal picker); the
+	// flag is one-shot and only ever set off a non-empty, error-free blink
+	// scan — an empty post-bounce scan is the documented failure shape the
+	// retry loop below exists for.
+	skipScan := m.skipNextPreAPScan
+	m.skipNextPreAPScan = false
+
 	var scanErr error
 	var ssids []string
-	for attempt := 1; attempt <= preAPScanAttempts; attempt++ {
+	for attempt := 1; attempt <= preAPScanAttempts && !skipScan; attempt++ {
 		ssids, scanErr = m.wifi.RefreshScanCache(ctx)
 		if scanErr == nil && len(ssids) > 0 {
 			break
@@ -1723,7 +2006,7 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 			}
 		}
 	}
-	if scanErr != nil || len(ssids) == 0 {
+	if !skipScan && (scanErr != nil || len(ssids) == 0) {
 		// Non-fatal after retries: withholding the AP entirely would strand the
 		// user. The portal serves whatever the cache still holds — wifictl keeps
 		// the previous entries rather than letting an empty scan blank them —
@@ -1745,7 +2028,10 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		Join:   m.RequestJoin,
 		Status: m.Status,
 		Rescan: m.RequestRescan,
-		Logger: m.logger,
+		// Human-caused portal requests defer session teardowns (§4.2); the
+		// portal classifies (action handlers only), the machine timestamps.
+		ActivityObserved: m.observePortalActivity,
+		Logger:           m.logger,
 	})
 	if err := srv.Start(); err != nil {
 		// The AP is up but the portal could not bind. Tear the radio hotspot back
@@ -1772,6 +2058,10 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 	m.portalSrv = srv
 	m.mu.Unlock()
 	m.clearAPRaiseFailures()
+	// Every successful raise (re-)arms the session phase timer under the
+	// latched policy — including the join-failure re-raise, whose clock reset
+	// is the §4.2 table's "resets its clock".
+	m.armSessionTimer()
 	m.logger.Info("provisioning: setup AP raised", zap.String("ssid", info.SSID))
 
 	// Re-announce StateAPActive now that the AP is actually up, carrying the live

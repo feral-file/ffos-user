@@ -87,6 +87,11 @@ type fakeWifi struct {
 	joinErr    error // returned by Join
 	// joinHang makes Join block until its ctx dies (a wedged NM activation).
 	joinHang bool
+	// Recheck-blink scripting (see ActivationProfiles/ActivateProfile).
+	activationProfiles []wifictl.ActivationProfile
+	activationErr      error
+	activateErrs       map[string]error
+	activations        []string
 	// scanErrs is consumed one per RefreshScanCache call; nil entries and calls
 	// beyond the script succeed.
 	scanErrs []error
@@ -213,6 +218,31 @@ func (w *fakeWifi) Join(ctx context.Context, ssid, _ string, hidden bool) error 
 	}
 	return w.joinErr
 }
+
+// activationProfiles / activationErr / activateErrs script the recheck
+// blink's forced-reactivation seam; activations records the attempted UUIDs
+// in order.
+func (w *fakeWifi) ActivationProfiles(context.Context) ([]wifictl.ActivationProfile, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rec.add("wifi.ActivationProfiles")
+	if w.activationErr != nil {
+		return nil, w.activationErr
+	}
+	return append([]wifictl.ActivationProfile(nil), w.activationProfiles...), nil
+}
+
+func (w *fakeWifi) ActivateProfile(_ context.Context, uuid string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rec.add("wifi.ActivateProfile:" + uuid)
+	w.activations = append(w.activations, uuid)
+	if err, ok := w.activateErrs[uuid]; ok {
+		return err
+	}
+	return nil
+}
+
 func (w *fakeWifi) setProfile(v bool) {
 	w.mu.Lock()
 	w.hasProfile = v

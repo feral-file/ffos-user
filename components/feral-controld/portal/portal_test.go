@@ -529,3 +529,44 @@ func TestRescanRejectedReRendersPicker(t *testing.T) {
 	// Back on the picker, not the rescan page.
 	assert.Contains(t, string(body), "Connect to Wi-Fi")
 }
+
+// TestActivityObservedOnHumanRoutesOnly pins the §4.2 deferral signal's
+// classification: the /connect and /rescan action handlers count (by handler,
+// not method — the rescan form submits as GET), while root fetches and OS
+// captive probes never do, because the probe routes exist precisely to
+// redirect an idle phone's automatic requests to "/" and counting them would
+// let an idle phone pin every teardown to its ceiling.
+func TestActivityObservedOnHumanRoutesOnly(t *testing.T) {
+	var observed int
+	var mu sync.Mutex
+	_, ts, client := newTestServer(t, Config{
+		Join:             func(JoinRequest) error { return nil },
+		Rescan:           func() error { return nil },
+		ActivityObserved: func() { mu.Lock(); observed++; mu.Unlock() },
+	})
+
+	count := func() int { mu.Lock(); defer mu.Unlock(); return observed }
+
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/generate_204")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 0, count(), "root fetches and OS probes are not human actions")
+
+	resp, err = client.PostForm(ts.URL+"/connect", url.Values{"ssid": {"X"}})
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 1, count(), "a credential submit is a human action")
+
+	resp, err = client.Get(ts.URL + "/rescan")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 2, count(), "the rescan confirmation page is handler-classified, method-agnostic")
+
+	resp, err = client.PostForm(ts.URL+"/rescan", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 3, count())
+}

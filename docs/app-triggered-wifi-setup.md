@@ -129,10 +129,13 @@ m.transition(ctx, StateAPActive, provisioning.Detail{Reason: "user-requested"})
 `StateAPActive` switch (`provisioning_wiring.go:277-290`) falls to its `default` and renders nothing
 until the credentials-bearing announcement arrives — which is the existing, correct behavior.
 
-**Safety timeout.** If no portal join completes within 30 minutes, `ensureAPDown()` and let the machine
-resume its normal state handling. **No explicit profile reactivation**: the saved profile is never
-touched, so NetworkManager autoconnect restores the previous network on its own. This exists only so a
-user who taps and changes their mind cannot strand the frame.
+**Safety timeout.** The bespoke 30-minute timeout this plan originally specified is **subsumed** by the
+`network-recovery-ux.md` §4.2 session mechanism (amendment 1 of that plan's §4.5): the
+`user-requested` policy row carries the same 30-minute bound, plus the portal-activity deferral and
+the 2-hour absolute cap this plan did not have. On expiry the machine tears the AP down and resumes
+normal state handling. **No explicit profile reactivation**: the saved profile is never touched, so
+NetworkManager autoconnect restores the previous network on its own (bench-verified: 6s
+reassociation). This exists only so a user who taps and changes their mind cannot strand the frame.
 
 ### 4.2 Device — additive: `contract` on relayer `getDeviceStatus`
 
