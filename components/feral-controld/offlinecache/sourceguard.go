@@ -208,6 +208,57 @@ func (g sourceGuard) addrsFor(ctx context.Context, host string) ([]net.IP, error
 // and lets the refusal carry ErrUnsafeSource like every other one here.
 const maxSourceRedirects = 10
 
+// MaxSourceURLBytes bounds a playlist ITEM's dialable source URL.
+//
+// The length matters because an item source is retained and re-emitted,
+// not merely dialed once: it is the cache key, it is held in sourceByKey
+// and in every queued job, it is echoed in offline_cache_status, and
+// service.process puts the capture error — which carries it — into a
+// notify() Coverage.Reason that goes out over the relayer WebSocket. The
+// hub accepts a 4 MiB request unauthenticated, so without a bound one
+// hostile playlist turns into multi-megabyte state and repeated
+// multi-megabyte notifications on a constrained device.
+//
+// Bounding HERE, at admission, rather than sanitizing at each log and
+// wire site is deliberate. Every path downstream — classify's *url.Error
+// (which quotes the whole URL), mediacapture's raw %s interpolation, the
+// notification payload, the status response — becomes bounded by
+// construction, and none of them has to remember to do anything.
+// truncateSourceForLog stays as defense in depth for the paths that
+// predate this and for sources already on disk.
+//
+// 2048 is the de-facto ceiling browsers, proxies and servers converged
+// on. It is not applied to data: URIs — an inline item's bytes ARE its
+// source, legitimately large, and it is never dialed — and it is not
+// applied to subresource URLs during capture, where signed CDN links
+// routinely run long and are transient rather than retained.
+const MaxSourceURLBytes = 2048
+
+// ErrSourceTooLong is returned for an item source past MaxSourceURLBytes.
+// Distinct from ErrUnsafeSource because the destination may be perfectly
+// safe — the objection is what holding the string costs, not where it
+// points — and a caller may want to report the two differently.
+var ErrSourceTooLong = errors.New("offline cache: item source URL is too long")
+
+// isInlineSource reports whether source carries its own bytes rather than
+// naming somewhere to dial. Such a source is exempt from the length bound
+// (see MaxSourceURLBytes) and is classified without any network access.
+func isInlineSource(source string) bool {
+	return strings.HasPrefix(strings.ToLower(source), "data:")
+}
+
+// checkSourceLength enforces MaxSourceURLBytes on a dialable item source.
+// The error deliberately reports only the length, never the URL: quoting
+// an oversized string in the error for a check whose entire purpose is to
+// stop oversized strings propagating would defeat itself.
+func checkSourceLength(source string) error {
+	if isInlineSource(source) || len(source) <= MaxSourceURLBytes {
+		return nil
+	}
+	return fmt.Errorf("%w: %d bytes exceeds the %d-byte limit",
+		ErrSourceTooLong, len(source), MaxSourceURLBytes)
+}
+
 // dialContext is the transport hook that makes this guard real. Every
 // connection the client opens — the first one, each redirect hop, and
 // each re-resolution of a name whose answer changed — arrives here, and
@@ -335,8 +386,25 @@ func isReservedAddr(ip net.IP) bool {
 		return true
 	}
 
+	// Deprecated IPv6 site-local (fec0::/10, RFC 3879). net has no
+	// predicate for it because it was deprecated before net's were
+	// written, but it is exactly the LAN-scoped space this guard exists
+	// to refuse, and a resolver on a network still using it will hand it
+	// back.
+	if len(ip) == net.IPv6len && ip.To4() == nil &&
+		ip[0] == 0xfe && ip[1]&0xc0 == 0xc0 {
+		return true
+	}
+
 	if v4 := ip.To4(); v4 != nil {
 		switch {
+		case v4[0] == 0:
+			// 0.0.0.0/8 "this network" (RFC 1122). IsUnspecified covers
+			// only 0.0.0.0 itself; the rest of the /8 is non-public
+			// space whose handling varies by stack, and a guard that
+			// admits only clearly-public destinations has no reason to
+			// reason about which of those stacks routes it where.
+			return true
 		case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127:
 			return true // 100.64.0.0/10 CGNAT — carrier-side, not a public origin
 		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0:
@@ -356,7 +424,37 @@ func isReservedAddr(ip net.IP) bool {
 	if embedded := embeddedIPv4(ip); embedded != nil {
 		return isReservedAddr(embedded)
 	}
+	if compat := ipv4Compatible(ip); compat != nil {
+		return isReservedAddr(compat)
+	}
 	return false
+}
+
+// ipv4Compatible extracts the IPv4 address from a deprecated
+// IPv4-compatible IPv6 address (::a.b.c.d, RFC 4291 2.5.5.1), or nil.
+//
+// This form needs its own unwrap because net.IP.To4 does NOT normalize
+// it — To4 recognizes only the IPv4-MAPPED shape (::ffff:a.b.c.d) — so
+// ::127.0.0.1 otherwise reaches the IPv6 branches, where IsLoopback
+// compares against ::1 and does not match. It would then be judged
+// public. Verified: before this, isReservedAddr("::127.0.0.1") was false.
+//
+// :: and ::1 are excluded because IsUnspecified and IsLoopback already
+// claim them, and unwrapping ::1 would otherwise yield 0.0.0.1.
+func ipv4Compatible(ip net.IP) net.IP {
+	if len(ip) != net.IPv6len || ip.To4() != nil {
+		return nil
+	}
+	for _, b := range ip[:12] {
+		if b != 0 {
+			return nil
+		}
+	}
+	// ::0 and ::1 are handled by their own predicates, not here.
+	if ip[12] == 0 && ip[13] == 0 && ip[14] == 0 && ip[15] <= 1 {
+		return nil
+	}
+	return net.IPv4(ip[12], ip[13], ip[14], ip[15])
 }
 
 // embeddedIPv4 extracts the IPv4 address carried inside a NAT64 or 6to4

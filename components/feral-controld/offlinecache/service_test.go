@@ -3414,3 +3414,56 @@ func TestService_DownloadItem_InlineDataURISucceedsWithoutQueuing(t *testing.T) 
 	// will ever send — see ErrItemInlineNotQueued.
 	require.ErrorIs(t, err, offlinecache.ErrItemInlineNotQueued)
 }
+
+// TestService_DownloadItem_RejectsOversizedSource pins the ADMISSION
+// bound, not the helper. A unit test on checkSourceLength alone passes
+// even if nothing calls it, which is exactly the failure mode worth
+// guarding against here — the whole value of this bound is that it runs
+// before the source can reach sourceByKey, a queued job, or a
+// notification.
+//
+// The gomock controller is what makes it a real assertion: with no
+// Classify expectation registered, a call would fail the test, so this
+// also proves the rejection happens BEFORE any network probe.
+func TestService_DownloadItem_RejectsOversizedSource(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	oversized := "https://example.com/" + strings.Repeat("a", offlinecache.MaxSourceURLBytes)
+	err := ts.service.DownloadItem(context.Background(), dp1playlist.PlaylistItem{ID: "item-1", Source: oversized})
+	require.ErrorIs(t, err, offlinecache.ErrSourceTooLong)
+	require.NotContains(t, err.Error(), strings.Repeat("a", 64),
+		"the rejection must not itself carry the oversized URL")
+}
+
+// TestService_DownloadPlaylist_SkipsOversizedSources pins the playlist
+// half: an oversized item is dropped rather than failing the whole
+// playlist, and — critically — a normal item alongside it still queues.
+// Reporting it as a classify failure instead would let one hostile item
+// make a legitimate playlist look like "classification is down".
+func TestService_DownloadPlaylist_SkipsOversizedSources(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	good := "https://example.com/good.png"
+	oversized := "https://example.com/" + strings.Repeat("b", offlinecache.MaxSourceURLBytes)
+
+	// Only the good source may be probed; the oversized one must never
+	// reach the classifier at all.
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), good).
+		Return(offlinecache.ClassMedia, nil).Times(1)
+	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).
+		Return(&offlinecache.ItemRecord{}, nil).AnyTimes()
+
+	raw := []byte(`{"id":"pl-1","items":[{"id":"a","source":"` + good + `"},{"id":"b","source":"` + oversized + `"}]}`)
+	queued, total, err := ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err, "one oversized item must not fail the whole playlist")
+	require.Equal(t, 2, total)
+	require.Equal(t, 1, queued, "only the in-bounds source is queued")
+}

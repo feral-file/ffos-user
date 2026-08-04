@@ -2290,6 +2290,32 @@ release-scoped (the open, unauthenticated `:1111` surface, end state
 #3471), and are the reason a filtering proxy remains the eventual
 complete answer.
 
+#### Source URL length is bounded at admission
+
+An item source is not merely dialed once — it is retained and re-emitted.
+It is the cache key, it is held in `sourceByKey` and every queued job, it
+is echoed in `offline_cache_status`, and `service.process` puts the
+capture error (which carries it) into a `notify()` `Coverage.Reason` that
+goes out over the relayer WebSocket. The hub accepts a 4 MiB request
+unauthenticated, so an unbounded source is multi-megabyte state plus
+repeated multi-megabyte notifications on a constrained device.
+
+`MaxSourceURLBytes` (2048) is therefore enforced at **admission** —
+`DownloadItem` and `classifyPlaylistItems` — rather than by sanitizing
+each log and wire site. Everything downstream becomes bounded by
+construction: classify's `*url.Error` (which quotes the whole URL),
+mediacapture's raw `%s` interpolation, the notification payload, the
+status response. `truncateSourceForLog` remains as defense in depth, not
+as the primary control.
+
+Two exemptions, both deliberate: `data:` sources (an inline item's bytes
+ARE its source, legitimately large, never dialed) and subresource URLs
+during capture (signed CDN links routinely run long, and they are
+transient rather than retained). A playlist item whose source is
+oversized is skipped, not counted as a classify failure — otherwise one
+hostile item would make a legitimate playlist look like classification
+itself was down.
+
 > **Scope note.** This section covers what a *playlist item's source* is
 > allowed to point at. It does NOT cover the playlist URL itself:
 > `displayPlaylist` fetches that through `dp1` on the plain daemon client,

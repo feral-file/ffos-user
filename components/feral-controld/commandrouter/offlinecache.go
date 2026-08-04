@@ -111,6 +111,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// below — indexing is what persists that body, so it matters MORE for
 	// an inline item than for a downloaded one, not less.
 	status := "queued"
+	inline := false
 	if err := h.offlineCache.DownloadItem(ctx, item); err != nil {
 		if !errors.Is(err, offlinecache.ErrItemInlineNotQueued) {
 			return offlineCacheErrorResponse(err), nil
@@ -118,6 +119,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		// Reported distinctly so a client does not wait for a progress
 		// notification that will never arrive.
 		status = "not_queued_inline"
+		inline = true
 	}
 
 	// Best-effort, and deliberately after the queue above already
@@ -131,25 +133,40 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// ErrItemInlineNotQueued path too: an inline item needs no download
 	// precisely BECAUSE its bytes live in this body, so dropping the body
 	// is the one case where skipping the save loses the actual content.
-	// A failure here must never turn an already-successful item queue
-	// into an error response, since the item itself is queued/cached
-	// either way.
-	h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen)
+	// Best-effort for a QUEUED item, and that asymmetry is the point: its
+	// bytes are being fetched and stored independently, so losing the
+	// playlist record degrades the by-URL fallback and nothing else.
+	//
+	// For the INLINE outcome it is not best-effort, because this save is
+	// the only thing that happens at all. Nothing was downloaded — the
+	// bytes exist solely inside this playlist body — so reporting
+	// ok:true after the save failed would tell a client the item is
+	// cached offline when in fact nothing was written anywhere.
+	if err := h.indexResolvedPlaylistForOfflineDisplay(playlist, sourceURL, clearGen); err != nil && inline {
+		return errorResponse("internal", "inline item not persisted: "+err.Error(), true), nil
+	}
 
 	return map[string]any{"ok": true, "status": status, "source": source}, nil
 }
 
-func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) {
+// indexResolvedPlaylistForOfflineDisplay persists the playlist and, when
+// sourceURL is non-empty, indexes it by that URL. It still logs its own
+// failures — every caller wants them in the journal — but now also
+// RETURNS them, because one caller (the inline outcome) cannot treat this
+// as best-effort: see downloadPlaylistItem.
+func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist, sourceURL string, clearGen uint64) error {
 	raw, err := h.json.Marshal(playlist)
 	if err != nil {
 		h.logger.Warn("offline cache: failed to marshal resolved playlist for URL indexing",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
-		return
+		return err
 	}
 	if err := h.offlineCache.IndexPlaylistForOfflineDisplay(raw, sourceURL, clearGen); err != nil {
 		h.logger.Warn("offline cache: failed to index playlist for offline display fallback",
 			zap.String("playlist_url", sourceURL), zap.Error(err))
+		return err
 	}
+	return nil
 }
 
 func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]any) (interface{}, error) {

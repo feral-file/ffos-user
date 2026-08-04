@@ -3,6 +3,7 @@ package commandrouter_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -1289,4 +1290,71 @@ func TestCommandHandler_DownloadPlaylistItem_InlineItemIsNotReportedQueued(t *te
 	assert.Equal(t, "not_queued_inline", resp["status"],
 		"an inline item is accepted but nothing is queued; saying otherwise promises a notification that never arrives")
 	assert.Equal(t, item.Source, resp["source"])
+}
+
+// TestCommandHandler_DownloadPlaylistItem_InlinePersistFailureIsAnError
+// pins the asymmetry between the two outcomes. For a QUEUED item the save
+// is best-effort — the bytes are being fetched independently, so a failed
+// save costs only the by-URL fallback. For an INLINE item the save is the
+// only thing that happens: the bytes live nowhere but this playlist body,
+// so ok:true after a failed save would claim an offline copy that does
+// not exist anywhere on disk.
+//
+// This is a WIRE-VISIBLE change: a request that previously answered
+// ok:true/not_queued_inline now answers an error when persistence fails.
+func TestCommandHandler_DownloadPlaylistItem_InlinePersistFailureIsAnError(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	source := "data:text/html;base64,PGh0bWw+"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: source}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	playlistURL := "https://example.com/playlist.json"
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+		Return(errors.New("disk full")).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": source},
+	})
+
+	require.NoError(t, err)
+	assertErrorResponse(t, result, "internal")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_QueuedPersistFailureStillSucceeds
+// is the other half of that asymmetry, and exists so a future edit cannot
+// "simplify" the inline case above into failing every outcome: the item
+// really is queued, and its bytes really are being written independently
+// of this record.
+func TestCommandHandler_DownloadPlaylistItem_QueuedPersistFailureStillSucceeds(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+		Return(errors.New("disk full")).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	require.Equal(t, "queued", resp["status"])
 }

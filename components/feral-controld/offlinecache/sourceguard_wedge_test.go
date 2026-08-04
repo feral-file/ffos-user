@@ -309,3 +309,68 @@ func TestCapturer_SourceGuard_BlockErrorsAreBoundedForLogging(t *testing.T) {
 			"a blocked-request error must not carry the untrusted URL at full length")
 	}
 }
+
+// TestIsReservedAddr_NonPublicFormsTheV4NormalizationMisses covers the
+// shapes net.IP's own predicates leave uncovered. Each was verified to
+// return false — i.e. "public, go ahead and dial" — before the fix.
+//
+// Reachability is deliberately NOT the criterion here. On the FF1 today
+// IPv6 is disabled entirely and 0.0.0.x times out rather than reaching
+// loopback, so none of these is a live bypass on that hardware. They are
+// rejected because the guard's contract is "dial only clearly-public
+// space", and a predicate that admits non-public addresses on the grounds
+// that some current kernel happens not to route them is one config change
+// away from being wrong.
+func TestIsReservedAddr_NonPublicFormsTheV4NormalizationMisses(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   string
+		want bool
+		why  string
+	}{
+		{"ipv4-compatible loopback", "::127.0.0.1", true,
+			"To4 normalizes only ::ffff: mapped form, so this reached the IPv6 branch where IsLoopback compares against ::1"},
+		{"ipv4-compatible loopback, hex form", "::7f00:1", true,
+			"same address, written the way a scanner would emit it"},
+		{"ipv4-compatible private", "::192.168.1.1", true,
+			"unwrapping must re-apply the whole v4 policy, not just loopback"},
+		{"this-network low", "0.0.0.1", true,
+			"IsUnspecified covers only 0.0.0.0; the rest of 0/8 is non-public"},
+		{"this-network high", "0.255.255.255", true, "upper end of 0/8"},
+		{"ipv6 site-local", "fec0::1", true, "deprecated RFC 3879 LAN scope; net has no predicate"},
+		{"ipv6 site-local upper", "feff::1", true, "fec0::/10 runs to feff:"},
+
+		// Guardrails: the unwrap must not over-reject.
+		{"unspecified v6", "::", true, "already covered by IsUnspecified, must stay covered"},
+		{"loopback v6", "::1", true, "must not be unwrapped to 0.0.0.1 and re-judged"},
+		{"public v4", "8.8.8.8", false, "must stay dialable"},
+		{"public v6", "2001:4860:4860::8888", false, "must stay dialable"},
+		{"public v6 near site-local", "fe00::1", false, "fe00::/9 below fec0:: is not site-local"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			require.NotNil(t, ip, "test bug: %q did not parse", tt.ip)
+			require.Equal(t, tt.want, isReservedAddr(ip), tt.why)
+		})
+	}
+}
+
+// TestCheckSourceLength_BoundsDialableSourcesOnly pins the admission
+// bound and, just as importantly, its two exemptions — a cap that also
+// hit data: URIs would break inline items outright.
+func TestCheckSourceLength_BoundsDialableSourcesOnly(t *testing.T) {
+	long := "https://example.com/" + strings.Repeat("a", MaxSourceURLBytes)
+	require.ErrorIs(t, checkSourceLength(long), ErrSourceTooLong)
+
+	// The error must not quote the URL: a check that exists to stop
+	// oversized strings propagating cannot itself propagate one.
+	require.NotContains(t, checkSourceLength(long).Error(), strings.Repeat("a", 64))
+
+	require.NoError(t, checkSourceLength("https://example.com/ok"))
+	require.NoError(t, checkSourceLength("https://example.com/"+strings.Repeat("a", MaxSourceURLBytes-21)))
+	require.NoError(t, checkSourceLength("data:text/html;base64,"+strings.Repeat("A", 5*MaxSourceURLBytes)),
+		"inline bytes ARE the source and are never dialed; capping them would break inline items")
+	require.NoError(t, checkSourceLength("DATA:text/html,"+strings.Repeat("x", 5*MaxSourceURLBytes)),
+		"scheme comparison must be case-insensitive")
+}

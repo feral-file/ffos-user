@@ -1401,6 +1401,12 @@ func (s *service) DownloadItem(ctx context.Context, item dp1playlist.PlaylistIte
 	if item.Source == "" {
 		return errors.New("offline cache: item must have a source")
 	}
+	// Bound BEFORE the epoch sample and classify below, so an oversized
+	// source never reaches sourceByKey, a queued job, or a notification —
+	// see MaxSourceURLBytes for why the bound lives at admission.
+	if err := checkSourceLength(item.Source); err != nil {
+		return err
+	}
 
 	// Sample the clear-epoch BEFORE the (network-bound) classify below,
 	// then hand it to enqueue: a ClearItem/ClearPlaylist for this source
@@ -1595,6 +1601,16 @@ func (s *service) classifyPlaylistItems(ctx context.Context, items []dp1playlist
 	seen := make(map[string]bool, len(items))
 	for i, item := range items {
 		if item.Source == "" {
+			continue
+		}
+		// Skipped like an absent source rather than counted as a
+		// classify failure: the classifier is not broken, this one item
+		// is refused. Counting it would let a single oversized item make
+		// a whole playlist look like "classification itself is down".
+		if err := checkSourceLength(item.Source); err != nil {
+			s.logger.Warn("offline cache: skipping playlist item with an oversized source",
+				zap.Int("source_bytes", len(item.Source)),
+				zap.Int("limit", MaxSourceURLBytes))
 			continue
 		}
 		if key := SourceKey(item.Source); seen[key] {
