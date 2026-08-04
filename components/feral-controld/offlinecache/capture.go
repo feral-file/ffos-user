@@ -340,7 +340,7 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	// Registered BEFORE Fetch.enable below so no paused request can be
 	// delivered with no handler to answer it — an unanswered pause hangs
 	// that request until the capture window closes.
-	c.attachSourceGuard(ctx, session)
+	guard := c.attachSourceGuard(ctx, session)
 
 	if _, err := session.Send(ctx, "Network.enable", map[string]interface{}{}); err != nil {
 		return nil, fmt.Errorf("offline cache: Network.enable: %w", err)
@@ -357,6 +357,12 @@ func (c *capturer) Capture(ctx context.Context, item dp1playlist.PlaylistItem, c
 	// very first request of the page is already covered.
 	if _, err := session.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
 		return nil, fmt.Errorf("offline cache: Fetch.enable on capture session: %w", err)
+	}
+	// Cross-origin iframes and workers run in their own CDP targets whose
+	// requests never reach the root handler above — see this function's
+	// doc for why guarding only the root is a complete bypass.
+	if err := c.enableGuardedAutoAttach(ctx, session, guard); err != nil {
+		return nil, fmt.Errorf("offline cache: arm child-target source guard: %w", err)
 	}
 
 	navCtx, navCancel := context.WithTimeout(ctx, window)
@@ -1043,9 +1049,27 @@ const (
 // also does not intercept WebSocket handshakes, so ws:// egress is
 // likewise uncovered. Both are recorded in
 // docs/offline-artwork-capture.md §9.
-func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) {
-	slots := make(chan struct{}, captureGuardConcurrency)
-	var saturatedOnce sync.Once
+func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) *captureGuard {
+	g := &captureGuard{c: c, slots: make(chan struct{}, captureGuardConcurrency)}
+	g.arm(ctx, session)
+	return g
+}
+
+// captureGuard carries the state shared by the root session and every
+// child target: one concurrency bound across ALL of them, so a page
+// cannot multiply its decision budget by spawning iframes.
+type captureGuard struct {
+	c             *capturer
+	slots         chan struct{}
+	saturatedOnce sync.Once
+}
+
+// arm registers the Fetch.requestPaused handler on one session. Called
+// for the root page and again for every auto-attached child target.
+func (g *captureGuard) arm(ctx context.Context, session CDPSession) {
+	c := g.c
+	slots := g.slots
+	saturatedOnce := &g.saturatedOnce
 
 	session.On("Fetch.requestPaused", func(params json.RawMessage) {
 		var evt struct {
@@ -1105,10 +1129,14 @@ func (c *capturer) decidePausedRequest(ctx context.Context, session CDPSession, 
 
 // pausedRequestAllowed applies the source policy to one page request.
 //
-// Only http(s) is checked. A non-http scheme reaching here (data:, blob:)
-// carries its own bytes and opens no socket, so blocking it would break
-// ordinary artwork for no security gain — the schemes that DO dial are
-// exactly the ones this covers.
+// ALLOWLIST, not a denylist — the same rule sourceGuard.check states and
+// for the same reason. An earlier version of this function continued
+// every scheme that was not http(s), intending only to let data: and
+// blob: through; that silently admitted file:, ftp:, chrome: and anything
+// else Chromium might hand us, which is precisely the shape of mistake a
+// denylist makes. data: and blob: are the ONLY non-dialing exceptions:
+// they carry their own bytes and open no socket, so refusing them would
+// break ordinary artwork for no security gain.
 func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) error {
 	u, err := go_url.Parse(rawURL)
 	if err != nil {
@@ -1116,8 +1144,11 @@ func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) erro
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
-	default:
+		// Checked against the address policy below.
+	case "data", "blob":
 		return nil
+	default:
+		return fmt.Errorf("%w: request scheme %q is not permitted", ErrUnsafeSource, u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "" {
@@ -1125,4 +1156,103 @@ func (c *capturer) pausedRequestAllowed(ctx context.Context, rawURL string) erro
 	}
 	_, err = c.guard.addrsFor(ctx, host)
 	return err
+}
+
+// enableGuardedAutoAttach extends the source guard to CHILD CDP targets.
+//
+// Why this is required, not defense in depth: a cross-origin iframe
+// (OOPIF) and a worker each run in their OWN CDP target, and their
+// requests are never delivered to the root page session's
+// Fetch.requestPaused handler. Guarding only the root therefore leaves a
+// complete bypass — an artwork embeds a cross-origin iframe, and that
+// iframe fetches http://127.0.0.1:1111/api/cast unguarded.
+//
+// Ordering contract, and the reason waitForDebuggerOnStart is set: a new
+// child is PAUSED before it issues even its first request. On
+// Target.attachedToTarget we arm the guard and Fetch.enable on it FIRST,
+// then resume it. Without the pause, the child's opening request races
+// our Fetch.enable and can reach the network before interception exists.
+//
+// Differs from replay's equivalent (kiosktargets.go) in two ways, both
+// deliberate. No target-type filter: replay scopes to iframes because it
+// has nothing cached for a worker, but a worker can dial, so a SECURITY
+// boundary cannot skip it. And it recurses — setAutoAttach is reissued on
+// each child — because an artwork can nest iframes, and a boundary that
+// stops at depth one is a boundary with a documented way around it.
+//
+// A child whose interception could not be armed is NOT resumed. It stays
+// frozen, which costs that subframe's content; resuming it would let it
+// run entirely outside the guard, which is the failure this exists to
+// prevent.
+func (c *capturer) enableGuardedAutoAttach(ctx context.Context, root CDPSession, guard *captureGuard) error {
+	c.armAutoAttachHandler(ctx, root, root, guard)
+	return c.sendAutoAttach(ctx, root)
+}
+
+// armAutoAttachHandler registers the child-attach handler on session.
+// root is kept separately because flat-mode sessions are all routed over
+// the root connection, so ForSession is always called on it — including
+// for grandchildren, whose events arrive on a child's session.
+func (c *capturer) armAutoAttachHandler(ctx context.Context, root, session CDPSession, guard *captureGuard) {
+	session.On("Target.attachedToTarget", func(params json.RawMessage) {
+		// Off the read pump: this handler Sends (Fetch.enable, resume),
+		// and CDPSession.On forbids that inline.
+		go c.handleCaptureTargetAttached(ctx, root, guard, params)
+	})
+}
+
+func (c *capturer) sendAutoAttach(ctx context.Context, session CDPSession) error {
+	if _, err := session.Send(ctx, "Target.setAutoAttach", map[string]interface{}{
+		"autoAttach":             true,
+		"waitForDebuggerOnStart": true,
+		"flatten":                true,
+		// No "filter": every child type must be covered, workers included.
+	}); err != nil {
+		return fmt.Errorf("Target.setAutoAttach: %w", err)
+	}
+	return nil
+}
+
+// handleCaptureTargetAttached arms the guard on a newly attached child,
+// extends auto-attach into it, and only then resumes it.
+func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSession, guard *captureGuard, params json.RawMessage) {
+	var evt targetAttachedEvent
+	if err := c.json.Unmarshal(params, &evt); err != nil {
+		c.logger.Warn("offline cache capture: failed to parse Target.attachedToTarget", zap.Error(err))
+		return
+	}
+	if evt.SessionID == "" {
+		// Without a sessionId there is nothing to route commands to, so
+		// the child can be neither guarded nor resumed.
+		c.logger.Warn("offline cache capture: Target.attachedToTarget without sessionId; child left paused",
+			zap.String("type", evt.TargetInfo.Type))
+		return
+	}
+
+	// Flat mode routes every session over the root connection, so the
+	// view is always taken from root — this is what makes the recursion
+	// below work for grandchildren too.
+	child := root.ForSession(evt.SessionID)
+	guard.arm(ctx, child)
+	if _, err := child.Send(ctx, "Fetch.enable", fetchEnablePatternAll()); err != nil {
+		// Deliberately NOT resumed: a child running without interception
+		// is exactly the bypass this closes.
+		c.logger.Warn("offline cache capture: Fetch.enable on child target failed; leaving it paused",
+			zap.String("session_id", evt.SessionID),
+			zap.String("type", evt.TargetInfo.Type), zap.Error(err))
+		return
+	}
+
+	// Recurse before resuming, so a nested target created by this child's
+	// first paint is already covered.
+	c.armAutoAttachHandler(ctx, root, child, guard)
+	if err := c.sendAutoAttach(ctx, child); err != nil {
+		c.logger.Debug("offline cache capture: could not extend auto-attach into child target",
+			zap.String("session_id", evt.SessionID), zap.Error(err))
+	}
+
+	if _, err := child.Send(ctx, "Runtime.runIfWaitingForDebugger", map[string]interface{}{}); err != nil {
+		c.logger.Debug("offline cache capture: resuming child target failed",
+			zap.String("session_id", evt.SessionID), zap.Error(err))
+	}
 }

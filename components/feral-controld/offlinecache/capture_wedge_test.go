@@ -354,6 +354,7 @@ type fakePausedSession struct {
 	mu       sync.Mutex
 	sent     []string
 	handlers map[string]func(json.RawMessage)
+	children map[string]*fakePausedSession
 }
 
 func newFakePausedSession() *fakePausedSession {
@@ -366,9 +367,40 @@ func (f *fakePausedSession) Send(_ context.Context, method string, _ map[string]
 	f.sent = append(f.sent, method)
 	return json.RawMessage(`{}`), nil
 }
-func (f *fakePausedSession) On(method string, h func(json.RawMessage)) { f.handlers[method] = h }
-func (f *fakePausedSession) ForSession(string) CDPSession              { return f }
-func (f *fakePausedSession) Close() error                              { return nil }
+func (f *fakePausedSession) On(method string, h func(json.RawMessage)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.handlers[method] = h
+}
+func (f *fakePausedSession) Close() error { return nil }
+
+// ForSession returns a DISTINCT child view, so a test can tell whether the
+// guard was armed on the child target or only on the root.
+func (f *fakePausedSession) ForSession(id string) CDPSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.children == nil {
+		f.children = map[string]*fakePausedSession{}
+	}
+	if c, ok := f.children[id]; ok {
+		return c
+	}
+	c := newFakePausedSession()
+	f.children[id] = c
+	return c
+}
+
+func (f *fakePausedSession) child(id string) *fakePausedSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.children[id]
+}
+
+func (f *fakePausedSession) handler(method string) func(json.RawMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.handlers[method]
+}
 
 func (f *fakePausedSession) verdicts() []string {
 	f.mu.Lock()
@@ -382,8 +414,8 @@ func (f *fakePausedSession) verdicts() []string {
 // read pump), so the wait is what makes the assertion deterministic.
 func (f *fakePausedSession) pause(t *testing.T, url string) string {
 	t.Helper()
-	h := f.handlers["Fetch.requestPaused"]
-	require.NotNil(t, h, "attachSourceGuard must register a Fetch.requestPaused handler")
+	h := f.handler("Fetch.requestPaused")
+	require.NotNil(t, h, "the guard must register a Fetch.requestPaused handler on this session")
 	before := len(f.verdicts())
 	h(json.RawMessage(`{"requestId":"r1","request":{"url":"` + url + `"}}`))
 	require.Eventually(t, func() bool { return len(f.verdicts()) > before },
@@ -452,4 +484,119 @@ func TestCapturer_SourceGuard_BlocksHostnameResolvingToReserved(t *testing.T) {
 	session := newFakePausedSession()
 	c.attachSourceGuard(context.Background(), session)
 	assert.Equal(t, "Fetch.failRequest", session.pause(t, "http://art.evil.example/x.js"))
+}
+
+// TestCapturer_SourceGuard_CoversChildTargets is the regression for the
+// bypass that made root-only interception useless: a cross-origin iframe
+// (OOPIF) and a worker each run in their OWN CDP target, and their
+// requests are never delivered to the root page session's handler. An
+// artwork embedding a cross-origin iframe could therefore reach loopback
+// with the root guard fully armed.
+//
+// The ordering matters as much as the coverage: the child must be armed
+// and Fetch-enabled BEFORE it is resumed, or its opening request races
+// ahead of interception.
+func TestCapturer_SourceGuard_CoversChildTargets(t *testing.T) {
+	c := &capturer{
+		json:   wrapper.NewJSON(),
+		logger: zaptest.NewLogger(t),
+		guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
+	}
+	root := newFakePausedSession()
+	guard := c.attachSourceGuard(context.Background(), root)
+	require.NoError(t, c.enableGuardedAutoAttach(context.Background(), root, guard))
+
+	attach := root.handler("Target.attachedToTarget")
+	require.NotNil(t, attach, "auto-attach must be armed on the root session")
+
+	for _, targetType := range []string{"iframe", "worker", "service_worker"} {
+		t.Run(targetType, func(t *testing.T) {
+			sessionID := "child-" + targetType
+			attach(json.RawMessage(`{"sessionId":"` + sessionID +
+				`","targetInfo":{"targetId":"t1","type":"` + targetType + `"}}`))
+
+			var child *fakePausedSession
+			require.Eventually(t, func() bool {
+				child = root.child(sessionID)
+				return child != nil && child.handler("Fetch.requestPaused") != nil
+			}, 2*time.Second, 5*time.Millisecond,
+				"the guard must be armed on the child target, not only the root")
+
+			// Armed and enabled before resume — never the other way round.
+			sent := child.verdicts()
+			require.Contains(t, sent, "Fetch.enable")
+			require.Contains(t, sent, "Runtime.runIfWaitingForDebugger")
+			assert.Less(t, indexOf(sent, "Fetch.enable"), indexOf(sent, "Runtime.runIfWaitingForDebugger"),
+				"a child resumed before interception is armed can race its first request out")
+
+			// And the child's own requests are actually policed.
+			assert.Equal(t, "Fetch.failRequest", child.pause(t, "http://127.0.0.1:1111/api/cast"))
+		})
+	}
+}
+
+// A nested target (an iframe inside the artwork's own iframe) must be
+// covered too — a boundary that stops at depth one is a boundary with a
+// documented way around it.
+func TestCapturer_SourceGuard_RecursesIntoNestedTargets(t *testing.T) {
+	c := &capturer{
+		json:   wrapper.NewJSON(),
+		logger: zaptest.NewLogger(t),
+		guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
+	}
+	root := newFakePausedSession()
+	guard := c.attachSourceGuard(context.Background(), root)
+	require.NoError(t, c.enableGuardedAutoAttach(context.Background(), root, guard))
+
+	root.handler("Target.attachedToTarget")(json.RawMessage(
+		`{"sessionId":"child-1","targetInfo":{"targetId":"t1","type":"iframe"}}`))
+
+	var child *fakePausedSession
+	require.Eventually(t, func() bool {
+		child = root.child("child-1")
+		return child != nil && child.handler("Target.attachedToTarget") != nil
+	}, 2*time.Second, 5*time.Millisecond, "auto-attach must be extended into the child")
+	assert.Contains(t, child.verdicts(), "Target.setAutoAttach")
+
+	// Grandchild events arrive on the child's session but route through
+	// root, so the view must still come from root.
+	child.handler("Target.attachedToTarget")(json.RawMessage(
+		`{"sessionId":"grandchild-1","targetInfo":{"targetId":"t2","type":"iframe"}}`))
+	var grand *fakePausedSession
+	require.Eventually(t, func() bool {
+		grand = root.child("grandchild-1")
+		return grand != nil && grand.handler("Fetch.requestPaused") != nil
+	}, 2*time.Second, 5*time.Millisecond, "a nested target must be guarded too")
+	assert.Equal(t, "Fetch.failRequest", grand.pause(t, "http://127.0.0.1:9222/json/new"))
+}
+
+// Non-http(s) schemes other than data:/blob: must FAIL CLOSED. An earlier
+// version continued everything that was not http(s), which is a denylist
+// wearing an allowlist's clothes.
+func TestCapturer_SourceGuard_UnsafeSchemesFailClosed(t *testing.T) {
+	c := &capturer{
+		json:   wrapper.NewJSON(),
+		logger: zaptest.NewLogger(t),
+		guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
+	}
+	session := newFakePausedSession()
+	c.attachSourceGuard(context.Background(), session)
+	for _, url := range []string{
+		"file:///etc/shadow",
+		"ftp://example.com/x",
+		"chrome://settings",
+		"devtools://devtools/bundled/inspector.html",
+		"ws://127.0.0.1:9222/devtools/page/X",
+	} {
+		assert.Equal(t, "Fetch.failRequest", session.pause(t, url), url)
+	}
+}
+
+func indexOf(haystack []string, needle string) int {
+	for i, v := range haystack {
+		if v == needle {
+			return i
+		}
+	}
+	return -1
 }

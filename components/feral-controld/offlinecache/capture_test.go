@@ -87,9 +87,10 @@ func setupCaptureWithMaxDiskBytes(t *testing.T, maxDiskBytes int64) *captureTest
 // domainEnableCallCount is how many outbound CDP calls capture.go always
 // issues, in order, before the observation window begins: Network.enable,
 // Page.enable, resetTargetState's Network.clearBrowserCache and
-// Storage.clearDataForOrigin, then Fetch.enable (the capture-side source
-// guard — see attachSourceGuard), then Page.navigate.
-const domainEnableCallCount = 6
+// Storage.clearDataForOrigin, then Fetch.enable and Target.setAutoAttach
+// (the capture-side source guard and its extension to child targets — see
+// attachSourceGuard and enableGuardedAutoAttach), then Page.navigate.
+const domainEnableCallCount = 7
 
 // answerDomainEnables drains and acks every call capture.go always
 // issues before the observation window begins (see
@@ -468,6 +469,15 @@ func TestCapturer_Capture_ClearsBrowserCacheAndOriginStorageBeforeNavigate(t *te
 				assert.Equal(t, "Fetch.enable", msg["method"],
 					"the source guard must be armed before navigation, or the page's first request is unchecked")
 			case 5:
+				assert.Equal(t, "Target.setAutoAttach", msg["method"],
+					"child targets (OOPIFs, workers) must be covered before navigation too")
+				params, ok := msg["params"].(map[string]interface{})
+				require.True(t, ok)
+				assert.Equal(t, true, params["waitForDebuggerOnStart"],
+					"a child must be paused until the guard is armed on it")
+				assert.NotContains(t, params, "filter",
+					"no target-type filter: a worker can dial, so a security boundary cannot skip it")
+			case 6:
 				assert.Equal(t, "Page.navigate", msg["method"],
 					"the cache/storage reset must complete before navigation starts")
 			}
@@ -511,6 +521,10 @@ func TestCapturer_Capture_UnparsableSourceSkipsOriginClearButStillClearsCache(t 
 		// itself surface the bad URL.
 		msg = h.conn.nextOutbound(t)
 		assert.Equal(t, "Fetch.enable", msg["method"])
+		h.ackEmpty(t, msg)
+
+		msg = h.conn.nextOutbound(t)
+		assert.Equal(t, "Target.setAutoAttach", msg["method"])
 		h.ackEmpty(t, msg)
 
 		msg = h.conn.nextOutbound(t)
