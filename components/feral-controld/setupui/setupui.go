@@ -171,8 +171,9 @@ type Service struct {
 	// renders-nothing connecting to an old player. Every resolution re-reads
 	// the manifest (connecting pushes are rare — boot hedge and offline
 	// episode edges — so one small file read each is nothing); this field
-	// only bridges unreadable windows (OTA mid-replace) with the last real
-	// evidence. supportUnknown until the first successful read.
+	// only bridges read/decode-failure windows (boot ordering, OTA
+	// mid-replace, a torn write) with the last real evidence. supportUnknown
+	// until the first successful read.
 	connectingSupport support
 	// last is the most recently intended narration state. It is retained (not
 	// cleared after sending) so it can be re-pushed when CDP reconnects.
@@ -302,29 +303,35 @@ func (s *Service) resolveConnectingState(req map[string]any) map[string]any {
 }
 
 // connectingUnsupported reports POSITIVE evidence that the running player
-// predates stateConnecting: a successfully read manifest whose state list
+// predates stateConnecting: a successfully DECODED manifest whose state list
 // lacks it. Re-read on every resolution — never latched — because the bundle
 // and manifest are OTA-replaced under a running controld (see the
-// connectingSupport field for both staleness directions a latch causes). An
-// unreadable manifest (boot ordering, OTA mid-replace) falls back to the
-// last verdict read from a real manifest; before any successful read it
-// reports false — keep the neutral state, because downgrading on anything
-// short of positive evidence would trade the M-0/M-1 narration's truthful
-// title for join_failed's false failure one, and that un-downgraded push is
-// skipped by narrationSupported's own unreadable branch anyway (the next
-// delivery or Resync replay re-resolves). A readable-but-undecodable
-// manifest downgrades conservatively without updating the remembered
-// verdict and without its own log line: narrationSupported fails the same
-// manifest loudly and, unless its verdict was latched earlier, suppresses
-// all narration before this is ever consulted.
+// connectingSupport field for both staleness directions a latch causes).
+// Only a decoded manifest ever updates the verdict; EVERY read/decode
+// failure (boot ordering, OTA mid-replace, a partially written file) falls
+// back to the last verdict derived from a real manifest, because a failure
+// proves nothing about the player — treating a torn mid-OTA write as
+// "unsupported" would repaint the false join_failed title on a player that
+// renders connecting fine, the exact flash this state removes. Before any
+// successful read the fallback reports false — keep the neutral state, since
+// downgrading on anything short of positive evidence would trade the M-0/M-1
+// narration's truthful title for join_failed's false failure one, and that
+// un-downgraded push is skipped by narrationSupported's own unreadable
+// branch anyway (the next delivery or Resync replay re-resolves).
+//
+// LOCKING: the manifest read and decode run OUTSIDE s.mu — every Show*/Hide
+// caller (the provisioning notifier's OnStateChange path) takes that mutex
+// in pushIf, and pushes must never block behind disk I/O (a hung read on a
+// degraded filesystem would otherwise stall the online Hide that ends the
+// narration). Safe without the lock because resolution only ever runs on the
+// single narration worker goroutine (the `running` guard); s.mu is taken
+// only around the cached-verdict field so it stays consistently guarded
+// alongside the Service's other mutable state.
 func (s *Service) connectingUnsupported() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	manifest, err := readPlayerContractManifest(s.contractPath)
 	if err != nil {
-		if !errors.Is(err, errContractUnreadable) {
-			return true
-		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		return s.connectingSupport == supportNo
 	}
 	supported := false
@@ -338,8 +345,11 @@ func (s *Service) connectingUnsupported() bool {
 	if !supported {
 		verdict = supportNo
 	}
-	if s.connectingSupport != verdict {
-		s.connectingSupport = verdict
+	s.mu.Lock()
+	changed := s.connectingSupport != verdict
+	s.connectingSupport = verdict
+	s.mu.Unlock()
+	if changed {
 		// Logged on verdict CHANGES only (not per push): the flip is the
 		// bundle-swap trace an operator needs, and steady-state pushes stay
 		// quiet. Info, not Warn — expected on fielded players until the

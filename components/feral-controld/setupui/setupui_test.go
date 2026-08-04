@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -473,6 +474,78 @@ func TestShowConnectingManifestGate(t *testing.T) {
 		sender.waitForCalls(t, 2)
 		assert.Equal(t, stateJoinFailed, sender.lastRequest()["state"])
 	})
+
+	t.Run("malformed manifest after a supported verdict keeps connecting", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
+
+		// A torn mid-OTA write leaves partial JSON: readable but
+		// undecodable. That proves nothing about the player, so the replay
+		// must keep the last real verdict — treating it as "unsupported"
+		// would repaint the false join_failed title on a player that renders
+		// connecting fine.
+		require.NoError(t, os.WriteFile(path, []byte(`{"contracts": {"setupDis`), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
+	})
+}
+
+// TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking
+// contract against the send-time capability read: with the narration worker
+// stuck inside a manifest read (a hung filesystem, modeled by a FIFO that has
+// no writer yet), every Show*/Hide call must still return immediately — the
+// read runs OUTSIDE the queue mutex, so a stalled resolution delays delivery,
+// never callers. The call that matters operationally is the online Hide that
+// ends the boot narration; under the old read-under-mutex shape it would have
+// waited on disk here.
+func TestShowCallersDoNotBlockOnManifestRead(t *testing.T) {
+	sender := newFakeCDP()
+	path := filepath.Join(t.TempDir(), "contract.json")
+	require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+	svc := New(sender, path, nil)
+
+	// Latch narrationSupported's overall verdict with a normal push so the
+	// next delivery reaches the connecting resolution at all.
+	svc.ShowJoining()
+	sender.waitForCalls(t, 1)
+
+	// Swap the manifest for a FIFO: the worker's next resolution blocks in
+	// os.ReadFile until a writer appears.
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
+
+	svc.ShowConnecting("Checking the network connection…")
+	// Give the worker time to enter the blocking read.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		svc.Hide()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Hide blocked behind the worker's manifest read")
+	}
+
+	// Unblock the worker with a real manifest so the test does not leak a
+	// stuck goroutine; the queued states then drain in order (connecting,
+	// then hidden).
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // Test-owned FIFO under t.TempDir.
+	require.NoError(t, err)
+	_, err = writer.Write([]byte(contractWithConnecting))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	sender.waitForCalls(t, 3)
+	assert.Equal(t, stateHidden, sender.lastRequest()["state"])
 }
 
 // TestDownCDPDoesNotBlockOrPanic verifies fire-and-forget semantics against a
