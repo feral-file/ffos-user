@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -355,6 +356,12 @@ type fakePausedSession struct {
 	sent     []string
 	handlers map[string]func(json.RawMessage)
 	children map[string]*fakePausedSession
+	// gate, when non-nil, holds every Send until it is closed — so a test
+	// can observe how many setups are genuinely IN FLIGHT rather than how
+	// many ran in total. Inherited by child views.
+	gate     chan struct{}
+	inFlight *atomic.Int32
+	peak     *atomic.Int32
 }
 
 func newFakePausedSession() *fakePausedSession {
@@ -363,8 +370,22 @@ func newFakePausedSession() *fakePausedSession {
 
 func (f *fakePausedSession) Send(_ context.Context, method string, _ map[string]interface{}) (json.RawMessage, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.sent = append(f.sent, method)
+	gate, in, peak := f.gate, f.inFlight, f.peak
+	f.mu.Unlock()
+	if gate != nil {
+		if in != nil {
+			cur := in.Add(1)
+			for {
+				old := peak.Load()
+				if cur <= old || peak.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			defer in.Add(-1)
+		}
+		<-gate
+	}
 	return json.RawMessage(`{}`), nil
 }
 func (f *fakePausedSession) On(method string, h func(json.RawMessage)) {
@@ -386,6 +407,7 @@ func (f *fakePausedSession) ForSession(id string) CDPSession {
 		return c
 	}
 	c := newFakePausedSession()
+	c.gate, c.inFlight, c.peak = f.gate, f.inFlight, f.peak
 	f.children[id] = c
 	return c
 }
@@ -599,4 +621,51 @@ func indexOf(haystack []string, needle string) int {
 		}
 	}
 	return -1
+}
+
+// TestCapturer_SourceGuard_TargetFloodIsBounded pins the second bound.
+// Deciding a paused request and setting up a child target are different
+// work: each attach performs several sequential CDP calls, so the
+// request semaphore does not constrain it at all. A hostile page can
+// create targets faster than those calls complete, and one unbounded
+// goroutine per attach event would exhaust the daemon.
+//
+// Fail-closed is what makes dropping safe: children are created with
+// waitForDebuggerOnStart, so a target that is never set up stays PAUSED
+// and never runs. Declining work can only cost fidelity, never admit an
+// unguarded target.
+func TestCapturer_SourceGuard_TargetFloodIsBounded(t *testing.T) {
+	c := &capturer{
+		json:   wrapper.NewJSON(),
+		logger: zaptest.NewLogger(t),
+		guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
+	}
+	root := newFakePausedSession()
+	// Every CDP Send stalls until released, so setups pile up in flight
+	// and the peak is what the bound has to hold.
+	root.gate = make(chan struct{})
+	root.inFlight = &atomic.Int32{}
+	root.peak = &atomic.Int32{}
+
+	guard := c.attachSourceGuard(context.Background(), root)
+	// setAutoAttach itself Sends, so arm the handler without it.
+	c.armAutoAttachHandler(context.Background(), root, root, guard)
+	attach := root.handler("Target.attachedToTarget")
+	require.NotNil(t, attach)
+
+	const flood = captureTargetSetupConcurrency * 20
+	for i := range flood {
+		attach(json.RawMessage(fmt.Sprintf(
+			`{"sessionId":"flood-%d","targetInfo":{"targetId":"t%d","type":"iframe"}}`, i, i)))
+	}
+
+	// Give the goroutines that DID get a slot time to reach their Send.
+	require.Eventually(t, func() bool { return root.peak.Load() > 0 },
+		2*time.Second, 5*time.Millisecond, "no setup ever started")
+	time.Sleep(100 * time.Millisecond)
+
+	assert.LessOrEqual(t, int(root.peak.Load()), captureTargetSetupConcurrency,
+		"child-target setup must be bounded; an unbounded goroutine per attach event would let all %d run at once", flood)
+
+	close(root.gate)
 }

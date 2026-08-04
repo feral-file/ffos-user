@@ -1025,6 +1025,12 @@ const (
 	// captureGuardDecisionTimeout bounds one decision, so a resolver that
 	// hangs cannot pin a slot for the whole capture window.
 	captureGuardDecisionTimeout = 5 * time.Second
+	// captureTargetSetupConcurrency bounds how many child targets are
+	// being armed at once. Lower than the request bound because each
+	// setup is several sequential CDP round trips rather than one
+	// decision, and a page has no legitimate reason to open many targets
+	// at once.
+	captureTargetSetupConcurrency = 8
 )
 
 // attachSourceGuard arms Fetch interception on the capture session and
@@ -1050,7 +1056,11 @@ const (
 // likewise uncovered. Both are recorded in
 // docs/offline-artwork-capture.md §9.
 func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) *captureGuard {
-	g := &captureGuard{c: c, slots: make(chan struct{}, captureGuardConcurrency)}
+	g := &captureGuard{
+		c:           c,
+		slots:       make(chan struct{}, captureGuardConcurrency),
+		targetSlots: make(chan struct{}, captureTargetSetupConcurrency),
+	}
 	g.arm(ctx, session)
 	return g
 }
@@ -1059,9 +1069,17 @@ func (c *capturer) attachSourceGuard(ctx context.Context, session CDPSession) *c
 // child target: one concurrency bound across ALL of them, so a page
 // cannot multiply its decision budget by spawning iframes.
 type captureGuard struct {
-	c             *capturer
-	slots         chan struct{}
-	saturatedOnce sync.Once
+	c     *capturer
+	slots chan struct{}
+	// targetSlots bounds CHILD-TARGET SETUP, which is separate work from
+	// deciding a paused request: each attach performs several CDP calls
+	// (Fetch.enable, setAutoAttach, resume), and a hostile page can create
+	// targets faster than those complete. Without its own bound, one
+	// goroutine per attach event is unbounded — the request semaphore
+	// above does not constrain it at all.
+	targetSlots         chan struct{}
+	saturatedOnce       sync.Once
+	targetSaturatedOnce sync.Once
 }
 
 // arm registers the Fetch.requestPaused handler on one session. Called
@@ -1196,8 +1214,26 @@ func (c *capturer) enableGuardedAutoAttach(ctx context.Context, root CDPSession,
 func (c *capturer) armAutoAttachHandler(ctx context.Context, root, session CDPSession, guard *captureGuard) {
 	session.On("Target.attachedToTarget", func(params json.RawMessage) {
 		// Off the read pump: this handler Sends (Fetch.enable, resume),
-		// and CDPSession.On forbids that inline.
-		go c.handleCaptureTargetAttached(ctx, root, guard, params)
+		// and CDPSession.On forbids that inline. Bounded, because a
+		// hostile page can create targets faster than the several CDP
+		// calls per attach complete.
+		select {
+		case guard.targetSlots <- struct{}{}:
+			go func() {
+				defer func() { <-guard.targetSlots }()
+				c.handleCaptureTargetAttached(ctx, root, guard, params)
+			}()
+		default:
+			// Fail closed: the child was created with
+			// waitForDebuggerOnStart, so declining to set it up leaves it
+			// PAUSED and it never runs. Dropping the event is therefore
+			// safe in the direction that matters — the opposite of
+			// admitting an unguarded target.
+			guard.targetSaturatedOnce.Do(func() {
+				c.logger.Warn("offline cache capture: child-target setup saturated; further targets left paused for this capture",
+					zap.Int("concurrency", captureTargetSetupConcurrency))
+			})
+		}
 	})
 }
 

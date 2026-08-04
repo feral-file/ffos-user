@@ -386,11 +386,16 @@ parsing; it always runs the code and observes.
 
 ### 3.2 CDP `Network` domain — the chosen capture mechanism
 
-`capture.go` enables the CDP `Network` and `Page` domains (not `Fetch` —
-`Fetch` interception is what *replay* uses, §6) and observes
+`capture.go` enables the CDP `Network` and `Page` domains and observes
 `Network.requestWillBeSent`/`responseReceived`/`loadingFailed` for a
 bounded capture window (`offlineCache.captureWindowMs`) after navigating to
 the item's `source`. For each distinct URL:
+
+> `Fetch` is enabled on the capture session too, but for a different
+> purpose than replay's: capture uses it only to **police** where the page
+> may connect (§9's capture-side source guard), never to fulfill a request
+> from cache. Discovery of which URLs were requested still comes from the
+> `Network` events described here.
 
 - **Found on a successful (2xx) response, captured via `GET`/`HEAD`** →
   fetch the exact bytes via an out-of-band `http.Client` request using
