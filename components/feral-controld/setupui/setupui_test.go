@@ -33,19 +33,27 @@ const validContract = `{
   }
 }`
 
-// contractWithConnecting models the current shipping manifest, which lists the
-// connecting extension state (validContract deliberately predates it, so the
-// pair exercises ShowConnecting's downgrade gate).
-const contractWithConnecting = `{
-  "contracts": {
-    "setupDisplay": {
-      "version": 1,
-      "requestKey": "request",
-      "states": ["softap_qr","joining","join_failed","connecting","updating","claim_qr","ready","hidden"],
-      "acceptedResponse": {"ok": true}
-    }
-  }
-}`
+// contractWithConnecting is the SHIPPING player manifest, loaded verbatim
+// from testdata/ffos-player-contract.json — a byte-for-byte copy of
+// ff-player `public/ffos-player-contract.json` on branch
+// feat/setup-display-connecting-state (PR feral-file/ff-player#275), kept in
+// lockstep by `cp`, the same convention as the DRM display-connected
+// predicate's mirrored copies (an inlined Go string cannot be byte-faithful:
+// the manifest's notes contain backticks). Deliberately the full file, not a
+// trimmed extract: the point is that the manifest these tests gate on is the
+// manifest the player actually ships, so cross-repo drift (e.g. the player
+// renaming a state) breaks these tests instead of leaving both repos green
+// while the state no-ops on screen. ff-player's own custom_event.test.ts
+// pins the other half (its enum ↔ that manifest). validContract above
+// deliberately predates the connecting state, so the pair exercises
+// ShowConnecting's downgrade gate.
+var contractWithConnecting = func() string {
+	raw, err := os.ReadFile(filepath.Join("testdata", "ffos-player-contract.json"))
+	if err != nil {
+		panic("shipping player manifest fixture missing: " + err.Error())
+	}
+	return string(raw)
+}()
 
 // contractWithoutSetupDisplay models an older player that predates the contract.
 const contractWithoutSetupDisplay = `{
@@ -491,6 +499,26 @@ func TestShowConnectingManifestGate(t *testing.T) {
 		// would repaint the false join_failed title on a player that renders
 		// connecting fine.
 		require.NoError(t, os.WriteFile(path, []byte(`{"contracts": {"setupDis`), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 2)
+		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])
+	})
+
+	t.Run("manifest without setupDisplay contract keeps the prior verdict", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc := New(sender, path, nil)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+		require.Equal(t, stateConnecting, sender.lastRequest()["state"])
+
+		// Decodes fine, but is not a setupDisplay v1 contract: no more
+		// capability evidence than a torn write. The replay must keep the
+		// last real verdict rather than flipping to a downgrade off the
+		// missing contract's empty state list.
+		require.NoError(t, os.WriteFile(path, []byte(`{"contracts":{}}`), 0o600))
 		svc.Resync()
 		sender.waitForCalls(t, 2)
 		assert.Equal(t, stateConnecting, sender.lastRequest()["state"])

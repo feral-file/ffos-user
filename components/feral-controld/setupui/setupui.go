@@ -329,6 +329,14 @@ func (s *Service) resolveConnectingState(req map[string]any) map[string]any {
 // alongside the Service's other mutable state.
 func (s *Service) connectingUnsupported() bool {
 	manifest, err := readPlayerContractManifest(s.contractPath)
+	if err == nil {
+		// A manifest that decodes but is not a real setupDisplay v1 contract
+		// (e.g. `{"contracts":{}}` from a transitional or foreign bundle) is
+		// no more capability evidence than a torn write — scanning its empty
+		// state list would flip the verdict to "unsupported" and repaint the
+		// false join_failed title on a player that renders connecting fine.
+		err = validateSetupDisplayManifest(manifest)
+	}
 	if err != nil {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -906,6 +914,16 @@ func validateSetupDisplayContract(path string) error {
 	if err != nil {
 		return err
 	}
+	return validateSetupDisplayManifest(manifest)
+}
+
+// validateSetupDisplayManifest is the manifest-level half of
+// validateSetupDisplayContract, split out so the connecting capability
+// resolution can apply the SAME "is this a real setupDisplay v1 contract"
+// test to an already-decoded manifest: a manifest that decodes but does not
+// speak the contract (e.g. a bare `{"contracts":{}}` from a transitional or
+// foreign bundle) is not capability evidence about any individual state.
+func validateSetupDisplayManifest(manifest playerContractManifest) error {
 	contract, ok := manifest.Contracts["setupDisplay"]
 	if !ok {
 		return fmt.Errorf("missing contracts.setupDisplay")
