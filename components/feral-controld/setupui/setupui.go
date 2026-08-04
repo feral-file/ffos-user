@@ -715,16 +715,29 @@ func (s *Service) trySend(req map[string]any) {
 // support. The decision is cached for the process lifetime: an older player
 // yields a permanent no-narration fallback so narration-disabled is
 // indistinguishable from narration-working from the state machine's side.
+//
+// LOCKING: the manifest read runs OUTSIDE s.mu, mirroring
+// connectingUnsupported — every Show*/Hide caller takes that mutex in
+// pushIf, and the UN-latched first read fires exactly on the boot narration
+// path (the process's first push), so a hung read on a degraded filesystem
+// under the mutex would stall the online Hide that ends the boot narration.
+// Safe without the lock because this only runs on the single narration
+// worker goroutine (the `running` guard); the latch and warnedUnreadable
+// stay mutex-guarded.
 func (s *Service) narrationSupported() bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch s.support {
+	cached := s.support
+	s.mu.Unlock()
+	switch cached {
 	case supportYes:
 		return true
 	case supportNo:
 		return false
 	}
-	if err := validateSetupDisplayContract(s.contractPath); err != nil {
+	err := validateSetupDisplayContract(s.contractPath)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
 		if errors.Is(err, errContractUnreadable) {
 			// Do NOT latch supportNo on a read failure: the very first push
 			// fires within seconds of boot (provisioning starts before CDP),

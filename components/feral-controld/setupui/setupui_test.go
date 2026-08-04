@@ -525,6 +525,76 @@ func TestShowConnectingManifestGate(t *testing.T) {
 	})
 }
 
+// TestShowCallersDoNotBlockOnInitialManifestRead is the un-latched
+// (supportUnknown) sibling of TestShowCallersDoNotBlockOnManifestRead: the
+// process's FIRST push — which on a real device is the boot narration — hits
+// narrationSupported's initial capability read. With that read stuck (FIFO
+// with no writer), Hide must still return immediately; under the old
+// read-under-mutex shape this is exactly the hung-first-read-at-boot case the
+// latch could never bound, because the latch only helps after a successful
+// read.
+func TestShowCallersDoNotBlockOnInitialManifestRead(t *testing.T) {
+	sender := newFakeCDP()
+	path := filepath.Join(t.TempDir(), "contract.json")
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
+	svc := New(sender, path, nil)
+
+	svc.ShowJoining()
+	// Give the worker time to enter the blocking read.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		svc.Hide()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Hide blocked behind the initial manifest read")
+	}
+
+	// Unblock the worker with a real manifest; the queued states then drain
+	// in order (joining, then hidden — no further manifest read once the
+	// verdict latches).
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // Test-owned FIFO under t.TempDir.
+	require.NoError(t, err)
+	_, err = writer.Write([]byte(validContract))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	sender.waitForCalls(t, 2)
+	assert.Equal(t, stateHidden, sender.lastRequest()["state"])
+}
+
+// TestShippingManifestDeclaresProsePayloads pins the controller-side payload
+// contract into the verbatim fixture: ShowConnecting and ShowJoinFailed send
+// their prose as the `reason` field, so the shipping manifest must keep
+// declaring that field for both states — a player change that keeps a state
+// but renames its prose field would otherwise leave this repo green while
+// the prose silently stops rendering. Decoded ad hoc here rather than in the
+// production manifest model on purpose: stateFields stays player-side
+// validation config, not a controld runtime input.
+func TestShippingManifestDeclaresProsePayloads(t *testing.T) {
+	var manifest struct {
+		Contracts struct {
+			SetupDisplay struct {
+				States      []string `json:"states"`
+				StateFields map[string]struct {
+					Optional []string `json:"optional"`
+				} `json:"stateFields"`
+			} `json:"setupDisplay"`
+		} `json:"contracts"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(contractWithConnecting), &manifest))
+	assert.Contains(t, manifest.Contracts.SetupDisplay.States, stateConnecting)
+	for _, state := range []string{stateConnecting, stateJoinFailed} {
+		fields, ok := manifest.Contracts.SetupDisplay.StateFields[state]
+		require.True(t, ok, "shipping manifest missing stateFields for %q", state)
+		assert.Contains(t, fields.Optional, "reason",
+			"state %q must declare the reason payload ShowConnecting/ShowJoinFailed send", state)
+	}
+}
+
 // TestShowCallersDoNotBlockOnManifestRead pins the notifier's non-blocking
 // contract against the send-time capability read: with the narration worker
 // stuck inside a manifest read (a hung filesystem, modeled by a FIFO that has
