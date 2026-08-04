@@ -27,35 +27,36 @@
 >   from `ap_active` as an idempotent refresh that re-latches the
 >   `user-requested` policy and re-arms a fresh 30-minute clock.
 >
-> **NOT yet implemented — stages 3 and 4 of §6 (the `ff-app` half; a new
-> session should start here, repo `/Users/yehboyang/ff-app`):**
+> **Stages 3 and 4 of §6 (the `ff-app` half) — IMPLEMENTED (2026-08-05)**
+> on ff-app branch `feat/app-triggered-wifi-setup` (`99e1c286`, not pushed;
+> four fresh-context review rounds, final round dual-accept):
 >
-> 1. **Stage 3 — capability gate** on the existing ungated "Configure Wi-Fi"
->    entry (`lib/widgets/device_configuration/options_button.dart:163-167`,
->    line refs pre-change): resolve a live endpoint FIRST
->    (`browseController.hold()` + bounded `findByDeviceId`, pattern
->    `ff1_lan_recovery.dart:77-84` — the LAN endpoint cache is stale outside
->    the 60s browse window, constraint 8), then consult `Ff1LanPairableGate`
->    (mDNS TXT `api=2` AND `/api/v2/status` → `contract:"2"`); the relayer
->    `getDeviceStatus` `contract:"2"` (now shipped device-side) also counts.
->    FAIL CLOSED to the existing BLE flow — only a positive v2 confirmation
->    takes the new path; empty TXT is NOT old-firmware evidence (Android
->    NsdManager delivers empty TXT; the gate already falls back to the HTTP
->    probe). If BLE also finds nothing: honest message (join the same Wi-Fi
->    and retry).
-> 2. **Stage 4 — three-step flow**: warning dialog (leaves current network,
->    must be AT the frame to scan the on-screen QR, frame will be removed
->    from the app and reappears after setup; §4.5 amendment 2 copy: the
->    up-but-offline case means joining THE SAME network the frame is on);
->    send `startWifiSetup` (new `FF1WifiCommandRequest` subclass +
->    `FF1WifiControl` wrapper; **a send timeout IS success** — the raise
->    severs the link that carries the reply); then
->    `removeDevice(deviceId)` (`ff1_bluetooth_device_providers.dart:118`).
->    Template for the whole shape incl. LAN/relayer fallback:
->    `factoryResetAndRemoveDevice` (`ff1_bluetooth_device_providers.dart:130+`).
->    App test list: §5 below ("App (`ff-app`)" block).
-> 3. Also pending app-side: rendering the §4.7 `network` health object
->    (see `network-recovery-ux.md` §4.7) incl. the `deferred` sub-state.
+> 1. **Stage 3 — capability gate**, exposed as
+>    `FF1BluetoothDeviceActionsNotifier.resolveConfigureWifiRoute` (pure
+>    logic in `lib/app/providers/ff1_wifi_setup_flow.dart`): live endpoint
+>    FIRST (`browseController.hold()` + bounded `findByDeviceId`), then
+>    `Ff1LanPairableGate`, then relayer `getDeviceStatus` `contract:"2"`;
+>    fail closed to the unchanged BLE flow. BLE-finds-nothing now surfaces
+>    the honest same-network remedy via a dedicated
+>    `FF1DeviceNotFoundError` copy arm.
+> 2. **Stage 4 — three-step flow** in `options_button.dart`: warning dialog
+>    (amendment-2 copy included) with the send inside the dialog's
+>    processing button; sends try the gate-confirmed LAN endpoint before
+>    the LAN-cache→relayer router; **a send timeout IS success on every
+>    transport** (Dio timeout types included — the relayer leg never throws
+>    `TimeoutException`); refusal only on an explicit `ok:false` (both the
+>    bare hub shape and the relayer envelope are pinned by tests); a
+>    delivered send is never downgraded, even if the local `removeDevice`
+>    throws. Implementation amendments beyond the plan, from review:
+>    `FF1LanHttpError` classifies as reached-terminal (never "unreachable",
+>    never a re-send), and the sent path lands on a terminal confirmation
+>    dialog after `popUntil(home)`.
+> 3. **§4.7 `network` health object** rendered under the Device Info Wi-Fi
+>    row incl. `deferred`; `FF1NetworkHealth` lives in `domain/models` and
+>    is parsed by BOTH status transports; the LAN-read copy is preferred
+>    (the relayer copy is dead exactly in the trouble states) and is
+>    one-shot per watch BY DESIGN — `status_v2` is a counted contact route,
+>    so polling would pin the raise `deferred` exists to warn about.
 >
 > Open items in §6 (sleeping panel, one-tap re-add, unauthenticated `:1111`)
 > remain accepted as written.

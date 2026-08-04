@@ -27,28 +27,41 @@
 > states; the recheck blink is synchronous rather than flag-suppressed; the
 > §4.6 `setup_error` raise-latch also resets at every episode boundary.
 >
-> **NOT yet implemented (a new session should start here):**
-> 1. **ff-player** (`/Users/yehboyang/ff-player`): render `setup_error`
->    (reason → title/body, §4.6) and add it to the manifest's `setupDisplay`
->    states (controld's test fixture already lists it); snapshot tests. Note
->    the player also renders `connecting` already (PR ff-player#275).
-> 2. **ff-app** (`/Users/yehboyang/ff-app`): sibling plan §4.3/§4.4 — gate the
->    existing "Configure Wi-Fi" entry (`lib/widgets/device_configuration/options_button.dart`)
->    on `Ff1LanPairableGate` with `hold()` + bounded `findByDeviceId` first
->    (pattern: `ff1_lan_recovery.dart:77-84`), fail closed to BLE; relayer
->    `contract:"2"` also counts as v2; three-step flow (warning dialog →
->    `startWifiSetup` send where a TIMEOUT IS SUCCESS → `removeDevice`,
->    template: `factoryResetAndRemoveDevice` in
->    `ff1_bluetooth_device_providers.dart:130+`); §4.7 health rendering incl.
->    `deferred` ("your phone is keeping the frame out of setup mode").
-> 3. **ffos** (`/Users/yehboyang/ffos`): `docs/DEVICE_LIFECYCLE.md` — document
->    the new AP session policy / escape cadence and `startWifiSetup`.
-> 4. **Hardware-gated bench items** (§5 list below): hidden-SSID join against
->    a real hidden AP; open-network join; one full link-present episode on a
->    bench frame; the router-cold-boot recheck observation; portal-activity
->    deferral with a real phone (idle phone must NOT defer); LAN pairing of an
->    unclaimed frame on a WAN-less network; venue-network counted-endpoint
->    check; power-restore-to-WAN timing.
+> **Cross-repo halves — ALL IMPLEMENTED (2026-08-05), each through its own
+> repo's reviewer loop:**
+> 1. **ff-player** — DONE: `setup_error` rendered ("Setup needs attention"
+>    title + reason prose; bare-request fallback line), manifest + CDP
+>    validator + tests, on branch `feat/setup-error-display-state`
+>    (`ed32713`, not pushed). The shipping manifest and controld's setupui
+>    testdata fixture are byte-identical again (fixture gained the
+>    `stateFields.setup_error` entry here, commit `ca6a204`, which also
+>    aligned ALL new on-screen controld copy to the player's "Art Computer"
+>    voice — session.go narrations + both setup_error messages).
+> 2. **ff-app** — DONE on branch `feat/app-triggered-wifi-setup`
+>    (`99e1c286`, not pushed; four review rounds): capability gate behind
+>    `FF1BluetoothDeviceActionsNotifier.resolveConfigureWifiRoute`
+>    (live-endpoint-first under a browse hold → `Ff1LanPairableGate` →
+>    relayer `contract:"2"`, fail closed to BLE); three-step flow with the
+>    send inside the dialog's processing button, gate-confirmed LAN endpoint
+>    tried before the router, timeout-is-success on EVERY transport (Dio
+>    types included), refusal only on explicit `ok:false`, delivered sends
+>    never downgraded (even on local removal failure); honest
+>    `FF1DeviceNotFoundError` BLE-not-found copy; §4.7 health surface
+>    (`FF1NetworkHealth` domain model on both status transports, LAN-read
+>    `/api/v2/status` preferred, `deferred` copy) — the LAN health read is
+>    deliberately one-shot per watch because `status_v2` is a counted
+>    contact route (polling would pin the raise `deferred` warns about).
+> 3. **ffos** — DONE: `docs/DEVICE_LIFECYCLE.md` documents the session
+>    policy table, escape cadence, `startWifiSetup`, and the
+>    `connecting`/`setup_error` states, on branch
+>    `docs/network-recovery-lifecycle` (`d1b00a4`, not pushed).
+>
+> **NOT yet done — hardware-gated bench items only** (§5 list below):
+> hidden-SSID join against a real hidden AP; open-network join; one full
+> link-present episode on a bench frame; the router-cold-boot recheck
+> observation; portal-activity deferral with a real phone (idle phone must
+> NOT defer); LAN pairing of an unclaimed frame on a WAN-less network;
+> venue-network counted-endpoint check; power-restore-to-WAN timing.
 >
 > Working notes for the next session: per-module gates run from
 > `components/feral-controld`; provisioning tests drive ticks via
