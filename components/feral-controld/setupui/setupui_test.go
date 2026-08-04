@@ -32,6 +32,20 @@ const validContract = `{
   }
 }`
 
+// contractWithConnecting models the current shipping manifest, which lists the
+// connecting extension state (validContract deliberately predates it, so the
+// pair exercises ShowConnecting's downgrade gate).
+const contractWithConnecting = `{
+  "contracts": {
+    "setupDisplay": {
+      "version": 1,
+      "requestKey": "request",
+      "states": ["softap_qr","joining","join_failed","connecting","updating","claim_qr","ready","hidden"],
+      "acceptedResponse": {"ok": true}
+    }
+  }
+}`
+
 // contractWithoutSetupDisplay models an older player that predates the contract.
 const contractWithoutSetupDisplay = `{
   "contracts": {
@@ -346,6 +360,77 @@ func TestTypedMethodsEmitContractPayloads(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestShowConnectingManifestGate: ShowConnecting emits the connecting state
+// when the player manifest lists it and downgrades to join_failed when the
+// manifest predates it — the downgrade (not a renders-nothing no-op) is what
+// keeps the M-0/M-1 offline narration visible on older fielded players.
+func TestShowConnectingManifestGate(t *testing.T) {
+	t.Run("manifest lists connecting", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		assert.Equal(t, "Checking the network connection…", req["reason"])
+	})
+
+	t.Run("blank message omits reason", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowConnecting(" ")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		_, present := req["reason"]
+		assert.False(t, present, "blank message must omit the reason field")
+	})
+
+	t.Run("older manifest downgrades to join_failed", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowConnecting("Checking the network connection…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateJoinFailed, req["state"])
+		assert.Equal(t, "Checking the network connection…", req["reason"])
+	})
+
+	// The boot-race regression: the hedge fires seconds after daemon start,
+	// while the player bundle can be unreadable (boot ordering, OTA
+	// mid-replace). The push must defer UN-downgraded, so that once the
+	// manifest lands and CDP reconnects, the Resync replay delivers the
+	// neutral state — a Show-time downgrade frozen into the retained intent
+	// would replay the false join_failed flash this state exists to remove.
+	t.Run("unreadable manifest defers; replay delivers connecting once readable", func(t *testing.T) {
+		sender := newFakeCDP()
+		path := filepath.Join(t.TempDir(), "contract.json")
+		svc := New(sender, path, nil) // manifest does not exist yet
+
+		svc.ShowConnecting("Looking for your Wi-Fi network…")
+		time.Sleep(50 * time.Millisecond)
+		assert.Zero(t, sender.callCount(), "no push while the contract is unreadable")
+
+		require.NoError(t, os.WriteFile(path, []byte(contractWithConnecting), 0o600))
+		svc.Resync()
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		assert.Equal(t, "Looking for your Wi-Fi network…", req["reason"])
+	})
 }
 
 // TestDownCDPDoesNotBlockOrPanic verifies fire-and-forget semantics against a
