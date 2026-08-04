@@ -203,6 +203,15 @@ func (h *handler) handleClearPlaylistItemCache(ctx context.Context, args map[str
 	if !ok {
 		return errorResponse("invalid_request", "source is required", false), nil
 	}
+	// Bounded here as well as at download admission: this path never goes
+	// through DownloadItem, so the admission bound does not cover it, and
+	// the ok response below echoes the source back. Non-retryable — a
+	// resend of the same oversized value cannot succeed — and the
+	// rejection deliberately reports only the length, never the value,
+	// since echoing it is the thing being prevented.
+	if err := offlinecache.CheckSourceKeyLength(source); err != nil {
+		return errorResponse("invalid_request", err.Error(), false), nil
+	}
 	if err := h.offlineCache.ClearItem(source); err != nil {
 		return offlineCacheErrorResponse(err), nil
 	}
@@ -445,6 +454,17 @@ func parseStatusRequest(args map[string]any) (offlinecache.StatusRequest, map[st
 		if len(sources) > offlinecache.MaxStatusSources {
 			return req, errorResponse("invalid_request",
 				fmt.Sprintf("sources accepts at most %d sources per request", offlinecache.MaxStatusSources), false)
+		}
+		// Per-source bound on top of the count bound above: the count
+		// alone leaves the aggregate unbounded, and an unknown source is
+		// echoed straight back as a not_cached entry, so without this a
+		// caller can reflect MaxStatusSources oversized values out of one
+		// request. Reported by INDEX and length, never by value.
+		for i, src := range sources {
+			if err := offlinecache.CheckSourceKeyLength(src); err != nil {
+				return req, errorResponse("invalid_request",
+					fmt.Sprintf("sources[%d]: %s", i, err.Error()), false)
+			}
 		}
 		req.Sources = sources
 	}

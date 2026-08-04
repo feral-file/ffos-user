@@ -2308,6 +2308,19 @@ mediacapture's raw `%s` interpolation, the notification payload, the
 status response. `truncateSourceForLog` remains as defense in depth, not
 as the primary control.
 
+The **clear and status RPCs need their own bound** and do not inherit
+this one: neither passes through `DownloadItem`, and both echo the
+submitted source back — the clear handler in its `ok` response, status as
+a `not_cached` entry, up to `MaxStatusSources` of them per request, so the
+count bound alone leaves the aggregate unbounded. `CheckSourceKeyLength`
+covers those two boundaries and rejects non-retryably, reporting length
+and (for status) index, never the value — echoing it is the thing being
+prevented. It has no `data:` exemption, because an inline source can
+never be a cached key at all: `Classify` returns `ClassInline`,
+`DownloadItem` returns `ErrItemInlineNotQueued`, nothing is ever
+recorded, so such a lookup can only answer not_found/not_cached either
+way.
+
 Two exemptions, both deliberate: `data:` sources (an inline item's bytes
 ARE its source, legitimately large, never dialed) and subresource URLs
 during capture (signed CDN links routinely run long, and they are

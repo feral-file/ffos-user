@@ -247,6 +247,32 @@ func isInlineSource(source string) bool {
 	return strings.HasPrefix(strings.ToLower(source), "data:")
 }
 
+// CheckSourceKeyLength enforces MaxSourceURLBytes on a source used as a
+// LOOKUP KEY — the clear and status RPCs — rather than as something to
+// dial and store.
+//
+// Unlike checkSourceLength this has NO data: exemption, and the reason is
+// specific rather than stylistic: an inline source can never be a cached
+// key at all. Classify returns ClassInline for data:, DownloadItem then
+// returns ErrItemInlineNotQueued, and nothing is ever enqueued or
+// recorded — so a data: source at these boundaries can only ever answer
+// not_found/not_cached, and bounding it changes no reachable outcome
+// while closing the same reflection hole.
+//
+// This exists because the admission bound alone does not cover these
+// paths: clear and status accept a source from the same unauthenticated
+// hub without it ever passing through DownloadItem, and both echo it back
+// — the clear handler in its ok response, status as a not_cached entry —
+// so an unbounded value is reflected into a daemon response and, for
+// status, up to MaxStatusSources times in one request.
+func CheckSourceKeyLength(source string) error {
+	if len(source) <= MaxSourceURLBytes {
+		return nil
+	}
+	return fmt.Errorf("%w: %d bytes exceeds the %d-byte limit",
+		ErrSourceTooLong, len(source), MaxSourceURLBytes)
+}
+
 // checkSourceLength enforces MaxSourceURLBytes on a dialable item source.
 // The error deliberately reports only the length, never the URL: quoting
 // an oversized string in the error for a check whose entire purpose is to

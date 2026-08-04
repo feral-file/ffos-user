@@ -2349,7 +2349,7 @@ func (s *service) ClearItem(source string) error {
 	key := SourceKey(source)
 	res, _, err := s.reserveForClear(map[string]bool{key: true})
 	if err != nil {
-		return fmt.Errorf("offline cache: clear item %s: %w", source, err)
+		return fmt.Errorf("offline cache: clear item %s: %w", truncateSourceForLog(source), err)
 	}
 	removed, err := s.store.DeleteItem(key)
 	if err != nil {
@@ -2361,10 +2361,10 @@ func (s *service) ClearItem(source string) error {
 		// the record-derived status, which is more machinery than this
 		// already-failing I/O path warrants. The error itself is the
 		// caller's signal to retry.
-		return fmt.Errorf("offline cache: clear item %s: %w", source, err)
+		return fmt.Errorf("offline cache: clear item %s: %w", truncateSourceForLog(source), err)
 	}
 	if !removed && !res.settled[key] {
-		return fmt.Errorf("offline cache: clear item %s: %w", source, ErrItemNotFound)
+		return fmt.Errorf("offline cache: clear item %s: %w", truncateSourceForLog(source), ErrItemNotFound)
 	}
 	// Ordered against a racing enqueue's own "queued" notification, then
 	// emitted as soon as the record is gone and ahead of GC: the record is

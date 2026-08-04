@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1357,4 +1358,63 @@ func TestCommandHandler_DownloadPlaylistItem_QueuedPersistFailureStillSucceeds(t
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
 	require.Equal(t, "queued", resp["status"])
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_RejectsOversizedSource pins
+// the clear boundary. The admission bound added for downloads does NOT
+// cover this path — nothing here goes through DownloadItem — and the ok
+// response echoes the source back, so an unbounded value would be
+// reflected into a daemon response by an unauthenticated hub caller.
+//
+// Three assertions, and the third is the one that matters most: the
+// rejection must not itself contain the submitted value.
+func TestCommandHandler_ClearPlaylistItemCache_RejectsOversizedSource(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	// No ClearItem expectation: gomock's strict controller fails the test
+	// if the handler reaches the service at all.
+	_ = mockOfflineCache
+
+	oversized := "https://example.com/" + strings.Repeat("a", offlinecache.MaxSourceURLBytes)
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"source": oversized},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	errObj := resp["error"].(map[string]any)
+	require.Equal(t, false, errObj["retryable"], "resending the same oversized value cannot succeed")
+	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("a", 64),
+		"the rejection must not echo the submitted source")
+}
+
+// TestCommandHandler_GetOfflineCacheStatus_RejectsOversizedSource pins
+// the status boundary, where the exposure is worse: an unknown source is
+// echoed back verbatim as a not_cached entry, and MaxStatusSources of
+// them are accepted per request, so the count bound alone leaves the
+// aggregate unbounded.
+func TestCommandHandler_GetOfflineCacheStatus_RejectsOversizedSource(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	_ = mockOfflineCache // no Status expectation: reaching the service fails the test
+
+	oversized := "https://example.com/" + strings.Repeat("z", offlinecache.MaxSourceURLBytes)
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type: commands.CMD_GET_OFFLINE_CACHE_STATUS,
+		Arguments: map[string]any{
+			"sources": []interface{}{"https://example.com/fine.png", oversized},
+		},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	errObj := resp["error"].(map[string]any)
+	require.Equal(t, false, errObj["retryable"])
+	require.Contains(t, fmt.Sprint(errObj["message"]), "sources[1]",
+		"the offending entry is identified by index, not by value")
+	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("z", 64),
+		"the rejection must not echo the submitted source")
 }
