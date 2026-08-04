@@ -1,5 +1,61 @@
 # Network dead-end recovery UX
 
+> ## Implementation status (updated 2026-08-05)
+>
+> **The entire `ffos-user` (device/controld) half of this plan is IMPLEMENTED,
+> reviewed, and committed** on branch **`feat/wiredlink-seam`** (based on
+> `docs/network-recovery-ux` = `develop` + the two plan docs). Every commit
+> passed a fresh-context reviewer loop (`Verdict: accept`) and the full gates
+> (gofmt, `go vet`, full `go test -count=1 ./...`, `-race` on touched
+> packages, `golangci-lint --new-from-rev` — use the `~/go/bin` binary, the
+> Homebrew one panics on this module's go 1.26). No `users/**` changes:
+> package rail, no `RELEASES.md` entry needed. Branch NOT pushed, no PR yet.
+>
+> | Commit | Landed |
+> |---|---|
+> | `b976e5f` | `status.LinkChecker.WiredLink` seam (§4.5 amendment 3 semantics; `linkProbe` → `linkResult{link,wired}` one-pass refactor) |
+> | `710be87` | **Stage 1** (§4.8+§4.3): portal picker+manual+hidden checkbox (`ssid_manual`/`hidden` form fields, manual wins non-blank, machine trims manual branch only); `wifictl.Join(ctx,ssid,psk,hidden)` (hidden ⇒ `hidden yes` + skip `waitForSSID`; empty PSK omits `password`); `wifiProfileList` (uuid/ssid/key-mgmt) + SSID-matched PSK/open-scoped deletion; `Config.JoinTimeout` 120s in `applyJoin` ⇒ `JoinErrTimeout`; offline window converted to SAMPLE-COUNTED (constraint 7) with bounded pause (`pauseOfflineWindow`: discard past one window, 2-fresh-sample debt) — existing wall-clock tests rewritten to tick cadence via `h.tickN`; relocation ladder tolerates 2 link-probe unknowns (`relocUnknowns`); `clearOffline` = single-truth full reset (window+ladder+raise-escalation) |
+> | `435333c` | **Stage 2** (§4.6): `setup_error` extension state; `resolveConnectingState` generalized to `resolveExtensionState` + `sendFallbacks` table (union-shaped: state fallback or hide) + per-state `extSupport` verdict map; escalation latches `noteAPRaiseFailure`/`noteAPReleaseFailure` (streak 8, one notify, `scanning` push suppressed while latched, raise flavor also reset at every `clearOffline` episode boundary with explicit `ReasonSetupErrorCleared`); executor topic-wait expiry paints `ShowConnectingIfShowing(StateFinalizing)` on a CONFIRMED-offline tri-state probe (`SetInternetProbe`, error ⇒ silent hide); portal `result.html` copy |
+> | `89b1a9c` | **Stage 3** (§4.1+§4.2+§4.4): `provisioning/session.go` (NEW — most escape-policy logic lives there). Session policy latched in `transition` via `latchSessionPolicy` (unknown reasons INHERIT — the one-typo rule); timers: `armSessionTimer` on `ensureAPUp` success / `applyRescan`, `cancelSessionTimer` in `applyJoin`, expiry in `onTick`'s raised-`StateAPActive` branch with portal-activity deferral (+15 min ceiling) and 2h cap; recheck blink `runRecheckBlink` runs SYNCHRONOUSLY on the loop goroutine (suppression is structural — no flag), `activateInRangeProfiles` (MRU, hidden last, listing error aborts), `skipNextPreAPScan` one-shot; episode `episodeSample` (4-term confirmed predicate, hub-contact budgeted pause charged per tick, `episodeFreshSamplesAfterPause`, ladder 5/10/20 via `episodeLadderSamples`, settle after `EpisodeRaiseCycles`); claim snapshot `SetClaimed` writes SYNCHRONOUSLY under `m.mu` (event is only a cancel nudge; loop reads via `isClaimed()`), boot seed moved to `Machine.Start` fed by `app.StateLoadKnown` (quarantined state file = unknown = claimed); §4.4: `bootNarration`→`episodeNarration` marker, `narratedOfflineReason`/`silentOfflineReason` sets, constraint-10 dedupe extension + constraint-4(b) narrated→silent rewrite in `transition`, D4 repaint in `onConnectivity`'s provisioned tail; wired exit `exitRaisedAPForWire`; hub `SetContactObserver` (routes cast/status/status_v2, non-loopback) + portal `ActivityObserved` (connect/rescan handlers only); `config.ProvisioningTuning` permissive `provisioning` JSON block (RawMessage) + `setupIncompleteDisabled` kill-switch + `config.example.json` |
+> | `f565862` | **Stage 4** (`startWifiSetup`, sibling plan stage 2): `CMD_START_WIFI_SETUP`; `Machine.StartWifiSetup` admission (busy joining/starting; `ErrWiredLinkActive` fail-closed on wire/probe-error/nil-probe) queues `evUserSetup` → `applyUserSetup` runs the entry triple + `armSessionTimer` AFTER the transition (load-bearing for the ap_active accept); executor handler replies BEFORE radio work (`{ok,ssid}` / `wired_link_active` / `busy` / `unavailable`); `contract:"2"` on `DeviceStatusResponse` (no omitempty; hub test pins equality with `StatusContractV2`) |
+> | `c594a17` | **§4.7** health surface: `Machine.Snapshot()` from mu-guarded caches (`linkOutcome*`/`wired*` written ONLY by real probes — apUp short-circuit never writes; `ExternalLinkDetail` gives link+wired from one nmcli pass via `Config.ActiveLinkDetail`); `status.NetworkHealth` on hub `/api/status` + `/api/v2/status` + `getDeviceStatus` (executor `SetNetworkHealth`); `deferred` sub-state mirrors the episode's contact pause |
+>
+> **Implementation amendments made under review (already reflected in the
+> relevant sections/docs):** `startWifiSetup` also accepts from `ap_active`
+> (idempotent refresh, fresh 30-min clock — recorded in the sibling plan §5);
+> the user-requested expiry lands `ap-session-ended-silent` for BOTH claim
+> states; the recheck blink is synchronous rather than flag-suppressed; the
+> §4.6 `setup_error` raise-latch also resets at every episode boundary.
+>
+> **NOT yet implemented (a new session should start here):**
+> 1. **ff-player** (`/Users/yehboyang/ff-player`): render `setup_error`
+>    (reason → title/body, §4.6) and add it to the manifest's `setupDisplay`
+>    states (controld's test fixture already lists it); snapshot tests. Note
+>    the player also renders `connecting` already (PR ff-player#275).
+> 2. **ff-app** (`/Users/yehboyang/ff-app`): sibling plan §4.3/§4.4 — gate the
+>    existing "Configure Wi-Fi" entry (`lib/widgets/device_configuration/options_button.dart`)
+>    on `Ff1LanPairableGate` with `hold()` + bounded `findByDeviceId` first
+>    (pattern: `ff1_lan_recovery.dart:77-84`), fail closed to BLE; relayer
+>    `contract:"2"` also counts as v2; three-step flow (warning dialog →
+>    `startWifiSetup` send where a TIMEOUT IS SUCCESS → `removeDevice`,
+>    template: `factoryResetAndRemoveDevice` in
+>    `ff1_bluetooth_device_providers.dart:130+`); §4.7 health rendering incl.
+>    `deferred` ("your phone is keeping the frame out of setup mode").
+> 3. **ffos** (`/Users/yehboyang/ffos`): `docs/DEVICE_LIFECYCLE.md` — document
+>    the new AP session policy / escape cadence and `startWifiSetup`.
+> 4. **Hardware-gated bench items** (§5 list below): hidden-SSID join against
+>    a real hidden AP; open-network join; one full link-present episode on a
+>    bench frame; the router-cold-boot recheck observation; portal-activity
+>    deferral with a real phone (idle phone must NOT defer); LAN pairing of an
+>    unclaimed frame on a WAN-less network; venue-network counted-endpoint
+>    check; power-restore-to-WAN timing.
+>
+> Working notes for the next session: per-module gates run from
+> `components/feral-controld`; provisioning tests drive ticks via
+> `h.tick/h.tickN` (15s per tick, `windowSamples = 20`); the reviewer loop is
+> mandatory before commit (see CLAUDE.md); memory file
+> `network-recovery-implementation.md` mirrors this status.
+
 Execution plan, written to the `PLANS.md` contract. Spans `ffos-user` (`feral-controld`),
 `ff-player` (setup display contract + copy), and `ff-app` (health surface; the Wi-Fi
 re-setup flow itself is specified in `docs/app-triggered-wifi-setup.md` and adopted here

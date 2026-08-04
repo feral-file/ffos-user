@@ -1,5 +1,65 @@
 # App-triggered Wi-Fi setup (`startWifiSetup`)
 
+> ## Implementation status (updated 2026-08-05)
+>
+> **The device (`ffos-user`) half — stages 1 and 2 of §6 — is IMPLEMENTED,
+> reviewed, and committed** on branch **`feat/wiredlink-seam`**, integrated
+> with `network-recovery-ux.md`'s escape policy per its §4.5 amendments (all
+> three amendments applied to this document):
+>
+> - `b976e5f` — **stage 1**: `status.LinkChecker.WiredLink` seam with the
+>   constraint-6 survey semantics (valid survey needs ≥1 ethernet/wifi row;
+>   verdict from ethernet rows only; no-ethernet-row = `(false, nil)`;
+>   corrupt output = error). Tests in `status/linkcheck_test.go`.
+> - `f565862` — **stage 2**: `CMD_START_WIFI_SETUP` (`commands/types.go`),
+>   `provisioning.Machine.StartWifiSetup` (admission + queue; sentinels
+>   `ErrSetupBusy`/`ErrWiredLinkActive`) and `applyUserSetup` (entry triple +
+>   post-transition `armSessionTimer`), executor handler
+>   (`devicectl/executor.go startWifiSetup`) replying `{ok, ssid}` BEFORE any
+>   radio work with wire codes `wired_link_active`/`busy`/`unavailable`, and
+>   the additive `contract:"2"` on `getDeviceStatus`
+>   (`status.DeviceStatusContract`, hub-side equality test). The 30-minute
+>   session, portal-activity deferral, and 2h cap come from the sibling
+>   plan's §4.2 session machinery (amendment 1) — no bespoke timer. Wire
+>   reference: `docs/controld-inbound-controller-messages.md`
+>   ("startWifiSetup" and the `getDeviceStatus` `contract`/`network` notes).
+> - Implementation amendment (recorded in §5 below): admission ALSO accepts
+>   from `ap_active` as an idempotent refresh that re-latches the
+>   `user-requested` policy and re-arms a fresh 30-minute clock.
+>
+> **NOT yet implemented — stages 3 and 4 of §6 (the `ff-app` half; a new
+> session should start here, repo `/Users/yehboyang/ff-app`):**
+>
+> 1. **Stage 3 — capability gate** on the existing ungated "Configure Wi-Fi"
+>    entry (`lib/widgets/device_configuration/options_button.dart:163-167`,
+>    line refs pre-change): resolve a live endpoint FIRST
+>    (`browseController.hold()` + bounded `findByDeviceId`, pattern
+>    `ff1_lan_recovery.dart:77-84` — the LAN endpoint cache is stale outside
+>    the 60s browse window, constraint 8), then consult `Ff1LanPairableGate`
+>    (mDNS TXT `api=2` AND `/api/v2/status` → `contract:"2"`); the relayer
+>    `getDeviceStatus` `contract:"2"` (now shipped device-side) also counts.
+>    FAIL CLOSED to the existing BLE flow — only a positive v2 confirmation
+>    takes the new path; empty TXT is NOT old-firmware evidence (Android
+>    NsdManager delivers empty TXT; the gate already falls back to the HTTP
+>    probe). If BLE also finds nothing: honest message (join the same Wi-Fi
+>    and retry).
+> 2. **Stage 4 — three-step flow**: warning dialog (leaves current network,
+>    must be AT the frame to scan the on-screen QR, frame will be removed
+>    from the app and reappears after setup; §4.5 amendment 2 copy: the
+>    up-but-offline case means joining THE SAME network the frame is on);
+>    send `startWifiSetup` (new `FF1WifiCommandRequest` subclass +
+>    `FF1WifiControl` wrapper; **a send timeout IS success** — the raise
+>    severs the link that carries the reply); then
+>    `removeDevice(deviceId)` (`ff1_bluetooth_device_providers.dart:118`).
+>    Template for the whole shape incl. LAN/relayer fallback:
+>    `factoryResetAndRemoveDevice` (`ff1_bluetooth_device_providers.dart:130+`).
+>    App test list: §5 below ("App (`ff-app`)" block).
+> 3. Also pending app-side: rendering the §4.7 `network` health object
+>    (see `network-recovery-ux.md` §4.7) incl. the `deferred` sub-state.
+>
+> Open items in §6 (sleeping panel, one-tap re-add, unauthenticated `:1111`)
+> remain accepted as written.
+
 Execution plan, written to the `PLANS.md` contract. Spans two repositories: `ffos-user`
 (`feral-controld`) and `ff-app`. No `users/**` changes, so the device half ships on the **package
 rail**.
