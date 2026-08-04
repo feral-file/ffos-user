@@ -3,6 +3,7 @@ package offlinecache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	go_io "io"
 	go_http "net/http"
@@ -362,6 +363,10 @@ type fakePausedSession struct {
 	gate     chan struct{}
 	inFlight *atomic.Int32
 	peak     *atomic.Int32
+	// failMethod, when set, makes Send return an error for that CDP
+	// method — so a test can drive the arming failure paths. Inherited by
+	// child views.
+	failMethod string
 }
 
 func newFakePausedSession() *fakePausedSession {
@@ -371,8 +376,11 @@ func newFakePausedSession() *fakePausedSession {
 func (f *fakePausedSession) Send(_ context.Context, method string, _ map[string]interface{}) (json.RawMessage, error) {
 	f.mu.Lock()
 	f.sent = append(f.sent, method)
-	gate, in, peak := f.gate, f.inFlight, f.peak
+	gate, in, peak, failMethod := f.gate, f.inFlight, f.peak, f.failMethod
 	f.mu.Unlock()
+	if failMethod != "" && method == failMethod {
+		return nil, errors.New("simulated CDP failure for " + method)
+	}
 	if gate != nil {
 		if in != nil {
 			cur := in.Add(1)
@@ -407,7 +415,7 @@ func (f *fakePausedSession) ForSession(id string) CDPSession {
 		return c
 	}
 	c := newFakePausedSession()
-	c.gate, c.inFlight, c.peak = f.gate, f.inFlight, f.peak
+	c.gate, c.inFlight, c.peak, c.failMethod = f.gate, f.inFlight, f.peak, f.failMethod
 	f.children[id] = c
 	return c
 }
@@ -668,4 +676,52 @@ func TestCapturer_SourceGuard_TargetFloodIsBounded(t *testing.T) {
 		"child-target setup must be bounded; an unbounded goroutine per attach event would let all %d run at once", flood)
 
 	close(root.gate)
+}
+
+// TestCapturer_SourceGuard_ChildStaysPausedWhenArmingFails pins the
+// fail-closed contract on BOTH arming steps. A child is created with
+// waitForDebuggerOnStart, so it is inert until resumed — which makes
+// "return without resuming" the safe outcome whenever the guard could not
+// be fully established on it.
+//
+// The setAutoAttach case is the subtle one, and an earlier version got it
+// wrong: it logged the failure and resumed anyway. That child's own
+// nested iframes and workers would then be neither paused nor
+// intercepted, reopening the loopback bypass one level down — the exact
+// hole the recursion exists to close.
+func TestCapturer_SourceGuard_ChildStaysPausedWhenArmingFails(t *testing.T) {
+	for _, tc := range []struct{ name, failing string }{
+		{"Fetch.enable fails", "Fetch.enable"},
+		{"recursive setAutoAttach fails", "Target.setAutoAttach"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &capturer{
+				json:   wrapper.NewJSON(),
+				logger: zaptest.NewLogger(t),
+				guard:  sourceGuard{resolver: staticResolver{ip: "93.184.216.34"}},
+			}
+			root := newFakePausedSession()
+			guard := c.attachSourceGuard(context.Background(), root)
+			// Arm the handler without the root's own setAutoAttach, which
+			// would otherwise trip the injected failure.
+			c.armAutoAttachHandler(context.Background(), root, root, guard)
+			root.mu.Lock()
+			root.failMethod = tc.failing
+			root.mu.Unlock()
+
+			root.handler("Target.attachedToTarget")(json.RawMessage(
+				`{"sessionId":"child-1","targetInfo":{"targetId":"t1","type":"iframe"}}`))
+
+			var child *fakePausedSession
+			require.Eventually(t, func() bool {
+				child = root.child("child-1")
+				return child != nil && len(child.verdicts()) > 0
+			}, 2*time.Second, 5*time.Millisecond, "the child was never touched")
+			// Let any (incorrect) resume land before asserting its absence.
+			time.Sleep(50 * time.Millisecond)
+
+			assert.NotContains(t, child.verdicts(), "Runtime.runIfWaitingForDebugger",
+				"a child whose guard could not be fully armed must stay PAUSED, never be resumed")
+		})
+	}
 }

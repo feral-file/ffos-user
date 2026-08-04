@@ -1281,10 +1281,19 @@ func (c *capturer) handleCaptureTargetAttached(ctx context.Context, root CDPSess
 
 	// Recurse before resuming, so a nested target created by this child's
 	// first paint is already covered.
+	//
+	// A failure here is NOT survivable, for the same reason a failed
+	// Fetch.enable above is not: without auto-attach on this child, the
+	// targets IT creates are neither paused nor intercepted, so resuming
+	// it would reopen the loopback bypass one level down. An earlier
+	// version logged this and resumed anyway — fail-open, and inconsistent
+	// with the Fetch.enable path immediately above it.
 	c.armAutoAttachHandler(ctx, root, child, guard)
 	if err := c.sendAutoAttach(ctx, child); err != nil {
-		c.logger.Debug("offline cache capture: could not extend auto-attach into child target",
-			zap.String("session_id", evt.SessionID), zap.Error(err))
+		c.logger.Warn("offline cache capture: could not extend auto-attach into child target; leaving it paused",
+			zap.String("session_id", evt.SessionID),
+			zap.String("type", evt.TargetInfo.Type), zap.Error(err))
+		return
 	}
 
 	if _, err := child.Send(ctx, "Runtime.runIfWaitingForDebugger", map[string]interface{}{}); err != nil {
