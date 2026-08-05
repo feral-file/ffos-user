@@ -8,10 +8,11 @@ package provisioning
 // the teardown, on after the re-raise), its fail bias (open on suppress
 // failure, latched on restore failure), the three paths that pay an outstanding
 // restore when no tick ever will (every daemon start's first tick; the loop's
-// shutdown branch; Stop — the last two on a live context, and each pinned
-// separately because neither covers every shutdown route), and its SCOPE — no
-// other teardown path may ever suppress, because the session landings depend on
-// autoconnect to restore the previous network.
+// shutdown branch; Stop — the last two on a live context, ordered ahead of the
+// unbounded shutdown teardown so a wedged deletion cannot starve them, and
+// each pinned separately because neither covers every shutdown route), and its
+// SCOPE — no other teardown path may ever suppress, because the session
+// landings depend on autoconnect to restore the previous network.
 
 import (
 	"context"
@@ -288,6 +289,66 @@ func TestCtxCancelDuringBounceRestoresAutoconnectWithoutStop(t *testing.T) {
 		assert.True(c, calls[len(calls)-1], "the last flip must be a restore")
 		assert.NoError(c, ctxErrs[len(ctxErrs)-1],
 			"the loop's ctx.Done branch must pay the latch on a live context")
+	}, 2*time.Second, 5*time.Millisecond)
+}
+
+// TestShutdownTeardownCannotStarveAutoconnectRestore pins the shutdown
+// ORDERING: the payment runs BEFORE the shutdown AP teardown. The teardown is
+// an unbounded nmcli profile deletion, so the reverse order would let a wedged
+// deletion hold the bounded restore hostage until systemd kills the unit —
+// re-creating the leak the payment exists to close. The re-armed down-hook
+// simulates that wedge: it blocks the SHUTDOWN teardown (which runs on a fresh
+// Background ctx, hence the release channel rather than the hook's ctx) until
+// the test lets go, and the restore must complete while it is still held.
+func TestShutdownTeardownCannotStarveAutoconnectRestore(t *testing.T) {
+	h := newHarness(t)
+	h.wifi.setProfile(false)
+	h.conn.online = false
+
+	ctx, cancel := context.WithCancel(context.Background())
+	h.m.Start(ctx)
+	defer h.m.Stop() // cleanup; the wedge is released first (defers run LIFO)
+	require.Eventually(t, func() bool {
+		return h.m.State() == StateAPActive && h.rec.count("portal.Start") == 1
+	}, 2*time.Second, 5*time.Millisecond)
+
+	entered := make(chan struct{})
+	wedged := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	h.ap.setDownHook(func(hookCtx context.Context) {
+		close(entered)
+		// Re-arm for the shutdown teardown before this (the bounce's) call
+		// returns. The bounce's re-raise cannot consume the new hook:
+		// ensureAPUp's leading ensureAPDown early-returns while the AP is
+		// already down with no deletion pending.
+		h.ap.setDownHook(func(context.Context) {
+			close(wedged)
+			<-release
+		})
+		<-hookCtx.Done()
+	})
+	require.NoError(t, h.m.RequestRescan())
+	awaitBounce(t, entered)
+
+	cancel()
+
+	select {
+	case <-wedged:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shutdown teardown never ran; the starvation scenario was not exercised")
+	}
+	// The wedge is still held (release is not closed), so these can only pass
+	// if the payment ran BEFORE the teardown.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		calls, ctxErrs := h.wifi.autoconnectLog(), h.wifi.autoconnectCtxLog()
+		if !assert.GreaterOrEqual(c, len(calls), 3,
+			"expected suppress, the doomed restore, then the pre-teardown payment") {
+			return
+		}
+		assert.True(c, calls[len(calls)-1], "the last flip must be a restore")
+		assert.NoError(c, ctxErrs[len(ctxErrs)-1],
+			"the payment must have completed on a live context while the teardown is wedged")
 	}, 2*time.Second, 5*time.Millisecond)
 }
 

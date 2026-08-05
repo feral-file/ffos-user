@@ -257,9 +257,10 @@ const (
 	// shutdownRestoreTimeout bounds the shutdown autoconnect restore. It runs on
 	// a FRESH context (the loop's is already canceled by then), so without a
 	// bound of its own a wedged nmcli would hold shutdown open indefinitely.
-	// Note this bounds only THIS call: the shutdown AP teardown ahead of it is
-	// unbounded by design (a leftover hotspot profile is persistent and must be
-	// deleted), so a wedge there still stalls shutdown and starves this.
+	// The bound is also what makes it safe to order the restore AHEAD of the
+	// shutdown AP teardown, which is unbounded by design (a leftover hotspot
+	// profile is persistent and must be deleted): a wedged deletion can still
+	// stall shutdown, but it can no longer starve the restore.
 	shutdownRestoreTimeout = 5 * time.Second
 	eventBuffer            = 16
 
@@ -873,16 +874,18 @@ func (m *Machine) Stop() {
 	}
 	cancel()
 	<-done
+	// Payment BEFORE teardown, mirroring the loop's ctx.Done branch: the
+	// payment is bounded, the profile deletion below is not, and the reverse
+	// order would let a wedged deletion starve the restore. The loop's own
+	// branch pays too, but it is not guaranteed to run — a panic recovered
+	// while the ctx is already canceled (or a shutdown landing in the
+	// supervisor's post-panic backoff) makes supervisor.run return WITHOUT
+	// re-entering loop. This call is what makes the payment unconditional for
+	// the Stop route. Safe to touch the loop-owned latch here: <-done orders
+	// this after the loop's last write.
+	m.payOutstandingAutoconnectRestore()
 	// Final teardown on a fresh context so a canceled runCtx cannot skip it.
 	m.ensureAPDown(context.Background())
-	// Same reason, same shape: the loop's own ctx.Done branch pays an
-	// outstanding autoconnect restore, but it is not guaranteed to run — a
-	// panic recovered while the ctx is already canceled (or a shutdown landing
-	// in the supervisor's post-panic backoff) makes supervisor.run return
-	// WITHOUT re-entering loop. This call is what makes the payment
-	// unconditional for the Stop route. Safe to touch the loop-owned latch
-	// here: <-done orders this after the loop's last write.
-	m.payOutstandingAutoconnectRestore()
 }
 
 // RestartCount reports how many times the supervised loop was restarted after a
@@ -956,22 +959,31 @@ func (m *Machine) loop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			m.ensureAPDown(context.Background())
 			// Pay any outstanding autoconnect restore on a context that can
-			// still complete — the same fresh-context rationale as the teardown
-			// above. applyRescan's deferred restore runs on THIS ctx, so a
-			// shutdown landing inside the bounce leaves the flag off with a
-			// latch no further tick will ever service. The startup self-heal
-			// only covers shutdowns that are followed by a start: an
+			// still complete — applyRescan's deferred restore runs on THIS
+			// ctx, so a shutdown landing inside the bounce leaves the flag off
+			// with a latch no further tick will ever service. The startup
+			// self-heal only covers shutdowns that are followed by a start: an
 			// intentional `systemctl --user stop` is not, and would leave NM
 			// unable to auto-reconnect the device until an NM restart or a
 			// reboot.
+			//
+			// Ordered BEFORE the teardown below deliberately: the payment is
+			// bounded (shutdownRestoreTimeout) but the profile deletion is
+			// not, so the reverse order would let a wedged nmcli starve the
+			// restore until systemd kills the unit. Restoring while the AP may
+			// still be up loses nothing — there is no re-raise at shutdown, so
+			// NM reconnecting once the AP drops is the desired end state, not
+			// the race the suppression exists to remove.
 			//
 			// This branch covers a shutdown driven by canceling Start's ctx
 			// with no Stop call. It is NOT the whole story — see Stop, which
 			// repeats the payment because supervisor.run can return without
 			// re-entering loop at all.
 			m.payOutstandingAutoconnectRestore()
+			// Final teardown on a fresh context so the canceled runCtx cannot
+			// skip it.
+			m.ensureAPDown(context.Background())
 			return
 		case ev := <-m.events:
 			switch ev.kind {
@@ -2107,12 +2119,13 @@ func (m *Machine) restoreAutoconnect(ctx context.Context) {
 // while unwinding a panic, which happens on the loop goroutine before the
 // supervisor recovers); never call it from anywhere else.
 //
-// Ordering note: on the loop's path this runs after that branch's ensureAPDown
-// but BEFORE Stop's retried profile deletion when a teardown failed
-// (apDownPending). "AP down, then autoconnect on" is therefore a success-path
-// ordering, accepted deliberately — the desired end state is autoconnect on,
-// and a still-pending profile deletion means the radio was never handed back
-// for NM to race over anyway.
+// Ordering note: BOTH sites run this BEFORE their shutdown ensureAPDown, on
+// purpose. This call is bounded; the profile deletion is not, so the reverse
+// order would let a wedged deletion starve the restore until systemd kills the
+// unit — re-creating exactly the leak the payment exists to close. Restoring
+// while the AP may still be up loses nothing: there is no re-raise at
+// shutdown, so NM reconnecting once the AP drops is the desired end state,
+// not the race the suppression exists to remove.
 func (m *Machine) payOutstandingAutoconnectRestore() {
 	if !m.autoconnectRestorePending {
 		return
