@@ -3,7 +3,9 @@ package commandrouter_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,6 +27,22 @@ import (
 // the 5 pre-CDP offline-cache commands can be exercised without touching
 // CDP, the executor, or mint pairing.
 func setupOfflineCache(t *testing.T) (*testSetup, *mocks.MockOfflineCacheService) {
+	ts, mockOfflineCache := setupOfflineCacheRaw(t)
+	// Default the clear-barrier pair to "no clear happened", so the tests
+	// that are not about that race need not restate it. A test that IS
+	// about the race must use setupOfflineCacheRaw: these AnyTimes
+	// expectations never exhaust, so a later, more specific expectation
+	// for the same method would never be reached.
+	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(0)).AnyTimes()
+	mockOfflineCache.EXPECT().
+		ClearedSinceBarrier(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(false).AnyTimes()
+	return ts, mockOfflineCache
+}
+
+// setupOfflineCacheRaw wires the handler with NO default expectations, for
+// tests that need to script ClearBarrier/ClearedSinceBarrier themselves.
+func setupOfflineCacheRaw(t *testing.T) (*testSetup, *mocks.MockOfflineCacheService) {
 	ts := setup(t)
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
@@ -102,22 +120,30 @@ func TestCommandHandler_DownloadPlaylistItem_Success(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
 	assert.Equal(t, "queued", resp["status"])
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, item.Source, resp["source"])
 }
 
-// TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing
-// pins that a dp1_call (inline) download has no source URL to index by
-// — mirroring TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL's
-// contract for downloadPlaylist. Deliberately no
-// IndexPlaylistForOfflineDisplay expectation: gomock's strict
-// controller fails this test if the handler calls it anyway.
-func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *testing.T) {
+// TestCommandHandler_DownloadPlaylistItem_InlinePlaylistPersistsBodyWithEmptySourceURL
+// pins the distinction an earlier version of this handler got wrong: a
+// dp1_call (inline) download has no source URL to index BY, but its
+// playlist body must still be persisted. The empty sourceURL argument is
+// the whole contract — Service skips only the URL index on "", never the
+// body save — and it mirrors
+// TestCommandHandler_DownloadPlaylist_InlinePlaylistPassesEmptySourceURL's
+// contract for the bulk path, which has always saved unconditionally.
+//
+// What the earlier "skip the whole call for inline" behavior actually
+// broke was reversibility, not the offline fallback: ClearPlaylist loads
+// the record BY ID to enumerate member sources, so with nothing saved it
+// failed ErrPlaylistNotFound and left the cached items clearable only
+// one-by-one by source.
+func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistPersistsBodyWithEmptySourceURL(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
@@ -125,6 +151,7 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *test
 	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{map[string]interface{}{"id": "item-1", "source": item.Source}}}
 	playlistBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/index.html"}]}`)
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1","resolved":true}`)
 
 	ts.mockJSON.EXPECT().Marshal(playlistMap).Return(playlistBytes, nil).Times(1)
 	ts.mockJSON.EXPECT().Unmarshal(playlistBytes, gomock.Any()).DoAndReturn(func(_ []byte, v interface{}) error {
@@ -132,15 +159,60 @@ func TestCommandHandler_DownloadPlaylistItem_InlinePlaylistSkipsIndexing(t *test
 		*p = playlist
 		return nil
 	}).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(7)).Times(1)
 	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	// Empty sourceURL, and the SAMPLED generation — not a fresh read —
+	// so a ClearPlaylist racing the download still wins.
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(7)).
+		Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"dp1_call": playlistMap, "itemId": "item-1"},
+		Arguments: map[string]any{"dp1_call": playlistMap, "source": item.Source},
 	})
 
 	require.NoError(t, err)
 	assertOkResponse(t, result)
+}
+
+// TestCommandHandler_DownloadPlaylistItem_InlineItemPersistsBody covers
+// the case the body matters MOST for: an item whose bytes are inline in
+// the playlist (a data: source), so DownloadItem queues nothing and
+// returns ErrItemInlineNotQueued. The item is already "offline" only in
+// the sense that this body holds it — dropping the body on the outcome
+// that reports success is what would make that claim false.
+func TestCommandHandler_DownloadPlaylistItem_InlineItemPersistsBody(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	source := "data:text/html;base64,PGh0bWw+"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: source}
+	playlistMap := map[string]interface{}{"id": "playlist-1", "items": []interface{}{map[string]interface{}{"id": "item-1", "source": source}}}
+	playlistBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"` + source + `"}]}`)
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockJSON.EXPECT().Marshal(playlistMap).Return(playlistBytes, nil).Times(1)
+	ts.mockJSON.EXPECT().Unmarshal(playlistBytes, gomock.Any()).DoAndReturn(func(_ []byte, v interface{}) error {
+		p := v.(**dp1.Playlist)
+		*p = playlist
+		return nil
+	}).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), "", uint64(0)).
+		Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"dp1_call": playlistMap, "source": source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	require.Equal(t, "not_queued_inline", resp["status"])
 }
 
 // TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess
@@ -166,7 +238,7 @@ func TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess(
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
@@ -174,7 +246,7 @@ func TestCommandHandler_DownloadPlaylistItem_IndexingFailureStillReportsSuccess(
 	assert.Equal(t, "queued", resp["status"])
 }
 
-func TestCommandHandler_DownloadPlaylistItem_MissingItemID(t *testing.T) {
+func TestCommandHandler_DownloadPlaylistItem_MissingSource(t *testing.T) {
 	ts, _ := setupOfflineCache(t)
 	defer ts.teardown()
 
@@ -197,7 +269,7 @@ func TestCommandHandler_DownloadPlaylistItem_ItemNotInPlaylist(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "missing-item"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": "https://example.com/never-in-playlist.html"},
 	})
 
 	require.NoError(t, err)
@@ -210,7 +282,7 @@ func TestCommandHandler_DownloadPlaylistItem_ResolveFailure(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"itemId": "item-1"}, // neither playlistUrl nor dp1_call
+		Arguments: map[string]any{"source": "https://example.com/index.html"}, // neither playlistUrl nor dp1_call
 	})
 
 	require.NoError(t, err)
@@ -233,7 +305,7 @@ func TestCommandHandler_DownloadPlaylistItem_ServiceNotStarted(t *testing.T) {
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
@@ -259,7 +331,7 @@ func TestCommandHandler_DownloadPlaylistItem_UnsupportedMediaClass(t *testing.T)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"playlistUrl": playlistURL, "itemId": "item-1"},
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
 	})
 
 	require.NoError(t, err)
@@ -367,19 +439,19 @@ func TestCommandHandler_ClearPlaylistItemCache_Success(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, "https://example.com/item-1", resp["source"])
 }
 
-func TestCommandHandler_ClearPlaylistItemCache_MissingItemID(t *testing.T) {
+func TestCommandHandler_ClearPlaylistItemCache_MissingSource(t *testing.T) {
 	ts, _ := setupOfflineCache(t)
 	defer ts.teardown()
 
@@ -418,11 +490,11 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
-		{ID: "item-1"}, {ID: "item-2"},
+		{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"},
 	}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
@@ -435,17 +507,17 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncsKioskReplayScope(t *testin
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, "https://example.com/item-1", resp["source"])
 }
 
 // TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlaylist
@@ -456,7 +528,7 @@ func TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlayl
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command: "someOtherCommand",
 	}, nil).Times(1)
@@ -471,7 +543,7 @@ func TestCommandHandler_ClearPlaylistItemCache_SkipsResyncWhenNotDisplayingPlayl
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -485,7 +557,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFailureDoesNotBlockResponse
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(nil, assertError("cdp not ready")).Times(1)
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
@@ -497,12 +569,12 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFailureDoesNotBlockResponse
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
-	assert.Equal(t, "item-1", resp["itemId"])
+	assert.Equal(t, "https://example.com/item-1", resp["source"])
 }
 
 // TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope mirrors
@@ -514,7 +586,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 
 	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(nil).Times(1)
 
-	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a"}}}}
+	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a", Source: "https://example.com/item-a"}}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
 		Playlist: inlinePlaylist,
@@ -525,7 +597,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncsKioskReplayScope(t *testing.T)
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-a"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-a"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
@@ -556,7 +628,7 @@ func TestCommandHandler_ClearPlaylistCache_ResyncSkipsWhenPlaybackGenerationAdva
 
 	mockOfflineCache.EXPECT().ClearPlaylist("playlist-1").Return(nil).Times(1)
 
-	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a"}}}}
+	inlinePlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{{ID: "item-a", Source: "https://example.com/item-a"}}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:  string(commands.CMD_DISPLAY_PLAYLIST),
 		Playlist: inlinePlaylist,
@@ -655,11 +727,11 @@ func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{Items: []dp1playlist.PlaylistItem{
-		{ID: "item-1"}, {ID: "item-2"},
+		{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"},
 	}}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
@@ -685,7 +757,7 @@ func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -694,7 +766,7 @@ func TestCommandHandler_ClearItemCache_ResyncWaitsOutInFlightDisplayScopeInstall
 
 	select {
 	case ids := <-fake.syncCalls:
-		assert.Equal(t, []string{"item-1", "item-2"}, ids,
+		assert.Equal(t, []string{"https://example.com/item-1", "https://example.com/item-2"}, ids,
 			"the resync must recompute scope from post-clear state, not defer to the pre-clear install")
 	default:
 		t.Fatal("resync deferred to a scope installed from pre-clear store reads: SyncPlaylist was never called, replay stays pointed at just-deleted blobs")
@@ -711,11 +783,11 @@ func TestCommandHandler_ClearPlaylistItemCache_ActiveCaptureReturnsBusy(t *testi
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(offlinecache.ErrItemBusy).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(offlinecache.ErrItemBusy).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -749,7 +821,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
@@ -759,10 +831,10 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).
 		Return(nil, assertError("no network")).Times(1)
 
-	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1"},{"id":"item-2"}]}`)
+	cachedRawBytes := []byte(`{"id":"playlist-1","items":[{"id":"item-1","source":"https://example.com/item-1"},{"id":"item-2","source":"https://example.com/item-2"}]}`)
 	cachedPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
 		ID:    "playlist-1",
-		Items: []dp1playlist.PlaylistItem{{ID: "item-1"}, {ID: "item-2"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-1", Source: "https://example.com/item-1"}, {ID: "item-2", Source: "https://example.com/item-2"}},
 	}}
 	mockOfflineCache.EXPECT().CachedPlaylistForURL(playlistURL).Return(json.RawMessage(cachedRawBytes), nil).Times(1)
 	ts.mockJSON.EXPECT().
@@ -779,12 +851,12 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncFallsBackToCachedPlaylistWh
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-1", "item-2"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-1", "https://example.com/item-2"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -800,7 +872,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEi
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("item-1").Return(nil).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/item-1").Return(nil).Times(1)
 
 	playlistURL := "https://example.com/playlist.json"
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
@@ -822,7 +894,7 @@ func TestCommandHandler_ClearPlaylistItemCache_ResyncSkipsWhenNoCachedFallbackEi
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "item-1"},
+		Arguments: map[string]any{"source": "https://example.com/item-1"},
 	})
 
 	require.NoError(t, err)
@@ -839,11 +911,11 @@ func TestCommandHandler_ClearPlaylistItemCache_NotFound(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
-	mockOfflineCache.EXPECT().ClearItem("missing").Return(offlinecache.ErrItemNotFound).Times(1)
+	mockOfflineCache.EXPECT().ClearItem("https://example.com/missing").Return(offlinecache.ErrItemNotFound).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
-		Arguments: map[string]any{"itemId": "missing"},
+		Arguments: map[string]any{"source": "https://example.com/missing"},
 	})
 
 	require.NoError(t, err)
@@ -866,23 +938,23 @@ func TestCommandHandler_ClearPlaylistCache_NotFound(t *testing.T) {
 	assertErrorResponse(t, result, "not_found")
 }
 
-func TestCommandHandler_GetOfflineCacheStatus_WithItemIDs(t *testing.T) {
+func TestCommandHandler_GetOfflineCacheStatus_WithSources(t *testing.T) {
 	ts, mockOfflineCache := setupOfflineCache(t)
 	defer ts.teardown()
 
 	totals := offlinecache.StatusTotals{Total: 1, Ready: 1}
 	diskUsed := int64(1024)
 	snapshot := offlinecache.StatusSnapshot{
-		Items:         []offlinecache.ItemStatus{{ItemID: "item-1", State: offlinecache.StateReady}},
+		Items:         []offlinecache.ItemStatus{{Source: "https://example.com/item-1", State: offlinecache.StateReady}},
 		Totals:        &totals,
 		DiskUsedBytes: &diskUsed,
 	}
-	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{ItemIDs: []string{"item-1", "item-2"}}).
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{Sources: []string{"https://example.com/item-1", "https://example.com/item-2"}}).
 		Return(snapshot, nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
-		Arguments: map[string]any{"itemIds": []interface{}{"item-1", "item-2"}},
+		Arguments: map[string]any{"sources": []interface{}{"https://example.com/item-1", "https://example.com/item-2"}},
 	})
 
 	require.NoError(t, err)
@@ -921,7 +993,7 @@ func TestCommandHandler_GetOfflineCacheStatus_PagingArguments(t *testing.T) {
 	defer ts.teardown()
 
 	snapshot := offlinecache.StatusSnapshot{
-		Items:      []offlinecache.ItemStatus{{ItemID: "item-9", State: offlinecache.StateReady}},
+		Items:      []offlinecache.ItemStatus{{Source: "https://example.com/item-9", State: offlinecache.StateReady}},
 		NextCursor: "item-9",
 		Truncated:  true,
 	}
@@ -976,20 +1048,20 @@ func TestCommandHandler_GetOfflineCacheStatus_RejectsInvalidArguments(t *testing
 		{
 			// The regression this closes: a bare string used to fall
 			// through to "report on every item" instead of erroring.
-			name: "itemIds not an array",
-			args: map[string]any{"itemIds": "item-1"},
+			name: "sources not an array",
+			args: map[string]any{"sources": "https://example.com/item-1"},
 		},
 		{
-			name: "itemIds holds a non-string",
-			args: map[string]any{"itemIds": []interface{}{"item-1", 7}},
+			name: "sources holds a non-string",
+			args: map[string]any{"sources": []interface{}{"https://example.com/item-1", 7}},
 		},
 		{
-			name: "itemIds holds an empty string",
-			args: map[string]any{"itemIds": []interface{}{""}},
+			name: "sources holds an empty string",
+			args: map[string]any{"sources": []interface{}{""}},
 		},
 		{
-			name: "itemIds over the per-request cap",
-			args: map[string]any{"itemIds": tooManyItemIDs()},
+			name: "sources over the per-request cap",
+			args: map[string]any{"sources": tooManySources()},
 		},
 		{
 			name: "limit is not a number",
@@ -1041,12 +1113,105 @@ func TestCommandHandler_GetOfflineCacheStatus_RejectsInvalidArguments(t *testing
 	}
 }
 
-func tooManyItemIDs() []interface{} {
-	ids := make([]interface{}, offlinecache.MaxStatusItemIDs+1)
-	for i := range ids {
-		ids[i] = fmt.Sprintf("item-%d", i)
+// TestCommandHandler_OfflineCache_LegacyItemIDShapeIsRejectedLoudly is the
+// controller-boundary contract test for the source-keying cutover: a
+// client still speaking the pre-cutover `itemId`/`itemIds` shape must be
+// rejected with a NON-retryable `invalid_request` on every command, never
+// silently misinterpreted.
+//
+// "Silently misinterpreted" is the failure this pins, and it is the one
+// that would actually be dangerous: an id accepted where a source belongs
+// would hash to a key nothing can ever match, so the device would report
+// work queued/cleared for an artwork it never touched. Failing closed
+// means a stale client sees an immediate, non-retryable error naming the
+// missing field instead — the honest signal that it needs the coordinated
+// release.
+//
+// Deliberately no legacy-compat branch is being pinned here: the
+// itemId-keyed contract never shipped in any release tag (the offline
+// cache command family merged after v1.0.21 and is opt-in via
+// offlineCache.enabled), so there is no fielded caller to preserve — see
+// docs/api-design.md's current-v1 posture, whose rule 2 allows a rename
+// through a coordinated release that updates all callers. This test is
+// what stops a future package release from quietly loosening that
+// rejection into a silent misread.
+func TestCommandHandler_OfflineCache_LegacyItemIDShapeIsRejectedLoudly(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  commands.Type
+		args map[string]any
+	}{
+		{
+			name: "downloadPlaylistItem with legacy itemId",
+			cmd:  commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+			args: map[string]any{"playlistUrl": "https://example.com/playlist.json", "itemId": "work-1"},
+		},
+		{
+			name: "clearPlaylistItemCache with legacy itemId",
+			cmd:  commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+			args: map[string]any{"itemId": "work-1"},
+		},
+		{
+			name: "getOfflineCacheStatus with legacy itemIds",
+			cmd:  commands.CMD_GET_OFFLINE_CACHE_STATUS,
+			args: map[string]any{"itemIds": []interface{}{"work-1", "work-2"}},
+		},
 	}
-	return ids
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts, mockOfflineCache := setupOfflineCache(t)
+			defer ts.teardown()
+
+			// The service must never be reached: a legacy-shape request
+			// is rejected at the argument boundary, so no download is
+			// queued, no cache is cleared, and no status work is done.
+			mockOfflineCache.EXPECT().DownloadItem(gomock.Any(), gomock.Any()).Times(0)
+			mockOfflineCache.EXPECT().ClearItem(gomock.Any()).Times(0)
+			mockOfflineCache.EXPECT().Status(gomock.Any()).Times(0)
+
+			result, err := ts.handler.Process(ts.ctx, commands.Command{Type: tt.cmd, Arguments: tt.args})
+			require.NoError(t, err)
+
+			body := assertErrorResponse(t, result, "invalid_request")
+			errBody, ok := body["error"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, false, errBody["retryable"],
+				"a stale client cannot fix this by retrying — it needs the coordinated release, so the error must be non-retryable")
+		})
+	}
+}
+
+// TestCommandHandler_GetOfflineCacheStatus_LegacyItemIDsDoNotWidenTheReport
+// pins the one legacy shape that could fail OPEN rather than closed:
+// `getOfflineCacheStatus` treats an absent `sources` as "report on every
+// known item", so an unrecognized `itemIds` key being ignored (rather
+// than rejected) would silently turn a stale client's narrow query into a
+// full-store scan — the exact "a client-side typo becomes a full-store
+// scan" hazard parseStatusRequest's strict validation exists to prevent.
+func TestCommandHandler_GetOfflineCacheStatus_LegacyItemIDsDoNotWidenTheReport(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	// No Status expectation at all: a whole-store snapshot must never be
+	// computed for a request that only named two items in the old shape.
+	mockOfflineCache.EXPECT().Status(gomock.Any()).Times(0)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
+		Arguments: map[string]any{"itemIds": []interface{}{"work-1", "work-2"}},
+	})
+
+	require.NoError(t, err)
+	assertErrorResponse(t, result, "invalid_request")
+}
+
+func tooManySources() []interface{} {
+	sources := make([]interface{}, offlinecache.MaxStatusSources+1)
+	for i := range sources {
+		sources[i] = fmt.Sprintf("https://example.com/item-%d", i)
+	}
+	return sources
 }
 
 func TestCommandHandler_GetOfflineCacheStatus_ServiceError(t *testing.T) {
@@ -1093,7 +1258,7 @@ func TestCommandHandler_DownloadPlaylistItem_ClearWonIsReportedNotAcked(t *testi
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
-		Arguments: map[string]any{"itemId": "item-1", "playlistUrl": playlistURL},
+		Arguments: map[string]any{"source": item.Source, "playlistUrl": playlistURL},
 	})
 
 	require.NoError(t, err)
@@ -1101,4 +1266,435 @@ func TestCommandHandler_DownloadPlaylistItem_ClearWonIsReportedNotAcked(t *testi
 	errBody, ok := body["error"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, errBody["retryable"], "the clear has settled by the time the client retries, so this must be retryable")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_InlineItemIsNotReportedQueued
+// pins the distinction between "accepted" and "queued". A data: item's
+// bytes travel inside the playlist body, so DownloadItem does no work and
+// no progress notification will ever be emitted for it. Reporting
+// status:"queued" for that told the client to wait for something that
+// never comes.
+//
+// The index step must still run: indexing is what persists the playlist
+// body those inline bytes live in, so it matters MORE for an inline item
+// than for a downloaded one.
+func TestCommandHandler_DownloadPlaylistItem_InlineItemIsNotReportedQueued(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "data:image/png;base64,iVBORw0KGgo="}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	const sampledGen = uint64(3)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(sampledGen).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
+		Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, sampledGen).
+		Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.Equal(t, "not_queued_inline", resp["status"],
+		"an inline item is accepted but nothing is queued; saying otherwise promises a notification that never arrives")
+	assert.Equal(t, item.Source, resp["source"])
+}
+
+// TestCommandHandler_DownloadPlaylistItem_InlinePersistFailureIsAnError
+// pins the asymmetry between the two outcomes. For a QUEUED item the save
+// is best-effort — the bytes are being fetched independently, so a failed
+// save costs only the by-URL fallback. For an INLINE item the save is the
+// only thing that happens: the bytes live nowhere but this playlist body,
+// so ok:true after a failed save would claim an offline copy that does
+// not exist anywhere on disk.
+//
+// This is a WIRE-VISIBLE change: a request that previously answered
+// ok:true/not_queued_inline now answers an error when persistence fails.
+func TestCommandHandler_DownloadPlaylistItem_InlinePersistFailureIsAnError(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	source := "data:text/html;base64,PGh0bWw+"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: source}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	playlistURL := "https://example.com/playlist.json"
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+		Return(errors.New("disk full")).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": source},
+	})
+
+	require.NoError(t, err)
+	assertErrorResponse(t, result, "internal")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_QueuedPersistFailureStillSucceeds
+// is the other half of that asymmetry, and exists so a future edit cannot
+// "simplify" the inline case above into failing every outcome: the item
+// really is queued, and its bytes really are being written independently
+// of this record.
+func TestCommandHandler_DownloadPlaylistItem_QueuedPersistFailureStillSucceeds(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+		Return(errors.New("disk full")).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	require.Equal(t, "queued", resp["status"])
+}
+
+// TestCommandHandler_ClearPlaylistItemCache_RejectsOversizedSource pins
+// the clear boundary. The admission bound added for downloads does NOT
+// cover this path — nothing here goes through DownloadItem — and the ok
+// response echoes the source back, so an unbounded value would be
+// reflected into a daemon response by an unauthenticated hub caller.
+//
+// Three assertions, and the third is the one that matters most: the
+// rejection must not itself contain the submitted value.
+func TestCommandHandler_ClearPlaylistItemCache_RejectsOversizedSource(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	// No ClearItem expectation: gomock's strict controller fails the test
+	// if the handler reaches the service at all.
+	_ = mockOfflineCache
+
+	oversized := "https://example.com/" + strings.Repeat("a", offlinecache.MaxSourceURLBytes)
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE,
+		Arguments: map[string]any{"source": oversized},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	errObj := resp["error"].(map[string]any)
+	require.Equal(t, false, errObj["retryable"], "resending the same oversized value cannot succeed")
+	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("a", 64),
+		"the rejection must not echo the submitted source")
+}
+
+// TestCommandHandler_GetOfflineCacheStatus_RejectsOversizedSource pins
+// the status boundary, where the exposure is worse: an unknown source is
+// echoed back verbatim as a not_cached entry, and MaxStatusSources of
+// them are accepted per request, so the count bound alone leaves the
+// aggregate unbounded.
+func TestCommandHandler_GetOfflineCacheStatus_RejectsOversizedSource(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	_ = mockOfflineCache // no Status expectation: reaching the service fails the test
+
+	oversized := "https://example.com/" + strings.Repeat("z", offlinecache.MaxSourceURLBytes)
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type: commands.CMD_GET_OFFLINE_CACHE_STATUS,
+		Arguments: map[string]any{
+			"sources": []interface{}{"https://example.com/fine.png", oversized},
+		},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	errObj := resp["error"].(map[string]any)
+	require.Equal(t, false, errObj["retryable"])
+	require.Contains(t, fmt.Sprint(errObj["message"]), "sources[1]",
+		"the offending entry is identified by index, not by value")
+	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("z", 64),
+		"the rejection must not echo the submitted source")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_InlineClearRaceIsRetryableBusy
+// covers the branch the earlier inline fix left open. A ClearPlaylist
+// landing inside the sample->save window makes the save a deliberate
+// no-op, which used to surface as a nil error and therefore as
+// ok:true/not_queued_inline — the exact "cached offline when nothing was
+// written" claim that fix set out to stop, arrived at by the other route.
+//
+// Reported as retryable busy rather than as an internal error: nothing is
+// broken, the clear simply won, and this is how the QUEUED path already
+// surfaces the identical race via ErrClearedDuringDownload.
+func TestCommandHandler_DownloadPlaylistItem_InlineClearRaceIsRetryableBusy(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	source := "data:text/html;base64,PGh0bWw+"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: source}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	playlistURL := "https://example.com/playlist.json"
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(3)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(offlinecache.ErrItemInlineNotQueued).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(3)).
+		Return(offlinecache.ErrPlaylistSaveClearedRace).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": source},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "busy")
+	require.Equal(t, true, resp["error"].(map[string]any)["retryable"],
+		"the clear won; a retry after it settles can legitimately succeed")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_OversizedSourceIsNotRetryable
+// pins the CLASSIFICATION of the download-side rejection, not merely that
+// it is rejected. ErrSourceTooLong reaching the generic offline_cache_error
+// default would advertise retryable:true, and a conforming controller
+// would then retry an oversized URL forever — while the clear and status
+// handlers return non-retryable for the identical condition.
+func TestCommandHandler_DownloadPlaylistItem_OversizedSourceIsNotRetryable(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	oversized := "https://example.com/" + strings.Repeat("q", offlinecache.MaxSourceURLBytes)
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: oversized}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	playlistURL := "https://example.com/playlist.json"
+
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).
+		Return(fmt.Errorf("offline cache: %w: too big", offlinecache.ErrSourceTooLong)).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": oversized},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	require.Equal(t, false, resp["error"].(map[string]any)["retryable"],
+		"resending the same oversized URL can never succeed")
+}
+
+// TestCommandHandler_ClearPlaylistCache_RejectsOversizedPlaylistId is the
+// sibling of the source-key bound. This id is echoed in the ok body and
+// embedded in every error along ClearPlaylist -> LoadPlaylist -> safeID;
+// an oversized one fails ReadFile with ENAMETOOLONG rather than
+// IsNotExist, so the whole submitted string came back in the message.
+func TestCommandHandler_ClearPlaylistCache_RejectsOversizedPlaylistId(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	_ = mockOfflineCache // no ClearPlaylist expectation: reaching the service fails the test
+
+	oversized := strings.Repeat("p", offlinecache.MaxSourceURLBytes+1)
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_CLEAR_PLAYLIST_CACHE,
+		Arguments: map[string]any{"playlistId": oversized},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "invalid_request")
+	require.Equal(t, false, resp["error"].(map[string]any)["retryable"])
+	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("p", 64),
+		"the rejection must not echo the submitted id")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_ClearDuringResolveIsRejected
+// pins the window that the per-playlist clear generation structurally
+// cannot cover.
+//
+// The generation is sampled after resolveOfflineCachePlaylist, because
+// until that (network-bound) call returns there is no playlist ID to
+// sample. So a clear landing DURING the resolve is already folded into
+// the sampled value, its equality check passes, and the download proceeds
+// to re-queue the item and re-save the playlist record — resurrecting
+// state that clearPlaylistCache already reported to its own caller as
+// removed.
+//
+// The barrier is sampled before the resolve, which is what makes the
+// clear visible. Deterministic rather than timing-based: the clear is
+// modeled by ClearedSinceBarrier answering true, exactly as the service
+// would after a real clear bumped its global sequence.
+func TestCommandHandler_DownloadPlaylistItem_ClearDuringResolveIsRejected(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCacheRaw(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+
+	// The barrier is read BEFORE the resolve...
+	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(41)).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	// ...and the clear that landed while it was in flight is visible after.
+	mockOfflineCache.EXPECT().
+		ClearedSinceBarrier("playlist-1", uint64(41), item.Source).
+		Return(true).Times(1)
+
+	// Nothing may be queued, sampled, or persisted after that: no
+	// DownloadItem, no CurrentPlaylistClearGeneration, no
+	// IndexPlaylistForOfflineDisplay expectation is registered, so the
+	// strict controller fails this test if the handler continues.
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "busy")
+	require.Equal(t, true, resp["error"].(map[string]any)["retryable"],
+		"re-issuing after the clear settles behaves normally, exactly as the enqueue-window twin reports it")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_NoClearDuringResolveProceeds is
+// the other half: the barrier must not reject the ordinary case. Without
+// this, returning true unconditionally from ClearedSinceBarrier would
+// satisfy the test above while breaking every download.
+func TestCommandHandler_DownloadPlaylistItem_NoClearDuringResolveProceeds(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCacheRaw(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(7)).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		ClearedSinceBarrier("playlist-1", uint64(7), item.Source).
+		Return(false).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+		Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	require.Equal(t, "queued", resp["status"])
+}
+
+// TestCommandHandler_DownloadPlaylist_ClearDuringResolveIsRejected is the
+// whole-playlist twin of the single-item barrier test. The route has the
+// identical shape — resolve, then sample — and DownloadPlaylist's own
+// clear epochs (the playlist epoch, and the per-item epochs
+// classifyPlaylistItems samples) are all taken AFTER the resolve, so none
+// of them can see a clear that landed during it.
+//
+// Table-driven over the two clear commands, because both are undone by
+// proceeding and fixing only the playlist half is exactly how this
+// finding recurred: the item route was fixed first and this one was left.
+func TestCommandHandler_DownloadPlaylist_ClearDuringResolveIsRejected(t *testing.T) {
+	itemA := dp1playlist.PlaylistItem{ID: "a", Source: "https://example.com/a.png"}
+	itemB := dp1playlist.PlaylistItem{ID: "b", Source: "https://example.com/b.png"}
+
+	for _, tt := range []struct {
+		name string
+		why  string
+	}{
+		{"playlist cleared during resolve", "clearPlaylistCache already reported the record removed"},
+		{"member item cleared during resolve", "clearPlaylistItemCache already reported that item removed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ts, mockOfflineCache := setupOfflineCacheRaw(t)
+			defer ts.teardown()
+
+			playlistURL := "https://example.com/playlist.json"
+			playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+				ID: "playlist-1", Items: []dp1playlist.PlaylistItem{itemA, itemB},
+			}}
+
+			mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(11)).Times(1)
+			ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+			// EVERY member source must be offered to the check, or an
+			// item cleared mid-resolve slips through.
+			mockOfflineCache.EXPECT().
+				ClearedSinceBarrier("playlist-1", uint64(11), itemA.Source, itemB.Source).
+				Return(true).Times(1)
+
+			// No Marshal and no DownloadPlaylist expectation: the strict
+			// controller fails this test if the handler proceeds to
+			// enqueue or persist anything.
+
+			result, err := ts.handler.Process(ts.ctx, commands.Command{
+				Type:      commands.CMD_DOWNLOAD_PLAYLIST,
+				Arguments: map[string]any{"playlistUrl": playlistURL},
+			})
+
+			require.NoError(t, err)
+			resp := assertErrorResponse(t, result, "busy")
+			require.Equal(t, true, resp["error"].(map[string]any)["retryable"], tt.why)
+		})
+	}
+}
+
+// TestCommandHandler_DownloadPlaylist_NoClearDuringResolveProceeds keeps
+// the barrier honest: without it, always answering "cleared" would pass
+// the test above while breaking every playlist download.
+func TestCommandHandler_DownloadPlaylist_NoClearDuringResolveProceeds(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCacheRaw(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "a", Source: "https://example.com/a.png"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
+		ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item},
+	}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(3)).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		ClearedSinceBarrier("playlist-1", uint64(3), item.Source).
+		Return(false).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		DownloadPlaylist(ts.ctx, json.RawMessage(marshaled), playlistURL).
+		Return(1, 1, nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST,
+		Arguments: map[string]any{"playlistUrl": playlistURL},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	require.Equal(t, "queued", resp["status"])
 }

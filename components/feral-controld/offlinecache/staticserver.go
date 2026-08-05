@@ -262,6 +262,23 @@ func (s *staticServer) handleBlob(w go_http.ResponseWriter, r *go_http.Request) 
 
 	if ct := r.URL.Query().Get("ct"); ct != "" {
 		w.Header().Set("Content-Type", ct)
+	} else {
+		// No ct means the captured origin declared no Content-Type (see
+		// Resource.ContentType), and this path must reproduce that
+		// absence as faithfully as the inline fulfill does. Merely
+		// leaving the header unset would NOT: http.ServeContent below
+		// fills in a type of its own when the header is absent, first
+		// from the file extension (there is none — blobs are named by
+		// hash) then by sniffing the first 512 bytes, and would thus
+		// invent exactly the kind of guessed declaration this whole
+		// split exists to stop serving.
+		//
+		// An explicit nil is net/http's documented way to suppress
+		// that: serveContent tests for the header's PRESENCE in the map,
+		// so a present-but-empty value takes the "caller set it" branch
+		// and emits nothing. Chromium then sniffs the response itself,
+		// which is precisely what it did live.
+		w.Header()["Content-Type"] = nil
 	}
 	// Re-validate against the same allowlist URLFor's caller (replay.go)
 	// already filtered through — defense in depth against this handler

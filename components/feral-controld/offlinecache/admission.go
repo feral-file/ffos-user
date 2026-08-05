@@ -98,23 +98,12 @@ const (
 	admissionResumeMemoryDeltaPercent = 5.0
 	admissionResumeTempDeltaC         = 5.0
 
-	// DefaultAdmissionMaxDefer bounds how long the head of the queue may
-	// sit deferred before it is failed with a visible reason instead of
-	// blocking the FIFO forever. Waiting forever would hide a wedged queue
-	// behind an eternal "queued"; proceeding anyway would defeat the gate
-	// exactly when it matters (a device hot for this long is genuinely
-	// distressed). Failing is safe: the queue is memory-only, failed is the
-	// established re-issuable terminal state, and the reason string tells
-	// the client why. An hour, not less: the software temperature
-	// threshold above is strict enough that a single hot-running WebGL
-	// artwork can legitimately hold the gate closed for its whole display
-	// slot, and the bound should let a queued download wait that slot out
-	// rather than fail midway through it.
-	DefaultAdmissionMaxDefer = 60 * time.Minute
-
-	// defaultAdmissionRetryInterval is how often the worker re-evaluates a
-	// deferred head — a slight backoff from monitord's ~2s publish cadence
-	// so re-checks never outpace fresh data.
+	// defaultAdmissionRetryInterval is how often the worker re-evaluates
+	// the deferred remainder of the queue — a slight backoff from
+	// monitord's ~2s publish cadence so re-checks never outpace fresh
+	// data. It is also what paces an indefinitely deferred software job's
+	// re-checks, so it must stay short enough that a device cooling down
+	// starts caching again promptly.
 	defaultAdmissionRetryInterval = 3 * time.Second
 )
 
@@ -123,29 +112,31 @@ const (
 // existed — so existing direct constructions (tests, chiefly) opt out by
 // passing AdmissionOptions{}.
 type AdmissionOptions struct {
-	// Controller is consulted before each head-of-queue pop; nil admits
-	// everything unconditionally.
+	// Controller is consulted before each pop; nil admits everything
+	// unconditionally.
 	Controller AdmissionController
-	// Clock drives deferral timing and the retry ticker; nil falls back
-	// to the real clock.
+	// Clock drives the retry ticker; nil falls back to the real clock.
 	Clock wrapper.Clock
-	// MaxDefer <= 0 means DefaultAdmissionMaxDefer.
-	MaxDefer time.Duration
 	// RetryInterval <= 0 means defaultAdmissionRetryInterval. Injectable
 	// so service tests can drive deferral loops without real seconds.
 	RetryInterval time.Duration
 }
 
-// AdmissionDecision is Admit's verdict. Reason is human-readable — used in
-// defer/admit transition logs and, when a deferral outlives the service's
-// max-defer bound, surfaced to the client via Coverage.Reason.
+// AdmissionDecision is Admit's verdict. Reason is human-readable and
+// LOG-ONLY: it reaches the daemon journal via dequeueAdmitted's
+// once-per-bucket deferral line and nothing else. It used to also reach
+// the client through Coverage.Reason when a deferral outlived the
+// max-defer bound, but deferral no longer fails anything, so a client
+// currently cannot see why an item is sitting queued — the known gap
+// docs/offline-artwork-capture.md §2 proposes closing with an additive
+// status field.
 type AdmissionDecision struct {
 	Allowed bool
 	Reason  string
 }
 
 // AdmissionController is the service-owned seam the capture worker consults
-// before popping the head of the queue. Admit is called under service.mu
+// before popping a job. Admit is called under service.mu
 // (inside dequeueAdmitted, so the decision and the pop are one critical
 // section — see that function's doc): implementations MUST be cheap and
 // non-blocking, and any internal lock MUST be a leaf that never acquires
@@ -174,6 +165,12 @@ type AdmissionPolicy struct {
 	// memory check becomes derived rather than a bare percentage: see
 	// softwareMemoryBlockPercent.
 	//
+	// Note the ceiling is enforced by the cgroup ALONE, so it holds only
+	// while the capture Chromium stays inside the scope we spawned it in.
+	// captureWrapperArgv is what keeps it there, and warnOnScopeEscape is
+	// what says so out loud if a future Chromium build escapes anyway —
+	// at which point this reserve is describing a limit nothing enforces.
+	//
 	// This coupling is the point. A static "block above 80%" is only
 	// safe at one RAM size: with a 2 GiB cap on a 16 GB device a capture
 	// admitted at 80% peaks near 92%, under the watchdog's 95% line —
@@ -187,7 +184,7 @@ type AdmissionPolicy struct {
 	// intent, and the downloader degrades to an uncapped spawn when
 	// transient systemd scopes are unavailable (no session bus, no
 	// systemd-run — it warns and continues rather than failing captures
-	// outright; see ensureScopeSupport). On that path the capture is
+	// outright; see ensureCaptureSupport). On that path the capture is
 	// unbounded and the projection no longer holds.
 	//
 	// That degradation is safe by construction rather than by luck:
@@ -394,9 +391,9 @@ func (g *AdmissionGate) softwareMemoryBlockPercent(s admissionSample) float64 {
 		// The cap alone does not fit under the ceiling (a tiny device, or
 		// memoryMaxBytes configured larger than the machine). Deriving
 		// here would produce a threshold nothing can ever satisfy —
-		// every software download would sit deferred until maxDefer
-		// failed it, with no diagnosable cause. Fall back to the static
-		// threshold and say so once: the cgroup ceiling is still enforced
+		// every software download would sit deferred forever, with no
+		// diagnosable cause. Fall back to the static threshold and say so
+		// once: the cgroup ceiling is still enforced
 		// by the kernel, so the worst case remains an OOM kill of the
 		// CAPTURE (a clean, retryable failed job) rather than of the
 		// kiosk — which is exactly the backstop MemoryMax exists to be.

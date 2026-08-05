@@ -50,7 +50,6 @@ func TestResource_IsRedirect(t *testing.T) {
 
 func TestItemRecord_ResourceByURL(t *testing.T) {
 	record := offlinecache.ItemRecord{
-		ItemID: "item-1",
 		Resources: []offlinecache.Resource{
 			{URL: "https://host/index.html", Status: 200, SHA256: "aaa"},
 			{URL: "https://host/app.js", Status: 200, SHA256: "bbb"},
@@ -70,8 +69,23 @@ func TestItemRecord_ResourceByURL(t *testing.T) {
 	})
 
 	t.Run("empty resources returns false", func(t *testing.T) {
-		empty := offlinecache.ItemRecord{ItemID: "item-2"}
+		empty := offlinecache.ItemRecord{}
 		_, ok := empty.ResourceByURL("https://host/index.html")
 		assert.False(t, ok)
 	})
+}
+
+// TestSourceKey_GoldenValue pins SourceKey's output format as an on-disk
+// and wire contract: record filenames and status paging cursors are both
+// built from it, so any change to the hash function, encoding, or casing
+// is a silent cache-invalidation/format break this test makes loud.
+func TestSourceKey_GoldenValue(t *testing.T) {
+	// Independently computed hex(sha256("https://example.com/art")).
+	assert.Equal(t,
+		"c4192ef8bbedd92f87c9f156e01e9f0ffdfa0954f2df3ed82be333b858aa01af",
+		offlinecache.SourceKey("https://example.com/art"))
+	// Byte-exact: trivially different spellings are distinct identities.
+	assert.NotEqual(t,
+		offlinecache.SourceKey("https://example.com/art"),
+		offlinecache.SourceKey("https://example.com/art/"))
 }

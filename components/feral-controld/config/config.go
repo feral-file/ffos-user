@@ -145,9 +145,13 @@ type OfflineCacheResourceGateConfig struct {
 	// MetricsStaleAfterSeconds bounds how old the last sysmetrics sample
 	// may be before the gate fails open (admits unconditionally).
 	MetricsStaleAfterSeconds int `json:"metricsStaleAfterSeconds,omitempty"`
-	// MaxDeferSeconds bounds how long one queued download may sit deferred
-	// before it is failed with a visible reason instead of blocking the
-	// download queue indefinitely.
+	// MaxDeferSeconds is ACCEPTED BUT INERT. Deferral no longer has a
+	// deadline for any class: a download waits for the device to recover
+	// instead of failing on a timer, and leaves the queue only by being
+	// processed or by an explicit clear (see dequeueAdmitted in
+	// offlinecache/service.go). Setting it logs a warning rather than
+	// being silently ignored; the field is kept so an existing config
+	// still parses and so that warning has something to name.
 	MaxDeferSeconds int `json:"maxDeferSeconds,omitempty"`
 }
 

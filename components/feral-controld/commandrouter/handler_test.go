@@ -449,7 +449,7 @@ func TestCommandHandler_Process_DisplayPlaylist_SyncsKioskReplayScope(t *testing
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1", "item2"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4", "https://example.com/app.js"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	command := commands.Command{
@@ -487,7 +487,7 @@ func TestCommandHandler_Process_DisplayPlaylist_HoldsPlaybackLockAcrossSyncAndSe
 
 	mockKioskReplay := mocks.NewMockOfflineCacheKioskReplay(ts.ctrl)
 	lock := mockKioskReplay.EXPECT().LockPlayback().Times(1)
-	sync := mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1"}).Return(nil).Times(1)
+	sync := mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(nil).Times(1)
 	// MarkPlaybackChanged must be announced UNDER the lock, after the sync
 	// and before the unlock, so a concurrent resync defers to this
 	// authoritative scope change (see KioskReplay.PlaybackGeneration).
@@ -523,7 +523,7 @@ func TestCommandHandler_Process_DisplayPlaylist_KioskReplaySyncFailureDoesNotBlo
 	mockKioskReplay.EXPECT().LockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item1"}).Return(errors.New("dial failed")).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/video.mp4"}).Return(errors.New("dial failed")).Times(1)
 	// The authoritative generation bump MUST still fire even though the
 	// SyncPlaylist above errored: this display path is authoritative for
 	// what SHOULD be on screen, so a concurrent corrective resync must
@@ -559,7 +559,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
 	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
 
@@ -568,7 +568,7 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
@@ -578,14 +578,14 @@ func TestCommandHandler_Process_DisplayPlaylist_CDPSendFailureRevertsKioskReplay
 
 	oldURL := "https://example.com/old.json"
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old", Source: "https://example.com/item-old"}},
 	}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
 		PlaylistURL: &oldURL,
 	}, nil).Times(1)
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-old"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,
@@ -606,7 +606,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 
 	newURL := "https://example.com/new.json"
 	newPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-new"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-new", Source: "https://example.com/item-new"}},
 	}}
 	ts.mockDP1.EXPECT().ProcessPlaylistURLForCast(ts.ctx, newURL).Return(newPlaylist, nil).Times(1)
 
@@ -615,7 +615,7 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 	mockKioskReplay.EXPECT().UnlockPlayback().AnyTimes()
 	mockKioskReplay.EXPECT().PlaybackGeneration().Return(uint64(0)).AnyTimes()
 	mockKioskReplay.EXPECT().MarkPlaybackChanged().AnyTimes()
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-new"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-new"}).Return(nil).Times(1)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, nil, mockKioskReplay, nil, ts.mockJSON, ts.logger)
 
 	ts.mockCDP.EXPECT().
@@ -626,14 +626,14 @@ func TestCommandHandler_Process_DisplayPlaylist_PlayerRejectionRevertsKioskRepla
 
 	oldURL := "https://example.com/old.json"
 	oldPlaylist := &dp1.Playlist{Playlist: dp1playlist.Playlist{
-		Items: []dp1playlist.PlaylistItem{{ID: "item-old"}},
+		Items: []dp1playlist.PlaylistItem{{ID: "item-old", Source: "https://example.com/item-old"}},
 	}}
 	ts.mockStatusPoller.EXPECT().FetchPlayerStatus(ts.ctx).Return(&status.PlayerStatus{
 		Command:     string(commands.CMD_DISPLAY_PLAYLIST),
 		PlaylistURL: &oldURL,
 	}, nil).Times(1)
 	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, oldURL, false).Return(oldPlaylist, nil).Times(1)
-	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"item-old"}).Return(nil).Times(1)
+	mockKioskReplay.EXPECT().SyncPlaylist(ts.ctx, []string{"https://example.com/item-old"}).Return(nil).Times(1)
 
 	result, err := ts.handler.Process(ts.ctx, commands.Command{
 		Type:      commands.CMD_DISPLAY_PLAYLIST,

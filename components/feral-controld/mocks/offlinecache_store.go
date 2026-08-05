@@ -66,18 +66,18 @@ func (mr *MockOfflineCacheStoreMockRecorder) BlobSize(sha256Hex interface{}) *go
 }
 
 // DeleteItem mocks base method.
-func (m *MockOfflineCacheStore) DeleteItem(itemID string) (bool, error) {
+func (m *MockOfflineCacheStore) DeleteItem(sourceKey string) (bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteItem", itemID)
+	ret := m.ctrl.Call(m, "DeleteItem", sourceKey)
 	ret0, _ := ret[0].(bool)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // DeleteItem indicates an expected call of DeleteItem.
-func (mr *MockOfflineCacheStoreMockRecorder) DeleteItem(itemID interface{}) *gomock.Call {
+func (mr *MockOfflineCacheStoreMockRecorder) DeleteItem(sourceKey interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteItem", reflect.TypeOf((*MockOfflineCacheStore)(nil).DeleteItem), itemID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteItem", reflect.TypeOf((*MockOfflineCacheStore)(nil).DeleteItem), sourceKey)
 }
 
 // DeletePlaylist mocks base method.
@@ -109,21 +109,6 @@ func (mr *MockOfflineCacheStoreMockRecorder) DiskUsage() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DiskUsage", reflect.TypeOf((*MockOfflineCacheStore)(nil).DiskUsage))
 }
 
-// PrunePlaylistRecords mocks base method.
-func (m *MockOfflineCacheStore) PrunePlaylistRecords(keep int) (int, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PrunePlaylistRecords", keep)
-	ret0, _ := ret[0].(int)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// PrunePlaylistRecords indicates an expected call of PrunePlaylistRecords.
-func (mr *MockOfflineCacheStoreMockRecorder) PrunePlaylistRecords(keep interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrunePlaylistRecords", reflect.TypeOf((*MockOfflineCacheStore)(nil).PrunePlaylistRecords), keep)
-}
-
 // GC mocks base method.
 func (m *MockOfflineCacheStore) GC() (int, int64, error) {
 	m.ctrl.T.Helper()
@@ -140,19 +125,19 @@ func (mr *MockOfflineCacheStoreMockRecorder) GC() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GC", reflect.TypeOf((*MockOfflineCacheStore)(nil).GC))
 }
 
-// ListItemIDs mocks base method.
-func (m *MockOfflineCacheStore) ListItemIDs() ([]string, error) {
+// ListItemKeys mocks base method.
+func (m *MockOfflineCacheStore) ListItemKeys() ([]string, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListItemIDs")
+	ret := m.ctrl.Call(m, "ListItemKeys")
 	ret0, _ := ret[0].([]string)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// ListItemIDs indicates an expected call of ListItemIDs.
-func (mr *MockOfflineCacheStoreMockRecorder) ListItemIDs() *gomock.Call {
+// ListItemKeys indicates an expected call of ListItemKeys.
+func (mr *MockOfflineCacheStoreMockRecorder) ListItemKeys() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListItemIDs", reflect.TypeOf((*MockOfflineCacheStore)(nil).ListItemIDs))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListItemKeys", reflect.TypeOf((*MockOfflineCacheStore)(nil).ListItemKeys))
 }
 
 // ListPlaylistIDs mocks base method.
@@ -171,18 +156,18 @@ func (mr *MockOfflineCacheStoreMockRecorder) ListPlaylistIDs() *gomock.Call {
 }
 
 // LoadItem mocks base method.
-func (m *MockOfflineCacheStore) LoadItem(itemID string) (*offlinecache.ItemRecord, error) {
+func (m *MockOfflineCacheStore) LoadItem(sourceKey string) (*offlinecache.ItemRecord, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "LoadItem", itemID)
+	ret := m.ctrl.Call(m, "LoadItem", sourceKey)
 	ret0, _ := ret[0].(*offlinecache.ItemRecord)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // LoadItem indicates an expected call of LoadItem.
-func (mr *MockOfflineCacheStoreMockRecorder) LoadItem(itemID interface{}) *gomock.Call {
+func (mr *MockOfflineCacheStoreMockRecorder) LoadItem(sourceKey interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadItem", reflect.TypeOf((*MockOfflineCacheStore)(nil).LoadItem), itemID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadItem", reflect.TypeOf((*MockOfflineCacheStore)(nil).LoadItem), sourceKey)
 }
 
 // LoadPlaylist mocks base method.
@@ -213,6 +198,21 @@ func (m *MockOfflineCacheStore) LoadPlaylistIDForURL(sourceURL string) (string, 
 func (mr *MockOfflineCacheStoreMockRecorder) LoadPlaylistIDForURL(sourceURL interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadPlaylistIDForURL", reflect.TypeOf((*MockOfflineCacheStore)(nil).LoadPlaylistIDForURL), sourceURL)
+}
+
+// PrunePlaylistRecords mocks base method.
+func (m *MockOfflineCacheStore) PrunePlaylistRecords(keep int) (int, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PrunePlaylistRecords", keep)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// PrunePlaylistRecords indicates an expected call of PrunePlaylistRecords.
+func (mr *MockOfflineCacheStoreMockRecorder) PrunePlaylistRecords(keep interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrunePlaylistRecords", reflect.TypeOf((*MockOfflineCacheStore)(nil).PrunePlaylistRecords), keep)
 }
 
 // ReadBlob mocks base method.

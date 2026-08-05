@@ -36,6 +36,7 @@ func (c scriptedCmd) Start() error                    { return c.err }
 func (c scriptedCmd) Wait() error                     { return c.err }
 func (c scriptedCmd) Output() ([]byte, error)         { return c.out, c.err }
 func (c scriptedCmd) CombinedOutput() ([]byte, error) { return c.out, c.err }
+func (c scriptedCmd) Pid() int                        { return 0 }
 
 func (e *scriptedExec) CommandContext(ctx context.Context, name string, arg ...string) wrapper.ExecCmd {
 	argv := append([]string{name}, arg...)

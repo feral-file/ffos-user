@@ -91,6 +91,21 @@ func (c *fakeWSConn) pushReply(data []byte) {
 	c.inbound <- data
 }
 
+// nextOutboundOK is nextOutbound without the fatal timeout: it reports
+// ok=false once the session closes c.outbound, so a test can loop over
+// every outbound call without pre-knowing how many there will be.
+func (c *fakeWSConn) nextOutboundOK() (map[string]interface{}, bool) {
+	data, ok := <-c.outbound
+	if !ok {
+		return nil, false
+	}
+	var msg map[string]interface{}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil, false
+	}
+	return msg, true
+}
+
 func (c *fakeWSConn) nextOutbound(t *testing.T) map[string]interface{} {
 	t.Helper()
 	select {

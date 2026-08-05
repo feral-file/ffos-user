@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -111,7 +112,6 @@ func TestService_EvictDownTo_StopsAfterOneVictimWhenGCFails(t *testing.T) {
 		blobHash, err := store.WriteBlob(strings.NewReader(content), 0)
 		require.NoError(t, err)
 		require.NoError(t, store.SaveItem(&ItemRecord{
-			ItemID:     id,
 			Item:       dp1playlist.PlaylistItem{ID: id, Source: "https://example.com/" + id},
 			Entry:      "https://example.com/" + id,
 			Resources:  []Resource{{URL: "https://example.com/" + id, Status: 200, SHA256: blobHash}},
@@ -129,19 +129,110 @@ func TestService_EvictDownTo_StopsAfterOneVictimWhenGCFails(t *testing.T) {
 	// The flaky record reads fine during the victim scan setup above;
 	// from here on it fails, so oldestEvictableItem skips it (its own
 	// LoadItem errors) and gc()'s mark phase aborts on it.
-	failOS.failPath = filepath.Join(root, "items", "item-flaky.json")
+	failOS.failPath = filepath.Join(root, "items", SourceKey("https://example.com/item-flaky")+".json")
 
 	// Target 0 with three items on disk: without the gc-failure stop this
 	// loop would evict every readable record trying to get under target.
-	svc.evictDownTo(0, "", false)
+	svc.evictDownTo(0, "", "", false)
 
-	_, err := store.LoadItem("item-victim")
+	_, err := store.LoadItem(SourceKey("https://example.com/item-victim"))
 	assert.ErrorIs(t, err, ErrItemNotFound, "the oldest readable record is deleted before the GC failure is discovered")
-	_, err = store.LoadItem("item-survivor")
+	_, err = store.LoadItem(SourceKey("https://example.com/item-survivor"))
 	assert.NoError(t, err, "the loop must stop after the failed GC instead of burning further healthy records")
 	for _, content := range []string{"victim payload", "survivor payload", "flaky payload"} {
 		sum := sha256.Sum256([]byte(content))
 		_, err := store.ReadBlob(hex.EncodeToString(sum[:]))
 		assert.NoError(t, err, "no blob bytes may be reclaimed while GC is aborting")
 	}
+}
+
+// TestService_NotifyEvicted_NeverDowngradesASourceWithAJobInFlight pins
+// eviction's compare-and-set announcement.
+//
+// A victim can legitimately be a source whose stale record is the oldest
+// on disk while a recapture for it sits in the queue. Announcing that
+// through the plain notify overwrote StateQueued with StateNotCached and
+// broke two contracts: enqueue's idempotency check stopped seeing the job
+// as scheduled, so the next request pushed a DUPLICATE job and the
+// artwork was captured twice; and reserveForClear stopped counting it as
+// settled, so a ClearItem that really did cancel the queued job answered
+// a NON-retryable ErrItemNotFound.
+//
+// Deliberately asserted here rather than by filtering the victim scan:
+// eviction must still be free to reclaim an in-flight source's stale
+// bytes (DownloadPlaylist enqueues every item, so a refresh marks nearly
+// the whole store in-flight — skipping those would starve reclaim exactly
+// when the store is full). Only the state downgrade is wrong.
+func TestService_NotifyEvicted_NeverDowngradesASourceWithAJobInFlight(t *testing.T) {
+	newSvc := func(t *testing.T) (*service, *recordingProgressObserver) {
+		t.Helper()
+		obs := &recordingProgressObserver{}
+		svc := &service{
+			queue: newJobQueue(), state: make(map[string]ItemState),
+			sourceByKey: make(map[string]string), downloadEpoch: make(map[string]uint64),
+			observer: obs, logger: zaptest.NewLogger(t),
+		}
+		return svc, obs
+	}
+
+	const source = "https://example.com/evicted"
+	key := SourceKey(source)
+
+	for _, inFlight := range []ItemState{StateQueued, StateDownloading} {
+		t.Run("preserves "+string(inFlight), func(t *testing.T) {
+			svc, obs := newSvc(t)
+			svc.state[key] = inFlight
+			svc.sourceByKey[key] = source
+
+			svc.notifyEvicted(source, Coverage{})
+
+			assert.Equal(t, inFlight, svc.state[key],
+				"an in-flight source's tracked state must survive the eviction of its stale record")
+			assert.Empty(t, obs.states(),
+				"and nothing is announced: the queued job's own capture reports the real terminal state")
+		})
+	}
+
+	t.Run("settles a terminal state", func(t *testing.T) {
+		svc, obs := newSvc(t)
+		svc.state[key] = StateReady
+		svc.sourceByKey[key] = source
+
+		svc.notifyEvicted(source, Coverage{})
+
+		assert.Equal(t, StateNotCached, svc.state[key],
+			"an ordinary victim must still be recorded and announced as not_cached")
+		assert.Equal(t, []ItemState{StateNotCached}, obs.states())
+	})
+
+	t.Run("settles an untracked source", func(t *testing.T) {
+		svc, obs := newSvc(t)
+
+		svc.notifyEvicted(source, Coverage{})
+
+		assert.Equal(t, StateNotCached, svc.state[key])
+		assert.Equal(t, source, svc.sourceByKey[key],
+			"the source must be recorded alongside the state, so status can still report an identity")
+		assert.Equal(t, []ItemState{StateNotCached}, obs.states())
+	})
+}
+
+// recordingProgressObserver is a minimal ProgressObserver for the
+// internal test package (service_test.go's equivalent lives in the
+// external one and cannot be imported here).
+type recordingProgressObserver struct {
+	mu       sync.Mutex
+	recorded []ItemState
+}
+
+func (o *recordingProgressObserver) OnItemStateChanged(status ItemStatus) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.recorded = append(o.recorded, status.State)
+}
+
+func (o *recordingProgressObserver) states() []ItemState {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]ItemState(nil), o.recorded...)
 }

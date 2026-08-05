@@ -51,8 +51,7 @@
       "mediaMaxMemoryPercent": 90,
       "mediaMaxCpuTempC": 85,
       "memorySafetyCeilingPercent": 90,
-      "metricsStaleAfterSeconds": 15,
-      "maxDeferSeconds": 3600
+      "metricsStaleAfterSeconds": 15
     },
     "headlessLimits": {
       "disabled": false,
