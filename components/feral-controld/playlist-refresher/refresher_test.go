@@ -1585,9 +1585,18 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 	// Expect ticker to be stopped exactly twice:
 	// 1. Once by the defer statement when the goroutine exits
 	// 2. Once explicitly when context is canceled
+	//
+	// The second one lands on the BACKGROUND goroutine, and Stop() only
+	// closes the done channel — it does not wait for that goroutine to
+	// unwind. So ctrl.Finish() in teardown could run first and report
+	// "missing call(s) to Stop()", which is what made this test flaky in
+	// CI. Signal each call and join on them below instead of trusting a
+	// sleep to be long enough.
+	stopped := make(chan struct{}, 2)
 	mockTicker.EXPECT().
 		Stop().
-		Times(2)
+		Times(2).
+		Do(func() { stopped <- struct{}{} })
 
 	// Expect clock to create ticker
 	ts.mockClock.EXPECT().
@@ -1625,11 +1634,19 @@ func TestRefresher_Background_ContextCancellation(t *testing.T) {
 	// Cancel the context - this should trigger the ticker.Stop() call
 	ts.cancel()
 
-	// Give it a moment to process the cancellation
-	time.Sleep(50 * time.Millisecond)
-
 	// Stop the refresher
 	ts.refresher.Stop()
+
+	// Join on both Stop() calls before teardown runs ctrl.Finish(). This
+	// replaces a 50ms sleep that was only ever probabilistically long
+	// enough.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("ticker.Stop() was called %d time(s) within the deadline, want 2", i)
+		}
+	}
 }
 
 func TestRefresher_Background_DoneChannel(t *testing.T) {

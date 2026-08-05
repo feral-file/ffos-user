@@ -3497,19 +3497,27 @@ func TestService_ClearPlaylist_NotificationCarriesTheExactSource(t *testing.T) {
 	// Comfortably past truncateSourceForLog's 256-byte cut, comfortably
 	// inside the 2048-byte admission bound: an ordinary long signed URL.
 	source := "https://example.com/art?sig=" + strings.Repeat("s", 600)
+
+	// Seeded directly, the way every other ClearPlaylist test here does,
+	// rather than by driving DownloadPlaylist. An earlier version called
+	// DownloadPlaylist and cleared immediately, which races the capture
+	// worker: if the worker has popped the item and is inside Capture at
+	// that instant, ClearPlaylist correctly refuses with ErrItemBusy and
+	// the test fails for a reason that has nothing to do with what it is
+	// asserting. Seeding removes the race instead of papering over it
+	// with a sleep, and this test is about the notification's CONTENT,
+	// not about how the record came to exist.
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		Item:     dp1playlist.PlaylistItem{ID: "item-1", Source: source},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
 	raw, err := json.Marshal(map[string]interface{}{
 		"dpVersion": "1.0.0", "id": "pl-exact", "title": "t",
 		"items": []map[string]interface{}{{"id": "item-1", "source": source}},
 	})
 	require.NoError(t, err)
+	require.NoError(t, ts.store.SavePlaylist("pl-exact", raw))
 
-	ts.mockClassifier.EXPECT().Classify(gomock.Any(), source).
-		Return(offlinecache.ClassMedia, nil).AnyTimes()
-	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).
-		Return(&offlinecache.ItemRecord{Item: dp1playlist.PlaylistItem{Source: source}}, nil).AnyTimes()
-
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
-	require.NoError(t, err)
 	require.NoError(t, ts.service.ClearPlaylist("pl-exact"))
 
 	obs.mu.Lock()
@@ -3523,9 +3531,7 @@ func TestService_ClearPlaylist_NotificationCarriesTheExactSource(t *testing.T) {
 	for _, got := range observed {
 		require.NotContains(t, got, "…[+",
 			"a truncation marker on the wire means the source no longer identifies anything")
-		if got != "" {
-			require.Equal(t, source, got, "the notification must carry the source byte-for-byte")
-		}
+		require.Equal(t, source, got, "the notification must carry the source byte-for-byte")
 	}
 }
 
