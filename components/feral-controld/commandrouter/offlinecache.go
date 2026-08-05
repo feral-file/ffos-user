@@ -69,9 +69,29 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 		return errorResponse("invalid_request", "source is required", false), nil
 	}
 
+	// Sampled BEFORE the resolve, which is the whole point. The resolve
+	// is a network call that can block for seconds, and until it returns
+	// we do not know the playlist ID — so the per-playlist generation
+	// sampled below is necessarily sampled AFTER it, by which time a
+	// clear that landed DURING the resolve has already been folded into
+	// the value and its equality check passes. This barrier is what makes
+	// that window visible: see Service.ClearBarrier.
+	barrier := h.offlineCache.ClearBarrier()
+
 	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
+	}
+
+	// A clearPlaylistCache or clearPlaylistItemCache that completed while
+	// we were resolving already reported success to its own caller.
+	// Continuing would re-queue the item and re-save the playlist record,
+	// resurrecting exactly what that clear removed. Retryable: re-issuing
+	// after the clear has settled behaves normally, which is how the
+	// enqueue-window twin (ErrClearedDuringDownload) is already reported.
+	if h.offlineCache.ClearedSinceBarrier(playlist.ID, source, barrier) {
+		return errorResponse("busy",
+			"a clear for this playlist or item landed while it was being resolved, so nothing was queued", true), nil
 	}
 
 	item, found := findPlaylistItemBySource(playlist, source)

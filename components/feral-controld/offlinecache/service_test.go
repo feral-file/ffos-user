@@ -3528,3 +3528,55 @@ func TestService_ClearPlaylist_NotificationCarriesTheExactSource(t *testing.T) {
 		}
 	}
 }
+
+// TestService_ClearBarrier_DetectsClearsLandingAfterTheSample proves the
+// barrier against the REAL service, not a mock. The commandrouter test
+// models a clear by making ClearedSinceBarrier answer true; this one
+// checks that an actual ClearItem/ClearPlaylist is what makes it answer
+// true, so the two halves cannot drift apart.
+func TestService_ClearBarrier_DetectsClearsLandingAfterTheSample(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	source := "https://example.com/a.png"
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "pl-barrier", "title": "t",
+		"items": []map[string]interface{}{{"id": "item-1", "source": source}},
+	})
+	require.NoError(t, err)
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), source).
+		Return(offlinecache.ClassMedia, nil).AnyTimes()
+	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).
+		Return(&offlinecache.ItemRecord{Item: dp1playlist.PlaylistItem{Source: source}}, nil).AnyTimes()
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+
+	// A barrier sampled now must see nothing behind it.
+	barrier := ts.service.ClearBarrier()
+	require.False(t, ts.service.ClearedSinceBarrier("pl-barrier", source, barrier),
+		"no clear has happened since the sample")
+
+	// A PLAYLIST clear after the sample is visible...
+	require.NoError(t, ts.service.ClearPlaylist("pl-barrier"))
+	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", source, barrier))
+
+	// ...and so is an ITEM clear, which is the other command that can
+	// land during a resolve. A fresh barrier first, so this asserts the
+	// item path rather than re-observing the playlist clear above.
+	after := ts.service.ClearBarrier()
+	require.False(t, ts.service.ClearedSinceBarrier("pl-barrier", source, after))
+
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+	require.NoError(t, ts.service.ClearItem(source))
+	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", source, after),
+		"a clearPlaylistItemCache during a resolve must disqualify the download too")
+
+	// An unrelated playlist/item must NOT be disqualified by either.
+	require.False(t, ts.service.ClearedSinceBarrier("other-playlist", "https://example.com/other.png", after),
+		"the barrier must be scoped to what was actually cleared")
+}

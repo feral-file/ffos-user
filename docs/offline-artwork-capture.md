@@ -2308,6 +2308,24 @@ mediacapture's raw `%s` interpolation, the notification payload, the
 status response. `truncateSourceForLog` remains as defense in depth, not
 as the primary control.
 
+**The clear barrier.** `downloadPlaylistItem` must resolve a playlist
+before it knows the playlist ID, and that resolve is a network call that
+can block for seconds. So the per-playlist clear generation can only be
+sampled *after* it — by which point a `clearPlaylistCache` that landed
+**during** the resolve is already folded into the sampled value, its
+equality check passes, and the download re-queues the item and re-saves
+the record that the clear already reported as removed.
+
+`ClearBarrier`/`ClearedSinceBarrier` close that window without needing the
+key up front: a process-global, monotonic `clearSeq` is bumped by every
+clear, each cleared playlist ID and item sourceKey records the value it
+was cleared at, and the handler samples the barrier *before* the resolve
+and asks afterwards whether either key was cleared since. Both clear
+commands are covered — `clearPlaylistItemCache` racing a resolve is the
+same bug with a different key. Rejected as retryable `busy`, matching how
+the narrower enqueue-window twin (`ErrClearedDuringDownload`) already
+reports itself.
+
 **What one capture may accumulate is also bounded.** Passing the source
 guard establishes that the ORIGIN is public, not that the page behaves.
 The disk budget caps bytes *fetched*, which does not cover this: the

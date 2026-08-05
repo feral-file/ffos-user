@@ -87,6 +87,20 @@ func (mr *MockOfflineCacheServiceMockRecorder) CachedPlaylistForURL(sourceURL in
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CachedPlaylistForURL", reflect.TypeOf((*MockOfflineCacheService)(nil).CachedPlaylistForURL), sourceURL)
 }
 
+// ClearBarrier mocks base method.
+func (m *MockOfflineCacheService) ClearBarrier() uint64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearBarrier")
+	ret0, _ := ret[0].(uint64)
+	return ret0
+}
+
+// ClearBarrier indicates an expected call of ClearBarrier.
+func (mr *MockOfflineCacheServiceMockRecorder) ClearBarrier() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearBarrier", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearBarrier))
+}
+
 // ClearItem mocks base method.
 func (m *MockOfflineCacheService) ClearItem(source string) error {
 	m.ctrl.T.Helper()
@@ -113,6 +127,20 @@ func (m *MockOfflineCacheService) ClearPlaylist(playlistID string) error {
 func (mr *MockOfflineCacheServiceMockRecorder) ClearPlaylist(playlistID interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearPlaylist", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearPlaylist), playlistID)
+}
+
+// ClearedSinceBarrier mocks base method.
+func (m *MockOfflineCacheService) ClearedSinceBarrier(playlistID, source string, barrier uint64) bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearedSinceBarrier", playlistID, source, barrier)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ClearedSinceBarrier indicates an expected call of ClearedSinceBarrier.
+func (mr *MockOfflineCacheServiceMockRecorder) ClearedSinceBarrier(playlistID, source, barrier interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearedSinceBarrier", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearedSinceBarrier), playlistID, source, barrier)
 }
 
 // CurrentPlaylistClearGeneration mocks base method.

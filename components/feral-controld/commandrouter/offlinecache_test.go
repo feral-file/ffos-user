@@ -27,6 +27,22 @@ import (
 // the 5 pre-CDP offline-cache commands can be exercised without touching
 // CDP, the executor, or mint pairing.
 func setupOfflineCache(t *testing.T) (*testSetup, *mocks.MockOfflineCacheService) {
+	ts, mockOfflineCache := setupOfflineCacheRaw(t)
+	// Default the clear-barrier pair to "no clear happened", so the tests
+	// that are not about that race need not restate it. A test that IS
+	// about the race must use setupOfflineCacheRaw: these AnyTimes
+	// expectations never exhaust, so a later, more specific expectation
+	// for the same method would never be reached.
+	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(0)).AnyTimes()
+	mockOfflineCache.EXPECT().
+		ClearedSinceBarrier(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(false).AnyTimes()
+	return ts, mockOfflineCache
+}
+
+// setupOfflineCacheRaw wires the handler with NO default expectations, for
+// tests that need to script ClearBarrier/ClearedSinceBarrier themselves.
+func setupOfflineCacheRaw(t *testing.T) (*testSetup, *mocks.MockOfflineCacheService) {
 	ts := setup(t)
 	mockOfflineCache := mocks.NewMockOfflineCacheService(ts.ctrl)
 	ts.handler = commandrouter.New(ts.mockExecutor, ts.mockCDP, ts.mockDP1, ts.mockStatusPoller, nil, mockOfflineCache, nil, nil, ts.mockJSON, ts.logger)
@@ -1510,4 +1526,87 @@ func TestCommandHandler_ClearPlaylistCache_RejectsOversizedPlaylistId(t *testing
 	require.Equal(t, false, resp["error"].(map[string]any)["retryable"])
 	require.NotContains(t, fmt.Sprint(resp), strings.Repeat("p", 64),
 		"the rejection must not echo the submitted id")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_ClearDuringResolveIsRejected
+// pins the window that the per-playlist clear generation structurally
+// cannot cover.
+//
+// The generation is sampled after resolveOfflineCachePlaylist, because
+// until that (network-bound) call returns there is no playlist ID to
+// sample. So a clear landing DURING the resolve is already folded into
+// the sampled value, its equality check passes, and the download proceeds
+// to re-queue the item and re-save the playlist record — resurrecting
+// state that clearPlaylistCache already reported to its own caller as
+// removed.
+//
+// The barrier is sampled before the resolve, which is what makes the
+// clear visible. Deterministic rather than timing-based: the clear is
+// modeled by ClearedSinceBarrier answering true, exactly as the service
+// would after a real clear bumped its global sequence.
+func TestCommandHandler_DownloadPlaylistItem_ClearDuringResolveIsRejected(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCacheRaw(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+
+	// The barrier is read BEFORE the resolve...
+	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(41)).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	// ...and the clear that landed while it was in flight is visible after.
+	mockOfflineCache.EXPECT().
+		ClearedSinceBarrier("playlist-1", item.Source, uint64(41)).
+		Return(true).Times(1)
+
+	// Nothing may be queued, sampled, or persisted after that: no
+	// DownloadItem, no CurrentPlaylistClearGeneration, no
+	// IndexPlaylistForOfflineDisplay expectation is registered, so the
+	// strict controller fails this test if the handler continues.
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertErrorResponse(t, result, "busy")
+	require.Equal(t, true, resp["error"].(map[string]any)["retryable"],
+		"re-issuing after the clear settles behaves normally, exactly as the enqueue-window twin reports it")
+}
+
+// TestCommandHandler_DownloadPlaylistItem_NoClearDuringResolveProceeds is
+// the other half: the barrier must not reject the ordinary case. Without
+// this, returning true unconditionally from ClearedSinceBarrier would
+// satisfy the test above while breaking every download.
+func TestCommandHandler_DownloadPlaylistItem_NoClearDuringResolveProceeds(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCacheRaw(t)
+	defer ts.teardown()
+
+	playlistURL := "https://example.com/playlist.json"
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	playlist := &dp1.Playlist{Playlist: dp1playlist.Playlist{ID: "playlist-1", Items: []dp1playlist.PlaylistItem{item}}}
+	marshaled := []byte(`{"id":"playlist-1"}`)
+
+	mockOfflineCache.EXPECT().ClearBarrier().Return(uint64(7)).Times(1)
+	ts.mockDP1.EXPECT().ProcessPlaylistURL(ts.ctx, playlistURL, false).Return(playlist, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		ClearedSinceBarrier("playlist-1", item.Source, uint64(7)).
+		Return(false).Times(1)
+	mockOfflineCache.EXPECT().CurrentPlaylistClearGeneration("playlist-1").Return(uint64(0)).Times(1)
+	mockOfflineCache.EXPECT().DownloadItem(ts.ctx, item).Return(nil).Times(1)
+	ts.mockJSON.EXPECT().Marshal(playlist).Return(marshaled, nil).Times(1)
+	mockOfflineCache.EXPECT().
+		IndexPlaylistForOfflineDisplay(json.RawMessage(marshaled), playlistURL, uint64(0)).
+		Return(nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_DOWNLOAD_PLAYLIST_ITEM,
+		Arguments: map[string]any{"playlistUrl": playlistURL, "source": item.Source},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	require.Equal(t, "queued", resp["status"])
 }

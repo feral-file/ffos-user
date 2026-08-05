@@ -537,6 +537,15 @@ type Service interface {
 	// The value is meaningful only for equality against a later sample of
 	// the SAME playlist ID; its absolute magnitude carries no meaning.
 	CurrentPlaylistClearGeneration(playlistID string) uint64
+	// ClearBarrier/ClearedSinceBarrier close the window
+	// CurrentPlaylistClearGeneration structurally cannot: a caller that
+	// must RESOLVE a playlist before it knows the playlist ID can only
+	// sample a per-key generation after that (network-bound) resolve, by
+	// which point a clear landing during the resolve is already folded
+	// into the sampled value. Sample ClearBarrier before the resolve and
+	// check ClearedSinceBarrier after it. See clearSeq's doc.
+	ClearBarrier() uint64
+	ClearedSinceBarrier(playlistID, source string, barrier uint64) bool
 }
 
 type captureJob struct {
@@ -819,6 +828,31 @@ type service struct {
 	// grow-without-pruning trade-off as downloadEpoch, for the same
 	// reason.
 	playlistClearEpoch map[string]uint64
+	// clearSeq is a process-global, monotonically increasing counter
+	// bumped by EVERY clear (item or playlist). It exists because the
+	// per-key epochs above cannot answer the question a cross-boundary
+	// caller actually has.
+	//
+	// handleDownloadPlaylistItem must resolve a playlist before it knows
+	// which playlist ID or item source it is about to touch, and the
+	// resolve is a network call that can block for seconds. Sampling a
+	// per-key epoch is therefore only possible AFTER the resolve — by
+	// which point a clear that landed DURING it has already been folded
+	// into the sampled value, so the later equality check passes and the
+	// download resurrects state the clear reported as removed.
+	//
+	// A single global counter fixes that without needing the key up
+	// front: sample it before the resolve, then ask whether the key's
+	// own last clear happened after that point. lastClearSeq below is
+	// what makes the comparison possible.
+	clearSeq uint64
+	// The per-key epochs above CARRY this counter rather than counting
+	// independently: a clear assigns the new clearSeq to the key's epoch.
+	// That keeps their existing "did this change since I sampled it?"
+	// equality checks working exactly as before (the value still changes
+	// on every clear) while making the values comparable ACROSS keys, so
+	// a barrier can be answered without a second map to keep in sync —
+	// and without a new map to leave nil on any construction path.
 
 	// started gates DownloadItem/DownloadPlaylist on the worker
 	// goroutine actually running — see ErrServiceNotStarted's doc. Three
@@ -1235,7 +1269,8 @@ func (s *service) reserveForClear(keys map[string]bool) (res clearReservation, b
 		// only after the busy check above passed, so a rejected
 		// (ErrItemBusy) clear never perturbs an in-flight download's
 		// epoch.
-		s.downloadEpoch[key]++
+		s.clearSeq++
+		s.downloadEpoch[key] = s.clearSeq
 	}
 	for _, j := range s.queue.removeItems(keys) {
 		if j.queuedNotified != nil {
@@ -1353,6 +1388,32 @@ func (s *service) currentPlaylistEpoch(playlistID string) uint64 {
 	return s.playlistClearEpoch[playlistID]
 }
 
+// ClearBarrier returns an opaque marker for "now" in the clear timeline.
+// Sample it BEFORE a resolve, then pass it to ClearedSinceBarrier once the
+// playlist and item are known — see clearSeq's doc for why a per-key epoch
+// sampled after the resolve cannot detect a clear that landed during it.
+func (s *service) ClearBarrier() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.clearSeq
+}
+
+// ClearedSinceBarrier reports whether this playlist, or this item, was
+// cleared after barrier was sampled. Either one is disqualifying: a
+// clearPlaylistCache and a clearPlaylistItemCache both make continuing
+// a download that started earlier a resurrection of state the clear
+// already reported as removed.
+//
+// sourceKey may be empty when the caller has no specific item in mind.
+func (s *service) ClearedSinceBarrier(playlistID, source string, barrier uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.playlistClearEpoch[playlistID] > barrier {
+		return true
+	}
+	return source != "" && s.downloadEpoch[SourceKey(source)] > barrier
+}
+
 // CurrentPlaylistClearGeneration is the exported sampling entry point for
 // callers that resolve+download+index a playlist across the Service
 // boundary (handleDownloadPlaylistItem) — see its interface doc. It is
@@ -1368,7 +1429,8 @@ func (s *service) CurrentPlaylistClearGeneration(playlistID string) uint64 {
 func (s *service) markPlaylistCleared(playlistID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.playlistClearEpoch[playlistID]++
+	s.clearSeq++
+	s.playlistClearEpoch[playlistID] = s.clearSeq
 }
 
 // stateFromCoverage classifies a finished capture's Coverage into an
