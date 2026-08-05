@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	dp1playlist "github.com/display-protocol/dp1-go/playlist"
@@ -128,6 +129,8 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	assert.Equal(t, item.Source, res.URL, "the resource must be keyed on the ORIGINAL source URL, never a resolved redirect target")
 	assert.Equal(t, http.StatusOK, res.Status)
 	assert.Equal(t, "video/mp4", res.ContentType)
+	assert.Empty(t, res.SniffedContentType,
+		"nothing to sniff for beside a real declaration — see Resource.SniffedContentType")
 	assert.Equal(t, sha256Hex(body), res.SHA256)
 	assert.Equal(t, map[string]string{"Access-Control-Allow-Origin": "*"}, res.Headers,
 		"only the CORS allowlist must survive; Set-Cookie must never be persisted")
@@ -139,6 +142,126 @@ func TestMediaCapturer_Capture_Success(t *testing.T) {
 	saved, err := h.store.LoadItem(offlinecache.SourceKey(item.Source))
 	require.NoError(t, err)
 	assert.Equal(t, rec.Resources, saved.Resources, "Capture must have persisted the record via SaveItem, not just returned it")
+}
+
+// TestMediaCapturer_Capture_SniffsContentTypeOnlyWhenOriginDeclaredNone
+// covers this path's half of the declared-vs-sniffed split (see
+// Resource.SniffedContentType). It matters most HERE precisely because
+// an empty Content-Type classifies as ClassUnknown, and ClassUnknown
+// routes to this browser-free capturer — so without a sniff of its own,
+// a headerless media origin would be the one case with no fallback at
+// all for ff-player's HEAD content-type probe, silently demoting an
+// extensionless <img>/<video>/<audio> to extension inference.
+//
+// The unrecognized case is the other half of the contract:
+// http.DetectContentType answers application/octet-stream when it cannot
+// tell, and recording that would replace "no answer" with a confident
+// non-answer — which the player reads as authoritative and stops
+// inferring from.
+func TestMediaCapturer_Capture_SniffsContentTypeOnlyWhenOriginDeclaredNone(t *testing.T) {
+	// A one-pixel GIF: real magic bytes, so DetectContentType recognizes
+	// it the same way Chromium would have on the browser path.
+	const gifBody = "GIF89a\x01\x00\x01\x00\x00\xff\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x00;"
+	tests := []struct {
+		name     string
+		body     string
+		expected string
+	}{
+		{
+			name:     "recognizable bytes give the probe an answer",
+			body:     gifBody,
+			expected: "image/gif",
+		},
+		{
+			name: "unrecognizable bytes record nothing rather than octet-stream",
+			// Deliberately not text and not any known signature.
+			body:     "\x00\x01\x02\x03\x04\x05\x06\x07",
+			expected: "",
+		},
+		{
+			// The TEXT-side catch-all, symmetric to octet-stream:
+			// net/http's sniff table ends in a signature matching any
+			// printable bytes. A headerless SVG without an XML prolog
+			// hits it, and so does a headerless .gltf manifest — both
+			// ClassUnknown items that route here — so reporting
+			// text/plain would demote exactly the sources this path
+			// exists to serve.
+			name:     "text catch-all records nothing either",
+			body:     `<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`,
+			expected: "",
+		},
+		{
+			name:     "a real signature past the text catch-all still answers",
+			body:     `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`,
+			expected: "text/xml; charset=utf-8",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := setupMediaCapture(t)
+			defer h.ctrl.Finish()
+
+			item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://cdn.example.com/previews/6bcc9b62"}
+			h.expectGET(t, item.Source, newMediaResponse(http.StatusOK, "", tt.body, nil))
+
+			rec, err := h.capturer.Capture(context.Background(), item)
+			require.NoError(t, err)
+			require.Len(t, rec.Resources, 1)
+
+			res := rec.Resources[0]
+			assert.Empty(t, res.ContentType,
+				"the origin declared nothing, and a sniff must never be promoted into the field replay serves")
+			assert.Equal(t, tt.expected, res.SniffedContentType)
+			// The sniffing wrapper sits in the streaming path; pin that it
+			// passes every byte through untouched rather than consuming
+			// the window it retains.
+			blob, err := h.store.ReadBlob(res.SHA256)
+			require.NoError(t, err)
+			assert.Equal(t, tt.body, string(blob))
+		})
+	}
+}
+
+// TestMediaCapturer_Capture_SniffsAcrossChunkedReadsWithoutTruncatingBody
+// exercises bodySniffer's retention clamp, which the table above cannot:
+// those bodies are smaller than one sniff window and arrive in a single
+// Read, so neither the partial fill nor the accumulation across reads is
+// touched. A clamp bug here would not merely mis-sniff — the sniffer sits
+// in the streaming path every byte of a gigabyte-scale asset flows
+// through, so it could silently truncate or corrupt the stored blob.
+func TestMediaCapturer_Capture_SniffsAcrossChunkedReadsWithoutTruncatingBody(t *testing.T) {
+	h := setupMediaCapture(t)
+	defer h.ctrl.Finish()
+
+	// Well past one 512-byte window, so the retained head fills mid-body
+	// and every later read must pass through with nothing retained.
+	body := "GIF89a" + strings.Repeat("payload-", 4096)
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://cdn.example.com/previews/chunked"}
+	req, err := http.NewRequest(http.MethodGet, item.Source, nil)
+	require.NoError(t, err)
+	h.mockHTTP.EXPECT().NewRequest(http.MethodGet, item.Source, nil).Return(req, nil).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		// One byte per Read: the most adversarial chunking for an
+		// accumulate-until-full buffer.
+		Body: io.NopCloser(iotest.OneByteReader(strings.NewReader(body))),
+	}, nil).Times(1)
+
+	rec, err := h.capturer.Capture(context.Background(), item)
+	require.NoError(t, err)
+	require.Len(t, rec.Resources, 1)
+
+	res := rec.Resources[0]
+	assert.Equal(t, "image/gif", res.SniffedContentType,
+		"the signature arrives in the first bytes and must survive being fed one at a time")
+	assert.Equal(t, sha256Hex(body), res.SHA256)
+
+	blob, err := h.store.ReadBlob(res.SHA256)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(blob), "every byte must pass through the sniffer untouched, window or no window")
 }
 
 // TestMediaCapturer_Capture_SendsOriginHeader is the regression test for

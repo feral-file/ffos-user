@@ -1461,7 +1461,14 @@ func (r *replayer) fulfillHeadFromGet(ctx context.Context, session CDPSession, r
 	// Empty body is what makes this an honest HEAD response rather than
 	// a GET answered on the wrong method: status/Content-Type/headers
 	// mirror the stored GET resource exactly, but body is nil.
-	r.fulfill(ctx, session, requestID, statusOrDefault(resource.Status, go_http.StatusOK), resource.ContentType, nil, "", resource.Headers)
+	//
+	// ProbeContentType, not ContentType: this is the ONE caller allowed
+	// to fall back to Chromium's sniffed type. The probe's only consumer
+	// is ff-player's renderer selection, which needs a best guess for an
+	// extensionless media URL and is not the browser's own MIME
+	// enforcement — see Resource.SniffedContentType. Every fulfill that
+	// actually carries bytes must keep serving ContentType alone.
+	r.fulfill(ctx, session, requestID, statusOrDefault(resource.Status, go_http.StatusOK), resource.ProbeContentType(), nil, "", resource.Headers)
 }
 
 func (r *replayer) continueRequest(ctx context.Context, session CDPSession, requestID string) {

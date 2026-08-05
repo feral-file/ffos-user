@@ -115,7 +115,7 @@ func TestResolveResources_ExpiredFinalizeContextSkipsEveryFetchWithoutNetworkCal
 	tracker := newCaptureTracker()
 	const resourceCount = 5
 	for i := 0; i < resourceCount; i++ {
-		tracker.recordResource(fmt.Sprintf("https://example.com/r%d.bin", i), go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
+		tracker.recordResource(observedResponse{URL: fmt.Sprintf("https://example.com/r%d.bin", i), Status: go_http.StatusOK, ContentType: "application/octet-stream", Method: go_http.MethodGet})
 	}
 
 	phaseCtx, cancel := context.WithCancel(context.Background())
@@ -187,8 +187,8 @@ func TestResolveResources_DeadlineExpiringMidFinalizationPreservesEarlierFetches
 	c := &capturer{fetchClient: client, store: store, logger: zaptest.NewLogger(t)}
 
 	tracker := newCaptureTracker()
-	tracker.recordResource(fastURL, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
-	tracker.recordResource(slowURL, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
+	tracker.recordResource(observedResponse{URL: fastURL, Status: go_http.StatusOK, ContentType: "application/octet-stream", Method: go_http.MethodGet})
+	tracker.recordResource(observedResponse{URL: slowURL, Status: go_http.StatusOK, ContentType: "application/octet-stream", Method: go_http.MethodGet})
 
 	resources, coverage := c.resolveResources(context.Background(), phaseCtx, tracker, newCaptureDiskBudget(0, true))
 
@@ -744,7 +744,7 @@ func TestCaptureTracker_BoundsResourcesAndURLs(t *testing.T) {
 	t.Run("distinct resources are capped", func(t *testing.T) {
 		tr := newCaptureTracker()
 		for i := 0; i < MaxCaptureResources+50; i++ {
-			tr.recordResource(fmt.Sprintf("https://example.com/r%d.png", i), 200, "image/png", "", nil, "GET")
+			tr.recordResource(observedResponse{URL: fmt.Sprintf("https://example.com/r%d.png", i), Status: 200, ContentType: "image/png", Method: "GET"})
 		}
 		keys, resources, _, _, overflow := tr.snapshot()
 		require.Len(t, resources, MaxCaptureResources)
@@ -755,7 +755,7 @@ func TestCaptureTracker_BoundsResourcesAndURLs(t *testing.T) {
 	t.Run("an oversized URL is refused, not stored truncated", func(t *testing.T) {
 		tr := newCaptureTracker()
 		long := "https://example.com/" + strings.Repeat("a", MaxCaptureResourceURLBytes)
-		tr.recordResource(long, 200, "image/png", "", nil, "GET")
+		tr.recordResource(observedResponse{URL: long, Status: 200, ContentType: "image/png", Method: "GET"})
 		_, resources, _, _, overflow := tr.snapshot()
 		require.Empty(t, resources,
 			"storing a truncated URL would be worse than dropping it: replay matches on exact URL, "+
@@ -766,12 +766,12 @@ func TestCaptureTracker_BoundsResourcesAndURLs(t *testing.T) {
 	t.Run("updating an already-tracked resource does not consume budget", func(t *testing.T) {
 		tr := newCaptureTracker()
 		for i := 0; i < MaxCaptureResources; i++ {
-			tr.recordResource(fmt.Sprintf("https://example.com/r%d.png", i), 200, "image/png", "", nil, "GET")
+			tr.recordResource(observedResponse{URL: fmt.Sprintf("https://example.com/r%d.png", i), Status: 200, ContentType: "image/png", Method: "GET"})
 		}
 		// Re-recording an existing key must still be allowed at the
 		// ceiling, or the last observation of a resource would be lost
 		// and a stale first-sight record kept instead.
-		tr.recordResource("https://example.com/r0.png", 404, "text/plain", "", nil, "GET")
+		tr.recordResource(observedResponse{URL: "https://example.com/r0.png", Status: 404, ContentType: "text/plain", Method: "GET"})
 		_, resources, _, _, overflow := tr.snapshot()
 		require.Equal(t, 0, overflow)
 		require.Equal(t, 404, resources[resourceKey("GET", "https://example.com/r0.png")].Status)
@@ -802,7 +802,7 @@ func TestCapturer_TrackerOverflowMakesCoverageIncomplete(t *testing.T) {
 	// fetch, so the only thing that can mark this capture incomplete is
 	// the overflow marker itself.
 	long := "https://example.com/" + strings.Repeat("a", MaxCaptureResourceURLBytes)
-	tr.recordResource(long, 200, "image/png", "", nil, "GET")
+	tr.recordResource(observedResponse{URL: long, Status: 200, ContentType: "image/png", Method: "GET"})
 	tr.recordFailure(long, "net::ERR")
 
 	_, coverage := c.resolveResources(context.Background(), context.Background(), tr, c.newDiskBudget())
@@ -873,7 +873,7 @@ func TestCaptureTracker_ResolveRequestPrunesInFlightState(t *testing.T) {
 func TestCaptureTracker_BoundsRedirectTarget(t *testing.T) {
 	tr := newCaptureTracker()
 	long := "https://example.com/" + strings.Repeat("t", MaxCaptureResourceURLBytes)
-	tr.recordResource("https://example.com/a", 302, "text/html", long, nil, "GET")
+	tr.recordResource(observedResponse{URL: "https://example.com/a", Status: 302, ContentType: "text/html", RedirectTo: long, Method: "GET"})
 
 	_, resources, _, _, overflow := tr.snapshot()
 	res := resources[resourceKey("GET", "https://example.com/a")]
@@ -893,8 +893,11 @@ func TestCaptureTracker_BoundsRedirectTarget(t *testing.T) {
 func TestCaptureTracker_BoundsResourceMetadata(t *testing.T) {
 	tr := newCaptureTracker()
 	longMeta := strings.Repeat("m", MaxCaptureResourceMetaBytes+1)
-	tr.recordResource("https://example.com/a", 200, longMeta, "",
-		map[string]string{"content-type": longMeta, "cache-control": "max-age=60"}, "GET")
+	tr.recordResource(observedResponse{
+		URL: "https://example.com/a", Status: 200, ContentType: longMeta,
+		Headers: map[string]string{"content-type": longMeta, "cache-control": "max-age=60"},
+		Method:  "GET",
+	})
 
 	_, resources, _, _, overflow := tr.snapshot()
 	res := resources[resourceKey("GET", "https://example.com/a")]
@@ -904,4 +907,51 @@ func TestCaptureTracker_BoundsResourceMetadata(t *testing.T) {
 	require.Equal(t, "max-age=60", res.Headers["cache-control"],
 		"and its in-bounds siblings survive")
 	require.Equal(t, 2, overflow)
+}
+
+// TestCaptureTracker_SniffedContentTypeSuppressionOrdering pins the
+// ordering recordResource's bounding block currently states only in a
+// comment, where a future reorder would change it silently. Two claims,
+// neither observable from the stored Resource alone:
+//
+//  1. The sniffed type is cleared AFTER the declaration's own bound, so
+//     an oversized declaration that was just dropped still leaves the
+//     fallback in place rather than losing both.
+//  2. That clear sits BEFORE the sniffed bound, so discarding a value
+//     nothing would ever have read cannot charge an overflow — which
+//     marks the item's WHOLE Coverage incomplete, turning a redundant
+//     field into a false "this capture is degraded" report.
+func TestCaptureTracker_SniffedContentTypeSuppressionOrdering(t *testing.T) {
+	longMeta := strings.Repeat("m", MaxCaptureResourceMetaBytes+1)
+
+	t.Run("an oversized declaration leaves the sniffed fallback standing", func(t *testing.T) {
+		tr := newCaptureTracker()
+		tr.recordResource(observedResponse{
+			URL: "https://example.com/a", Status: 200,
+			ContentType: longMeta, SniffedContentType: "text/plain", Method: "GET",
+		})
+
+		_, resources, _, _, overflow := tr.snapshot()
+		res := resources[resourceKey("GET", "https://example.com/a")]
+		require.Equal(t, "", res.ContentType)
+		require.Equal(t, "text/plain", res.SniffedContentType,
+			"the HEAD probe keeps an answer even when the declaration had to be dropped")
+		require.Equal(t, 1, overflow, "only the dropped declaration is charged")
+	})
+
+	t.Run("a redundant oversized sniff is free", func(t *testing.T) {
+		tr := newCaptureTracker()
+		tr.recordResource(observedResponse{
+			URL: "https://example.com/b", Status: 200,
+			ContentType: "text/css", SniffedContentType: longMeta, Method: "GET",
+		})
+
+		_, resources, _, _, overflow := tr.snapshot()
+		res := resources[resourceKey("GET", "https://example.com/b")]
+		require.Equal(t, "text/css", res.ContentType)
+		require.Equal(t, "", res.SniffedContentType,
+			"never stored beside a real declaration, oversized or not")
+		require.Equal(t, 0, overflow,
+			"suppressing a value nothing reads must not report the item as degraded")
+	})
 }

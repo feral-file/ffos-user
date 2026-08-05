@@ -87,7 +87,7 @@ func TestResourceTransfer_SlowButProgressingBodyOutlivesTheFinalizeWindow(t *tes
 	c := &capturer{fetchClient: wrapper.NewHTTPClientWithoutTimeout(), store: store, logger: zaptest.NewLogger(t)}
 
 	tracker := newCaptureTracker()
-	tracker.recordResource(url, go_http.StatusOK, "application/octet-stream", "", nil, go_http.MethodGet)
+	tracker.recordResource(observedResponse{URL: url, Status: go_http.StatusOK, ContentType: "application/octet-stream", Method: go_http.MethodGet})
 
 	// Long enough to let the fetch START (the work before it is a map
 	// walk and a sort, microseconds), far too short to let the ~1.5s

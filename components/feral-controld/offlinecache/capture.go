@@ -823,7 +823,16 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		// its own earlier requestWillBeSent event, not this one's.
 		if evt.RedirectResponse != nil {
 			redirectMethod := tracker.methodForRequest(evt.RequestID)
-			tracker.recordResource(evt.RedirectResponse.URL, evt.RedirectResponse.Status, "", evt.Request.URL, filterReplayableHeaders(evt.RedirectResponse.Headers), redirectMethod)
+			// No content type of either kind: a 3xx carries no body for
+			// one to describe, and replay fulfills this hop with a
+			// Location header only (see fulfillFromBlob/IsRedirect).
+			tracker.recordResource(observedResponse{
+				URL:        evt.RedirectResponse.URL,
+				Status:     evt.RedirectResponse.Status,
+				RedirectTo: evt.Request.URL,
+				Headers:    filterReplayableHeaders(evt.RedirectResponse.Headers),
+				Method:     redirectMethod,
+			})
 		}
 		tracker.trackRequest(evt.RequestID, evt.Request.URL, evt.Request.Method)
 	})
@@ -846,7 +855,21 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 		// requestWillBeSent event, which always precedes its terminal
 		// responseReceived/loadingFailed.
 		method := tracker.methodForRequest(evt.RequestID)
-		tracker.recordResource(evt.Response.URL, evt.Response.Status, evt.Response.MimeType, "", filterReplayableHeaders(evt.Response.Headers), method)
+		// Read the origin's OWN Content-Type out of the raw header map
+		// (before filterReplayableHeaders drops it) rather than taking
+		// evt.Response.MimeType, which is Chromium's post-sniff verdict
+		// and would fabricate a declaration the origin never made. The
+		// sniffed value still travels, into its own field, for the HEAD
+		// probe alone — see Resource.ContentType/SniffedContentType for
+		// the full argument and the failure this split closes.
+		tracker.recordResource(observedResponse{
+			URL:                evt.Response.URL,
+			Status:             evt.Response.Status,
+			ContentType:        headerValue(evt.Response.Headers, "Content-Type"),
+			SniffedContentType: evt.Response.MimeType,
+			Headers:            filterReplayableHeaders(evt.Response.Headers),
+			Method:             method,
+		})
 		tracker.resolveRequest(evt.RequestID)
 	})
 
@@ -964,7 +987,31 @@ func isIgnoredCaptureURL(url string) bool {
 	return strings.HasPrefix(url, "blob:") || strings.HasPrefix(url, "data:")
 }
 
-func (t *captureTracker) recordResource(url string, status int, contentType, redirectTo string, headers map[string]string, method string) {
+// observedResponse is one response as capture observed it. Passed as a
+// struct rather than positionally because ContentType,
+// SniffedContentType and RedirectTo are three adjacent strings whose
+// meanings are NOT interchangeable: swapping two of them compiles
+// cleanly and then serves wrong metadata on every replay of that
+// resource, which is precisely the class of bug the ContentType split
+// exists to fix.
+type observedResponse struct {
+	URL    string
+	Status int
+	// ContentType is the origin's declared Content-Type, "" when it
+	// declared none; SniffedContentType is Chromium's guess. See the
+	// Resource fields of the same names — recordResource stores the
+	// latter only when the former is empty, so that invariant holds in
+	// one place rather than at each call site.
+	ContentType        string
+	SniffedContentType string
+	RedirectTo         string
+	Headers            map[string]string
+	Method             string
+}
+
+func (t *captureTracker) recordResource(obs observedResponse) {
+	url, status, redirectTo := obs.URL, obs.Status, obs.RedirectTo
+	contentType, sniffed, headers, method := obs.ContentType, obs.SniffedContentType, obs.Headers, obs.Method
 	if url == "" || isIgnoredCaptureURL(url) {
 		return
 	}
@@ -997,6 +1044,23 @@ func (t *captureTracker) recordResource(url string, status int, contentType, red
 		contentType = ""
 		t.overflow++
 	}
+	// Enforced here, once, rather than at each call site: the sniffed
+	// type is a fallback for the HEAD probe when the origin declared
+	// nothing (see Resource.SniffedContentType), so beside a real
+	// declaration it is never read and would only bloat every record on
+	// disk. Deliberately reads the POST-bounding contentType, so an
+	// oversized declaration that was just dropped still leaves the
+	// sniffed fallback in place rather than losing both — and sits
+	// BEFORE the bound below so discarding a value nothing would have
+	// read cannot charge the item an overflow (which marks its whole
+	// Coverage incomplete).
+	if contentType != "" {
+		sniffed = ""
+	}
+	if len(sniffed) > MaxCaptureResourceMetaBytes {
+		sniffed = ""
+		t.overflow++
+	}
 	for name, value := range headers {
 		if len(value) > MaxCaptureResourceMetaBytes {
 			delete(headers, name)
@@ -1020,7 +1084,15 @@ func (t *captureTracker) recordResource(url string, status int, contentType, red
 	if normalized := strings.ToUpper(method); normalized != "" && normalized != go_http.MethodGet {
 		storedMethod = normalized
 	}
-	t.resources[key] = Resource{URL: url, Status: status, ContentType: contentType, RedirectTo: redirectTo, Headers: headers, Method: storedMethod}
+	t.resources[key] = Resource{
+		URL:                url,
+		Status:             status,
+		ContentType:        contentType,
+		SniffedContentType: sniffed,
+		RedirectTo:         redirectTo,
+		Headers:            headers,
+		Method:             storedMethod,
+	}
 }
 
 func (t *captureTracker) recordFailure(url, reason string) {

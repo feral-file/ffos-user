@@ -45,10 +45,42 @@ const (
 // deliberately dropped: role/note/failedRequests/size all derive from
 // these or from the blob file itself).
 type Resource struct {
-	URL         string `json:"url"`
-	Status      int    `json:"status"`
-	SHA256      string `json:"sha256,omitempty"`
+	URL    string `json:"url"`
+	Status int    `json:"status"`
+	SHA256 string `json:"sha256,omitempty"`
+	// ContentType is the Content-Type the ORIGIN declared for this
+	// response, verbatim (parameters included), or "" when the origin
+	// declared none at all. Replay's fulfill emits the header only when
+	// this is non-empty, so "the origin declared none" replays as "no
+	// header" and Chromium sniffs exactly as it did live.
+	//
+	// It must never hold Chromium's SNIFFED type (CDP's
+	// Network.responseReceived response.mimeType), which capture used to
+	// store here: sniffing turns "absent" into a concrete guess, and
+	// asserting that guess back on replay is strictly worse than
+	// asserting nothing. A headerless stylesheet sniffs as text/plain,
+	// which Chromium's standards-mode CSS loader REJECTS — it tolerates
+	// an absent Content-Type but not a non-CSS one — so the artwork
+	// replays with zero style rules while working fine online. Observed
+	// in the field as a <model-viewer> piece collapsing to its intrinsic
+	// 300x150 box in the corner of a 4K screen, from one CDN stylesheet
+	// served with no Content-Type at all.
 	ContentType string `json:"contentType,omitempty"`
+	// SniffedContentType is Chromium's sniffed mimeType, persisted ONLY
+	// when the origin declared no Content-Type of its own — where there
+	// IS a declaration it is both more faithful and what replay serves,
+	// so storing a guess beside it would be dead weight on disk.
+	//
+	// It is never emitted on a fulfill; see ContentType for why
+	// asserting a sniffed type breaks stylesheets. Its one consumer is
+	// the HEAD content-type probe (replay's fulfillHeadFromGet, answering
+	// ff-player's getContentTypeFromURL), which picks the native
+	// <img>/<video>/<audio> renderer for an extensionless media URL:
+	// answering that with nothing regresses the player to extension
+	// inference. A sniffed type is a good answer to "what is this,
+	// roughly?" and a bad answer to "what did the server say?" — these
+	// two fields exist to keep those questions apart.
+	SniffedContentType string `json:"sniffedContentType,omitempty"`
 	// RedirectTo holds the Location header of a 3xx response. Replay
 	// fulfills the redirect itself (rather than following it during
 	// capture) so the real target is captured and cached as its own
@@ -84,6 +116,18 @@ type Resource struct {
 // Location header rather than a cached body.
 func (r Resource) IsRedirect() bool {
 	return r.Status >= 300 && r.Status < 400 && r.RedirectTo != ""
+}
+
+// ProbeContentType returns the type replay may answer a HEAD
+// content-type probe with: the origin's own declaration when it made
+// one, else Chromium's sniffed type. See SniffedContentType's doc for
+// why that fallback exists and why no other caller may take it — a
+// fulfill must serve ContentType alone, empty included.
+func (r Resource) ProbeContentType() string {
+	if r.ContentType != "" {
+		return r.ContentType
+	}
+	return r.SniffedContentType
 }
 
 // EffectiveMethod returns r.Method, defaulting to GET — see Method's doc
@@ -138,7 +182,9 @@ func requestOrigin(rawURL string) (string, error) {
 //     would let an offline replay silently set stale/foreign cookies for
 //     the artwork's origin.
 //   - Content-Type is already tracked as its own Resource field, not
-//     duplicated here.
+//     duplicated here (see Resource.ContentType — capture reads the
+//     origin's declaration out of the same raw header map this filters,
+//     via headerValue, before the filtering happens).
 //
 // What remains is exactly the set of response headers Chromium's own
 // CORS / cross-origin enforcement checks when it receives a fetched
@@ -174,6 +220,16 @@ func isReplayableHeaderName(name string) bool {
 // Fetch.fulfillRequest and the static server always emit consistent
 // header names regardless of how the original origin cased them. Returns
 // nil (matching Resource.Headers' omitempty) when nothing in raw matched.
+//
+// Values are cut at the first newline for the same reason headerValue
+// does it (see its doc): CDP joins a repeated header into one
+// "\n"-separated value, and these values are persisted and re-emitted
+// verbatim as Fetch.fulfillRequest response headers, where a newline is
+// either a rejected fulfill (the paused request stalls forever, hanging
+// the artwork offline) or a header-splitting primitive fed by an
+// untrusted playlist source. The static-server path is not exposed —
+// Go's own Header.Set/writeSubset sanitize — but it shares this map, so
+// the cut belongs here rather than at the one risky consumer.
 func filterReplayableHeaders(raw map[string]string) map[string]string {
 	if len(raw) == 0 {
 		return nil
@@ -187,9 +243,42 @@ func filterReplayableHeaders(raw map[string]string) map[string]string {
 		if out == nil {
 			out = make(map[string]string, len(raw))
 		}
-		out[canonical] = value
+		first, _, _ := strings.Cut(value, "\n")
+		out[canonical] = strings.TrimSpace(first)
 	}
 	return out
+}
+
+// headerValue returns raw's value for name, matched case-insensitively.
+// CDP delivers response headers keyed however they arrived on the wire —
+// whatever case an HTTP/1.1 origin chose, all-lowercase over HTTP/2 — so
+// a direct map index would miss the header on one transport and find it
+// on the other, which for Content-Type is the difference between
+// replaying the origin's declaration and replaying nothing.
+//
+// Returns "" when raw carries no such header, which for Content-Type is
+// a meaningful value in its own right (see Resource.ContentType), not
+// merely "unknown".
+//
+// Only the value up to the first newline is returned. CDP joins a
+// header sent MORE than once into a single "\n"-separated value, and
+// what this reads goes on to be persisted and re-emitted as a response
+// header by replay — an embedded newline there is at best a
+// Fetch.fulfillRequest Chromium rejects (the paused request then stalls
+// forever, hanging the artwork) and at worst a header-splitting
+// primitive, from a value an untrusted playlist source controls. The
+// first value is the honest reading of a duplicated header anyway:
+// Content-Type is not a list-valued header, so a second one is the
+// origin contradicting itself, not adding to it.
+func headerValue(raw map[string]string, name string) string {
+	canonical := go_http.CanonicalHeaderKey(name)
+	for key, value := range raw {
+		if go_http.CanonicalHeaderKey(key) == canonical {
+			first, _, _ := strings.Cut(value, "\n")
+			return strings.TrimSpace(first)
+		}
+	}
+	return ""
 }
 
 // ReasonCSPBlocked is the one Coverage.Reason token capture.go emits as a

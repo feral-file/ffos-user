@@ -157,6 +157,10 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 			"requestId": "req-1",
 			"response": map[string]interface{}{
 				"url": "https://example.com/index.html", "status": 200, "mimeType": "text/html",
+				// Lowercased, as an HTTP/2 origin sends it — headerValue
+				// matches case-insensitively so the declaration is found
+				// on either transport.
+				"headers": map[string]interface{}{"content-type": "text/html; charset=utf-8"},
 			},
 		})
 		h.drainAndAckRemaining(t)
@@ -173,7 +177,10 @@ func TestCapturer_Capture_SingleResource(t *testing.T) {
 	res := rec.Resources[0]
 	assert.Equal(t, "https://example.com/index.html", res.URL)
 	assert.Equal(t, 200, res.Status)
-	assert.Equal(t, "text/html", res.ContentType)
+	assert.Equal(t, "text/html; charset=utf-8", res.ContentType,
+		"the ORIGIN's declaration is stored verbatim, parameters included — not Chromium's bare sniffed mimeType")
+	assert.Empty(t, res.SniffedContentType,
+		"and the sniffed guess is not stored beside a real declaration, which would only bloat the record")
 	require.NotEmpty(t, res.SHA256)
 
 	blob, err := h.store.ReadBlob(res.SHA256)
@@ -550,6 +557,114 @@ func TestCapturer_Capture_UnparsableSourceSkipsOriginClearButStillClearsCache(t 
 
 	_, err := h.capturer.Capture(context.Background(), item, 50)
 	require.NoError(t, err)
+}
+
+// TestCapturer_Capture_HeaderlessResponseKeepsSniffOutOfDeclaredContentType
+// is the regression test for the wrong-viewport failure observed on
+// FF1-191TYKPB: a Feral File CDN preview served its styles.css with NO
+// Content-Type header at all. Chromium tolerates that live and sniffs,
+// but capture used to record the SNIFFED verdict (text/plain) as though
+// the origin had declared it, and replay then asserted that header back
+// — which Chromium's standards-mode CSS loader rejects outright. The
+// stylesheet parsed to zero rules and the artwork's <model-viewer>
+// collapsed to its intrinsic 300x150 box in the corner of a 4K screen,
+// offline only.
+//
+// The declaration and the guess must therefore land in different fields:
+// only the (absent) declaration is replayable.
+func TestCapturer_Capture_HeaderlessResponseKeepsSniffOutOfDeclaredContentType(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://cdn.example.com/preview/styles.css", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("body { margin: 0; width: 100vw; }")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://cdn.example.com/preview/styles.css"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://cdn.example.com/preview/styles.css", "status": 200,
+				// What the device actually saw: a sniffed mimeType, and
+				// a header block carrying everything BUT a Content-Type.
+				"mimeType": "text/plain",
+				"headers":  map[string]interface{}{"Content-Length": "33"},
+			},
+		})
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://cdn.example.com/preview/styles.css"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	res := rec.Resources[0]
+	assert.Empty(t, res.ContentType,
+		"the origin declared none, so the record must claim none — replay asserting a sniffed text/plain is what broke the stylesheet")
+	assert.Equal(t, "text/plain", res.SniffedContentType,
+		"the sniffed guess is still kept, but only where the HEAD content-type probe can reach it")
+}
+
+// TestCapturer_Capture_DuplicateContentTypeHeaderKeepsOnlyTheFirstValue
+// pins the hardening that came with reading the declared type off the
+// raw CDP header map: CDP joins a header sent more than once into one
+// "\n"-separated value, and this value is persisted and re-emitted as a
+// response header by replay. An embedded newline there is at best a
+// Fetch.fulfillRequest Chromium rejects — leaving the paused request
+// stalled forever, hanging the artwork offline — and at worst a
+// header-splitting primitive, from a value an untrusted playlist source
+// controls.
+func TestCapturer_Capture_DuplicateContentTypeHeaderKeepsOnlyTheFirstValue(t *testing.T) {
+	h := setupCapture(t)
+	defer h.ctrl.Finish()
+
+	h.mockHTTP.EXPECT().
+		NewRequest(http.MethodGet, "https://example.com/index.html", nil).
+		DoAndReturn(func(method, url string, body io.Reader) (*http.Request, error) {
+			return http.NewRequest(method, url, body)
+		}).Times(1)
+	h.mockHTTP.EXPECT().Do(gomock.Any()).Return(&http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("<html>art</html>")),
+	}, nil).Times(1)
+
+	go func() {
+		h.answerDomainEnables(t)
+		h.pushEvent(t, "Network.requestWillBeSent", map[string]interface{}{
+			"requestId": "req-1",
+			"request":   map[string]interface{}{"url": "https://example.com/index.html"},
+		})
+		h.pushEvent(t, "Network.responseReceived", map[string]interface{}{
+			"requestId": "req-1",
+			"response": map[string]interface{}{
+				"url": "https://example.com/index.html", "status": 200, "mimeType": "text/html",
+				"headers": map[string]interface{}{
+					"content-type": "text/html\nX-Injected: evil",
+				},
+			},
+		})
+		h.drainAndAckRemaining(t)
+	}()
+
+	item := dp1playlist.PlaylistItem{ID: "item-1", Source: "https://example.com/index.html"}
+	rec, err := h.capturer.Capture(context.Background(), item, 300)
+	require.NoError(t, err)
+
+	require.Len(t, rec.Resources, 1)
+	assert.Equal(t, "text/html", rec.Resources[0].ContentType,
+		"only the first value survives; a duplicated Content-Type is the origin contradicting itself, not adding to itself")
 }
 
 // TestCapturer_Capture_FiltersResponseHeadersToReplayableAllowlist pins

@@ -664,6 +664,104 @@ func TestReplayer_ProcessRequestPaused_AnswersHEADContentTypeProbeFromGETResourc
 	assert.Equal(t, "*", cors)
 }
 
+// seedSniffedItem saves a single-resource ItemRecord for the shape a
+// headerless origin produces: no declared ContentType, only Chromium's
+// sniffed guess (see Resource.SniffedContentType).
+func seedSniffedItem(t *testing.T, store offlinecache.Store, itemID, sourceURL, sniffed, blobContent string) offlinecache.Resource {
+	t.Helper()
+	hash := writeBlobString(t, store, blobContent)
+	res := offlinecache.Resource{URL: sourceURL, Status: 200, SHA256: hash, SniffedContentType: sniffed}
+	require.NoError(t, store.SaveItem(&offlinecache.ItemRecord{
+		Item:      dp1playlist.PlaylistItem{ID: itemID, Source: sourceURL},
+		Entry:     sourceURL,
+		Resources: []offlinecache.Resource{res},
+		Coverage:  offlinecache.Coverage{Complete: true},
+	}))
+	return res
+}
+
+// TestReplayer_ProcessRequestPaused_ServesNoContentTypeWhenOriginDeclaredNone
+// is the replay half of the FF1-191TYKPB wrong-viewport regression (the
+// capture half is
+// TestCapturer_Capture_HeaderlessResponseKeepsSniffOutOfDeclaredContentType):
+// where the origin declared no Content-Type, the fulfill must declare
+// none either, leaving Chromium to sniff exactly as it did live.
+// Asserting the sniffed type instead is what Chromium's standards-mode
+// CSS loader rejects — it tolerates an absent Content-Type but not a
+// non-CSS one — dropping every rule in the stylesheet.
+func TestReplayer_ProcessRequestPaused_ServesNoContentTypeWhenOriginDeclaredNone(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	cssURL := "https://cdn.example.com/preview/styles.css"
+	seedSniffedItem(t, ts.store, "item-css", cssURL, "text/plain", "body { margin: 0; width: 100vw; }")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), cssURL))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEvent(t, "req-1", cssURL))
+	params := awaitSend(t, done)
+
+	assert.EqualValues(t, 200, params["responseCode"])
+	_, hasContentType := headerValue(t, params, "Content-Type")
+	assert.False(t, hasContentType,
+		"a sniffed guess must never be promoted to a declaration on the path that actually carries bytes")
+}
+
+// TestReplayer_ProcessRequestPaused_HEADProbeFallsBackToSniffedContentType
+// is the other side of the same split: dropping the sniffed type
+// outright would regress ff-player's pre-render content-type probe (see
+// TestReplayer_ProcessRequestPaused_AnswersHEADContentTypeProbeFromGETResource)
+// for any extensionless media URL whose origin declared nothing,
+// silently demoting the native renderer to extension inference. This one
+// caller may fall back to the guess precisely because it feeds renderer
+// selection, not the browser's own MIME enforcement.
+func TestReplayer_ProcessRequestPaused_HEADProbeFallsBackToSniffedContentType(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	mediaURL := "https://cdn.example.com/preview/6bcc9b62"
+	seedSniffedItem(t, ts.store, "item-media", mediaURL, "video/mp4", "fake video bytes")
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), mediaURL))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-1", mediaURL+"?v=123&x-request=xhr", "HEAD"))
+	params := awaitSend(t, done)
+
+	ct, ok := headerValue(t, params, "Content-Type")
+	require.True(t, ok, "the probe still needs an answer when the origin declared nothing")
+	assert.Equal(t, "video/mp4", ct)
+}
+
+// TestReplayer_ProcessRequestPaused_HEADProbePrefersDeclaredContentType
+// pins the fallback's order: a real declaration always outranks the
+// sniffed guess, so the probe reports what the server actually said
+// whenever it said anything.
+func TestReplayer_ProcessRequestPaused_HEADProbePrefersDeclaredContentType(t *testing.T) {
+	ts := setupReplay(t, offlinecache.MissPolicyFailClosed)
+	defer ts.ctrl.Finish()
+	mediaURL := "https://cdn.example.com/preview/declared"
+	hash := writeBlobString(t, ts.store, "fake audio bytes")
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		Item:  dp1playlist.PlaylistItem{ID: "item-media", Source: mediaURL},
+		Entry: mediaURL,
+		Resources: []offlinecache.Resource{{
+			URL: mediaURL, Status: 200, SHA256: hash,
+			ContentType: "audio/mpeg", SniffedContentType: "application/octet-stream",
+		}},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+	ts.stubFetchEnable()
+	require.NoError(t, ts.replayer.EnableForItem(context.Background(), mediaURL))
+
+	done := ts.expectSend("Fetch.fulfillRequest")
+	ts.handler(requestPausedEventWithMethod(t, "req-1", mediaURL+"?v=123&x-request=xhr", "HEAD"))
+	params := awaitSend(t, done)
+
+	ct, ok := headerValue(t, params, "Content-Type")
+	require.True(t, ok)
+	assert.Equal(t, "audio/mpeg", ct)
+}
+
 // TestReplayer_ProcessRequestPaused_HEADProbeStripDoesNotReorderOtherParams
 // is headProbeQueryParams' analog to
 // TestReplayer_ProcessRequestPaused_StripsDisplayModeWithoutReorderingOtherParams:

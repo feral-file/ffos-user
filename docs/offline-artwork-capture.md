@@ -934,6 +934,74 @@ just a status code. Recording it as incomplete rather than silently
 promising `Coverage.Complete=true` keeps that promise honest; replay
 treats it the same honest-miss way described above.
 
+### 4.8 A sniffed MIME type is not a declared one
+
+CDP's `Network.responseReceived` reports `response.mimeType`, which is
+Chromium's *sniffed* verdict, not the header the origin sent. Where an
+origin declares nothing, Chromium sniffs a type anyway and reports it
+there — so recording `mimeType` as `Resource.contentType` (capture's
+original behavior) turns "the server said nothing" into "the server said
+`text/plain`", and replay then asserts that invented declaration back to
+the browser.
+
+That is strictly worse than asserting nothing, because Chromium's
+MIME enforcement distinguishes the two. Its standards-mode CSS loader
+*tolerates* a stylesheet with no `Content-Type` but *rejects* one with a
+non-CSS type. Observed on FF1-191TYKPB: a Feral File CDN preview served
+`styles.css` with no `Content-Type` at all, and the artwork rendered
+correctly online but, offline, its stylesheet parsed to zero rules and
+its `<model-viewer>` collapsed to the element's intrinsic 300×150 box in
+the corner of a 4K screen. Injecting the same cached bytes as a real
+`<style>` element restored the full 3840×2160 layout — the bytes were
+never the problem, only the asserted type. The same latent hazard applies
+to scripts, which Chromium MIME-checks whenever the response carries
+`X-Content-Type-Options: nosniff`.
+
+Capture therefore reads the origin's own `Content-Type` out of the raw
+CDP header map (`headerValue`, before `filterReplayableHeaders` drops it)
+and stores exactly that in `Resource.contentType`, empty included; every
+replay path that carries bytes — the inline `Fetch.fulfillRequest` and
+the static server's large-asset fallback alike — emits the header only
+when it is non-empty, so an origin that declared nothing replays as
+nothing and Chromium sniffs just as it did live. The static-server path
+needs one extra step for this: `http.ServeContent` invents a type of its
+own when the header is absent, so `handleBlob` sets `Content-Type` to an
+explicit `nil` to suppress it.
+
+The sniffed value is still worth keeping, in its own
+`Resource.sniffedContentType` field, persisted only when the origin
+declared nothing. Its single consumer is the HEAD content-type probe
+(`fulfillHeadFromGet` answering ff-player's `getContentTypeFromURL`, see
+§6), which selects the native `<img>`/`<video>`/`<audio>` renderer for an
+extensionless media URL: dropping the guess outright would silently
+demote those items to extension inference. A sniffed type is a good
+answer to "what is this, roughly?" and a bad answer to "what did the
+server say?" — the two fields exist to keep those questions apart, and
+only the probe may fall back from one to the other.
+
+The direct-download path (`mediacapture.go`) has no browser to sniff for
+it, so it fills the same field itself from the leading bytes of the
+response (`bodySniffer`, `http.DetectContentType`) when the origin
+declared nothing — otherwise the gap would land exactly where it hurts
+most, since an empty `Content-Type` classifies as `ClassUnknown` and
+`ClassUnknown` routes to that very path. It records nothing when the
+bytes sniff to either of `DetectContentType`'s two catch-alls — one per
+branch of its binary/text split, `application/octet-stream` and
+`text/plain; charset=utf-8` — since neither is a positive
+identification: a confident non-answer is worse than silence for a field
+whose consumer stops falling back to extension inference the moment it
+gets one. The text catch-all matters as much as the binary one here, and
+for the same items: a headerless SVG without an XML prolog and a
+headerless `.gltf` manifest both land on it.
+
+Existing on-disk records keep whatever type they were captured with.
+They are re-captured — and thereby fixed — the next time the controller
+issues `downloadPlaylist` for them, since `enqueue` skips only items
+already queued or downloading, never ones already cached. Nothing in the
+daemon re-captures on its own, though: `displayPlaylist` and the
+periodic playlist refresh both only index, so shipping this package
+alone does not repair a fielded device's existing records.
+
 ---
 
 ## 5. On-disk format (simplified, no redundancy)
@@ -1051,7 +1119,9 @@ replay reads `resources` and the DP-1 id inside is not an identity.
     { "url": "https://host/app.js",  "status": 200, "sha256": "ab12…", "contentType": "application/javascript" },
     { "url": "https://cdn.example.com/lib.js", "status": 200, "sha256": "cd34…", "contentType": "application/javascript",
       "headers": { "Access-Control-Allow-Origin": "https://host" } },
-    { "url": "https://host/mv.min.js", "status": 302, "redirectTo": "https://host/mv@1.2/mv.min.js" }
+    { "url": "https://host/mv.min.js", "status": 302, "redirectTo": "https://host/mv@1.2/mv.min.js" },
+    { "url": "https://cdn.example.com/preview/styles.css", "status": 200, "sha256": "ef56…",
+      "sniffedContentType": "text/plain", "//": "origin declared none: no contentType, so replay declares none either (§4.8)" }
   ],
   "coverage": { "complete": true, "reason": "" },
   "capturedAt": "2026-07-17T04:55:00Z"
@@ -1156,7 +1226,10 @@ There is deliberately **no** top-level manifest, no separate
 - Only fields replay routing and status reporting actually consume are
   kept on `Resource`: `url`/`status`/`redirectTo` drive replay's
   fulfill-or-redirect decision, `sha256`/`contentType` drive the fulfill
-  body. `size` is not persisted — it derives from the blob file's own size
+  body. `contentType` is the origin's own declaration and is absent when
+  the origin made none; the separate, rarely-present
+  `sniffedContentType` holds Chromium's guess for the HEAD probe alone
+  (see §4.8). `size` is not persisted — it derives from the blob file's own size
   on disk. Capture-time diagnostics collapse into `Coverage.{Complete,Reason}`
   (free text — `csp_blocked`, `loading_failed(<errorText>):<url>`,
   `fetch_failed:<url>`, `unresolved_at_deadline:<url>`, `http_error(<status>):
@@ -1593,9 +1666,13 @@ the correct native `<img>`/`<video>`/`<audio>` element. `replay.go`'s
 `v`/`x-request` params (`headProbeQueryParams`, the same order/encoding-
 preserving stripping as `display_mode` above) and looking up the `GET`
 resource for that same URL; if found, it fulfills with that resource's
-status/`Content-Type`/allowlisted headers but an **empty body** — correct
-HTTP semantics for `HEAD`, and exactly what the probe needs to pick the
-right renderer. This substitutes method only, never URL, so it carries
+status/allowlisted headers and its `ProbeContentType()` but an **empty
+body** — correct HTTP semantics for `HEAD`, and exactly what the probe
+needs to pick the right renderer. This is the ONE caller that may fall
+back from the origin's declared `Content-Type` to Chromium's sniffed
+guess (§4.8): the probe feeds renderer selection, not the browser's own
+MIME enforcement, so a guess beats no answer here where it would break a
+stylesheet on any path that carries bytes. This substitutes method only, never URL, so it carries
 none of the "could serve the wrong bytes" risk a URL-based normalization
 would. Since native media elements render on the kiosk's TOP-LEVEL page
 (not inside a cross-origin iframe the way software artworks are — see
