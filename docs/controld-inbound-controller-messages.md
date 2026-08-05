@@ -259,7 +259,32 @@ Example:
 ```
 
 Current success response: the latest metrics object, or `null`/empty if no
-metrics have been received yet.
+metrics have been received yet. controld forwards `feral-sys-monitord`'s
+payload **verbatim** — this document does not restate that daemon's schema,
+and the field names are its `snake_case`, not the `camelCase` used
+elsewhere here. Note the units are not uniform across that payload, so read
+`components/feral-sys-monitord/metric/metric.go` before consuming a field
+rather than inferring from a neighbouring one.
+
+One group is called out because `getOfflineCacheStatus` invites a direct
+comparison with it. `disk` describes the **device root filesystem**:
+
+```json
+"disk": {
+  "total_capacity": 121387538,
+  "used_capacity": 74047216,
+  "available_capacity": 41155284
+}
+```
+
+Those are **KiB** floats, straight from `df -k /`. `getOfflineCacheStatus`'
+`diskUsed`/`diskLimit` are **bytes**, and they scope to the cache directory
+and its policy budget rather than to the whole filesystem — so the two are a
+factor of 1024 apart *and* describe different things. A client showing both must convert
+and must keep them as separate quantities. Values persist from the last
+successful probe, so a failed read leaves the previous figures in place
+rather than zeroing or removing them; all-zero means no successful read
+since boot.
 
 Current error cases:
 
@@ -1829,7 +1854,7 @@ Request fields, all optional:
 | `sources` | string[] | Restrict the report to the items with these source URLs. Omitted or `[]` means every known item. At most **1024** sources per request. |
 | `limit` | integer | Cap on how many entries `items` carries. Omitted, `0`, or above the cap is clamped to **1000**, which is also the maximum. (A value above 2^20 is rejected as `invalid_request` rather than clamped — an overflow guard, far above any meaningful page size.) |
 | `cursor` | string | The `nextCursor` from the previous page — an opaque token, not a source URL. Omitted means the first page. |
-| `totalsOnly` | boolean | Return `totals`/`diskUsed` with an empty `items`, for a summary view. Cannot be combined with `cursor`. |
+| `totalsOnly` | boolean | Return the summary block (`totals`/`diskUsed`/`diskLimit`) with an empty `items`, for a summary view. Cannot be combined with `cursor`. |
 
 Unlike the other commands in this family, these arguments are validated
 strictly: a wrong type (for example `"sources": "https://…"` instead of
@@ -1872,7 +1897,8 @@ Success response:
     "downloading": 0,
     "failed": 0
   },
-  "diskUsed": 4402690
+  "diskUsed": 5219840,
+  "diskLimit": 10737418240
 }
 ```
 
@@ -1897,14 +1923,87 @@ absent on the last page, so a client can treat "no `nextCursor`" as
 position, a cursor stays valid even if the item it names is cleared or
 evicted between pages.
 
-`totals` and `diskUsed` describe the **whole requested set**, not the
-current page, and for that reason are returned **only on the first page**
-(a request with no `cursor`). Deriving them costs one on-disk read per
-item in the set, so recomputing them for every page would make walking a
-large cache cost far more than it needs to. A continuation page omits
-both fields; carry forward what the first page reported. Use
-`totalsOnly: true` when the summary is all you need — it skips the
-per-item disk measurements and the response body entirely.
+`totals`, `diskUsed`, and `diskLimit` form the **summary block**, returned
+**only on the first page** (a request with no `cursor`). Deriving `totals`
+and `diskUsed` costs one on-disk read per item in the set, so recomputing
+them for every page would make walking a large cache cost far more than it
+needs to. `diskLimit` is a constant the daemon already holds and costs
+nothing, but it rides the same gate because a ceiling is not renderable
+without the usage measured against it. A continuation page omits all
+three; carry forward what the first page reported. Use `totalsOnly: true`
+when the summary is all you need — it skips the per-item disk measurements
+and the response body entirely.
+
+`totals` counts the **whole requested set**, not the current page.
+`diskUsed` is different: it measures the **whole store** — every byte the
+cache persists (blobs, item records, playlist bodies, the by-url index) —
+and is *not* narrowed by a `sources` filter. A filtered request still
+reports total cache usage, not the usage of the items it asked about.
+So `diskUsed` does not equal the sum of `items[].bytes`, in either
+direction: it counts metadata no item reports, while blobs shared between
+items are counted once in `diskUsed` but reported by each item that
+references them. Use `diskUsed` for a total; never add up per-item bytes
+to get one.
+
+`diskUsed` reads **`0` if the device failed to measure the store** (a
+transient I/O error; the device logs a warning locally). The field is
+still present, so a `0` is not distinguishable on the wire from a genuinely
+empty cache. Do not present a lone `0` as authoritative "cache is empty"
+if other fields — a nonzero `totals.ready`, say — contradict it.
+
+**Cache size and eviction.** `diskLimit` is the cache's byte budget: the device's
+`offlineCache.maxDiskBytes`, or 10 GiB when the operator left it unset.
+It is why cached items are evicted at all. Both it and `diskUsed` are in
+**bytes** — note the `deviceMetrics` command reports device filesystem
+figures in KiB, so the two cannot be mixed without conversion.
+
+**The ratio is not bounded to 0..100%, in either direction.** Render
+`diskUsed / diskLimit` as a proportion by all means, but clamp it, and do
+not label any fixed percentage "full":
+
+- *It usually rests below the budget.* The device reclaims room **ahead of**
+  each download, evicting oldest-captured items until a headroom margin is
+  free, so a busy cache typically settles below `diskLimit` and climbs back
+  toward it as each download lands. A gauge that only reads "full at
+  `diskLimit`" will rarely look full. Items are therefore evicted — and
+  eviction notifications sent — while `diskUsed` still shows room left.
+- *It can also exceed the budget.* Eviction runs only on the download path,
+  so lowering `offlineCache.maxDiskBytes` on a device that already holds a
+  larger cache leaves `diskUsed` above `diskLimit` until the next download
+  runs. Playlist metadata is also counted in `diskUsed` but bounded by
+  count rather than bytes, and no eviction can reclaim it.
+
+For user-facing copy: "removed to make room for newer downloads" is honest
+at any fill level; "evicted because the cache is full" is not.
+
+The current headroom margin is one eighth of the budget (a 10 GiB budget
+starts reclaiming past ~8.75 GiB). That figure is **illustrative, not
+contractual** — it is a device-side tuning constant that may change
+without a contract revision, so do not hardcode it or derive a threshold
+from it.
+
+`diskLimit` is **not** bounded by the device's actual free disk space, and
+is a different quantity from the device filesystem usage `deviceMetrics`
+reports. It is a policy budget, not reserved space: on a device with less
+free space than the budget, downloads can start failing while `diskUsed`
+is still well under `diskLimit`. A client showing both device storage and
+cache usage must present them as two separate quantities, never as parts
+of one total.
+
+**On a first-page response, an absent `diskLimit` means there is no
+ceiling** — the cache is unlimited and no *item* is ever evicted (playlist
+metadata is still pruned by count). Do not confuse this with its absence
+on a continuation page, which means only "carry forward what the first
+page reported". No supported configuration produces the unlimited case
+today (`offlineCache.maxDiskBytes <= 0` means "use the 10 GiB default"),
+but handle it anyway: render it as "no limit", never as `0`, and never by
+substituting the 10 GiB default, which an operator may have overridden.
+`diskUsed` is still reported.
+
+To keep a live gauge current, re-poll with `totalsOnly: true` — the
+`offline_cache_status` notifications below carry per-item state only, never
+the summary block, so an eviction or a completed download moves `diskUsed`
+with nothing on the wire to say so.
 
 `state` is one of `not_cached`, `queued`, `downloading`, `ready`, `partial`,
 `failed`, `broken_online`. `percent` is coarse (`0` or `100`): capture is a

@@ -295,17 +295,50 @@ type StatusSnapshot struct {
 	// KEY (see StatusRequest.Sources). Never nil, so the wire always
 	// carries [] rather than null.
 	Items []ItemStatus `json:"items"`
-	// Totals and DiskUsedBytes describe the WHOLE requested set, not
-	// this page, and are computed on the first page only (empty
-	// Cursor) — deriving them costs one store read per item in the set,
-	// so recomputing them for every page would turn a full paged walk
-	// from O(total) into O(pages x total). They are always both set or
-	// both nil; a continuation page leaves them nil and the client
-	// carries forward what the first page reported.
+	// Totals, DiskUsedBytes and DiskLimitBytes are the first-page-only
+	// summary block: they are computed on the first page (empty Cursor)
+	// and left nil on continuation pages, which carry items alone.
+	// Deriving Totals/DiskUsedBytes costs one store read per item in the
+	// set, so recomputing them for every page would turn a full paged
+	// walk from O(total) into O(pages x total). Totals and DiskUsedBytes
+	// always describe the WHOLE requested set, not this page, and are
+	// always both set or both nil; a client carries forward what the
+	// first page reported.
 	Totals *StatusTotals `json:"totals,omitempty"`
 	// DiskUsedBytes is named diskUsed on the wire to match the plan's
-	// documented command response shape (section 5).
+	// documented command response shape (section 5). Note it measures the
+	// WHOLE store (Store.DiskUsage), which is not narrowed by a Sources
+	// filter the way Totals is.
 	DiskUsedBytes *int64 `json:"diskUsed,omitempty"`
+	// DiskLimitBytes is the cache's byte budget (Service.maxDiskBytes,
+	// i.e. offlineCache.maxDiskBytes or DefaultMaxDiskBytes) that
+	// DiskUsedBytes is measured against — the denominator a controller
+	// needs to render cache usage, and the reason items are evicted.
+	//
+	// It is the budget, NOT the threshold eviction fires at, and
+	// DiskUsedBytes is NOT bounded by it in either direction:
+	// reclaimDiskForCapture evicts down to maxDiskBytes minus a headroom
+	// margin before every capture, so a busy store swings between that
+	// reclaim target (currently seven eighths of the budget) and the
+	// ceiling itself, and controllers see evictions while usage still
+	// shows room; and a lowered maxDiskBytes on a populated
+	// device stays unreconciled until the next capture, since eviction runs
+	// only on that path. See
+	// docs/controld-inbound-controller-messages.md's "Cache size and
+	// eviction", which tells client authors to clamp the ratio and quotes
+	// the current margin as illustrative rather than contractual.
+	//
+	// Nil means NO ceiling, not a zero-sized one: maxDiskBytes <=0 is
+	// Service's "unlimited" (see the field), under which enforceDiskLimit
+	// and reclaimDiskForCapture return early and no ITEM is ever evicted
+	// (playlist bodies are still pruned by count — see
+	// PrunePlaylistRecords — which is why this says item).
+	// Serializing that as 0 would tell a controller the precise opposite —
+	// a cache permanently at 100% of its budget, with eviction imminent —
+	// so it is omitted and clients must render the absence as "no limit"
+	// rather than defaulting to DefaultMaxDiskBytes, which an operator's
+	// offlineCache.maxDiskBytes may have overridden.
+	DiskLimitBytes *int64 `json:"diskLimit,omitempty"`
 	// NextCursor is the source KEY (an opaque token on the wire) to pass
 	// back as StatusRequest.Cursor to fetch the next page. Empty means
 	// this was the last page.
@@ -2859,9 +2892,25 @@ func (s *service) Status(req StatusRequest) (StatusSnapshot, error) {
 			// Reported as 0 rather than omitted so the first page's
 			// shape never depends on a transient store error; the
 			// warning is what makes the 0 diagnosable.
+			//
+			// Note this 0 is indistinguishable on the wire from an
+			// empty cache, and is deliberately NOT held to
+			// DiskLimitBytes' omit-rather-than-mislead rule below:
+			// omitting it would break the "Totals and DiskUsedBytes
+			// are always both set or both nil" invariant clients page
+			// on. The wire doc warns client authors instead.
 			s.logger.Warn("offline cache: failed to measure disk usage for status", zap.Error(err))
 		}
 		snapshot.DiskUsedBytes = &usage
+		// Omitted rather than reported as 0 when unlimited — the two
+		// cases are opposites to a client, not degrees of the same
+		// thing. See DiskLimitBytes' doc.
+		if s.maxDiskBytes > 0 {
+			// Named diskLimit rather than limit: the enclosing scope's
+			// limit is the page size, an unrelated quantity.
+			diskLimit := s.maxDiskBytes
+			snapshot.DiskLimitBytes = &diskLimit
+		}
 	}
 	return snapshot, nil
 }

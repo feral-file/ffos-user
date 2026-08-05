@@ -458,9 +458,9 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 
 	// Built field by field rather than by marshaling the snapshot so the
 	// optional parts stay absent instead of serializing as null: totals/
-	// diskUsed are first-page-only (see StatusSnapshot's doc), and a
-	// client on the last page must not see an empty nextCursor it might
-	// follow.
+	// diskUsed/diskLimit are first-page-only (see StatusSnapshot's doc),
+	// and a client on the last page must not see an empty nextCursor it
+	// might follow.
 	response := map[string]any{
 		"ok":    true,
 		"items": snapshot.Items,
@@ -470,6 +470,11 @@ func (h *handler) handleGetOfflineCacheStatus(args map[string]any) (interface{},
 	}
 	if snapshot.DiskUsedBytes != nil {
 		response["diskUsed"] = *snapshot.DiskUsedBytes
+	}
+	// Absent means "no eviction ceiling", which is why it must not
+	// degrade to 0 here any more than it does on the snapshot.
+	if snapshot.DiskLimitBytes != nil {
+		response["diskLimit"] = *snapshot.DiskLimitBytes
 	}
 	if snapshot.NextCursor != "" {
 		response["nextCursor"] = snapshot.NextCursor

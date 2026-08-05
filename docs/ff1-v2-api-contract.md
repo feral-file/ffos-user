@@ -2399,6 +2399,7 @@ and panel apply state are reported independently.
     "verifiedPlaylistCount": 4,
     "artworkCount": 92,
     "bytes": "428713984",
+    "limitBytes": "10737418240",
     "lastSuccessfulPlaybackAt": "2026-07-21T08:15:00.000Z"
   },
   "update": {
@@ -2432,7 +2433,16 @@ and optional `oldestOccurredAt` is present only when the queue is nonempty.
 Percentages are int[0..100], temperature is finite [-40..125], and resource
 fields are individually optional. Cache readiness fields are required;
 `offlineReady` is true only when the active/default verified playlist and every
-asset required for autonomous playback are locally readable. `update.status` is
+asset required for autonomous playback are locally readable. `cache.bytes` is
+the whole cache footprint, not just artwork blobs, and `cache.limitBytes` is
+the byte budget it is measured against — the v2 spelling of v1's
+`diskUsed`/`diskLimit`, whose semantics (usage unbounded by the budget in both
+directions, clamp the ratio, not comparable to `resources.storageUsedPercent`)
+are documented in `docs/controld-inbound-controller-messages.md` and must stay
+identical here. `limitBytes` **deviates from this section's "omitted when
+unknown" rule**: it is omitted when the value is known and the cache is
+unbounded, so absence means "no limit" — never "unknown", and never `0`.
+`update.status` is
 `idle|checking|downloading|verifying|installing|reboot_required|failed`; a
 non-idle update also has `operationId`, optional `targetVersion`, and
 `progressPercent` int[0..100]. `factoryResetConfirmations` is required and is a
