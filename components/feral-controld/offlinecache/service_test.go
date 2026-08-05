@@ -3472,3 +3472,59 @@ func TestService_DownloadPlaylist_SkipsOversizedSources(t *testing.T) {
 	require.Equal(t, 2, total)
 	require.Equal(t, 1, queued, "only the in-bounds source is queued")
 }
+
+// TestService_ClearPlaylist_NotificationCarriesTheExactSource pins
+// ItemStatus.Source as an IDENTITY, not log text. It exists because a
+// previous revision "hardened" this call with truncateSourceForLog, which
+// cuts at 256 bytes while admission permits 2048 — silently renaming
+// every ordinary long source.
+//
+// The damage was not cosmetic: the controller matches this byte-for-byte
+// against its playlist, and the notifier coalesces on
+// SourceKey(status.Source), so a truncated source hashes to a different
+// queue key than the same item's pending entry. The controller would get
+// a not_cached for a source that exists nowhere while its real entry
+// stayed stuck at queued — the exact stranding this notification exists
+// to prevent.
+func TestService_ClearPlaylist_NotificationCarriesTheExactSource(t *testing.T) {
+	obs := &recordingObserver{}
+	ts := setupService(t, 0, obs)
+	defer ts.ctrl.Finish()
+
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	// Comfortably past truncateSourceForLog's 256-byte cut, comfortably
+	// inside the 2048-byte admission bound: an ordinary long signed URL.
+	source := "https://example.com/art?sig=" + strings.Repeat("s", 600)
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "pl-exact", "title": "t",
+		"items": []map[string]interface{}{{"id": "item-1", "source": source}},
+	})
+	require.NoError(t, err)
+
+	ts.mockClassifier.EXPECT().Classify(gomock.Any(), source).
+		Return(offlinecache.ClassMedia, nil).AnyTimes()
+	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).
+		Return(&offlinecache.ItemRecord{Item: dp1playlist.PlaylistItem{Source: source}}, nil).AnyTimes()
+
+	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
+	require.NoError(t, err)
+	require.NoError(t, ts.service.ClearPlaylist("pl-exact"))
+
+	obs.mu.Lock()
+	observed := make([]string, 0, len(obs.statuses))
+	for _, st := range obs.statuses {
+		observed = append(observed, st.Source)
+	}
+	obs.mu.Unlock()
+
+	require.NotEmpty(t, observed, "the clear must notify at all")
+	for _, got := range observed {
+		require.NotContains(t, got, "…[+",
+			"a truncation marker on the wire means the source no longer identifies anything")
+		if got != "" {
+			require.Equal(t, source, got, "the notification must carry the source byte-for-byte")
+		}
+	}
+}

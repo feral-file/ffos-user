@@ -123,6 +123,8 @@ const defaultMaxQueueLen = 4 * dp1MaxPlaylistItems
 // Retryable: re-issuing the download after the clear has landed queues
 // normally — see offlineCacheErrorResponse's "busy" mapping, which this
 // joins for exactly that reason.
+var ErrClearedDuringDownload = errors.New("offline cache: a clear for this item landed while the download was being queued, so nothing was queued")
+
 // ErrPlaylistSaveClearedRace means a ClearPlaylist for this exact
 // playlist landed between the caller sampling the clear-generation and
 // the save, so the playlist record was deliberately NOT written.
@@ -138,8 +140,6 @@ const defaultMaxQueueLen = 4 * dp1MaxPlaylistItems
 // That caller maps this to the same retryable "busy" the queued path
 // already reports via ErrClearedDuringDownload.
 var ErrPlaylistSaveClearedRace = errors.New("offline cache: a clear for this playlist landed while it was being saved, so nothing was persisted")
-
-var ErrClearedDuringDownload = errors.New("offline cache: a clear for this item landed while the download was being queued, so nothing was queued")
 
 // ErrItemInlineNotQueued reports that an item needed no download because
 // its bytes are already inline in the playlist body (a data: URI — see
@@ -2467,7 +2467,13 @@ func (s *service) ClearPlaylist(playlistID string) error {
 	}
 	res, busyKey, err := s.reserveForClear(keys)
 	if err != nil {
-		return fmt.Errorf("offline cache: clear playlist %s: item %s: %w", playlistID, sourceOf[busyKey], err)
+		// Truncated for the same reason as the delete error below: these
+		// sources come out of a STORED playlist body, which is persisted
+		// wholesale including inline data: items that admission exempts.
+		// This one fires on an ordinary operational condition (an item
+		// mid-capture), so it is the MORE likely of the two to be hit.
+		return fmt.Errorf("offline cache: clear playlist %s: item %s: %w",
+			playlistID, truncateSourceForLog(sourceOf[busyKey]), err)
 	}
 	// Before any not_cached is emitted below — see
 	// awaitQueuedNotifications' doc for the inversion it prevents.
@@ -2524,6 +2530,22 @@ func (s *service) ClearPlaylist(playlistID string) error {
 			continue
 		}
 		if removed || res.settled[key] {
+			// Raw, NOT truncated — and that is deliberate, having been
+			// tried the other way. ItemStatus.Source is an IDENTITY on
+			// the wire: the controller matches it byte-for-byte against
+			// its playlist, and notifier coalesces on
+			// SourceKey(status.Source). truncateSourceForLog cuts at 256
+			// bytes while admission permits 2048, so truncating here
+			// renamed every ordinary long source into a string that
+			// exists nowhere — it would hash to a different queue key
+			// than the item's own pending entry, so the controller would
+			// get a not_cached for a phantom source and keep its real
+			// entry stuck at queued. That is the exact stranding this
+			// notification exists to prevent.
+			//
+			// Nothing unbounded reaches here anyway: the branch requires
+			// a record on disk or tracked state, and the sources
+			// admission exempts (inline data:) never get either.
 			s.notifyObserver(item.Source, StateNotCached, Coverage{})
 		}
 	}

@@ -810,6 +810,98 @@ func TestCapturer_TrackerOverflowMakesCoverageIncomplete(t *testing.T) {
 	require.False(t, coverage.Complete,
 		"a capture that dropped observations must never report Complete:true")
 	require.Contains(t, coverage.Reason, "tracker_limit_exceeded")
-	require.NotContains(t, coverage.Reason, "example.com/r",
+	// Assert against the ACTUAL refused URL. An earlier version of this
+	// checked for "example.com/r", a copy-paste from the sibling subtest's
+	// r%d.png URLs — a substring the refused URLs here never contain — so
+	// it passed vacuously and would have passed just as happily if
+	// resolveResources appended every refused URL in full.
+	require.NotContains(t, coverage.Reason, long,
 		"the marker must be bounded: naming the refused URLs would reintroduce the growth the bound prevents")
+	require.Less(t, len(coverage.Reason), 512,
+		"the marker is a fixed-size summary; it must not scale with what was refused")
+}
+
+// TestCaptureTracker_UnknownMethodIsNotTreatedAsIdempotent pins the
+// security property behind methodUnknown. An untracked requestId used to
+// yield "", which means GET everywhere downstream — and GET is in
+// safeIdempotentMethods, so resolveResources RE-ISSUES a resource whose
+// body it does not have. A page that got a requestId dropped could
+// therefore have the daemon re-send its POST as a GET, which is precisely
+// the side effect the unsupported_method branch exists to prevent.
+//
+// The bound added alongside this made that reachable on purpose: saturate
+// the in-flight map, and every later request is refused and so untracked.
+func TestCaptureTracker_UnknownMethodIsNotTreatedAsIdempotent(t *testing.T) {
+	tr := newCaptureTracker()
+
+	require.Equal(t, methodUnknown, tr.methodForRequest("never-seen"),
+		"an untracked id must not report the empty string, which downstream reads as GET")
+	require.False(t, safeIdempotentMethods[methodUnknown],
+		"methodUnknown must never be re-issued; this is the assertion that keeps the downgrade closed")
+
+	// A tracked request still reports its real method, and a resolved one
+	// goes back to unknown rather than lingering as a stale attribution.
+	tr.trackRequest("req-1", "https://example.com/a", "POST")
+	require.Equal(t, "POST", tr.methodForRequest("req-1"))
+	tr.resolveRequest("req-1")
+	require.Equal(t, methodUnknown, tr.methodForRequest("req-1"))
+}
+
+// TestCaptureTracker_ResolveRequestPrunesInFlightState is what makes the
+// in-flight ceiling a bound on CONCURRENCY rather than on total requests
+// ever seen. Without pruning, a page can walk requestURL to the ceiling
+// with sequential, perfectly-terminated requests and force every later
+// one to be refused — which is the lever for the method downgrade above,
+// and also marks otherwise-healthy range/tile-heavy captures incomplete.
+func TestCaptureTracker_ResolveRequestPrunesInFlightState(t *testing.T) {
+	tr := newCaptureTracker()
+	for i := 0; i < MaxCaptureResources*2; i++ {
+		id := fmt.Sprintf("req-%d", i)
+		tr.trackRequest(id, fmt.Sprintf("https://example.com/s%d.png", i), "GET")
+		tr.resolveRequest(id)
+	}
+	_, _, _, pendingURLs, overflow := tr.snapshot()
+	require.Empty(t, pendingURLs)
+	require.Equal(t, 0, overflow,
+		"sequential terminated requests must never reach the in-flight ceiling")
+}
+
+// TestCaptureTracker_BoundsRedirectTarget covers the parameter the first
+// version of the bound missed: redirectTo is an attacker-controlled 3xx
+// Location, persisted in Resource.RedirectTo and served back by replay,
+// yet only url was being checked.
+func TestCaptureTracker_BoundsRedirectTarget(t *testing.T) {
+	tr := newCaptureTracker()
+	long := "https://example.com/" + strings.Repeat("t", MaxCaptureResourceURLBytes)
+	tr.recordResource("https://example.com/a", 302, "text/html", long, nil, "GET")
+
+	_, resources, _, _, overflow := tr.snapshot()
+	res := resources[resourceKey("GET", "https://example.com/a")]
+	require.Equal(t, "", res.RedirectTo,
+		"an oversized redirect target is dropped, not stored truncated: replay matches exact URLs, "+
+			"so a truncated target would mis-resolve rather than simply miss")
+	require.Equal(t, 1, overflow, "and the capture is marked incomplete rather than silently altered")
+}
+
+// TestCaptureTracker_BoundsResourceMetadata covers the two remaining
+// attacker-supplied strings recordResource stores: the content type and
+// the allowlisted header values. Both are persisted in Resource and
+// served back by replay. Chromium bounds one response's header block, but
+// MaxCaptureResources is 4096, so unbounded values still let one capture
+// accumulate on the order of a gigabyte — the exact accumulation these
+// bounds exist to stop.
+func TestCaptureTracker_BoundsResourceMetadata(t *testing.T) {
+	tr := newCaptureTracker()
+	longMeta := strings.Repeat("m", MaxCaptureResourceMetaBytes+1)
+	tr.recordResource("https://example.com/a", 200, longMeta, "",
+		map[string]string{"content-type": longMeta, "cache-control": "max-age=60"}, "GET")
+
+	_, resources, _, _, overflow := tr.snapshot()
+	res := resources[resourceKey("GET", "https://example.com/a")]
+	require.Equal(t, "", res.ContentType,
+		"dropped, not truncated: a truncated MIME type would be SERVED on replay as though it were real")
+	require.NotContains(t, res.Headers, "content-type", "an oversized header value is dropped")
+	require.Equal(t, "max-age=60", res.Headers["cache-control"],
+		"and its in-bounds siblings survive")
+	require.Equal(t, 2, overflow)
 }

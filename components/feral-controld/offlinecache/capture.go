@@ -899,15 +899,25 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 const (
 	MaxCaptureResources        = 4096
 	MaxCaptureResourceURLBytes = 4096
+	// MaxCaptureResourceMetaBytes bounds each stored content type and
+	// each allowlisted header VALUE. Much smaller than the URL bound
+	// because these are short by nature — a MIME type is tens of bytes,
+	// and the replayable header allowlist carries no field that
+	// legitimately runs long.
+	MaxCaptureResourceMetaBytes = 1024
 )
 
 type captureTracker struct {
 	mu sync.Mutex
 
-	// overflow counts observations refused by the bounds above: distinct
-	// resources past MaxCaptureResources, and URLs past
-	// MaxCaptureResourceURLBytes. Counted rather than dropped silently so
-	// Coverage can say the capture is incomplete AND why.
+	// overflow counts observations refused by the bounds above. Keep this
+	// list complete — an enumerating comment that has gone stale is worse
+	// than none: distinct resources past MaxCaptureResources, URLs past
+	// MaxCaptureResourceURLBytes, an oversized redirect TARGET on an
+	// otherwise-accepted resource, and an oversized content type or
+	// header value past MaxCaptureResourceMetaBytes. Counted rather than
+	// dropped silently so Coverage can say the capture is incomplete AND
+	// why.
 	overflow int
 
 	// requestURL maps a CDP requestId to its current URL so
@@ -965,6 +975,34 @@ func (t *captureTracker) recordResource(url string, status int, contentType, red
 		t.overflow++
 		return
 	}
+	// redirectTo is attacker-controlled too (a 3xx Location header) and is
+	// persisted in Resource.RedirectTo and served back by replay, so it
+	// needs the same ceiling as url. Dropped rather than truncated, for
+	// the same reason: replay matches exact URLs, and a truncated target
+	// would be a permanent mis-resolution rather than a missing one.
+	if len(redirectTo) > MaxCaptureResourceURLBytes {
+		redirectTo = ""
+		t.overflow++
+	}
+	// contentType and the allowlisted header VALUES are attacker-supplied
+	// too, and both are persisted in Resource and served back by replay.
+	// Chromium caps one response's header block at ~256 KB, which bounds
+	// each resource — but MaxCaptureResources is 4096, so unbounded values
+	// still let one capture accumulate on the order of a gigabyte, which
+	// is precisely the accumulation this tracker's bounds exist to stop.
+	// Dropped rather than truncated, like redirectTo: a truncated MIME
+	// type or header value would be served on replay as though it were
+	// real, and serving subtly wrong metadata is worse than serving none.
+	if len(contentType) > MaxCaptureResourceMetaBytes {
+		contentType = ""
+		t.overflow++
+	}
+	for name, value := range headers {
+		if len(value) > MaxCaptureResourceMetaBytes {
+			delete(headers, name)
+			t.overflow++
+		}
+	}
 	if _, exists := t.resources[key]; !exists {
 		// Bound checked only for a NEW key: an update to a resource
 		// already tracked costs no additional entry, and refusing it
@@ -1016,11 +1054,14 @@ func (t *captureTracker) recordFailure(url, reason string) {
 func (t *captureTracker) trackRequest(requestID, url, method string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// Same ceiling on the in-flight maps. These are keyed by requestId
-	// rather than URL, so they are bounded by concurrent requests rather
-	// than distinct ones in practice — but a page that never lets its
-	// requests terminate keeps every entry alive, and the URL strings are
-	// the part that carries weight.
+	// Same ceiling on the in-flight maps. resolveRequest prunes both on
+	// every terminal event, so in practice these hold only requests
+	// actually in flight and this ceiling is a backstop against a page
+	// that starts requests and never lets them finish — NOT the normal
+	// bound. (An earlier version of this comment claimed concurrency
+	// bounding without the pruning that would make it true, which left
+	// the ceiling reachable by request COUNT and turned it into a lever
+	// for the methodUnknown downgrade described on that constant.)
 	if len(url) > MaxCaptureResourceURLBytes {
 		t.overflow++
 		return
@@ -1040,13 +1081,32 @@ func (t *captureTracker) urlForRequest(requestID string) string {
 	return t.requestURL[requestID]
 }
 
+// methodUnknown is what methodForRequest reports when a requestId has no
+// tracked method — because its requestWillBeSent was never seen, or was
+// refused at the tracker ceiling.
+//
+// It must NOT be the empty string, and this is a security property rather
+// than tidiness. Empty means GET everywhere downstream (Resource.Method's
+// doc, EffectiveMethod), GET is in safeIdempotentMethods, and
+// resolveResources RE-ISSUES a safe-idempotent resource whose body it
+// does not have. So an untracked POST would have been re-sent as a GET by
+// the daemon — exactly the side effect the unsupported_method branch
+// exists to prevent, reachable by any page that can get a requestId
+// dropped. methodUnknown is deliberately absent from safeIdempotentMethods
+// so an unknown method degrades to "recorded but not fetched" instead.
+const methodUnknown = "UNKNOWN"
+
 // methodForRequest returns the method most recently tracked for
 // requestID — see requestMethod's doc for why callers must read this
-// before a same-event trackRequest call would overwrite it.
+// before a same-event trackRequest call would overwrite it. An untracked
+// id yields methodUnknown, never "": see that constant.
 func (t *captureTracker) methodForRequest(requestID string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.requestMethod[requestID]
+	if m, ok := t.requestMethod[requestID]; ok {
+		return m
+	}
+	return methodUnknown
 }
 
 // resolveRequest marks requestID as having reached a terminal event
@@ -1056,6 +1116,25 @@ func (t *captureTracker) resolveRequest(requestID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.pending, requestID)
+	// Also drop the in-flight URL/method. Without this the two maps grow
+	// once per distinct requestId for the whole window and are bounded
+	// only by the ceiling below — which is a bound on TOTAL requests, not
+	// on concurrency, and is what a page saturates to force requestIds to
+	// be refused. Both terminal handlers read urlForRequest/
+	// methodForRequest BEFORE calling this, and a redirect hop re-tracks
+	// via its own requestWillBeSent rather than passing through here.
+	//
+	// One deliberate behavior change, stated rather than implied: CDP can
+	// emit loadingFailed AFTER responseReceived for the same requestId
+	// (a mid-body failure such as ERR_INCOMPLETE_CHUNKED_ENCODING). That
+	// late failure now finds no URL and is not recorded. Benign, and
+	// arguably better: the resource was already recorded at
+	// responseReceived and resolveResources re-fetches it, so a genuine
+	// breakage still surfaces as fetch_failed, while a browser-side body
+	// failure our own re-fetch succeeds at no longer marks the capture
+	// incomplete for no reason.
+	delete(t.requestURL, requestID)
+	delete(t.requestMethod, requestID)
 }
 
 // snapshot returns copies of the tracker's state for lock-free use after
