@@ -3554,12 +3554,22 @@ func TestService_ClearBarrier_DetectsClearsLandingAfterTheSample(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ts.mockClassifier.EXPECT().Classify(gomock.Any(), source).
-		Return(offlinecache.ClassMedia, nil).AnyTimes()
-	ts.mockMediaCapturer.EXPECT().Capture(gomock.Any(), gomock.Any()).
-		Return(&offlinecache.ItemRecord{Item: dp1playlist.PlaylistItem{Source: source}}, nil).AnyTimes()
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
-	require.NoError(t, err)
+	// Seeded directly rather than by driving DownloadPlaylist, for the
+	// same reason as TestService_ClearPlaylist_NotificationCarriesTheExactSource
+	// above: a download followed immediately by a clear races the capture
+	// worker into ErrItemBusy, which is correct behavior and an
+	// irrelevant failure here. This test is about the barrier's
+	// bookkeeping, and a clear needs a record to delete, not a capture to
+	// have run. seedPlaylist is used for BOTH rounds below — the second
+	// re-seeds, because the first clear deleted what it cleared.
+	seedPlaylist := func() {
+		require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+			Item:     dp1playlist.PlaylistItem{ID: "item-1", Source: source},
+			Coverage: offlinecache.Coverage{Complete: true},
+		}))
+		require.NoError(t, ts.store.SavePlaylist("pl-barrier", raw))
+	}
+	seedPlaylist()
 
 	// A barrier sampled now must see nothing behind it.
 	barrier := ts.service.ClearBarrier()
@@ -3570,14 +3580,24 @@ func TestService_ClearBarrier_DetectsClearsLandingAfterTheSample(t *testing.T) {
 	require.NoError(t, ts.service.ClearPlaylist("pl-barrier"))
 	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", barrier, source))
 
+	// ...through the PLAYLIST epoch specifically. Passing no sources is
+	// the only way to assert that: ClearPlaylist clears its member items
+	// too, so each one's download-epoch is bumped as well, and
+	// ClearedSinceBarrier returns true on the first branch that fires.
+	// With a source in hand the item branch answers, and the playlist
+	// branch could be deleted outright without this test noticing —
+	// verified by breaking markPlaylistCleared, which left the assertion
+	// above still passing.
+	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", barrier),
+		"the playlist clear must be visible with no source to fall back on")
+
 	// ...and so is an ITEM clear, which is the other command that can
 	// land during a resolve. A fresh barrier first, so this asserts the
 	// item path rather than re-observing the playlist clear above.
 	after := ts.service.ClearBarrier()
 	require.False(t, ts.service.ClearedSinceBarrier("pl-barrier", after, source))
 
-	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
-	require.NoError(t, err)
+	seedPlaylist()
 	require.NoError(t, ts.service.ClearItem(source))
 	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", after, source),
 		"a clearPlaylistItemCache during a resolve must disqualify the download too")
@@ -3585,4 +3605,126 @@ func TestService_ClearBarrier_DetectsClearsLandingAfterTheSample(t *testing.T) {
 	// An unrelated playlist/item must NOT be disqualified by either.
 	require.False(t, ts.service.ClearedSinceBarrier("other-playlist", after, "https://example.com/other.png"),
 		"the barrier must be scoped to what was actually cleared")
+}
+
+// loadHookStore wraps a Store and runs a hook at the instant
+// LoadPlaylist is served. That instant is the one that matters for
+// ClearPlaylist: it is where the clear takes its membership snapshot,
+// and the bug this pins was that the clear-epoch had not been advanced
+// yet when it did.
+type loadHookStore struct {
+	offlinecache.Store
+	onLoadPlaylist func(playlistID string)
+}
+
+func (s *loadHookStore) LoadPlaylist(playlistID string) (json.RawMessage, error) {
+	if s.onLoadPlaylist != nil {
+		s.onLoadPlaylist(playlistID)
+	}
+	return s.Store.LoadPlaylist(playlistID)
+}
+
+// TestService_ClearPlaylist_AdvancesEpochBeforeSnapshottingMembership is
+// the regression test for a lost-source race:
+//
+//	clear     load playlist P -> sees items {A}
+//	download                     save refreshed P {A,B}, enqueue B
+//	clear     reserveForClear({A}) -- B's epoch was never bumped
+//	clear     bump epoch, delete P's record
+//	worker                       B's capture persists its ItemRecord
+//
+// B ends up cached with no playlist referencing it, AFTER ClearPlaylist
+// reported success — and because no playlist points at it, no
+// playlist-scoped operation can ever see it again.
+//
+// It is written as an ORDERING assertion rather than by running the two
+// operations concurrently, and that is deliberate. The fix makes the
+// snapshot and the epoch bump one critical section under
+// playlistRecordMu, so a genuinely concurrent DownloadPlaylist would
+// BLOCK on that mutex instead of interleaving — a thread-racing test
+// would deadlock or hang rather than fail, which is a far worse
+// regression signal than a failed compare. What actually has to be true
+// is the ordering: by the time membership is read, the epoch must
+// already be advanced, because that is what forces any save arriving
+// afterwards to fail its own re-check and return before enqueuing
+// anything. Asserting the ordering directly is both deterministic and
+// closer to the invariant than any sleep-based interleaving.
+//
+// What this does NOT pin, stated plainly so the next session does not
+// over-trust it: that the bump and the snapshot share ONE critical
+// section. That half is separately load-bearing — without the mutex, a
+// bump could still land between a concurrent save's epoch re-check and
+// its write, and that save would then persist a refreshed playlist and
+// enqueue from it after this snapshot was taken. Observing it would mean
+// asserting that a competing save BLOCKS, which cannot be done from here
+// without a timing window in the unsound direction (a goroutine that has
+// not reached the lock yet is indistinguishable from one parked on it).
+// If you move the bump out of the playlistRecordMu section, this test
+// will still pass and the race will still be open.
+func TestService_ClearPlaylist_AdvancesEpochBeforeSnapshottingMembership(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+
+	source := "https://example.com/a.png"
+	raw, err := json.Marshal(map[string]interface{}{
+		"dpVersion": "1.0.0", "id": "pl-order", "title": "t",
+		"items": []map[string]interface{}{{"id": "item-1", "source": source}},
+	})
+	require.NoError(t, err)
+
+	var epochAtSnapshot uint64
+	var sawLoad bool
+	hooked := &loadHookStore{Store: ts.store}
+	svc := offlinecache.NewService(hooked, ts.mockClassifier, ts.mockCapturer,
+		ts.mockMediaCapturer, wrapper.NewJSON(), 5000, 0, nil,
+		offlinecache.AdmissionOptions{}, zaptest.NewLogger(t))
+	hooked.onLoadPlaylist = func(playlistID string) {
+		sawLoad = true
+		// Read through the service's own exported accessor, which is
+		// what savePlaylistAndURLIndex compares against.
+		epochAtSnapshot = svc.CurrentPlaylistClearGeneration(playlistID)
+	}
+
+	require.NoError(t, svc.Start(context.Background()))
+	defer svc.Stop()
+
+	require.NoError(t, ts.store.SaveItem(&offlinecache.ItemRecord{
+		Item:     dp1playlist.PlaylistItem{ID: "item-1", Source: source},
+		Coverage: offlinecache.Coverage{Complete: true},
+	}))
+	require.NoError(t, ts.store.SavePlaylist("pl-order", raw))
+
+	before := svc.CurrentPlaylistClearGeneration("pl-order")
+	require.NoError(t, svc.ClearPlaylist("pl-order"))
+
+	require.True(t, sawLoad, "test bug: the clear never loaded the playlist through the hook")
+	require.Greater(t, epochAtSnapshot, before,
+		"the clear-epoch must already be advanced when membership is snapshotted; "+
+			"otherwise a DownloadPlaylist saving a refreshed playlist in that window "+
+			"enqueues a source the clear will never invalidate")
+}
+
+// TestService_ClearPlaylist_UncachedStillAdvancesTheGeneration pins a
+// semantic this change introduced deliberately: clearing a playlist that
+// was never cached still fails (there is no record to delete) but STILL
+// advances the clear-generation, so a download already in flight for
+// that id loses to the clear rather than racing it.
+//
+// This follows from bumping before the load, and it is the branch a
+// future "only bump once we know the playlist exists" change would
+// quietly revert — which would reopen the window the bump ordering
+// exists to close. It also matches the rest of the design:
+// ClearedSinceBarrier treats a playlist bump as disqualifying whether or
+// not anything was cached.
+func TestService_ClearPlaylist_UncachedStillAdvancesTheGeneration(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	require.NoError(t, ts.service.Start(context.Background()))
+	defer ts.service.Stop()
+
+	before := ts.service.CurrentPlaylistClearGeneration("pl-never-cached")
+	require.Error(t, ts.service.ClearPlaylist("pl-never-cached"),
+		"there is no record to delete, so the call still reports failure")
+	require.Greater(t, ts.service.CurrentPlaylistClearGeneration("pl-never-cached"), before,
+		"the generation must advance anyway, so an in-flight download for this id loses to the clear")
 }

@@ -2359,6 +2359,46 @@ skipping the cleared member: the alternative invents partial-success
 semantics for a command whose contract is a single queued/total answer,
 to save one retry that succeeds as soon as the clear settles.
 
+**The clear's own membership snapshot is inside the same serialization.**
+The barrier above protects the *download* side. `ClearPlaylist` needed the
+mirror guarantee: it reads a playlist's member sources to decide what to
+invalidate, and an earlier revision took that snapshot while the clear
+generation was advanced only much later, at the record delete. A
+`DownloadPlaylist` saving a refreshed playlist in between enqueued a source
+the snapshot never saw, `reserveForClear` bumped only the older keys, and
+that item's capture persisted **after** the clear had already reported
+success — leaving it cached with no playlist referencing it, and therefore
+invisible to every playlist-scoped operation.
+
+The generation bump and the membership read now happen together under
+`playlistRecordMu`, the same mutex `savePlaylistAndURLIndex` holds across
+its own re-check and write, and the bump comes first. A save that commits
+earlier is in the snapshot and its items are invalidated; one arriving
+later fails its re-check, which returns `saved=false` and makes
+`DownloadPlaylist` return *before* its enqueue loop, so nothing is queued
+rather than queued-and-orphaned. Bumping first also means clearing an
+uncached playlist still advances the generation — an in-flight download for
+that ID loses to the clear, consistent with how `ClearedSinceBarrier`
+already treats a playlist bump.
+
+**Accepted risk — the narrow residual.** A download that both samples its
+generation *and* saves entirely inside a clear's window still has its
+record deleted with its newly-queued items left cached: the same orphan,
+through a narrower window. It needs a three-way interleaving — sample after
+the clear's first bump, classify the offending item after
+`reserveForClear`, save before the final bump — so a network-bound classify
+loop has to fit inside the clear's delete-and-GC phase. Rare, but that
+phase is not microseconds. Closing it means either holding
+`playlistRecordMu` across the item deletes and GC (putting blob I/O and
+`gc`'s `captureMu` wait under a lock every playlist save needs), or making
+the final delete conditional on the stored bytes still matching the
+snapshot, which changes clear-vs-download from *clear wins* to *newest
+writer wins*. A third option, cheaper than both, is an in-progress-clear
+marker keyed by playlist ID and checked by `savePlaylistAndURLIndex` — it
+runs under `playlistRecordMu` already, so it needs no new lock or ordering,
+though the marker must be released on every return path. Recorded here so
+this is re-opened as a decision rather than re-reported as a new finding.
+
 **What one capture may accumulate is also bounded.** Passing the source
 guard establishes that the ORIGIN is public, not that the page behaves.
 The disk budget caps bytes *fetched*, which does not cover this: the

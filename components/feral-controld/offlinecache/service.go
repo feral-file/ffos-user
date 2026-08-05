@@ -755,15 +755,33 @@ type service struct {
 	// by ClearPlaylist. playlistClearEpoch alone is not enough: reading
 	// the epoch and writing the record are two steps, and a ClearPlaylist
 	// landing between them would bump-then-delete, then the stale writer
-	// would re-save — resurrecting a cleared record. Both the writer's
-	// (epoch re-check + SavePlaylist) and ClearPlaylist's (epoch bump +
-	// DeletePlaylist) run under this mutex, so they cannot interleave:
-	// whichever acquires it first is authoritative, exactly as the
-	// item-level dequeueForProcessing/reserveForClear pair does under
-	// s.mu. Deliberately a SEPARATE, narrow mutex rather than s.mu: it is
-	// held only across a small playlist-metadata store write (never blob
-	// bytes), and folding that I/O under s.mu would stall every unrelated
-	// in-memory state read/write for its duration.
+	// would re-save — resurrecting a cleared record. THREE pairs run
+	// under this mutex, so none of them can interleave; whichever
+	// acquires it first is authoritative, exactly as the item-level
+	// dequeueForProcessing/reserveForClear pair does under s.mu:
+	//
+	//   - the writer's (epoch re-check + SavePlaylist);
+	//   - ClearPlaylist's opening (epoch bump + membership snapshot);
+	//   - ClearPlaylist's closing (epoch bump + DeletePlaylist).
+	//
+	// The middle one is the least obvious and the easiest to lose to a
+	// later "simplify this closure" edit. Taking BOTH of its operations
+	// out of the mutex is the original bug: a save's re-check then runs
+	// before the bump lands, passes legitimately, and its write becomes
+	// visible only after an unlocked snapshot — leaving the source that
+	// save enqueues cached with no playlist referencing it, after the
+	// clear reported success. Note that shape still bumps before
+	// reading, so the ordering test cannot see it; only
+	// TestClearPlaylist_HoldsPlaylistRecordMuAcrossBumpAndSnapshot
+	// fails it. Hoisting just one of the two happens to stay safe today
+	// (that test's doc traces exactly why, and why it is not something
+	// to rely on). See ClearPlaylist's own comment.
+	//
+	// Deliberately a SEPARATE, narrow mutex rather than s.mu: it is held
+	// only across small playlist-metadata store operations — a record
+	// write, or the single metadata read the snapshot needs — never blob
+	// bytes and never GC, and folding that I/O under s.mu would stall
+	// every unrelated in-memory state read/write for its duration.
 	//
 	// Lock ordering: whenever both are held, playlistRecordMu is always
 	// acquired BEFORE s.mu (the epoch read/bump nested inside), never the
@@ -2510,8 +2528,61 @@ func (s *service) ClearItem(source string) error {
 // could dequeue and start capturing one of these exact items in
 // between, after this call's own check already passed.
 func (s *service) ClearPlaylist(playlistID string) error {
-	raw, err := s.store.LoadPlaylist(playlistID)
-	if err != nil {
+	// Reading the membership and advancing the clear-epoch MUST be one
+	// critical section under playlistRecordMu — the same lock
+	// savePlaylistAndURLIndex holds across its own epoch re-check and
+	// write. Splitting them leaves a window that loses a source outright:
+	//
+	//	clear     load playlist P -> sees items {A}
+	//	download                     save refreshed P {A,B}, enqueue B
+	//	clear     reserveForClear({A}) -- B's epoch never bumped
+	//	clear     bump epoch, delete P's record
+	//	worker                       B's capture persists its ItemRecord
+	//
+	// B is then cached with no playlist referencing it, after this call
+	// already reported success — the record survives every playlist-scoped
+	// operation because none of them can see it. Bumping the epoch here
+	// instead closes it from both sides: a save that got in BEFORE this
+	// point is in the snapshot below and its items are invalidated by
+	// reserveForClear, and a save that arrives AFTER fails its own
+	// re-check, which makes DownloadPlaylist return before its enqueue
+	// loop (see the !saved branch there) so nothing is queued at all.
+	//
+	// Cheap to hold: one store read plus a map write, no network and no
+	// blob I/O. The item deletes and GC below deliberately stay outside
+	// it — they are the slow part, and they no longer need it.
+	var raw json.RawMessage
+	if err := func() error {
+		s.playlistRecordMu.Lock()
+		defer s.playlistRecordMu.Unlock()
+
+		// Bump BEFORE the read, not merely in the same critical section.
+		// Either order is equally correct against a concurrent save —
+		// the mutex is what makes the pair atomic — but doing it first
+		// makes the invariant directly observable to a test at the
+		// instant membership is snapshotted, instead of only inferable
+		// from lock behavior. It also gives a clear of an UNCACHED
+		// playlist the semantics it should have: the epoch still
+		// advances, so a download already in flight for that id loses
+		// to the clear rather than racing it. That matches what the rest
+		// of the design already assumes — ClearedSinceBarrier treats a
+		// playlist bump as disqualifying whether or not anything was
+		// cached.
+		//
+		// Consequence of bumping first, accepted: the epoch also
+		// advances when the load below fails for a TRANSIENT reason, not
+		// just a missing playlist. The cost is that one concurrent
+		// download aborts its save and is retried by the caller; the
+		// alternative — bumping only after a successful read — reopens
+		// the window this whole section exists to close.
+		s.markPlaylistCleared(playlistID)
+		loaded, err := s.store.LoadPlaylist(playlistID)
+		if err != nil {
+			return err
+		}
+		raw = loaded
+		return nil
+	}(); err != nil {
 		return fmt.Errorf("offline cache: load playlist %s: %w", playlistID, err)
 	}
 
@@ -2622,13 +2693,40 @@ func (s *service) ClearPlaylist(playlistID string) error {
 			s.notifyObserver(item.Source, StateNotCached, Coverage{})
 		}
 	}
-	// Bump the playlist clear-epoch and delete the record as ONE critical
-	// section under playlistRecordMu, so a DownloadPlaylist /
-	// IndexPlaylistForOfflineDisplay still in its classify/resolve window
-	// cannot slip its (epoch-check + SavePlaylist) between the bump and
-	// the delete and resurrect the record — see playlistRecordMu's doc.
-	// The per-item reserveForClear above already invalidated the items
-	// themselves; this covers the playlist index record.
+	// Bump the clear-epoch AGAIN and delete the record as one critical
+	// section under playlistRecordMu. The bump at the top of this function
+	// is what makes the membership snapshot sound; this second one covers
+	// the narrower window it cannot: a DownloadPlaylist that sampled the
+	// epoch AFTER that first bump would otherwise pass its own re-check
+	// and re-save the record between here and there, resurrecting what
+	// this call is about to delete — see playlistRecordMu's doc. Bumping
+	// twice is free because clearSeq is monotonic and every comparison is
+	// a strict >, so no reader can tell the difference.
+	//
+	// Residual, deliberately left and NOT covered by either bump: a
+	// download that both samples and saves inside this clear's window
+	// saves a record this call then deletes, and its own newly-queued
+	// items stay cached behind it.
+	//
+	// Be clear about what that is: it is the SAME failure this function's
+	// opening comment describes — an item cached with no playlist
+	// referencing it, after this call reported success, invisible to
+	// every playlist-scoped operation — reached through a narrower
+	// window rather than a different mechanism. It needs a three-way
+	// interleaving (the download samples plEpoch after the first bump,
+	// classifies the offending item after reserveForClear, and saves
+	// before the final bump), so a network-bound classify loop has to
+	// fit inside this clear's delete-and-GC phase. Rare, but that phase
+	// is not microseconds, so it is not unreachable. Recorded as an
+	// accepted risk in docs/offline-artwork-capture.md §9.
+	//
+	// Closing that means holding
+	// playlistRecordMu across the item deletes and GC below — which puts
+	// blob I/O and gc's captureMu wait inside a lock that playlist saves
+	// need — or making the final delete conditional on the stored bytes
+	// still matching the snapshot, which changes clear-vs-download from
+	// "clear wins" to "newest writer wins". Both are larger decisions than
+	// this fix, and neither is needed for the interleaving above.
 	func() {
 		s.playlistRecordMu.Lock()
 		defer s.playlistRecordMu.Unlock()

@@ -2,6 +2,7 @@ package offlinecache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -313,3 +314,110 @@ func (failingCapturer) Capture(context.Context, dp1playlist.PlaylistItem, int) (
 	return nil, errors.New("simulated capture failure")
 }
 func (failingCapturer) Close() error { return nil }
+
+// errAfterHook is returned by the stub store below so ClearPlaylist
+// unwinds immediately after its first critical section. The point is to
+// observe that section and nothing else — no reserveForClear, no blob
+// deletes, no gc.
+var errAfterHook = errors.New("stop the clear here")
+
+// lockProbeStore serves LoadPlaylist by running a hook and then failing.
+// Store is embedded as an interface and left nil deliberately: this test
+// must exercise exactly one store method, so any other call is a test
+// bug and a nil panic names it immediately.
+type lockProbeStore struct {
+	Store
+	onLoadPlaylist func()
+}
+
+func (s *lockProbeStore) LoadPlaylist(string) (json.RawMessage, error) {
+	s.onLoadPlaylist()
+	return nil, errAfterHook
+}
+
+// TestClearPlaylist_HoldsPlaylistRecordMuAcrossBumpAndSnapshot pins the
+// half of the invariant that the ordering test in service_test.go
+// cannot: that the clear-epoch bump and the membership snapshot happen
+// in ONE critical section, not merely in that order.
+//
+// Both halves are load-bearing and neither implies the other:
+//
+//   - Bump before load (the ordering test). Without it, a save that
+//     lands in between passes its own epoch re-check and enqueues a
+//     source this clear will never invalidate.
+//   - Both the bump AND the load under playlistRecordMu (this test).
+//     This is what catches a regression to the ORIGINAL bug shape —
+//     bump and load BOTH outside the mutex — where a save's re-check
+//     runs before the bump lands, passes legitimately, and its atomic
+//     write becomes visible only after an unlocked snapshot. That
+//     snapshot misses the source the save enqueues, whose per-item epoch
+//     was sampled during its classify and is never bumped by
+//     reserveForClear: the same orphaned-item failure ClearPlaylist's own
+//     comment describes. That shape still bumps before reading, so the
+//     ordering test passes it and this is the only test in the package
+//     that fails it.
+//
+// Be precise about the weaker rearrangements — the obvious stronger
+// claim ("each operation must individually be under the lock") is wrong,
+// and was believed twice during review before being traced out:
+//
+//   - Hoisting the BUMP alone (load still inside) is safe, and this test
+//     passes it. A save arriving in the gap re-checks against the
+//     already-bumped epoch and declines to write. Releasing and
+//     re-acquiring between the two is safe for the same reason.
+//   - Hoisting the LOAD alone (bump still inside) is not a live hole
+//     either, but only because savePlaylistAndURLIndex holds the mutex
+//     across its re-check AND its write and fsStore.SavePlaylist writes
+//     atomically. It degrades to the residual ClearPlaylist already
+//     documents, not to a fresh one.
+//
+// So this test does not pin "the load must be locked" as a standalone
+// hazard. It pins both operations inside the mutex so the guarantee stops
+// depending on those two assumptions holding elsewhere in the file, and
+// so the edit that hoists both is caught.
+//
+// TryLock is what makes this sound rather than timing-dependent: it
+// reports false whenever the mutex is held by ANY goroutine, so probing
+// it from inside the LoadPlaylist hook is a direct observation of "the
+// lock is held at the instant membership is read". No second goroutine,
+// no sleep, and no window in either direction — unlike an attempt to
+// prove blocking by racing a competing save, where a goroutine that has
+// not yet reached the lock is indistinguishable from one parked on it.
+func TestClearPlaylist_HoldsPlaylistRecordMuAcrossBumpAndSnapshot(t *testing.T) {
+	var (
+		heldAtSnapshot  bool
+		epochAtSnapshot uint64
+		probed          bool
+	)
+	s := &service{
+		playlistClearEpoch: make(map[string]uint64),
+		downloadEpoch:      make(map[string]uint64),
+	}
+	s.store = &lockProbeStore{onLoadPlaylist: func() {
+		probed = true
+		// Held by this same goroutine — Go mutexes are not reentrant, so
+		// TryLock reports false either way, which is exactly the signal
+		// wanted here.
+		if s.playlistRecordMu.TryLock() {
+			s.playlistRecordMu.Unlock()
+			return
+		}
+		heldAtSnapshot = true
+		s.mu.RLock()
+		epochAtSnapshot = s.playlistClearEpoch["pl-lock"]
+		s.mu.RUnlock()
+	}}
+
+	err := s.ClearPlaylist("pl-lock")
+	require.ErrorIs(t, err, errAfterHook, "the stub store must be what ended the call")
+
+	require.True(t, probed, "test bug: ClearPlaylist never loaded the playlist")
+	require.True(t, heldAtSnapshot,
+		"the bump and the membership read must BOTH be under playlistRecordMu; with both "+
+			"outside it (the original bug shape, which still bumps first and so passes the "+
+			"ordering test) a save's re-check runs before the bump, passes, and its write "+
+			"lands after this snapshot — leaving the source it enqueues cached with no "+
+			"playlist referencing it")
+	require.NotZero(t, epochAtSnapshot,
+		"the bump must already be visible inside that same critical section")
+}
