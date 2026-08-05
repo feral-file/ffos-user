@@ -599,6 +599,14 @@ const StateFinalizing = stateFinalizing
 // overlay).
 const StateUpdating = stateUpdating
 
+// StateFactoryReset is exported for HideIfShowing callers that need to name the
+// factory-reset narration. Its caller is devicectl's stuck-reset watchdog (and
+// the failed-unit-start path): the reset panel promises an imminent reboot, so
+// when that reboot provably did not happen it must come down rather than lie
+// forever — cleared conditionally so a narrator that took the screen meanwhile
+// is not erased.
+const StateFactoryReset = stateFactoryReset
+
 // Narrating reports whether the last intended narration state is a visible
 // overlay — something has been shown and it was not subsequently hidden. It
 // reflects INTENT (the last push), not delivery: a push whose CDP send failed

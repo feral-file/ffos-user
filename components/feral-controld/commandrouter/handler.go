@@ -154,12 +154,53 @@ func New(
 	}
 }
 
+// servedDuringFactoryReset names the commands still answered while a factory
+// reset is staged: pure reporting, no persisted write, no screen ownership, no
+// boot staging. An allowlist rather than a denylist on purpose — a command
+// added later is rejected during the reset window until someone deliberately
+// decides it belongs here, which is the safe direction for a guard protecting
+// a device mid-wipe. CMD_FACTORY_RESET itself is absent: a duplicate while one
+// is already staged has nothing to add, and once the stuck-reset watchdog
+// releases the latch a retry is accepted normally again.
+var servedDuringFactoryReset = map[commands.Type]bool{
+	commands.CMD_DEVICE_STATUS:    true,
+	commands.CMD_PROFILE:          true, // == CMD_SYS_METRICS ("deviceMetrics")
+	commands.CMD_DDC_PANEL_STATUS: true,
+}
+
 // Process processes the command and returns the result
 func (h *handler) Process(ctx context.Context, command commands.Command) (interface{}, error) {
 	commandType := command.Type
 	if commandType == "" {
 		h.logger.Warn("Received command with no type", zap.Any("command", command))
 		return nil, nil
+	}
+
+	// A staged factory reset closes the command surface. This is the ONE place
+	// it can be enforced completely: every transport (relayer mediator, LAN
+	// hub, OOM recovery) and every command family (device control, mint
+	// pairing, offline cache, player) funnels through this function, while
+	// devicectl.Execute below sees only the device-control subset.
+	//
+	// Why it must close at all: the reset unclaims the device but leaves the
+	// former owner's relayer session open across the pre-reboot window, and the
+	// candidate boot can ROLL BACK to the running subvolume — so any write
+	// landing here survives a reset the new owner believes happened. `connect`
+	// re-persists the claim, `sshAccess` writes authorized_keys, the toggles
+	// write state sentinels, the offline-cache commands write and delete cached
+	// artwork, and updateToLatestVersion arms a competing bootctl one-shot that
+	// can displace the reset's own. Mint pairing and the player commands also
+	// take the screen the reset narration owns.
+	// No nil guard on h.executor deliberately: every other collaborator here is
+	// optional and nil-checked, but the executor is not — there is one
+	// construction (main.go) and it always passes a real one. A `!= nil` here
+	// would turn a future mis-wire into a SILENTLY DISABLED reset guard, which
+	// is the same fail-open shape ResetStaged was made a required interface
+	// method to prevent. A nil panics loudly at startup instead.
+	if h.executor.ResetStaged() && !servedDuringFactoryReset[commandType] {
+		h.logger.Warn("Rejecting command while a factory reset is staged",
+			zap.String("command", commandType.String()))
+		return nil, fmt.Errorf("factory reset in progress: %s is not accepted", commandType)
 	}
 
 	var result interface{}

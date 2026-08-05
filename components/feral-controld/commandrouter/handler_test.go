@@ -26,6 +26,17 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/status"
 )
 
+// newRoutableExecutor builds an executor mock for a device that is NOT mid
+// factory reset. Process consults ResetStaged on every command (the
+// staged-reset guard closes the whole command surface, every family and every
+// transport), so each routing test has to answer it; the rejection behavior
+// itself is covered by TestCommandHandler_Process_StagedFactoryReset_*.
+func newRoutableExecutor(ctrl *gomock.Controller) *mocks.MockExecutor {
+	m := mocks.NewMockExecutor(ctrl)
+	m.EXPECT().ResetStaged().Return(false).AnyTimes()
+	return m
+}
+
 // fakeRecoverySession is a directly-controllable commandrouter.RecoverySession
 // double: err, when set, is what NavigateHomeInline returns.
 type fakeRecoverySession struct {
@@ -57,7 +68,7 @@ func setup(t *testing.T) *testSetup {
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
 	ctx := context.Background()
 
-	mockExecutor := mocks.NewMockExecutor(ctrl)
+	mockExecutor := newRoutableExecutor(ctrl)
 	mockCDP := mocks.NewMockCDP(ctrl)
 	mockDP1 := mocks.NewMockDP1(ctrl)
 	mockStatusPoller := mocks.NewMockStatusPoller(ctrl)
@@ -1507,4 +1518,83 @@ func isPlayerResponseOkForTest(result interface{}) bool {
 	}
 	okVal, _ := msg["ok"].(bool)
 	return okVal
+}
+
+// --- staged factory reset (the command-surface guard) ------------------------
+
+// stagedResetHandler builds a router whose device is mid-factory-reset. Every
+// collaborator is wired so that a command reaching its handler would be
+// visible: nothing below is expected to, which is the point.
+func stagedResetHandler(t *testing.T) (commandrouter.Handler, *gomock.Controller) {
+	t.Helper()
+	ctrl := gomock.NewController(t)
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	ex := mocks.NewMockExecutor(ctrl)
+	ex.EXPECT().ResetStaged().Return(true).AnyTimes()
+
+	// mintPairing/offlineCache left nil deliberately: unguarded, both families
+	// answer a nil collaborator with their own {ok:false, code:disabled|...}
+	// map and a NIL error, so requiring an error below proves the guard fired
+	// rather than the nil-guard.
+	return commandrouter.New(ex, mocks.NewMockCDP(ctrl), mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil,
+		mocks.NewMockJSON(ctrl), logger), ctrl
+}
+
+// TestCommandHandler_Process_StagedFactoryReset_RejectsEveryFamily is the guard
+// that makes the wire contract's "the command surface closes" true. It spans
+// all four routed families deliberately: the guard used to sit inside
+// devicectl.Execute, where mint pairing, the offline cache and the player
+// commands bypassed it entirely — and the candidate boot can roll back, so
+// anything those handlers write survives a reset the new owner believes
+// happened. The absent collaborator expectations are the assertion: gomock
+// fails if any command reaches its handler.
+func TestCommandHandler_Process_StagedFactoryReset_RejectsEveryFamily(t *testing.T) {
+	h, ctrl := stagedResetHandler(t)
+	defer ctrl.Finish()
+
+	for _, cmd := range []commands.Type{
+		commands.CMD_CONNECT,                    // re-persists the claim
+		commands.CMD_SSH_ACCESS,                 // writes authorized_keys
+		commands.CMD_ANALYTICS_TOGGLE,           // writes a state sentinel
+		commands.CMD_UPDATE_TO_LATEST,           // arms a competing bootctl one-shot
+		commands.CMD_SHOW_PAIRING_QR_CODE,       // paints the claim QR
+		commands.CMD_START_MINT_PAIRING_SESSION, // mint pairing: own overlay + token minting
+		commands.CMD_DOWNLOAD_PLAYLIST,          // offline cache: writes under the root subvolume
+		commands.CMD_CLEAR_PLAYLIST_CACHE,       // offline cache: deletes under it
+		commands.CMD_FACTORY_RESET,              // a duplicate adds nothing while one is staged
+	} {
+		_, err := h.Process(context.Background(), commands.Command{Type: cmd})
+		require.Error(t, err, "%s must be rejected while a factory reset is staged", cmd)
+		assert.Contains(t, err.Error(), "factory reset in progress")
+	}
+}
+
+// TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly: the guard
+// closes the command surface, not the device's ability to report what it is
+// doing — a controller polling through the still-open session gets an answer
+// rather than an error storm. These three are the allowlist; each is pure
+// reporting, with no persisted write, no screen ownership and no boot staging.
+func TestCommandHandler_Process_StagedFactoryReset_ServesReadOnly(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	logger := zaptest.NewLogger(t, zaptest.Level(zap.FatalLevel))
+
+	ex := mocks.NewMockExecutor(ctrl)
+	ex.EXPECT().ResetStaged().Return(true).AnyTimes()
+	h := commandrouter.New(ex, mocks.NewMockCDP(ctrl), mocks.NewMockDP1(ctrl),
+		mocks.NewMockStatusPoller(ctrl), nil, nil, nil, nil, mocks.NewMockJSON(ctrl), logger)
+
+	for _, cmd := range []commands.Type{
+		commands.CMD_DEVICE_STATUS,
+		commands.CMD_PROFILE,
+		commands.CMD_DDC_PANEL_STATUS,
+	} {
+		ex.EXPECT().
+			Execute(gomock.Any(), gomock.Any()).
+			Return(map[string]any{"ok": true}, nil)
+		_, err := h.Process(context.Background(), commands.Command{Type: cmd})
+		require.NoError(t, err, "%s must still be served during a staged reset", cmd)
+	}
 }

@@ -247,11 +247,13 @@ A claimed, provisioned device that later loses internet does **not** immediately
 
 Factory reset (`factoryReset` command) is a security-relevant special case handled in `devicectl`:
 
-1. `feral-controld` clears the persisted relayer topic in-process (`clearPersistedRelayerTopic`), best-effort.
-2. It starts `set-factory-boot.service` via `systemctl`, which stages a one-shot boot into the pristine factory btrfs snapshot and reboots.
-3. `setupui` narrates `factory_reset` best-effort before the reboot.
+1. `feral-controld` clears the persisted claim in-process (`clearPersistedClaim` — relayer topic AND `ConnectedDevice`), best-effort.
+2. `setupui` narrates `factory_reset` best-effort.
+3. It starts `set-factory-boot.service` via `systemctl`, which stages a one-shot boot into the pristine factory btrfs snapshot and reboots.
 
-The reset **abandons** the running subvolume rather than wiping it: the pristine snapshot becomes the boot target, and the old subvolume (with its now-cleared topic) is left behind. Clearing the topic first closes the window where a resold or interrupted device could remain commandable on the old topic before the reboot completes. On next boot the device comes up fresh and re-enters this flow from cold boot.
+The reset **abandons** the running subvolume rather than wiping it: the pristine snapshot becomes the boot target, and the old subvolume (with its now-cleared claim) is left behind. But the btrfs default is left unchanged, so a candidate that fails to boot returns the device to that old subvolume — clearing the claim first is what keeps a rolled-back (or never-started) reset from leaving a resold device commandable on the old topic. On the success path the clear is redundant: the state file lives inside the root subvolume the candidate boot discards. On next boot the device comes up fresh and re-enters this flow from cold boot.
+
+Clearing the claim also arms the auto-claim flow and every durable-effect command against the reset itself, so `controld` latches `resetStaged` until the reboot: no claim QR repaints over the `factory_reset` screen, and the command surface closes down to read-only reporting. A stuck-reset watchdog releases the latch (and takes the panel down) if no reboot follows, since a clean `systemctl start` does not prove the reset was staged. The live relayer session is deliberately left open — see [`architecture.md`](architecture.md#btrfs-snapshot-system) for the full rationale.
 
 ---
 

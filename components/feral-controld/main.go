@@ -970,11 +970,6 @@ func initializeApp(
 			provMachineForClaim.SetClaimed(claimed)
 		}
 	})
-	// Factory reset revokes the live relayer session, not just the persisted
-	// topic (the staged reboot can be delayed or fail). Wired here for the same
-	// no-cross-import reason as the claim observer.
-	executor.SetRelayerCloser(relayer.Close)
-
 	// Provisioning domain (SoftAP setup). controld owns setup, so run() starts it
 	// unconditionally. The connectivity adapter reads sys-monitord over the shared
 	// D-Bus client; the ActiveLink guard reuses the link checker so a device with

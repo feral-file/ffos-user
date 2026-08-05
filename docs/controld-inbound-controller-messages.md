@@ -163,6 +163,8 @@ Current success response:
 Current error cases:
 
 - Invalid JSON shape under `request` causes command failure.
+- Missing or blank `clientDevice.device_id` causes command failure.
+- A staged factory reset rejects the claim — see the shared rule under [`factoryReset`](#factoryreset).
 - State persistence failure causes command failure.
 - `primaryAddress` is accepted but not currently used by the executor.
 
@@ -908,7 +910,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### factoryReset
 
-Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted relayer topic, narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume).
+Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted claim (relayer topic and `ConnectedDevice`), narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume). The live relayer session stays open, so this command's ack is deliverable — see [`architecture.md`](architecture.md) for why closing it was removed.
 
 Example:
 
@@ -927,6 +929,8 @@ Current success response: `{"ok": true}`.
 Current error cases:
 
 - Starting `set-factory-boot.service` fails.
+
+**While a reset is staged, the command surface closes.** Every command except read-only reporting (`getDeviceStatus`, `deviceMetrics`, `ddcPanelStatus`) is rejected with `factory reset in progress: <command> is not accepted`, including a repeat `factoryReset`. The reset clears the claim so a rolled-back candidate boot comes up unclaimed, and any write behind it — a new claim, an SSH key, a toggle sentinel, a competing update one-shot — would survive that rollback and undo the reset. The closure normally ends when the device reboots; it is also lifted if the reset unit fails to start, or by a watchdog if no reboot follows (a clean `systemctl start` does not prove the reset was staged — the unit is `Type=simple`).
 
 Current relayer error response: none standardized; command failure is logged.
 

@@ -70,12 +70,15 @@ type Executor interface {
 	// setupui.Service with the provisioning domain. Set once at wiring time; the
 	// lazy setupUI() fallback still covers tests that do not inject.
 	SetSetupUI(ui *setupui.Service)
-	// SetRelayerCloser injects the function that closes the LIVE relayer
-	// session (relayer.Close). Factory reset calls it so revoking the former
-	// owner's control channel does not depend on the staged reboot actually
-	// happening — the seam keeps devicectl from importing relayer. Set once at
-	// wiring time.
-	SetRelayerCloser(close func())
+	// ResetStaged reports that a factory reset is staged and its reboot is
+	// pending, so the command surface must stay closed (see the resetStaged
+	// field). It is a REQUIRED interface method rather than an optional
+	// type-asserted seam on purpose: an implementation that silently lacked it
+	// would fail OPEN, which for this guard means serving commands to a former
+	// owner on a device mid-wipe. Enforcement lives in commandrouter.Process —
+	// the one dispatch point every transport and every command family shares;
+	// devicectl only owns the latch.
+	ResetStaged() bool
 }
 
 type executor struct {
@@ -90,11 +93,6 @@ type executor struct {
 	// claimObserver, when set, is notified on claim-state transitions. Set once
 	// at wiring time before commands are served, so it needs no lock.
 	claimObserver func(claimed bool)
-
-	// relayerCloser, when set, closes the live relayer session (see
-	// SetRelayerCloser). Same single-writer wiring-time contract as
-	// claimObserver, so it needs no lock.
-	relayerCloser func()
 
 	// Add reference to StatusPoller to get metrics
 	statusPoller status.Poller
@@ -151,6 +149,37 @@ type executor struct {
 	// Ready/hidden screen. In-memory: a restart re-derives via deviceClaimed
 	// (connect precedes the confirmation in the normal flow).
 	pairingConfirmed atomic.Bool
+
+	// resetStaged latches while a factory reset is staged and its reboot is
+	// pending. It exists because the reset's own unclaim (clearPersistedClaim)
+	// ARMS the very things it needs held off during the reset script's ~8s
+	// pre-reboot window, on a relayer session that stays open:
+	//
+	//   - the auto-claim flow, which stops being a no-op the moment
+	//     claimSettled() goes false, and repaints "finalizing" then the claim QR
+	//     over the factory_reset narration. Its trigger is a topic-less relayer
+	//     reconnect: the persisted topic is cleared, so ANY reconnect (the read
+	//     loop's own on a socket error — relayer.background — or the mediator's
+	//     sysmetrics reconcile) draws a fresh topic, and that empty->set edge
+	//     fires the mediator's topic observer. The same edge also fires if the
+	//     server re-sends a system message on the ESTABLISHED socket, so
+	//     removing any single reconnect path does not close this.
+	//   - every inbound command with an effect that OUTLIVES the reset. The
+	//     candidate boot can roll back to this subvolume, so a write under it
+	//     survives: connect re-persists ConnectedDevice, sshAccess writes
+	//     authorized_keys, the analytics/beta toggles write state sentinels,
+	//     and updateToLatestVersion arms a competing bootctl one-shot that can
+	//     displace the reset's own. commandrouter.Process rejects all of them
+	//     (see servedDuringFactoryReset) — deliberately NOT devicectl.Execute,
+	//     which only ever sees the device-control subset.
+	//
+	// Released on the two paths where the reboot provably is not coming: the
+	// unit failing to start, and the stuck-reset watchdog. Both matter because
+	// a stuck latch is worse than the bug it prevents — it would leave a live,
+	// unclaimed device permanently refusing commands behind a "do not power
+	// off" panel. In-memory by design: a successful reset reboots into a
+	// subvolume where none of this state exists.
+	resetStaged atomic.Bool
 
 	// staleOverlaySwept gates the once-per-process boot reconciliation of the
 	// player's overlay: narration is in-memory, so after a daemon restart the
@@ -473,17 +502,15 @@ func (e *executor) SetSetupUI(ui *setupui.Service) {
 	})
 }
 
-// SetRelayerCloser wires the live-session revocation used by factoryReset. See
-// the Executor interface doc.
-func (e *executor) SetRelayerCloser(close func()) {
-	e.relayerCloser = close
-}
-
 func (e *executor) SaveLastSysMetrics(metrics []byte) {
 	e.Lock()
 	defer e.Unlock()
 	e.lastSysMetrics = metrics
 }
+
+// ResetStaged reports the staged-factory-reset latch. See the Executor
+// interface doc for why enforcement lives in commandrouter, not here.
+func (e *executor) ResetStaged() bool { return e.resetStaged.Load() }
 
 func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface{}, error) {
 	cmdJSON, _ := cmd.JSON()
@@ -922,6 +949,12 @@ const (
 // concurrent runs, and topic-less waits (e.g. an offline wired link) are all
 // no-ops; a later online transition re-triggers.
 func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
+	// A staged factory reset owns the screen until the reboot lands. Checked
+	// before the in-flight swap so a poke cannot queue a repaint either — the
+	// reset's own unclaim is what made this flow live again (see resetStaged).
+	if e.resetStaged.Load() {
+		return
+	}
 	if !e.autoClaimInFlight.CompareAndSwap(false, true) {
 		// A run is already in flight — possibly parked in the stretched
 		// ladder-failure backoff. Poke it (non-blocking, buffered 1) so the
@@ -2744,16 +2777,28 @@ func (e *executor) narrateUpdateProgress(pct int) {
 func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 	e.logger.Info("Executing factory reset command")
 
-	// Topic rotation (security invariant): set-factory-boot.service stages a
-	// one-shot boot into a pristine factory btrfs snapshot and reboots; it does
-	// NOT wipe the currently running subvolume, so the persisted relayer topicID
-	// (and the live relayer session) survive on disk until that reboot actually
-	// completes. A resold device — or one whose reset is interrupted before the
-	// reboot — would otherwise keep running on the old subvolume and stay
-	// commandable via the saved topic. Clear the persisted claim (topic AND
-	// ConnectedDevice) here so that window is closed: leaving ConnectedDevice
-	// would keep the process locally "claimed" (hub /api/status, mDNS TXT,
-	// claimSettled) after a failed/delayed reset, blocking any re-claim.
+	// Latch FIRST, before the unclaim below arms the claim flow and connect()
+	// (see resetStaged): the arming and the guard must not be separable by a
+	// concurrent relayer message.
+	e.resetStaged.Store(true)
+
+	// Topic rotation (security invariant): set-factory-boot.service does NOT
+	// swap the running root. It snapshots the factory image to
+	// @snapshots/@factory_reset_new and arms a ONE-SHOT boot entry
+	// (bootctl set-oneshot) while leaving the btrfs default at @snapshots/@ —
+	// so a candidate that fails to boot silently lands the device back on THIS
+	// subvolume, claim state and all, with the reset never having happened (see
+	// ffos docs/SNAPSHOT_SYSTEM_V2_FLOW.md). Clear the persisted claim (topic
+	// AND ConnectedDevice) here so that rollback — and a failed unit start
+	// below — cannot leave a resold device commandable on the old topic.
+	// Leaving ConnectedDevice would additionally keep the process locally
+	// "claimed" (hub /api/status, mDNS TXT, claimSettled), blocking any
+	// re-claim.
+	//
+	// On the SUCCESS path this write is redundant: the state file lives at
+	// /home/feralfile/.state/ inside the root subvolume (no separate @home —
+	// the install creates only @log, @pkg and @snapshots), so booting the
+	// candidate discards it wholesale. It is kept for the rollback path alone.
 	e.clearPersistedClaim()
 
 	// The process-lifetime pairing latch must fall with the persisted claim,
@@ -2767,21 +2812,20 @@ func (e *executor) factoryReset(ctx context.Context) (interface{}, error) {
 		e.claimObserver(false)
 	}
 
-	// Revoke the LIVE control channel too, not just the persisted topic: the
-	// reset unit only STAGES a reboot, and until that reboot actually happens
-	// (it can be delayed, or the unit start below can fail) the former owner's
-	// established relayer WebSocket would keep delivering commands. Closing it
-	// now bounds the reset: any later reconnect runs with the topic already
-	// cleared, so the server assigns a FRESH topic the old controller does not
-	// know. Deliberately BEFORE the unit start so a failed reset still leaves
-	// the old session revoked — the fail-safe direction. Accepted trade-off:
-	// the command's own CmdOK ack can no longer be delivered over the closed
-	// socket (the mediator's Send fails gracefully). Sending it first would
-	// reopen the revocation window this exists to close; controllers must
-	// treat factory reset as fire-and-forget.
-	if e.relayerCloser != nil {
-		e.relayerCloser()
-	}
+	// The LIVE relayer session is deliberately left OPEN. Closing it (the
+	// former shape) revoked the old owner's control channel, but it was also
+	// the surest way to trip the topic-observer chain described on resetStaged:
+	// the close made the mediator reconcile the connection back up within ~2s,
+	// topic-less, and the fresh topic's assignment edge repainted the claim QR
+	// over this reset's own narration. It cost the command's CmdOK ack too —
+	// that ack could never be delivered over the socket it had just closed.
+	//
+	// What the close bought is now covered from the other side, and covered
+	// better: the persisted topic is already gone above, and resetStaged closes
+	// the command surface itself (commandrouter.Process's guard — every
+	// transport and every command family) rather than one transport to it. What remains reachable on that socket is read-only reporting. Do not
+	// reintroduce the close to shrink it further: the reconnect it forces is a
+	// repaint trigger, not a revocation.
 
 	// controld runs the reset in-process: start the system reset unit directly.
 	return e.factoryResetInProcess(ctx)
@@ -2817,9 +2861,58 @@ func (e *executor) factoryResetInProcess(ctx context.Context) (interface{}, erro
 
 	out, err := e.exec.CommandContext(ctx, "systemctl", "start", "set-factory-boot.service").CombinedOutput()
 	if err != nil {
+		// Nothing is staged and no reboot is coming: release the latch so the
+		// device — now unclaimed — can be re-claimed and can paint its claim QR
+		// again. Keeping it set would strand a live device with no way back.
+		e.releaseStuckResetLatch("factory reset unit failed to start")
 		return nil, fmt.Errorf("failed to start factory reset service: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	// A clean start is NOT evidence the reset was staged: the unit is
+	// Type=simple, so systemctl returns the moment the script is spawned, and
+	// factory_reset.sh runs under `set -euo pipefail` with explicit exit paths
+	// (subvolume delete, snapshot creation) BEFORE it ever reaches
+	// `bootctl set-oneshot`. Arm the watchdog for that gap.
+	e.scheduleStuckResetWatchdog()
 	return CmdOK, nil
+}
+
+// stuckResetWatchdogTimeout bounds how long the staged-reset latch may hold the
+// command surface and the screen. factory_reset.sh ends in `sleep 8; systemctl
+// reboot`, so a real reset kills this process an order of magnitude sooner;
+// still being alive when this elapses IS the "no reboot completed" signal — the
+// same detection-free design as otagate's post-ladder watchdog. Strictly it
+// cannot distinguish "never staged" from "shutdown itself is hanging past two
+// minutes", and the latter would release mid-shutdown; the process is being
+// killed either way, so the release is moot there.
+const stuckResetWatchdogTimeout = 2 * time.Minute
+
+// scheduleStuckResetWatchdog arms the release for a reset that never rebooted.
+// Detached from any caller ctx for the reason otagate's twin documents: in
+// production this runs under the daemon-lifetime ctx, and a canceled ctx would
+// make SleepContext return early and SKIP the release rather than perform it —
+// the wrong direction for a guard whose failure mode is a device stuck
+// refusing commands.
+func (e *executor) scheduleStuckResetWatchdog() {
+	go func() {
+		if err := e.clock.SleepContext(context.Background(), stuckResetWatchdogTimeout); err != nil {
+			return
+		}
+		if !e.resetStaged.Load() {
+			return
+		}
+		e.releaseStuckResetLatch("factory reset staged but no reboot followed within the watchdog timeout")
+	}()
+}
+
+// releaseStuckResetLatch reopens the command surface and takes down the reset
+// panel. Extracted as a named method — like otagate's clearStuckUpdatingOverlay
+// — so the policy is unit-testable without driving a real timer. The hide is
+// conditional (HideIfShowing) so a narrator that legitimately took the screen
+// while the reset was staged is not erased.
+func (e *executor) releaseStuckResetLatch(why string) {
+	e.logger.Warn("Releasing the staged factory-reset latch", zap.String("reason", why))
+	e.resetStaged.Store(false)
+	e.setupUI().HideIfShowing(setupui.StateFactoryReset)
 }
 
 func (e *executor) uploadLogs(ctx context.Context, args []byte) (interface{}, error) {

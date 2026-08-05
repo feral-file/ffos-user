@@ -169,13 +169,155 @@ func TestFactoryResetInProcess_ShowsConfirmationThenStartsService(t *testing.T) 
 	mockCmd.EXPECT().CombinedOutput().Return([]byte(""), nil)
 
 	spy := &narratorSpy{}
-	e := &executor{logger: zap.NewNop(), exec: mockExec, setupNarrator: spy}
+	// pendingRebootClock: a successful unit start arms the stuck-reset
+	// watchdog, whose sleep must not resolve here.
+	e := &executor{logger: zap.NewNop(), exec: mockExec, setupNarrator: spy, clock: &pendingRebootClock{}}
 
 	res, err := e.factoryResetInProcess(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, CmdOK, res)
 	// The controld-owned reset pushes the on-screen confirmation.
 	assert.Equal(t, []string{"factory_reset"}, spy.calls)
+}
+
+// pendingRebootClock models the normal post-reset world for the stuck-reset
+// watchdog: the reboot arrives long before the timeout, so the watchdog's sleep
+// never returns. Tests that want the fired policy call releaseStuckResetLatch
+// directly — keeping the timer out of the assertions makes them deterministic
+// and keeps the watchdog goroutine off the narration spy.
+type pendingRebootClock struct{ autoClaimClock }
+
+func (c *pendingRebootClock) SleepContext(ctx context.Context, _ time.Duration) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// stagedResetExecutor builds an executor mid-factory-reset: the state manager
+// is injected, the reset unit's start is mocked with unitOK, and factoryReset
+// has run. Shared by the resetStaged tests below.
+func stagedResetExecutor(t *testing.T, ctrl *gomock.Controller, unitOK bool) (*executor, *narratorSpy, *mocks.MockStateManager) {
+	t.Helper()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting) // don't leave a finished mock as the global manager
+	sm.EXPECT().ClearClaim().Return(true, nil)
+	// Unclaimed for the rest of the test: the reset just cleared the claim,
+	// which is exactly what arms the flows resetStaged guards.
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+
+	mockExec := mocks.NewMockExec(ctrl)
+	mockCmd := mocks.NewMockExecCmd(ctrl)
+	mockExec.EXPECT().
+		CommandContext(gomock.Any(), "systemctl", "start", "set-factory-boot.service").
+		Return(mockCmd)
+	if unitOK {
+		mockCmd.EXPECT().CombinedOutput().Return([]byte(""), nil)
+	} else {
+		mockCmd.EXPECT().CombinedOutput().Return([]byte("unit failed"), errors.New("exit status 1"))
+	}
+
+	spy := &narratorSpy{}
+	e := &executor{
+		logger:        zap.NewNop(),
+		exec:          mockExec,
+		setupNarrator: spy,
+		json:          wrapper.NewJSON(),
+		clock:         &pendingRebootClock{},
+	}
+
+	_, err := e.factoryReset(context.Background())
+	if unitOK {
+		require.NoError(t, err)
+	} else {
+		require.Error(t, err)
+	}
+	return e, spy, sm
+}
+
+// TestFactoryReset_StagedResetSuppressesClaimQRRepaint pins the user-visible
+// regression the resetStaged latch exists for. The reset's own unclaim makes
+// the auto-claim flow live again, and because the persisted topic is cleared
+// too, ANY relayer reconnect inside factory_reset.sh's ~8s pre-reboot window
+// draws a fresh topic whose assignment edge fires the mediator's topic
+// observer — wired straight to MaybeShowClaimQROnOnline (main.go). This test
+// drives that observer's exact call, so the invariant stays pinned no matter
+// which internal path (read-loop reconnect, heartbeat reconcile, a re-sent
+// system message) trips it.
+func TestFactoryReset_StagedResetSuppressesClaimQRRepaint(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, spy, _ := stagedResetExecutor(t, ctrl, true)
+
+	e.MaybeShowClaimQROnOnline(context.Background())
+
+	assert.Equal(t, []string{"factory_reset"}, spy.calls,
+		"nothing may repaint over the factory reset narration while the reset is staged")
+}
+
+// TestFactoryReset_LatchesResetStagedForTheCommandGuard: devicectl owns the
+// latch, commandrouter.Process enforces it (that is the one dispatch point
+// every transport and every command family shares — see the Executor
+// interface). This pins the half that lives here; the rejection behavior is
+// pinned in commandrouter's TestCommandHandler_Process_StagedFactoryReset_*.
+func TestFactoryReset_LatchesResetStagedForTheCommandGuard(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, spy, _ := stagedResetExecutor(t, ctrl, true)
+
+	assert.True(t, e.ResetStaged(), "a staged reset must close the command surface")
+	assert.Equal(t, []string{"factory_reset"}, spy.calls)
+}
+
+// TestFactoryReset_UnitFailureReleasesResetLatch: a reset whose unit never
+// started stages nothing and reboots nothing. The device keeps running
+// unclaimed, so it must stay claimable — a latch that outlived the failure
+// would strand it with no way back — and the panel promising an imminent
+// reboot must come down with it.
+func TestFactoryReset_UnitFailureReleasesResetLatch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	e, spy, _ := stagedResetExecutor(t, ctrl, false)
+
+	assert.False(t, e.ResetStaged())
+	assert.Equal(t, []string{"factory_reset", "hide"}, spy.calls)
+}
+
+// TestFactoryReset_StuckResetWatchdogArms pins that a successful reset ARMS
+// the watchdog — the half a directly-called release policy cannot cover, and
+// the half that matters most: without the arming line the latch never lifts.
+// The clock returns from every sleep immediately, so the detached watchdog
+// goroutine runs its full path (including the real setupui.Service, which
+// no-ops before touching the nil CDP because no player manifest exists here).
+func TestFactoryReset_StuckResetWatchdogArms(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	sm := mocks.NewMockStateManager(ctrl)
+	state.InjectStateManagerForTesting(sm)
+	t.Cleanup(state.ResetForTesting)
+	sm.EXPECT().ClearClaim().Return(true, nil)
+	sm.EXPECT().ClaimSnapshot().Return(state.ClaimInfo{}).AnyTimes()
+
+	mockExec := mocks.NewMockExec(ctrl)
+	mockCmd := mocks.NewMockExecCmd(ctrl)
+	mockExec.EXPECT().
+		CommandContext(gomock.Any(), "systemctl", "start", "set-factory-boot.service").
+		Return(mockCmd)
+	mockCmd.EXPECT().CombinedOutput().Return([]byte(""), nil)
+
+	// No narratorSpy here: the watchdog fires on its own goroutine, and the spy
+	// is not synchronized. The lazily-built real Service is.
+	e := &executor{logger: zap.NewNop(), exec: mockExec, json: wrapper.NewJSON(), clock: &autoClaimClock{}}
+
+	_, err := e.factoryReset(context.Background())
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return !e.ResetStaged() }, time.Second, 10*time.Millisecond,
+		"the stuck-reset watchdog must release the latch when no reboot follows")
 }
 
 // TestNarrateUpdateProgress_ForwardsPercentSkipsUnparsed exercises the exact
