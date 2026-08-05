@@ -217,6 +217,7 @@ Current success response example:
   "type": "RPC",
   "messageID": "msg-status-1",
   "message": {
+    "contract": "2",
     "screenRotation": "normal",
     "connectedWifi": "Studio WiFi",
     "installedVersion": "1.2.3",
@@ -233,6 +234,33 @@ Current success response example:
 }
 ```
 
+`contract` is always `"2"` on this firmware (equal to the hub's
+`/api/v2/status` contract — one firmware gate, two transports): it lets the
+app identify a v2 frame over the relayer when mDNS is unavailable. Its
+PRESENCE is the capability
+signal — old firmware's reply simply lacks the key.
+
+The reply additionally carries the additive `network` health object — the
+same diagnosis the on-screen
+narration shows, also served on the hub status routes:
+
+```json
+"network": {
+  "state": "offline_retrying",
+  "reason": "joined-no-internet",
+  "ssid": "Studio WiFi",
+  "link": "wifi",
+  "internet": false
+}
+```
+
+(`deferred` is `omitempty`: it appears only while true.)
+
+`link` ∈ `wifi`/`ethernet`/`none`/`unknown` from the machine's cached probe
+evidence (a status poll never runs a probe); `deferred` tells the app its own
+control-plane contact is holding a pending setup-mode raise down, so it should
+surface the pairing/`startWifiSetup` action instead of waiting.
+
 Current error cases:
 
 - Status collection dependencies may fail; unavailable fields are usually
@@ -240,6 +268,58 @@ Current error cases:
 - A hard status collection error causes command failure.
 
 Current relayer error response: none standardized; command failure is logged.
+
+### startWifiSetup
+
+Purpose: put the frame into its existing SoftAP setup mode on the app's
+request, so a user can re-configure Wi-Fi.
+Reachable over the relayer and the LAN hub `POST /api/cast` like every
+device-control command. Ships with the initial v2 release, so the v2 gate
+(mDNS TXT `api=2` + `/api/v2/status` → `contract:"2"`, or the relayer
+`contract` above) is the capability gate.
+
+Example:
+
+```json
+{
+  "messageID": "msg-wifisetup-1",
+  "message": {
+    "command": "startWifiSetup",
+    "request": {}
+  }
+}
+```
+
+Current success response example (produced before the raise is queued, so it
+normally wins the race by a wide margin — the raise is seconds of `nmcli` work
+— but it is NOT synchronized against the transport, and raising the AP severs
+the station link that carries the reply, so the app must treat a send timeout
+as success):
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-wifisetup-1",
+  "message": { "ok": true, "ssid": "FF1-8EVTK3RE" }
+}
+```
+
+Rejections are normal replies, not transport errors:
+
+```json
+{ "ok": false, "code": "wired_link_active", "message": "…" }
+```
+
+| Code | When |
+|---|---|
+| `wired_link_active` | a live ethernet link, or the wire probe errored or is unavailable (fail closed) |
+| `busy` | the provisioning machine is in `joining` or `starting` |
+| `unavailable` | the provisioning seam is not wired (test/partial builds) |
+
+Acceptance queues the raise on the provisioning loop: the standard entry
+sequence runs there, and the session is bounded by the `user-requested` row of
+the AP session policy (30 minutes, portal-activity deferral, 2h cap — see
+`setup-flow.md`). Everything after the raise is the unchanged out-of-box flow.
 
 ### deviceMetrics
 

@@ -30,6 +30,34 @@ const MAX_INFLIGHT_REQUESTS = 64
 // so the reader is inert there. Oversized bodies surface as 413 in handleCast.
 const MAX_REQUEST_BODY_BYTES = 4 << 20
 
+// countsAsContact names the routes whose traffic evidences a human's app
+// talking to the device (see hub.contactObserver). Keyed on the middleware
+// route label so the counted set stays legible in one place.
+func countsAsContact(route string) bool {
+	switch route {
+	case "cast", "status", "status_v2":
+		return true
+	default:
+		return false
+	}
+}
+
+// isLoopbackAddr reports whether an http.Request.RemoteAddr is a loopback
+// source. Unparseable addresses count as loopback — the fail direction that
+// NEVER fabricates human contact (a fabricated contact defers a recovery
+// raise; a missed one merely skips a deferral).
+func isLoopbackAddr(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback()
+}
+
 // withMiddleware is the SINGLE wrapper every hub route is registered through.
 //
 // It is deliberately the one chokepoint for cross-cutting concerns on the LAN
@@ -62,6 +90,12 @@ func (h *hub) withMiddleware(route string, next http.HandlerFunc) http.HandlerFu
 		}
 
 		r.Body = http.MaxBytesReader(w, r.Body, MAX_REQUEST_BODY_BYTES)
+
+		// Control-plane contact signal (see hub.contactObserver for the route
+		// and loopback exclusions and why they are load-bearing).
+		if h.contactObserver != nil && countsAsContact(route) && !isLoopbackAddr(r.RemoteAddr) {
+			h.contactObserver()
+		}
 
 		// LAN AUTHORIZATION SEAM (issue #3471): screen-anchored pairing checks
 		// go here, guarding every route uniformly, before next is invoked.

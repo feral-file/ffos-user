@@ -507,7 +507,7 @@ func TestShowConnectingManifestGate(t *testing.T) {
 	// The reviewer-named killer for latching decode failures at the MAIN
 	// gate: a torn write present at the very first push. narrationSupported
 	// used to latch supportNo off it, killing ALL narration for the daemon
-	// lifetime — connectingUnsupported's tolerant handling never ran because
+	// lifetime — stateUnsupported's tolerant handling never ran because
 	// the earlier gate refused to send at all.
 	t.Run("malformed initial manifest defers; replay delivers connecting once valid", func(t *testing.T) {
 		sender := newFakeCDP()
@@ -1405,4 +1405,132 @@ func TestParkForNavigation_TimesOutAndDeliversBestEffort(t *testing.T) {
 	svc.ShowReady()
 	sender.waitForCalls(t, 1)
 	assert.Equal(t, stateReady, sender.lastRequest()["state"])
+}
+
+// TestShowSetupErrorManifestGate pins the §4.6 escalation state's contract
+// posture: setup_error is an EXTENSION state (absent from the required
+// validation set, so older manifests still pass the narration gate), rendered
+// natively when the manifest lists it and downgraded to join_failed — through
+// the same fallback table as connecting — when a decoded manifest provably
+// lacks it. Degraded title, never a dark or lying screen.
+func TestShowSetupErrorManifestGate(t *testing.T) {
+	t.Run("manifest lists setup_error", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting) // shipping fixture
+
+		svc.ShowSetupError("The frame could not start setup mode. (FF1-TEST)")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateSetupError, req["state"])
+		assert.Equal(t, "The frame could not start setup mode. (FF1-TEST)", req["reason"])
+	})
+
+	t.Run("older manifest downgrades to join_failed with the prose intact", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract) // required set only
+
+		svc.ShowSetupError("The frame could not start setup mode. (FF1-TEST)")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateJoinFailed, req["state"])
+		assert.Equal(t, "The frame could not start setup mode. (FF1-TEST)", req["reason"])
+	})
+
+	t.Run("required set does not grow", func(t *testing.T) {
+		// The delivery-skew posture: growing the required set would latch
+		// narration off entirely on every device that takes the controld
+		// package before the player bundle. validContract predates both
+		// downgradeable states and must still pass the gate.
+		assert.NoError(t, validateSetupDisplayManifest(mustDecodeManifest(t, validContract)))
+	})
+
+	t.Run("one fallback mechanism covers both states", func(t *testing.T) {
+		// The §4.6 downgrade table is the single mechanism; a second bespoke
+		// copy of the resolution path is the regression this pins against.
+		assert.Contains(t, sendFallbacks, stateConnecting)
+		assert.Contains(t, sendFallbacks, stateSetupError)
+	})
+}
+
+func mustDecodeManifest(t *testing.T, raw string) playerContractManifest {
+	t.Helper()
+	var m playerContractManifest
+	require.NoError(t, json.Unmarshal([]byte(raw), &m))
+	return m
+}
+
+// TestShowConnectingIfShowing pins the conditional paint's race safety (the
+// §4.6 topic-wait expiry fix): the connecting narration lands only when the
+// current intent is one of the named states — a concurrently painted
+// softap_qr (a link drop raised the setup AP during the 60s topic wait) must
+// survive untouched, exactly like HideIfShowing's guarantee.
+func TestShowConnectingIfShowing(t *testing.T) {
+	t.Run("paints over the named state", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowFinalizing()
+		sender.waitForCalls(t, 1)
+		svc.ShowConnectingIfShowing("Connected by cable, but no internet. (FF1-TEST)", StateFinalizing)
+		sender.waitForCalls(t, 2)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		assert.Equal(t, "Connected by cable, but no internet. (FF1-TEST)", req["reason"])
+	})
+
+	t.Run("a concurrently painted softap_qr survives", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowSoftAPQR("FF1-TEST", "12345678")
+		sender.waitForCalls(t, 1)
+		svc.ShowConnectingIfShowing("Connected by cable, but no internet.", StateFinalizing)
+
+		time.Sleep(50 * time.Millisecond)
+		assert.Equal(t, 1, sender.callCount(),
+			"the conditional paint must not overwrite another narrator's overlay")
+		assert.Equal(t, stateSoftAPQR, sender.lastRequest()["state"])
+	})
+}
+
+// TestShowConnectingOrHideDowngradesToHide pins the delivery-skew hide-blink
+// rule: the recurring ap-recheck push downgrades to a HIDE — never
+// join_failed, and never a skipped push that strands the stale QR — on a
+// manifest that provably lacks `connecting`, while a manifest that lists it
+// renders the neutral state as usual (with the internal marker never reaching
+// the wire).
+func TestShowConnectingOrHideDowngradesToHide(t *testing.T) {
+	t.Run("older manifest downgrades to hide, not join_failed", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, validContract)
+
+		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateHidden, req["state"],
+			"the recurring blink must clear the screen, never flash a false failure")
+	})
+
+	t.Run("supporting manifest renders connecting without the marker", func(t *testing.T) {
+		sender := newFakeCDP()
+		svc := newTestService(t, sender, contractWithConnecting)
+
+		svc.ShowConnectingOrHide("Checking for your Wi-Fi network…")
+		sender.waitForCalls(t, 1)
+
+		req := sender.lastRequest()
+		require.NotNil(t, req)
+		assert.Equal(t, stateConnecting, req["state"])
+		assert.Equal(t, "Checking for your Wi-Fi network…", req["reason"])
+		_, leaked := req[fallbackHideKey]
+		assert.False(t, leaked, "the queue marker must never reach the wire")
+	})
 }

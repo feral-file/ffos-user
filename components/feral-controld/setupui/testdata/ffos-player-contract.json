@@ -22,6 +22,7 @@
         "joining",
         "join_failed",
         "connecting",
+        "setup_error",
         "updating",
         "finalizing",
         "claim_qr",
@@ -38,6 +39,9 @@
           "optional": ["reason"]
         },
         "connecting": {
+          "optional": ["reason"]
+        },
+        "setup_error": {
           "optional": ["reason"]
         },
         "updating": {

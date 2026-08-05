@@ -1989,6 +1989,14 @@ commands. A command that merely requests a status poll is not part of v2.
 | `support.create-bundle` | `supportBundleId`: caller-generated UUIDv7; `title`: string(1..120); `components`: unique nonempty subset of `chromium\|controld\|setupd\|sys-monitor\|watchdog\|system`; `upload`: boolean | accepted: `operationId`, same `supportBundleId` | `support:upload`; ID is bound to this owner/device and joins app/device evidence; upload uses device-side scoped grant/presigned URL; no controller API key |
 | `ssh.set-access` | enable shape: `enabled:true`, `publicKey`: OpenSSH public key(1..8192), `ttlSeconds`: int[60..3600]; disable shape: `enabled:false` only | enabled: `enabled:true`, `expiresAt`, `fingerprint`; disabled: `enabled:false` | `ssh:manage`; LAN owner certificate only; one active key; factory reset clears it |
 
+> Known-stale pending the v2 service-set decision: the `setupd` value in
+> `support.create-bundle`'s `components` enum, and the `services.setupd` key
+> in the health-response example later in this document, predate the merge of
+> `feral-setupd` into `feral-controld` — no such component exists on current
+> firmware. Changing them is a wire-contract decision for this draft, not a
+> documentation cleanup (see [`architecture.md`](architecture.md), "The setupd
+> merge").
+
 `system.update` is never an instruction to download an arbitrary URL or execute
 an arbitrary version string. The signed update service resolves `latest` for
 the selected permitted channel. A progress event is advisory; retained health

@@ -21,17 +21,23 @@ The v2 target preserves these service boundaries:
   routes the common command model to existing executors. Protocol encoding,
   retained state, authentication, and authorization belong in focused boundary
   packages; command policy must not be hidden in transport handlers.
-- `feral-setupd` remains the owner of setup and recovery UX, including the
-  recovery SoftAP. Reset preparation, physical confirmation, local erasure,
-  and setup-state transitions cross the service boundary only through a
-  versioned D-Bus contract.
+- `feral-controld` also owns setup and recovery UX, including the recovery
+  SoftAP: reset preparation, physical confirmation, local erasure, and
+  setup-state transitions no longer cross a service boundary at all, so the
+  versioned D-Bus contract the v2 draft specified for them is moot — the
+  coordination is in-process (see "The setupd merge" below).
 - For reset, `feral-controld` owns external command admission, protocol-visible
   confirmation state, the broker authorization barrier, runtime-identity
-  rotation, controller-authority bootstrap, and final protocol status.
-  `feral-setupd` owns the on-device confirmation UX and local reset execution.
-  Neither service writes the other's state, and reset cannot report completion
-  before the broker-barrier, identity-registry, and authority-registration ACKs
-  plus durable local authority activation and cleanup finish.
+  rotation, controller-authority bootstrap, and final protocol status — plus
+  the on-device confirmation UX and local reset execution the draft had split
+  out to `feral-setupd`. The ordering constraint survives the merge and is
+  what actually matters: reset cannot report completion before the
+  broker-barrier, identity-registry, and authority-registration ACKs plus
+  durable local authority activation and cleanup finish.
+
+> The setup/recovery bullet above previously assigned that ownership to
+> `feral-setupd`, copied from the v2 draft written before that daemon was
+> merged into `feral-controld` (see "The setupd merge" below).
 
 The current relayer, Mint pairing handoff, optional port-1111 Hub, and
 `GetRelayerTopicID` exist only behind migration compatibility gates. They are
@@ -94,7 +100,7 @@ Rules for each boundary:
 
 - `feral-sys-monitord` is a **publisher only**. It must not make recovery decisions, reboot the system, or call other services. Callers pull from it via RPC or subscribe to its signals.
 - `feral-watchdog` is the **single owner of recovery policy**. It decides when to restart Chromium, clean disk pressure, or reboot. Raw telemetry collection does not belong here; that belongs in `feral-sys-monitord`.
-- `feral-controld` is the **connectivity, command orchestration, and device-setup hub**. Since the setupd merge it deliberately owns first-run provisioning and recovery as well as runtime command routing. It remains the highest-risk service for architectural sprawl: keep the setup domain (`softap`, `portal`, `provisioning`, `wifictl`, `otagate`, `setupui`) and the runtime domain (`relayer`, `commandrouter`, `devicectl`, `cdp`, `hub`) as legible sub-packages, and do not let unrelated device policy that belongs in `feral-watchdog` leak in.
+- `feral-controld` is the **connectivity, command orchestration, and device-setup hub**. Since the setupd merge it deliberately owns first-run provisioning and recovery as well as runtime command routing — including the network dead-end **escape policy** (AP session bounds, the recheck cadence, the setup-incomplete episode, teardown narration invariants), whose canonical rules live in `setup-flow.md`. It remains the highest-risk service for architectural sprawl: keep the setup domain (`softap`, `portal`, `provisioning`, `wifictl`, `otagate`, `setupui`) and the runtime domain (`relayer`, `commandrouter`, `devicectl`, `cdp`, `hub`) as legible sub-packages, and do not let unrelated device policy that belongs in `feral-watchdog` leak in.
 - `player-wrapper-ui` is a **thin process starter**. It contains no business logic. Parameters come from command-line arguments. State and control live in daemons, not in this wrapper.
 
 ---

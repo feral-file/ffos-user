@@ -41,6 +41,7 @@ var deviceCtlCommands = map[Type]bool{
 	CMD_SET_SLEEP_SCHEDULE:         true,
 	CMD_SLEEP_NOW:                  true,
 	CMD_WAKE_NOW:                   true,
+	CMD_START_WIFI_SETUP:           true,
 }
 
 type Command struct {
@@ -83,6 +84,13 @@ const (
 	CMD_SLEEP_NOW                  Type = "sleepNow"
 	CMD_WAKE_NOW                   Type = "wakeNow"
 	CMD_SET_SLEEP_MODE             Type = "setSleepMode"
+	// CMD_START_WIFI_SETUP puts the frame into its existing SoftAP setup mode
+	// on the app's request (docs/app-triggered-wifi-setup.md). The reply is
+	// produced BEFORE any radio work — raising the AP severs the link that
+	// carries it — and everything after the raise is the unchanged
+	// out-of-box flow. Ships with the initial v2 release, so the v2 LAN gate
+	// (mDNS TXT api=2 + /api/v2/status contract "2") is the capability gate.
+	CMD_START_WIFI_SETUP           Type = "startWifiSetup"
 	CMD_START_MINT_PAIRING_SESSION Type = "startMintPairingSession"
 	CMD_CLOSE_MINT_PAIRING_SESSION Type = "closeMintPairingSession"
 	CMD_MINT_PAIRING_APPROVAL      Type = "mintPairingApprovalDecision"

@@ -21,6 +21,7 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/helper"
 	"github.com/feral-file/ffos-user/components/feral-controld/logger"
 	"github.com/feral-file/ffos-user/components/feral-controld/otagate"
+	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
 	"github.com/feral-file/ffos-user/components/feral-controld/setupui"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 	"github.com/feral-file/ffos-user/components/feral-controld/state"
@@ -258,6 +259,29 @@ type executor struct {
 	//     broken until repaired.
 	// nil (tests, doubles) means no expiry.
 	bootLifecycleProbe func() bool
+
+	// networkHealth, when wired (SetNetworkHealth), composes the additive
+	// §4.7 network object attached to getDeviceStatus replies.
+	networkHealth func(ctx context.Context) *status.NetworkHealth
+
+	// wifiSetupStarter, when wired (SetWifiSetupStarter), runs the
+	// provisioning machine's startWifiSetup admission and queues the
+	// user-requested raise (provisioning.Machine.StartWifiSetup). nil renders
+	// the command unavailable — a wiring that predates the seam must reject,
+	// not pretend.
+	wifiSetupStarter func(ctx context.Context) error
+
+	// internetProbe, when wired (SetInternetProbe), reports cached internet
+	// reachability. The claim flow's topic-wait expiry consults it to tell
+	// "reachable LAN but no WAN — the topic can never arrive" (narrate it:
+	// the unclaimed wired no-WAN device otherwise ends at a black screen,
+	// docs/network-recovery-ux.md §4.6) from "online but the relayer is slow"
+	// (keep today's silent hide). Deliberately TRI-STATE (value, error), not a
+	// bool: only a real "offline" verdict may narrate — a monitord restart or
+	// D-Bus timeout at expiry proves nothing, and degrading it to false would
+	// paint "no internet access" over a healthy network. nil, like an error,
+	// keeps the silent hide unconditionally.
+	internetProbe func(ctx context.Context) (bool, error)
 
 	// otaGateEntryProbe is the startup OTA gate's OWN entry-window predicate
 	// (main wires it to re-read /proc/uptime against the wider
@@ -507,6 +531,8 @@ func (e *executor) Execute(ctx context.Context, cmd commands.Command) (interface
 		result, err = e.setBetaFeaturesToggle(ctx, bytes)
 	case commands.CMD_DEVICE_STATUS:
 		result, err = e.getDeviceStatus(ctx)
+	case commands.CMD_START_WIFI_SETUP:
+		result, err = e.startWifiSetup(ctx)
 	case commands.CMD_UPDATE_TO_LATEST:
 		result, err = e.updateToLatest(ctx)
 	case commands.CMD_FACTORY_RESET:
@@ -823,6 +849,7 @@ type setupNarrator interface {
 	Hide()
 	SweepStaleOverlay()
 	HideIfShowing(states ...string)
+	ShowConnectingIfShowing(message string, states ...string)
 }
 
 // setupUI lazily builds the setup-narration surface from the executor's CDP
@@ -931,12 +958,35 @@ func (e *executor) MaybeShowClaimQROnOnline(ctx context.Context) {
 
 	if !e.waitForRelayerTopic(ctx) {
 		e.logger.Warn("Auto claim flow: relayer topic not ready; withholding claim QR until the next online transition")
-		// Clear only our own finalizing narration; nothing is coming. The
-		// topic wait is 60s — the longest window in this flow for another
-		// narrator to take the screen (a link drop re-raises the setup AP
-		// and paints softap_qr), so an unconditional Hide here would blank
-		// an active setup surface. See runPreClaimGateAndPaint's settled
-		// branch for the shared rationale.
+		// The topic wait is 60s — the longest window in this flow for another
+		// narrator to take the screen (a link drop re-raises the setup AP and
+		// paints softap_qr), so BOTH branches below are conditional on the
+		// finalizing overlay this flow painted still being up; an
+		// unconditional paint or hide here would clobber an active setup
+		// surface. See runPreClaimGateAndPaint's settled branch for the shared
+		// rationale.
+		//
+		// With CONFIRMED no internet (cached verdict, unclaimed device) the
+		// topic can never arrive — the old silent hide here was the unclaimed
+		// wired no-WAN black screen (docs/network-recovery-ux.md §4.6):
+		// reachable over the LAN, claimable over the LAN, and nothing on the
+		// panel saying so. Narrate it instead; the overlay is cleared by this
+		// flow's own later narrations or any provisioning transition, the same
+		// ownership it has today.
+		if e.internetProbe != nil {
+			if online, perr := e.internetProbe(ctx); perr == nil && !online {
+				msg := "Connected by cable, but there is no internet access. " +
+					"Setup will continue when the connection is restored."
+				if name := e.deviceID(); name != "" {
+					msg += " (" + name + ")"
+				}
+				e.setupUI().ShowConnectingIfShowing(msg, setupui.StateFinalizing)
+				return
+			}
+		}
+		// Online, probe error, or no probe wired: nothing is coming this
+		// pass, but asserting "no internet" without a real offline verdict
+		// would smear a healthy network — keep the silent hide.
 		e.setupUI().HideIfShowing(setupui.StateFinalizing)
 		return
 	}
@@ -1231,6 +1281,21 @@ func (e *executor) SetStartupOTAGateEntryProbe(probe func() bool) {
 	e.otaGateEntryProbe = probe
 }
 
+// SetWifiSetupStarter injects the provisioning machine's startWifiSetup
+// admission+queue entry point. Same wiring-before-run ordering contract as
+// SetBootLifecycleProbe.
+func (e *executor) SetWifiSetupStarter(starter func(ctx context.Context) error) {
+	e.wifiSetupStarter = starter
+}
+
+// SetInternetProbe injects a cached internet-reachability check (sys-monitord's
+// cached connectivity, never a live network probe) used by the claim flow's
+// topic-wait expiry narration (see internetProbe for the tri-state contract).
+// Same wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetInternetProbe(probe func(ctx context.Context) (bool, error)) {
+	e.internetProbe = probe
+}
+
 // Defaults for awaitPlayerCommandHandlerReady. The timeout is shorter than the
 // connectivity re-seed's: on timeout this path still proceeds (and escalates
 // to the reload), so it only delays the dead-page repair, never skips it.
@@ -1358,7 +1423,68 @@ func formatDeviceConnectURL(deviceID, topicID string, online bool, branch, versi
 }
 
 func (e *executor) getDeviceStatus(ctx context.Context) (interface{}, error) {
-	return e.deviceStatus.GetStatus(ctx)
+	resp, err := e.deviceStatus.GetStatus(ctx)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	// Attach the §4.7 health object (probe-free by the seam's contract);
+	// nil seam simply omits the additive field.
+	if e.networkHealth != nil {
+		resp.Network = e.networkHealth(ctx)
+	}
+	return resp, nil
+}
+
+// SetNetworkHealth injects the §4.7 network-health composer (the provisioning
+// snapshot plus the cached internet verdict — never a live probe). Same
+// wiring-before-run ordering contract as SetBootLifecycleProbe.
+func (e *executor) SetNetworkHealth(fn func(ctx context.Context) *status.NetworkHealth) {
+	e.networkHealth = fn
+}
+
+// startWifiSetup handles CMD_START_WIFI_SETUP
+// (docs/app-triggered-wifi-setup.md): admission runs synchronously in the
+// provisioning machine, but ACCEPTANCE only queues the raise, so the reply
+// below is PRODUCED before the raise is even queued — raising the AP severs
+// the station link that would carry it (constraint 1).
+//
+// Deliberately not claimed: that the reply is FLUSHED first. Nothing here
+// synchronizes with the transport, and once the event is queued the machine's
+// loop goroutine may start the raise while the reply is still on the wire.
+// Two things make that acceptable rather than a gap to close with ordering
+// machinery. The margin is enormous — the raise is seconds of nmcli work
+// against microseconds of reply flush — and, decisively, the contract already
+// tolerates the loss: the app treats a timed-out send as success precisely
+// because a raise can sever the reply in flight on either transport (relayer
+// or LAN hub). See docs/controld-inbound-controller-messages.md.
+//
+// A rejection is a NORMAL reply ({ok:false, code, message}), not a transport
+// error: the app branches on the code. The message strings render VERBATIM in
+// the mobile app, so they carry the app's product voice ("Art Computer") — not
+// the captive portal's deliberately separate "frame" voice.
+func (e *executor) startWifiSetup(ctx context.Context) (interface{}, error) {
+	if e.wifiSetupStarter == nil {
+		return map[string]any{"ok": false, "code": "unavailable",
+			"message": "Wi-Fi setup is not available on this device"}, nil
+	}
+	if err := e.wifiSetupStarter(ctx); err != nil {
+		code := "busy"
+		msg := "The Art Computer is busy joining a network. Try again in a moment."
+		if errors.Is(err, provisioning.ErrWiredLinkActive) {
+			code = "wired_link_active"
+			msg = "The Art Computer is connected by ethernet cable. Unplug the cable to set up Wi-Fi."
+		}
+		e.logger.Info("startWifiSetup rejected", zap.String("code", code), zap.Error(err))
+		return map[string]any{"ok": false, "code": code, "message": msg}, nil
+	}
+	// The AP SSID is deterministic (softap: the FF1-prefixed device id), so
+	// the reply can carry it without waiting for the raise.
+	ssid := e.deviceID()
+	if !strings.HasPrefix(ssid, "FF1-") {
+		ssid = "FF1-" + ssid
+	}
+	e.logger.Info("startWifiSetup accepted; setup AP raise queued", zap.String("ssid", ssid))
+	return map[string]any{"ok": true, "ssid": ssid}, nil
 }
 
 func (e *executor) handleScreenRotation(ctx context.Context, args []byte) (interface{}, error) {

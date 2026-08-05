@@ -22,8 +22,14 @@ command endpoint and uses a fleet-wide API key and device topic ID.
 `feral-controld` receives commands from a remote relayer WebSocket or the
 unauthenticated `0.0.0.0:1111` LAN WebSocket, routes OS commands to `devicectl`,
 player commands to Chromium/CDP, and polls status approximately every five
-seconds. Device, player, and DDC state use separate ad-hoc shapes. BLE in
-`feral-setupd` carries Wi-Fi setup and recovery commands.
+seconds. Device, player, and DDC state use separate ad-hoc shapes. Wi-Fi setup
+and recovery also live in `feral-controld`, over a SoftAP captive portal plus
+the `startWifiSetup` command.
+
+> This paragraph previously placed Wi-Fi setup and recovery on a BLE channel
+> in `feral-setupd`; that daemon was merged into `feral-controld` and BLE was
+> replaced by SoftAP (see [`architecture.md`](architecture.md), "The setupd
+> merge").
 
 V2 changes the external edge, not the internal service boundaries:
 

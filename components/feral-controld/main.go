@@ -7,6 +7,7 @@ import (
 	"net/http"
 	go_os "os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -106,6 +107,14 @@ type app struct {
 	Hub                  hub.Hub
 	LinkChecker          *status.LinkChecker
 
+	// StateLoadKnown records whether run()'s state.Load succeeded (false =
+	// the persisted state was unreadable and quarantined). The provisioning
+	// machine's boot claim seed reads it (see InitialClaimed): a corrupt state
+	// file must read as claim-UNKNOWN (= claimed, the fail-safe), not as the
+	// empty state's "unclaimed". Atomic because run() writes it after
+	// initializeApp built the closure that reads it.
+	StateLoadKnown *atomic.Bool
+
 	// Provisioning is the setup-AP trigger state machine. run() starts it
 	// unconditionally; left nil in the test app. Typed as an interface so tests
 	// can inject an ordering spy.
@@ -170,6 +179,7 @@ func main() {
 		config.RelayerConfig.APIKey,
 		config.MintPairingConfig,
 		config.OfflineCache,
+		provisioningTuningFromConfig(config.ProvisioningTuning(finalLogger), finalLogger),
 		dbus.NAME,
 		[]dbus_v5.MatchOption{
 			dbus_v5.WithMatchPathNamespace(dbus_v5.ObjectPath("/com/feralfile")),
@@ -228,6 +238,15 @@ func (app *app) run(ctx context.Context, conf *config.Config) error {
 			app.Logger.Warn("Failed to quarantine state file", zap.Error(rerr))
 		}
 		state.GetState() // installs a fresh empty state
+	} else if app.StateLoadKnown != nil {
+		// A SUCCESSFUL load makes the claim reading known; the quarantine
+		// branch above deliberately leaves it unknown, so the provisioning
+		// machine's boot claim seed reads the empty state as
+		// claim-UNKNOWN = claimed (constraint 8's fail-safe) rather than as
+		// unclaimed — the one consumer for which "present as unclaimed and
+		// re-pair" is NOT acceptable, because it would authorize an automatic
+		// setup-AP raise over a possibly claimed exhibition frame.
+		app.StateLoadKnown.Store(true)
 	}
 
 	// Set global topic ID in Sentry if available.
@@ -731,6 +750,7 @@ func initializeApp(
 	relayerAPIKey string,
 	mintPairingConfig *config.MintPairingConfig,
 	offlineCacheConfig *config.OfflineCacheConfig,
+	provTuning provisioning.Tuning,
 	dbusName string,
 	dbusOpts []dbus_v5.MatchOption,
 ) *app {
@@ -738,6 +758,10 @@ func initializeApp(
 	// long-lived component built below, and main cancels it (app.Cancel) on
 	// SIGTERM so those components observe shutdown.
 	context, cancelApp := context.WithCancel(context.Background())
+
+	// stateLoadKnown starts UNKNOWN (false); run() stores the state.Load
+	// verdict before Provisioning.Start reads it via InitialClaimed.
+	stateLoadKnown := &atomic.Bool{}
 
 	// Wrappers
 	clock := wrapper.NewClock()
@@ -934,9 +958,18 @@ func initializeApp(
 	linkChecker := status.NewLinkChecker(exec, logger)
 
 	// Claim-state transitions (a successful connect) re-register mDNS with the
-	// updated `claimed` TXT. Wire the executor's observer to the mediator here so
-	// neither package depends on the other's concrete type.
-	executor.SetClaimObserver(mediator.SetClaimed)
+	// updated `claimed` TXT, and feed the provisioning machine's loop-visible
+	// claim snapshot (escape policy, constraint 8). One observer fans out to
+	// both consumers; provMachine is declared below and assigned before the
+	// executor can observe any transition (command handling starts after
+	// initializeApp returns).
+	var provMachineForClaim *provisioning.Machine
+	executor.SetClaimObserver(func(claimed bool) {
+		mediator.SetClaimed(claimed)
+		if provMachineForClaim != nil {
+			provMachineForClaim.SetClaimed(claimed)
+		}
+	})
 	// Factory reset revokes the live relayer session, not just the persisted
 	// topic (the staged reboot can be delayed or fail). Wired here for the same
 	// no-cross-import reason as the claim observer.
@@ -1024,7 +1057,15 @@ func initializeApp(
 	wifiCtl := wifictl.New(exec, clock, logger, "")
 	// The claim QR auto-paints when an unclaimed device comes online — the
 	// launcher-ui replacement (see MaybeShowClaimQROnOnline).
-	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context}
+	provisioningNotifier := &setupNotifier{ui: setupNarrator, logger: logger, claimCtx: context,
+		// The same identity mDNS advertises; §4.6 trouble-state copy carries it
+		// so a user reporting a stuck frame can say which one.
+		deviceName: resolveMDNSDeviceInfo(os, state.ClaimSnapshot(), logger).Name}
+	// The claim flow's topic-wait expiry narration needs a cached internet
+	// verdict to tell "no WAN — the topic can never arrive" from "relayer
+	// slow" (§4.6, the unclaimed wired no-WAN black screen). Same cached
+	// monitord read the hub status provider serves; never a live probe.
+	wireInternetProbe(executor, dbusClient, logger)
 	if ac, ok := executor.(autoClaimFlow); ok {
 		provisioningNotifier.claim = ac.MaybeShowClaimQROnOnline
 		// Topic assignment re-triggers the claim flow: a factory-fresh device
@@ -1048,13 +1089,31 @@ func initializeApp(
 		func() bool { return uptimeWithin(bootLifecycleWindow, go_os.ReadFile, logger) },
 		func() bool { return uptimeWithin(startupOTAGateEntryWindow, go_os.ReadFile, logger) })
 	provMachine := provisioning.New(provisioning.Config{
-		AP:           softAP,
-		Wifi:         wifiCtl,
-		Connectivity: &dbusConnectivity{dbus: dbusClient, logger: logger},
-		Clock:        clock,
-		Logger:       logger,
-		Notifier:     provisioningNotifier,
-		ActiveLink:   externalLinkProbe(linkChecker),
+		AP:               softAP,
+		Wifi:             wifiCtl,
+		Connectivity:     &dbusConnectivity{dbus: dbusClient, logger: logger},
+		Clock:            clock,
+		Logger:           logger,
+		Notifier:         provisioningNotifier,
+		ActiveLink:       externalLinkProbe(linkChecker),
+		ActiveLinkDetail: externalLinkDetailProbe(linkChecker),
+		// Ethernet-only verdict for the escape policy's wired guard and the
+		// wired exit from a raised AP (constraint 6 — NOT ExternalLink, which
+		// counts stations).
+		WiredLink: wiredLinkProbe(linkChecker),
+		// Boot-time claim snapshot; the executor's claim observer (above)
+		// keeps it fresh. known comes from stateLoadKnown, which run() stores
+		// AFTER state.Load and BEFORE Provisioning.Start: a quarantined
+		// (corrupt) state file reads as empty — i.e. unclaimed — everywhere
+		// else, but the machine must treat it as UNKNOWN = claimed
+		// (constraint 8's fail-safe: never auto-raise the setup AP over a
+		// possibly claimed exhibition frame off a disk error). Defaults false
+		// (unknown) so any ordering mistake fails safe.
+		InitialClaimed: func() (bool, bool) {
+			claim := state.ClaimSnapshot()
+			return claim.Claimed, stateLoadKnown.Load()
+		},
+		Tuning: provTuning,
 		// Same boot-vs-restart discriminator as wireBootLifecycleHooks above:
 		// the machine narrates its boot offline assessment (and may run the
 		// relocation check) only when this process start IS a device boot —
@@ -1073,8 +1132,25 @@ func initializeApp(
 		base:     baseStatusProvider,
 		machine:  provMachine,
 		internet: internetProbeFrom(dbusClient, logger),
+		snapshot: provMachine.Snapshot,
 	}
 	hub := hub.New(context, wsHandler, cmdHandler, statusProvider, nil, json, logger)
+	// Control-plane hub contact defers the escape policy's episode raise
+	// (§4.1): a phone with the app open must not have its link yanked. The
+	// hub filters (counted routes, non-loopback) and the machine timestamps.
+	if sink, ok := hub.(interface{ SetContactObserver(func()) }); ok {
+		sink.SetContactObserver(provMachine.ObserveHubContact)
+	}
+	// The claim observer registered above fans out here (declared before the
+	// machine existed).
+	provMachineForClaim = provMachine
+	// App-triggered Wi-Fi setup (startWifiSetup): the executor's command
+	// handler runs the machine's admission and queues the user-requested
+	// raise; the §4.2 session machinery bounds the session.
+	wireWifiSetupStarter(executor, provMachine)
+	// getDeviceStatus carries the same §4.7 health object the hub status
+	// routes serve (one diagnosis, every transport).
+	wireNetworkHealth(executor, provMachine, internetProbeFrom(dbusClient, logger))
 
 	return &app{
 		Ctx:                      context,
@@ -1109,6 +1185,7 @@ func initializeApp(
 		Hub:                      hub,
 		LinkChecker:              linkChecker,
 		Provisioning:             provMachine,
+		StateLoadKnown:           stateLoadKnown,
 		SetupUI:                  setupNarrator,
 		Session:                  session,
 	}

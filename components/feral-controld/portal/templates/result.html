@@ -62,12 +62,14 @@
   <p class="brand">Feral File · FF1</p>
   <h1>Connecting to {{.SSID}}</h1>
   <p class="note">
-    The frame is switching to your Wi-Fi network. This page may stop
-    responding for a moment. If it does, reconnect your phone to
-    <strong>{{.APSSID}}</strong> and open <strong>http://ff1.config</strong>
-    to reopen this page.
+    The frame is switching to your Wi-Fi network. <strong>Watch the frame's
+    screen</strong> — it will show its progress. You can close this page.
   </p>
-  <a class="action" href="/">Check progress</a>
+  <p class="note">
+    If the connection fails, the frame reopens its setup Wi-Fi
+    (<strong>{{.APSSID}}</strong>): scan the QR code on its screen again to
+    retry.
+  </p>
 </main>
 </body>
 </html>
