@@ -1719,8 +1719,19 @@ func TestRefresher_HeadlessBoot_CDPNotInitialized(t *testing.T) {
 	ts := setupWithLogger(t, zap.New(core))
 	defer ts.teardown()
 
-	// CDP stays down for the whole test.
-	ts.mockCDP.EXPECT().Initialized().Return(false).MinTimes(2)
+	// CDP stays down for the whole test. The channel is the synchronization
+	// point: the test must observe the guard actually running (twice) before
+	// stopping — a wall-clock sleep here was flaky on loaded CI runners,
+	// where the startup-loop goroutine could go unscheduled long enough to
+	// miss the MinTimes(2) expectation.
+	initCalls := make(chan struct{}, 2)
+	ts.mockCDP.EXPECT().Initialized().DoAndReturn(func() bool {
+		select {
+		case initCalls <- struct{}{}:
+		default:
+		}
+		return false
+	}).MinTimes(2)
 
 	// Quiet retry loop: sleep between passes.
 	ts.mockClock.EXPECT().
@@ -1731,7 +1742,13 @@ func TestRefresher_HeadlessBoot_CDPNotInitialized(t *testing.T) {
 	// unexpected-call failure, proving the guard short-circuits before them.
 
 	ts.refresher.Start()
-	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-initCalls:
+		case <-time.After(5 * time.Second):
+			t.Fatal("startup loop never reached the CDP guard twice")
+		}
+	}
 	ts.refresher.Stop()
 
 	for _, entry := range observed.All() {

@@ -570,3 +570,40 @@ func TestActivityObservedOnHumanRoutesOnly(t *testing.T) {
 	_ = resp.Body.Close()
 	assert.Equal(t, 3, count())
 }
+
+// TestTrafficObservedCountsEveryRequest pins the two observers' opposite
+// classifications: TrafficObserved fires for EVERY request — root fetches and
+// OS captive probes included — while ActivityObserved stays action-only. The
+// recheck cadence's attached-phone deferral depends on exactly this split.
+func TestTrafficObservedCountsEveryRequest(t *testing.T) {
+	var traffic, activity int
+	var mu sync.Mutex
+	count := func(n *int) func() {
+		return func() { mu.Lock(); *n++; mu.Unlock() }
+	}
+	_, ts, client := newTestServer(t, Config{
+		APSSID:           "FF1-abc",
+		Scan:             func(context.Context) ([]string, error) { return []string{"Net"}, nil },
+		Rescan:           func() error { return nil },
+		ActivityObserved: count(&activity),
+		TrafficObserved:  count(&traffic),
+	})
+
+	for _, path := range []string{"/", "/generate_204", "/hotspot-detect.html"} {
+		resp, err := client.Get(ts.URL + path)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+	mu.Lock()
+	assert.Equal(t, 3, traffic, "probes and root fetches all count as traffic")
+	assert.Equal(t, 0, activity, "none of them count as human activity")
+	mu.Unlock()
+
+	resp, err := client.Get(ts.URL + "/rescan")
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	mu.Lock()
+	assert.Equal(t, 4, traffic)
+	assert.Equal(t, 1, activity, "an action request counts as both")
+	mu.Unlock()
+}

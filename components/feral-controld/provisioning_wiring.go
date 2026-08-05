@@ -553,6 +553,12 @@ func provisioningTuningFromConfig(t config.ProvisioningTuning, logger *zap.Logge
 		out.EpisodeStationLadder = append(out.EpisodeStationLadder,
 			secs("episodeStationLadderSeconds["+strconv.Itoa(i)+"]", s))
 	}
+	// Same zero-then-all-or-nothing route for the recheck AP-phase ladder
+	// (usableRecheckLadder on the provisioning side).
+	for i, s := range t.RecheckApPhaseLadderSeconds {
+		out.RecheckApPhaseLadder = append(out.RecheckApPhaseLadder,
+			secs("recheckApPhaseLadderSeconds["+strconv.Itoa(i)+"]", s))
+	}
 	return out
 }
 

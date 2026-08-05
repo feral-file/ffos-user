@@ -154,7 +154,19 @@ type Config struct {
 	// goroutines; the observer must be internally synchronized and
 	// non-blocking.
 	ActivityObserved func()
-	Logger           *zap.Logger
+	// TrafficObserved, when set, is invoked once per portal request of ANY
+	// kind — root fetches and OS captive probes included, from the
+	// withLimits chokepoint. Deliberately the OPPOSITE classification to
+	// ActivityObserved: it proves only that a device is attached to the AP
+	// and talking to us, not that a human acted. The provisioning machine
+	// consumes it for the recheck cadence's attached-phone deferral ONLY
+	// (short recheck phases must not kick a phone that has joined the AP
+	// but not yet submitted anything); the bounded session policies keep
+	// the probes-never-count rule above. Same calling contract as
+	// ActivityObserved: request goroutines, internally synchronized,
+	// non-blocking.
+	TrafficObserved func()
+	Logger          *zap.Logger
 }
 
 // Server is the captive-portal HTTP server.
@@ -199,6 +211,12 @@ func (s *Server) Handler() http.Handler { return s.withLimits(s.mux) }
 // bounds (Read/Write/Idle timeouts) live on the http.Server in Start.
 func (s *Server) withLimits(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Observed BEFORE the in-flight cap: a saturated portal is still
+		// hard evidence a device is attached, and the deferral this feeds
+		// must not lapse because the phone was too chatty.
+		if s.cfg.TrafficObserved != nil {
+			s.cfg.TrafficObserved()
+		}
 		select {
 		case s.reqSlots <- struct{}{}:
 			defer func() { <-s.reqSlots }()

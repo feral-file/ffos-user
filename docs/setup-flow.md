@@ -115,7 +115,7 @@ across join attempts):
 | Raise reason | Session policy |
 |---|---|
 | `unprovisioned` | Unbounded, no recheck, and exempt from the wired exit (out-of-box behavior; a station blink can learn nothing with no saved profile). |
-| `sustained-offline`, `relocated` | **Recheck cadence**: AP up 30 min, then a narrated blink (`ap-recheck`) — teardown, forced scan, explicit activation of in-range saved profiles (MRU order, hidden last, 90s per activation, 4-min blink ceiling; a listing error aborts the blink, never a blind activation) — then re-raise with the original reason if nothing associates. Unbounded cycles: the QR is the correct steady state for a gone network, and every cycle re-tests the world (D11). |
+| `sustained-offline`, `relocated` | **Recheck cadence**: AP up on an escalating ladder — 2 min, then 5, then 15 (`recheckApPhaseLadder`), then 30 min steady (`recheckApPhase`) — each phase ending in a narrated blink (`ap-recheck`): teardown, forced scan, explicit activation of in-range saved profiles (MRU order, hidden last, 90s per activation, 4-min blink ceiling; a listing error aborts the blink, never a blind activation), then re-raise with the original reason if nothing associates. The ladder index advances only on a blink that COMPLETED a usable measurement (non-empty error-free scan + a finished activation pass over a readable profile list) — every abort shape (teardown failure, scan error, empty post-bounce scan, listing error, exhausted blink budget) re-arms the same rung, because a blink that never looked at the world must not walk the cadence back toward the blind window. It re-bases at every `clearOffline` boundary (a landing means the next session is a new outage); short early rungs exist because the single radio cannot scan under its own AP, so the blink is the only way to notice the user's network returning — a fixed 30-min first phase left a structural blind window (incident FF1-8EVTK3RE, 2026-08-05). Unbounded cycles: the QR is the correct steady state for a gone network, and every cycle re-tests the world (D11). |
 | `setup-incomplete` | 5-min AP phase, then the §4.1 station ladder (5/10/20 min); AP ≤ 33% of every cycle. |
 | `user-requested` | 30 min, then teardown and resume normal state handling (the `startWifiSetup` abandonment net). |
 | join-failure re-raise | Inherits the originating session's policy and resets its clock; never `resetJoinStatus` (the phone polls `/status` for that outcome). |
@@ -123,7 +123,19 @@ across join attempts):
 Bounded rows carry a 2-hour absolute cap across `applyRescan` re-arms, and
 every teardown defers while the portal served a **human-caused** request
 (`/connect`, `/rescan` — never root fetches or OS captive probes) in the last
-2 minutes, up to +15 min. A confirmed **wired** sighting lowers any raised AP
+2 minutes, up to +15 min. The **recheck** blink additionally defers on portal
+traffic of ANY kind — probes and root fetches included — under the same
+window and ceiling: with ladder-short early phases, a phone that has joined
+the AP but not yet submitted anything (the user reading the network list)
+must not be kicked by the first blink, and an attached phone's automatic
+probes are exactly that evidence. Best-effort, not a guarantee: the portal
+page never polls, so the signal is only as fresh as the OS's own captive
+re-probe cadence — a phone whose OS goes quiet for a full window is treated
+as absent and the blink proceeds. The bounded rows keep the
+probes-never-count rule; their phases were never shortened. An `applyRescan`
+re-arm restarts only the CURRENT ladder phase, never the ladder index —
+resetting the index would let repeated rescans hold the cadence at 2-minute
+blinks forever. A confirmed **wired** sighting lowers any raised AP
 (the survey's ethernet rows carry none of the own-hotspot ambiguity) — with
 one exemption: the out-of-box `unprovisioned` session stays up, because there
 is no saved network for its AP to compete with and lowering it would leave an
