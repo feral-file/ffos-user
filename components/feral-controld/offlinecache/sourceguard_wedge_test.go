@@ -340,12 +340,65 @@ func TestIsReservedAddr_NonPublicFormsTheV4NormalizationMisses(t *testing.T) {
 		{"ipv6 site-local", "fec0::1", true, "deprecated RFC 3879 LAN scope; net has no predicate"},
 		{"ipv6 site-local upper", "feff::1", true, "fec0::/10 runs to feff:"},
 
-		// Guardrails: the unwrap must not over-reject.
+		// RFC 5737 / RFC 3849 / RFC 9637 documentation ranges. Not
+		// globally routable, but lab and overlay networks route them
+		// internally, which is exactly where this daemon runs.
+		{"TEST-NET-1", "192.0.2.10", true, "RFC 5737 documentation range"},
+		{"TEST-NET-2", "198.51.100.10", true, "RFC 5737 documentation range"},
+		{"TEST-NET-3", "203.0.113.10", true, "RFC 5737 documentation range"},
+		{"v6 documentation", "2001:db8::1", true, "RFC 3849 documentation range"},
+		{"v6 documentation, new block", "3fff::1", true, "RFC 9637 documentation range"},
+		{"6to4 relay anycast", "192.88.99.1", true,
+			"deprecated RFC 7526 anycast; forwards to a v6 destination this guard never inspected"},
+
+		// The rest of the IANA special-purpose space, refused by the
+		// 2000::/3 allowlist rather than one branch each.
+		{"v6 discard prefix", "100::1", true, "RFC 6666, outside 2000::/3"},
+		{"local-use NAT64", "64:ff9b:1::1", true, "RFC 8215 local-use prefix, outside 2000::/3"},
+		// THE discriminating NAT64 row. The one above passes for an
+		// accidental reason — its low 32 bits are 0.0.0.1, which the v4
+		// policy refuses however it is unwrapped — so it would still
+		// pass with the shape check gone. This address translates to
+		// 127.0.0.1 under a /64 NAT64 prefix (v4 in bytes 9-12) while
+		// its LAST four bytes read 1.0.0.0, i.e. public: matching the
+		// 64:ff9b prefix without verifying the /96 shape admits it.
+		{"local-use NAT64 wrapping loopback", "64:ff9b:1:0:7f:0:100:0", true,
+			"translates to 127.0.0.1 at /64; unwrapping the last 4 bytes would read 1.0.0.0 and admit it"},
+		{"local-use NAT64 wrapping RFC 1918", "64:ff9b:1:0:c0:a801:100:0", true,
+			"same shape, translating to 192.168.1.1"},
+		{"SRv6 SID block", "5f00::1", true, "RFC 9602, outside 2000::/3"},
+		{"teredo", "2001:0:4136:e378:8000:63bf:3fff:fdd2", true,
+			"2001::/23 IETF protocol assignments; Teredo tunnels to an embedded v4 endpoint"},
+		{"v6 benchmarking", "2001:2::1", true, "2001:2::/48, inside the 2001::/23 carve-out"},
+
+		// Guardrails: neither the unwrap nor the allowlist may over-reject.
 		{"unspecified v6", "::", true, "already covered by IsUnspecified, must stay covered"},
 		{"loopback v6", "::1", true, "must not be unwrapped to 0.0.0.1 and re-judged"},
 		{"public v4", "8.8.8.8", false, "must stay dialable"},
 		{"public v6", "2001:4860:4860::8888", false, "must stay dialable"},
-		{"public v6 near site-local", "fe00::1", false, "fe00::/9 below fec0:: is not site-local"},
+		{"public v6 in APNIC space", "2001:200::1", false,
+			"the 2001::/23 carve-out must stop at 2001:01ff — 2001:0200::/23 is a live RIR allocation"},
+		{"public v6, ARIN", "2600::1", false, "live RIR allocation"},
+		{"public v6, RIPE", "2a00::1", false, "live RIR allocation"},
+		{"public v6, Cloudflare", "2606:4700::1111", false, "a real artwork-CDN neighbor"},
+		{"public v6, AFRINIC", "2c0f::1", false, "live RIR allocation (2c00::/12)"},
+		{"unallocated inside 2000::/3", "3000::1", false,
+			"the allowlist admits unallocated space inside 2000::/3 by design; only the named " +
+				"special-purpose blocks are carved out"},
+		{"6bone, returned to IANA", "3ffe::1", false,
+			"discriminates the 3fff::/20 carve-out from a 3ff0::/12 one: a /20 fixes bytes 0-1 plus " +
+				"the top nibble of byte 2, so 3ffe:: is outside it and must stay admitted like any " +
+				"other unallocated slice"},
+		{"AS112 delegation", "192.175.48.1", false,
+			"listed globally reachable in the IANA registry; blocking it would be a functional regression"},
+		{"public v4 near TEST-NET-2", "198.51.101.1", false, "the /24 carve-out must not widen to a /16"},
+		{"public v4 near TEST-NET-3", "203.0.114.1", false, "the /24 carve-out must not widen to a /16"},
+		{"NAT64-wrapped public v4", "64:ff9b::8.8.8.8", false,
+			"a v6-only deployment reaches public origins through NAT64; unwrap must run before the allowlist"},
+		{"fe00::1 is not site-local, but is still not public", "fe00::1", true,
+			"outside 2000::/3. This row asserted false until the v6 policy became an allowlist: it was " +
+				"correct that fe00::/9 escapes the fec0::/10 mask, and wrong that escaping it makes an " +
+				"unallocated address dialable"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

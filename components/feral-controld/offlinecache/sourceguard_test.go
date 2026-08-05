@@ -106,6 +106,12 @@ func TestClassify_RejectsReservedLiteralAddresses(t *testing.T) {
 		"http://255.255.255.255/",        // broadcast
 		"http://[64:ff9b::7f00:1]/",      // NAT64-wrapped 127.0.0.1
 		"http://[2002:7f00:1::]/",        // 6to4-wrapped 127.0.0.1
+		"http://192.0.2.10/art.png",      // TEST-NET-1
+		"http://198.51.100.10/art.png",   // TEST-NET-2
+		"http://203.0.113.10/art.png",    // TEST-NET-3
+		"http://[2001:db8::1]/art.png",   // IPv6 documentation
+		"http://[3fff::1]/art.png",       // IPv6 documentation, RFC 9637 block
+		"http://[100::1]/art.png",        // IPv6 discard prefix
 	}
 
 	for _, raw := range unsafe {
@@ -142,6 +148,45 @@ func TestClassify_RejectsHostnameResolvingToReserved(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, offlinecache.ErrUnsafeSource)
 	assert.Equal(t, offlinecache.ClassUnknown, got)
+}
+
+// TestClassify_RejectsHostnameResolvingToSpecialUse is the DNS half of
+// the same policy for the ranges a literal-only test would miss.
+//
+// It matters more than the literal table it mirrors: nothing stops an
+// attacker-controlled name from answering with a documentation or
+// discard address, and unlike loopback these look unremarkable in a log.
+// The guard's job is to refuse them on the grounds that they are not
+// public, without regard to whether this particular network routes them.
+func TestClassify_RejectsHostnameResolvingToSpecialUse(t *testing.T) {
+	for _, ip := range []string{
+		"192.0.2.10",    // TEST-NET-1
+		"198.51.100.10", // TEST-NET-2
+		"203.0.113.10",  // TEST-NET-3
+		"192.88.99.1",   // deprecated 6to4 relay anycast
+		"2001:db8::1",   // IPv6 documentation
+		"3fff::1",       // IPv6 documentation, RFC 9637 block
+		"100::1",        // IPv6 discard prefix
+		"5f00::1",       // SRv6 SID block
+		"64:ff9b:1::1",  // local-use NAT64
+		"2001:2::1",     // IPv6 benchmarking
+	} {
+		t.Run(ip, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// A strict controller with no EXPECT is the assertion that
+			// no request was made: the guard must reject before the
+			// classifier ever reaches for the HTTP client.
+			classifier := offlinecache.NewClassifier(
+				mocks.NewMockHTTPClient(ctrl), fixedResolver{ip: ip})
+
+			got, err := classifier.Classify(context.Background(), "https://art.example.com/piece")
+			require.Error(t, err)
+			assert.ErrorIs(t, err, offlinecache.ErrUnsafeSource)
+			assert.Equal(t, offlinecache.ClassUnknown, got)
+		})
+	}
 }
 
 // TestClassify_RejectsWhenAnyResolvedAddressIsReserved pins that the

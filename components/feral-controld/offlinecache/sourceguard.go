@@ -400,70 +400,171 @@ func (g sourceGuard) transport() *go_http.Transport {
 }
 
 // isReservedAddr reports whether ip is somewhere a playlist source must
-// never point. It covers the ranges that reach either this device's own
-// services or the LAN around it — the two things an SSRF through a
-// playlist would be aimed at.
+// never point. The contract it enforces is "dial only clearly-public
+// space" — NOT "block the ranges that happen to be reachable on this
+// hardware today". Those differ, and the difference matters: IPv6 is
+// disabled on the FF1 right now and 0.0.0.x times out rather than
+// reaching loopback, so several of the forms below are not live bypasses
+// on that device. They are refused anyway, because a predicate that
+// admits non-public addresses on the grounds that some current kernel
+// does not route them is one config change away from being wrong, and
+// because lab and overlay networks routinely DO route the special-use
+// ranges internally.
 //
-// The IPv4-mapped IPv6 forms (::ffff:127.0.0.1 and friends) are covered
-// without a special case: To4 normalizes them to their v4 shape first,
-// so they take exactly the same branches as the literal v4 address.
+// The two families get opposite treatments, deliberately:
+//
+//   - IPv4 is a denylist, because public v4 is fragmented across the
+//     whole space with no single prefix to allow. It enumerates the IANA
+//     Special-Purpose Address Registry entries that are not globally
+//     reachable; see isReservedIPv4.
+//   - IPv6 is an ALLOWLIST (see isReservedIPv6), because there the
+//     public space IS one prefix. That inversion is what stops this
+//     predicate from needing a new branch every time someone notices
+//     another special-use v6 block.
+//
+// The IPv4-mapped IPv6 form (::ffff:127.0.0.1 and friends) needs no
+// special case: To4 normalizes it to its v4 shape, so it takes exactly
+// the same branches as the literal v4 address.
 func isReservedAddr(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
 	if v4 := ip.To4(); v4 != nil {
-		ip = v4
+		return isReservedIPv4(v4)
 	}
-
-	// net's own predicates cover loopback (127/8, ::1), RFC 1918 and
-	// IPv6 ULA (fc00::/7), link-local (169.254/16, fe80::/10), every
-	// multicast scope, and the unspecified address (0.0.0.0, ::).
-	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
+	if len(ip) != net.IPv6len {
+		// Neither a v4 nor a well-formed v6 address. Unreachable via
+		// net.ParseIP, but a hand-built net.IP can be any length, and
+		// the safe answer to "what is this" is never "dial it".
 		return true
 	}
 
-	// Deprecated IPv6 site-local (fec0::/10, RFC 3879). net has no
-	// predicate for it because it was deprecated before net's were
-	// written, but it is exactly the LAN-scoped space this guard exists
-	// to refuse, and a resolver on a network still using it will hand it
-	// back.
-	if len(ip) == net.IPv6len && ip.To4() == nil &&
-		ip[0] == 0xfe && ip[1]&0xc0 == 0xc0 {
-		return true
-	}
-
-	if v4 := ip.To4(); v4 != nil {
-		switch {
-		case v4[0] == 0:
-			// 0.0.0.0/8 "this network" (RFC 1122). IsUnspecified covers
-			// only 0.0.0.0 itself; the rest of the /8 is non-public
-			// space whose handling varies by stack, and a guard that
-			// admits only clearly-public destinations has no reason to
-			// reason about which of those stacks routes it where.
-			return true
-		case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127:
-			return true // 100.64.0.0/10 CGNAT — carrier-side, not a public origin
-		case v4[0] == 192 && v4[1] == 0 && v4[2] == 0:
-			return true // 192.0.0.0/24 IETF protocol assignments
-		case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19):
-			return true // 198.18.0.0/15 benchmarking
-		case v4[0] >= 240:
-			return true // 240.0.0.0/4 reserved, and 255.255.255.255 broadcast
-		}
-		return false
-	}
-
-	// IPv6 forms that wrap a v4 address the checks above would have
-	// caught in its native shape: NAT64 (64:ff9b::/96) and 6to4
-	// (2002::/16) both embed one. Unwrap and re-test rather than
-	// trusting the outer prefix to look public.
+	// IPv6 forms that WRAP a v4 address must be unwrapped and judged by
+	// the v4 policy before the allowlist below sees them, in both
+	// directions. NAT64 (64:ff9b::/96) sits outside the global-unicast
+	// prefix, so without this a v6-only deployment reaching a perfectly
+	// public origin through its NAT64 gateway would be refused; 6to4
+	// (2002::/16) sits inside it, so without this a 6to4-wrapped
+	// loopback address would be admitted.
 	if embedded := embeddedIPv4(ip); embedded != nil {
-		return isReservedAddr(embedded)
+		return isReservedIPv4(embedded)
 	}
 	if compat := ipv4Compatible(ip); compat != nil {
-		return isReservedAddr(compat)
+		return isReservedIPv4(compat)
+	}
+	return isReservedIPv6(ip)
+}
+
+// isReservedIPv4 applies the v4 policy. ip may be in either 4-byte or
+// 16-byte form; it is normalized here so callers that unwrap an embedded
+// address (which net.IPv4 returns in 16-byte form) need not think about
+// it.
+//
+// The switch enumerates the IANA IPv4 Special-Purpose Address Registry
+// rows whose "Globally Reachable" column is False, minus the ones net's
+// own predicates already cover. Rows marked globally reachable — the
+// AS112 delegations (192.31.196.0/24, 192.175.48.0/24) and AMT
+// (192.52.193.0/24) — are deliberately NOT listed: they are real public
+// destinations, and blocking them would be a functional regression with
+// no security gain.
+func isReservedIPv4(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return true
+	}
+
+	// net's own predicates cover loopback (127/8), RFC 1918, link-local
+	// (169.254/16), every multicast scope (224/4), and 0.0.0.0.
+	if v4.IsUnspecified() || v4.IsLoopback() || v4.IsPrivate() ||
+		v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() ||
+		v4.IsInterfaceLocalMulticast() || v4.IsMulticast() {
+		return true
+	}
+
+	switch {
+	case v4[0] == 0:
+		// 0.0.0.0/8 "this network" (RFC 1122). IsUnspecified covers
+		// only 0.0.0.0 itself; the rest of the /8 is non-public space
+		// whose handling varies by stack, and a guard that admits only
+		// clearly-public destinations has no reason to reason about
+		// which of those stacks routes it where.
+		return true
+	case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127:
+		return true // 100.64.0.0/10 CGNAT — carrier-side, not a public origin
+	case v4[0] == 192 && v4[1] == 0 && v4[2] == 0:
+		return true // 192.0.0.0/24 IETF protocol assignments
+	case v4[0] == 192 && v4[1] == 0 && v4[2] == 2:
+		return true // 192.0.2.0/24 TEST-NET-1 (RFC 5737)
+	case v4[0] == 192 && v4[1] == 88 && v4[2] == 99:
+		// 192.88.99.0/24, the deprecated 6to4 relay anycast prefix
+		// (RFC 7526). A packet sent here is forwarded by whichever
+		// relay answers the anycast, to a v6 destination this guard
+		// never got to inspect — a pivot, not an origin.
+		return true
+	case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19):
+		return true // 198.18.0.0/15 benchmarking
+	case v4[0] == 198 && v4[1] == 51 && v4[2] == 100:
+		return true // 198.51.100.0/24 TEST-NET-2 (RFC 5737)
+	case v4[0] == 203 && v4[1] == 0 && v4[2] == 113:
+		return true // 203.0.113.0/24 TEST-NET-3 (RFC 5737)
+	case v4[0] >= 240:
+		return true // 240.0.0.0/4 reserved, and 255.255.255.255 broadcast
+	}
+	return false
+}
+
+// isReservedIPv6 applies the v6 policy to an address that carries no
+// embedded v4 (its callers unwrap those first).
+//
+// This is an ALLOWLIST, and that is the whole point. 2000::/3 is the
+// only block IANA has ever allocated for global unicast, so every other
+// v6 address — ULA, link-local, the deprecated site-local range,
+// multicast, the discard prefix, local-use NAT64, the SRv6 SID block,
+// and the vast unallocated remainder — is refused by default rather than
+// by enumeration. Earlier revisions of this file listed the non-public
+// v6 ranges one at a time and were repeatedly found to be missing
+// another one; a denylist over a mostly-unallocated address space cannot
+// be completed, so it was inverted instead.
+//
+// Trade-off, accepted: if IANA ever opens a second global-unicast block,
+// artwork hosted there is refused until this predicate learns about it.
+// That is a documented, one-line fix on a multi-year timeline, and it
+// fails closed rather than open.
+func isReservedIPv6(ip net.IP) bool {
+	if ip[0]&0xe0 != 0x20 {
+		return true
+	}
+
+	// Special-purpose blocks that sit INSIDE 2000::/3 and so have to be
+	// carved back out by hand.
+	switch {
+	case ip[0] == 0x20 && ip[1] == 0x01 && ip[2]&0xfe == 0x00:
+		// 2001::/23, the IETF protocol-assignments block: Teredo
+		// (2001::/32, which tunnels to an embedded v4 endpoint),
+		// benchmarking, AMT, ORCHIDv2. Note this stops at 2001:01ff —
+		// the RIR allocations start at 2001:0200::/23 (APNIC) and are
+		// untouched.
+		//
+		// Refusing the whole /23 is deliberately BROADER than the v4
+		// policy above, which goes out of its way to admit the AS112
+		// delegations because the registry marks them globally
+		// reachable. The few globally-reachable rows in here — AS112-v6
+		// (2001:4:112::/48), PCP anycast (2001:1::1), TURN anycast
+		// (2001:1::2) — get no such exemption, because none of them is
+		// ever an artwork origin and carving them back out would
+		// reintroduce exactly the per-prefix enumeration this allowlist
+		// exists to end.
+		return true
+	case ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8:
+		return true // 2001:db8::/32 documentation (RFC 3849)
+	case ip[0] == 0x3f && ip[1] == 0xff && ip[2]&0xf0 == 0x00:
+		// 3fff::/20 documentation (RFC 9637). A /20 fixes bytes 0-1
+		// plus the TOP NIBBLE of byte 2 — testing only ip[1]&0xf0
+		// would be a /12, refusing all of 3ff0:: upward. That would
+		// fail closed rather than open, but it also contradicts the
+		// allowlist's own logic: every other unallocated slice of
+		// 2000::/3 is admitted, so this one must not be special.
+		return true
 	}
 	return false
 }
@@ -477,8 +578,10 @@ func isReservedAddr(ip net.IP) bool {
 // compares against ::1 and does not match. It would then be judged
 // public. Verified: before this, isReservedAddr("::127.0.0.1") was false.
 //
-// :: and ::1 are excluded because IsUnspecified and IsLoopback already
-// claim them, and unwrapping ::1 would otherwise yield 0.0.0.1.
+// :: and ::1 are excluded so they are judged as the v6 addresses they
+// are: unwrapping ::1 would otherwise yield 0.0.0.1 and re-enter the v4
+// policy, which is a confusing way to reach the same verdict. Both are
+// outside 2000::/3, so isReservedIPv6 refuses them.
 func ipv4Compatible(ip net.IP) net.IP {
 	if len(ip) != net.IPv6len || ip.To4() != nil {
 		return nil
@@ -502,7 +605,23 @@ func embeddedIPv4(ip net.IP) net.IP {
 		return nil
 	}
 	// NAT64 well-known prefix 64:ff9b::/96 — v4 sits in the last 4 bytes.
+	//
+	// The /96 SHAPE must be verified, not just the 64:ff9b prefix.
+	// RFC 6052 §3.1 permits the well-known prefix only at /96, but
+	// 64:ff9b:1::/48 (RFC 8215, local-use NAT64) shares those first two
+	// octets and embeds its v4 somewhere else entirely — at /64 the
+	// address lands in bytes 9-12. Matching on the prefix alone would
+	// therefore read the WRONG four bytes and judge them public:
+	// 64:ff9b:1:0:7f:0:100:0 translates to 127.0.0.1 but unwraps here
+	// as 1.0.0.0. Requiring bytes 4-11 to be zero costs nothing the RFC
+	// allows and drops every other 64:ff9b:* form through to
+	// isReservedIPv6, which refuses it for being outside 2000::/3.
 	if ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b {
+		for _, b := range ip[4:12] {
+			if b != 0 {
+				return nil
+			}
+		}
 		return net.IPv4(ip[12], ip[13], ip[14], ip[15])
 	}
 	// 6to4 2002::/16 — v4 sits in bytes 2..5.

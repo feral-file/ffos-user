@@ -2139,13 +2139,37 @@ rejects, with `ErrUnsafeSource`:
   the set of schemes a browser or `http.Client` will act on (`file`,
   `ftp`, `gopher`, `ws`, `chrome`, `devtools`, `about`, `blob`,
   `javascript`, …) is long and grows;
-- a literal address in a reserved range: loopback, RFC 1918, IPv6 ULA,
-  link-local (including `169.254.169.254`), CGNAT, multicast, broadcast,
-  unspecified, and the IPv4-mapped / NAT64 / 6to4 forms that wrap one;
+- a literal address outside clearly-public space, and the IPv4-mapped /
+  NAT64 / 6to4 forms that wrap one. The two families are handled in
+  opposite directions, deliberately:
+  - **IPv4 is a denylist**, because public v4 is fragmented across the
+    whole space with no single prefix to allow. It enumerates the IANA
+    Special-Purpose Address Registry rows that are not globally
+    reachable — loopback, RFC 1918, link-local (including
+    `169.254.169.254`), CGNAT, `0.0.0.0/8`, IETF protocol assignments,
+    the RFC 5737 documentation ranges, benchmarking, the deprecated
+    6to4 relay anycast prefix, `240.0.0.0/4`, multicast, broadcast.
+    Rows the registry marks globally reachable (the AS112 delegations,
+    AMT) are deliberately admitted: they are real public destinations.
+  - **IPv6 is an allowlist** — `2000::/3`, the only block IANA has ever
+    allocated for global unicast, minus the special-purpose blocks
+    inside it (`2001::/23`, `2001:db8::/32`, `3fff::/20`). Earlier
+    revisions enumerated the non-public v6 ranges instead and were
+    repeatedly found to be missing another one; a denylist over a
+    mostly-unallocated address space cannot be completed, so it was
+    inverted. The cost is that a future second global-unicast block
+    would need a one-line update, which fails closed rather than open.
 - a hostname that RESOLVES to any of the above — checked across *every*
   answer, not just the first, so a name returning one public and one
   loopback address cannot be admitted here and then dialed round-robin
   later.
+
+Reachability on *this* device is deliberately not the criterion. IPv6 is
+disabled on the FF1 today and `0.0.0.x` times out rather than reaching
+loopback, so several refused forms are not live bypasses there — but lab
+and overlay networks do route the special-use ranges internally, and a
+predicate that admits non-public addresses because some current kernel
+does not route them is one config change away from being wrong.
 
 The userinfo trick (`http://cdn.feralfileassets.com@127.0.0.1:9222/…`)
 is handled by resolving the real host via `url.Hostname()` rather than
