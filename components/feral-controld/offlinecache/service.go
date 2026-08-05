@@ -2514,7 +2514,13 @@ func (s *service) ClearPlaylist(playlistID string) error {
 		done[key] = true
 		removed, err := s.store.DeleteItem(key)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("delete item %s: %w", item.Source, err))
+			// Truncated, and this one is NOT covered by the admission
+			// bound: these sources are read back out of a STORED
+			// playlist body, which is persisted wholesale and includes
+			// inline data: items that are exempt from that bound by
+			// design. So a delete failure here could return a
+			// multi-megabyte command error.
+			errs = append(errs, fmt.Errorf("delete item %s: %w", truncateSourceForLog(item.Source), err))
 			continue
 		}
 		if removed || res.settled[key] {

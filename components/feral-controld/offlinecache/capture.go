@@ -593,7 +593,7 @@ var safeIdempotentMethods = map[string]bool{
 // fetched across every resource in this call — see captureDiskBudget's
 // doc.
 func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *captureTracker, budget *captureDiskBudget) ([]Resource, Coverage) {
-	keys, resources, failures, pendingURLs := tracker.snapshot()
+	keys, resources, failures, pendingURLs, overflow := tracker.snapshot()
 
 	result := make([]Resource, 0, len(keys))
 	var failureReasons []string
@@ -716,6 +716,17 @@ func (c *capturer) resolveResources(ctx, phaseCtx context.Context, tracker *capt
 	// failure here is what keeps that promise honest.
 	for _, u := range pendingURLs {
 		failureReasons = append(failureReasons, fmt.Sprintf("unresolved_at_deadline:%s", u))
+	}
+
+	// A capture that hit the tracker ceiling is INCOMPLETE by definition:
+	// resources the page asked for were never recorded, so replay would
+	// serve an artwork with missing pieces. One bounded marker rather
+	// than per-URL reasons — the URLs are exactly what was refused, so
+	// naming them here would reintroduce the growth the bound prevents.
+	if overflow > 0 {
+		failureReasons = append(failureReasons,
+			fmt.Sprintf("tracker_limit_exceeded:%d observation(s) dropped past %d resources/%d URL bytes",
+				overflow, MaxCaptureResources, MaxCaptureResourceURLBytes))
 	}
 
 	coverage := Coverage{Complete: len(failureReasons) == 0}
@@ -868,8 +879,36 @@ func (c *capturer) attachHandlers(session CDPSession, tracker *captureTracker) {
 // session. All access is mutex-guarded because events are delivered on the
 // CDPSession's read-pump goroutine while resolveResources reads the final
 // state from the caller's goroutine after the observation window closes.
+// MaxCaptureResources bounds how many distinct resources one capture may
+// track, and MaxCaptureResourceURLBytes bounds the length of each URL kept.
+//
+// Both exist because a capture's input is a PERMITTED artwork, and passing
+// the source guard says only that the origin is public — not that the page
+// is well behaved. Nothing else bounds this: the disk budget caps BYTES
+// FETCHED, but the tracker also holds URLs for resources it never fetches
+// (failures and still-pending requests), so a page issuing a stream of
+// distinct long URLs grew daemon memory during the capture window and then
+// grew ItemRecord.Resources and the on-disk coverage without limit.
+//
+// The limits are deliberately generous rather than tight: a rich software
+// artwork legitimately pulls hundreds of resources, and signed CDN links
+// legitimately run long, so these are an anti-abuse ceiling and must never
+// be reached by real work. Hitting either is recorded rather than silent —
+// see trackerOverflow — because a capture that quietly dropped resources
+// would replay as an artwork with missing pieces and no explanation.
+const (
+	MaxCaptureResources        = 4096
+	MaxCaptureResourceURLBytes = 4096
+)
+
 type captureTracker struct {
 	mu sync.Mutex
+
+	// overflow counts observations refused by the bounds above: distinct
+	// resources past MaxCaptureResources, and URLs past
+	// MaxCaptureResourceURLBytes. Counted rather than dropped silently so
+	// Coverage can say the capture is incomplete AND why.
+	overflow int
 
 	// requestURL maps a CDP requestId to its current URL so
 	// Network.loadingFailed (which only carries the id) can be attributed
@@ -922,7 +961,18 @@ func (t *captureTracker) recordResource(url string, status int, contentType, red
 	key := resourceKey(method, url)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(url) > MaxCaptureResourceURLBytes {
+		t.overflow++
+		return
+	}
 	if _, exists := t.resources[key]; !exists {
+		// Bound checked only for a NEW key: an update to a resource
+		// already tracked costs no additional entry, and refusing it
+		// would leave a stale first-observation record in place.
+		if len(t.resources) >= MaxCaptureResources {
+			t.overflow++
+			return
+		}
 		t.order = append(t.order, key)
 	}
 	// Method is stored as "" for GET (see Resource.Method's doc), never
@@ -941,6 +991,14 @@ func (t *captureTracker) recordFailure(url, reason string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(url) > MaxCaptureResourceURLBytes {
+		t.overflow++
+		return
+	}
+	if _, exists := t.failures[url]; !exists && len(t.failures) >= MaxCaptureResources {
+		t.overflow++
+		return
+	}
 	t.failures[url] = reason
 }
 
@@ -958,6 +1016,19 @@ func (t *captureTracker) recordFailure(url, reason string) {
 func (t *captureTracker) trackRequest(requestID, url, method string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Same ceiling on the in-flight maps. These are keyed by requestId
+	// rather than URL, so they are bounded by concurrent requests rather
+	// than distinct ones in practice — but a page that never lets its
+	// requests terminate keeps every entry alive, and the URL strings are
+	// the part that carries weight.
+	if len(url) > MaxCaptureResourceURLBytes {
+		t.overflow++
+		return
+	}
+	if _, exists := t.requestURL[requestID]; !exists && len(t.requestURL) >= MaxCaptureResources {
+		t.overflow++
+		return
+	}
 	t.requestURL[requestID] = url
 	t.requestMethod[requestID] = method
 	t.pending[requestID] = struct{}{}
@@ -997,7 +1068,7 @@ func (t *captureTracker) resolveRequest(requestID string) {
 // terminal event since they resolve in-page, so treating one as "still
 // pending" would be a permanent false incompleteness on every capture
 // rather than a real signal.
-func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]string, []string) {
+func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]string, []string, int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -1017,7 +1088,7 @@ func (t *captureTracker) snapshot() ([]string, map[string]Resource, map[string]s
 		}
 	}
 	sort.Strings(pendingURLs)
-	return resourceKeys, resources, failures, pendingURLs
+	return resourceKeys, resources, failures, pendingURLs, t.overflow
 }
 
 // Capture-side source guarding. fetchClient covers the bytes THIS daemon

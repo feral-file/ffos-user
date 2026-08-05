@@ -2308,6 +2308,30 @@ mediacapture's raw `%s` interpolation, the notification payload, the
 status response. `truncateSourceForLog` remains as defense in depth, not
 as the primary control.
 
+**What one capture may accumulate is also bounded.** Passing the source
+guard establishes that the ORIGIN is public, not that the page behaves.
+The disk budget caps bytes *fetched*, which does not cover this: the
+capture tracker also holds URLs for resources it never fetches (failures,
+and requests still pending at the deadline), so a permitted artwork
+emitting a stream of distinct long URLs grew daemon memory during the
+window and then grew `ItemRecord.Resources` and the on-disk coverage
+without limit. `MaxCaptureResources` (4096) and
+`MaxCaptureResourceURLBytes` (4096) are an anti-abuse ceiling, set
+generously so real work — a rich software artwork pulls hundreds of
+resources, and signed CDN links run long — never reaches them.
+
+Exceeding either marks the capture **incomplete** with one bounded
+`tracker_limit_exceeded` marker. That matters more than the bound itself:
+silently dropping resources while still reporting `Complete: true` would
+replay as an artwork with missing pieces and no explanation, which is
+worse than the growth being prevented. The marker deliberately does not
+name the refused URLs — those are exactly what was refused.
+
+Note this is the one place a `data:` source is still unbounded on disk, by
+design: a stored playlist body is persisted wholesale, inline items
+included, so `ClearPlaylist` reads those sources back out and truncates
+them at the error boundary rather than at admission.
+
 The **clear and status RPCs need their own bound** and do not inherit
 this one: neither passes through `DownloadItem`, and both echo the
 submitted source back — the clear handler in its `ok` response, status as

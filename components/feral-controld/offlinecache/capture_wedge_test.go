@@ -725,3 +725,91 @@ func TestCapturer_SourceGuard_ChildStaysPausedWhenArmingFails(t *testing.T) {
 		})
 	}
 }
+
+// TestCaptureTracker_BoundsResourcesAndURLs pins the anti-abuse ceiling on
+// what one capture may accumulate. Passing the source guard means the
+// ORIGIN is public; it says nothing about whether the page behaves. The
+// disk budget caps bytes FETCHED, which does not help here: the tracker
+// also holds URLs for resources it never fetches (failures, and requests
+// still pending at the deadline), so a page emitting a stream of distinct
+// long URLs grew daemon memory during the window and then grew
+// ItemRecord.Resources and the on-disk coverage without limit.
+//
+// The important half is the last assertion: exceeding the bound must make
+// the capture INCOMPLETE. Dropping resources while still reporting
+// Complete:true would replay as an artwork with missing pieces and no
+// explanation — strictly worse than the unbounded growth, because it is
+// silent.
+func TestCaptureTracker_BoundsResourcesAndURLs(t *testing.T) {
+	t.Run("distinct resources are capped", func(t *testing.T) {
+		tr := newCaptureTracker()
+		for i := 0; i < MaxCaptureResources+50; i++ {
+			tr.recordResource(fmt.Sprintf("https://example.com/r%d.png", i), 200, "image/png", "", nil, "GET")
+		}
+		keys, resources, _, _, overflow := tr.snapshot()
+		require.Len(t, resources, MaxCaptureResources)
+		require.Len(t, keys, MaxCaptureResources)
+		require.Equal(t, 50, overflow)
+	})
+
+	t.Run("an oversized URL is refused, not stored truncated", func(t *testing.T) {
+		tr := newCaptureTracker()
+		long := "https://example.com/" + strings.Repeat("a", MaxCaptureResourceURLBytes)
+		tr.recordResource(long, 200, "image/png", "", nil, "GET")
+		_, resources, _, _, overflow := tr.snapshot()
+		require.Empty(t, resources,
+			"storing a truncated URL would be worse than dropping it: replay matches on exact URL, "+
+				"so a truncated entry is a permanent false cache miss")
+		require.Equal(t, 1, overflow)
+	})
+
+	t.Run("updating an already-tracked resource does not consume budget", func(t *testing.T) {
+		tr := newCaptureTracker()
+		for i := 0; i < MaxCaptureResources; i++ {
+			tr.recordResource(fmt.Sprintf("https://example.com/r%d.png", i), 200, "image/png", "", nil, "GET")
+		}
+		// Re-recording an existing key must still be allowed at the
+		// ceiling, or the last observation of a resource would be lost
+		// and a stale first-sight record kept instead.
+		tr.recordResource("https://example.com/r0.png", 404, "text/plain", "", nil, "GET")
+		_, resources, _, _, overflow := tr.snapshot()
+		require.Equal(t, 0, overflow)
+		require.Equal(t, 404, resources[resourceKey("GET", "https://example.com/r0.png")].Status)
+	})
+
+	t.Run("failures and pending requests are capped too", func(t *testing.T) {
+		tr := newCaptureTracker()
+		for i := 0; i < MaxCaptureResources+10; i++ {
+			tr.recordFailure(fmt.Sprintf("https://example.com/f%d.png", i), "net::ERR")
+			tr.trackRequest(fmt.Sprintf("req-%d", i), fmt.Sprintf("https://example.com/p%d.png", i), "GET")
+		}
+		_, _, failures, pendingURLs, overflow := tr.snapshot()
+		require.Len(t, failures, MaxCaptureResources)
+		require.LessOrEqual(t, len(pendingURLs), MaxCaptureResources)
+		require.Positive(t, overflow)
+	})
+}
+
+// TestCapturer_TrackerOverflowMakesCoverageIncomplete is the half that
+// matters operationally: the bound must be visible in the record, not
+// only in memory.
+func TestCapturer_TrackerOverflowMakesCoverageIncomplete(t *testing.T) {
+	c := &capturer{logger: zaptest.NewLogger(t)}
+	tr := newCaptureTracker()
+	// Oversized URLs, so every observation is REFUSED and the tracker
+	// ends up empty-but-overflowed. That isolates the coverage assembly:
+	// with no accepted resource there is nothing for resolveResources to
+	// fetch, so the only thing that can mark this capture incomplete is
+	// the overflow marker itself.
+	long := "https://example.com/" + strings.Repeat("a", MaxCaptureResourceURLBytes)
+	tr.recordResource(long, 200, "image/png", "", nil, "GET")
+	tr.recordFailure(long, "net::ERR")
+
+	_, coverage := c.resolveResources(context.Background(), context.Background(), tr, c.newDiskBudget())
+
+	require.False(t, coverage.Complete,
+		"a capture that dropped observations must never report Complete:true")
+	require.Contains(t, coverage.Reason, "tracker_limit_exceeded")
+	require.NotContains(t, coverage.Reason, "example.com/r",
+		"the marker must be bounded: naming the refused URLs would reintroduce the growth the bound prevents")
+}
