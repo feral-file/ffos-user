@@ -62,6 +62,19 @@ type fakeAP struct {
 	upErr   error
 	downErr error
 	info    softap.Info
+
+	// downHook, when set, runs inside the NEXT Down call (and is consumed by
+	// it) with that call's ctx. It exists so a test can hold the loop goroutine
+	// INSIDE a bounce — the only way to exercise a shutdown landing mid-window.
+	// Guarded because it is set while the loop runs.
+	hookMu   sync.Mutex
+	downHook func(ctx context.Context)
+}
+
+func (a *fakeAP) setDownHook(fn func(ctx context.Context)) {
+	a.hookMu.Lock()
+	a.downHook = fn
+	a.hookMu.Unlock()
 }
 
 func (a *fakeAP) Up(context.Context) (softap.Info, error) {
@@ -71,8 +84,15 @@ func (a *fakeAP) Up(context.Context) (softap.Info, error) {
 	}
 	return a.info, nil
 }
-func (a *fakeAP) Down(context.Context) error {
+func (a *fakeAP) Down(ctx context.Context) error {
 	a.rec.add("ap.Down")
+	a.hookMu.Lock()
+	hook := a.downHook
+	a.downHook = nil
+	a.hookMu.Unlock()
+	if hook != nil {
+		hook(ctx)
+	}
 	return a.downErr
 }
 func (a *fakeAP) Status(context.Context) (softap.Status, error) {
@@ -127,6 +147,9 @@ type fakeWifi struct {
 	autoconnectErrs      []error
 	autoconnectErrSticky error
 	autoconnectCalls     []bool
+	// autoconnectCtxErrs records each call's ctx.Err() at call time, so a test
+	// can assert a restore ran on a context that could actually complete.
+	autoconnectCtxErrs []error
 }
 
 func (w *fakeWifi) HasSavedProfile(context.Context) (bool, error) {
@@ -251,7 +274,11 @@ func (w *fakeWifi) ActivateProfile(_ context.Context, uuid string) error {
 	return nil
 }
 
-func (w *fakeWifi) SetDeviceAutoconnect(_ context.Context, enabled bool) error {
+// SetDeviceAutoconnect honors ctx like the real seam (which reaches nmcli
+// through wrapper.Exec's CommandContext): a call on a dead context fails. The
+// shutdown test depends on that — it is what makes the deferred restore latch
+// instead of silently "succeeding" on a canceled loop.
+func (w *fakeWifi) SetDeviceAutoconnect(ctx context.Context, enabled bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if enabled {
@@ -260,6 +287,10 @@ func (w *fakeWifi) SetDeviceAutoconnect(_ context.Context, enabled bool) error {
 		w.rec.add("wifi.Autoconnect:off")
 	}
 	w.autoconnectCalls = append(w.autoconnectCalls, enabled)
+	w.autoconnectCtxErrs = append(w.autoconnectCtxErrs, ctx.Err())
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(w.autoconnectErrs) > 0 {
 		err := w.autoconnectErrs[0]
 		w.autoconnectErrs = w.autoconnectErrs[1:]
@@ -276,12 +307,23 @@ func (w *fakeWifi) autoconnectLog() []bool {
 	return append([]bool(nil), w.autoconnectCalls...)
 }
 
+// autoconnectCtxLog returns the ctx.Err() seen by each SetDeviceAutoconnect
+// call, in order.
+func (w *fakeWifi) autoconnectCtxLog() []error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]error(nil), w.autoconnectCtxErrs...)
+}
+
 // resetAutoconnectLog drops the recorded flips so a test can assert on the
 // calls a specific scenario makes, unpolluted by the startup self-heal every
-// machine issues on its first tick.
+// machine issues on its first tick. Both slices are cleared together: they are
+// parallel arrays (call i's flag and ctx.Err()), and the shutdown tests assert
+// on that pairing by index.
 func (w *fakeWifi) resetAutoconnectLog() {
 	w.mu.Lock()
 	w.autoconnectCalls = nil
+	w.autoconnectCtxErrs = nil
 	w.mu.Unlock()
 }
 
