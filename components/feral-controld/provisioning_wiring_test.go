@@ -7,8 +7,11 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -583,4 +586,75 @@ func TestStatusProviderServesNetworkHealth(t *testing.T) {
 	if unwired.Status(context.Background()).Network != nil {
 		t.Fatal("an unwired snapshot must omit the additive field")
 	}
+}
+
+// TestProvisioningTuningFromConfigRejectsOutOfRangeSeconds pins the overflow
+// guard at the ONLY place it can work: before the seconds→Duration
+// multiplication. time.Duration(n) * time.Second wraps int64 above roughly
+// 9.2e9 seconds, so 18446744074 lands as ~290ms — a small, plausible-looking
+// positive that sails through every downstream sanity check including
+// provisioning's own >24h ceiling. Rejected values become 0, which is the
+// machine's documented "unset" input; provisioning's withDefaults then
+// substitutes the built-in default (pinned on that side by
+// TestTuningSanitation's zero-value cases).
+func TestProvisioningTuningFromConfigRejectsOutOfRangeSeconds(t *testing.T) {
+	// The exact wrap: proof the bad value really does look benign after
+	// conversion, so the test cannot rot into asserting a value that would
+	// have been caught anyway. It has to go through a runtime variable — as a
+	// constant expression the compiler rejects the overflow outright, which is
+	// precisely why this hazard only ever reaches production through a
+	// config-decoded int and never through a literal in Go source.
+	overflowSeconds := 18446744074
+	wrapped := time.Duration(overflowSeconds) * time.Second
+	require.Greater(t, wrapped, time.Duration(0),
+		"the overflow case must wrap to a POSITIVE duration, else it proves nothing")
+	require.Less(t, wrapped, time.Second,
+		"...and to a small one that no >24h ceiling could catch")
+
+	t.Run("scalar field", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			seconds int
+			want    time.Duration
+		}{
+			{"overflow wraps to a small positive but is rejected", 18446744074, 0},
+			{"overflow wraps negative and is rejected", 9223372037, 0},
+			{"just past the 24h bound is rejected", 86401, 0},
+			{"negative is rejected", -30, 0},
+			{"exactly the 24h bound is kept", 86400, 24 * time.Hour},
+			{"an ordinary override is kept", 600, 10 * time.Minute},
+			{"unset stays unset", 0, 0},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := provisioningTuningFromConfig(
+					config.ProvisioningTuning{RecheckApPhaseSeconds: tc.seconds}, zap.NewNop())
+				assert.Equal(t, tc.want, got.RecheckApPhase)
+			})
+		}
+	})
+
+	t.Run("ladder rung", func(t *testing.T) {
+		got := provisioningTuningFromConfig(config.ProvisioningTuning{
+			EpisodeStationLadderSeconds: []int{300, 18446744074, 1200},
+		}, zap.NewNop())
+		// The rejected rung becomes 0 rather than ~290ms. provisioning's
+		// usableLadder reads that 0 as out-of-range and discards the WHOLE
+		// override for the built-in ladder (its all-or-nothing rule), so the
+		// zero here is the handoff, not the end state.
+		assert.Equal(t, []time.Duration{5 * time.Minute, 0, 20 * time.Minute},
+			got.EpisodeStationLadder)
+	})
+
+	t.Run("a fully valid block passes through untouched", func(t *testing.T) {
+		got := provisioningTuningFromConfig(config.ProvisioningTuning{
+			EpisodeApPhaseSeconds:       120,
+			UserRequestedSessionSeconds: 900,
+			EpisodeStationLadderSeconds: []int{60, 120, 240},
+		}, zap.NewNop())
+		assert.Equal(t, 2*time.Minute, got.EpisodeApPhase)
+		assert.Equal(t, 15*time.Minute, got.UserRequestedSession)
+		assert.Equal(t, []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute},
+			got.EpisodeStationLadder)
+	})
 }

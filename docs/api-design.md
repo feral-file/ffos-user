@@ -18,12 +18,17 @@ second production contract.
 For v2, `feral-controld` remains the only runtime external-control owner. It
 initiates MQTT 5 connections and owns the LAN HTTPS/WebSocket adapter, while
 focused protocol, state, and authentication packages implement the shared
-contract without hiding command policy in transport code. `feral-setupd`
-continues to own setup and recovery UX, including recovery SoftAP. Cross-service
-setup and reset coordination uses an explicitly versioned D-Bus interface:
-`feral-controld` owns external admission, confirmation records, broker cleanup,
-identity rotation, controller-authority bootstrap, and protocol completion;
-`feral-setupd` owns physical confirmation and durable local reset execution.
+contract without hiding command policy in transport code. It owns setup and
+recovery UX, including recovery SoftAP; setup and reset coordination is
+in-process, not the explicitly versioned D-Bus interface the v2 draft
+specified for it — one owner holds external admission, confirmation records,
+broker cleanup, identity rotation, controller-authority bootstrap and
+protocol completion together with physical confirmation and durable local
+reset execution.
+
+> This paragraph previously assigned setup/recovery UX to `feral-setupd`,
+> which was merged into `feral-controld` (see
+> [`architecture.md`](architecture.md), "The setupd merge").
 
 The v1 relayer envelope, Mint handoff, port-1111 Hub, and
 `GetRelayerTopicID` remain unchanged only through the migration compatibility

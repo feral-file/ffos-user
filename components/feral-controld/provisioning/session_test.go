@@ -1151,6 +1151,32 @@ func TestTuningSanitation(t *testing.T) {
 		}
 	})
 
+	t.Run("episode raise cycles", func(t *testing.T) {
+		// The cycle counter is the episode's only overall bound: every re-raise
+		// latches the on-table "setup-incomplete" reason, which re-stamps
+		// sessionFirstRaise, so the 2h absolute cap re-bases with it and bounds
+		// each AP PHASE rather than the episode. An unbounded count therefore
+		// postpones the four-cycle settlement — and the settled state is where
+		// the LAN escape lives — indefinitely.
+		cases := []struct {
+			name   string
+			cycles int
+			want   int
+		}{
+			{"zero takes the default", 0, defaultEpisodeRaiseCycles},
+			{"negative takes the default", -3, defaultEpisodeRaiseCycles},
+			{"past the ceiling takes the default", maxEpisodeRaiseCycles + 1, defaultEpisodeRaiseCycles},
+			{"exactly the ceiling is kept", maxEpisodeRaiseCycles, maxEpisodeRaiseCycles},
+			{"a valid override is kept", 7, 7},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := Tuning{EpisodeRaiseCycles: tc.cycles}.withDefaults(tick, zap.NewNop())
+				assert.Equal(t, tc.want, got.EpisodeRaiseCycles)
+			})
+		}
+	})
+
 	t.Run("scalar durations", func(t *testing.T) {
 		cases := []struct {
 			name string

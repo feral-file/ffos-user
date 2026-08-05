@@ -21,17 +21,23 @@ The v2 target preserves these service boundaries:
   routes the common command model to existing executors. Protocol encoding,
   retained state, authentication, and authorization belong in focused boundary
   packages; command policy must not be hidden in transport handlers.
-- `feral-setupd` remains the owner of setup and recovery UX, including the
-  recovery SoftAP. Reset preparation, physical confirmation, local erasure,
-  and setup-state transitions cross the service boundary only through a
-  versioned D-Bus contract.
+- `feral-controld` also owns setup and recovery UX, including the recovery
+  SoftAP: reset preparation, physical confirmation, local erasure, and
+  setup-state transitions no longer cross a service boundary at all, so the
+  versioned D-Bus contract the v2 draft specified for them is moot — the
+  coordination is in-process (see "The setupd merge" below).
 - For reset, `feral-controld` owns external command admission, protocol-visible
   confirmation state, the broker authorization barrier, runtime-identity
-  rotation, controller-authority bootstrap, and final protocol status.
-  `feral-setupd` owns the on-device confirmation UX and local reset execution.
-  Neither service writes the other's state, and reset cannot report completion
-  before the broker-barrier, identity-registry, and authority-registration ACKs
-  plus durable local authority activation and cleanup finish.
+  rotation, controller-authority bootstrap, and final protocol status — plus
+  the on-device confirmation UX and local reset execution the draft had split
+  out to `feral-setupd`. The ordering constraint survives the merge and is
+  what actually matters: reset cannot report completion before the
+  broker-barrier, identity-registry, and authority-registration ACKs plus
+  durable local authority activation and cleanup finish.
+
+> The setup/recovery bullet above previously assigned that ownership to
+> `feral-setupd`, copied from the v2 draft written before that daemon was
+> merged into `feral-controld` (see "The setupd merge" below).
 
 The current relayer, Mint pairing handoff, optional port-1111 Hub, and
 `GetRelayerTopicID` exist only behind migration compatibility gates. They are

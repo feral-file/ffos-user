@@ -496,29 +496,62 @@ func wiredLinkProbe(lc *status.LinkChecker) func(context.Context) (bool, error) 
 	return lc.WiredLink
 }
 
+// maxTuningSeconds bounds every integer-seconds knob in the config block, and
+// is the seconds-side twin of provisioning's own maxTuningDuration ceiling
+// (24h). The two are mirrored BY HAND across the package boundary; changing
+// one means changing the other.
+//
+// The mirror is not redundancy — this side is the one that can actually catch
+// an overflow, and it must run BEFORE the multiplication below. See the secs
+// helper for why a post-conversion check cannot.
+const maxTuningSeconds = 24 * 60 * 60
+
 // provisioningTuningFromConfig maps the config file's permissive provisioning
-// block onto the machine's typed knobs (integer-with-unit fields → durations;
-// zeros pass through so the machine's defaults apply).
-func provisioningTuningFromConfig(t config.ProvisioningTuning) provisioning.Tuning {
-	secs := func(n int) time.Duration { return time.Duration(n) * time.Second }
+// block onto the machine's typed knobs (integer-with-unit fields → durations).
+// Out-of-range entries are rejected to ZERO, which is the machine's documented
+// "unset" value, so withDefaults substitutes the built-in default for them.
+func provisioningTuningFromConfig(t config.ProvisioningTuning, logger *zap.Logger) provisioning.Tuning {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	// secs validates the INT and only then converts. The ordering is the whole
+	// point: time.Duration(n) * time.Second overflows int64 above roughly
+	// 9.2e9 seconds and WRAPS, so 18446744074 lands as ~290ms — a small,
+	// plausible-looking positive that then passes every downstream sanity
+	// check, provisioning's >24h ceiling included. Once the multiplication has
+	// happened the original magnitude is unrecoverable, so validating on the
+	// far side cannot work no matter how careful it is.
+	secs := func(field string, n int) time.Duration {
+		if n < 0 || n > maxTuningSeconds {
+			logger.Warn("provisioning config: seconds value out of range; using the built-in default",
+				zap.String("field", field), zap.Int("configured", n),
+				zap.Int("maxSeconds", maxTuningSeconds))
+			return 0
+		}
+		return time.Duration(n) * time.Second
+	}
 	out := provisioning.Tuning{
 		SetupIncompleteDisabled: t.SetupIncompleteDisabled,
-		EpisodeWindow:           secs(t.EpisodeWindowSeconds),
-		EpisodeApPhase:          secs(t.EpisodeApPhaseSeconds),
+		EpisodeWindow:           secs("episodeWindowSeconds", t.EpisodeWindowSeconds),
+		EpisodeApPhase:          secs("episodeApPhaseSeconds", t.EpisodeApPhaseSeconds),
 		EpisodeRaiseCycles:      t.EpisodeRaiseCycles,
-		HubContactFresh:         secs(t.HubContactFreshSeconds),
-		DeferralCycleBudget:     secs(t.DeferralCycleBudgetSeconds),
-		DeferralEpisodeBudget:   secs(t.DeferralEpisodeBudgetSeconds),
-		RecheckApPhase:          secs(t.RecheckApPhaseSeconds),
-		RecheckBlinkCeiling:     secs(t.RecheckBlinkCeilingSeconds),
-		ActivationTimeout:       secs(t.ActivationTimeoutSeconds),
-		PortalActivityWindow:    secs(t.PortalActivityWindowSeconds),
-		PortalDeferralCeiling:   secs(t.PortalDeferralCeilingSeconds),
-		UserRequestedSession:    secs(t.UserRequestedSessionSeconds),
-		SessionAbsoluteCap:      secs(t.SessionAbsoluteCapSeconds),
+		HubContactFresh:         secs("hubContactFreshSeconds", t.HubContactFreshSeconds),
+		DeferralCycleBudget:     secs("deferralCycleBudgetSeconds", t.DeferralCycleBudgetSeconds),
+		DeferralEpisodeBudget:   secs("deferralEpisodeBudgetSeconds", t.DeferralEpisodeBudgetSeconds),
+		RecheckApPhase:          secs("recheckApPhaseSeconds", t.RecheckApPhaseSeconds),
+		RecheckBlinkCeiling:     secs("recheckBlinkCeilingSeconds", t.RecheckBlinkCeilingSeconds),
+		ActivationTimeout:       secs("activationTimeoutSeconds", t.ActivationTimeoutSeconds),
+		PortalActivityWindow:    secs("portalActivityWindowSeconds", t.PortalActivityWindowSeconds),
+		PortalDeferralCeiling:   secs("portalDeferralCeilingSeconds", t.PortalDeferralCeilingSeconds),
+		UserRequestedSession:    secs("userRequestedSessionSeconds", t.UserRequestedSessionSeconds),
+		SessionAbsoluteCap:      secs("sessionAbsoluteCapSeconds", t.SessionAbsoluteCapSeconds),
 	}
-	for _, s := range t.EpisodeStationLadderSeconds {
-		out.EpisodeStationLadder = append(out.EpisodeStationLadder, secs(s))
+	// A rejected rung becomes 0, which usableLadder reads as out-of-range and
+	// answers by discarding the WHOLE override for the built-in ladder — the
+	// all-or-nothing rule, reached through the zero rather than duplicated here.
+	for i, s := range t.EpisodeStationLadderSeconds {
+		out.EpisodeStationLadder = append(out.EpisodeStationLadder,
+			secs("episodeStationLadderSeconds["+strconv.Itoa(i)+"]", s))
 	}
 	return out
 }

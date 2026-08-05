@@ -118,6 +118,13 @@ const (
 	// freshness debt: a single counted sample after a pause can never fire
 	// the raise off stale evidence.
 	episodeFreshSamplesAfterPause = 2
+
+	// maxEpisodeRaiseCycles is the sanity ceiling on the configured cycle
+	// count — the episode's only overall bound (see withDefaults). Generous by
+	// design: it exists to reject a typo or an "effectively never settle"
+	// value, not to second-guess an operator who genuinely wants a long
+	// episode.
+	maxEpisodeRaiseCycles = 100
 )
 
 // defaultEpisodeStationLadder is the escalating station phase between episode
@@ -156,14 +163,20 @@ func usableLadder(ladder []time.Duration, logger *zap.Logger) []time.Duration {
 }
 
 // maxTuningDuration is the sanity ceiling every configured duration knob must
-// clear. Two shapes need it, and neither is caught by a "zero means default"
-// rule. A seconds value large enough to overflow provisioningTuningFromConfig's
-// seconds→Duration multiplication arrives here as garbage — possibly a small
-// positive that silently passes every other check. And an honestly-typed but
-// absurd value (a year-long AP phase, a week-long station rung) would disable
-// the escape policy this whole file exists to guarantee, with nothing on
-// screen or in the logs saying so. Past the ceiling the value is treated as a
-// typo, not as intent.
+// clear: an honestly-typed but absurd value (a year-long AP phase, a week-long
+// station rung) would disable the escape policy this whole file exists to
+// guarantee, with nothing on screen or in the logs saying so. Past the ceiling
+// the value is treated as a typo, not as intent.
+//
+// What it does NOT catch, so nobody trusts it for this: an integer-seconds
+// config value large enough to overflow the seconds→Duration multiplication.
+// That wraps to an arbitrary small value BEFORE it ever reaches this type
+// (18446744074 seconds becomes ~290ms), and no ceiling on the far side can
+// recover the original magnitude. Overflow is rejected at the conversion site
+// instead — see maxTuningSeconds and the secs helper in
+// provisioning_wiring.go, whose 24h bound mirrors this one by hand.
+// This ceiling remains the guard for Tuning values built directly in Go
+// (tests, future callers) that never pass through that conversion.
 const maxTuningDuration = 24 * time.Hour
 
 // withDefaults resolves unset/out-of-range fields to the package defaults and
@@ -199,7 +212,23 @@ func (t Tuning) withDefaults(tick time.Duration, logger *zap.Logger) Tuning {
 	def("portalDeferralCeiling", &t.PortalDeferralCeiling, defaultPortalDeferralCeiling)
 	def("userRequestedSession", &t.UserRequestedSession, defaultUserRequestedSession)
 	def("sessionAbsoluteCap", &t.SessionAbsoluteCap, defaultSessionAbsoluteCap)
-	if t.EpisodeRaiseCycles <= 0 {
+	// The cycle counter is the ONLY thing bounding an episode's overall length,
+	// which is why an absurd value here has to be rejected rather than merely
+	// looking silly. Every episode re-raise carries reason "setup-incomplete",
+	// an on-table reason, so latchSessionPolicy re-stamps sessionFirstRaise and
+	// the §4.2 two-hour absolute cap re-bases with it: that cap bounds each AP
+	// PHASE, never the episode. (The per-session reset is deliberate — a fresh
+	// raise really is a fresh session — so the fix belongs here, not in
+	// sessionFirstRaise.) Left unbounded, episodeRaiseCycles = 100000 would
+	// postpone the documented four-cycle settlement effectively forever, and
+	// the settled state is where the LAN escape lives.
+	if t.EpisodeRaiseCycles <= 0 || t.EpisodeRaiseCycles > maxEpisodeRaiseCycles {
+		if t.EpisodeRaiseCycles != 0 {
+			logger.Warn("provisioning: episodeRaiseCycles out of range; using the built-in default",
+				zap.Int("configured", t.EpisodeRaiseCycles),
+				zap.Int("max", maxEpisodeRaiseCycles),
+				zap.Int("default", defaultEpisodeRaiseCycles))
+		}
 		t.EpisodeRaiseCycles = defaultEpisodeRaiseCycles
 	}
 	t.EpisodeStationLadder = usableLadder(t.EpisodeStationLadder, logger)
