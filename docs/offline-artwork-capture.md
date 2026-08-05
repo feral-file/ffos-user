@@ -1857,6 +1857,40 @@ Item records are counted but not separately bounded: unlike playlist
 bodies they are deleted with their item, so they scale with a population
 eviction already controls.
 
+The ceiling is also **reported**, as `getOfflineCacheStatus`' `diskLimit`
+alongside the `diskUsed` it bounds, so a controller can show cache usage
+as a proportion rather than a bare byte count and explain why items
+disappear. It is omitted rather than sent as `0` when `maxDiskBytes <= 0`,
+because that case means no ceiling *and no item eviction* — the opposite
+of what a `0` would convey. (Playlist-body pruning above is by count and
+runs regardless, which is why that phrasing says *item*.)
+
+What `diskLimit` reports is the **budget, not the threshold eviction
+actually fires at** — the two are different numbers, and a controller that
+conflates them draws a gauge that misreads in both directions.
+`reclaimDiskForCapture` above runs before every capture and evicts down to
+`maxDiskBytes - maxDiskBytes/captureReclaimHeadroomDivisor`, so a busy
+store oscillates between roughly seven eighths of the budget and the
+budget itself (a capture is handed the whole freed headroom as its own
+ceiling — see `newDiskBudgetFromStore`); `enforceDiskLimit` only binds
+when one capture writes past the ceiling in a single pass. Usage can also
+sit *above* the budget indefinitely, because eviction runs only on the
+capture path: lowering `maxDiskBytes` on a populated device is not
+reconciled until the next download, and `Start` deliberately does not
+enforce the ceiling (it sweeps and GCs only). Playlist bodies are counted
+but bounded by count, so no eviction reclaims them either.
+
+`docs/controld-inbound-controller-messages.md` states all of this for
+client authors, and quotes the current one-eighth margin as an explicitly
+**illustrative, non-contractual** figure so a client can picture the
+behavior without hardcoding it. Retuning `captureReclaimHeadroomDivisor`
+therefore means updating every figure derived from it: "one eighth" and the
+"~8.75 GiB" example in that doc's "Cache size and eviction" paragraph, and
+"roughly seven eighths" above in this one — not merely rechecking the
+surrounding prose, which stays true at any margin. If a controller ever
+genuinely needs the threshold rather than the budget, add a field for it
+rather than letting clients derive one from the divisor.
+
 ### A child target is only resumed once interception is armed
 
 Flat-mode child targets (cross-origin OOPIF iframes) attach paused, and

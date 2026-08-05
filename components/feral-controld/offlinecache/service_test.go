@@ -1958,6 +1958,100 @@ func TestService_Status_AggregatesTotalsAndDiskUsage(t *testing.T) {
 	assert.Greater(t, *snap.DiskUsedBytes, int64(20), "the two seeded blobs alone are 20 bytes")
 	assert.False(t, snap.Truncated)
 	assert.Empty(t, snap.NextCursor)
+	// This service was built with maxDiskBytes 0 — see the unlimited case
+	// below for why that must not surface as a zero limit.
+	assert.Nil(t, snap.DiskLimitBytes)
+}
+
+// diskUsed measures the WHOLE store even when the request narrows the
+// report to a subset of sources — unlike totals, which counts only the
+// requested set. The wire contract now states this, and a controller
+// renders it as total cache usage, so an "optimization" that narrowed
+// DiskUsage to the filtered set would silently turn a subset into a
+// whole-cache figure on screen.
+func TestService_Status_DiskUsedIsWholeStoreUnderSourceFilter(t *testing.T) {
+	ts := setupService(t, 0, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "0123456789", time.Now())
+	seedItemWithCapturedAt(t, ts.store, "item-2", "abcdefghij", time.Now())
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{
+		Sources: []string{"https://example.com/item-1"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, snap.Totals)
+	assert.Equal(t, 1, snap.Totals.Total, "totals ARE narrowed by the filter")
+	require.NotNil(t, snap.DiskUsedBytes)
+	assert.Equal(t, allCacheBytesOnDisk(t, ts.store.RootDir()), *snap.DiskUsedBytes,
+		"diskUsed is NOT narrowed — it stays the whole store's footprint")
+}
+
+func TestService_Status_ReportsDiskLimit(t *testing.T) {
+	ts := setupService(t, 4096, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "0123456789", time.Now())
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, snap.DiskLimitBytes)
+	assert.Equal(t, int64(4096), *snap.DiskLimitBytes)
+}
+
+// A <=0 budget means "unlimited" to Service (see its maxDiskBytes field),
+// and with no ceiling enforceDiskLimit/reclaimDiskForCapture return early,
+// so no item is ever evicted (playlist bodies are still pruned by count).
+// Reporting that as diskLimit 0 would tell a client the exact opposite —
+// a cache permanently at 100% of its budget — so the field is omitted
+// instead and the client renders "no limit".
+func TestService_Status_OmitsDiskLimitWhenUnlimited(t *testing.T) {
+	for _, maxDiskBytes := range []int64{0, -1} {
+		ts := setupService(t, maxDiskBytes, nil)
+		seedItemWithCapturedAt(t, ts.store, "item-1", "0123456789", time.Now())
+
+		snap, err := ts.service.Status(offlinecache.StatusRequest{})
+		require.NoError(t, err)
+		require.NotNil(t, snap.DiskUsedBytes, "usage is still measured without a ceiling")
+		assert.Nil(t, snap.DiskLimitBytes, "maxDiskBytes=%d means unlimited", maxDiskBytes)
+		ts.ctrl.Finish()
+	}
+}
+
+// diskLimit rides the same first-page gate as totals/diskUsed even though
+// it costs nothing to compute: a ceiling without the usage measured
+// against it is not renderable, so one rule ("the first page carries the
+// summary block") beats two.
+func TestService_Status_DiskLimitIsFirstPageOnly(t *testing.T) {
+	ts := setupService(t, 4096, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "one", time.Now())
+	seedItemWithCapturedAt(t, ts.store, "item-2", "two", time.Now())
+
+	first, err := ts.service.Status(offlinecache.StatusRequest{Limit: 1})
+	require.NoError(t, err)
+	require.True(t, first.Truncated)
+	require.NotNil(t, first.DiskLimitBytes)
+
+	second, err := ts.service.Status(offlinecache.StatusRequest{Limit: 1, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	assert.Nil(t, second.DiskLimitBytes)
+	assert.Nil(t, second.DiskUsedBytes, "the whole summary block is first-page-only")
+}
+
+// TotalsOnly is the summary caller's request shape (an empty items list),
+// and it is exactly what the app's storage section uses — so the limit
+// has to survive that path, not just the full-snapshot one.
+func TestService_Status_TotalsOnlyCarriesDiskLimit(t *testing.T) {
+	ts := setupService(t, 4096, nil)
+	defer ts.ctrl.Finish()
+	seedItemWithCapturedAt(t, ts.store, "item-1", "0123456789", time.Now())
+
+	snap, err := ts.service.Status(offlinecache.StatusRequest{TotalsOnly: true})
+	require.NoError(t, err)
+	assert.Empty(t, snap.Items)
+	require.NotNil(t, snap.Totals)
+	require.NotNil(t, snap.DiskUsedBytes)
+	require.NotNil(t, snap.DiskLimitBytes)
+	assert.Equal(t, int64(4096), *snap.DiskLimitBytes)
 }
 
 // seedItemWithReason writes a record whose capture came back incomplete,

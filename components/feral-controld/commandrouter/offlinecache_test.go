@@ -944,10 +944,12 @@ func TestCommandHandler_GetOfflineCacheStatus_WithSources(t *testing.T) {
 
 	totals := offlinecache.StatusTotals{Total: 1, Ready: 1}
 	diskUsed := int64(1024)
+	diskLimit := int64(10 << 30)
 	snapshot := offlinecache.StatusSnapshot{
-		Items:         []offlinecache.ItemStatus{{Source: "https://example.com/item-1", State: offlinecache.StateReady}},
-		Totals:        &totals,
-		DiskUsedBytes: &diskUsed,
+		Items:          []offlinecache.ItemStatus{{Source: "https://example.com/item-1", State: offlinecache.StateReady}},
+		Totals:         &totals,
+		DiskUsedBytes:  &diskUsed,
+		DiskLimitBytes: &diskLimit,
 	}
 	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{Sources: []string{"https://example.com/item-1", "https://example.com/item-2"}}).
 		Return(snapshot, nil).Times(1)
@@ -962,6 +964,7 @@ func TestCommandHandler_GetOfflineCacheStatus_WithSources(t *testing.T) {
 	assert.Equal(t, snapshot.Items, resp["items"])
 	assert.Equal(t, snapshot.Totals, resp["totals"])
 	assert.EqualValues(t, 1024, resp["diskUsed"])
+	assert.EqualValues(t, 10<<30, resp["diskLimit"])
 	// Last page: the paging fields must be absent, not present-and-empty,
 	// so a client cannot follow a cursor that does not exist.
 	assert.NotContains(t, resp, "nextCursor")
@@ -982,10 +985,42 @@ func TestCommandHandler_GetOfflineCacheStatus_NoFilter(t *testing.T) {
 
 	require.NoError(t, err)
 	resp := assertOkResponse(t, result)
-	// Totals/diskUsed are pointers on the snapshot; a nil one must be
-	// omitted rather than marshaled as null.
+	// Totals/diskUsed/diskLimit are pointers on the snapshot; a nil one
+	// must be omitted rather than marshaled as null. For diskLimit a null
+	// (or a 0) would additionally be a lie about eviction — see
+	// TestService_Status_OmitsDiskLimitWhenUnlimited.
 	assert.NotContains(t, resp, "totals")
 	assert.NotContains(t, resp, "diskUsed")
+	assert.NotContains(t, resp, "diskLimit")
+}
+
+// The first-page shape an unlimited cache produces: usage measured and
+// reported, no ceiling to report it against. This is the mixed case the
+// wire contract tells clients to special-case ("render the absence as no
+// limit"), so the two fields must be independently optional here rather
+// than traveling as a pair the way totals/diskUsed do.
+func TestCommandHandler_GetOfflineCacheStatus_DiskUsedWithoutLimit(t *testing.T) {
+	ts, mockOfflineCache := setupOfflineCache(t)
+	defer ts.teardown()
+
+	totals := offlinecache.StatusTotals{Total: 1, Ready: 1}
+	diskUsed := int64(2048)
+	snapshot := offlinecache.StatusSnapshot{
+		Items:         []offlinecache.ItemStatus{{Source: "https://example.com/item-1", State: offlinecache.StateReady}},
+		Totals:        &totals,
+		DiskUsedBytes: &diskUsed,
+	}
+	mockOfflineCache.EXPECT().Status(offlinecache.StatusRequest{}).Return(snapshot, nil).Times(1)
+
+	result, err := ts.handler.Process(ts.ctx, commands.Command{
+		Type:      commands.CMD_GET_OFFLINE_CACHE_STATUS,
+		Arguments: map[string]any{},
+	})
+
+	require.NoError(t, err)
+	resp := assertOkResponse(t, result)
+	assert.EqualValues(t, 2048, resp["diskUsed"])
+	assert.NotContains(t, resp, "diskLimit")
 }
 
 func TestCommandHandler_GetOfflineCacheStatus_PagingArguments(t *testing.T) {
