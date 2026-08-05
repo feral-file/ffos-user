@@ -646,6 +646,22 @@ func TestProvisioningTuningFromConfigRejectsOutOfRangeSeconds(t *testing.T) {
 			got.EpisodeStationLadder)
 	})
 
+	t.Run("recheck ladder rung", func(t *testing.T) {
+		// Same zero-handoff contract as the episode ladder above, on the
+		// recheck AP-phase ladder (usableRecheckLadder on the far side).
+		got := provisioningTuningFromConfig(config.ProvisioningTuning{
+			RecheckApPhaseLadderSeconds: []int{60, 18446744074, 900},
+		}, zap.NewNop())
+		assert.Equal(t, []time.Duration{time.Minute, 0, 15 * time.Minute},
+			got.RecheckApPhaseLadder)
+
+		valid := provisioningTuningFromConfig(config.ProvisioningTuning{
+			RecheckApPhaseLadderSeconds: []int{60, 300},
+		}, zap.NewNop())
+		assert.Equal(t, []time.Duration{time.Minute, 5 * time.Minute},
+			valid.RecheckApPhaseLadder)
+	})
+
 	t.Run("a fully valid block passes through untouched", func(t *testing.T) {
 		got := provisioningTuningFromConfig(config.ProvisioningTuning{
 			EpisodeApPhaseSeconds:       120,

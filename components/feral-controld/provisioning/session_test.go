@@ -650,7 +650,7 @@ func TestRecheckBlinkReRaisesWhenNetworkStillGone(t *testing.T) {
 	driveSustainedRaise(t, h, ctx)
 
 	scansBefore := h.rec.count("wifi.RefreshScanCache")
-	h.tickN(ctx, 120) // the 30-minute AP phase
+	h.tickN(ctx, 8) // the first AP phase (ladder rung 0: 2 minutes)
 	// Blink ran: narrated, scanned, activated in MRU order with hidden last
 	// and the out-of-range profile never attempted, then re-raised.
 	assert.Equal(t, 1, countReason(h, StateOfflineRetrying, ReasonAPRecheck))
@@ -737,13 +737,13 @@ func TestRecheckTeardownFailureAbortsBlink(t *testing.T) {
 	driveSustainedRaise(t, h, ctx)
 
 	h.ap.downErr = errors.New("nm refuses")
-	h.tickN(ctx, 121)
+	h.tickN(ctx, 9) // past the 2-minute rung: the blink attempt aborts
 	assert.Equal(t, 0, countReason(h, StateOfflineRetrying, ReasonAPRecheck),
 		"no recheck narration while the teardown cannot complete")
 	assert.Empty(t, h.wifi.activations, "no activation with the hotspot possibly up")
 
 	h.ap.downErr = nil
-	h.tickN(ctx, 121) // the re-armed phase expires again; the blink now runs
+	h.tickN(ctx, 9) // the re-armed rung expires again; the blink now runs
 	assert.Equal(t, 1, countReason(h, StateOfflineRetrying, ReasonAPRecheck))
 }
 

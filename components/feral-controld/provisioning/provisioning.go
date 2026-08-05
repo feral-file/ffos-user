@@ -604,13 +604,17 @@ type Machine struct {
 	// presence is holding the AP down). Written on the loop, read under mu.
 	episodeDeferredShared bool
 
-	// lastHubContact / lastPortalActivity live in the mu-guarded block: they
-	// are WRITTEN by request goroutines (the hub middleware's contact
-	// observer; the portal's action handlers) and read by the loop. Hub
-	// contact feeds the §4.1 episode's deferral; portal activity feeds the
-	// §4.2 mid-portal teardown deferral.
+	// lastHubContact / lastPortalActivity / lastPortalTraffic live in the
+	// mu-guarded block: they are WRITTEN by request goroutines (the hub
+	// middleware's contact observer; the portal's handlers) and read by the
+	// loop. Hub contact feeds the §4.1 episode's deferral; portal activity
+	// (human actions only) feeds the §4.2 mid-portal teardown deferral;
+	// portal traffic (ANY request, probes included) feeds the recheck-only
+	// attached-phone deferral — see sessionExpiryDue for why the two signals
+	// stay separate.
 	lastHubContact     time.Time
 	lastPortalActivity time.Time
+	lastPortalTraffic  time.Time
 
 	// Session-policy state (§4.2) — all loop-goroutine-only. sessionPolicy is
 	// LATCHED from the raise reason at raise time and RETAINED across join
@@ -628,6 +632,13 @@ type Machine struct {
 	sessionPhaseStart time.Time
 	sessionFirstRaise time.Time
 	skipNextPreAPScan bool
+	// recheckCycle indexes the recheck cadence's AP-phase ladder
+	// (sessionPhaseBound): advanced by each completed still-gone blink,
+	// reset only at clearOffline's episode boundary. Survives blink
+	// re-raises and join-failure re-raises BY DESIGN — resetting on either
+	// would let the cadence restart its short rungs forever and never reach
+	// the 30-minute steady state.
+	recheckCycle int
 
 	// Setup-incomplete episode state (§4.1) — loop-goroutine-only. The
 	// episode window is sample-counted like the offline window but with the
@@ -2084,7 +2095,10 @@ func (m *Machine) ensureAPUp(ctx context.Context) error {
 		// Human-caused portal requests defer session teardowns (§4.2); the
 		// portal classifies (action handlers only), the machine timestamps.
 		ActivityObserved: m.observePortalActivity,
-		Logger:           m.logger,
+		// ANY portal request — probes included — feeds the recheck-only
+		// attached-phone deferral (see sessionExpiryDue for the scope).
+		TrafficObserved: m.observePortalTraffic,
+		Logger:          m.logger,
 	})
 	if err := srv.Start(); err != nil {
 		// The AP is up but the portal could not bind. Tear the radio hotspot back
@@ -2412,6 +2426,13 @@ func (m *Machine) clearOffline() {
 	// raise a stale portal picker. Clearing it here binds its lifetime to the
 	// AP-world boundary every clearOffline site already marks.
 	m.skipNextPreAPScan = false
+	// The recheck backoff ladder re-bases at the same boundary: a landing —
+	// online, a link sighting, a fresh raise after an interlude — means the
+	// NEXT recheck session is a new outage and deserves the short early
+	// rungs again. The blink's still-gone re-raise deliberately never calls
+	// clearOffline (see runRecheckBlink), which is exactly what lets the
+	// counter climb toward the 30-minute steady state within one session.
+	m.recheckCycle = 0
 }
 
 // resetAPRaiseEscalation resets the raise-failure streak and dismisses a

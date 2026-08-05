@@ -81,7 +81,12 @@ type Tuning struct {
 	DeferralCycleBudget   time.Duration
 	DeferralEpisodeBudget time.Duration
 
-	RecheckApPhase        time.Duration
+	RecheckApPhase time.Duration
+	// RecheckApPhaseLadder is the escalating AP phase for the recheck
+	// cadence's EARLY cycles (cycle 0 = first rung); once the ladder is
+	// exhausted every later cycle uses RecheckApPhase. See
+	// defaultRecheckApPhaseLadder for why the early rungs are short.
+	RecheckApPhaseLadder  []time.Duration
 	RecheckBlinkCeiling   time.Duration
 	ActivationTimeout     time.Duration
 	PortalActivityWindow  time.Duration
@@ -126,6 +131,56 @@ const (
 	// episode.
 	maxEpisodeRaiseCycles = 100
 )
+
+// defaultRecheckApPhaseLadder is the escalating AP phase for the recheck
+// cadence's early cycles: 2m → 5m → 15m, then RecheckApPhase (30m) steady.
+// A fixed 30-minute first phase left a structural blind window — the single
+// radio cannot scan under its own AP, so the ONLY way the machine notices the
+// user's network returning is the blink at phase end. Field incident
+// FF1-8EVTK3RE (2026-08-05): the user restored their hotspot ~3 minutes after
+// the AP rose and the frame sat blind for what would have been the full 30
+// minutes. Short early rungs catch that dominant real recovery (a human
+// fixing the network within minutes); the steady state keeps the documented
+// 30-minute cadence so a truly gone network costs no extra radio churn.
+//
+// Accepted worst-case duty cycle on rung 0: the blink may hold the AP down
+// for up to RecheckBlinkCeiling (4m, e.g. a hidden-profile activation eating
+// its full 90s timeout), so a 2-minute rung can spend more time blinking
+// than broadcasting. Tolerated for at most the first two rungs because
+// during a recheck session the escape a present human actually uses is
+// joining THEIR OWN returned network — which is what the blink attempts —
+// unlike the §4.1 episode, whose LAN escape lives in station mode and pins
+// "AP ≤ 33% of every cycle". Anyone lowering the knob below the built-in
+// rungs trades exactly this duty cycle; minRecheckRung is the hard floor.
+func defaultRecheckApPhaseLadder() []time.Duration {
+	return []time.Duration{2 * time.Minute, 5 * time.Minute, 15 * time.Minute}
+}
+
+// minRecheckRung is the floor a configured recheck rung must clear: below
+// one minute the AP-down blink time dominates the cycle outright and the QR
+// flaps faster than a human can act on it — a typo, not a cadence.
+const minRecheckRung = time.Minute
+
+// usableRecheckLadder validates a configured recheck AP-phase ladder,
+// ALL-OR-NOTHING like usableLadder above and for the same reason: the rungs
+// are one escalation shape, and splicing a default into a custom ladder
+// produces a cadence nobody designed. A rung below minRecheckRung or over
+// the tuning ceiling discards the whole override. An empty ladder means
+// "unset" and takes the default — an operator who wants the old fixed
+// cadence sets a single rung equal to recheckApPhase.
+func usableRecheckLadder(ladder []time.Duration, logger *zap.Logger) []time.Duration {
+	if len(ladder) == 0 {
+		return defaultRecheckApPhaseLadder()
+	}
+	for _, d := range ladder {
+		if d < minRecheckRung || d > maxTuningDuration {
+			logger.Warn("provisioning: recheck AP-phase ladder has an out-of-range rung; using the built-in ladder",
+				zap.Duration("rung", d), zap.Durations("configured", ladder))
+			return defaultRecheckApPhaseLadder()
+		}
+	}
+	return ladder
+}
 
 // defaultEpisodeStationLadder is the escalating station phase between episode
 // AP phases: early cycles favor the user who is probably still nearby
@@ -206,6 +261,7 @@ func (t Tuning) withDefaults(tick time.Duration, logger *zap.Logger) Tuning {
 	def("deferralCycleBudget", &t.DeferralCycleBudget, defaultDeferralCycleBudget)
 	def("deferralEpisodeBudget", &t.DeferralEpisodeBudget, defaultDeferralEpisodeBudget)
 	def("recheckApPhase", &t.RecheckApPhase, defaultRecheckApPhase)
+	t.RecheckApPhaseLadder = usableRecheckLadder(t.RecheckApPhaseLadder, logger)
 	def("recheckBlinkCeiling", &t.RecheckBlinkCeiling, defaultRecheckBlinkCeiling)
 	def("activationTimeout", &t.ActivationTimeout, defaultActivationTimeout)
 	def("portalActivityWindow", &t.PortalActivityWindow, defaultPortalActivityWindow)
@@ -311,6 +367,18 @@ func (m *Machine) ObserveHubContact() {
 func (m *Machine) observePortalActivity() {
 	m.mu.Lock()
 	m.lastPortalActivity = m.clock.Now()
+	m.mu.Unlock()
+}
+
+// observePortalTraffic records one portal request of ANY kind — captive
+// probes and root fetches included (wired into portal.Config.TrafficObserved
+// by ensureAPUp). Weaker evidence than observePortalActivity: it proves a
+// phone is attached to the AP, not that a human acted. Consumed only by the
+// recheck blink's attached-phone deferral in sessionExpiryDue.
+// Request-goroutine-safe.
+func (m *Machine) observePortalTraffic() {
+	m.mu.Lock()
+	m.lastPortalTraffic = m.clock.Now()
 	m.mu.Unlock()
 }
 
@@ -494,6 +562,14 @@ func (m *Machine) latchSessionPolicy(reason string) {
 func (m *Machine) sessionPhaseBound() time.Duration {
 	switch m.sessionPolicy {
 	case sessionRecheck:
+		// Escalating backoff: early cycles read the ladder (short phases so
+		// a network the user fixes within minutes is noticed within
+		// minutes), later cycles settle on RecheckApPhase. recheckCycle is
+		// advanced by the blink's still-gone re-raise and reset only at
+		// clearOffline's episode boundary — see both sites.
+		if m.recheckCycle < len(m.tuning.RecheckApPhaseLadder) {
+			return m.tuning.RecheckApPhaseLadder[m.recheckCycle]
+		}
 		return m.tuning.RecheckApPhase
 	case sessionEpisode:
 		return m.tuning.EpisodeApPhase
@@ -552,6 +628,34 @@ func (m *Machine) sessionExpiryDue() bool {
 	if !lastActivity.IsZero() && now.Sub(lastActivity) < m.tuning.PortalActivityWindow &&
 		now.Sub(m.sessionPhaseStart) < bound+m.tuning.PortalDeferralCeiling {
 		return false
+	}
+	// Attached-phone deferral, RECHECK ONLY: any portal traffic — root
+	// fetches and OS captive probes included — within the activity window
+	// defers a recheck blink, up to the same ceiling. This deliberately
+	// reverses portal.Config.ActivityObserved's "probes never count" rule
+	// for this one policy: with ladder-short early phases (2 minutes, not
+	// 30), a phone that has joined the AP but not yet submitted anything —
+	// the user reading the network list — would otherwise be kicked by the
+	// first blink, and an associated phone's automatic probes are exactly
+	// the "a human is attached" evidence that gap needs. The ceiling keeps
+	// an idle phone left on the AP from pinning it forever, and the bounded
+	// policies keep the probes-never-count rule because their phases were
+	// never shortened.
+	//
+	// Best-effort, not a guarantee: the portal page itself never polls, so
+	// after the initial page load this signal is only as fresh as the OS's
+	// own captive re-probe cadence — minutes-scale and backing off on some
+	// platforms. A phone whose OS goes quiet for a full activity window is
+	// treated as absent and the blink proceeds; the mitigation narrows R1,
+	// it does not close it.
+	if m.sessionPolicy == sessionRecheck {
+		m.mu.Lock()
+		lastTraffic := m.lastPortalTraffic
+		m.mu.Unlock()
+		if !lastTraffic.IsZero() && now.Sub(lastTraffic) < m.tuning.PortalActivityWindow &&
+			now.Sub(m.sessionPhaseStart) < bound+m.tuning.PortalDeferralCeiling {
+			return false
+		}
 	}
 	return true
 }
@@ -734,8 +838,9 @@ func (m *Machine) runRecheckBlink(ctx context.Context) {
 	}
 
 	associated := false
+	measured := false
 	if scanErr == nil {
-		associated = m.activateInRangeProfiles(blinkCtx, ssids)
+		associated, measured = m.activateInRangeProfiles(blinkCtx, ssids)
 	}
 
 	if associated {
@@ -762,6 +867,29 @@ func (m *Machine) runRecheckBlink(ctx context.Context) {
 	// the documented common failure the retry loop exists for), so the
 	// re-raise then runs its normal scan retries.
 	m.skipNextPreAPScan = scanUsable
+	// Escalate the backoff ONLY after a COMPLETED still-gone measurement: a
+	// usable scan (non-empty, error-free) AND a finished activation pass over
+	// a readable profile list. Every abort shape re-arms the SAME rung — the
+	// teardown failure (early return above), a scan error or the documented
+	// common empty post-bounce scan (scanUsable false), a profile-listing
+	// error, and an exhausted blink budget (measured false) — because a blink
+	// that never looked at the world says nothing about whether the network
+	// is still gone, and escalating on it would walk the cadence back into
+	// the 30-minute blind window this ladder exists to remove. The accepted
+	// trade-off: a CHRONICALLY unmeasurable world (every scan empty or
+	// erroring — an empty RF environment, a wedged nmcli) holds the short
+	// rung indefinitely, and on an unattended frame that churn is UNBOUNDED
+	// — deliberately preferred over silent blindness, because the churn is
+	// visible in logs and on screen while the blind window is invisible by
+	// definition, and its usual causes co-occur with louder failures the
+	// §4.6 escalation latches already surface. The re-raise below
+	// re-latches an on-table reason
+	// without touching the counter, and only clearOffline's episode boundary
+	// resets it — a blink re-raise deliberately never calls clearOffline,
+	// which is what lets the cadence survive its own cycles.
+	if scanUsable && measured {
+		m.recheckCycle++
+	}
 	m.transition(ctx, StateAPActive, Detail{
 		Reason:  m.sessionReason,
 		Message: "Wi-Fi still unavailable; reopening setup",
@@ -771,18 +899,23 @@ func (m *Machine) runRecheckBlink(ctx context.Context) {
 // activateInRangeProfiles force-activates saved profiles whose SSID the scan
 // shows in range, most-recently-used first, with hidden-SSID profiles
 // (invisible to scans by definition) getting one attempt last if budget
-// remains. Returns whether any activation succeeded. Relocation is
+// remains. Returns (associated, measured): `associated` is whether any
+// activation succeeded; `measured` is whether the pass COMPLETED — the
+// profile list was readable and every candidate got its attempt (or there
+// legitimately were none in range). The backoff ladder escalates only on a
+// completed measurement, so a listing error or an exhausted blink budget
+// returns measured=false and the same rung re-arms. Relocation is
 // definitionally multi-profile, and a blind `connection up` on an
 // out-of-range profile blocks up to a full activation deadline — half the
 // blink budget — so the wrong pick would starve the right one; hence the
-// in-range filter. Fail-bias per §4.2: a LISTING error aborts (returns false
-// → the blink re-raises) — never a blind activation off an unreadable list;
-// a per-ACTIVATION error logs and continues (fail-open).
-func (m *Machine) activateInRangeProfiles(blinkCtx context.Context, ssids []string) bool {
+// in-range filter. Fail-bias per §4.2: a LISTING error aborts (returns
+// false → the blink re-raises) — never a blind activation off an unreadable
+// list; a per-ACTIVATION error logs and continues (fail-open).
+func (m *Machine) activateInRangeProfiles(blinkCtx context.Context, ssids []string) (associated, measured bool) {
 	profiles, err := m.wifi.ActivationProfiles(blinkCtx)
 	if err != nil {
 		m.logger.Warn("provisioning: recheck profile listing failed; aborting the blink", zap.Error(err))
-		return false
+		return false, false
 	}
 	inRange := make(map[string]bool, len(ssids))
 	for _, s := range ssids {
@@ -804,8 +937,10 @@ func (m *Machine) activateInRangeProfiles(blinkCtx context.Context, ssids []stri
 
 	for _, p := range candidates {
 		if blinkCtx.Err() != nil {
+			// Exhausted budget = INCOMPLETE measurement: candidates remain
+			// unattempted, so this pass must not escalate the ladder.
 			m.logger.Info("provisioning: recheck blink budget exhausted; re-raising")
-			return false
+			return false, false
 		}
 		actCtx, cancel := context.WithTimeout(blinkCtx, m.tuning.ActivationTimeout)
 		err := m.wifi.ActivateProfile(actCtx, p.UUID)
@@ -813,12 +948,12 @@ func (m *Machine) activateInRangeProfiles(blinkCtx context.Context, ssids []stri
 		if err == nil {
 			m.logger.Info("provisioning: recheck reactivated a saved profile",
 				zap.String("ssid", p.SSID))
-			return true
+			return true, true
 		}
 		m.logger.Info("provisioning: recheck activation failed; trying the next candidate",
 			zap.String("ssid", p.SSID), zap.Error(err))
 	}
-	return false
+	return false, true
 }
 
 // -----------------------------------------------------------------------------

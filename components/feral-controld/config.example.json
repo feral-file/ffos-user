@@ -31,6 +31,7 @@
     "deferralCycleBudgetSeconds": 300,
     "deferralEpisodeBudgetSeconds": 900,
     "recheckApPhaseSeconds": 1800,
+    "recheckApPhaseLadderSeconds": [120, 300, 900],
     "recheckBlinkCeilingSeconds": 240,
     "activationTimeoutSeconds": 90,
     "portalActivityWindowSeconds": 120,

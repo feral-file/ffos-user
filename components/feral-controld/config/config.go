@@ -209,13 +209,17 @@ type ProvisioningTuning struct {
 	// ladder (default 300/600/1200).
 	EpisodeStationLadderSeconds []int `json:"episodeStationLadderSeconds,omitempty"`
 
-	RecheckApPhaseSeconds        int `json:"recheckApPhaseSeconds,omitempty"`
-	RecheckBlinkCeilingSeconds   int `json:"recheckBlinkCeilingSeconds,omitempty"`
-	ActivationTimeoutSeconds     int `json:"activationTimeoutSeconds,omitempty"`
-	PortalActivityWindowSeconds  int `json:"portalActivityWindowSeconds,omitempty"`
-	PortalDeferralCeilingSeconds int `json:"portalDeferralCeilingSeconds,omitempty"`
-	UserRequestedSessionSeconds  int `json:"userRequestedSessionSeconds,omitempty"`
-	SessionAbsoluteCapSeconds    int `json:"sessionAbsoluteCapSeconds,omitempty"`
+	RecheckApPhaseSeconds int `json:"recheckApPhaseSeconds,omitempty"`
+	// RecheckApPhaseLadderSeconds overrides the escalating recheck AP-phase
+	// ladder for the EARLY cycles (default 120/300/900); after the ladder,
+	// every cycle uses recheckApPhaseSeconds.
+	RecheckApPhaseLadderSeconds  []int `json:"recheckApPhaseLadderSeconds,omitempty"`
+	RecheckBlinkCeilingSeconds   int   `json:"recheckBlinkCeilingSeconds,omitempty"`
+	ActivationTimeoutSeconds     int   `json:"activationTimeoutSeconds,omitempty"`
+	PortalActivityWindowSeconds  int   `json:"portalActivityWindowSeconds,omitempty"`
+	PortalDeferralCeilingSeconds int   `json:"portalDeferralCeilingSeconds,omitempty"`
+	UserRequestedSessionSeconds  int   `json:"userRequestedSessionSeconds,omitempty"`
+	SessionAbsoluteCapSeconds    int   `json:"sessionAbsoluteCapSeconds,omitempty"`
 }
 
 // ProvisioningTuning decodes the raw provisioning block permissively: an
