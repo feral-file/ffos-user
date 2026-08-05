@@ -2442,11 +2442,13 @@ Percentages are int[0..100], temperature is finite [-40..125], and resource
 fields are individually optional. Cache readiness fields are required;
 `offlineReady` is true only when the active/default verified playlist and every
 asset required for autonomous playback are locally readable. `cache.bytes` is
-the whole cache footprint, not just artwork blobs, and `cache.limitBytes` is
-the byte budget it is measured against — the v2 spelling of v1's
-`diskUsed`/`diskLimit`, whose semantics (usage unbounded by the budget in both
-directions, clamp the ratio, not comparable to `resources.storageUsedPercent`)
-are documented in `docs/controld-inbound-controller-messages.md` and must stay
+the whole **committed** cache footprint — not just artwork blobs, and not
+including partially-written temporaries, so a download in flight is absent
+from it — and `cache.limitBytes` is the byte budget it is measured against.
+These are the v2 spelling of v1's `diskUsed`/`diskLimit`, whose semantics
+(usage unbounded by the budget in both directions, clamp the ratio, temporary
+files excluded, not comparable to `resources.storageUsedPercent`) are
+documented in `docs/controld-inbound-controller-messages.md` and must stay
 identical here. `limitBytes` **deviates from this section's "omitted when
 unknown" rule**: it is omitted when the value is known and the cache is
 unbounded, so absence means "no limit" — never "unknown", and never `0`.

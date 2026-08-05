@@ -308,7 +308,9 @@ type StatusSnapshot struct {
 	// DiskUsedBytes is named diskUsed on the wire to match the plan's
 	// documented command response shape (section 5). Note it measures the
 	// WHOLE store (Store.DiskUsage), which is not narrowed by a Sources
-	// filter the way Totals is.
+	// filter the way Totals is — and only the COMMITTED footprint, since
+	// dirSize skips .tmp files, so a capture in flight and any orphaned
+	// temporary (reclaimed only by Start's sweep) are absent from it.
 	DiskUsedBytes *int64 `json:"diskUsed,omitempty"`
 	// DiskLimitBytes is the cache's byte budget (Service.maxDiskBytes,
 	// i.e. offlineCache.maxDiskBytes or DefaultMaxDiskBytes) that

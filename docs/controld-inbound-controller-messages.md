@@ -2019,10 +2019,21 @@ when the summary is all you need — it skips the per-item disk measurements
 and the response body entirely.
 
 `totals` counts the **whole requested set**, not the current page.
-`diskUsed` is different: it measures the **whole store** — every byte the
-cache persists (blobs, item records, playlist bodies, the by-url index) —
-and is *not* narrowed by a `sources` filter. A filtered request still
-reports total cache usage, not the usage of the items it asked about.
+`diskUsed` is different: it measures the **whole store** — committed blobs,
+item records, playlist bodies, and the by-url index — and is *not* narrowed
+by a `sources` filter. A filtered request still reports total cache usage,
+not the usage of the items it asked about.
+
+It is the **committed** footprint, not everything occupying the cache
+directory: partially-written `.tmp` files are excluded by design, since a
+mid-write file is not yet cache content. Two visible consequences. A
+download in flight consumes disk that `diskUsed` does not report until it
+lands — and a single artwork can be gigabyte-scale, so a gauge can sit
+still while the device is demonstrably busy and free space is falling. And
+if the daemon is killed mid-write (SIGKILL, power loss), the orphaned
+temporary is reclaimed only by the sweep on the **next daemon start** —
+neither GC nor eviction reclaims it — so until then it occupies space that
+neither `diskUsed` nor the budget below accounts for.
 So `diskUsed` does not equal the sum of `items[].bytes`, in either
 direction: it counts metadata no item reports, while blobs shared between
 items are counted once in `diskUsed` but reported by each item that
