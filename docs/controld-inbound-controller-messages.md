@@ -163,6 +163,8 @@ Current success response:
 Current error cases:
 
 - Invalid JSON shape under `request` causes command failure.
+- Missing or blank `clientDevice.device_id` causes command failure.
+- A staged factory reset rejects the claim — see the shared rule under [`factoryReset`](#factoryreset).
 - State persistence failure causes command failure.
 - `primaryAddress` is accepted but not currently used by the executor.
 
@@ -217,6 +219,7 @@ Current success response example:
   "type": "RPC",
   "messageID": "msg-status-1",
   "message": {
+    "contract": "2",
     "screenRotation": "normal",
     "connectedWifi": "Studio WiFi",
     "installedVersion": "1.2.3",
@@ -233,6 +236,33 @@ Current success response example:
 }
 ```
 
+`contract` is always `"2"` on this firmware (equal to the hub's
+`/api/v2/status` contract — one firmware gate, two transports): it lets the
+app identify a v2 frame over the relayer when mDNS is unavailable. Its
+PRESENCE is the capability
+signal — old firmware's reply simply lacks the key.
+
+The reply additionally carries the additive `network` health object — the
+same diagnosis the on-screen
+narration shows, also served on the hub status routes:
+
+```json
+"network": {
+  "state": "offline_retrying",
+  "reason": "joined-no-internet",
+  "ssid": "Studio WiFi",
+  "link": "wifi",
+  "internet": false
+}
+```
+
+(`deferred` is `omitempty`: it appears only while true.)
+
+`link` ∈ `wifi`/`ethernet`/`none`/`unknown` from the machine's cached probe
+evidence (a status poll never runs a probe); `deferred` tells the app its own
+control-plane contact is holding a pending setup-mode raise down, so it should
+surface the pairing/`startWifiSetup` action instead of waiting.
+
 Current error cases:
 
 - Status collection dependencies may fail; unavailable fields are usually
@@ -240,6 +270,58 @@ Current error cases:
 - A hard status collection error causes command failure.
 
 Current relayer error response: none standardized; command failure is logged.
+
+### startWifiSetup
+
+Purpose: put the frame into its existing SoftAP setup mode on the app's
+request, so a user can re-configure Wi-Fi.
+Reachable over the relayer and the LAN hub `POST /api/cast` like every
+device-control command. Ships with the initial v2 release, so the v2 gate
+(mDNS TXT `api=2` + `/api/v2/status` → `contract:"2"`, or the relayer
+`contract` above) is the capability gate.
+
+Example:
+
+```json
+{
+  "messageID": "msg-wifisetup-1",
+  "message": {
+    "command": "startWifiSetup",
+    "request": {}
+  }
+}
+```
+
+Current success response example (produced before the raise is queued, so it
+normally wins the race by a wide margin — the raise is seconds of `nmcli` work
+— but it is NOT synchronized against the transport, and raising the AP severs
+the station link that carries the reply, so the app must treat a send timeout
+as success):
+
+```json
+{
+  "type": "RPC",
+  "messageID": "msg-wifisetup-1",
+  "message": { "ok": true, "ssid": "FF1-8EVTK3RE" }
+}
+```
+
+Rejections are normal replies, not transport errors:
+
+```json
+{ "ok": false, "code": "wired_link_active", "message": "…" }
+```
+
+| Code | When |
+|---|---|
+| `wired_link_active` | a live ethernet link, or the wire probe errored or is unavailable (fail closed) |
+| `busy` | the provisioning machine is in `joining` or `starting` |
+| `unavailable` | the provisioning seam is not wired (test/partial builds) |
+
+Acceptance queues the raise on the provisioning loop: the standard entry
+sequence runs there, and the session is bounded by the `user-requested` row of
+the AP session policy (30 minutes, portal-activity deferral, 2h cap — see
+`setup-flow.md`). Everything after the raise is the unchanged out-of-box flow.
 
 ### deviceMetrics
 
@@ -853,7 +935,7 @@ Current relayer error response: none standardized; command failure is logged.
 
 ### factoryReset
 
-Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted relayer topic, narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume).
+Purpose: execute factory reset. Handled in-process by `feral-controld`: it clears the persisted claim (relayer topic and `ConnectedDevice`), narrates `factory_reset`, and starts `set-factory-boot.service` (which stages a one-shot boot into the pristine factory snapshot and reboots, abandoning the running subvolume). The live relayer session stays open, so this command's ack is deliverable — see [`architecture.md`](architecture.md) for why closing it was removed.
 
 Example:
 
@@ -872,6 +954,8 @@ Current success response: `{"ok": true}`.
 Current error cases:
 
 - Starting `set-factory-boot.service` fails.
+
+**While a reset is staged, the command surface closes.** Every command except read-only reporting (`getDeviceStatus`, `deviceMetrics`, `ddcPanelStatus`) is rejected with `factory reset in progress: <command> is not accepted`, including a repeat `factoryReset`. The reset clears the claim so a rolled-back candidate boot comes up unclaimed, and any write behind it — a new claim, an SSH key, a toggle sentinel, a competing update one-shot — would survive that rollback and undo the reset. The closure normally ends when the device reboots; it is also lifted if the reset unit fails to start, or by a watchdog if no reboot follows (a clean `systemctl start` does not prove the reset was staged — the unit is `Type=simple`).
 
 Current relayer error response: none standardized; command failure is logged.
 

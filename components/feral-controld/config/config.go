@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -168,6 +169,17 @@ type Config struct {
 	CommandStorm *CommandStormConfig `json:"commandStorm,omitempty"`
 	OfflineCache *OfflineCacheConfig `json:"offlineCache,omitempty"`
 
+	// Provisioning carries the escape-policy tuning block
+	// (docs/network-recovery-ux.md §4.1/§4.2) as RAW bytes, decoded
+	// permissively by ProvisioningTuning(). RawMessage on purpose: config.Load
+	// failing is FATAL under Restart=always, so a typo'd provisioning block
+	// must never crash-loop the daemon and take down every recovery surface at
+	// once — a syntactically valid but wrong-typed block logs and falls back
+	// to defaults, while a SYNTAX error anywhere in the file still fails the
+	// whole parse exactly as today (operator guidance: validate the JSON
+	// before restarting). Existing keys keep their existing strict behavior.
+	Provisioning json.RawMessage `json:"provisioning,omitempty"`
+
 	// MACInfo contains MAC addresses for all network interfaces
 	// e.g., map[string]string{"enp1s0":"aa:bb:cc:dd:ee:ff","wlp2s0":"11:22:33:44:55:66"}
 	MACInfo map[string]string `json:"-"`
@@ -177,6 +189,55 @@ type Config struct {
 // explicit "enableHub": false disables it.
 func (c *Config) HubEnabled() bool {
 	return c.EnableHub == nil || *c.EnableHub
+}
+
+// ProvisioningTuning carries the on-device knobs for the provisioning escape
+// policy (docs/network-recovery-ux.md §4.1/§4.2). Every field follows the
+// integer-with-unit-in-the-name convention (never time.Duration, which JSON
+// would read as nanoseconds); zero means "use the built-in default" — the
+// defaults live as constants in the provisioning package, next to the logic
+// that runs on them, so config carries only overrides.
+type ProvisioningTuning struct {
+	// SetupIncompleteDisabled is the §4.1 kill-switch: disabling the
+	// setup-incomplete fallback reverts unclaimed devices to
+	// narration-plus-LAN-pairing only, with no other behavior change.
+	SetupIncompleteDisabled bool `json:"setupIncompleteDisabled,omitempty"`
+
+	EpisodeWindowSeconds         int `json:"episodeWindowSeconds,omitempty"`
+	EpisodeApPhaseSeconds        int `json:"episodeApPhaseSeconds,omitempty"`
+	EpisodeRaiseCycles           int `json:"episodeRaiseCycles,omitempty"`
+	HubContactFreshSeconds       int `json:"hubContactFreshSeconds,omitempty"`
+	DeferralCycleBudgetSeconds   int `json:"deferralCycleBudgetSeconds,omitempty"`
+	DeferralEpisodeBudgetSeconds int `json:"deferralEpisodeBudgetSeconds,omitempty"`
+	// EpisodeStationLadderSeconds overrides the escalating station-phase
+	// ladder (default 300/600/1200).
+	EpisodeStationLadderSeconds []int `json:"episodeStationLadderSeconds,omitempty"`
+
+	RecheckApPhaseSeconds        int `json:"recheckApPhaseSeconds,omitempty"`
+	RecheckBlinkCeilingSeconds   int `json:"recheckBlinkCeilingSeconds,omitempty"`
+	ActivationTimeoutSeconds     int `json:"activationTimeoutSeconds,omitempty"`
+	PortalActivityWindowSeconds  int `json:"portalActivityWindowSeconds,omitempty"`
+	PortalDeferralCeilingSeconds int `json:"portalDeferralCeilingSeconds,omitempty"`
+	UserRequestedSessionSeconds  int `json:"userRequestedSessionSeconds,omitempty"`
+	SessionAbsoluteCapSeconds    int `json:"sessionAbsoluteCapSeconds,omitempty"`
+}
+
+// ProvisioningTuning decodes the raw provisioning block permissively: an
+// absent block, or one that decodes to the wrong shape, yields the zero value
+// (all defaults) — see the Provisioning field for why this must never fail
+// the load.
+func (c *Config) ProvisioningTuning(logger *zap.Logger) ProvisioningTuning {
+	var t ProvisioningTuning
+	if len(c.Provisioning) == 0 {
+		return t
+	}
+	if err := json.Unmarshal(c.Provisioning, &t); err != nil {
+		if logger != nil {
+			logger.Warn("provisioning config block malformed; using built-in defaults", zap.Error(err))
+		}
+		return ProvisioningTuning{}
+	}
+	return t
 }
 
 //go:generate mockgen -source=config.go -destination=../mocks/config.go -package=mocks -mock_names=ConfigManager=MockConfigManager

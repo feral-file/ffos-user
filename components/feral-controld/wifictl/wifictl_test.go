@@ -2,6 +2,7 @@ package wifictl
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,7 +147,7 @@ func TestJoinSuccess(t *testing.T) {
 		}
 		return []byte("Device 'wlan0' successfully activated"), nil
 	}))
-	err := c.Join(context.Background(), "Home", "supersecret")
+	err := c.Join(context.Background(), "Home", "supersecret", false)
 	require.NoError(t, err)
 
 	// Pre-delete listing (no matches, so no delete), visibility scan, connect.
@@ -157,17 +158,43 @@ func TestJoinSuccess(t *testing.T) {
 	assert.Contains(t, strings.Join(calls[2], " "), "device wifi connect Home password supersecret")
 }
 
+// profileListReply reports whether argv is the UUID,TYPE,NAME profile listing
+// (as opposed to the per-profile -g field reads, which also end in
+// "connection show uuid <uuid>").
+func profileListReply(argv []string) bool {
+	return strings.HasSuffix(strings.Join(argv, " "), "-f UUID,TYPE,NAME connection show")
+}
+
+// fieldRead answers a per-profile `-g <field> connection show uuid <uuid>`
+// read from the given per-uuid values, reporting whether it matched.
+func fieldRead(argv []string, field string, byUUID map[string]string) ([]byte, bool) {
+	if len(argv) == 7 && argv[1] == "-g" && argv[2] == field &&
+		argv[3] == "connection" && argv[4] == "show" && argv[5] == "uuid" {
+		return []byte(byUUID[argv[6]] + "\n"), true
+	}
+	return nil, false
+}
+
 func TestJoinAuthFailureCleansUpProfile(t *testing.T) {
 	// The first profile listing (pre-delete) is empty; after the failed connect
-	// the half-created wifi profile shows up and must be deleted BY UUID.
+	// the half-created wifi profile shows up — targeting the join SSID with a
+	// PSK — and must be deleted BY UUID.
 	listings := 0
 	c, exec, _ := newController(joinScanAware("Home", func(argv []string) ([]byte, error) {
-		if len(argv) > 2 && argv[len(argv)-2] == "connection" && argv[len(argv)-1] == "show" {
+		if profileListReply(argv) {
 			listings++
 			if listings == 1 {
 				return nil, nil
 			}
 			return []byte("half-created-uuid:802-11-wireless:Home\n"), nil
+		}
+		if out, ok := fieldRead(argv, "802-11-wireless.ssid",
+			map[string]string{"half-created-uuid": "Home"}); ok {
+			return out, nil
+		}
+		if out, ok := fieldRead(argv, "802-11-wireless-security.key-mgmt",
+			map[string]string{"half-created-uuid": "wpa-psk"}); ok {
+			return out, nil
 		}
 		if len(argv) >= 4 && argv[1] == "device" && argv[2] == "wifi" && argv[3] == "connect" {
 			return []byte("Error: Connection activation failed: (7) Secrets were required."),
@@ -176,28 +203,38 @@ func TestJoinAuthFailureCleansUpProfile(t *testing.T) {
 		return nil, nil
 	}))
 
-	err := c.Join(context.Background(), "Home", "wrongpass")
+	err := c.Join(context.Background(), "Home", "wrongpass", false)
 	require.Error(t, err)
 
 	var je *JoinError
 	require.ErrorAs(t, err, &je)
 	assert.Equal(t, JoinErrAuth, je.Kind)
 
-	// Pre-delete listing, visibility scan, connect (fails), cleanup listing,
-	// UUID-scoped delete of the half-created broken profile.
+	// Pre-delete listing (empty), visibility scan, connect (fails), cleanup
+	// listing + the profile's two field reads, then the UUID-scoped delete of
+	// the half-created broken profile.
 	calls := exec.recorded()
-	require.Len(t, calls, 5)
-	assert.Equal(t, []string{"nmcli", "connection", "delete", "uuid", "half-created-uuid"}, calls[4])
+	require.Len(t, calls, 7)
+	assert.Equal(t, []string{"nmcli", "connection", "delete", "uuid", "half-created-uuid"}, calls[6])
 }
 
 // TestJoinCleanupSparesNonWifiProfiles: ssid is user input from the captive
 // portal, and nmcli deletes by connection ID match ANY profile type — a
 // submission named like the device's ethernet or VPN profile must never
-// delete it. Only the same-named 802-11-wireless profile may go, by UUID.
+// delete it. Only the 802-11-wireless profile targeting that SSID may go, by
+// UUID (non-Wi-Fi rows are filtered before any per-profile field read runs).
 func TestJoinCleanupSparesNonWifiProfiles(t *testing.T) {
 	c, exec, _ := newController(joinScanAware("Home", func(argv []string) ([]byte, error) {
-		if len(argv) > 2 && argv[len(argv)-2] == "connection" && argv[len(argv)-1] == "show" {
+		if profileListReply(argv) {
 			return []byte("eth-uuid:802-3-ethernet:Home\nwifi-uuid:802-11-wireless:Home\nvpn-uuid:vpn:Home\n"), nil
+		}
+		if out, ok := fieldRead(argv, "802-11-wireless.ssid",
+			map[string]string{"wifi-uuid": "Home"}); ok {
+			return out, nil
+		}
+		if out, ok := fieldRead(argv, "802-11-wireless-security.key-mgmt",
+			map[string]string{"wifi-uuid": "wpa-psk"}); ok {
+			return out, nil
 		}
 		if len(argv) >= 4 && argv[1] == "device" && argv[2] == "wifi" && argv[3] == "connect" {
 			return []byte("Error: Connection activation failed."),
@@ -206,21 +243,139 @@ func TestJoinCleanupSparesNonWifiProfiles(t *testing.T) {
 		return nil, nil
 	}))
 
-	err := c.Join(context.Background(), "Home", "wrongpass")
+	err := c.Join(context.Background(), "Home", "wrongpass", false)
 	require.Error(t, err)
 
 	deletes := [][]string{}
+	fieldReads := [][]string{}
 	for _, call := range exec.recorded() {
 		if len(call) > 2 && call[1] == "connection" && call[2] == "delete" {
 			deletes = append(deletes, call)
+		}
+		if len(call) == 7 && call[1] == "-g" {
+			fieldReads = append(fieldReads, call)
 		}
 	}
 	// Pre-delete pass and post-failure pass each delete exactly the wifi UUID.
 	require.Len(t, deletes, 2)
 	for _, del := range deletes {
 		assert.Equal(t, []string{"nmcli", "connection", "delete", "uuid", "wifi-uuid"}, del,
-			"only the same-named WIFI profile may be deleted, never ethernet/VPN")
+			"only the WIFI profile targeting the SSID may be deleted, never ethernet/VPN")
 	}
+	for _, fr := range fieldReads {
+		assert.Equal(t, "wifi-uuid", fr[6],
+			"per-profile field reads must never target non-Wi-Fi profiles")
+	}
+}
+
+// TestDeleteWifiProfilesScope pins the D9 fix and its two safety rails: the
+// delete matches the profile's TARGET SSID (a stale PSK profile not named
+// after its SSID is exactly the profile NM reuses over fresh credentials),
+// never touches non-PSK security (a portal PSK join must not destroy an
+// 802.1X profile for the same SSID), and keeps any profile it cannot read
+// (unconfirmed is not deletable).
+func TestDeleteWifiProfilesScope(t *testing.T) {
+	ssids := map[string]string{
+		"renamed-uuid": "Home", // name != SSID: the D9 case — must be deleted
+		"eap-uuid":     "Home",
+		"other-uuid":   "Elsewhere",
+		"open-uuid":    "Home",
+	}
+	keyMgmts := map[string]string{
+		"renamed-uuid": "wpa-psk",
+		"eap-uuid":     "wpa-eap",
+		"other-uuid":   "wpa-psk",
+		"open-uuid":    "", // no security section: open network, deletable
+	}
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		if profileListReply(argv) {
+			return []byte("renamed-uuid:802-11-wireless:Old Router\n" +
+				"eap-uuid:802-11-wireless:Home\n" +
+				"other-uuid:802-11-wireless:Home\n" +
+				"open-uuid:802-11-wireless:HomeOpen\n" +
+				"broken-uuid:802-11-wireless:Broken\n"), nil
+		}
+		if len(argv) == 7 && argv[1] == "-g" && argv[6] == "broken-uuid" {
+			return nil, fakeExitError{code: 10, msg: "exit status 10"}
+		}
+		if out, ok := fieldRead(argv, "802-11-wireless.ssid", ssids); ok {
+			return out, nil
+		}
+		if out, ok := fieldRead(argv, "802-11-wireless-security.key-mgmt", keyMgmts); ok {
+			return out, nil
+		}
+		return nil, nil
+	})
+
+	c.deleteWifiProfiles(context.Background(), "Home")
+
+	var deleted []string
+	for _, call := range exec.recorded() {
+		if len(call) == 5 && call[1] == "connection" && call[2] == "delete" {
+			deleted = append(deleted, call[4])
+		}
+	}
+	assert.ElementsMatch(t, []string{"renamed-uuid", "open-uuid"}, deleted,
+		"delete PSK/open profiles targeting the SSID; spare 802.1X, other SSIDs, and unreadable profiles")
+}
+
+// TestJoinHiddenSkipsVisibilityWaitAndPassesHiddenYes pins the hidden-network
+// join contract (D3): a hidden SSID never appears in scan output, so the
+// post-bounce visibility wait must be skipped (it could only burn its whole
+// window) and nmcli must be told `hidden yes` so NM probes for the network
+// directly instead of consulting broadcast scan results.
+func TestJoinHiddenSkipsVisibilityWaitAndPassesHiddenYes(t *testing.T) {
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		if profileListReply(argv) {
+			return nil, nil
+		}
+		if strings.Contains(strings.Join(argv, " "), "device wifi list") {
+			t.Fatal("hidden join must not run the visibility scan")
+		}
+		return []byte("successfully activated"), nil
+	})
+	require.NoError(t, c.Join(context.Background(), "GhostNet", "secret12", true))
+
+	connect := exec.recorded()[len(exec.recorded())-1]
+	joined := strings.Join(connect, " ")
+	assert.Contains(t, joined, "device wifi connect GhostNet")
+	assert.Contains(t, joined, "hidden yes")
+}
+
+// TestJoinNonHiddenOmitsHiddenFlag: the flag must appear ONLY when requested —
+// `hidden yes` on a broadcast network changes NM's probing behavior for no
+// reason.
+func TestJoinNonHiddenOmitsHiddenFlag(t *testing.T) {
+	c, exec, _ := newController(joinScanAware("Home", func(argv []string) ([]byte, error) {
+		if profileListReply(argv) {
+			return nil, nil
+		}
+		return []byte("successfully activated"), nil
+	}))
+	require.NoError(t, c.Join(context.Background(), "Home", "secret12", false))
+	connect := exec.recorded()[len(exec.recorded())-1]
+	assert.NotContains(t, strings.Join(connect, " "), "hidden",
+		"non-hidden joins must not pass the hidden flag")
+}
+
+// TestJoinOpenNetworkOmitsPassword pins the open-network fix: an empty PSK
+// must omit the password argument entirely — `password ""` makes NM build a
+// WPA-PSK security block around the empty key, and the open network then
+// reads as "wrong password" forever.
+func TestJoinOpenNetworkOmitsPassword(t *testing.T) {
+	c, exec, _ := newController(joinScanAware("CafeOpen", func(argv []string) ([]byte, error) {
+		if profileListReply(argv) {
+			return nil, nil
+		}
+		return []byte("successfully activated"), nil
+	}))
+	require.NoError(t, c.Join(context.Background(), "CafeOpen", "", false))
+
+	connect := exec.recorded()[len(exec.recorded())-1]
+	joined := strings.Join(connect, " ")
+	assert.Contains(t, joined, "device wifi connect CafeOpen")
+	assert.NotContains(t, joined, "password",
+		"an open-network join must not send a password argument at all")
 }
 
 // TestUnescapeTerse pins the terse-mode unescaping both profile-listing
@@ -242,7 +397,7 @@ func TestJoinSSIDNotFound(t *testing.T) {
 		}
 		return []byte("SomeOtherNet"), nil
 	})
-	err := c.Join(context.Background(), "Ghost", "whatever1")
+	err := c.Join(context.Background(), "Ghost", "whatever1", false)
 	var je *JoinError
 	require.ErrorAs(t, err, &je)
 	assert.Equal(t, JoinErrSSIDNotFound, je.Kind)
@@ -269,7 +424,7 @@ func TestJoinTimeout(t *testing.T) {
 		}
 		return nil, nil
 	}))
-	err := c.Join(context.Background(), "Slow", "password1")
+	err := c.Join(context.Background(), "Slow", "password1", false)
 	var je *JoinError
 	require.ErrorAs(t, err, &je)
 	assert.Equal(t, JoinErrTimeout, je.Kind)
@@ -279,7 +434,7 @@ func TestJoinIfacePinned(t *testing.T) {
 	exec := &scriptedExec{reply: joinScanAware("Home", func(argv []string) ([]byte, error) { return nil, nil })}
 	clock := &fakeClock{now: time.Now()}
 	c := New(exec, clock, zap.NewNop(), "wlan0")
-	require.NoError(t, c.Join(context.Background(), "Home", "password1"))
+	require.NoError(t, c.Join(context.Background(), "Home", "password1", false))
 	scan, connect := exec.recorded()[1], exec.recorded()[2]
 	assert.Contains(t, strings.Join(scan, " "), "ifname wlan0")
 	assert.Contains(t, strings.Join(connect, " "), "ifname wlan0")
@@ -309,7 +464,7 @@ func TestJoinWaitsForSSIDAfterAPBounce(t *testing.T) {
 		return nil, nil
 	})
 
-	require.NoError(t, c.Join(context.Background(), "Home", "secret12"))
+	require.NoError(t, c.Join(context.Background(), "Home", "secret12", false))
 
 	// delete, scan, scan, scan (visible), connect — connect strictly after the
 	// scan that surfaced the SSID.
@@ -341,7 +496,7 @@ func TestJoinScanRetriesToleratesErrors(t *testing.T) {
 		}
 		return nil, nil
 	})
-	require.NoError(t, c.Join(context.Background(), "Home", "secret12"))
+	require.NoError(t, c.Join(context.Background(), "Home", "secret12", false))
 }
 
 // --- Scan cache TTL ----------------------------------------------------------
@@ -731,7 +886,7 @@ func TestJoinFailureCleanupSurvivesCanceledContext(t *testing.T) {
 		return nil, nil
 	})
 
-	err := c.Join(ctx, "Home", "pw123456")
+	err := c.Join(ctx, "Home", "pw123456", false)
 	require.Error(t, err)
 
 	// Pre-delete listing, scan, connect, post-failure cleanup listing: the
@@ -747,4 +902,265 @@ func TestJoinFailureCleanupSurvivesCanceledContext(t *testing.T) {
 	ctxErrs := exec.recordedCtxErrs()
 	require.Len(t, ctxErrs, 4)
 	assert.NoError(t, ctxErrs[3], "cleanup must run on a detached, live context")
+}
+
+// --- SavedWifiSSIDs / ScanAllSSIDs (boot relocation evidence, M-0b) -----------
+
+// TestSavedWifiSSIDsReadsProfileFieldsNotNames: the SSID must come from the
+// profile's 802-11-wireless.ssid resolved by UUID (an ops-created profile may
+// be named anything, and name resolution can match a same-named profile of a
+// different type), and a hidden profile must flip anyHidden — scan absence is
+// not evidence for a network that never appears in scans.
+func TestSavedWifiSSIDsReadsProfileFieldsNotNames(t *testing.T) {
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		switch {
+		case strings.Contains(joined, "-f UUID,TYPE,NAME connection show"):
+			return []byte("uuid-office:802-11-wireless:office-frame\nuuid-eth:802-3-ethernet:office-frame\nuuid-home:802-11-wireless:HomeNet\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-office"):
+			return []byte("Gallery5G\n"), nil
+		case strings.Contains(joined, "802-11-wireless.hidden connection show uuid uuid-office"):
+			return []byte("yes\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-home"):
+			return []byte("HomeNet\n"), nil
+		case strings.Contains(joined, "802-11-wireless.hidden connection show uuid uuid-home"):
+			return []byte("no\n"), nil
+		}
+		return nil, fakeExitError{code: 1, msg: "unexpected: " + joined}
+	})
+
+	ssids, anyHidden, err := c.SavedWifiSSIDs(context.Background())
+	if err != nil {
+		t.Fatalf("SavedWifiSSIDs: %v", err)
+	}
+	if len(ssids) != 2 || ssids[0] != "Gallery5G" || ssids[1] != "HomeNet" {
+		t.Fatalf("ssids = %v, want [Gallery5G HomeNet] (profile fields, not names)", ssids)
+	}
+	if !anyHidden {
+		t.Fatal("anyHidden = false, want true (office-frame targets a hidden network)")
+	}
+	// The same-named ethernet profile must never be queried: name-based
+	// resolution would have hit it and read back an empty ssid.
+	for _, call := range exec.recorded() {
+		if strings.Contains(strings.Join(call, " "), "uuid-eth") {
+			t.Fatalf("non-wifi profile was queried: %v", call)
+		}
+	}
+}
+
+// TestSavedWifiSSIDsEmptySSIDIsError: a wifi profile whose ssid reads back
+// empty (exit 0) must be an error, not a silent skip — a list silently
+// missing a profile is the false "none in range" the relocation check must
+// never act on.
+func TestSavedWifiSSIDsEmptySSIDIsError(t *testing.T) {
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		switch {
+		case strings.Contains(joined, "-f UUID,TYPE,NAME connection show"):
+			return []byte("uuid-weird:802-11-wireless:imported-profile\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-weird"):
+			return []byte("\n"), nil
+		}
+		return nil, fakeExitError{code: 1, msg: "unexpected: " + joined}
+	})
+
+	if _, _, err := c.SavedWifiSSIDs(context.Background()); err == nil {
+		t.Fatal("expected an error for an empty ssid read; got nil")
+	}
+}
+
+// TestSavedWifiSSIDsFailsClosedOnProfileReadError: a partial list silently
+// missing a profile is exactly the false "none in range" the relocation check
+// must never act on, so any per-profile read failure is an error, not a skip.
+func TestSavedWifiSSIDsFailsClosedOnProfileReadError(t *testing.T) {
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "-f UUID,TYPE,NAME connection show") {
+			return []byte("uuid-home:802-11-wireless:HomeNet\n"), nil
+		}
+		return nil, fakeExitError{code: 10, msg: "nmcli: unknown connection"}
+	})
+
+	if _, _, err := c.SavedWifiSSIDs(context.Background()); err == nil {
+		t.Fatal("expected an error when a profile read fails; got nil")
+	}
+}
+
+// TestSavedWifiSSIDsPreservesWhitespaceSSID (review P1): leading/trailing
+// spaces are valid SSID bytes and the scan side preserves them, so the
+// profile read may strip ONLY nmcli's trailing newline. A TrimSpace here made
+// a saved " Cafe " compare unequal to its own scan sighting — an in-range
+// network reading as "absent" is the false relocation evidence the
+// fail-closed contract exists to prevent.
+func TestSavedWifiSSIDsPreservesWhitespaceSSID(t *testing.T) {
+	c, _, _ := newController(func(argv []string) ([]byte, error) {
+		joined := strings.Join(argv, " ")
+		switch {
+		case strings.Contains(joined, "-f UUID,TYPE,NAME connection show"):
+			return []byte("uuid-cafe:802-11-wireless:cafe\n"), nil
+		case strings.Contains(joined, "802-11-wireless.ssid connection show uuid uuid-cafe"):
+			return []byte(" Cafe \n"), nil
+		case strings.Contains(joined, "802-11-wireless.hidden connection show uuid uuid-cafe"):
+			return []byte("no\n"), nil
+		}
+		return nil, fakeExitError{code: 1, msg: "unexpected: " + joined}
+	})
+
+	ssids, _, err := c.SavedWifiSSIDs(context.Background())
+	if err != nil {
+		t.Fatalf("SavedWifiSSIDs: %v", err)
+	}
+	if len(ssids) != 1 || ssids[0] != " Cafe " {
+		t.Fatalf("ssids = %q, want [\" Cafe \"] (SSID whitespace preserved, only the newline terminator stripped)", ssids)
+	}
+}
+
+// TestScanAllSSIDsPinsConfiguredInterface (review P1): every other
+// radio-touching command pins ifname when the controller is configured with
+// one; the relocation-evidence scan must too, or on multi-radio hardware it
+// can report a different radio's air and fabricate "saved SSID absent".
+func TestScanAllSSIDsPinsConfiguredInterface(t *testing.T) {
+	exec := &scriptedExec{reply: func(argv []string) ([]byte, error) {
+		return []byte("Net\n"), nil
+	}}
+	clock := &fakeClock{now: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
+	c := New(exec, clock, zap.NewNop(), "wlan1")
+
+	if _, err := c.ScanAllSSIDs(context.Background()); err != nil {
+		t.Fatalf("ScanAllSSIDs: %v", err)
+	}
+	last := exec.recorded()[len(exec.recorded())-1]
+	joined := strings.Join(last, " ")
+	if !strings.Contains(joined, "device wifi list") {
+		t.Fatalf("last call is not the scan; argv = %v", last)
+	}
+	if !strings.Contains(joined, "ifname wlan1") {
+		t.Fatalf("ScanAllSSIDs must pin the configured interface; argv = %v", last)
+	}
+}
+
+// TestScanAllSSIDsIsUncapped: Scan truncates at the portal display cap
+// (maxSSIDs); ScanAllSSIDs must not — a saved network ranked below the cap
+// would otherwise read as absent and fire a false relocation.
+func TestScanAllSSIDsIsUncapped(t *testing.T) {
+	var lines []string
+	for i := 0; i < maxSSIDs+3; i++ {
+		lines = append(lines, fmt.Sprintf("Net%02d", i))
+	}
+	out := []byte(strings.Join(lines, "\n") + "\n")
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		return out, nil
+	})
+
+	capped, err := c.Scan(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(capped) != maxSSIDs {
+		t.Fatalf("Scan returned %d SSIDs, want the %d display cap", len(capped), maxSSIDs)
+	}
+
+	all, err := c.ScanAllSSIDs(context.Background())
+	if err != nil {
+		t.Fatalf("ScanAllSSIDs: %v", err)
+	}
+	if len(all) != maxSSIDs+3 {
+		t.Fatalf("ScanAllSSIDs returned %d SSIDs, want %d (uncapped)", len(all), maxSSIDs+3)
+	}
+	// And it must force a fresh scan: stale results are not relocation evidence.
+	last := exec.recorded()[len(exec.recorded())-1]
+	joined := strings.Join(last, " ")
+	if !strings.Contains(joined, "--rescan yes") {
+		t.Fatalf("ScanAllSSIDs must force a rescan; argv = %v", last)
+	}
+}
+
+// --- ActivationProfiles / ActivateProfile (recheck blink, §4.2) ---------------
+
+// TestActivationProfilesReadsFieldsFailClosed pins the blink helper's
+// contract: per-profile fields are read by UUID (type-filtered before any
+// field read), a blank timestamp is a legitimate 0 (never-activated profile),
+// and ANY per-profile read failure — or an unparseable non-blank timestamp —
+// fails the whole listing, because the caller ACTIVATES off this list and the
+// §4.2 fail-bias is "a listing error aborts the blink, never a blind
+// activation".
+func TestActivationProfilesReadsFieldsFailClosed(t *testing.T) {
+	t.Run("happy path with MRU fields", func(t *testing.T) {
+		ssids := map[string]string{"u1": "Home", "u2": "Studio"}
+		hiddens := map[string]string{"u1": "no", "u2": "yes"}
+		stamps := map[string]string{"u1": "1722400000", "u2": ""}
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			if profileListReply(argv) {
+				return []byte("u1:802-11-wireless:Home\nu2:802-11-wireless:StudioProfile\n" +
+					"e1:802-3-ethernet:Wired\n"), nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.ssid", ssids); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.hidden", hiddens); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "connection.timestamp", stamps); ok {
+				return out, nil
+			}
+			return nil, nil
+		})
+		got, err := c.ActivationProfiles(context.Background())
+		require.NoError(t, err)
+		require.Len(t, got, 2, "non-Wi-Fi profiles are filtered before any field read")
+		assert.Equal(t, ActivationProfile{UUID: "u1", SSID: "Home", Hidden: false, LastUsed: 1722400000}, got[0])
+		assert.Equal(t, ActivationProfile{UUID: "u2", SSID: "Studio", Hidden: true, LastUsed: 0}, got[1],
+			"a blank timestamp is a never-activated 0, not an error")
+	})
+
+	t.Run("per-profile read failure fails the listing", func(t *testing.T) {
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			if profileListReply(argv) {
+				return []byte("u1:802-11-wireless:Home\n"), nil
+			}
+			return nil, fakeExitError{code: 10, msg: "exit status 10"}
+		})
+		_, err := c.ActivationProfiles(context.Background())
+		assert.Error(t, err, "an unreadable profile must fail closed — never a partial list")
+	})
+
+	t.Run("unparseable timestamp fails the listing", func(t *testing.T) {
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			if profileListReply(argv) {
+				return []byte("u1:802-11-wireless:Home\n"), nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.ssid", map[string]string{"u1": "Home"}); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "802-11-wireless.hidden", map[string]string{"u1": "no"}); ok {
+				return out, nil
+			}
+			if out, ok := fieldRead(argv, "connection.timestamp", map[string]string{"u1": "garbage"}); ok {
+				return out, nil
+			}
+			return nil, nil
+		})
+		_, err := c.ActivationProfiles(context.Background())
+		assert.Error(t, err)
+	})
+}
+
+// TestActivateProfile pins the explicit-activation argv and its error
+// wrapping (the blink logs and moves to the next candidate on failure).
+func TestActivateProfile(t *testing.T) {
+	c, exec, _ := newController(func(argv []string) ([]byte, error) {
+		if len(argv) == 5 && argv[1] == "connection" && argv[2] == "up" && argv[3] == "uuid" {
+			if argv[4] == "bad" {
+				return []byte("Error: network could not be found"), fakeExitError{code: 4, msg: "exit status 4"}
+			}
+			return []byte("Connection successfully activated"), nil
+		}
+		return nil, nil
+	})
+	require.NoError(t, c.ActivateProfile(context.Background(), "good"))
+	err := c.ActivateProfile(context.Background(), "bad")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "network could not be found",
+		"the nmcli output must surface for the blink's candidate log")
+	assert.Equal(t, []string{"nmcli", "connection", "up", "uuid", "good"}, exec.recorded()[0])
 }

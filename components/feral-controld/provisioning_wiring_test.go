@@ -7,8 +7,11 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/feral-file/ffos-user/components/feral-controld/config"
 	"github.com/feral-file/ffos-user/components/feral-controld/hub"
 	"github.com/feral-file/ffos-user/components/feral-controld/mocks"
 	"github.com/feral-file/ffos-user/components/feral-controld/provisioning"
@@ -18,13 +21,41 @@ import (
 // spyNarrationUI records the narration calls the notifier makes.
 type spyNarrationUI struct {
 	calls []string
+	// joinFailedReasons records ShowJoinFailed bodies in order (real join
+	// failures re-announced with the AP raise).
+	joinFailedReasons []string
+	// connectingMessages records ShowConnecting bodies in order: the offline
+	// entry-edge narration uses the neutral connecting state and the tests
+	// must assert the machine's prose (not a reason code) is what reaches
+	// the player.
+	connectingMessages []string
+	// setupErrorReasons records ShowSetupError bodies (the §4.6 escalation
+	// latches) so tests can assert the prose — including the appended device
+	// identity — reaches the player.
+	setupErrorReasons []string
+}
+
+func (s *spyNarrationUI) ShowSetupError(reason string) {
+	s.calls = append(s.calls, "setup_error")
+	s.setupErrorReasons = append(s.setupErrorReasons, reason)
 }
 
 func (s *spyNarrationUI) ShowScanning()                 { s.calls = append(s.calls, "scanning") }
 func (s *spyNarrationUI) ShowSoftAPQR(ssid, psk string) { s.calls = append(s.calls, "softap") }
-func (s *spyNarrationUI) ShowJoinFailed(reason string)  { s.calls = append(s.calls, "join_failed") }
-func (s *spyNarrationUI) ShowJoining()                  { s.calls = append(s.calls, "joining") }
-func (s *spyNarrationUI) Hide()                         { s.calls = append(s.calls, "hide") }
+func (s *spyNarrationUI) ShowJoinFailed(reason string) {
+	s.calls = append(s.calls, "join_failed")
+	s.joinFailedReasons = append(s.joinFailedReasons, reason)
+}
+func (s *spyNarrationUI) ShowConnecting(message string) {
+	s.calls = append(s.calls, "connecting")
+	s.connectingMessages = append(s.connectingMessages, message)
+}
+func (s *spyNarrationUI) ShowConnectingOrHide(message string) {
+	s.calls = append(s.calls, "connecting_or_hide")
+	s.connectingMessages = append(s.connectingMessages, message)
+}
+func (s *spyNarrationUI) ShowJoining() { s.calls = append(s.calls, "joining") }
+func (s *spyNarrationUI) Hide()        { s.calls = append(s.calls, "hide") }
 
 // TestSetupNotifierHidesOnlyOwnNarration is the G6 regression: a connectivity
 // flap (OfflineRetrying→Online) while the EXECUTOR's claim QR owns the overlay
@@ -433,4 +464,197 @@ func TestWireBootLifecycleHooksProbeInjectionIsIndependent(t *testing.T) {
 	if n.playerRecovery != nil {
 		t.Fatal("an OTA-only flow must not have a player recovery wired")
 	}
+}
+
+// TestSetupNotifierNarratesOfflineEntryEdges (M-0/M-1): the narrated
+// StateOfflineRetrying entry edges paint the neutral connecting state with
+// the machine's Message as the body (join_failed's asserting title used to
+// flash a false failure on every normal reboot); the generic exhibition edge
+// ("offline") stays silent — that default is what keeps a WAN blip from
+// covering artwork with a setup overlay. The narration counts as owned, so a
+// later Online must hide it.
+func TestSetupNotifierNarratesOfflineEntryEdges(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy}
+
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonBootOffline, Message: "Looking for your Wi-Fi network… Setup mode will start in a few minutes if the connection does not return."})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonJoinedNoInternet, Message: "Connected to X, but this network has no internet access"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonJoinedConnUnknown, Message: "Connected to X. Checking internet access…"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonBootNoInternet, Message: "Connected to the network, but there is no internet access. Retrying…"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: provisioning.ReasonBootLinkUnknown, Message: "Checking the network connection…"})
+	// The exhibition edge and future unknown reasons must fail silent.
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: "offline", Message: "Reconnecting to Wi-Fi"})
+	n.OnStateChange(provisioning.StateOfflineRetrying, provisioning.Detail{
+		Reason: "link-present", Message: "Reconnecting to Wi-Fi"})
+
+	if got := len(spy.connectingMessages); got != 5 {
+		t.Fatalf("connecting narrations = %d (%v); want 5 — un-narrated reasons must stay silent",
+			got, spy.calls)
+	}
+	for i, want := range []string{
+		"Looking for your Wi-Fi network… Setup mode will start in a few minutes if the connection does not return.",
+		"Connected to X, but this network has no internet access",
+		"Connected to X. Checking internet access…",
+		"Connected to the network, but there is no internet access. Retrying…",
+		"Checking the network connection…",
+	} {
+		if spy.connectingMessages[i] != want {
+			t.Fatalf("narration %d = %q, want the machine's Message %q", i, spy.connectingMessages[i], want)
+		}
+	}
+	if len(spy.joinFailedReasons) != 0 {
+		t.Fatalf("offline entry edges must not use join_failed anymore; got %v", spy.joinFailedReasons)
+	}
+
+	// The narration is owned: Online clears it exactly once.
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{})
+	if spy.calls[len(spy.calls)-1] != "hide" {
+		t.Fatalf("expected Online to hide the owned narration; calls = %v", spy.calls)
+	}
+}
+
+// TestSetupNotifierRendersSetupError pins the §4.6 escalation-latch routing:
+// the reason-keyed dispatch renders ShowSetupError with the device identity
+// appended (whatever state the machine emitted it from), and the cleared
+// notification hides — narrating-guarded, like every hide on this surface.
+func TestSetupNotifierRendersSetupError(t *testing.T) {
+	spy := &spyNarrationUI{}
+	n := &setupNotifier{ui: spy, deviceName: "FF1-TEST"}
+
+	n.OnStateChange(provisioning.StateAPActive, provisioning.Detail{
+		Reason:  provisioning.ReasonSetupError,
+		Message: "The frame could not start setup mode.",
+	})
+	if len(spy.setupErrorReasons) != 1 ||
+		spy.setupErrorReasons[0] != "The frame could not start setup mode. (FF1-TEST)" {
+		t.Fatalf("setup-error prose = %v; want identity-suffixed message", spy.setupErrorReasons)
+	}
+
+	// The cleared edge dismisses the panel this surface painted.
+	n.OnStateChange(provisioning.StateOnline, provisioning.Detail{
+		Reason: provisioning.ReasonSetupErrorCleared,
+	})
+	if got := spy.calls[len(spy.calls)-1]; got != "hide" {
+		t.Fatalf("cleared edge painted %q; want hide", got)
+	}
+
+	// A cleared edge with nothing narrated (another surface owns the screen)
+	// must not hide anything.
+	spy2 := &spyNarrationUI{}
+	n2 := &setupNotifier{ui: spy2}
+	n2.OnStateChange(provisioning.StateOnline, provisioning.Detail{
+		Reason: provisioning.ReasonSetupErrorCleared,
+	})
+	if len(spy2.calls) != 0 {
+		t.Fatalf("unowned cleared edge produced calls %v; want none", spy2.calls)
+	}
+}
+
+// TestStatusProviderServesNetworkHealth pins the §4.7 hub surface: the
+// provider composes the machine snapshot with the cached internet verdict
+// into the additive network object, and leaves it nil (omitted) when no
+// snapshot source is wired.
+func TestStatusProviderServesNetworkHealth(t *testing.T) {
+	base := stubHubStatusBase{info: hub.StatusInfo{DeviceID: "FF1-TEST"}}
+	p := &provisioningStatusProvider{
+		base:     base,
+		internet: func(context.Context) bool { return false },
+		snapshot: func() provisioning.NetworkSnapshot {
+			return provisioning.NetworkSnapshot{
+				State: "offline_retrying", Reason: "joined-no-internet",
+				SSID: "Studio WiFi", Link: "wifi", Deferred: true,
+			}
+		},
+	}
+	info := p.Status(context.Background())
+	if info.Network == nil {
+		t.Fatal("network object missing")
+	}
+	want := status.NetworkHealth{State: "offline_retrying", Reason: "joined-no-internet",
+		SSID: "Studio WiFi", Link: "wifi", Internet: false, Deferred: true}
+	if *info.Network != want {
+		t.Fatalf("network = %+v, want %+v", *info.Network, want)
+	}
+
+	unwired := &provisioningStatusProvider{base: base}
+	if unwired.Status(context.Background()).Network != nil {
+		t.Fatal("an unwired snapshot must omit the additive field")
+	}
+}
+
+// TestProvisioningTuningFromConfigRejectsOutOfRangeSeconds pins the overflow
+// guard at the ONLY place it can work: before the seconds→Duration
+// multiplication. time.Duration(n) * time.Second wraps int64 above roughly
+// 9.2e9 seconds, so 18446744074 lands as ~290ms — a small, plausible-looking
+// positive that sails through every downstream sanity check including
+// provisioning's own >24h ceiling. Rejected values become 0, which is the
+// machine's documented "unset" input; provisioning's withDefaults then
+// substitutes the built-in default (pinned on that side by
+// TestTuningSanitation's zero-value cases).
+func TestProvisioningTuningFromConfigRejectsOutOfRangeSeconds(t *testing.T) {
+	// The exact wrap: proof the bad value really does look benign after
+	// conversion, so the test cannot rot into asserting a value that would
+	// have been caught anyway. It has to go through a runtime variable — as a
+	// constant expression the compiler rejects the overflow outright, which is
+	// precisely why this hazard only ever reaches production through a
+	// config-decoded int and never through a literal in Go source.
+	overflowSeconds := 18446744074
+	wrapped := time.Duration(overflowSeconds) * time.Second
+	require.Greater(t, wrapped, time.Duration(0),
+		"the overflow case must wrap to a POSITIVE duration, else it proves nothing")
+	require.Less(t, wrapped, time.Second,
+		"...and to a small one that no >24h ceiling could catch")
+
+	t.Run("scalar field", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			seconds int
+			want    time.Duration
+		}{
+			{"overflow wraps to a small positive but is rejected", 18446744074, 0},
+			{"overflow wraps negative and is rejected", 9223372037, 0},
+			{"just past the 24h bound is rejected", 86401, 0},
+			{"negative is rejected", -30, 0},
+			{"exactly the 24h bound is kept", 86400, 24 * time.Hour},
+			{"an ordinary override is kept", 600, 10 * time.Minute},
+			{"unset stays unset", 0, 0},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := provisioningTuningFromConfig(
+					config.ProvisioningTuning{RecheckApPhaseSeconds: tc.seconds}, zap.NewNop())
+				assert.Equal(t, tc.want, got.RecheckApPhase)
+			})
+		}
+	})
+
+	t.Run("ladder rung", func(t *testing.T) {
+		got := provisioningTuningFromConfig(config.ProvisioningTuning{
+			EpisodeStationLadderSeconds: []int{300, 18446744074, 1200},
+		}, zap.NewNop())
+		// The rejected rung becomes 0 rather than ~290ms. provisioning's
+		// usableLadder reads that 0 as out-of-range and discards the WHOLE
+		// override for the built-in ladder (its all-or-nothing rule), so the
+		// zero here is the handoff, not the end state.
+		assert.Equal(t, []time.Duration{5 * time.Minute, 0, 20 * time.Minute},
+			got.EpisodeStationLadder)
+	})
+
+	t.Run("a fully valid block passes through untouched", func(t *testing.T) {
+		got := provisioningTuningFromConfig(config.ProvisioningTuning{
+			EpisodeApPhaseSeconds:       120,
+			UserRequestedSessionSeconds: 900,
+			EpisodeStationLadderSeconds: []int{60, 120, 240},
+		}, zap.NewNop())
+		assert.Equal(t, 2*time.Minute, got.EpisodeApPhase)
+		assert.Equal(t, 15*time.Minute, got.UserRequestedSession)
+		assert.Equal(t, []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute},
+			got.EpisodeStationLadder)
+	})
 }

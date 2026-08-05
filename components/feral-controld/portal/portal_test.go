@@ -95,16 +95,15 @@ func TestRootFallsBackToManualEntryOnScanError(t *testing.T) {
 func TestConnectInvokesJoinFuncWithFormValues(t *testing.T) {
 	var (
 		mu       sync.Mutex
-		gotSSID  string
-		gotPass  string
+		got      JoinRequest
 		callHits int
 	)
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-abc",
-		Join: func(ssid, password string) error {
+		Join: func(req JoinRequest) error {
 			mu.Lock()
 			defer mu.Unlock()
-			gotSSID, gotPass, callHits = ssid, password, callHits+1
+			got, callHits = req, callHits+1
 			return nil
 		},
 	})
@@ -121,17 +120,92 @@ func TestConnectInvokesJoinFuncWithFormValues(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, 1, callHits)
-	assert.Equal(t, "HomeNet", gotSSID)
-	assert.Equal(t, "s3cret-pw", gotPass)
+	assert.Equal(t, JoinRequest{SSID: "HomeNet", Password: "s3cret-pw"}, got,
+		"a picker submission is neither manual nor hidden")
 	// "Connecting" result page, with the reconnect hint again.
 	assert.Contains(t, body, "Connecting to HomeNet")
 	assert.Contains(t, body, "FF1-abc")
 }
 
+// TestConnectRoutesManualEntry pins the two-source SSID rule (D3): a non-blank
+// manual field wins over the picker (the select always submits SOME value),
+// carries Manual so downstream can apply the manual-only trim, and the hidden
+// checkbox is honored only on this branch. The RAW manual value must pass
+// through — trimming is the machine's call, keyed on the Manual flag.
+func TestConnectRoutesManualEntry(t *testing.T) {
+	tests := []struct {
+		name string
+		form url.Values
+		want JoinRequest
+	}{
+		{
+			name: "manual entry wins over picker",
+			form: url.Values{"ssid": {"PickedNet"}, "ssid_manual": {"TypedNet"},
+				"password": {"pw"}, "hidden": {"1"}},
+			want: JoinRequest{SSID: "TypedNet", Password: "pw", Manual: true, Hidden: true},
+		},
+		{
+			name: "manual value passes through untrimmed",
+			form: url.Values{"ssid_manual": {" TypedNet "}, "password": {"pw"}},
+			want: JoinRequest{SSID: " TypedNet ", Password: "pw", Manual: true},
+		},
+		{
+			name: "blank manual falls back to picker, hidden ignored",
+			form: url.Values{"ssid": {"PickedNet"}, "ssid_manual": {"   "},
+				"password": {"pw"}, "hidden": {"1"}},
+			want: JoinRequest{SSID: "PickedNet", Password: "pw"},
+		},
+		{
+			name: "no picker at all takes the manual branch even when blank",
+			form: url.Values{"ssid_manual": {""}, "password": {"pw"}},
+			want: JoinRequest{SSID: "", Password: "pw", Manual: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				mu  sync.Mutex
+				got JoinRequest
+			)
+			_, ts, client := newTestServer(t, Config{
+				Join: func(req JoinRequest) error {
+					mu.Lock()
+					defer mu.Unlock()
+					got = req
+					return nil
+				},
+			})
+			resp, err := client.PostForm(ts.URL+"/connect", tt.form)
+			require.NoError(t, err)
+			_ = resp.Body.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestIndexAlwaysOffersManualEntry pins the D3 fix at the template: the manual
+// field and the hidden-network checkbox must render alongside a NON-empty
+// picker — the old either/or template made hidden networks unprovisionable
+// whenever any network was in range.
+func TestIndexAlwaysOffersManualEntry(t *testing.T) {
+	_, ts, client := newTestServer(t, Config{
+		Scan: func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil },
+	})
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body := readAll(t, resp)
+	assert.Contains(t, body, "<select", "picker must render for the scanned networks")
+	assert.Contains(t, body, `name="ssid_manual"`, "manual entry must render beside the picker")
+	assert.Contains(t, body, `name="hidden"`, "hidden-network checkbox must render")
+}
+
 func TestConnectRejectionReRendersForm(t *testing.T) {
 	_, ts, client := newTestServer(t, Config{
 		Scan: func(context.Context) ([]string, error) { return []string{"HomeNet"}, nil },
-		Join: func(ssid, password string) error {
+		Join: func(req JoinRequest) error {
 			return stubError("empty ssid")
 		},
 	})
@@ -240,7 +314,7 @@ func TestConnectOversizedBodyRejected(t *testing.T) {
 	joined := false
 	_, ts, client := newTestServer(t, Config{
 		APSSID: "FF1-abc",
-		Join:   func(_, _ string) error { joined = true; return nil },
+		Join:   func(JoinRequest) error { joined = true; return nil },
 	})
 
 	body := strings.NewReader("ssid=" + strings.Repeat("a", maxRequestBodyBytes+1024))
@@ -316,7 +390,7 @@ func TestSlowBodyClientIsDisconnected(t *testing.T) {
 	s := NewServer(Config{
 		Addr:   "127.0.0.1:0",
 		APSSID: "FF1-abc",
-		Join:   func(_, _ string) error { joined <- struct{}{}; return nil },
+		Join:   func(JoinRequest) error { joined <- struct{}{}; return nil },
 	})
 	require.NoError(t, s.Start())
 	defer func() { _ = s.Stop(context.Background()) }()
@@ -454,4 +528,45 @@ func TestRescanRejectedReRendersPicker(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	// Back on the picker, not the rescan page.
 	assert.Contains(t, string(body), "Connect to Wi-Fi")
+}
+
+// TestActivityObservedOnHumanRoutesOnly pins the §4.2 deferral signal's
+// classification: the /connect and /rescan action handlers count (by handler,
+// not method — the rescan form submits as GET), while root fetches and OS
+// captive probes never do, because the probe routes exist precisely to
+// redirect an idle phone's automatic requests to "/" and counting them would
+// let an idle phone pin every teardown to its ceiling.
+func TestActivityObservedOnHumanRoutesOnly(t *testing.T) {
+	var observed int
+	var mu sync.Mutex
+	_, ts, client := newTestServer(t, Config{
+		Join:             func(JoinRequest) error { return nil },
+		Rescan:           func() error { return nil },
+		ActivityObserved: func() { mu.Lock(); observed++; mu.Unlock() },
+	})
+
+	count := func() int { mu.Lock(); defer mu.Unlock(); return observed }
+
+	resp, err := client.Get(ts.URL + "/")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	resp, err = client.Get(ts.URL + "/generate_204")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 0, count(), "root fetches and OS probes are not human actions")
+
+	resp, err = client.PostForm(ts.URL+"/connect", url.Values{"ssid": {"X"}})
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 1, count(), "a credential submit is a human action")
+
+	resp, err = client.Get(ts.URL + "/rescan")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 2, count(), "the rescan confirmation page is handler-classified, method-agnostic")
+
+	resp, err = client.PostForm(ts.URL+"/rescan", nil)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.Equal(t, 3, count())
 }

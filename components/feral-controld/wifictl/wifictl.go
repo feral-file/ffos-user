@@ -12,6 +12,7 @@ package wifictl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,6 +150,70 @@ func (c *Controller) HasSavedProfile(ctx context.Context) (bool, error) {
 	return len(names) > 0, nil
 }
 
+// SavedWifiSSIDs returns the SSID each saved Wi-Fi profile actually targets —
+// read from the profile itself (802-11-wireless.ssid), NOT from the profile
+// name: profiles this codebase creates are SSID-named (`nmcli device wifi
+// connect <ssid>`), but out-of-band profiles (factory image, an ops-side
+// `nmcli connection add con-name …`) need not be, and a name-based comparison
+// would misread such a device as relocated on every offline boot. anyHidden
+// reports whether any profile targets a hidden network (802-11-wireless.hidden):
+// hidden SSIDs never appear in scan output, so scan-presence evidence is
+// unobtainable for them and callers must treat the whole saved set as
+// unverifiable rather than "absent".
+//
+// Fail-closed contract: the caller uses this as evidence for a one-way
+// decision, and a list silently missing a profile is exactly the false
+// positive it must never act on — so any per-profile read failure AND any
+// wifi profile whose ssid reads back EMPTY are errors, never skips. Profiles
+// are resolved by UUID (same rationale as deleteWifiProfiles): resolving by
+// name matches ANY profile type sharing the id, and `-g 802-11-wireless.ssid`
+// against, say, an ethernet profile exits 0 with empty output — which the
+// empty-is-error rule would misreport without the UUID pinning. The two
+// fields are read with separate -g calls because multi-field -g output layout
+// differs across nmcli versions.
+func (c *Controller) SavedWifiSSIDs(ctx context.Context) (ssids []string, anyHidden bool, err error) {
+	out, _, err := c.run(ctx, "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
+	if err != nil {
+		return nil, false, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		// UUID and TYPE never contain colons, so the third field is NAME with
+		// terse-mode escaping intact (kept only for error legibility).
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		uuid, typ, name := parts[0], parts[1], unescapeTerse(parts[2])
+		if typ != "802-11-wireless" {
+			continue
+		}
+		out, _, err := c.run(ctx, "-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, false, fmt.Errorf("reading ssid of profile %q (%s): %w", name, uuid, err)
+		}
+		// Strip ONLY nmcli's record terminator (a single trailing newline).
+		// Leading/trailing spaces are valid SSID bytes, and the scan side
+		// (parseSSIDsCapped) preserves them — TrimSpace here made a
+		// whitespace-padded saved SSID compare unequal to its own scan
+		// sighting, so an in-range network read as "absent" and could satisfy
+		// every relocation confirmation: exactly the false positive this
+		// function's fail-closed contract exists to prevent.
+		ssid := unescapeTerse(strings.TrimSuffix(string(out), "\n"))
+		if ssid == "" {
+			return nil, false, fmt.Errorf("profile %q (%s) reports an empty ssid", name, uuid)
+		}
+		ssids = append(ssids, ssid)
+		out, _, err = c.run(ctx, "-g", "802-11-wireless.hidden", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, false, fmt.Errorf("reading hidden flag of profile %q (%s): %w", name, uuid, err)
+		}
+		if strings.TrimSpace(string(out)) == "yes" {
+			anyHidden = true
+		}
+	}
+	return ssids, anyHidden, nil
+}
+
 // -----------------------------------------------------------------------------
 // Scanning (with pre-AP cache)
 // -----------------------------------------------------------------------------
@@ -166,6 +231,37 @@ func (c *Controller) Scan(ctx context.Context, force bool) ([]string, error) {
 		return nil, err
 	}
 	return parseSSIDs(string(out)), nil
+}
+
+// ScanAllSSIDs performs a forced live scan and returns every unique SSID in
+// range, uncapped. Scan's maxSSIDs cap is a captive-portal DISPLAY concern;
+// callers that use scan presence as EVIDENCE (the boot relocation check reads
+// "no saved SSID in the scan" as "the device was moved" and raises the setup
+// AP on it — a one-way door on this hardware) must see the full list: a
+// weaker in-range saved network truncated out by a display cap would read as
+// absent and fire a false relocation.
+func (c *Controller) ScanAllSSIDs(ctx context.Context) ([]string, error) {
+	// Same radio-readiness gate as RefreshScanCache, and it matters MORE here:
+	// the relocation check runs its first sample right after the boot AP
+	// sweep flips the radio AP→station, exactly when an early `wifi list`
+	// exits 0 with an empty row set — which the caller must treat as
+	// inconclusive and may only retry a bounded number of times. Fails open
+	// after scanReadyTimeout, so a healthy radio pays nothing.
+	c.waitForScanReady(ctx)
+	args := []string{"-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "yes"}
+	// Pin to the configured interface like the other radio commands (Join,
+	// waitForSSID, wifiDeviceState — including this call's own readiness
+	// gate): on multi-radio hardware an unpinned list can report a different
+	// radio's air, and "saved SSID absent" from the wrong radio is fabricated
+	// relocation evidence.
+	if c.iface != "" {
+		args = append(args, "ifname", c.iface)
+	}
+	out, _, err := c.run(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	return parseSSIDsUncapped(string(out)), nil
 }
 
 // CachedScan returns a cached scan when it is still fresh, otherwise performs a
@@ -387,29 +483,47 @@ func (e *JoinError) Error() string {
 
 func (e *JoinError) Unwrap() error { return e.err }
 
-// Join connects to ssid using psk (WPA2-PSK). On failure it returns a
-// *JoinError with a classified Kind.
+// Join connects to ssid using psk (WPA2-PSK; empty for an open network). On
+// failure it returns a *JoinError with a classified Kind. hidden marks the
+// target as a non-broadcasting network: nmcli gets `hidden yes` (directed
+// probing — without it NM only consults broadcast scan results and the join
+// fails "not found" for a network that is right there), and the pre-connect
+// visibility wait is skipped because a hidden SSID never appears in scan
+// output, so waiting for it can only burn the whole window.
 //
 // nmcli's `device wifi connect` creates a saved connection profile named after
 // the SSID as a side effect. Two cleanup steps mirror feral-setupd's wifi_utils
 // semantics:
-//   - Pre-delete any same-named profile before connecting. A stale profile can
-//     make nmcli reuse dead credentials instead of the new ones
-//     (https://bbs.archlinux.org/viewtopic.php?id=300321&p=2).
+//   - Pre-delete any stale profile targeting this SSID before connecting. A
+//     stale profile can make nmcli reuse dead credentials instead of the new
+//     ones (https://bbs.archlinux.org/viewtopic.php?id=300321&p=2).
 //   - On a failed join, delete the half-created profile so a later scan/list
 //     never surfaces a broken saved network the device can't actually use.
-func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
+func (c *Controller) Join(ctx context.Context, ssid, psk string, hidden bool) error {
 	// Pre-delete: best-effort, a missing profile is the normal case.
 	c.deleteWifiProfiles(ctx, ssid)
 
-	// The AP-bounce join reaches here moments after the hotspot went down, with
-	// the radio freshly flipped from AP back to station mode and NM's BSS list
-	// empty or stale. `device wifi connect` consults that list WITHOUT
-	// rescanning, so connecting immediately fails "no network with SSID" even
-	// though the network exists. Wait for the target to become visible first.
-	c.waitForSSID(ctx, ssid)
+	if !hidden {
+		// The AP-bounce join reaches here moments after the hotspot went down,
+		// with the radio freshly flipped from AP back to station mode and NM's
+		// BSS list empty or stale. `device wifi connect` consults that list
+		// WITHOUT rescanning, so connecting immediately fails "no network with
+		// SSID" even though the network exists. Wait for the target to become
+		// visible first. (Hidden targets skip this: they are invisible to scans
+		// by definition, and `hidden yes` makes NM probe for them directly.)
+		c.waitForSSID(ctx, ssid)
+	}
 
-	args := []string{"device", "wifi", "connect", ssid, "password", psk}
+	args := []string{"device", "wifi", "connect", ssid}
+	// An OPEN network takes no password argument at all: sending `password ""`
+	// makes NM build a WPA-PSK security block around the empty key, which the
+	// AP then rejects — the open network reads as "wrong password" forever.
+	if psk != "" {
+		args = append(args, "password", psk)
+	}
+	if hidden {
+		args = append(args, "hidden", "yes")
+	}
 	if c.iface != "" {
 		args = append(args, "ifname", c.iface)
 	}
@@ -435,20 +549,43 @@ func (c *Controller) Join(ctx context.Context, ssid, psk string) error {
 	return joinErr
 }
 
-// deleteWifiProfiles removes saved profiles named ssid, and ONLY Wi-Fi ones.
-// `nmcli connection delete <name>` matches ANY profile type by ID, and ssid is
-// user input from the captive portal — a submission equal to an unrelated
-// ethernet/VPN profile's name must never delete that profile. So: resolve the
-// name to UUIDs, filter to 802-11-wireless, delete by UUID. Best-effort like
-// the two call sites (pre-join stale-credential purge, post-failure cleanup of
-// the half-created profile): a listing failure just means no cleanup.
-func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
+// wifiProfile is one saved 802-11-wireless profile's identity fields, read
+// from the profile itself. SSID comes from 802-11-wireless.ssid (NOT the
+// profile name — out-of-band profiles need not be SSID-named, which is exactly
+// the D9 stale-credential dead end: a name-keyed delete misses the profile
+// whose stale PSK NM then reuses). KeyMgmt is
+// 802-11-wireless-security.key-mgmt; empty means the profile has no security
+// section (an open network).
+type wifiProfile struct {
+	uuid    string
+	name    string
+	ssid    string
+	keyMgmt string
+	// readErr records a failed per-profile field read; ssid/keyMgmt are
+	// unreliable when set. See wifiProfileList's failure-bias note.
+	readErr error
+}
+
+// wifiProfileList reads every saved Wi-Fi profile's (uuid, ssid, key-mgmt).
+// This is the single nmcli read path the SSID-scoped deletion below keys on;
+// the escape-policy recheck (docs/network-recovery-ux.md §4.2) extends the
+// same read with more field sets later. Per-profile field reads are separate
+// -g calls because multi-field -g output layout differs across nmcli versions
+// (same rationale as SavedWifiSSIDs). Profiles are resolved by UUID so a `-g`
+// against a same-named non-Wi-Fi profile can never be misattributed.
+//
+// Failure bias: an unreadable PROFILE is returned with readErr set rather than
+// dropped or failing the listing — the two consumers want opposite treatments
+// (deletion skips it: "cannot confirm PSK" must never delete; the future
+// recheck aborts on it: a blind activation off an unreadable list is worse
+// than a retry), so the helper reports and lets each caller apply its own
+// bias. Only the top-level listing failing is an error.
+func (c *Controller) wifiProfileList(ctx context.Context) ([]wifiProfile, error) {
 	out, _, err := c.run(ctx, "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
 	if err != nil {
-		c.logger.Debug("wifictl: profile listing for cleanup failed",
-			zap.String("ssid", ssid), zap.Error(err))
-		return
+		return nil, err
 	}
+	var profiles []wifiProfile
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		// UUID and TYPE never contain colons, so the third field is NAME with
 		// terse-mode escaping intact.
@@ -457,14 +594,169 @@ func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
 			continue
 		}
 		uuid, typ, name := parts[0], parts[1], unescapeTerse(parts[2])
-		if typ != "802-11-wireless" || name != ssid {
+		if typ != "802-11-wireless" {
 			continue
 		}
-		if _, _, delErr := c.run(ctx, "connection", "delete", "uuid", uuid); delErr != nil {
+		p := wifiProfile{uuid: uuid, name: name}
+		ssidOut, _, ssidErr := c.run(ctx, "-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid)
+		if ssidErr != nil {
+			p.readErr = ssidErr
+			profiles = append(profiles, p)
+			continue
+		}
+		// Strip ONLY nmcli's record terminator: leading/trailing spaces are
+		// valid SSID bytes (same rule as SavedWifiSSIDs).
+		p.ssid = unescapeTerse(strings.TrimSuffix(string(ssidOut), "\n"))
+		kmOut, _, kmErr := c.run(ctx, "-g", "802-11-wireless-security.key-mgmt", "connection", "show", "uuid", uuid)
+		if kmErr != nil {
+			p.readErr = kmErr
+			profiles = append(profiles, p)
+			continue
+		}
+		p.keyMgmt = strings.TrimSpace(string(kmOut))
+		profiles = append(profiles, p)
+	}
+	return profiles, nil
+}
+
+// deletableKeyMgmt reports whether a profile's key management is in the
+// PSK/open family the portal join flow is allowed to replace. A portal PSK
+// join must never destroy an enterprise (802.1X/EAP) profile for the same
+// SSID — those credentials cannot be re-entered through the portal, so the
+// allow-list fails safe: anything unrecognized is kept.
+func deletableKeyMgmt(keyMgmt string) bool {
+	switch keyMgmt {
+	case "", "none", "wpa-psk", "sae":
+		// "" = no security section (open); "none" = WEP/static; "wpa-psk" =
+		// WPA2-Personal; "sae" = WPA3-Personal. All re-creatable from the
+		// portal form.
+		return true
+	default:
+		return false
+	}
+}
+
+// deleteWifiProfiles removes saved Wi-Fi profiles whose TARGET SSID is ssid
+// and whose key management is PSK/open — never by profile name, and never
+// enterprise profiles:
+//   - Name matching misses the stale profile NM actually reuses when a profile
+//     is not named after its SSID (the D9 dead end: the user types the correct
+//     new password forever while NM re-offers the old PSK), and ssid is user
+//     input from the captive portal — a submission equal to an unrelated
+//     ethernet/VPN profile's name must never delete that profile.
+//   - The key-mgmt scope keeps a portal PSK join from destroying an 802.1X
+//     profile for the same SSID (see deletableKeyMgmt).
+//
+// Best-effort like the two call sites (pre-join stale-credential purge,
+// post-failure cleanup of the half-created profile): a listing failure means
+// no cleanup, and an unreadable profile is skipped — it cannot be CONFIRMED
+// PSK, and the fail-safe direction for deletion is to keep it.
+func (c *Controller) deleteWifiProfiles(ctx context.Context, ssid string) {
+	profiles, err := c.wifiProfileList(ctx)
+	if err != nil {
+		c.logger.Debug("wifictl: profile listing for cleanup failed",
+			zap.String("ssid", ssid), zap.Error(err))
+		return
+	}
+	for _, p := range profiles {
+		if p.readErr != nil {
+			c.logger.Debug("wifictl: profile unreadable, keeping it",
+				zap.String("name", p.name), zap.String("uuid", p.uuid), zap.Error(p.readErr))
+			continue
+		}
+		if p.ssid != ssid || !deletableKeyMgmt(p.keyMgmt) {
+			continue
+		}
+		if _, _, delErr := c.run(ctx, "connection", "delete", "uuid", p.uuid); delErr != nil {
 			c.logger.Debug("wifictl: wifi profile delete failed",
-				zap.String("ssid", ssid), zap.String("uuid", uuid), zap.Error(delErr))
+				zap.String("ssid", ssid), zap.String("uuid", p.uuid), zap.Error(delErr))
 		}
 	}
+}
+
+// ActivationProfile is one saved Wi-Fi profile's activation identity for the
+// provisioning recheck blink (docs/network-recovery-ux.md §4.2): UUID to
+// activate, target SSID for the in-range filter, Hidden because a hidden SSID
+// never appears in scans (it gets one attempt last, if budget remains), and
+// LastUsed (connection.timestamp, Unix seconds, 0 = never activated) for
+// most-recently-used ordering among in-range candidates.
+type ActivationProfile struct {
+	UUID     string
+	SSID     string
+	Hidden   bool
+	LastUsed int64
+}
+
+// ActivationProfiles returns every saved Wi-Fi profile's activation identity,
+// extending the wifiProfileList nmcli read path with the recheck's field set
+// (one read path, two field sets — see wifiProfileList). Unlike the deletion
+// consumer this is FAIL-CLOSED: any per-profile read failure fails the whole
+// listing, because the caller ACTIVATES off this list and a blind
+// `connection up` on a misread profile blocks up to its full activation
+// deadline — half a bounded blink budget — starving the profile that would
+// have worked (the §4.2 fail-bias: a listing error aborts the blink and
+// re-raises, never a blind activation).
+func (c *Controller) ActivationProfiles(ctx context.Context) ([]ActivationProfile, error) {
+	out, _, err := c.run(ctx, "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
+	if err != nil {
+		return nil, err
+	}
+	var profiles []ActivationProfile
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		uuid, typ, name := parts[0], parts[1], unescapeTerse(parts[2])
+		if typ != "802-11-wireless" {
+			continue
+		}
+		p := ActivationProfile{UUID: uuid}
+		ssidOut, _, err := c.run(ctx, "-g", "802-11-wireless.ssid", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, fmt.Errorf("reading ssid of profile %q (%s): %w", name, uuid, err)
+		}
+		// Record-terminator strip only; padding bytes are valid SSID content
+		// (same rule as SavedWifiSSIDs).
+		p.SSID = unescapeTerse(strings.TrimSuffix(string(ssidOut), "\n"))
+		hiddenOut, _, err := c.run(ctx, "-g", "802-11-wireless.hidden", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, fmt.Errorf("reading hidden flag of profile %q (%s): %w", name, uuid, err)
+		}
+		p.Hidden = strings.TrimSpace(string(hiddenOut)) == "yes"
+		tsOut, _, err := c.run(ctx, "-g", "connection.timestamp", "connection", "show", "uuid", uuid)
+		if err != nil {
+			return nil, fmt.Errorf("reading timestamp of profile %q (%s): %w", name, uuid, err)
+		}
+		// A missing/blank timestamp (never activated) is 0, not an error: the
+		// field is only an ORDERING hint, and a fresh profile is legitimately
+		// timestamp-less. An unparseable non-blank value still fails closed.
+		ts := strings.TrimSpace(string(tsOut))
+		if ts != "" {
+			n, convErr := strconv.ParseInt(ts, 10, 64)
+			if convErr != nil {
+				return nil, fmt.Errorf("unparseable timestamp %q of profile %q (%s)", ts, name, uuid)
+			}
+			p.LastUsed = n
+		}
+		profiles = append(profiles, p)
+	}
+	return profiles, nil
+}
+
+// ActivateProfile runs an EXPLICIT activation of the saved profile (`nmcli
+// connection up uuid <uuid>`), honoring ctx via the exec seam. The recheck
+// blink uses this rather than waiting for autoconnect because the repo's own
+// evidence says passive autoconnect after an AP→station flip is unreliable
+// (empty/stale BSS list; see waitForScanReady), and bench evidence
+// (docs/network-recovery-ux.md §3) shows explicit activation is not gated by
+// NM's autoconnect backoff on repeatedly failed profiles.
+func (c *Controller) ActivateProfile(ctx context.Context, uuid string) error {
+	out, _, err := c.run(ctx, "connection", "up", "uuid", uuid)
+	if err != nil {
+		return fmt.Errorf("activating profile %s: %w (%s)", uuid, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // waitForSSID blocks until ssid appears in a forced rescan or the wait window
@@ -568,8 +860,18 @@ func exitCode(err error) int {
 }
 
 // parseSSIDs extracts unique, non-empty SSIDs from nmcli terse output, ordered
-// as nmcli returned them and capped at maxSSIDs.
+// as nmcli returned them and capped at maxSSIDs (the portal display cap).
 func parseSSIDs(out string) []string {
+	return parseSSIDsCapped(out, maxSSIDs)
+}
+
+// parseSSIDsUncapped is parseSSIDs without the display cap — for callers that
+// treat scan CONTENTS as evidence, where truncation would fabricate absence.
+func parseSSIDsUncapped(out string) []string {
+	return parseSSIDsCapped(out, 0)
+}
+
+func parseSSIDsCapped(out string, limit int) []string {
 	seen := make(map[string]struct{})
 	var ssids []string
 	for _, line := range strings.Split(out, "\n") {
@@ -582,7 +884,7 @@ func parseSSIDs(out string) []string {
 		}
 		seen[ssid] = struct{}{}
 		ssids = append(ssids, ssid)
-		if len(ssids) >= maxSSIDs {
+		if limit > 0 && len(ssids) >= limit {
 			break
 		}
 	}

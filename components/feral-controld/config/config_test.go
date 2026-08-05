@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -525,4 +527,40 @@ func TestConfig_Get_Success(t *testing.T) {
 	assert.NotNil(t, result.SentryConfig)
 	assert.Empty(t, result.CDPConfig.Endpoint)
 	assert.Empty(t, result.RelayerConfig.Endpoint)
+}
+
+// TestProvisioningTuningPermissiveDecode pins the §3 config hazard rule: a
+// syntactically valid but wrong-typed provisioning block logs and falls back
+// to defaults WITHOUT failing the load (config.Load failing is fatal under
+// Restart=always), while a well-formed block decodes and an absent one yields
+// zeros (the machine's defaults).
+func TestProvisioningTuningPermissiveDecode(t *testing.T) {
+	t.Run("absent block yields zeros", func(t *testing.T) {
+		c := &config.Config{}
+		got := c.ProvisioningTuning(zap.NewNop())
+		assert.Equal(t, config.ProvisioningTuning{}, got)
+	})
+
+	t.Run("well-formed block decodes", func(t *testing.T) {
+		c := &config.Config{Provisioning: []byte(`{"setupIncompleteDisabled":true,"episodeApPhaseSeconds":120}`)}
+		got := c.ProvisioningTuning(zap.NewNop())
+		assert.True(t, got.SetupIncompleteDisabled)
+		assert.Equal(t, 120, got.EpisodeApPhaseSeconds)
+	})
+
+	t.Run("wrong-typed block falls back to defaults without failing", func(t *testing.T) {
+		c := &config.Config{Provisioning: []byte(`"not an object"`)}
+		got := c.ProvisioningTuning(zap.NewNop())
+		assert.Equal(t, config.ProvisioningTuning{}, got)
+	})
+
+	t.Run("wrong-typed block survives the whole-config parse", func(t *testing.T) {
+		// The RawMessage field must swallow a wrong-typed (but syntactically
+		// valid) block at Load time — the strictness stays scoped to existing
+		// keys.
+		var c config.Config
+		err := json.Unmarshal([]byte(`{"provisioning": 42, "enableHub": true}`), &c)
+		require.NoError(t, err, "a wrong-typed provisioning block must not fail the parse")
+		assert.Equal(t, config.ProvisioningTuning{}, c.ProvisioningTuning(zap.NewNop()))
+	})
 }

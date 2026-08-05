@@ -1,0 +1,69 @@
+{
+  "contracts": {
+    "mintPairingDisplay": {
+      "version": 1,
+      "requestKey": "request",
+      "states": [
+        "pairing_code",
+        "request_received",
+        "creating_token",
+        "hidden"
+      ],
+      "acceptedResponse": {
+        "ok": true
+      }
+    },
+    "setupDisplay": {
+      "version": 1,
+      "requestKey": "request",
+      "states": [
+        "scanning",
+        "softap_qr",
+        "joining",
+        "join_failed",
+        "connecting",
+        "setup_error",
+        "updating",
+        "finalizing",
+        "claim_qr",
+        "factory_reset",
+        "ready",
+        "hidden"
+      ],
+      "stateFields": {
+        "softap_qr": {
+          "required": ["ssid"],
+          "optional": ["password"]
+        },
+        "join_failed": {
+          "optional": ["reason"]
+        },
+        "connecting": {
+          "optional": ["reason"]
+        },
+        "setup_error": {
+          "optional": ["reason"]
+        },
+        "updating": {
+          "optional": ["progress"]
+        },
+        "claim_qr": {
+          "required": ["url"],
+          "optional": ["device_name"]
+        }
+      },
+      "notes": "Requests missing a required field for their state are rejected with {ok:false}. progress must be a finite number. The player renders overlay-driving commands (mintPairingDisplay, setupDisplay) without arbitration, so the controller must keep at most one non-hidden at a time.",
+      "acceptedResponse": {
+        "ok": true
+      }
+    },
+    "renderStatus": {
+      "version": 1,
+      "notes": "checkStatus replies carry an optional numeric renderStatus: 0 pending, 1 loading, 2 ready, 3 failed. Live-only — never persisted, so boot and hydrate strip it. `ready` means the artwork finished loading AND is what the screen is showing, not that it rendered correctly. It publishes when the incoming slot commits, so on a transition it trails byte arrival by up to the crossfade duration (650ms); a first load publishes immediately. For iframe/PDF a browser-generated error document still reports ready, because Chromium does not emit an iframe error for a failed navigation. On a player build that declares this entry, an ABSENT renderStatus means 'no lifecycle published yet for the current mount' — not a terminal state, and not a fault. A manifest without this entry is an older build that never reports the field at all: controld must treat that as capability-absent rather than as a stuck pending, because the two are byte-identical on the wire (JSON.stringify drops the undefined key)."
+    },
+    "playerStatus": {
+      "version": 1,
+      "notes": "window.__ffosPlayerStatus() (no request payload — a plain global function, not a checkStatus-style command) returns JSON.stringify({protocol, route, handlerRegistered, hasArtwork, bootHydration}), where bootHydration is one of pending|ok|halted_cleared|halted_preserving|failed. Installed by CDPRequestHandler.initialize() and set back to null by cleanup(). Absent on player builds that predate this contract entry — controld's capability fuse treats a manifest without this entry as unsupported and falls back to conservative (log-only) boot recovery."
+    }
+  }
+}

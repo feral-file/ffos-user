@@ -24,6 +24,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,11 +94,29 @@ type Status struct {
 // unreliable, so the portal reads the pre-AP cache.
 type ScanFunc func(ctx context.Context) ([]string, error)
 
+// JoinRequest is one credential submission from the portal form.
+type JoinRequest struct {
+	SSID     string
+	Password string
+	// Hidden marks the target as a non-broadcasting network: the join must use
+	// directed probing (`hidden yes`) because the SSID never appears in scan
+	// results. Only settable on the manual-entry branch — a picked network was
+	// by definition visible in the scan.
+	Hidden bool
+	// Manual marks the SSID as typed by hand rather than picked from the scan
+	// list. Downstream trimming is keyed on this flag: a typed SSID gets
+	// leading/trailing whitespace stripped (phone keyboards autocomplete a
+	// trailing space), while a picker value must pass through VERBATIM —
+	// leading/trailing bytes are valid SSID content and the scan side
+	// preserves them.
+	Manual bool
+}
+
 // JoinFunc hands submitted credentials to the provisioning machine. It MUST
 // return promptly (the machine performs the AP-bounce + join asynchronously);
 // a non-nil error means the submission was rejected outright (e.g. empty SSID)
 // and the form is re-rendered.
-type JoinFunc func(ssid, password string) error
+type JoinFunc func(req JoinRequest) error
 
 // StatusFunc reports the current/last join outcome. Backed by the provisioning
 // machine so the outcome persists across portal restarts.
@@ -110,7 +129,7 @@ type StatusFunc func() Status
 // request was rejected (e.g. the machine is busy) and the form is re-rendered.
 type RescanFunc func() error
 
-// Config wires the portal's listener and its three seams.
+// Config wires the portal's listener and its seams.
 type Config struct {
 	// Addr is the bind address. Production binds ":80" (a sysctl lowers the
 	// unprivileged port floor; the portal adds no capabilities logic). Tests
@@ -123,7 +142,19 @@ type Config struct {
 	Join   JoinFunc
 	Status StatusFunc
 	Rescan RescanFunc
-	Logger *zap.Logger
+	// ActivityObserved, when set, is invoked once per HUMAN-CAUSED portal
+	// request — the /connect and /rescan action handlers only, classified by
+	// handler, not method (the rescan form submits as GET). It feeds the
+	// provisioning session policy's mid-portal teardown deferral
+	// (docs/network-recovery-ux.md §4.2). GET / is deliberately NOT counted:
+	// in net/http.ServeMux the "/" pattern is the catch-all, and the OS
+	// captive-probe routes exist precisely to redirect an idle phone's
+	// automatic probes to it — counting root fetches would let an idle
+	// associated phone pin every teardown to its ceiling. Invoked on request
+	// goroutines; the observer must be internally synchronized and
+	// non-blocking.
+	ActivityObserved func()
+	Logger           *zap.Logger
 }
 
 // Server is the captive-portal HTTP server.
@@ -304,15 +335,33 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	s.noteActivity()
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	ssid := r.PostFormValue("ssid")
-	password := r.PostFormValue("password")
+	// Two SSID sources, both always rendered (picker plus manual field — a
+	// hidden network can never be picked, and D3 was exactly the picker
+	// crowding manual entry out whenever the scan was non-empty). A non-blank
+	// manual entry wins over the picker: the user typed it deliberately, while
+	// the select always submits SOME value. Blank-ness is judged on the
+	// trimmed value, but the RAW value is what gets passed through — the
+	// manual-branch trim is the machine's call, keyed on the Manual flag.
+	req := JoinRequest{
+		SSID:     r.PostFormValue("ssid"),
+		Password: r.PostFormValue("password"),
+	}
+	if manual := r.PostFormValue("ssid_manual"); strings.TrimSpace(manual) != "" || req.SSID == "" {
+		req.SSID = manual
+		req.Manual = true
+		// The hidden checkbox is scoped to manual entry: a picked network was
+		// visible in the scan, and `hidden yes` there would also skip the
+		// post-AP-bounce visibility wait the picker path relies on.
+		req.Hidden = r.PostFormValue("hidden") != ""
+	}
 
 	if s.cfg.Join != nil {
-		if err := s.cfg.Join(ssid, password); err != nil {
+		if err := s.cfg.Join(req); err != nil {
 			// Rejected outright (e.g. empty SSID): re-render the picker so the
 			// user can correct it. The AP has not bounced in this case.
 			s.logger.Info("portal: join submission rejected", zap.Error(err))
@@ -326,7 +375,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "result.html", struct {
 		SSID   string
 		APSSID string
-	}{SSID: ssid, APSSID: s.cfg.APSSID})
+	}{SSID: strings.TrimSpace(req.SSID), APSSID: s.cfg.APSSID})
 }
 
 // handleRescan drives the "search for networks again" flow. GET renders a
@@ -337,6 +386,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 // BEFORE the bounce lands) tells the user to scan the QR code on the frame
 // again to reconnect.
 func (s *Server) handleRescan(w http.ResponseWriter, r *http.Request) {
+	s.noteActivity()
 	switch r.Method {
 	case http.MethodGet:
 		s.render(w, "rescan_confirm.html", struct{ APSSID string }{APSSID: s.cfg.APSSID})
@@ -374,6 +424,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) redirectToPortal(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// noteActivity reports one human-caused request (see Config.ActivityObserved).
+func (s *Server) noteActivity() {
+	if s.cfg.ActivityObserved != nil {
+		s.cfg.ActivityObserved()
+	}
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
