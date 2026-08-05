@@ -2326,6 +2326,15 @@ same bug with a different key. Rejected as retryable `busy`, matching how
 the narrower enqueue-window twin (`ErrClearedDuringDownload`) already
 reports itself.
 
+Both download routes take the barrier — `downloadPlaylistItem` and
+`downloadPlaylist`. The whole-playlist route passes every resolved member
+source as well as the playlist ID, because `classifyPlaylistItems` samples
+its per-item epochs after the resolve too and so is equally blind to a
+clear that landed during it. It rejects the whole command rather than
+skipping the cleared member: the alternative invents partial-success
+semantics for a command whose contract is a single queued/total answer,
+to save one retry that succeeds as soon as the clear settles.
+
 **What one capture may accumulate is also bounded.** Passing the source
 guard establishes that the ORIGIN is public, not that the page behaves.
 The disk budget caps bytes *fetched*, which does not cover this: the

@@ -545,7 +545,7 @@ type Service interface {
 	// into the sampled value. Sample ClearBarrier before the resolve and
 	// check ClearedSinceBarrier after it. See clearSeq's doc.
 	ClearBarrier() uint64
-	ClearedSinceBarrier(playlistID, source string, barrier uint64) bool
+	ClearedSinceBarrier(playlistID string, barrier uint64, sources ...string) bool
 }
 
 type captureJob struct {
@@ -1404,14 +1404,25 @@ func (s *service) ClearBarrier() uint64 {
 // a download that started earlier a resurrection of state the clear
 // already reported as removed.
 //
-// sourceKey may be empty when the caller has no specific item in mind.
-func (s *service) ClearedSinceBarrier(playlistID, source string, barrier uint64) bool {
+// sources may be empty when the caller has no specific item in mind, or
+// hold every member source of a resolved playlist — the whole-playlist
+// route passes all of them, so one call answers for the entire playlist
+// under a single lock acquisition rather than one per item.
+func (s *service) ClearedSinceBarrier(playlistID string, barrier uint64, sources ...string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.playlistClearEpoch[playlistID] > barrier {
 		return true
 	}
-	return source != "" && s.downloadEpoch[SourceKey(source)] > barrier
+	for _, source := range sources {
+		if source == "" {
+			continue
+		}
+		if s.downloadEpoch[SourceKey(source)] > barrier {
+			return true
+		}
+	}
+	return false
 }
 
 // CurrentPlaylistClearGeneration is the exported sampling entry point for

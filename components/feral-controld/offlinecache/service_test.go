@@ -3557,26 +3557,26 @@ func TestService_ClearBarrier_DetectsClearsLandingAfterTheSample(t *testing.T) {
 
 	// A barrier sampled now must see nothing behind it.
 	barrier := ts.service.ClearBarrier()
-	require.False(t, ts.service.ClearedSinceBarrier("pl-barrier", source, barrier),
+	require.False(t, ts.service.ClearedSinceBarrier("pl-barrier", barrier, source),
 		"no clear has happened since the sample")
 
 	// A PLAYLIST clear after the sample is visible...
 	require.NoError(t, ts.service.ClearPlaylist("pl-barrier"))
-	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", source, barrier))
+	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", barrier, source))
 
 	// ...and so is an ITEM clear, which is the other command that can
 	// land during a resolve. A fresh barrier first, so this asserts the
 	// item path rather than re-observing the playlist clear above.
 	after := ts.service.ClearBarrier()
-	require.False(t, ts.service.ClearedSinceBarrier("pl-barrier", source, after))
+	require.False(t, ts.service.ClearedSinceBarrier("pl-barrier", after, source))
 
 	_, _, err = ts.service.DownloadPlaylist(context.Background(), raw, "")
 	require.NoError(t, err)
 	require.NoError(t, ts.service.ClearItem(source))
-	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", source, after),
+	require.True(t, ts.service.ClearedSinceBarrier("pl-barrier", after, source),
 		"a clearPlaylistItemCache during a resolve must disqualify the download too")
 
 	// An unrelated playlist/item must NOT be disqualified by either.
-	require.False(t, ts.service.ClearedSinceBarrier("other-playlist", "https://example.com/other.png", after),
+	require.False(t, ts.service.ClearedSinceBarrier("other-playlist", after, "https://example.com/other.png"),
 		"the barrier must be scoped to what was actually cleared")
 }

@@ -130,17 +130,22 @@ func (mr *MockOfflineCacheServiceMockRecorder) ClearPlaylist(playlistID interfac
 }
 
 // ClearedSinceBarrier mocks base method.
-func (m *MockOfflineCacheService) ClearedSinceBarrier(playlistID, source string, barrier uint64) bool {
+func (m *MockOfflineCacheService) ClearedSinceBarrier(playlistID string, barrier uint64, sources ...string) bool {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ClearedSinceBarrier", playlistID, source, barrier)
+	varargs := []interface{}{playlistID, barrier}
+	for _, a := range sources {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "ClearedSinceBarrier", varargs...)
 	ret0, _ := ret[0].(bool)
 	return ret0
 }
 
 // ClearedSinceBarrier indicates an expected call of ClearedSinceBarrier.
-func (mr *MockOfflineCacheServiceMockRecorder) ClearedSinceBarrier(playlistID, source, barrier interface{}) *gomock.Call {
+func (mr *MockOfflineCacheServiceMockRecorder) ClearedSinceBarrier(playlistID, barrier interface{}, sources ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearedSinceBarrier", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearedSinceBarrier), playlistID, source, barrier)
+	varargs := append([]interface{}{playlistID, barrier}, sources...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearedSinceBarrier", reflect.TypeOf((*MockOfflineCacheService)(nil).ClearedSinceBarrier), varargs...)
 }
 
 // CurrentPlaylistClearGeneration mocks base method.

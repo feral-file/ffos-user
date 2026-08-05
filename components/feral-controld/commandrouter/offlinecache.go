@@ -89,7 +89,7 @@ func (h *handler) handleDownloadPlaylistItem(ctx context.Context, args map[strin
 	// resurrecting exactly what that clear removed. Retryable: re-issuing
 	// after the clear has settled behaves normally, which is how the
 	// enqueue-window twin (ErrClearedDuringDownload) is already reported.
-	if h.offlineCache.ClearedSinceBarrier(playlist.ID, source, barrier) {
+	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, source) {
 		return errorResponse("busy",
 			"a clear for this playlist or item landed while it was being resolved, so nothing was queued", true), nil
 	}
@@ -200,9 +200,35 @@ func (h *handler) indexResolvedPlaylistForOfflineDisplay(playlist *dp1.Playlist,
 }
 
 func (h *handler) handleDownloadPlaylist(ctx context.Context, args map[string]any) (interface{}, error) {
+	// Sampled before the resolve, for the reason spelled out in
+	// handleDownloadPlaylistItem: DownloadPlaylist samples its own clear
+	// epochs once it HAS the body, which is necessarily after this
+	// network-bound resolve, so a clear landing during the resolve is
+	// already folded into those samples and cannot be detected by them.
+	barrier := h.offlineCache.ClearBarrier()
+
 	playlist, err := h.resolveOfflineCachePlaylist(ctx, args)
 	if err != nil {
 		return errorResponse("resolve_failed", err.Error(), true), nil
+	}
+
+	// Every member source, not just the playlist id: clearPlaylistCache
+	// and clearPlaylistItemCache are both undone by proceeding here, and
+	// the per-item epochs classifyPlaylistItems samples are taken after
+	// the resolve too, so they cannot see a clear that landed during it.
+	//
+	// Rejecting the WHOLE command when any single member was cleared is
+	// deliberately coarser than skipping that member. The alternative
+	// invents partial-success semantics for a command whose contract is a
+	// single queued/total answer, to save a client one retry that
+	// succeeds immediately once the clear settles.
+	sources := make([]string, 0, len(playlist.Items))
+	for _, item := range playlist.Items {
+		sources = append(sources, item.Source)
+	}
+	if h.offlineCache.ClearedSinceBarrier(playlist.ID, barrier, sources...) {
+		return errorResponse("busy",
+			"a clear for this playlist or one of its items landed while it was being resolved, so nothing was queued", true), nil
 	}
 
 	raw, err := h.json.Marshal(playlist)
