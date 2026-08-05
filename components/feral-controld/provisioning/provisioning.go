@@ -1973,29 +1973,33 @@ func (m *Machine) applyRescan(ctx context.Context) {
 	// Do NOT widen it to cover a failed re-raise retried by the tick: NM
 	// grabbing a network in that gap is the desired recovery, not the race
 	// this exists to remove.
+	//
+	// The restore is scheduled BEFORE the suppress attempt and regardless of
+	// its outcome, because the outcome is not knowable from the return value:
+	// no error can distinguish "the flip never applied" from "it applied and
+	// the call then failed" (a ctx kill, a timeout, exec teardown after the
+	// write reached NM). Conditioning the restore on success is therefore the
+	// one shape that can leave the flag off with no latch and no retry — and a
+	// long-running daemon never re-runs the startup self-heal, so such a leak
+	// would survive until an NM restart, silently removing the autoconnect the
+	// session landings depend on. Restoring is idempotent, so being wrong in
+	// the other direction costs one nmcli call on a rare error path.
+	//
+	// Registering the defer first also covers a panic inside the suppress call
+	// itself, a failed ensureAPUp, and a panic anywhere in the bounce; the
+	// latch inside restoreAutoconnect covers the restore failing.
+	//
+	// One case the defer canNOT cover, deliberately: a Stop() during the bounce
+	// cancels ctx, so the restore fails and latches on a loop that will never
+	// tick again. Unlike the shutdown teardown (which runs on a fresh context
+	// because a leftover hotspot profile is persistent), nothing here is worth
+	// a detached call — the flag is runtime-only, the daemon is Restart=always,
+	// and the next start's first tick re-enables it.
+	defer m.restoreAutoconnect(ctx)
 	if err := m.wifi.SetDeviceAutoconnect(ctx, false); err != nil {
 		// Fail OPEN: the race is a quality problem, the rescan is the feature
-		// the user pressed. Proceed with today's unsuppressed bounce and do not
-		// latch. Accepted residual: an error does not PROVE the flip never
-		// landed (a ctx kill after the property write), so a partially applied
-		// suppression waits for the next rescan, the next daemon start's
-		// self-heal, or an NM restart rather than being restored here — the
-		// alternative, restoring unconditionally, spends an nmcli call on every
-		// broken-seam bounce to cover a window the self-heal already bounds.
+		// the user pressed. Proceed with today's unsuppressed bounce.
 		m.logger.Warn("provisioning: autoconnect suppression failed; rescan proceeds unsuppressed", zap.Error(err))
-	} else {
-		// Deferred so the restore also runs when ensureAPUp fails or the loop
-		// panics into the supervisor; the latch inside covers the case where
-		// the restore call itself fails.
-		//
-		// One case the defer canNOT cover, deliberately: a Stop() during the
-		// bounce cancels ctx, so this restore fails and latches on a loop that
-		// will never tick again. Unlike the shutdown teardown (which runs on a
-		// fresh context because a leftover hotspot profile is persistent),
-		// nothing here is worth a detached call — the flag is runtime-only, the
-		// daemon is Restart=always, and the next start's first tick re-enables
-		// it within one tick.
-		defer m.restoreAutoconnect(ctx)
 	}
 	m.ensureAPDown(ctx)
 	// State is still StateAPActive, so reconcile re-raises via ensureAPUp: it

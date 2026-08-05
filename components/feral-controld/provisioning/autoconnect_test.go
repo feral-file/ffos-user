@@ -95,9 +95,15 @@ func TestRescanRestoresAutoconnectWhenReRaiseFails(t *testing.T) {
 }
 
 // TestRescanSuppressionFailureFailsOpen: the race is a quality problem, the
-// rescan is the feature the user pressed. A suppression that cannot be applied
-// must not block the bounce — and must not latch a restore for a flag nothing
-// ever changed.
+// rescan is the feature the user pressed, so a suppression that errors must not
+// block the bounce.
+//
+// It must ALSO still restore. A suppress error does not prove the flag stayed
+// on — no error return separates "never applied" from "applied, then the call
+// failed" — and skipping the restore is the one path that can leave the flag
+// off with no latch and no retry, which on a long-running daemon (no further
+// start, so no self-heal) would silently strip the session landings'
+// autoconnect until an NM restart.
 func TestRescanSuppressionFailureFailsOpen(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -109,12 +115,37 @@ func TestRescanSuppressionFailureFailsOpen(t *testing.T) {
 	h.wifi.autoconnectErrs = []error{errors.New("nmcli device set failed")}
 	h.m.applyRescan(ctx)
 
-	assert.Equal(t, []bool{false}, h.wifi.autoconnectLog(),
-		"nothing was suppressed, so nothing may be restored")
-	assert.False(t, h.m.autoconnectRestorePending, "fail-open must not latch a phantom restore")
+	assert.Equal(t, []bool{false, true}, h.wifi.autoconnectLog(),
+		"the restore must run even when the suppress reported failure")
+	assert.False(t, h.m.autoconnectRestorePending, "the restore succeeded, so no latch")
 	assert.Greater(t, h.rec.count("wifi.RefreshScanCache"), scansBefore, "the rescan must still run")
 	assert.Greater(t, h.rec.count("ap.Up"), upsBefore, "the AP must still come back")
 	assert.Equal(t, StateAPActive, h.m.State())
+}
+
+// TestRescanBrokenSeamLatchesAndConverges: when BOTH calls fail — the seam is
+// broken, so the flag's true state is unknown — the machine must not assume the
+// optimistic reading. It latches and keeps retrying, then converges the moment
+// the seam recovers.
+func TestRescanBrokenSeamLatchesAndConverges(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	raiseUnprovisionedAP(t, h, ctx)
+	settleStartupSelfHeal(t, h, ctx)
+
+	h.wifi.autoconnectErrSticky = errors.New("nmcli unavailable")
+	h.m.applyRescan(ctx)
+	require.Equal(t, StateAPActive, h.m.State(), "a broken seam must not block the rescan")
+	assert.True(t, h.m.autoconnectRestorePending,
+		"an unknown flag state must latch, not be assumed on")
+
+	h.m.onTick(ctx)
+	assert.True(t, h.m.autoconnectRestorePending, "still broken: the latch holds")
+
+	h.wifi.autoconnectErrSticky = nil
+	h.m.onTick(ctx)
+	assert.False(t, h.m.autoconnectRestorePending, "a recovered seam converges")
+	assert.Equal(t, []bool{false, true, true, true}, h.wifi.autoconnectLog())
 }
 
 // TestAutoconnectRestoreLatchRetriesUntilSuccess: a failed restore is the one
