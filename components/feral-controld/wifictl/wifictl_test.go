@@ -1164,3 +1164,97 @@ func TestActivateProfile(t *testing.T) {
 		"the nmcli output must surface for the blink's candidate log")
 	assert.Equal(t, []string{"nmcli", "connection", "up", "uuid", "good"}, exec.recorded()[0])
 }
+
+// --- SetDeviceAutoconnect (rescan-bounce suppression seam) --------------------
+
+// autoconnectReply answers the two argv shapes the seam issues: the device
+// listing used to resolve an unpinned iface, and the flip itself.
+func autoconnectReply(devices string) func(argv []string) ([]byte, error) {
+	return func(argv []string) ([]byte, error) {
+		if strings.Contains(strings.Join(argv, " "), "-f DEVICE,TYPE device status") {
+			return []byte(devices), nil
+		}
+		// The flip itself: nmcli prints nothing on success.
+		return nil, nil
+	}
+}
+
+// TestSetDeviceAutoconnectArgv pins the argv of both directions and the
+// unpinned-iface resolution: production wires an empty iface, so the wifi row
+// of `device status` is what the flip must land on — flipping the ethernet
+// device would silently do nothing for the race the suppression exists to
+// remove.
+func TestSetDeviceAutoconnectArgv(t *testing.T) {
+	c, exec, _ := newController(autoconnectReply("eno1:ethernet\nwlp2s0:wifi\nlo:loopback\n"))
+
+	require.NoError(t, c.SetDeviceAutoconnect(context.Background(), false))
+	require.NoError(t, c.SetDeviceAutoconnect(context.Background(), true))
+
+	calls := exec.recorded()
+	require.Len(t, calls, 4, "each flip resolves the device then sets it")
+	assert.Equal(t, []string{"nmcli", "device", "set", "wlp2s0", "autoconnect", "off"}, calls[1])
+	assert.Equal(t, []string{"nmcli", "device", "set", "wlp2s0", "autoconnect", "on"}, calls[3])
+}
+
+// TestSetDeviceAutoconnectUsesPinnedIface: a pinned iface skips the listing
+// entirely (one fewer nmcli round-trip inside the bounce's critical window).
+func TestSetDeviceAutoconnectUsesPinnedIface(t *testing.T) {
+	exec := &scriptedExec{reply: autoconnectReply("")}
+	c := New(exec, &fakeClock{now: time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)}, zap.NewNop(), "wlan9")
+
+	require.NoError(t, c.SetDeviceAutoconnect(context.Background(), false))
+
+	calls := exec.recorded()
+	require.Len(t, calls, 1)
+	assert.Equal(t, []string{"nmcli", "device", "set", "wlan9", "autoconnect", "off"}, calls[0])
+}
+
+// TestSetDeviceAutoconnectFailures: every failure mode must surface as an
+// error, because the caller's fail-open branch keys on it — a silent success
+// on an unflipped device would make it believe the race was suppressed.
+func TestSetDeviceAutoconnectFailures(t *testing.T) {
+	t.Run("no wifi device", func(t *testing.T) {
+		c, _, _ := newController(autoconnectReply("eno1:ethernet\n"))
+		err := c.SetDeviceAutoconnect(context.Background(), false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no wifi device")
+	})
+
+	t.Run("listing fails", func(t *testing.T) {
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			return nil, fakeExitError{code: 1, msg: "exit status 1"}
+		})
+		require.Error(t, c.SetDeviceAutoconnect(context.Background(), false))
+	})
+
+	t.Run("flip fails", func(t *testing.T) {
+		c, _, _ := newController(func(argv []string) ([]byte, error) {
+			joined := strings.Join(argv, " ")
+			if strings.Contains(joined, "-f DEVICE,TYPE device status") {
+				return []byte("wlp2s0:wifi\n"), nil
+			}
+			return []byte("Error: Device 'wlp2s0' not found."), fakeExitError{code: 10, msg: "exit status 10"}
+		})
+		err := c.SetDeviceAutoconnect(context.Background(), false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found", "nmcli's own message must reach the caller's log")
+	})
+}
+
+// TestSetDeviceAutoconnectHonorsCtx: the WifiController contract requires every
+// method to respect ctx. The seam owns no waits of its own, so honoring it
+// means handing the caller's ctx to the exec seam — which is what actually
+// kills a wedged nmcli inside the bounce.
+func TestSetDeviceAutoconnectHonorsCtx(t *testing.T) {
+	c, exec, _ := newController(autoconnectReply("wlp2s0:wifi\n"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_ = c.SetDeviceAutoconnect(ctx, false)
+
+	ctxErrs := exec.recordedCtxErrs()
+	require.Len(t, ctxErrs, 2, "the assertion below is vacuous if nothing ran")
+	for i, err := range ctxErrs {
+		assert.Error(t, err, "call %d must carry the caller's canceled ctx", i)
+	}
+}

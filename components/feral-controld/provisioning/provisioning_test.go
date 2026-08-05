@@ -119,6 +119,14 @@ type fakeWifi struct {
 	// flip the link state WHILE the scan is in flight.
 	scanAllHook  func(call int)
 	scanAllCalls int
+	// autoconnectErrs scripts SetDeviceAutoconnect: consumed one per call, nil
+	// entries succeed. Once exhausted, autoconnectErrSticky (nil by default)
+	// answers every later call — that is how "the restore keeps failing" is
+	// scripted for the latch tests. autoconnectCalls records each call's
+	// enabled flag in order.
+	autoconnectErrs      []error
+	autoconnectErrSticky error
+	autoconnectCalls     []bool
 }
 
 func (w *fakeWifi) HasSavedProfile(context.Context) (bool, error) {
@@ -241,6 +249,40 @@ func (w *fakeWifi) ActivateProfile(_ context.Context, uuid string) error {
 		return err
 	}
 	return nil
+}
+
+func (w *fakeWifi) SetDeviceAutoconnect(_ context.Context, enabled bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if enabled {
+		w.rec.add("wifi.Autoconnect:on")
+	} else {
+		w.rec.add("wifi.Autoconnect:off")
+	}
+	w.autoconnectCalls = append(w.autoconnectCalls, enabled)
+	if len(w.autoconnectErrs) > 0 {
+		err := w.autoconnectErrs[0]
+		w.autoconnectErrs = w.autoconnectErrs[1:]
+		return err
+	}
+	return w.autoconnectErrSticky
+}
+
+// autoconnectLog returns the enabled flags SetDeviceAutoconnect was called
+// with, in order.
+func (w *fakeWifi) autoconnectLog() []bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]bool(nil), w.autoconnectCalls...)
+}
+
+// resetAutoconnectLog drops the recorded flips so a test can assert on the
+// calls a specific scenario makes, unpolluted by the startup self-heal every
+// machine issues on its first tick.
+func (w *fakeWifi) resetAutoconnectLog() {
+	w.mu.Lock()
+	w.autoconnectCalls = nil
+	w.mu.Unlock()
 }
 
 func (w *fakeWifi) setProfile(v bool) {

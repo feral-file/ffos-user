@@ -214,6 +214,12 @@ type WifiController interface {
 	// Both must honor ctx (the blink runs under a hard ceiling).
 	ActivationProfiles(ctx context.Context) ([]wifictl.ActivationProfile, error)
 	ActivateProfile(ctx context.Context, uuid string) error
+	// SetDeviceAutoconnect flips the DEVICE-level runtime autoconnect flag,
+	// gating only NM's OWN activations — explicit Join/ActivateProfile calls
+	// stay effective while it is off. applyRescan is the sole consumer (see
+	// its suppression block); the flag is runtime-only, so an NM restart or a
+	// reboot restores it regardless of what this machine did. Must honor ctx.
+	SetDeviceAutoconnect(ctx context.Context, enabled bool) error
 }
 
 // Connectivity reports the device's network reachability as sys-monitord sees
@@ -672,6 +678,19 @@ type Machine struct {
 	apRaiseFails    int
 	apReleaseFails  int
 	setupErrorLatch string
+
+	// autoconnectRestorePending is the restore latch behind applyRescan's
+	// autoconnect suppression: set when a restore call FAILED (or, at
+	// construction, unconditionally — see below), cleared by the first restore
+	// that succeeds. onTick retries it every tick, which is what makes the
+	// suppression's time-bound layered rather than dependent on one deferred
+	// call succeeding.
+	//
+	// It is initialized TRUE deliberately: every daemon start then issues one
+	// idempotent `autoconnect on` on its first tick, which self-heals a
+	// suppression a crash (or a SIGKILL mid-bounce) left behind without needing
+	// any crash-time bookkeeping. Loop-goroutine-only, like apRaiseFails.
+	autoconnectRestorePending bool
 }
 
 // Setup-error latch flavors, carried in setupErrorLatch and logged; the
@@ -775,6 +794,10 @@ func New(cfg Config) *Machine {
 		events:               make(chan event, eventBuffer),
 		state:                StateStarting,
 		status:               portal.Status{State: portal.JoinIdle},
+		// Startup self-heal: the first tick unconditionally re-enables device
+		// autoconnect (idempotent), covering a suppression stranded by a crash
+		// mid-rescan-bounce. See the field's doc.
+		autoconnectRestorePending: true,
 	}
 }
 
@@ -1476,6 +1499,15 @@ func (m *Machine) disarmRelocation(reason string) {
 
 // onTick fires the sustained-offline window and retries any deferred AP op.
 func (m *Machine) onTick(ctx context.Context) {
+	// Autoconnect restore, retried until it succeeds. Placed at the TOP and
+	// outside the state switch on purpose: every branch below can return early,
+	// and this must run on every tick in every state — it is both the retry for
+	// a failed restore and the startup self-heal for a suppression a crash left
+	// behind (the latch starts true; see the field's doc).
+	if m.autoconnectRestorePending {
+		m.restoreAutoconnect(ctx)
+	}
+
 	// Recover from an assumed-offline boot: re-query reachability until one
 	// query succeeds (a connectivity_change event also resolves it). Runs
 	// BEFORE the window/reconcile logic so a corrected reading drives this
@@ -1920,11 +1952,86 @@ func (m *Machine) applyRescan(ctx context.Context) {
 		Reason:  "scanning",
 		Message: "Looking for nearby Wi-Fi networks",
 	})
+	// Suppress NM's OWN activations for the length of the bounce. Between the
+	// teardown below and the re-raise the radio sits in station mode with every
+	// saved profile's autoconnect live, so NM races this function for it: on
+	// FF1-8EVTK3RE the policy engine started auto-activating a saved profile
+	// 5.9s after teardown and lost to the re-raise by 0.52s, which killed the
+	// association mid-`config`. Either winner is survivable (the state is still
+	// StateAPActive, so the next reconcile re-raises and cuts NM off again) —
+	// what the suppression buys is that the outcome no longer depends on which
+	// side wins a sub-second race, which is what made field behavior
+	// irreproducible.
+	//
+	// Scope is deliberately THIS call frame only, and the guarantee that it
+	// cannot bleed into the other teardown paths is structural, not a check:
+	// applyRescan runs synchronously on the loop goroutine, so the blink, a
+	// portal join, and the session landings (which legitimately DEPEND on
+	// autoconnect to restore the previous network) can never overlap the
+	// window — a join submitted mid-bounce queues behind the restore.
+	//
+	// Do NOT widen it to cover a failed re-raise retried by the tick: NM
+	// grabbing a network in that gap is the desired recovery, not the race
+	// this exists to remove.
+	if err := m.wifi.SetDeviceAutoconnect(ctx, false); err != nil {
+		// Fail OPEN: the race is a quality problem, the rescan is the feature
+		// the user pressed. Proceed with today's unsuppressed bounce and do not
+		// latch. Accepted residual: an error does not PROVE the flip never
+		// landed (a ctx kill after the property write), so a partially applied
+		// suppression waits for the next rescan, the next daemon start's
+		// self-heal, or an NM restart rather than being restored here — the
+		// alternative, restoring unconditionally, spends an nmcli call on every
+		// broken-seam bounce to cover a window the self-heal already bounds.
+		m.logger.Warn("provisioning: autoconnect suppression failed; rescan proceeds unsuppressed", zap.Error(err))
+	} else {
+		// Deferred so the restore also runs when ensureAPUp fails or the loop
+		// panics into the supervisor; the latch inside covers the case where
+		// the restore call itself fails.
+		//
+		// One case the defer canNOT cover, deliberately: a Stop() during the
+		// bounce cancels ctx, so this restore fails and latches on a loop that
+		// will never tick again. Unlike the shutdown teardown (which runs on a
+		// fresh context because a leftover hotspot profile is persistent),
+		// nothing here is worth a detached call — the flag is runtime-only, the
+		// daemon is Restart=always, and the next start's first tick re-enables
+		// it within one tick.
+		defer m.restoreAutoconnect(ctx)
+	}
 	m.ensureAPDown(ctx)
 	// State is still StateAPActive, so reconcile re-raises via ensureAPUp: it
 	// narrates the scan on-screen, completes a fresh scan pass, then brings the
 	// AP (and its QR narration) back.
 	m.reconcile(ctx)
+}
+
+// restoreAutoconnect re-enables device autoconnect, latching a tick retry when
+// the call fails. Loop-goroutine-only (it owns autoconnectRestorePending).
+//
+// A leak is bounded rather than fatal even if every layer above fails: the
+// blink and portal joins activate profiles EXPLICITLY and are unaffected by the
+// flag, so the only casualty is the session landings' reliance on autoconnect
+// to restore the previous network — worst case one sustained-offline window
+// plus the first recheck blink, after which the normal machinery recovers. The
+// flag itself dies with the next NM restart or reboot.
+func (m *Machine) restoreAutoconnect(ctx context.Context) {
+	if err := m.wifi.SetDeviceAutoconnect(ctx, true); err != nil {
+		// Throttled like the link probe's failure log (linkProbeFailing): the
+		// retry runs at tick cadence and NM being down for minutes is the
+		// EXPECTED case the startup self-heal exists for — an unthrottled Warn
+		// would put 4 lines/minute in the journal for a condition that is
+		// already latched and visible.
+		if m.autoconnectRestorePending {
+			m.logger.Debug("provisioning: autoconnect restore still failing", zap.Error(err))
+		} else {
+			m.logger.Warn("provisioning: autoconnect restore failed; retrying every tick until it succeeds", zap.Error(err))
+		}
+		m.autoconnectRestorePending = true
+		return
+	}
+	if m.autoconnectRestorePending {
+		m.logger.Info("provisioning: device autoconnect restored")
+	}
+	m.autoconnectRestorePending = false
 }
 
 // transition sets the desired state (notifying on change) and reconciles the

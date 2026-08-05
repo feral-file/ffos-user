@@ -759,6 +759,77 @@ func (c *Controller) ActivateProfile(ctx context.Context, uuid string) error {
 	return nil
 }
 
+// SetDeviceAutoconnect flips the DEVICE-level runtime autoconnect flag
+// (`nmcli device set <iface> autoconnect on|off`), which is what decides whether
+// NetworkManager may activate saved profiles ON ITS OWN. Explicit activations
+// (ActivateProfile, Join) are a separate mechanism and are NOT gated by it.
+//
+// Two properties the caller depends on, both bench-verified on FF1 (the
+// provisioning rescan-bounce suppression is the only consumer — see
+// docs/setup-flow.md, "The rescan bounce and its autoconnect suppression"):
+//
+//   - It is RUNTIME-ONLY. NM never persists it, and an NM restart resets it to
+//     on. That is the ultimate backstop under a suppression that leaks: a
+//     crashed daemon cannot leave the device permanently unable to autoconnect.
+//   - It is the ONLY safe way to suppress autoconnect for a bounded window.
+//     `nmcli connection down <profile>` looks equivalent but is not: it leaves a
+//     STICKY manual-down block on the profile that survives re-enabling the flag
+//     and only clears on an NM restart. Never reach for it here.
+//
+// The device is resolved through wifiDeviceName because production wires an
+// empty iface; a device that cannot be resolved is an error, and the caller's
+// documented bias is to fail open rather than block the user's operation.
+func (c *Controller) SetDeviceAutoconnect(ctx context.Context, enabled bool) error {
+	iface, err := c.wifiDeviceName(ctx)
+	if err != nil {
+		return fmt.Errorf("resolving wifi device for autoconnect flip: %w", err)
+	}
+	// "on"/"off" is the form the bench experiment verified against NM on FF1;
+	// nmcli's boolean parser also takes yes/no, but there is no reason to differ
+	// from the evidence.
+	value := "off"
+	if enabled {
+		value = "on"
+	}
+	out, _, err := c.run(ctx, "device", "set", iface, "autoconnect", value)
+	if err != nil {
+		return fmt.Errorf("setting autoconnect %s on %s: %w (%s)", value, iface, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// wifiDeviceName returns the Wi-Fi device to operate on: the pinned iface when
+// set, otherwise the first wifi row of `device status`. Single-radio FF1
+// hardware has exactly one, which is why production pins nothing; a multi-radio
+// host would need an explicit iface rather than this first-match rule.
+func (c *Controller) wifiDeviceName(ctx context.Context) (string, error) {
+	if c.iface != "" {
+		return c.iface, nil
+	}
+	out, _, err := c.run(ctx, "-t", "-f", "DEVICE,TYPE", "device", "status")
+	if err != nil {
+		return "", fmt.Errorf("listing devices: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// TYPE is colon-free and last; an interface name never contains a colon
+		// in practice, but split on the LAST one for the same reason
+		// SavedProfiles does.
+		idx := strings.LastIndex(line, ":")
+		if idx < 0 {
+			continue
+		}
+		name, typ := line[:idx], line[idx+1:]
+		if typ == "wifi" {
+			return unescapeTerse(name), nil
+		}
+	}
+	return "", errors.New("no wifi device in nmcli device status")
+}
+
 // waitForSSID blocks until ssid appears in a forced rescan or the wait window
 // closes. Scan errors are retried, not fatal: right after the mode flip the
 // device can transiently report busy/unavailable. On timeout it returns

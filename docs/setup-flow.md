@@ -209,6 +209,17 @@ On `POST /connect` with `ssid` + `password`, the provisioning machine:
 
 This tear-down-then-rejoin, with a re-raise on failure, is the "AP bounce" the phone experiences: it may briefly lose the AP during the join attempt and re-associate afterward if the join failed.
 
+### The rescan bounce and its autoconnect suppression
+
+The portal's "search for networks again" button (`/rescan`) bounces the AP for the same single-radio reason: tear down → fresh station-mode scan → re-raise. The join bounce specifies its own target immediately, but the rescan bounce does not — so between the teardown and the re-raise the radio sits in station mode with every saved profile's autoconnect live, and NM's policy engine races the re-raise for it. On FF1-8EVTK3RE the policy engine began auto-activating a saved profile 5.9s after teardown and lost to the re-raise by **0.52s**, which killed the association mid-`config`.
+
+Either winner is survivable (the state is still `ap_active`, so the next reconcile re-raises and cuts NM off again), so the suppression exists to remove the *nondeterminism*, not to rescue the connection: `applyRescan` flips the **device-level runtime** autoconnect flag off (`nmcli device set <iface> autoconnect off`) for the length of the bounce and restores it on the way out.
+
+- **Scope is that call frame only**, and the guarantee is structural rather than a check: `applyRescan` runs synchronously on the machine's loop goroutine, so the recheck blink, a portal join, and the session landings can never overlap the window (a join submitted mid-bounce queues behind the restore). This matters because the session landings deliberately **depend** on autoconnect to restore the previous network.
+- **The flag gates NM's own activations only.** Explicit `nmcli connection up` (the blink's forced reactivation, joins) stays effective while it is off.
+- **Fail bias:** a failed suppression fails **open** — the rescan proceeds unsuppressed, because the race is a quality problem and the rescan is the feature the user pressed. A failed restore **latches** and is retried on every 15s tick until it succeeds.
+- **Crash safety is layered:** the restore is deferred (so a failed re-raise or a panic still restores), the latch retries, every daemon start issues one idempotent `autoconnect on` on its first tick, and the flag is runtime-only — an NM restart or a reboot resets it to on regardless. A daemon `Stop()` mid-bounce is the one case the defer cannot cover (its restore runs on the cancelled loop context and latches on a loop that will not tick again); the first-tick self-heal is deliberately the answer to it. `nmcli connection down` is **never** used for this: it leaves a sticky manual-down block that survives re-enabling the flag.
+
 ---
 
 ## OTA gate
