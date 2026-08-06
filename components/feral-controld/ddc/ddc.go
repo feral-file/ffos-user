@@ -39,10 +39,12 @@ type PanelDDC interface {
 	// re-opens polling on the very next tick.
 	ShouldPoll() bool
 	// Generation identifies the attached-display generation; it increments
-	// whenever the DRM fingerprint changes (plug, unplug, swap). Consumers
+	// whenever the DRM fingerprint changes (plug, unplug, swap) AND whenever
+	// the panel recovers from an "unavailable" verdict without a fingerprint
+	// change (a monitor power-toggled while its HPD/EDID stayed up). Consumers
 	// that cache their own per-display give-up state (e.g. the sleep panel
-	// leg's retry cap) compare generations so a display change re-arms them.
-	// Calling it also refreshes the fingerprint.
+	// leg's retry cap) compare generations so either kind of display comeback
+	// re-arms them. Calling it also refreshes the fingerprint.
 	Generation() uint64
 }
 
@@ -630,6 +632,15 @@ func (p *panelDdc) recordOutcome(success, hardFail bool) {
 	case success:
 		if p.unsupported {
 			p.logger.Info("DDC panel is responding again; resuming status polls")
+			// Coming back from an "unavailable" verdict is a display comeback
+			// even when the DRM fingerprint never moved (monitor power-toggled
+			// with HPD/EDID held up — the fingerprint cannot see it). Bump the
+			// generation so Generation()-keyed give-up state (the sleep panel
+			// leg's retry cap) re-arms and the scheduled power state is
+			// re-driven onto the returned panel; tracker state itself is NOT
+			// reset here (everSucceeded must survive so the next off period
+			// keeps the short proven-panel reprobe lease).
+			p.generation++
 		}
 		p.unsupported = false
 		p.failStreak = 0
@@ -857,7 +868,14 @@ func (p *panelDdc) getVCPBriefBatch(ctx context.Context, vcpCodes []string) ([]b
 		p.logger.Debug("ddcutil getvcp needs rescue; recovery suppressed as futile for this display",
 			zap.Strings("ddcutil_argv", argv))
 	} else {
-		p.logger.Info("ddcutil reported error or missing VCP output; running recovery and retrying once",
+		// Reprobes of a panel already judged unavailable fail here every lease
+		// window for as long as the monitor stays powered off — expected, so
+		// Debug; anything else is news and stays at Info.
+		logAt := p.logger.Info
+		if p.knownUnavailable() {
+			logAt = p.logger.Debug
+		}
+		logAt("ddcutil reported error or missing VCP output; running recovery and retrying once",
 			zap.Strings("ddcutil_argv", argv))
 		p.runDdcRecoveryPoke(ctx)
 		out, err = run()
@@ -878,6 +896,17 @@ func (p *panelDdc) recoverySuppressed() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.recoveryFutile
+}
+
+// knownUnavailable reports whether the tracker currently holds the
+// "unsupported" verdict. Used to pick log levels: a failing read against a
+// panel already judged unavailable (the periodic reprobe of a powered-off
+// monitor) is the expected state, not news, and must not emit Info/Warn lines
+// every reprobe forever.
+func (p *panelDdc) knownUnavailable() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.unsupported
 }
 
 // noteCleanInitialRead re-enables recovery: the display answered without
@@ -938,7 +967,14 @@ func (p *panelDdc) runDdcRecoveryPoke(ctx context.Context) {
 		"--brief",
 	).CombinedOutput()
 	if recoverErr != nil {
-		p.logger.Warn("ddcutil getvcp 60 as recovery after ddcutil error",
+		// Same taxonomy as the recovery-attempt log above: a failing poke
+		// against a panel already judged unavailable repeats every reprobe
+		// while the monitor is off, so it drops to Debug.
+		logAt := p.logger.Warn
+		if p.knownUnavailable() {
+			logAt = p.logger.Debug
+		}
+		logAt("ddcutil getvcp 60 as recovery after ddcutil error",
 			zap.Error(recoverErr),
 			zap.String("output", strings.TrimSpace(string(recoverOut))))
 	}
@@ -968,7 +1004,14 @@ func (p *panelDdc) execDdcutilWithDisplayRecovery(ctx context.Context, argv ...s
 		return out, err
 	}
 
-	p.logger.Info("ddcutil reported error or missing VCP output; running recovery and retrying once",
+	// Known-unavailable panels (monitor powered off) fail every attempt until
+	// they come back; the intermediate recovery line is expected there and
+	// drops to Debug. The caller still surfaces the final failure.
+	logAt := p.logger.Info
+	if p.knownUnavailable() {
+		logAt = p.logger.Debug
+	}
+	logAt("ddcutil reported error or missing VCP output; running recovery and retrying once",
 		zap.Strings("ddcutil_argv", argv))
 
 	p.runDdcRecoveryPoke(ctx)

@@ -1,0 +1,20 @@
+---
+description: Architecture rules for ffos-user service work
+globs:
+  - "components/**"
+alwaysApply: false
+---
+
+# Architecture Rule
+
+`docs/architecture.md` is the canonical architecture contract for this repository, and it is filled in. Read it before cross-service changes.
+
+(This file previously said the contract "has not been finalized". That predated
+the doc being written and contradicted `AGENTS.md`/`CLAUDE.md`, which both state
+it is filled — see CLAUDE.md's "Which file wins".)
+
+Alongside it:
+- keep service boundaries explicit
+- avoid cross-cutting abstractions without strong justification
+- record trade-offs in comments when changing architecture-sensitive paths
+- update `docs/architecture.md` when you establish a rule it does not yet state

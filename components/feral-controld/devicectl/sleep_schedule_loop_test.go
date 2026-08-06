@@ -223,8 +223,19 @@ func TestApplySleepTransition_ConcurrentManualAndLoopIsRaceFree(t *testing.T) {
 	// job must carry the final player-commanded state. Wait for the worker to
 	// drain, then check the last power actually applied.
 	e.sleepApplyMu.Lock()
-	require.NotNil(t, e.sleepAppliedState)
-	finalState := *e.sleepAppliedState
+	// The last write's TARGET state, regardless of whether it succeeded
+	// (playerAwake/playerSleeping -> the state itself) or failed
+	// (playerUnknownFailed -> sleepAttempted, the four-value tracker's record
+	// of what that write attempted).
+	var finalState sleepschedule.State
+	switch e.sleepPlayerState {
+	case playerSleeping:
+		finalState = sleepschedule.StateSleeping
+	case playerUnknownFailed:
+		finalState = e.sleepAttempted
+	default:
+		finalState = sleepschedule.StateAwake
+	}
 	e.sleepApplyMu.Unlock()
 
 	wantPower := `"on"`

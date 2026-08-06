@@ -2,6 +2,7 @@ package status_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -151,4 +152,35 @@ func TestGetStatus_DisplayURL_OmittedWhenCDPNil(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Nil(t, resp.DisplayURL)
+}
+
+// TestGetStatusCarriesContract pins the §4.2 capability signal end to end:
+// GetStatus populates the contract field and the marshaled reply carries the
+// KEY (no omitempty — presence is what the app branches on when mDNS is
+// unavailable, and hub.StatusContractV2 equality is pinned hub-side).
+func TestGetStatusCarriesContract(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	mockOS := mocks.NewMockOS(ctrl)
+	mockExec := mocks.NewMockExec(ctrl)
+	mockHTTP := mocks.NewMockHTTPClient(ctrl)
+	mockIO := mocks.NewMockIO(ctrl)
+	mockCDP := mocks.NewMockCDP(ctrl)
+	nmcliCmd := mocks.NewMockExecCmd(ctrl)
+	pamCmd := mocks.NewMockExecCmd(ctrl)
+
+	expectDeviceStatusOSMocks(t, mockOS)
+	expectDeviceStatusExecMocks(t, mockExec, nmcliCmd, pamCmd)
+	mockCDP.EXPECT().PageNavigationURL(gomock.Any()).Return("", errors.New("cdp down")).Times(1)
+
+	ds := status.NewDeviceStatus(wrapper.NewJSON(), mockOS, mockExec, mockHTTP, mockIO, mockCDP)
+	resp, err := ds.GetStatus(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, status.DeviceStatusContract, resp.Contract)
+
+	raw, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"contract":"2"`,
+		"the reply must carry the key even when best-effort fields are empty")
 }

@@ -24,12 +24,6 @@ const (
 	READ_TIMEOUT        = 30 * time.Second
 	WRITE_TIMEOUT       = 30 * time.Second
 	IDLE_TIMEOUT        = 60 * time.Second
-
-	// MAX_INFLIGHT_CASTS caps concurrent /api/cast handlers so a LAN command
-	// storm (including floods of byte-identical commands that the command
-	// router dedupes downstream) cannot pile up unbounded HTTP goroutines.
-	// Excess requests are rejected with 429 rather than blocking.
-	MAX_INFLIGHT_CASTS = 64
 )
 
 //go:generate mockgen -source=hub.go -destination=../mocks/hub.go -package=mocks -mock_names=Hub=MockHub
@@ -39,19 +33,41 @@ type Hub interface {
 }
 
 type hub struct {
-	ctx        context.Context
-	logger     *zap.Logger
-	server     wrapper.HTTPServer
-	wsHandler  ws.WS
-	cmdHandler commandrouter.Handler
-	json       wrapper.JSON
-	castSlots  chan struct{}
+	ctx            context.Context
+	logger         *zap.Logger
+	server         wrapper.HTTPServer
+	wsHandler      ws.WS
+	cmdHandler     commandrouter.Handler
+	statusProvider StatusProvider
+	json           wrapper.JSON
+	reqSlots       chan struct{}
+
+	// contactObserver, when set, is invoked once per request on the counted
+	// control-plane routes (cast, status, status_v2) from a NON-loopback
+	// source. It feeds the provisioning escape policy's "a human's app is
+	// talking to this device" deferral signal (docs/network-recovery-ux.md
+	// §4.1). The exclusions are load-bearing, not hygiene: /metrics is scraped
+	// by local feral-vmagent every 60s over loopback and any loopback poller
+	// of a counted endpoint would otherwise pin the deferral permanently; the
+	// long-lived /api/notification WebSocket's persistence is not fresh
+	// evidence of a human; the catch-all is anything's stray traffic. Set at
+	// wiring time before Start (same plain-field ordering contract as the
+	// executor's probes); invoked on request goroutines, so the observer must
+	// be internally synchronized and non-blocking.
+	contactObserver func()
+}
+
+// SetContactObserver wires the control-plane contact signal (see
+// contactObserver). Call before Start.
+func (h *hub) SetContactObserver(fn func()) {
+	h.contactObserver = fn
 }
 
 func New(
 	ctx context.Context,
 	wsHandler ws.WS,
 	cmdHandler commandrouter.Handler,
+	statusProvider StatusProvider,
 	server wrapper.HTTPServer,
 	json wrapper.JSON,
 	logger *zap.Logger,
@@ -68,18 +84,23 @@ func New(
 		server = wrapper.NewHTTPServer(httpServer)
 	}
 	h := &hub{
-		ctx:        ctx,
-		wsHandler:  wsHandler,
-		cmdHandler: cmdHandler,
-		json:       json,
-		server:     server,
-		logger:     logger,
-		castSlots:  make(chan struct{}, MAX_INFLIGHT_CASTS),
+		ctx:            ctx,
+		wsHandler:      wsHandler,
+		cmdHandler:     cmdHandler,
+		statusProvider: statusProvider,
+		json:           json,
+		server:         server,
+		logger:         logger,
+		reqSlots:       make(chan struct{}, MAX_INFLIGHT_REQUESTS),
 	}
 	h.routes()
 	return h
 }
 
+// routes registers every hub endpoint through the shared middleware. Each route
+// MUST be wrapped by withMiddleware — it is the single chokepoint for the
+// in-flight storm cap, request logging, and the future LAN authorization check
+// (issue #3471). Do not register a bare handler here.
 func (h *hub) routes() {
 	handler := h.server.Handler()
 	mux, ok := handler.(*http.ServeMux)
@@ -87,22 +108,59 @@ func (h *hub) routes() {
 		panic("Expected ServeMux handler, got different type")
 	}
 
-	mux.HandleFunc("/api/cast", h.handleCast)
-	mux.HandleFunc("/api/notification", h.handleNotification)
-	mux.Handle("/metrics", promhttp.HandlerFor(status.PlaybackMetricsGatherer(), promhttp.HandlerOpts{}))
+	metrics := promhttp.HandlerFor(status.PlaybackMetricsGatherer(), promhttp.HandlerOpts{})
+
+	mux.HandleFunc("/api/cast", h.withMiddleware("cast", h.handleCast))
+	mux.HandleFunc("/api/notification", h.withMiddleware("notification", h.handleNotification))
+	mux.HandleFunc("/api/status", h.withMiddleware("status", h.handleStatus))
+	mux.HandleFunc("/api/v2/status", h.withMiddleware("status_v2", h.handleStatusV2))
+	mux.HandleFunc("/metrics", h.withMiddleware("metrics", metrics.ServeHTTP))
+
+	// Chokepoint completeness: without this, the ServeMux serves unmatched
+	// paths its own bare 404 — bypassing the storm cap, request logging, and
+	// the future LAN-auth seam entirely. "/" is ServeMux's catch-all, so
+	// registering it through the same middleware guarantees every request
+	// that resolves to a handler passes withMiddleware, matched route or not.
+	// (ServeMux's own path-cleaning 301s still happen before dispatch — an
+	// inherent net/http behavior that consumes no handler resources.)
+	mux.HandleFunc("/", h.withMiddleware("unmatched", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
 }
 
-// Start starts the HTTP server
+// Listener retry backoff bounds. Vars rather than consts so tests can compress
+// the schedule.
+var (
+	listenRetryBase = time.Second
+	listenRetryMax  = 30 * time.Second
+)
+
+// Start starts the HTTP server. The listener goroutine retries ListenAndServe
+// with capped exponential backoff rather than giving up: this hub is the
+// BLE-replacement LAN recovery channel, so a transient bind failure at startup
+// (e.g. a lingering :1111 holder) must not silently disable it until an
+// unrelated daemon restart. Retrying ends when the server reports
+// ErrServerClosed (Stop ran) or the hub context is canceled.
 func (h *hub) Start() {
 	h.logger.Info("Starting HTTP server", zap.String("addr", HUB_ADDRESS))
 
 	// Start server in a goroutine
 	go func() {
-		if err := h.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			h.logger.Error("HTTP server error", zap.Error(err))
-			// FIXME should restart the server instead of stopping it
-			if e := h.Stop(); e != nil {
-				h.logger.Error("Failed to stop HTTP server", zap.Error(e))
+		backoff := listenRetryBase
+		for {
+			err := h.server.ListenAndServe()
+			if err == nil || errors.Is(err, http.ErrServerClosed) {
+				return
+			}
+			h.logger.Error("HTTP server error; retrying listener",
+				zap.Error(err), zap.Duration("backoff", backoff))
+			select {
+			case <-h.ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff *= 2; backoff > listenRetryMax {
+				backoff = listenRetryMax
 			}
 		}
 	}()
@@ -124,18 +182,19 @@ func (h *hub) handleCast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bound concurrent in-flight casts so a LAN storm cannot exhaust goroutines.
-	select {
-	case h.castSlots <- struct{}{}:
-		defer func() { <-h.castSlots }()
-	default:
-		h.logger.Warn("Cast rejected: hub at capacity")
-		http.Error(w, "Too many concurrent commands, slow down", http.StatusTooManyRequests)
-		return
-	}
-
+	// Concurrency is bounded upstream by the shared middleware (reqSlots); the
+	// per-command token-bucket gate runs below inside cmdHandler.Process.
 	var payload commands.Command
 	if err := h.json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		// The middleware's MaxBytesReader makes an oversized body surface here
+		// as *http.MaxBytesError: report it as 413 (the caller sent too much),
+		// not 400 (the caller sent garbage).
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.logger.Warn("Cast payload exceeds body limit", zap.Int64("limit", maxErr.Limit))
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		h.logger.Error("Failed to decode cast payload", zap.Error(err))
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return

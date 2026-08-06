@@ -77,6 +77,111 @@ wait_for_display() {
 
 wait_for_display
 
+# Chromium's HTTP cache can outlive a player-bundle swap and poison the app
+# shell: heuristically cached route HTML and negative (404) chunk responses
+# captured while a swap is in flight survive kiosk restarts and full reboots
+# and leave the wall running the previous app or a ChunkLoadError page (#234).
+# serve-feral-player.sh mitigates going forward by having darkhttpd send a
+# global "Cache-Control: no-cache" when the binary supports --header — but
+# that only governs responses fetched while the header is active. Entries
+# cached headerless (on an already-poisoned device, or under the legacy
+# fallback when darkhttpd lacks --header) carry heuristic freshness and are
+# reused WITHOUT revalidation, so this purge remains the backstop that heals
+# them. The purge is keyed to a content fingerprint of the bundle, not
+# done unconditionally, so an unchanged bundle keeps the cache (remote artwork
+# stays warm across the frequent Restart=always kiosk restarts) and any bundle
+# change — OTA, pacman, or manual dev swap — wipes it exactly once. This must
+# run only where no Chromium instance holds the cache open; this script IS the
+# unit's ExecStart, so systemd has already torn down the previous cgroup and
+# the delete cannot race a live browser. Keep it that way: do not move this
+# into serve-feral-player.sh, which restarts independently of Chromium.
+PLAYER_BUNDLE_ROOT="/opt/feral/feral-player"
+CHROMIUM_CACHE_DIR="/home/feralfile/.cache/chromium"
+PLAYER_FINGERPRINT_FILE="/home/feralfile/.state/player-bundle-fingerprint"
+
+clear_chromium_cache_on_bundle_change() {
+    local fingerprint previous fp_err fp_cause
+    # A MISSING bundle tree skips the guard entirely:
+    # serve-feral-player.service is about to fail readiness anyway, and
+    # churning the cache on an absent tree helps nothing. (A present-but-
+    # non-traversable root passes this check, fails the cd below, and takes
+    # the defensive-purge path — it is unreadable content, not absence.)
+    if [ ! -d "$PLAYER_BUNDLE_ROOT" ]; then
+        return 0
+    fi
+    # cksum over file contents, not names/mtimes: chunk filenames are
+    # content-hashed but index.html and other stable-name files change in
+    # place, so contents must be read. The bundle is tens of MB on local
+    # disk — well under a second per kiosk start. LC_ALL=C pins sort to
+    # byte order; collation drift would reorder the digest input and force
+    # one spurious purge. An existing-but-empty tree still fingerprints
+    # and purges once — fail-safe, self-correcting when the tree returns.
+    # pipefail (subshell-local) makes ANY stage failure — an unreadable
+    # file, a path vanishing mid-read — yield an empty fingerprint instead
+    # of a silent digest of just the readable subset: a partial digest can
+    # collide with the recorded one (e.g. when the only change is a newly
+    # added unreadable file) and mask a real bundle change.
+    # Pipeline stderr is captured so the WARN below can name the culprit
+    # (e.g. "cksum: ./chunk.js: Permission denied") — the failure state is
+    # permanent until a human fixes the tree, so the journal line must be
+    # actionable, not just present. mktemp failure degrades to a causeless
+    # warning, never to a blocked launch.
+    fp_err=$(mktemp 2>/dev/null) || fp_err=""
+    fingerprint=$( (set -o pipefail; cd "$PLAYER_BUNDLE_ROOT" && \
+        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 cksum | cksum) 2>"${fp_err:-/dev/null}" ) || fingerprint=""
+    fp_cause=""
+    if [ -n "$fp_err" ]; then
+        fp_cause=$(head -n 1 "$fp_err" 2>/dev/null || true)
+        rm -f "$fp_err"
+    fi
+    if [ -z "$fingerprint" ]; then
+        # An unknowable bundle state fails toward purging: a stale cache is
+        # the failure this guard exists to prevent, and an extra purge costs
+        # re-downloads — though on an OFFLINE wall previously cached artwork
+        # is lost until connectivity returns, acceptable only because this
+        # state is a packaging bug that must be fixed regardless. Nothing is
+        # recorded, so every start retries (and re-warns) until the tree
+        # reads cleanly — a broken bundle is legible in chromium.log rather
+        # than silently disabling the guard. The launch is never blocked:
+        # rm failure is tolerated, but LOGGED with the same retry warning as
+        # the normal path — the line above says the cache is being cleared,
+        # and without this an operator cannot tell a successful defensive
+        # purge from stale cache left in place.
+        echo "$(date '+%F %T') [WARN] Player bundle fingerprint failed${fp_cause:+ ($fp_cause)}; clearing Chromium cache, will retry on next kiosk start"
+        if ! rm -rf "$CHROMIUM_CACHE_DIR" 2>/dev/null; then
+            echo "$(date '+%F %T') [WARN] Could not delete Chromium cache; will retry on next kiosk start"
+        fi
+        return 0
+    fi
+    previous=$(cat "$PLAYER_FINGERPRINT_FILE" 2>/dev/null || true)
+    if [ "$fingerprint" = "$previous" ]; then
+        return 0
+    fi
+    echo "$(date '+%F %T') [INFO] Player bundle changed, clearing Chromium cache"
+    # A failed delete (I/O error, immutable entry) must NOT record the new
+    # fingerprint: that would mark the purge as done and leave the stale
+    # cache in place permanently — the exact failure this guard exists to
+    # prevent. Keeping the previous fingerprint retries the purge on every
+    # subsequent start until it succeeds.
+    if ! rm -rf "$CHROMIUM_CACHE_DIR" 2>/dev/null; then
+        echo "$(date '+%F %T') [WARN] Could not delete Chromium cache; will retry on next kiosk start"
+        return 0
+    fi
+    # Temp-then-rename per the state-write contract (docs/architecture.md,
+    # "Persistence and State Ownership"): a crash mid-write must not leave a
+    # truncated fingerprint. A failed record (read-only /home, full disk)
+    # degrades into a purge on EVERY kiosk restart — the exact cache churn
+    # the fingerprint exists to avoid — so make that state legible in
+    # chromium.log instead of silent.
+    if ! { mkdir -p "$(dirname "$PLAYER_FINGERPRINT_FILE")" && \
+           printf '%s\n' "$fingerprint" > "$PLAYER_FINGERPRINT_FILE.tmp" && \
+           mv -f "$PLAYER_FINGERPRINT_FILE.tmp" "$PLAYER_FINGERPRINT_FILE"; } 2>/dev/null; then
+        echo "$(date '+%F %T') [WARN] Could not record player bundle fingerprint; cache will be purged on every kiosk start"
+    fi
+}
+
+clear_chromium_cache_on_bundle_change
+
 # A display is present: from here the CDP readiness probe and cage/Chromium can
 # make real progress, so start the probe now (starting it earlier under headless
 # would just time out and restart the unit for no reason).
@@ -137,4 +242,4 @@ exec cage -- /bin/bash -c "
     --deny-permission-prompts \
     --disable-external-intent-requests \
     --disable-component-extensions-with-background-pages \
-    file:///opt/feral/ui/launcher/index.html?step=logo"
+    http://127.0.0.1:8080/"

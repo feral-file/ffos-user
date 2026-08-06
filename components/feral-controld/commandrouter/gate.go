@@ -84,7 +84,6 @@ func DefaultGateConfig() GateConfig {
 		commands.CMD_UPDATE_TO_LATEST:   disruptive,
 		commands.CMD_SET_SLEEP_SCHEDULE: disruptive,
 		commands.CMD_SET_SLEEP_MODE:     disruptive,
-		commands.CMD_SCREEN_ROTATION:    disruptive,
 
 		// User-initiated power toggles: loosely capped (executor coalesces).
 		commands.CMD_SLEEP_NOW: userAction,
@@ -99,11 +98,43 @@ func DefaultGateConfig() GateConfig {
 
 		// Slow, disruptive panel writes (DDC, incl. power): moderate + heavier.
 		commands.CMD_DDC_PANEL_CONTROL: slowWrite,
+		// Screen rotation is a relative step (each command advances one
+		// orientation), so reaching a target legitimately takes up to 3 rapid
+		// taps — the disruptive 1-per-5s budget rejected the third tap with a
+		// 429 (hardware repro 2026-07-22 over the LAN hub). It shells out to
+		// wlr-randr like the other slow panel writes, so it shares their
+		// budget. It must NOT dedupe: concurrent byte-identical {clockwise}
+		// commands are distinct user taps, and coalescing them silently drops
+		// a rotation. The devicectl executor's rotationMu serializes the
+		// overlapping steps instead, so each admitted tap advances exactly
+		// one orientation.
+		commands.CMD_SCREEN_ROTATION: slowWrite,
+
+		// Offline-cache downloads: heavy, like displayPlaylist. Both do DP1
+		// resolution and downloadPlaylist additionally enqueues into
+		// offlinecache.Service's jobQueue — bounded (defaultMaxQueueLen,
+		// 4096) but only as a backlog safety valve, not a throttle a
+		// realistic burst is expected to hit — so a storm here is cheap
+		// to send but expensive to work through; heavy's dedupe
+		// also collapses a duplicate download request for the same
+		// playlist/item into the one already in flight rather than
+		// re-enqueuing (DownloadItem/DownloadPlaylist are themselves
+		// idempotent against an already-queued/downloading item, but
+		// dedupe avoids paying for a second Classify call to discover that).
+		commands.CMD_DOWNLOAD_PLAYLIST_ITEM: heavy,
+		commands.CMD_DOWNLOAD_PLAYLIST:      heavy,
+
+		// Offline-cache clears: disk I/O (delete + store-wide GC sweep) on
+		// every call, so classified the same as the other disruptive panel
+		// write above rather than left at the generous Default.
+		commands.CMD_CLEAR_PLAYLIST_ITEM_CACHE: slowWrite,
+		commands.CMD_CLEAR_PLAYLIST_CACHE:      slowWrite,
 
 		// Cheap queries: deduped so a poll storm collapses to one execution.
-		commands.CMD_DEVICE_STATUS:    query,
-		commands.CMD_PROFILE:          query,
-		commands.CMD_DDC_PANEL_STATUS: query,
+		commands.CMD_DEVICE_STATUS:            query,
+		commands.CMD_PROFILE:                  query,
+		commands.CMD_DDC_PANEL_STATUS:         query,
+		commands.CMD_GET_OFFLINE_CACHE_STATUS: query,
 
 		// High-frequency input events: shared generous budget.
 		commands.CMD_KEYBOARD_EVENT:             input,

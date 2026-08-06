@@ -19,13 +19,6 @@ jobs:
       upload-coverage: true
     secrets: inherit
 
-  test-setupd:
-    name: Test Setupd
-    uses: ./.github/workflows/test-setupd.yaml
-    with:
-      upload-coverage: true
-    secrets: inherit
-
   test-sys-monitord:
     name: Test Sys Monitord
     uses: ./.github/workflows/test-sys-monitord.yaml

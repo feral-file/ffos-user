@@ -2,6 +2,7 @@ package devicectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,53 @@ import (
 	"github.com/feral-file/ffos-user/components/feral-controld/ddc"
 	"github.com/feral-file/ffos-user/components/feral-controld/sleepschedule"
 )
+
+// playerSleepState is the player (CDP) leg's four-value tracker record
+// (design doc §7). The zero value playerAwake preserves today's
+// pre-tracker nil semantics: a bare executor reports aligned whenever the
+// target is awake, with nothing to redrive.
+type playerSleepState int
+
+const (
+	// playerAwake: the last apply SUCCEEDED at StateAwake.
+	playerAwake playerSleepState = iota
+	// playerSleeping: the last apply SUCCEEDED at StateSleeping.
+	playerSleeping
+	// playerUnknownFailed: the last apply FAILED (transport error, or a
+	// generation race that means the ACK cannot be trusted). sleepAttempted
+	// holds the state that apply attempted; sleepLastGood is untouched.
+	// NEVER aligned — the actual player state is unknown.
+	playerUnknownFailed
+	// playerFreshDocument: invalidatePlayerSleepState ran (a CDP reconnect —
+	// the page reloaded awake). sleepDesiredAtInvalidate holds the schedule's
+	// desired state at that moment. NEVER aligned — the tracker is stale by
+	// design, forcing a re-drive.
+	playerFreshDocument
+)
+
+func (s playerSleepState) String() string {
+	switch s {
+	case playerAwake:
+		return "awake"
+	case playerSleeping:
+		return "sleeping"
+	case playerUnknownFailed:
+		return "unknown_failed"
+	case playerFreshDocument:
+		return "fresh_document"
+	default:
+		return fmt.Sprintf("playerSleepState(%d)", int(s))
+	}
+}
+
+// playerSleepStateFor maps a successfully-applied schedule state onto its
+// tracker record.
+func playerSleepStateFor(state sleepschedule.State) playerSleepState {
+	if state == sleepschedule.StateSleeping {
+		return playerSleeping
+	}
+	return playerAwake
+}
 
 // ffpSleepPowerControlTimeout bounds each DDC ApplyControl attempt in the sleep
 // power-alignment worker. ApplyControl can take many seconds on failure; relayer
@@ -97,7 +145,20 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 			continue
 		}
 
-		now := e.clock.Now().In(sleepschedule.LocalTimezone())
+		loc, tzResolved := sleepschedule.LocalTimezoneResolved()
+		if !tzResolved {
+			// The time.Local fallback is usually stale UTC (device booted before
+			// the timezone landed): evaluating the schedule on it would sleep or
+			// wake the display hours off the user's wall clock. Defer until the
+			// timezone resolves; the capped tick re-checks within a minute.
+			e.sleepScheduleFileMu.Unlock()
+			e.logger.Warn("Sleep schedule: device timezone unresolved; deferring schedule evaluation")
+			if !e.waitForSleepScheduleSignal(ctx, sleepScheduleMaxTick) {
+				return
+			}
+			continue
+		}
+		now := e.clock.Now().In(loc)
 		normalized, changed := sleepschedule.Normalize(record, now)
 		if changed {
 			if err := sleepschedule.Save(e.os, e.json, normalized); err != nil {
@@ -107,12 +168,21 @@ func (e *executor) runSleepScheduleLoop(ctx context.Context) {
 		e.sleepScheduleFileMu.Unlock()
 
 		status, _ := sleepschedule.EffectiveStatus(now, normalized)
+		// Cache the schedule's desired state EVERY tick, under sleepApplyMu, so
+		// invalidatePlayerSleepState (called from the CDP-connect reconciler, a
+		// different goroutine) can read it without a fresh sleepschedule.Load()
+		// — see sleepScheduleDesiredCache's doc for why a fresh read there is
+		// unsafe (arch-final D1).
+		e.sleepApplyMu.Lock()
+		e.sleepScheduleDesiredCache = status.CurrentState
+		e.sleepApplyMu.Unlock()
 		if err := e.applySleepTransitionIfChanged(ctx, status.CurrentState, "schedule-loop"); err != nil {
 			e.logger.Error("Failed to apply sleep schedule transition",
 				zap.Error(err),
 				zap.String("state", string(status.CurrentState)))
-			// The failed apply leaves sleepApplyOK false, so the next capped tick
-			// retries rather than waiting until the next schedule boundary.
+			// The failed apply leaves the tracker at playerUnknownFailed, so the
+			// next capped tick retries rather than waiting until the next
+			// schedule boundary.
 		}
 
 		if !e.waitForSleepScheduleSignal(ctx, sleepScheduleTickWait(status.NextTransitionAt)) {
@@ -203,7 +273,17 @@ func InvalidatePlayerSleepState(exec Executor, logger *zap.Logger) {
 
 func (e *executor) invalidatePlayerSleepState() {
 	e.sleepApplyMu.Lock()
-	e.sleepAppliedState, e.sleepApplyOK = nil, false
+	e.sleepPlayerState = playerFreshDocument
+	// desiredAtInvalidate MUST come from the schedule loop's own per-tick
+	// cache, never a fresh sleepschedule.Load() here (design doc §7):
+	// loading the schedule on this goroutine (the CDP
+	// connect callback) would nil-panic a bare executor, violate the
+	// sleepScheduleFileMu discipline (invalidate is called from
+	// wakeSleepScheduleLoop's caller, not the file-lock holder), and put file
+	// I/O on the connect loop. The cache's zero value "" is neither awake nor
+	// sleeping, so a bare executor (loop never started) yields no onAwake
+	// fire — exactly the pinned no-sleep-edge case.
+	e.sleepDesiredAtInvalidate = e.sleepScheduleDesiredCache
 	e.sleepApplyMu.Unlock()
 	// Safe before the loop starts (nil wake channel is a no-op) — the loop's first
 	// iteration evaluates the schedule from scratch anyway.
@@ -256,6 +336,14 @@ func (e *executor) setSleepSchedule(ctx context.Context, args []byte) (interface
 
 	now := e.clock.Now().In(sleepschedule.LocalTimezone())
 	status, _ := sleepschedule.EffectiveStatus(now, record)
+	// Refresh the desired-state cache the same way the schedule
+	// loop does every tick (see its own doc) — playerSleepGateBlocked reads
+	// it, so a schedule update that flips the desired state must be visible
+	// to the navigation gate immediately, not only after the loop's next
+	// tick (up to sleepScheduleMaxTick later).
+	e.sleepApplyMu.Lock()
+	e.sleepScheduleDesiredCache = status.CurrentState
+	e.sleepApplyMu.Unlock()
 	if err := e.applySleepTransition(ctx, status.CurrentState, "schedule-update"); err != nil {
 		return nil, err
 	}
@@ -305,6 +393,12 @@ func (e *executor) applyManualSleepOverride(ctx context.Context, state sleepsche
 	e.sleepScheduleFileMu.Unlock()
 
 	status, _ := sleepschedule.EffectiveStatus(now, updated)
+	// See setSleepSchedule's identical refresh: a manual
+	// sleepNow/wakeNow override must update the desired-state cache
+	// immediately, not wait for the schedule loop's next tick.
+	e.sleepApplyMu.Lock()
+	e.sleepScheduleDesiredCache = status.CurrentState
+	e.sleepApplyMu.Unlock()
 	if err := e.applySleepTransition(ctx, state, "manual-override"); err != nil {
 		return nil, err
 	}
@@ -334,21 +428,115 @@ func (e *executor) applySleepTransition(ctx context.Context, state sleepschedule
 	//
 	//   • Shutdown does not wait for queued or in-flight DDC alignment.
 	e.sleepApplyMu.Lock()
-	defer e.sleepApplyMu.Unlock()
-	return e.applySleepTransitionLocked(ctx, state, reason)
+	wasSleeping := e.onAwakeWasSleepingLocked()
+	err := e.applySleepTransitionLocked(ctx, state, reason)
+	onAwake := e.onAwake
+	e.sleepApplyMu.Unlock()
+	// Fire outside sleepApplyMu: displayAt recompute does its own CDP round-trip
+	// and must not serialize behind (or extend) the sleep-transition critical section.
+	// Fire only on the sleep→awake EDGE, never on a successful re-drive of an
+	// already-awake player: the hook's job is to catch a displayAt timer that
+	// fired while the player slept, and re-drives are routine (every CDP
+	// reconnect invalidates the tracker; wakeNow re-drives unconditionally).
+	// Firing on those would force-push — and visibly remount — a byte-identical
+	// active set on top of the on-connect RecomputeNow that already serves a
+	// reloaded page. A FAILED previous sleep apply still counts as the edge:
+	// the player state is unknown and a timer may have fired into it, so the
+	// recompute errs toward one redundant push over a stale playlist.
+	if err == nil && state == sleepschedule.StateAwake && wasSleeping && onAwake != nil {
+		onAwake(ctx)
+	}
+	// Swallow the generation-race sentinel specifically before
+	// returning to this function's RPC-facing caller (setSleepSchedule /
+	// sleepNow / wakeNow): the send itself did not fail, so a manual
+	// override must still report success — see
+	// errSleepTransitionGenerationRace's doc. The onAwake suppression above
+	// already happened correctly against the non-nil err.
+	if errors.Is(err, errSleepTransitionGenerationRace) {
+		return nil
+	}
+	return err
 }
+
+// SetSessionGeneration injects playersession.Session.Generation, narrowed to
+// a func() uint64 seam so devicectl needs no import of playersession and
+// tests need no real session (design doc §4). Safe before or after the
+// sleep schedule loop starts; nil (never called) keeps the generation
+// re-check below permanently a no-op.
+func SetSessionGeneration(exec Executor, fn func() uint64, logger *zap.Logger) {
+	setter, ok := exec.(interface{ setSessionGeneration(func() uint64) })
+	if !ok {
+		logger.Warn("Executor does not support session generation re-check")
+		return
+	}
+	setter.setSessionGeneration(fn)
+}
+
+func (e *executor) setSessionGeneration(fn func() uint64) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	e.sessionGeneration = fn
+}
+
+func (e *executor) currentGeneration() uint64 {
+	if e.sessionGeneration == nil {
+		return 0
+	}
+	return e.sessionGeneration()
+}
+
+// errSleepTransitionGenerationRace marks applySleepTransitionLocked's
+// generation re-check failure — see that function's doc for the
+// full rationale. errors.Is-able so applySleepTransition can swallow it
+// specifically before returning to its RPC-facing caller.
+var errSleepTransitionGenerationRace = errors.New("devicectl: sleep transition send raced a page generation change")
 
 // applySleepTransitionLocked performs the transition assuming e.sleepApplyMu is
 // already held. Holding the lock across the player send and the tracker write is
 // what makes the tracker a faithful record of the player's last commanded state
 // even when a manual override and a schedule tick race.
 func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepschedule.State, reason string) error {
+	genBefore := e.currentGeneration()
 	if err := e.applyPlayerSleepMode(ctx, state == sleepschedule.StateSleeping); err != nil {
-		// Record the attempted state as not-applied so the schedule loop retries
-		// on its next tick instead of assuming the state took effect.
-		s := state
-		e.sleepAppliedState, e.sleepApplyOK = &s, false
+		// Record the attempted state as FAILED (§7) so the schedule loop
+		// retries on its next tick instead of assuming the state took effect.
+		e.sleepPlayerState = playerUnknownFailed
+		e.sleepAttempted = state
 		return err
+	}
+
+	// Generation re-check (design doc §4): the send itself succeeded, but if
+	// the page generation moved WHILE it was in flight — a recovery
+	// navigation, a reconnect, or a watchdog-driven reload — the ACK may have
+	// come from (or been silently swallowed by) a document that is no longer
+	// current. Treat as FAILED (§7: "Generation re-check failure on
+	// setSleepMode → playerUnknownFailed") so the schedule loop re-drives
+	// against whatever document is current now, rather than trusting a stale
+	// success.
+	//
+	// Returns errSleepTransitionGenerationRace, NOT nil: a nil
+	// return here reads as "applied" to applySleepTransition's onAwake edge
+	// check, which would fire onAwake for an UNCONFIRMED wake — and fire
+	// AGAIN when the schedule loop's next tick re-drives the (still
+	// playerUnknownFailed) tracker, double-recomputing displayAt. Returning
+	// this distinct, mirror-the-failed-apply error suppresses onAwake here
+	// (exactly like a real send failure) and skips applyFfpPowerStateAsync/
+	// ForceRefresh below, which is correct — nothing here was actually
+	// confirmed applied. applySleepTransition (the RPC-facing path) swallows
+	// this SPECIFIC error before returning to its own caller: the send
+	// itself did not fail, so a manual override still reports success to the
+	// relayer — only the internal tracker's bookkeeping withholds "applied".
+	// The schedule-loop path (applySleepTransitionIfChanged) lets it
+	// propagate, since its caller already treats any error as "log and
+	// retry next tick" — exactly the re-drive this needs.
+	if genAfter := e.currentGeneration(); genAfter != genBefore {
+		e.sleepPlayerState = playerUnknownFailed
+		e.sleepAttempted = state
+		e.logger.Info("Sleep transition send raced a page generation change; not recording it as applied",
+			zap.String("state", string(state)),
+			zap.Uint64("generation_before", genBefore),
+			zap.Uint64("generation_after", genAfter))
+		return errSleepTransitionGenerationRace
 	}
 
 	e.applyFfpPowerStateAsync(state, reason)
@@ -357,9 +545,69 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 		e.statusPoller.ForceRefresh()
 	}
 
-	s := state
-	e.sleepAppliedState, e.sleepApplyOK = &s, true
+	e.sleepPlayerState = playerSleepStateFor(state)
+	e.sleepLastGood = state
 	return nil
+}
+
+// onAwakeWasSleepingLocked evaluates the onAwake edge predicate (design doc
+// §7) against the CURRENT (pre-transition) tracker record; caller must
+// hold sleepApplyMu and call this BEFORE applySleepTransitionLocked
+// overwrites the record.
+func (e *executor) onAwakeWasSleepingLocked() bool {
+	switch e.sleepPlayerState {
+	case playerSleeping:
+		return true
+	case playerUnknownFailed:
+		// M1: a failed WAKE retried still counts if the player was last
+		// confirmed sleeping. The pinned case (a failed SLEEP apply) is
+		// covered by sleepAttempted==sleeping directly.
+		return e.sleepAttempted == sleepschedule.StateSleeping || e.sleepLastGood == sleepschedule.StateSleeping
+	case playerFreshDocument:
+		// A restart while the schedule said sleeping, with the
+		// sleeping re-drive skipped/deferred, must still fire at the wake
+		// boundary — the displayAt recompute must not stay silent from boot
+		// to the wake edge.
+		return e.sleepDesiredAtInvalidate == sleepschedule.StateSleeping
+	default:
+		return false
+	}
+}
+
+// SetOnAwake registers a callback invoked after a successful sleep→awake
+// transition (the edge, not every awake re-drive). Safe before or after the
+// sleep schedule loop starts.
+func SetOnAwake(exec Executor, fn func(context.Context), logger *zap.Logger) {
+	setter, ok := exec.(interface{ setOnAwake(func(context.Context)) })
+	if !ok {
+		logger.Warn("Executor does not support on-awake hook")
+		return
+	}
+	setter.setOnAwake(fn)
+}
+
+func (e *executor) setOnAwake(fn func(context.Context)) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	e.onAwake = fn
+}
+
+// SetWithPlayerPush registers the playlist-write serialization hook shared with
+// displayAt scheduling. It intentionally serializes claim-time default fallback
+// writes without giving devicectl permission to clear scheduler-owned cache.
+func SetWithPlayerPush(exec Executor, fn func(func()), logger *zap.Logger) {
+	setter, ok := exec.(interface{ setWithPlayerPush(func(func())) })
+	if !ok {
+		logger.Warn("Executor does not support player-push serialization hook")
+		return
+	}
+	setter.setWithPlayerPush(fn)
+}
+
+func (e *executor) setWithPlayerPush(fn func(func())) {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	e.withPlayerPush = fn
 }
 
 // applySleepTransitionIfChanged drives a transition only when it is not already
@@ -375,9 +623,13 @@ func (e *executor) applySleepTransitionLocked(ctx context.Context, state sleepsc
 //     this cheap and a newer transition always supersedes it.
 func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state sleepschedule.State, reason string) error {
 	e.sleepApplyMu.Lock()
-	defer e.sleepApplyMu.Unlock()
 
-	playerAligned := e.sleepApplyOK && e.sleepAppliedState != nil && *e.sleepAppliedState == state
+	// playerAligned (design doc §7): aligned iff (playerAwake and target is
+	// awake) or (playerSleeping and target is sleeping). playerUnknownFailed
+	// and playerFreshDocument are NEVER aligned — that is the whole point of
+	// invalidate forcing a re-drive.
+	playerAligned := (e.sleepPlayerState == playerAwake && state == sleepschedule.StateAwake) ||
+		(e.sleepPlayerState == playerSleeping && state == sleepschedule.StateSleeping)
 	// BOTH panel verdicts — the success ("panel already aligned") and the
 	// capped give-up (sleepPanelFailStreak >= panelRetryMax) — only hold for
 	// the display generation they were earned against: Generation() bumps when
@@ -391,6 +643,7 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 			(e.sleepPanelOK || e.sleepPanelFailStreak >= panelRetryMax))
 
 	if playerAligned && panelAligned {
+		e.sleepApplyMu.Unlock()
 		return nil
 	}
 	if playerAligned && !panelAligned {
@@ -403,6 +656,7 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 		// the last enqueued job, so the stale panel command would supersede the
 		// manual one.
 		e.applyFfpPowerStateAsync(state, reason)
+		e.sleepApplyMu.Unlock()
 		return nil
 	}
 
@@ -419,10 +673,21 @@ func (e *executor) applySleepTransitionIfChanged(ctx context.Context, state slee
 		e.logger.Debug("Deferring sleep schedule transition: CDP not connected",
 			zap.String("state", string(state)),
 			zap.String("reason", reason))
+		e.sleepApplyMu.Unlock()
 		return nil
 	}
 
-	return e.applySleepTransitionLocked(ctx, state, reason)
+	wasSleeping := e.onAwakeWasSleepingLocked()
+	err := e.applySleepTransitionLocked(ctx, state, reason)
+	onAwake := e.onAwake
+	e.sleepApplyMu.Unlock()
+	// Sleep→awake edge only — see applySleepTransition for why re-drives
+	// (tracker invalidated on CDP reconnect, or a failed awake retry) must
+	// not re-fire the displayAt recompute.
+	if err == nil && state == sleepschedule.StateAwake && wasSleeping && onAwake != nil {
+		onAwake(ctx)
+	}
+	return err
 }
 
 // recordPanelApply stores the state the async FFP power worker last drove the
@@ -581,4 +846,41 @@ func (e *executor) applyFfpPowerState(ctx context.Context, state sleepschedule.S
 	}
 
 	return e.panelDDC.ApplyControl(ctx, ddc.DdcPanelActionPower, []byte(fmt.Sprintf("%q", powerState)))
+}
+
+// PlayerSleepGate returns the sleep-tracker predicate playersession.Session's
+// NavigateHome sleep gate consults (design doc §3.1 step 2, §7): navigate
+// is blocked when the desired/actual player state is sleeping (or unknown
+// with the last attempted state sleeping) — navigating would route a
+// sleeping wall out of /sleep. Executor implementations that don't support
+// the four-value tracker (test doubles) yield an always-false predicate:
+// never blocking navigation is the conservative default for a build without
+// the tracker.
+func PlayerSleepGate(exec Executor) func() bool {
+	g, ok := exec.(interface{ playerSleepGateBlocked() bool })
+	if !ok {
+		return func() bool { return false }
+	}
+	return g.playerSleepGateBlocked
+}
+
+// playerSleepGateBlocked implements PlayerSleepGate's predicate.
+// Design doc §3.1 step 2 gates on the schedule's DESIRED state, not just the
+// last APPLIED one — so this also blocks when sleepScheduleDesiredCache
+// (refreshed every schedule-loop tick and by every desired-state write; see
+// its own doc) says sleeping, even if the tracker's last successful apply
+// was awake. This closes the fresh-document-inside-sleep-window window: a
+// kiosk restart mid sleep-window leaves the tracker at playerFreshDocument
+// (not playerSleeping) until the loop re-drives it, and without the desired
+// check a recovery navigation racing that gap would route a sleeping wall
+// out of /sleep. playerFreshDocument itself is still deliberately NOT
+// included as its own case (an invalidated tracker means "we don't yet know
+// if the reloaded page is sleeping or awake", not "assume sleeping" — the
+// desired-state check covers the one sub-case that actually matters here).
+func (e *executor) playerSleepGateBlocked() bool {
+	e.sleepApplyMu.Lock()
+	defer e.sleepApplyMu.Unlock()
+	return e.sleepPlayerState == playerSleeping ||
+		(e.sleepPlayerState == playerUnknownFailed && e.sleepAttempted == sleepschedule.StateSleeping) ||
+		e.sleepScheduleDesiredCache == sleepschedule.StateSleeping
 }

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Art Computer setup — Connect to Wi-Fi</title>
+<link rel="stylesheet" href="/setup.css">
+</head>
+<body>
+<main>
+  <p class="brand">Feral File · Art Computer</p>
+  <h1>Connect to Wi-Fi</h1>
+  <p class="lede">
+    Choose the network your Art Computer should use. After you press Connect,
+    this page may pause while it switches networks. If that happens, reconnect
+    to <strong>{{.APSSID}}</strong> and open
+    <strong>http://ff1.config</strong> to check progress.
+  </p>
+
+  {{if .LastStatus}}
+  <div class="status status-{{.LastStatus.State}}">
+    {{.LastStatus.Message}}
+  </div>
+  {{end}}
+
+  <form class="connect" method="POST" action="/connect">
+    {{if .SSIDs}}
+    <label for="ssid">Network</label>
+    <select id="ssid" name="ssid">
+      {{range .SSIDs}}<option value="{{.}}">{{.}}</option>{{end}}
+      {{- /* The empty value routes to the manual branch server-side (a blank
+           picker value can never be a real pick), so no-JS submissions of
+           this option degrade to the ordinary empty-SSID rejection. */}}
+      <option value="">Other network…</option>
+    </select>
+
+    <div id="manual-entry">
+      <label for="ssid-manual">Or type a network name</label>
+      <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
+             autocapitalize="none" placeholder="Leave empty to use the list above">
+
+      <label class="check" for="hidden">
+        <input id="hidden" name="hidden" type="checkbox" value="1">
+        <span>This is a hidden network</span>
+      </label>
+    </div>
+    {{else}}
+    <label for="ssid-manual">Network</label>
+    <input id="ssid-manual" name="ssid_manual" type="text" autocomplete="off"
+           autocapitalize="none" placeholder="Network name">
+
+    <label class="check" for="hidden">
+      <input id="hidden" name="hidden" type="checkbox" value="1">
+      <span>This is a hidden network</span>
+    </label>
+    {{end}}
+
+    <label for="password">Password</label>
+    <div class="pwfield">
+      <input id="password" name="password" type="password" autocomplete="off">
+      <button type="button" id="password-toggle" class="pwtoggle"
+              aria-pressed="false" aria-label="Show password" hidden>
+        {{- /* The icon shows the tap's ACTION, following the majority
+             convention (Material/Android, Edge): open eye while concealed
+             ("tap to reveal"), slashed eye while revealed. */}}
+        <svg id="pw-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        <svg id="pw-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" hidden>
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+          <line x1="1" y1="1" x2="23" y2="23"/>
+        </svg>
+      </button>
+    </div>
+
+    <button type="submit" class="primary">Connect</button>
+  </form>
+
+  <form method="GET" action="/rescan">
+    <button type="submit" class="secondary">Search for networks again</button>
+  </form>
+
+  <p class="hint">
+    Don't see your Wi-Fi network? Make sure your router is switched on, then
+    tap <strong>Search for networks again</strong>. The Art Computer will
+    restart its setup network, so you'll need to scan the QR code on the
+    screen again afterwards.
+  </p>
+</main>
+<script>
+  // Collapse manual entry behind the picker's "Other network…" option.
+  // Progressive enhancement: the markup ships fully visible, so a captive
+  // mini-browser with scripting disabled keeps today's dual-source form;
+  // the server accepts either shape unchanged. The reveal rewrites the
+  // label/placeholder copy ("Or type a network name" only reads right when
+  // the field sits beside the picker) and marks the input required — under
+  // "Other network…" a blank name can only be a mistake.
+  (function () {
+    var select = document.getElementById('ssid');
+    var manual = document.getElementById('manual-entry');
+    var input = document.getElementById('ssid-manual');
+    if (!select || !manual || !input) return;
+    var label = manual.querySelector('label[for="ssid-manual"]');
+    var sync = function (viaChange) {
+      var other = select.value === '';
+      manual.hidden = !other;
+      input.required = other;
+      if (other) {
+        if (label) label.textContent = 'Network name';
+        input.placeholder = "Type the network's name";
+        if (viaChange) input.focus();
+      } else {
+        // A typed name outranks the picker server-side, so a stale value
+        // left behind a re-hidden field would silently override the pick.
+        input.value = '';
+      }
+    };
+    select.addEventListener('change', function () { sync(true); });
+    sync(false);
+  })();
+
+  // Show/hide toggle for the Wi-Fi password, an icon-only button. The icon
+  // shows the tap's action — open eye while concealed ("tap to reveal"),
+  // slashed eye while revealed; aria-label carries the accessible name.
+  // Progressive enhancement: the button ships [hidden] so a captive
+  // mini-browser with scripting disabled just gets a plain password field.
+  (function () {
+    var input = document.getElementById('password');
+    var toggle = document.getElementById('password-toggle');
+    var eye = document.getElementById('pw-eye');
+    var eyeOff = document.getElementById('pw-eye-off');
+    if (!input || !toggle || !eye || !eyeOff) return;
+    toggle.hidden = false;
+    // Attribute API, not the .hidden property: the icons are SVG elements,
+    // and `hidden` is an HTMLElement property — on an SVGElement assigning
+    // it creates an inert expando and the attribute never changes.
+    var show = function (el, on) {
+      if (on) { el.removeAttribute('hidden'); } else { el.setAttribute('hidden', ''); }
+    };
+    toggle.addEventListener('click', function () {
+      var reveal = input.type === 'password';
+      input.type = reveal ? 'text' : 'password';
+      show(eye, !reveal);
+      show(eyeOff, reveal);
+      toggle.setAttribute('aria-pressed', reveal ? 'true' : 'false');
+      toggle.setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
+    });
+  })();
+</script>
+</body>
+</html>

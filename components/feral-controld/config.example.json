@@ -21,8 +21,45 @@
     "release": "feral-controld@1.0.0",
     "repository": "organization/repository-name"
   },
+  "provisioning": {
+    "setupIncompleteDisabled": false,
+    "episodeWindowSeconds": 300,
+    "episodeApPhaseSeconds": 300,
+    "episodeStationLadderSeconds": [300, 600, 1200],
+    "episodeRaiseCycles": 4,
+    "hubContactFreshSeconds": 180,
+    "deferralCycleBudgetSeconds": 300,
+    "deferralEpisodeBudgetSeconds": 900,
+    "recheckApPhaseSeconds": 1800,
+    "recheckApPhaseLadderSeconds": [120, 300, 900],
+    "recheckBlinkCeilingSeconds": 240,
+    "activationTimeoutSeconds": 90,
+    "portalActivityWindowSeconds": 120,
+    "portalDeferralCeilingSeconds": 900,
+    "userRequestedSessionSeconds": 1800,
+    "sessionAbsoluteCapSeconds": 7200
+  },
   "commandStorm": {
     "disabled": false,
     "maxConcurrent": 0
-  }
+  },
+  "offlineCache": {
+    "enabled": false,
+    "resourceGate": {
+      "disabled": false,
+      "softwareMaxMemoryPercent": 80,
+      "softwareMaxCpuTempC": 75,
+      "mediaMaxMemoryPercent": 90,
+      "mediaMaxCpuTempC": 85,
+      "memorySafetyCeilingPercent": 90,
+      "metricsStaleAfterSeconds": 15
+    },
+    "headlessLimits": {
+      "disabled": false,
+      "cpuQuotaPercent": 300,
+      "allowedCpus": "0-3",
+      "memoryMaxBytes": 2147483648
+    }
+  },
+  "enableHub": true
 }

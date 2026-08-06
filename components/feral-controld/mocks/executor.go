@@ -8,9 +8,9 @@ import (
 	context "context"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
-
 	commands "github.com/feral-file/ffos-user/components/feral-controld/commands"
+	setupui "github.com/feral-file/ffos-user/components/feral-controld/setupui"
+	gomock "github.com/golang/mock/gomock"
 )
 
 // MockExecutor is a mock of Executor interface.
@@ -61,4 +61,42 @@ func (m *MockExecutor) SaveLastSysMetrics(metrics []byte) {
 func (mr *MockExecutorMockRecorder) SaveLastSysMetrics(metrics interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SaveLastSysMetrics", reflect.TypeOf((*MockExecutor)(nil).SaveLastSysMetrics), metrics)
+}
+
+// SetClaimObserver mocks base method.
+func (m *MockExecutor) SetClaimObserver(observer func(bool)) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetClaimObserver", observer)
+}
+
+// SetClaimObserver indicates an expected call of SetClaimObserver.
+func (mr *MockExecutorMockRecorder) SetClaimObserver(observer interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClaimObserver", reflect.TypeOf((*MockExecutor)(nil).SetClaimObserver), observer)
+}
+
+// SetSetupUI mocks base method.
+func (m *MockExecutor) SetSetupUI(ui *setupui.Service) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetSetupUI", ui)
+}
+
+// ResetStaged mocks base method.
+func (m *MockExecutor) ResetStaged() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ResetStaged")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ResetStaged indicates an expected call of ResetStaged.
+func (mr *MockExecutorMockRecorder) ResetStaged() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetStaged", reflect.TypeOf((*MockExecutor)(nil).ResetStaged))
+}
+
+// SetSetupUI indicates an expected call of SetSetupUI.
+func (mr *MockExecutorMockRecorder) SetSetupUI(ui interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSetupUI", reflect.TypeOf((*MockExecutor)(nil).SetSetupUI), ui)
 }

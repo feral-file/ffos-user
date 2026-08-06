@@ -2,7 +2,6 @@ package sleepschedule
 
 import (
 	"fmt"
-	"log"
 	stdsys "os"
 	"path/filepath"
 	"sort"
@@ -151,17 +150,27 @@ func (c ClockTime) Format() string {
 //     rather than a symlink, and does not require tzdata on disk.
 //  4. time.Local (likely stale UTC) as a last resort.
 func LocalTimezone() *time.Location {
+	loc, _ := LocalTimezoneResolved()
+	return loc
+}
+
+// LocalTimezoneResolved is LocalTimezone plus an explicit signal for whether
+// any resolver actually succeeded. Callers that ACT on civil time (the sleep
+// schedule loop) must check it: the time.Local fallback is usually stale UTC,
+// and sleeping/waking the display hours off the user's wall clock is worse
+// than deferring until the timezone resolves. Display-only callers (status
+// reporting) can ignore the flag.
+func LocalTimezoneResolved() (*time.Location, bool) {
 	if loc, ok := loadZoneFromLocaltimeSymlink(); ok {
-		return loc
+		return loc, true
 	}
 	if loc, ok := loadZoneFromEtcTimezone(); ok {
-		return loc
+		return loc, true
 	}
 	if loc, ok := loadZoneFromLocaltimeData(); ok {
-		return loc
+		return loc, true
 	}
-	log.Printf("[sleepschedule] LocalTimezone: all resolvers failed — falling back to time.Local (%s)", time.Local)
-	return time.Local
+	return time.Local, false
 }
 
 func loadZoneFromLocaltimeSymlink() (*time.Location, bool) {

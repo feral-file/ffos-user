@@ -6,11 +6,15 @@ name: Release Guardrail
 # full-image declaration in RELEASES.md. No path filter — the check must run
 # on every PR into a release branch precisely because the failure mode is a
 # cross-rail diff that FORGOT the release evidence.
+#
+# The release flow is develop -> staging -> release (there is no main-based
+# release). Both promotion hops are gated so the evidence cannot be lost
+# between staging and the final release merge.
 on:
   pull_request:
     branches:
       - staging
-      - main
+      - release
 
 permissions:
   contents: read
