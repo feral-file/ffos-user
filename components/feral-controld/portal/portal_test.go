@@ -70,6 +70,9 @@ func TestRootRendersNetworksAndPrewarning(t *testing.T) {
 	body := readAll(t, resp)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	// HTML is dynamic (scan list, join status): never cached, or a CNA back
+	// navigation would show a stale picker.
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	assert.Contains(t, body, "HomeNet")
 	assert.Contains(t, body, "Cafe-5G")
 	// AP-bounce pre-warning names the AP SSID to reconnect to.
@@ -553,6 +556,9 @@ func TestFontsServeEmbeddedFaces(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode, name)
 		assert.Equal(t, "font/woff2", resp.Header.Get("Content-Type"), name)
+		// Session-scale only: the URLs carry no fingerprint, so anything longer
+		// would pin a stale face across an OTA font swap.
+		assert.Equal(t, "max-age=3600", resp.Header.Get("Cache-Control"), name)
 		assert.NotEmpty(t, body, name)
 	}
 
@@ -584,6 +590,7 @@ func TestSetupCSSServed(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "text/css; charset=utf-8", resp.Header.Get("Content-Type"))
+	assert.Equal(t, "max-age=3600", resp.Header.Get("Cache-Control"))
 	assert.Contains(t, string(body), "PP Mori")
 
 	// Every template must link the shared sheet — checked against the embedded

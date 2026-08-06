@@ -330,8 +330,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 // handleFonts serves the embedded woff2 faces. Names are matched against the
 // embedded FS only (no path traversal: a name containing "/" is rejected
 // before the lookup). Content-Type is set explicitly because Go's built-in
-// mime table has no woff2 entry, and the immutable cache header spares the
-// phone re-fetching fonts across the portal's redirect-heavy flow.
+// mime table has no woff2 entry. The cache header spares the phone
+// re-fetching fonts across the portal's redirect-heavy flow, but only for a
+// session-scale hour: the URLs carry no content fingerprint, so a longer
+// (or immutable) lifetime would pin a stale face across an OTA that swaps
+// the font under the same name.
 func (s *Server) handleFonts(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/fonts/")
 	if name == "" || strings.Contains(name, "/") || !strings.HasSuffix(name, ".woff2") {
@@ -344,7 +347,7 @@ func (s *Server) handleFonts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "font/woff2")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", "max-age=3600")
 	_, _ = w.Write(data)
 }
 
@@ -499,6 +502,10 @@ func (s *Server) noteActivity() {
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Every page carries live state (scan list, join status), and without a
+	// header the CNA mini-browser may heuristically cache it — a back
+	// navigation would then show a stale picker or a stale error.
+	w.Header().Set("Cache-Control", "no-store")
 	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
 		s.logger.Error("portal: render failed", zap.String("template", name), zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
