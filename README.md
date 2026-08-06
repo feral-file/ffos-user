@@ -199,6 +199,12 @@ make verify
 
 Local prerequisites are Go 1.26.0 or compatible for `feral-controld`, Go 1.23.5 or compatible for the other Go components, and `golangci-lint` v2.4.0. `feral-controld` uses Go 1.26.0 because its mint-pairing handoff minter dependency declares Go 1.26.
 
+After the recovery daemon is submitted at user-session startup, the
+timeout-bounded `enable-wake-on-lan.service` persists magic-packet wake on
+every NetworkManager Ethernet profile and arms supported wired interfaces with
+`ethtool`. It runs asynchronously; unsupported, absent, or wedged adapters
+cannot block the rest of FF OS startup.
+
 GitHub Actions are split by component and purpose:
 
 - `lint-controld.yaml`, `lint-sys-monitord.yaml`, and `lint-watchdog.yaml` run the matching Go lint targets.
