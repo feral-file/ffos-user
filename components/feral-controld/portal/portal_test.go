@@ -201,6 +201,11 @@ func TestIndexAlwaysOffersManualEntry(t *testing.T) {
 	assert.Contains(t, body, "<select", "picker must render for the scanned networks")
 	assert.Contains(t, body, `name="ssid_manual"`, "manual entry must render beside the picker")
 	assert.Contains(t, body, `name="hidden"`, "hidden-network checkbox must render")
+	// The page script collapses manual entry until this option is picked, so
+	// dropping it would make hidden networks unprovisionable again for every
+	// JS-enabled phone. The empty value routes to the manual branch.
+	assert.Contains(t, body, `<option value="">Other network…</option>`,
+		"picker must carry the manual-entry escape option")
 }
 
 func TestConnectRejectionReRendersForm(t *testing.T) {
