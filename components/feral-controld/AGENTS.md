@@ -111,6 +111,7 @@ This component is the highest-risk Go daemon for accidental architectural sprawl
 - Run `go test ./...` in `components/feral-controld`.
 - Run `go vet ./...` in `components/feral-controld`.
 - Run changed-diff linting with `golangci-lint run --new-from-rev=HEAD~1 ./...` in `components/feral-controld`.
+- For portal template/copy/stylesheet changes, eyeball the rendered pages via `go run ./cmd/portal-demo` (stubbed seams, every page reachable; see the command's doc comment) — from a phone on the same LAN if the change affects mobile layout.
 
 ## Definition of done
 A task in this component is done only when:

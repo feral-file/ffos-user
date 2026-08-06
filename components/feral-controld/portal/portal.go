@@ -31,7 +31,13 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:embed templates/*.html
+// The woff2 fonts are embedded so the portal renders in PP Mori — the same
+// face as the on-screen setup overlay and the app — with no internet (the
+// phone is on the setup AP, which has none). ~76 KiB total in the binary.
+// The stylesheet is likewise embedded and shared by every template (one
+// copy of the setup design language instead of four hand-synced ones).
+//
+//go:embed templates/*.html fonts/*.woff2 static/setup.css
 var assets embed.FS
 
 var tmpl = template.Must(template.ParseFS(assets, "templates/*.html"))
@@ -234,6 +240,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/connect", s.handleConnect)
 	s.mux.HandleFunc("/status", s.handleStatus)
 	s.mux.HandleFunc("/rescan", s.handleRescan)
+	// Explicit registrations keep these asset paths out of handleRoot's
+	// treat-unknown-paths-as-captive-probes redirect.
+	s.mux.HandleFunc("/fonts/", s.handleFonts)
+	s.mux.HandleFunc("/setup.css", s.handleSetupCSS)
 
 	// OS captive-portal probes. Returning a redirect (rather than the 204 /
 	// success body each OS looks for) is what makes the phone decide it is
@@ -315,6 +325,45 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderIndex(w, r)
+}
+
+// handleFonts serves the embedded woff2 faces. Names are matched against the
+// embedded FS only (no path traversal: a name containing "/" is rejected
+// before the lookup). Content-Type is set explicitly because Go's built-in
+// mime table has no woff2 entry. The cache header spares the phone
+// re-fetching fonts across the portal's redirect-heavy flow, but only for a
+// session-scale hour: the URLs carry no content fingerprint, so a longer
+// (or immutable) lifetime would pin a stale face across an OTA that swaps
+// the font under the same name.
+func (s *Server) handleFonts(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/fonts/")
+	if name == "" || strings.Contains(name, "/") || !strings.HasSuffix(name, ".woff2") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := assets.ReadFile("fonts/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	_, _ = w.Write(data)
+}
+
+// handleSetupCSS serves the shared stylesheet. Unlike the fonts it is not
+// marked immutable: the sheet changes with daemon releases, and a phone that
+// cached it across an OTA would style the new pages with the old rules. An
+// hour comfortably covers a setup session.
+func (s *Server) handleSetupCSS(w http.ResponseWriter, r *http.Request) {
+	data, err := assets.ReadFile("static/setup.css")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	_, _ = w.Write(data)
 }
 
 // renderIndex writes the picker page. It is path-independent so the /connect
@@ -453,6 +502,10 @@ func (s *Server) noteActivity() {
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Every page carries live state (scan list, join status), and without a
+	// header the CNA mini-browser may heuristically cache it — a back
+	// navigation would then show a stale picker or a stale error.
+	w.Header().Set("Cache-Control", "no-store")
 	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
 		s.logger.Error("portal: render failed", zap.String("template", name), zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
